@@ -11,6 +11,50 @@
 
 ---
 
+## 给朋友的最短说明
+
+如果你只是想把 PM工作台跑起来：
+
+1. 装好 **DSH** 并登录（Windows）。
+2. 打开 PowerShell，粘贴下面这一行。
+3. 等它自动下载、安装依赖、建桌面图标，然后双击 `PM工作台`。
+
+```powershell
+$f="$env:TEMP\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@6031ac5/install.ps1" -OutFile $f; & $f
+```
+
+这一行会处理 **Node.js 没有安装**的情况：自动下载便携 Node 到安装目录，不写系统 PATH、不需要管理员权限。
+
+### 如果你还想在 DSH 里直接打开它
+
+先装好上面的 PM工作台，再装 DSH 启动器插件：
+
+```powershell
+dsh plugin --profile desktop add github:781237194/agile-workbench#dsh-plugin
+```
+
+> 重要：`dsh plugin` 命令安装的是 **DSH 启动器插件**，不是 PM工作台本体。  
+> 现在还不能只靠一条 `dsh plugin` 命令把整个工作台装完；工作台本体用上面的 PowerShell 一行命令安装。
+
+---
+
+## 朋友一键安装（Windows）
+
+- **已有仓库/压缩包**：双击根目录的 `安装PM工作台.cmd`。
+- **不想先下载**：用上面的 PowerShell 一行命令。
+- **只想要 zip**：<https://github.com/781237194/agile-workbench/archive/refs/heads/main.zip>，解压后双击 `安装PM工作台.cmd`。
+- **卸载**：删除安装目录即可；不会写系统 PATH，不会注册系统服务。
+
+安装器会：
+
+1. 检测 Git 和 Node.js；系统有 Node 20+ 就直接用。
+2. 没有 Node 就自动下载 Windows x64 便携 Node.js LTS 到 `<安装目录>\.runtime\node`。
+3. 下载/复用仓库，执行 `npm install`。
+4. 创建桌面 `PM工作台` 快捷方式，可选立即启动。
+5. 重复执行只补依赖，**不覆盖** `data/`、`项目/`、`团队/状态/`。
+
+---
+
 ## 一、功能概述
 
 ### 项目、任务与看板
@@ -88,21 +132,7 @@
   - 只把实际使用的 Node 目录临时加入**安装进程**的 PATH，不写系统 PATH、不改系统环境、不需要管理员权限。
 - 便携 Node 只用于安装阶段；`start.cmd` 直接启动 Electron，日常运行不需要 Node。
 
-### 朋友一键安装（Windows）
-
-给不熟悉命令行的朋友：双击一个文件，或粘贴一行命令。**只需要 Windows + 网络 + DSH；Node.js 会自动装，不需要预装。**
-
-**入口 1：已经下载 / 克隆了仓库** —— 双击仓库根目录的 `安装PM工作台.cmd`。
-
-**入口 2：不想先下载** —— 在 PowerShell 里粘贴：
-
-```powershell
-$f="$env:TEMP\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@6031ac5/install.ps1" -OutFile $f; & $f
-```
-
-先落盘再执行，避免 PowerShell 5.1 把 CDN 的 UTF-8 BOM 当成乱码。
-
-**入口 3：只想要一个 zip** —— 下载 <https://github.com/781237194/agile-workbench/archive/refs/heads/main.zip>，解压后双击 `安装PM工作台.cmd`。
+### 安装器细节
 
 安装器会：
 
