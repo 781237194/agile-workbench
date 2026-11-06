@@ -97,7 +97,7 @@
 **入口 2：不想先下载** —— 在 PowerShell 里粘贴：
 
 ```powershell
-$f="$env:TEMP\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@main/install.ps1" -OutFile $f; & $f
+$f="$env:TEMP\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@6031ac5/install.ps1" -OutFile $f; & $f
 ```
 
 先落盘再执行，避免 PowerShell 5.1 把 CDN 的 UTF-8 BOM 当成乱码。
