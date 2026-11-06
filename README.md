@@ -30,7 +30,7 @@ $f="$env:TEMP\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237
 只装 DSH 插件也可以，插件首次加载会自动安装 PM工作台本体、便携 Node、Electron 依赖和桌面入口：
 
 ```powershell
-dsh plugin --profile desktop add github:781237194/agile-workbench#dsh-plugin
+dsh plugin --profile desktop add dsh-pm-workbench
 ```
 
 安装后重启 DSH，插件会在后台启动安装器；安装完成后对 DSH 说“打开 PM工作台”，或调用 `pm_workbench_open`。
