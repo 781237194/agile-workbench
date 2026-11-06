@@ -11,7 +11,7 @@
 
 ---
 
-## 给朋友的最短说明
+## 新用户最短说明
 
 如果你只是想把 PM工作台跑起来：
 
@@ -25,20 +25,22 @@ $f="$env:TEMP\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237
 
 这一行会处理 **Node.js 没有安装**的情况：自动下载便携 Node 到安装目录，不写系统 PATH、不需要管理员权限。
 
-### 如果你还想在 DSH 里直接打开它
+### 只装 DSH 插件（自动补齐工作台）
 
-先装好上面的 PM工作台，再装 DSH 启动器插件：
+只装 DSH 插件也可以，插件首次加载会自动安装 PM工作台本体、便携 Node、Electron 依赖和桌面入口：
 
 ```powershell
 dsh plugin --profile desktop add github:781237194/agile-workbench#dsh-plugin
 ```
 
-> 重要：`dsh plugin` 命令安装的是 **DSH 启动器插件**，不是 PM工作台本体。  
-> 现在还不能只靠一条 `dsh plugin` 命令把整个工作台装完；工作台本体用上面的 PowerShell 一行命令安装。
+安装后重启 DSH，插件会在后台启动安装器；安装完成后对 DSH 说“打开 PM工作台”，或调用 `pm_workbench_open`。
+
+> 这条命令安装的是 **DSH 启动器插件**，但它会自动补齐 PM工作台本体，仍然需要联网下载。  
+> 如果你不想装 DSH 插件，用上面的 PowerShell 一行命令直接装桌面版也可以。
 
 ---
 
-## 朋友一键安装（Windows）
+## 一键安装（Windows）
 
 - **已有仓库/压缩包**：双击根目录的 `安装PM工作台.cmd`。
 - **不想先下载**：用上面的 PowerShell 一行命令。
@@ -120,7 +122,7 @@ dsh plugin --profile desktop add github:781237194/agile-workbench#dsh-plugin
 
 ### 环境要求
 
-**给朋友的最短说明：只需要 Windows + 网络 + DSH，Node.js 会自动装。**
+**最短说明：只需要 Windows + 网络 + DSH，Node.js 会自动装。**
 
 - Windows 10+（一键安装器）；macOS / Linux 桌面环境可手动 `npm install`
 - 首次安装需要联网：无系统 Node 时下载便携 Node.js（约 39 MB，解压约 110 MB），以及 Electron 依赖
