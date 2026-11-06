@@ -76,33 +76,43 @@
 
 ### 环境要求
 
-- Node.js ≥ 20（含 npm）
-- Windows 10+ / macOS / Linux 桌面环境
-- 首次安装需要联网下载 Electron 依赖
+**给朋友的最短说明：只需要 Windows + 网络 + DSH，Node.js 会自动装。**
+
+- Windows 10+（一键安装器）；macOS / Linux 桌面环境可手动 `npm install`
+- 首次安装需要联网：无系统 Node 时下载便携 Node.js（约 39 MB，解压约 110 MB），以及 Electron 依赖
+- Node.js **不需要预装**：
+  - 系统已有 Node.js 20+ → 直接使用，不下载；
+  - 没有 → 自动下载 Windows x64 便携 Node.js LTS 到 `<安装目录>\.runtime\node`；
+  - 优先 `nodejs.org` 官方源，失败自动换 `npmmirror` 镜像；
+  - 下载后校验文件非空、zip 文件头；能拿到官方 SHA-256 时校验哈希；最后实际运行 `node.exe` / `npm` 确认可运行；
+  - 只把实际使用的 Node 目录临时加入**安装进程**的 PATH，不写系统 PATH、不改系统环境、不需要管理员权限。
+- 便携 Node 只用于安装阶段；`start.cmd` 直接启动 Electron，日常运行不需要 Node。
 
 ### 朋友一键安装（Windows）
 
-给不熟悉命令行的朋友：双击一个文件，或粘贴一行命令。
+给不熟悉命令行的朋友：双击一个文件，或粘贴一行命令。**只需要 Windows + 网络 + DSH；Node.js 会自动装，不需要预装。**
 
 **入口 1：已经下载 / 克隆了仓库** —— 双击仓库根目录的 `安装PM工作台.cmd`。
 
-**入口 2：不想先下载** —— 在 PowerShell 里粘贴（`-replace` 去掉 GitHub raw 返回的 UTF-8 BOM）：
+**入口 2：不想先下载** —— 在 PowerShell 里粘贴：
 
 ```powershell
-iex ((irm https://raw.githubusercontent.com/781237194/agile-workbench/main/install.ps1) -replace "^\uFEFF", "")
+$f="$env:TEMP\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@main/install.ps1" -OutFile $f; & $f
 ```
+
+先落盘再执行，避免 PowerShell 5.1 把 CDN 的 UTF-8 BOM 当成乱码。
 
 **入口 3：只想要一个 zip** —— 下载 <https://github.com/781237194/agile-workbench/archive/refs/heads/main.zip>，解压后双击 `安装PM工作台.cmd`。
 
 安装器会：
 
-1. 检查 Git / Node.js / npm。缺 Node.js 或 npm 时打印下载地址并停下，**不会静默安装系统软件**；Git 只影响 clone / 更新，zip 安装不需要。
+1. 检查 Git（可选）和系统 Node.js 20+。系统已有 20+ 就直接用；没有就自动下载 Windows x64 便携 Node.js LTS 到 `<安装目录>\.runtime\node`，只给本安装器与 npm 使用，**不写系统 PATH、不改系统环境、不需要管理员权限**；官方源失败会自动换 npmmirror 镜像。
 2. 当前目录是仓库 → 直接使用；否则下载 main 分支 zip 到 `D:\PM工作台`（D 盘不存在或不可写时用 `%USERPROFILE%\PM工作台`），解压后使用。
 3. 在仓库目录执行 `npm install`（首次会下载 Electron，可能需要几分钟）。
 4. 创建桌面快捷方式 `PM工作台.lnk`，指向 `start.cmd`，图标 `assets\pm-workbench.ico`。
 5. 可选立即启动：给命令加 `-Launch`（例如 `安装PM工作台.cmd -Launch`）。
 
-**重复执行是安全的**：已有仓库只补依赖，不重新下载；`data\`、`项目\`、`团队\状态\` 等已有内容不会被覆盖。目标目录已有别的文件时安装器会停下并提示换目录，**绝不删除**。
+**重复执行是安全的**：系统 Node 或 `.runtime\node` 已有可用版本时直接复用，不重复下载、不覆盖；已有仓库只补依赖，不重新下载；`data\`、`项目\`、`团队\状态\` 等已有内容不会被覆盖。目标目录已有别的文件时安装器会停下并提示换目录，**绝不删除**。
 
 可选参数（加在 `安装PM工作台.cmd` 或 `install.ps1` 后面）：
 
@@ -117,7 +127,7 @@ iex ((irm https://raw.githubusercontent.com/781237194/agile-workbench/main/insta
 | `-LogDir <目录>` | 日志目录 |
 | `-NonInteractive` | 不暂停，适合自动化（也可设 `AWB_NO_PAUSE=1`） |
 
-失败时窗口不会立刻关闭，最后会打印日志路径，方便把日志发给作者排查。日志默认在 `<仓库>\_tmp\install-logs\`；全新下载时在 `%LOCALAPPDATA%\PMWorkbench\install-logs\`。
+如果自动准备 Node 失败（下载、解压或校验不通过），窗口不会立刻关闭，会打印具体原因和日志路径；也可以手动安装 Node.js 20+ LTS 后重跑，安装器会优先使用系统 Node。日志默认在 `<仓库>\_tmp\install-logs\`；全新下载时在 `%LOCALAPPDATA%\PMWorkbench\install-logs\`。
 
 ### 直接命令（任意平台）
 
@@ -295,7 +305,7 @@ docs/ARCHITECTURE.md            分层、数据与流程状态
 docs/FEATURE-MATRIX.md          功能矩阵
 docs/CLEAN-ROOM.md              clean-room 约定
 assets/                         应用图标（pm-workbench.ico / pm-workbench.png）
-install.ps1                     Windows 一键安装器（环境检查 / 下载 / 依赖 / 快捷方式）
+install.ps1                     Windows 一键安装器（环境检查 / 便携 Node / 下载 / 依赖 / 快捷方式）
 安装PM工作台.cmd                Windows 双击入口，调用 install.ps1
 start.cmd                       Windows 一键启动
 ```
@@ -324,7 +334,7 @@ npm pack --dry-run
 ## 九、当前边界
 
 - v0.1 完成本地基座、六角色/快速四人的 DSH 会话启动与协作闭环；
-- DSH 事件流（轮询/推送）与场景页签仍在推进，独立安装包（exe/msi）与自动更新尚未提供；Windows 一键安装脚本已提供（`install.ps1` + `安装PM工作台.cmd`）；
+- DSH 事件流（轮询/推送）与场景页签仍在推进，独立安装包（exe/msi）与自动更新尚未提供；Windows 一键安装脚本已提供（`install.ps1` + `安装PM工作台.cmd`），需要时自动下载便携 Node.js，不要求预装 Node；
 - DSH 适配层只通过公开 HTTP 协议连接，不复制 DSH 内部实现；
 - 主要验证平台为 Windows，macOS / Linux 未做完整回归。
 

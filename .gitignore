@@ -29,6 +29,7 @@ _backup/
 _archive/
 .tmp/
 *.tmp
+.runtime/
 
 # ── 本地运行数据与自测产物 ────────────────────────
 data/
