@@ -32,10 +32,62 @@ const DEFAULT_DIRS = [
   'D:\\PM工作台',
   join(homedir(), 'PM工作台'),
 ]
+const DEFAULT_INSTALLER_URL =
+  'https://cdn.jsdelivr.net/gh/781237194/agile-workbench@6031ac5/install.ps1'
 const INSTALL_COMMAND =
   '$f="$env:TEMP\\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@6031ac5/install.ps1" -OutFile $f; & $f'
 const MANUAL_INSTALL_COMMAND =
   'git clone https://github.com/781237194/agile-workbench.git; cd agile-workbench; npm install'
+
+let bootstrapState = 'idle'
+let bootstrapProcess = null
+
+function installerUrl(config) {
+  return (typeof config.installerUrl === 'string' && config.installerUrl.trim())
+    ? config.installerUrl.trim()
+    : DEFAULT_INSTALLER_URL
+}
+
+function installerScript(config) {
+  const url = installerUrl(config).replace(/'/g, "''")
+  return [
+    "$ErrorActionPreference='Stop'",
+    "$f=Join-Path $env:TEMP 'pm-workbench-install.ps1'",
+    `Invoke-WebRequest '${url}' -OutFile $f -UseBasicParsing`,
+    '& $f',
+  ].join('; ')
+}
+
+/**
+ * 首次安装：插件本身只负责把安装器拉起来。
+ * 不在 apply 中等待（npm install 可能几分钟），安装完成后下一次调用即可启动。
+ */
+function startBootstrap(config) {
+  if (bootstrapProcess) return bootstrapState
+  bootstrapState = 'installing'
+  try {
+    bootstrapProcess = spawn('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy', 'Bypass',
+      '-Command', installerScript(config),
+    ], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: { ...process.env, PM_WORKBENCH_AUTO_INSTALL: '1' },
+    })
+    bootstrapProcess.once('error', () => { bootstrapState = 'failed'; bootstrapProcess = null })
+    bootstrapProcess.once('exit', (code) => {
+      bootstrapState = code === 0 ? 'done' : 'failed'
+      bootstrapProcess = null
+    })
+    bootstrapProcess.unref()
+  } catch {
+    bootstrapState = 'failed'
+    bootstrapProcess = null
+  }
+  return bootstrapState
+}
 
 function expandHome(value) {
   const text = value.trim()
@@ -234,6 +286,21 @@ function renderText(value) {
     ].join('\n')
   }
 
+  if (value.code === 'PM_WORKBENCH_INSTALLING') {
+    return [
+      'PM工作台尚未安装，插件已在后台启动一键安装。',
+      '安装器会自动准备 Node、下载 PM工作台、安装 Electron 依赖并创建桌面入口。',
+      '安装完成后再次调用 pm_workbench_open 即可启动；安装日志在安装目录的 _tmp/install-logs。',
+    ].join('\n')
+  }
+  if (value.code === 'PM_WORKBENCH_INSTALL_FAILED') {
+    return [
+      '自动安装没有启动成功。',
+      `原因：${value.error ?? '无法创建安装进程'}`,
+      `请手动执行：\n${value.installCommand ?? INSTALL_COMMAND}`,
+    ].join('\n')
+  }
+
   const lines = [`启动失败：${value.error ?? '未知错误'}`]
   if (value.code) lines.push(`错误码：${value.code}`)
   if (value.target) lines.push(`目标：${value.target}`)
@@ -249,13 +316,22 @@ function renderText(value) {
 export function apply(ctx, config) {
   const pluginConfig = config && typeof config === 'object' ? config : {}
 
+  // 插件安装后首次加载就自动补工作台；不等安装完成，避免阻塞 DSH 启动。
+  if (pluginConfig.autoInstall !== false) {
+    const resolved = resolveLaunchTarget({}, pluginConfig)
+    if (!resolved.ok && resolved.code === 'PM_WORKBENCH_NOT_FOUND') {
+      startBootstrap(pluginConfig)
+    }
+  }
+
   ctx.effect(() =>
     ctx.tools.register({
       name: TOOL_NAME,
       description:
         '启动本机的 PM工作台（PM Workbench，Electron 桌面应用）。这是 DSH 启动器插件，不把 Electron UI 嵌入 DSH；' +
-        '调用后只负责拉起 start.cmd 并立即返回，不等待工作台退出。默认查找 D:\\deepseek\\agile-workbench\\start.cmd，' +
-        '也可用 path 参数或 workbenchDir 配置指定安装目录；找不到时会返回安装命令。',
+        '调用后只负责拉起 start.cmd 并立即返回，不等待工作台退出。默认查找 D:\\PM工作台\\start.cmd，' +
+        '也可用 path 参数或 workbenchDir 配置指定安装目录；首次找不到时会自动下载并安装 PM工作台，' +
+        '安装完成后再次调用即可启动。',
       parameters: {
         type: 'object',
         properties: {
@@ -278,7 +354,21 @@ export function apply(ctx, config) {
       async execute(args) {
         const input = args && typeof args === 'object' ? args : {}
         const resolved = resolveLaunchTarget(input, pluginConfig)
-        if (!resolved.ok) return resolved
+        if (!resolved.ok) {
+          if (resolved.code === 'PM_WORKBENCH_NOT_FOUND' && pluginConfig.autoInstall !== false) {
+            const installState = startBootstrap(pluginConfig)
+            return {
+              ...resolved,
+              code: installState === 'failed' ? 'PM_WORKBENCH_INSTALL_FAILED' : 'PM_WORKBENCH_INSTALLING',
+              autoInstall: true,
+              installState,
+              message: installState === 'failed'
+                ? '自动安装没有启动成功，请按 installCommand 手动安装。'
+                : 'PM工作台尚未安装，插件已在后台启动安装。安装完成后再次调用本工具即可。',
+            }
+          }
+          return resolved
+        }
 
         const blocked = preflight(resolved.target)
         if (blocked) return blocked

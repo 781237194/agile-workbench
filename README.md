@@ -1,10 +1,10 @@
 # pm-workbench-dsh —— PM工作台 DSH 启动器插件
 
 > **它是什么**：一个可安装的 DSH bundle（Host 侧插件）。装进 DSH 后注册工具 `pm_workbench_open`，
-> 让模型可以拉起本机的 PM工作台。
+> 第一次加载会自动把 PM工作台本体、便携 Node 和 Electron 依赖补齐，然后拉起本机窗口。
 >
-> **它不是什么**：**不是把 PM工作台的 Electron UI 嵌入 DSH**，也不是 DSH 会话桥、不是安装器，
-> 不读取工作台的项目数据，也不修改 Electron 主分支的任何源码。
+> **它不是什么**：**不是把 PM工作台的 Electron UI 嵌入 DSH**，也不是 DSH 会话桥；
+> 它不读取工作台的项目数据，也不修改 Electron 主分支的任何源码。
 
 - 包名：`pm-workbench-dsh`
 - 插件类型：DSH Host 插件（无 Client/UI 半边）
@@ -24,27 +24,22 @@ dsh plugin --profile desktop add github:781237194/agile-workbench#dsh-plugin
 
 安装后重启 DSH（或新开一个会话），在工具列表里应能看到 `pm_workbench_open`。
 
+**一条命令完成安装**：插件首次加载时如果找不到 PM工作台，会自动从 CDN 下载安装器到本机执行。安装器会自动准备便携 Node、下载 PM工作台、安装 Electron 依赖并创建桌面入口。安装可能需要几分钟，完成后再次调用 `pm_workbench_open` 即可。
+
 ### 依赖
 
 | 依赖 | 说明 |
 |---|---|
 | DSH | `>=0.2.2-rc.1 <0.3.0`，不满足时 DSH 会拒绝安装/激活 |
-| PM工作台 | 本机已安装，并且执行过 `npm install`（需要 `node_modules\electron\dist\electron.exe`） |
-| 操作系统 | Windows 10+，因为启动入口是 `start.cmd` |
-| Node.js | 插件只使用 DSH 自带的 Node 内置模块，不需要额外 `npm install` |
+| 操作系统 | Windows 10+，因为自动安装与启动入口是 `start.cmd` |
+| 网络 | 首次安装需要联网下载安装器、Node 和 Electron 依赖 |
+| PM工作台 | **不需要预装**；插件首次加载会自动补 |
+| Node.js | **不需要预装**；安装器会自动下载便携 Node |
 
-PM工作台还没装时，插件会返回可读错误和下面这条安装命令：
+如果自动安装失败，插件会返回可读错误和下面这条兜底命令：
 
 ```powershell
 $f="$env:TEMP\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@6031ac5/install.ps1" -OutFile $f; & $f
-```
-
-也可以手动安装：
-
-```powershell
-git clone https://github.com/781237194/agile-workbench.git
-cd agile-workbench
-npm install
 ```
 
 ---
@@ -101,21 +96,22 @@ $env:PM_WORKBENCH_DIR = 'D:\PM工作台'
 调用一次工具时，插件会：
 
 1. 解析并确认 `start.cmd` 存在；
-2. 如果目标是标准的 `start.cmd`，先确认 `node_modules\electron\dist\electron.exe` 存在；
-3. 删除继承的 `ELECTRON_RUN_AS_NODE`，用 `child_process.spawn` 以 **detached + stdio ignore** 方式启动；
-4. 最多等 1.5 秒确认进程已创建，然后 `unref()` 并立即返回，**不等待工作台退出**。
+2. 如果找不到，且没有显式指定路径，自动启动安装器，返回“正在安装”；
+3. 安装完成后再调用一次，确认 Electron 依赖存在；
+4. 删除继承的 `ELECTRON_RUN_AS_NODE`，用 `child_process.spawn` 以 **detached + stdio ignore** 方式启动；
+5. 最多等 1.5 秒确认进程已创建，然后 `unref()` 并立即返回，**不等待工作台退出**。
 
 限制：
 
 - **不嵌入 UI**：DSH 里不会出现 PM工作台的界面；它只是拉起本机窗口。
-- **不安装依赖**：Electron/Node 依赖仍需在 PM工作台目录执行 `npm install`。
+- **首次安装需要网络**：插件会下载安装器、便携 Node 和 Electron 依赖；离线环境请手动安装。
 - **不确认窗口最终打开**：进程创建成功只代表启动命令已提交；窗口是否出现、是否被单实例锁拦下，以桌面为准。
 - **不管理进程生命周期**：不提供关闭、重启、状态查询；重复调用由 PM工作台自身的单实例行为处理。
-- **只支持 Windows**：入口固定为 `start.cmd`，没有 macOS/Linux 启动分支。
+- **只支持 Windows**：自动安装与启动入口固定为 `start.cmd`，没有 macOS/Linux 分支。
 - **无 locale/icon 元数据**：本包按最小文件集发布（`index.js`、`cordis.patch.yml`、`README.md`、`LICENSE`），
   插件管理器会回退显示包名与 `description`，不提供自定义图标。
 - **不读工作台数据**：不访问 `data\`、`项目\`、`团队\状态\`、凭据或 DSH 会话正文。
-- **插件本身不联网**：唯一网络动作发生在用户执行上面的安装命令时。
+- **自动安装有网络动作**：首次加载时访问 CDN 下载安装器；之后启动工作台不再联网。
 
 ---
 
