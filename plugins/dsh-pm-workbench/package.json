@@ -1,0 +1,43 @@
+{
+  "name": "dsh-pm-workbench",
+  "version": "0.1.0",
+  "description": "DSH host plugin that installs and opens PM Workbench, a local Electron multi-role project workbench.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "author": "徐野风",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/781237194/agile-workbench.git",
+    "directory": "plugins/dsh-pm-workbench"
+  },
+  "homepage": "https://github.com/781237194/agile-workbench/tree/main/plugins/dsh-pm-workbench",
+  "bugs": {
+    "url": "https://github.com/781237194/agile-workbench/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "pm-workbench",
+    "launcher"
+  ],
+  "engines": {
+    "dsh": ">=0.2.2-rc.1 <0.3.0",
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
