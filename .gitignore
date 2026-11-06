@@ -1,0 +1,65 @@
+# ── 依赖 ──────────────────────────────────────────
+node_modules/
+
+# ── 私有项目（永不入库）──────────────────────────
+项目/
+projects/
+
+# ── 团队运行态：状态/日志/看板是本机私有数据 ──────
+团队/状态/
+团队/日志/
+团队/看板.html
+团队/看板.md
+团队/看板.json
+团队/看板.png
+
+# ── 团队实例文档：由 team.mjs init 生成，含本机信息 ──
+团队/团队宪法.md
+团队/项目铁律.md
+团队/运行手册.md
+团队/试点报告.md
+团队/README.md
+团队/LICENSE
+团队/NOTICE.md
+团队/工具/export-open-source.mjs
+
+# ── 临时、备份、归档 ──────────────────────────────
+_tmp/
+_backup/
+_archive/
+.tmp/
+*.tmp
+
+# ── 本地运行数据与自测产物 ────────────────────────
+data/
+userdata*/
+.selftest-data/
+.selftest-data-*/
+probe-receipts/
+selftest*.png
+
+# ── 内部审计 / QA / 对账报告（本机过程记录）───────
+docs/QA-*.md
+docs/PARITY-*.md
+docs/MVP-*.md
+docs/OLD-CODE-AUDIT.md
+docs/DSH-MODEL-AUDIT.md
+
+# ── 日志 ──────────────────────────────────────────
+*.log
+*.log.*
+
+# ── DSH 凭据与本机密钥（永不入库）────────────────
+.env
+.env.*
+!.env.example
+config.local.json
+config.local.*.json
+dsh-credentials.json
+credentials.json
+secrets.json
+token.json
+*.key
+*.pem
+.dsh/
+dsh-home/

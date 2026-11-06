@@ -1,0 +1,53 @@
+{
+  "name": "pm-workbench",
+  "productName": "PM工作台",
+  "appId": "com.xuyefeng.pmworkbench",
+  "version": "0.1.0",
+  "description": "PM工作台（PM Workbench）：独立开源的多角色项目工作台，覆盖项目、角色、任务、看板、评审流程与 DSH 适配层",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "license": "MIT",
+  "author": "徐野风",
+
+  "files": [
+    "src/",
+    "assets/**",
+    "scripts/run-electron.cjs",
+    "scripts/test-entrypoints.cjs",
+    "团队/工具/",
+    "团队/角色/",
+    "团队/模板/",
+    "团队/协议/",
+    "!团队/工具/export-open-source.mjs",
+    "!团队/README.md",
+    "!团队/LICENSE",
+    "!团队/NOTICE.md",
+    "install.ps1",
+    "安装PM工作台.cmd",
+    "LICENSE",
+    "NOTICE.md",
+    "README.md",
+    "start.cmd"
+  ],
+
+  "scripts": {
+    "start": "node scripts/run-electron.cjs .",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer/app.js && node --check src/dsh-adapter.js && node --check src/team-tools.js && node --check scripts/run-electron.cjs && node --check scripts/test-entrypoints.cjs && node --check scripts/export-open-source.mjs",
+    "selftest": "node scripts/run-electron.cjs . --selftest",
+    "test:scripts": "node scripts/test-entrypoints.cjs",
+    "export:oss": "node scripts/export-open-source.mjs"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "pm",
+    "workbench",
+    "multi-agent",
+    "electron",
+    "dsh"
+  ]
+}

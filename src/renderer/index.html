@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PM工作台 · DSH 壳</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="titlebar">
+    <div class="titlebar-brand">
+      <span class="brand-mark" aria-hidden="true">PM</span>
+      <span class="brand">PM工作台</span>
+      <span id="version" class="version">v0.1</span>
+      <span class="brand-sub">DSH 壳</span>
+    </div>
+    <div class="titlebar-center">
+      <button id="workspace-switch" class="workspace-switch" type="button" aria-haspopup="dialog" aria-expanded="false" title="切换工作区（项目 = 工作区）">
+        <span class="ws-rail" aria-hidden="true"></span>
+        <span class="ws-text">
+          <b id="tb-project">未选择工作区</b>
+          <small id="tb-project-path">选择或新建一个项目</small>
+        </span>
+        <span id="tb-stage" class="ws-stage">—</span>
+        <span class="ws-caret" aria-hidden="true">⌄</span>
+      </button>
+      <div class="tb-status">
+        <button id="team-pill" class="tb-chip" type="button" title="打开团队台：六角色、消息与回执">
+          <span class="chip-k">团队</span><b id="tb-team">0/6</b>
+        </button>
+        <button id="session-pill" class="tb-chip" type="button" title="打开团队台：六角色 DSH 会话">
+          <span class="chip-k">会话</span><b id="tb-sessions">0</b>
+        </button>
+      </div>
+      <nav class="top-tools" aria-label="工作区操作">
+        <button id="btn-workspace" class="ghost tb-btn" title="新建项目（一个项目 = 一个工作区，并自动生成六角色目录）" type="button">
+          <span class="tb-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 2.8v10.4M2.8 8h10.4"/></svg></span>
+          <span class="tb-text">新建项目</span>
+        </button>
+        <button id="btn-team-start" class="ghost tb-btn" title="为当前工作区启动当前团队模式的 DSH 会话（角色随团队模式）" type="button">
+          <span class="tb-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 1.8c.5 3.1 1.6 4.4 5.2 5.2-3.6.8-4.7 2.1-5.2 5.2-.5-3.1-1.6-4.4-5.2-5.2 3.6-.8 4.7-2.1 5.2-5.2Z"/><path d="M12.3 10.2c.2 1.4.7 2 2.2 2.3-1.5.3-2 .9-2.2 2.3-.2-1.4-.7-2-2.2-2.3 1.5-.3 2-.9 2.2-2.3Z"/></svg></span>
+          <span class="tb-text">建团队</span>
+        </button>
+        <button id="btn-restore" class="ghost tb-btn" title="从磁盘已有项目目录恢复工作区" type="button">
+          <span class="tb-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3.2 6.6A5.2 5.2 0 1 1 2.9 9"/><path d="M3.2 2.8v3.9h3.9"/></svg></span>
+          <span class="tb-text">恢复项目</span>
+        </button>
+        <button id="btn-refresh" class="ghost tb-btn" title="刷新工作区、团队与 DSH 状态" type="button">
+          <span class="tb-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M13 6.2A5.2 5.2 0 1 0 13.2 9"/><path d="M13 2.9v3.4h-3.4"/></svg></span>
+          <span class="tb-text">刷新</span>
+        </button>
+        <button id="btn-folder-top" class="ghost tb-btn tb-folder" title="打开当前工作区文件夹" type="button">
+          <span class="tb-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M1.9 4.2c0-.6.4-1 1-1h3l1.2 1.4h5.9c.6 0 1 .4 1 1v6.2c0 .6-.4 1-1 1H2.9c-.6 0-1-.4-1-1V4.2Z"/></svg></span>
+          <span class="tb-text">文件夹</span>
+        </button>
+      </nav>
+    </div>
+    <div class="titlebar-right">
+      <button id="btn-theme" class="ghost tb-icon" type="button" title="切换主题（暗金 / 暖白）" aria-label="切换主题" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.6"/><path d="M8 1.5v1.8M8 12.7v1.8M1.5 8h1.8M12.7 8h1.8M3.4 3.4l1.3 1.3M11.3 11.3l1.3 1.3M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3"/></svg></button>
+      <button id="btn-more" class="ghost tb-icon" type="button" title="更多" aria-label="更多" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.2" cy="8" r="1.15"/><circle cx="8" cy="8" r="1.15"/><circle cx="12.8" cy="8" r="1.15"/></svg></button>
+      <span class="win-sep"></span>
+      <button class="win-btn" type="button" data-win="min" title="最小化" aria-label="最小化">─</button>
+      <button class="win-btn" type="button" data-win="max" title="最大化" aria-label="最大化">□</button>
+      <button class="win-btn close" type="button" data-win="close" title="关闭" aria-label="关闭">×</button>
+    </div>
+  </header>
+
+  <div id="workspace-pop" class="workspace-pop" role="dialog" aria-label="切换工作区" hidden>
+    <header class="wp-head">
+      <div><div class="wp-kicker">WORKSPACES</div><b>项目 = 工作区</b></div>
+      <span id="workspace-pop-count" class="counter">0</span>
+    </header>
+    <div id="workspace-pop-dsh" class="wp-dsh"></div>
+    <div id="workspace-pop-list" class="workspace-pop-list"></div>
+    <footer class="wp-foot">
+      <button type="button" class="ghost small" data-open-new-project>＋ 新建工作区</button>
+      <button type="button" class="ghost small" data-open-restore>恢复目录</button>
+      <button type="button" class="ghost small" id="btn-ws-refresh" title="重新读取团队登记与 DSH 工作区">刷新清单</button>
+    </footer>
+  </div>
+
+  <div id="more-menu" class="more-menu" role="menu" aria-label="更多" hidden>
+    <div class="more-label">PM工作台</div>
+    <button type="button" role="menuitem" data-more="project"><span class="mm-ico" aria-hidden="true">▤</span><span class="mm-text">项目面板（浮层）</span></button>
+    <button type="button" role="menuitem" data-more="team"><span class="mm-ico" aria-hidden="true">◉</span><span class="mm-text">团队台 / 消息回执</span></button>
+    <button type="button" role="menuitem" data-more="workspaces"><span class="mm-ico" aria-hidden="true">❖</span><span class="mm-text">工作区清单（本机 / 团队 / DSH）</span></button>
+    <button type="button" role="menuitem" data-more="theme"><span class="mm-ico" aria-hidden="true">◐</span><span class="mm-text">外观：暗金（点击切暖白）</span></button>
+    <button type="button" role="menuitem" data-more="refresh"><span class="mm-ico" aria-hidden="true">⟳</span><span class="mm-text">刷新工作区 / DSH 状态</span></button>
+    <div class="more-sep"></div>
+    <button type="button" role="menuitem" data-more="index"><span class="mm-ico" aria-hidden="true">◈</span><span class="mm-text">打开项目索引</span></button>
+    <button type="button" role="menuitem" data-more="folder"><span class="mm-ico" aria-hidden="true">▣</span><span class="mm-text">打开工作区文件夹</span></button>
+    <button type="button" role="menuitem" data-more="open-project"><span class="mm-ico" aria-hidden="true">▱</span><span class="mm-text">打开已有项目文件夹（登记）</span></button>
+    <button type="button" role="menuitem" data-more="team-board"><span class="mm-ico" aria-hidden="true">▦</span><span class="mm-text">团队看板（内嵌浮窗 / 切项目）</span></button>
+    <button type="button" role="menuitem" data-more="team-board-window"><span class="mm-ico" aria-hidden="true">▱</span><span class="mm-text">独立看板窗口（旧版 BrowserWindow）</span></button>
+    <button type="button" role="menuitem" data-more="sync"><span class="mm-ico" aria-hidden="true">⇄</span><span class="mm-text">同步团队登记 / 绑定工作区</span></button>
+    <button type="button" role="menuitem" data-more="restore"><span class="mm-ico" aria-hidden="true">♻</span><span class="mm-text">恢复 / 登记已有项目</span></button>
+    <div class="more-sep"></div>
+    <button type="button" role="menuitem" data-more="guide"><span class="mm-ico" aria-hidden="true">？</span><span class="mm-text">新手引导</span></button>
+    <button type="button" role="menuitem" data-more="version"><span class="mm-ico mm-ico-pm" aria-hidden="true">PM</span><span class="mm-text">关于 PM工作台</span></button>
+    <div class="more-sep"></div>
+    <button type="button" role="menuitem" data-more="inbox"><span class="mm-ico" aria-hidden="true">✉</span><span class="mm-text">调试：角色收件箱（旧协议，非主界面）</span></button>
+  </div>
+
+  <div id="app">
+    <div id="bridge-alert" class="bridge-alert" role="alert" hidden></div>
+    <div class="shell-body">
+      <aside id="sidebar" aria-label="工作区与六角色会话">
+        <div class="sidebar-head">
+          <div class="sidebar-kicker"><span class="sidebar-gem" aria-hidden="true"></span>WORKSPACE<span class="sidebar-kicker-sub">/ 六角色</span></div>
+          <div class="sidebar-title-row">
+            <h2>工作区</h2>
+            <span id="project-count" class="counter">0</span>
+          </div>
+          <p id="sidebar-stats" class="sidebar-sub">项目 = 工作区 · 会话 = 角色</p>
+        </div>
+
+        <div id="workspace-current" class="workspace-current">
+          <div class="wc-top">
+            <span class="wc-rail" aria-hidden="true"></span>
+            <span class="wc-kicker">当前工作区</span>
+            <span id="workspace-mode" class="badge">完整 6 人</span>
+            <span id="workspace-stage" class="badge">—</span>
+          </div>
+          <b id="workspace-name">未选择</b>
+          <p id="workspace-path" class="mono" title="">—</p>
+          <p id="workspace-meta" class="wc-meta">DSH workspace · 待建团队</p>
+          <p id="workspace-warn" class="wc-warn" hidden></p>
+          <div class="wc-actions">
+            <button id="btn-wc-folder" class="ghost small" type="button">目录</button>
+            <button id="btn-wc-team" class="ghost small" type="button">团队台</button>
+            <button id="btn-wc-build" class="primary small" type="button">建团队</button>
+          </div>
+        </div>
+
+        <section class="side-section sessions-section">
+          <div class="side-section-head"><span>六角色会话</span><span id="session-count" class="side-count">0/6</span></div>
+          <div id="role-sessions" class="role-sessions"></div>
+        </section>
+
+        <section class="side-section projects-section">
+          <div class="side-section-head"><span>切换工作区</span><button id="btn-side-new" class="side-mini" type="button" title="新建工作区" aria-label="新建工作区">＋</button></div>
+          <div id="project-list" class="project-list"></div>
+        </section>
+
+        <div class="sidebar-foot">
+          <button id="metrics" class="metrics-mini" type="button" title="本机负载（点击刷新）">CPU — · GPU — · MEM —</button>
+          <div class="dsh-box">
+            <div class="dsh-row"><span class="dot" id="dsh-dot"></span><b id="dsh-label">DSH 未检测</b></div>
+            <p id="dsh-detail">外部会话引擎</p>
+            <div class="dsh-links">
+              <button id="btn-dsh-config" class="link-btn" type="button">配置地址</button>
+              <button id="btn-side-restore" class="link-btn" type="button">恢复项目</button>
+            </div>
+          </div>
+          <div class="sidebar-note">DSH 是主画面 · 项目面板与团队台是浮层 · 本地数据</div>
+        </div>
+      </aside>
+
+      <main id="dsh-shell" class="stage" aria-label="DSH 主画面">
+        <div class="stage-bar">
+          <div class="stage-crumb">
+            <span class="scene-rail" aria-hidden="true"></span>
+            <span class="stage-kicker">DSH 主画面</span>
+            <span class="stage-sep">/</span>
+            <b id="stage-project">未选择工作区</b>
+            <span id="stage-path" class="stage-path">选择项目后进入工作区</span>
+            <button id="stage-owner" class="stage-owner" type="button" title="Owner 状态：待决定 / 已通过 / 已打回；点击打开评审">Owner —</button>
+          </div>
+          <div class="stage-actions">
+            <span id="session-dots" class="session-dots" title="六角色会话"></span>
+            <button id="btn-owner-quick" class="stage-btn stage-owner-quick" type="button" title="本轮 Owner 还没决定，点这里继续" hidden>Owner 待决定</button>
+            <button id="btn-board" class="stage-btn" type="button" title="打开项目面板（浮层）">项目面板</button>
+            <button id="btn-members" class="stage-btn" type="button" title="打开团队台：六角色、消息、回执">团队台</button>
+            <button id="btn-dsh-mode" class="stage-btn" type="button" title="重载 DSH 主画面" aria-pressed="false">重载 DSH</button>
+            <button id="btn-side" class="stage-btn stage-icon" type="button" title="显示 / 隐藏左侧工作区栏" aria-pressed="true">◧</button>
+            <button id="store-flag" class="store-flag" type="button" hidden>状态库异常</button>
+            <button id="btn-dsh" class="dsh-pill" type="button" title="DSH 外部引擎状态">DSH 检测中</button>
+          </div>
+        </div>
+
+        <div class="stage-body">
+          <webview id="dsh-view" src="about:blank" allowpopups></webview>
+          <div id="dsh-off" class="dsh-off" hidden>
+            <div class="dsh-off-card">
+              <div class="dsh-off-mark" aria-hidden="true">◈</div>
+              <b>DSH 引擎没有连上</b>
+              <p id="dsh-off-url" class="mono">—</p>
+              <p>DSH 是主画面；先启动 DSH Web，再点重试。工作台的项目与团队浮层不受影响。</p>
+              <div class="dsh-off-actions">
+                <button id="dsh-retry" class="primary small" type="button">重试连接</button>
+                <button id="dsh-config-2" class="ghost small" type="button">配置地址</button>
+                <button id="btn-dsh-off-reload" class="ghost small" type="button">重载 WebView</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="drawer-mask" class="drawer-mask" hidden></div>
+
+          <section id="project-drawer" class="drawer project-drawer" role="dialog" aria-modal="false" aria-label="项目面板" hidden>
+            <header class="drawer-head project-head">
+              <div class="project-title-wrap">
+                <div class="project-crumb">
+                  <span class="eyebrow" id="project-kicker">PROJECT</span>
+                  <span class="crumb-sep">/</span>
+                  <span class="crumb-muted" id="project-crumb">工作区</span>
+                  <span id="project-current" class="current-badge" hidden>当前</span>
+                  <span id="project-owner-badge" class="badge owner-badge" hidden>Owner —</span>
+                </div>
+                <h1 id="project-name">还没有项目</h1>
+                <p id="project-path">新建一个项目，或从左侧选择。</p>
+              </div>
+              <div class="drawer-head-right">
+                <div class="project-actions" id="project-actions" hidden>
+                  <button id="btn-project-index" class="ghost small" type="button" title="打开项目根目录的 项目索引.md">项目索引</button>
+                  <button id="btn-open" class="ghost small" type="button">打开目录</button>
+                  <button id="btn-team-board-old" class="ghost small" type="button" title="打开内嵌团队看板浮窗：可折叠、刷新、切看板项目">团队看板</button>
+                  <button id="btn-provision" class="ghost small" type="button">启动团队</button>
+                  <button id="btn-owner" class="owner-btn" type="button" title="打开需求级 Owner 闸门；Fast 后端壳收口后一次点击直接调用 requirement:owner">Owner（我）一次点击</button>
+                  <button id="btn-project-remove" class="ghost small danger" type="button" title="只移除本机项目记录，不删除项目文件">移除记录</button>
+                </div>
+                <button id="project-to-team" class="ghost small drawer-switch" type="button" title="切到团队台（同一个浮层，不会离开 DSH 主画面）">团队台 →</button>
+                <button class="drawer-close" type="button" data-close-drawer="project" aria-label="关闭项目面板">×</button>
+              </div>
+            </header>
+
+            <div id="project-truth" class="project-truth" aria-live="polite"></div>
+
+            <nav id="tabs" class="tabs drawer-tabs" aria-label="项目面板页">
+              <button type="button" data-tab="overview" class="tab active" data-icon="◉">本轮</button>
+              <button type="button" data-tab="docs" class="tab" data-icon="▤">必读与目录</button>
+              <button type="button" data-tab="flow" class="tab" data-icon="⇢">流程</button>
+              <button type="button" data-tab="roles" class="tab" data-icon="◈">六角色</button>
+              <button type="button" data-tab="files" class="tab" data-icon="▣">文件</button>
+            </nav>
+
+            <div class="drawer-scroll">
+              <section id="view-overview" class="view active">
+                <div id="empty-view" class="empty">
+                  <div class="empty-mark">A</div>
+                  <h2>从第一个项目开始</h2>
+                  <p>项目 = 工作区，六角色 = 六个 DSH 会话。先新建项目，再点顶部「建团队」；之后按每轮必读：铁律 → 项目信息 → 角色卡 → 其他人文档，读完再 boot 开工。</p>
+                  <div class="empty-actions">
+                    <button class="primary" id="btn-empty-new" type="button">＋ 新建项目</button>
+                    <button class="ghost" type="button" data-open-restore>恢复已有项目</button>
+                  </div>
+                  <p id="empty-role-hint" class="empty-role-hint">六角色目录：项目经理 / 产品 / 需求分析师 / 程序员 A / 程序员 B / 测试人员</p>
+                  <p class="empty-role-hint">每轮必读：项目铁律 → 项目信息 → 角色卡 → 其他人文档</p>
+                </div>
+                <div id="overview-body" hidden>
+                  <section id="legacy-round" class="panel legacy-round" aria-live="polite"></section>
+
+                  <section class="panel legacy-gate-panel">
+                    <div class="panel-head">
+                      <h3>本轮必读 <span class="legacy-order">铁律 → 项目信息 → 角色卡 → 其他人文档</span></h3>
+                      <div class="panel-actions">
+                        <span id="legacy-gate-badge" class="badge badge-rejected">未核验</span>
+                        <button id="legacy-boot-all" class="ghost small" type="button" title="依次调用 workflow:boot，让未读全的角色各自读齐必读文件；界面发起不冒充角色本人">全队 boot</button>
+                        <button id="legacy-refresh" class="ghost small" type="button" title="重新读取项目文档与角色目录；只读，不调用写接口">刷新必读</button>
+                      </div>
+                    </div>
+                    <div id="legacy-gate" class="legacy-gate"></div>
+                  </section>
+
+                  <section class="panel">
+                    <div class="panel-head">
+                      <h3>六角色目录 / 必读（角色卡 + 文件索引）</h3>
+                      <div class="panel-actions">
+                        <span id="legacy-role-badge" class="badge muted-badge">读取中</span>
+                        <button class="ghost small" type="button" data-legacy-go="docs" title="查看完整六角色目录与项目文档">完整目录</button>
+                      </div>
+                    </div>
+                    <div id="legacy-role-table" class="legacy-role-table"></div>
+                    <p class="legacy-note">角色目录指向项目内六个角色目录；<code>角色卡.md</code> / <code>文件索引.md</code> 是否存在由 <code>files:list</code> 实际返回决定，表格里的「角色卡 / 索引 / boot」按钮直接打开只读文档或调用真实 <code>workflow:boot</code>。共享目录 <code>团队/角色/</code> 属团队工具，当前后端只允许读项目目录，不越界读取。</p>
+                  </section>
+
+                  <div class="two-col legacy-two-col">
+                    <section class="panel">
+                      <div class="panel-head"><h3>项目文档</h3><span class="badge muted-badge">只读 · files:read</span></div>
+                      <div id="legacy-doc-cards" class="legacy-doc-cards"></div>
+                    </section>
+                    <section class="panel">
+                      <div class="panel-head"><h3>Owner 状态</h3><span id="owner-badge" class="badge muted-badge">可选</span></div>
+                      <p id="owner-summary" class="muted">本轮还没有 Owner 决定。</p>
+                      <div id="owner-result" class="owner-result" hidden></div>
+                      <div class="quick-actions">
+                        <button id="btn-owner-open" class="ghost small" type="button" title="打开需求级 Owner 闸门（PM 派单的前置）">打开需求 Owner 决定</button>
+                        <button id="btn-owner-legacy" class="ghost small" type="button" title="旧版项目级 Owner 评审：只写项目 ownerReview，不参与需求派单">旧版项目级评审</button>
+                      </div>
+                      <p class="legacy-note">需求级 Owner 决定走 <code>requirement:owner</code>，写入该需求的 <code>ownerReview</code>，是 PM 派单的前置闸门；Owner 是外部角色，不跑 boot。项目级旧闸门（<code>owner:decide</code>）只写顶层 <code>ownerReview</code>，不参与任何需求派单，已在下面单独标出，不混用。</p>
+                    </section>
+                  </div>
+
+                  <section class="panel">
+                    <div class="panel-head"><h3>本轮推进</h3><span id="legacy-advance-badge" class="badge badge-rejected">禁止推进</span></div>
+                    <div id="legacy-advance-box" class="legacy-advance"></div>
+                  </section>
+                </div>
+              </section>
+
+              <section id="view-docs" class="view">
+                <div class="board-head">
+                  <div><div class="eyebrow">READING &amp; DIRECTORY</div><h2>六角色目录 / 必读文档</h2></div>
+                  <div class="board-head-actions">
+                    <span id="legacy-docs-summary" class="board-summary"></span>
+                    <button id="legacy-refresh-2" class="ghost small" type="button">刷新（只读）</button>
+                  </div>
+                </div>
+                <div id="legacy-roles-dirs" class="legacy-role-dirs"></div>
+                <section class="panel">
+                  <div class="panel-head">
+                    <h3>角色索引</h3>
+                    <span id="legacy-role-index-badge" class="badge muted-badge">—</span>
+                  </div>
+                  <div id="legacy-role-index" class="legacy-role-table"></div>
+                </section>
+                <section class="panel legacy-doc-panel">
+                  <div class="panel-head">
+                    <h3>项目必读文档</h3>
+                    <span class="badge muted-badge">只读 · 不写盘</span>
+                  </div>
+                  <div id="legacy-doc-tabs" class="legacy-doc-tabs" role="tablist" aria-label="选择项目文档"></div>
+                  <div id="legacy-doc-preview" class="legacy-doc-preview" aria-live="polite"></div>
+                  <p class="legacy-note">文档内容来自 <code>files:read</code>，上限 512 KiB；页签同时列出六角色《角色卡.md》与《文件索引.md》，缺失就写“缺失”，不生成模板、不补造内容。项目目录没有 <code>项目铁律.md</code> 时，旧工具会回退团队根的同名文件；当前界面不越界读取，因此如实显示缺失。</p>
+                </section>
+              </section>
+
+              <section id="view-flow" class="view">
+                <div class="board-head">
+                  <div><div class="eyebrow">PROJECT / TEAM FLOW</div><h2>需求 → 产品评审 → Owner → PM 派单 → 开发互审 → 测试 → Owner 验收 → 迭代/终止</h2></div>
+                  <div class="board-head-actions">
+                    <span id="flow-summary" class="board-summary"></span>
+                    <button id="btn-flow-owner" class="owner-btn" type="button" title="打开当前需求的 Owner 闸门；项目级旧闸门不参与派单">Owner（我）决定</button>
+                  </div>
+                </div>
+                <div class="flow-wrap">
+                  <div id="legacy-flow-ledger" class="legacy-flow-ledger"></div>
+                  <div id="flow-board" class="flow-board"></div>
+                  <div id="quick-tech-review" class="quick-tech-review" hidden></div>
+                  <div id="legacy-flow-gate" class="legacy-flow-gate"></div>
+                  <section class="panel legacy-req-panel">
+                    <div class="panel-head">
+                      <h3>需求队列 / 本轮动作</h3>
+                      <div class="panel-actions">
+                        <span id="legacy-req-badge" class="badge muted-badge">—</span>
+                        <button class="ghost small" type="button" data-legacy-req-action="owner-demand">向 PM 提交需求（Owner）</button>
+                      </div>
+                    </div>
+                    <div id="legacy-requirements" class="legacy-req-list"></div>
+                    <p class="legacy-note">项目索引只显示真实需求数：<code>需求/评审/</code>、<code>需求/验收/</code> 下的决策记录不计入需求数；需求正文里重复的「状态记录」在界面只显示一次（都不改文件）。Owner 通过 / 跳过 / 打回 / 验收是 <b>Owner（我）一次点击</b>：直接调用 <code>requirement:owner</code> / <code>owner:accept</code>，一次点击直接提交，无需二次确认；后端返回什么界面就显示什么，<code>actor</code> 以后端落账为准（本机点击，不是 DSH 身份证明）。动作按钮在动作 IPC 缺失或所需旧命令缺失/未核验时禁用；Owner 决定/验收由后端壳层落账，Full / Fast 都不依赖 team.mjs 的 <code>owner</code> 旧命令。所需角色未 boot/未读全时，执行前会先自动补一次真实 boot，再由后端校验阅读证据。</p>
+                  </section>
+                  <div id="legacy-flow-owner" class="legacy-flow-owner"></div>
+                  <div id="legacy-flow-actions" class="legacy-flow-actions"></div>
+                  <section class="panel legacy-cap-panel">
+                    <div class="panel-head">
+                      <h3>旧工具能力 / 命令缺口</h3>
+                      <div class="panel-actions">
+                        <span id="legacy-cap-badge" class="badge muted-badge">读取中</span>
+                      </div>
+                    </div>
+                    <div id="legacy-last-action" class="legacy-last-action-box" hidden></div>
+                    <div id="legacy-capabilities" class="legacy-capabilities"></div>
+                    <p class="legacy-note">能力矩阵来自 <code>workflow:state</code> 的 <code>legacy.capabilities</code>，渲染层 IPC 来自 <code>window.workbench</code> 实际函数探测。只有矩阵明确缺失（<code>caps.missing</code> 或 <code>false</code>）才写“缺”；矩阵没有返回的命令写“未核验”，对应动作按钮暂时禁用，不写成缺失。后端也会在写状态前返回 <code>LEGACY_PROTOCOL_REQUIRED</code>，不按文件契约伪造成功。</p>
+                  </section>
+                  <div id="flow-meta" class="flow-meta">读取中…</div>
+                  <div class="flow-legend">
+                    <span><i class="legend-dot current"></i>当前</span>
+                    <span><i class="legend-dot done"></i>已完成</span>
+                    <span><i class="legend-dot pending"></i>未到</span>
+                    <span><i class="legend-dot optional"></i>Owner 可跳过（记录在需求级闸门）</span>
+                  </div>
+                  <p class="flow-note">阶段状态来自后端 <code>workflow:next</code> 与 <code>workflow:briefing</code>；流程只保留八步：需求 → 产品评审 → Owner → PM 派单 → 开发互审 → 测试 → Owner 验收 → 迭代/终止。快速 4 人模式把产品评审显示为分析师评审、开发互审显示为复核，并在 Owner 之后增加 <b>TR（技术评审）</b>：TR 通过后需求状态为 <code>ready</code> 才可派单；投票驳回的需求标为“可迭代”，仍可重新评审，不是死锁。Owner 的“通过 / 跳过 / 打回”是<b>需求级</b>闸门（<code>requirement:owner</code> → 需求 <code>ownerReview</code>），PM 派单只认它；顶栏与项目头的“项目级 Owner”是旧版顶层字段，只做历史展示，不参与需求派单。动作按钮在动作 IPC 缺失或旧命令缺失/未核验时禁用（<code>caps.missing</code> / 明确 <code>false</code> 才写“缺”，矩阵没返回写“未核验”；Owner 决定/验收在 Full / Fast 都由后端壳收口，不受旧 <code>owner</code> 命令影响）；所需角色未 boot/未读全时，执行前自动补一次真实 boot，再由后端校验阅读证据与 boot 有效期。不把壳代跑当成角色已开工，也不替后端把旧任务改成已关闭。</p>
+                </div>
+              </section>
+
+              <section id="view-files" class="view">
+                <div class="board-head">
+                  <div><div class="eyebrow">FILES</div><h2>工作区文件</h2></div>
+                  <div class="board-head-actions">
+                    <span id="files-summary" class="files-summary"></span>
+                    <button id="btn-files-refresh" class="ghost small" type="button">刷新</button>
+                  </div>
+                </div>
+                <div class="files-panel">
+                  <div class="file-toolbar">
+                    <div class="file-crumb" id="file-crumb" title="项目根目录"><span class="file-crumb-dot" aria-hidden="true"></span><span id="files-root">—</span></div>
+                    <div class="file-toolbar-actions">
+                      <button class="file-tool" type="button" data-file-tool="expand" title="全部展开">⌄</button>
+                      <button class="file-tool" type="button" data-file-tool="collapse" title="全部收起">⌃</button>
+                      <button class="file-tool" type="button" data-file-tool="refresh" title="刷新目录">↻</button>
+                    </div>
+                  </div>
+                  <div id="files-list" class="file-list"><div class="empty-row">选择一个项目</div></div>
+                </div>
+                <p class="file-hint">点文件夹展开；点文件先打开内嵌预览（Markdown / 文本 / 图片），预览里保留“用系统程序打开”。目录树只显示当前工作区，不读项目外路径。</p>
+              </section>
+
+              <section id="view-roles" class="view">
+                <div class="board-head">
+                  <div><div class="eyebrow">SIX ROLES</div><h2>六角色目录</h2></div>
+                  <div class="board-head-actions">
+                    <span id="roles-summary" class="roles-summary"></span>
+                    <button id="roles-boot-all" class="ghost small" type="button" title="依次调用 workflow:boot，让未读全的角色各自读齐必读文件">全队 boot</button>
+                  </div>
+                </div>
+                <div id="roles-grid" class="roles-grid"></div>
+                <div class="rule-card">
+                  <b>每轮必读与路径纪律</b>
+                  <p>每轮先读《项目铁律.md》→《项目信息.md》→ 本角色《角色卡.md》→ 其他人文档；没有 boot / 没有读完，不写、不评审、不推进。文档写各自角色目录；程序员代码写项目根代码目录，不写角色目录。禁止写系统 Temp、桌面、C 盘根。</p>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section id="team-drawer" class="drawer team-drawer" role="dialog" aria-modal="false" aria-label="团队台" hidden>
+            <header class="drawer-head team-head">
+              <div class="project-title-wrap">
+                <div class="eyebrow">TEAM CONSOLE</div>
+                <h2>团队台</h2>
+                <p id="team-summary">六角色 · 本地映射 / DSH 存在 / 收件箱未读 / 最近回执 / 最后唤醒</p>
+              </div>
+              <div class="drawer-head-right">
+                <button id="btn-roles-refresh" class="ghost small" type="button">刷新状态</button>
+                <button id="team-to-project" class="ghost small drawer-switch" type="button" title="切到项目面板（同一个浮层，不会离开 DSH 主画面）">← 项目面板</button>
+                <button class="drawer-close" type="button" data-close-drawer="team" aria-label="关闭团队台">×</button>
+              </div>
+            </header>
+            <div class="drawer-scroll team-scroll">
+              <section class="team-block">
+                <div class="team-block-head"><h3>当前工作区</h3><div class="team-head-tools"><span id="team-mode-badge" class="badge">完整 6 人</span><span id="team-ws-badge" class="badge">—</span></div></div>
+                <div id="team-workspace" class="team-workspace"></div>
+              </section>
+
+              <section class="team-block legacy-team-block">
+                <div class="team-block-head">
+                  <h3>六角色目录 / 角色索引</h3>
+                  <span id="team-legacy-badge" class="badge badge-rejected">未核验</span>
+                </div>
+                <div id="team-legacy-gate" class="legacy-team-gate"></div>
+              </section>
+
+              <section class="team-block legacy-team-block">
+                <div class="team-block-head">
+                  <h3>评审 / 回执 · 真实 actor</h3>
+                  <span class="muted">不冒充</span>
+                </div>
+                <div id="team-actor-list" class="actor-list"></div>
+                <p class="legacy-team-rule">只认后端字段：<code>by</code> 是表单/记录字段，<code>actor</code> / <code>executor</code> 才是执行者。<b>actor=workbench-shell</b> 是壳代跑，<b>actor=workbench-shell/manual</b> 是人工确认；没有 actor 就写“执行者未记录”，不猜成角色本人。</p>
+              </section>
+
+              <section class="team-block">
+                <div class="team-block-head"><h3>六角色会话</h3><span id="team-session-count" class="side-count">0/6</span></div>
+                <div id="team-live-note" class="team-live-note">会话状态以 DSH 核验为准；DSH 未连接时只显示本地映射。</div>
+                <p class="team-status-source">每行五个字段：本地映射（workbench.json 的 sessions）、DSH 存在（dsh:team-status 核验，10 分钟有效）、收件箱未读（旧协议邮箱 new；未展开调试收件箱时按通信链 comm 统计并标“通信链未读”）、最近回执（本机 messages / 通信链 comm.ack / 回执.jsonl）、最后唤醒（通信链 comm.wake，其次已核验 dsh:prompt 事件，最后本次界面返回）。没有记录就写“未记录”，不补造。</p>
+                <div id="team-session-list" class="team-session-list"></div>
+              </section>
+
+              <section id="team-receipts" class="team-block team-receipts">
+                <div class="team-block-head">
+                  <h3>最近回执 <span class="muted">/ 回执.jsonl</span></h3>
+                  <div class="team-head-tools">
+                    <span id="team-receipts-source" class="badge muted-badge" title="回执数据来源">team:receipts</span>
+                    <button id="btn-receipts-refresh" class="ghost small" type="button" title="重新读取真实 team:receipts">刷新</button>
+                  </div>
+                </div>
+                <div id="team-receipts-note" class="team-receipts-note"></div>
+                <div id="team-receipts-summary" class="team-receipts-summary muted"></div>
+                <div id="team-receipts-list" class="team-receipts-list" role="list" aria-label="最近回执列表"></div>
+                <div id="team-manual-acks" class="team-manual-acks" hidden></div>
+                <p class="team-receipts-rule">旧看板口径：只显示 <code>!update</code> 行，按 <code>msgId|from</code> 去重，项目过滤含空 <code>project</code>，最新 50 条倒序；字段：时间 / 回执人 / 项目 / 消息 / 备注。每条另标 <code>actor</code> / <code>executor</code> / 身份来源：<b>actor=workbench-shell</b> 是壳执行旧协议 ack，<b>actor=workbench-shell/manual</b> 是人工确认（只写本机，不写 回执.jsonl，不是角色回执）；没有 actor 的旧回执行只写“执行者未记录”，不猜是角色本人。接口缺失时只明确提示，不用本机消息或看板计数冒充回执。</p>
+              </section>
+
+              <section class="team-block">
+                <div class="team-block-head">
+                  <h3>团队消息</h3>
+                  <div class="team-head-tools">
+                    <select id="team-log-filter" class="select mini-select" aria-label="按角色筛选团队消息">
+                      <option value="all">全部角色</option>
+                    </select>
+                    <span id="team-msg-summary" class="muted"></span>
+                  </div>
+                </div>
+                <div id="team-log" class="team-log"></div>
+              </section>
+
+              <section class="team-block">
+                <div class="team-block-head"><h3>团队派单</h3><span class="muted">本地单派锁 10 分钟 · 角色互发不占锁</span></div>
+                <div class="dispatch-form">
+                  <div class="dispatch-row">
+                    <label class="dispatch-field"><span>发起</span><select id="dispatch-from" class="select"></select></label>
+                    <label class="dispatch-field"><span>发给</span><select id="dispatch-role" class="select"></select></label>
+                  </div>
+                  <select id="dispatch-task" class="select" aria-label="关联任务（可选）"></select>
+                  <input id="dispatch-subject" class="input" placeholder="主题，例如：评审需求">
+                  <textarea id="dispatch-body" class="textarea" placeholder="任务 id、目标文件、边界、交付物"></textarea>
+                  <label class="check-row"><input type="checkbox" id="dispatch-ack" checked><span>需要回执（PM 派单占本地单派锁 10 分钟）</span></label>
+                  <div id="dispatch-hint" class="dispatch-hint"></div>
+                  <button id="dispatch-send" class="primary small" type="button">发给角色</button>
+                </div>
+                <div id="dispatch-result" class="dispatch-result" hidden></div>
+                <div id="dispatch-pending" class="dispatch-pending"></div>
+                <p class="dispatch-rule">旧协议：发起和收件角色都必须有当前项目真实 DSH 会话；缺一个就禁用派单，不会悄悄写本机降级记录。点「记录回执」时，工作台壳持收件角色会话身份执行旧协议 ack，回执 <code>actor=workbench-shell</code>（不是角色本人）；「人工确认」<code>actor=workbench-shell/manual</code>，只写本机消息，不是角色回执，也不释放派单锁。</p>
+              </section>
+
+              <section class="team-block">
+                <div class="team-block-head"><h3>团队投票</h3><div class="team-head-tools"><span class="muted">分析师发起 · 除 PM 外全员</span><span id="vote-summary" class="muted"></span></div></div>
+                <div id="team-vote-panel" class="vote-panel"></div>
+                <p class="vote-rule">投票走真实 <code>vote:start / vote:cast / vote:status</code>：需求分析师发起，除 PM 外当前团队模式全员投票；全部“驳回”才驳回 Owner 需求，任一“保留”即未驳回。理由、证据与结果来自后端工作流，不在本地造票。</p>
+              </section>
+
+              <section class="team-block">
+                <div class="team-block-head"><h3>团队看板浮窗</h3><span id="team-board-state" class="muted">未读取</span></div>
+                <div id="team-board-summary" class="team-board-summary"></div>
+                <div class="team-board-actions">
+                  <button id="btn-team-board-2" class="ghost small" type="button">打开看板浮窗</button>
+                  <button id="btn-team-board-refresh" class="ghost small" type="button">刷新摘要</button>
+                </div>
+              </section>
+
+              <details id="inbox-block" class="team-block inbox-block debug-fold">
+                <summary class="team-block-head debug-fold-head">
+                  <h3>收件箱 <span class="debug-tag">调试 / 旧协议</span></h3>
+                  <div class="team-head-tools">
+                    <span id="inbox-source" class="badge muted-badge" title="收件箱数据来源">本机镜像</span>
+                    <span class="debug-fold-hint">旧版没有此面板</span>
+                  </div>
+                </summary>
+                <div class="debug-note"><b>调试工具，不是主界面。</b>旧版工作台没有收件箱；这里只用于排查旧协议邮箱 <code>邮箱/&lt;角色&gt;/new|cur</code> 与未读。日常协作看上方“六角色会话”“最近回执”“团队消息”和“团队派单”。展开后才读取邮箱，不会在后台空跑；本机浏览标记不等于旧协议 read。</div>
+                <div class="inbox-toolbar">
+                  <button id="btn-inbox-refresh" class="ghost small" type="button" title="重新读取收件箱（旧协议调试）">刷新收件箱</button>
+                </div>
+                <div id="inbox-api-note" class="inbox-api-note" hidden></div>
+                <div id="inbox-roles" class="inbox-roles" role="tablist" aria-label="按角色查看收件箱"></div>
+                <div class="inbox-bar">
+                  <div id="inbox-filters" class="inbox-filters" role="tablist" aria-label="收件箱筛选（未读 / 已读 / 全部）"></div>
+                  <span id="inbox-count" class="inbox-count"></span>
+                </div>
+                <div class="inbox-body">
+                  <div id="inbox-list" class="inbox-list" role="listbox" aria-label="收件箱消息列表"></div>
+                  <div id="inbox-detail" class="inbox-detail" aria-live="polite"></div>
+                </div>
+                <p class="inbox-rule">收件箱是折叠的调试入口，不是主界面。按角色读 <code>邮箱/&lt;角色&gt;/new|cur</code>；本机镜像没有旧协议 IPC 时只读 <code>workbench.json.messages</code>，会明确标出来源。read 由工作台壳持角色会话身份执行（<code>actor=workbench-shell</code>）；「记录回执」同样由壳执行旧协议 ack（<code>actor=workbench-shell</code>），不是角色本人；「人工确认」<code>actor=workbench-shell/manual</code>，只写本机，不冒充角色回执。没有会话时全部禁用。</p>
+              </details>
+
+              <div class="team-actions">
+                <button id="btn-team-board" class="ghost small" type="button">团队看板</button>
+                <button id="btn-team-flow" class="ghost small" type="button">项目流程</button>
+                <button id="btn-team-members" class="ghost small" type="button">成员清单</button>
+                <button id="btn-team-project" class="ghost small" type="button">项目面板</button>
+                <button id="btn-team-sync" class="ghost small" type="button" title="重新向团队工具同步登记并绑定 DSH 工作区">同步团队登记</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <button id="board-launcher" class="flow-launcher board-launcher" type="button" title="团队看板浮窗（可打开/刷新/折叠/切看板项目）" aria-expanded="false">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.6" width="11.6" height="10.8" rx="1.4"/><path d="M6.2 2.6v10.8M2.2 6.4h11.6"/></svg>
+    <span>团队看板</span>
+  </button>
+  <button id="flow-launcher" class="flow-launcher" type="button" title="项目流程图（实时高亮当前阶段）" aria-expanded="false">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.7"/><path d="M10.5 5.5 9.1 9.1 5.5 10.5 6.9 6.9z"/></svg>
+    <span>流程</span>
+  </button>
+  <section id="flow-panel" class="flow-panel" hidden aria-label="项目流程图">
+    <header id="flow-drag" class="flow-panel-head">
+      <div><b>项目流程</b><span id="flow-project">—</span></div>
+      <div class="flow-panel-tools">
+        <button id="flow-board-open" class="flow-tool" type="button" title="打开团队看板浮窗">看板</button>
+        <button id="flow-close" class="flow-close" type="button" title="关闭">×</button>
+      </div>
+    </header>
+    <div class="flow-panel-body">
+      <div id="flow-mini" class="flow-board compact"></div>
+      <div id="flow-mini-meta" class="flow-meta">读取中…</div>
+    </div>
+  </section>
+
+  <section id="board-panel" class="board-panel" hidden aria-label="团队看板浮窗">
+    <header id="board-panel-head" class="board-panel-head">
+      <div class="board-panel-title">
+        <span class="eyebrow">TEAM BOARD</span>
+        <b>团队看板</b>
+        <span id="board-panel-subject" class="board-panel-subject">—</span>
+        <span id="board-panel-badge" class="badge">未加载</span>
+      </div>
+      <div class="board-panel-tools">
+        <select id="board-panel-project" class="select board-panel-select" aria-label="选择看板项目"></select>
+        <button id="board-panel-view" class="ghost small" type="button" title="只切换看板查看项目，不改工作台当前工作区">查看</button>
+        <button id="board-panel-open" class="ghost small" type="button" title="打开当前看板项目的独立 BrowserWindow">独立浮窗</button>
+        <button id="board-panel-refresh" class="ghost small" type="button" title="按当前看板项目重新生成看板">刷新</button>
+        <button id="board-panel-max" class="flow-tool" type="button" aria-pressed="false" title="放大 / 还原看板浮窗">放大</button>
+        <button id="board-panel-collapse" class="flow-tool" type="button" aria-expanded="true" title="折叠 / 展开看板">折叠</button>
+        <button id="board-panel-close" class="flow-close" type="button" aria-label="关闭团队看板浮窗" title="关闭浮窗">×</button>
+      </div>
+    </header>
+    <div id="board-panel-owner" class="board-panel-owner" hidden></div>
+    <div id="board-panel-meta" class="board-panel-meta">打开后读取当前项目的团队看板。</div>
+    <div id="board-panel-body" class="board-panel-body">
+      <div id="board-panel-empty" class="board-panel-empty">先选择一个工作区。</div>
+      <iframe id="board-panel-frame" class="board-panel-frame" title="团队看板内容" src="about:blank" hidden></iframe>
+    </div>
+    <footer class="board-panel-foot"><span id="board-panel-note">内嵌只读看板；切项目只切换看板查看，不改工作台当前工作区；独立窗口用其自身按钮关闭/折叠。</span></footer>
+  </section>
+
+  <div id="onboard" class="onboard-mask" hidden>
+    <div class="ob-blocker"></div>
+    <div id="ob-ring" class="ob-ring" hidden></div>
+    <div id="ob-arrow" class="ob-arrow" hidden></div>
+    <div id="ob-tip" class="ob-tip" role="dialog" aria-modal="true" aria-labelledby="ob-title">
+      <div class="onboard-head">
+        <div>
+          <span class="onboard-kicker" id="ob-kicker">QUICK START</span>
+          <h3 id="ob-title">欢迎使用 PM工作台</h3>
+        </div>
+        <button id="ob-skip" class="ob-skip" type="button" title="跳过引导">跳过</button>
+      </div>
+      <div id="ob-progress" class="onboard-progress"></div>
+      <div id="ob-body" class="onboard-body"></div>
+      <div class="onboard-actions">
+        <button id="ob-prev" class="ghost small" type="button">上一步</button>
+        <button id="ob-next" class="primary small" type="button">下一步</button>
+      </div>
+      <p class="onboard-note">只在这里操作；按 Esc 可跳过。</p>
+    </div>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
