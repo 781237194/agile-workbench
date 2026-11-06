@@ -19,7 +19,7 @@
 在已经装好 DSH 的机器上执行：
 
 ```powershell
-dsh plugin --profile web add github:781237194/agile-workbench#dsh-plugin
+dsh plugin --profile desktop add github:781237194/agile-workbench#dsh-plugin
 ```
 
 安装后重启 DSH（或新开一个会话），在工具列表里应能看到 `pm_workbench_open`。
@@ -70,9 +70,8 @@ pm_workbench_open
 3. 插件配置 `workbenchDir`
 4. 环境变量 `PM_WORKBENCH_START`
 5. 环境变量 `PM_WORKBENCH_DIR`
-6. 默认 `D:\deepseek\agile-workbench\start.cmd`
-7. 安装器默认 `D:\PM工作台\start.cmd`
-8. 安装器回退 `%USERPROFILE%\PM工作台\start.cmd`
+6. 安装器默认 `D:\PM工作台\start.cmd`
+7. 安装器回退 `%USERPROFILE%\PM工作台\start.cmd`
 
 显式路径（参数/配置/环境变量）不存在时直接报错并列出该路径，**不会**偷偷换成别的目录。
 全部默认路径都找不到时，返回已查找路径、安装命令和手动安装命令。

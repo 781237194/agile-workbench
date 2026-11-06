@@ -29,7 +29,6 @@ export const inject = ['tools']
 const TOOL_NAME = 'pm_workbench_open'
 const START_FILE = 'start.cmd'
 const DEFAULT_DIRS = [
-  'D:\\deepseek\\agile-workbench',
   'D:\\PM工作台',
   join(homedir(), 'PM工作台'),
 ]
