@@ -19,7 +19,7 @@
 在已经装好 DSH 的机器上执行：
 
 ```powershell
-dsh plugin --profile desktop add github:781237194/agile-workbench#dsh-plugin
+dsh plugin --profile desktop add dsh-pm-workbench
 ```
 
 安装后重启 DSH（或新开一个会话），在工具列表里应能看到 `pm_workbench_open`。
