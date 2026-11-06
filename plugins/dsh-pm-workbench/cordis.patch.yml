@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-pm-workbench
+      name: dsh-pm-workbench
+      config: {}
