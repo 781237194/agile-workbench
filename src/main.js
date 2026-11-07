@@ -11260,10 +11260,10 @@ async function reloadDshWebview(baseUrl) {
         if (!view) return false;
         const target = ${JSON.stringify(target)};
         if (view.getAttribute('src') === target) {
-          try { view.reload(); } catch (error) { return false; }
-        } else {
-          view.setAttribute('src', target);
+          // 已经在目标地址（或正在加载）时不要 reload；否则会中止当前导航并产生 ERR_ABORTED。
+          return true;
         }
+        view.setAttribute('src', target);
         return true;
       })()`, true);
       if (handled) return { ok: true, via: 'dom' };
