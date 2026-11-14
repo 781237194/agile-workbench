@@ -4057,9 +4057,12 @@ export async function cmdOwner(args) {
     } : {}),
     // R-b52b F-8：无 tester 的验收由 PM 代签测试结论（signedBy 只落 decisions，不新增任务字段）。
     ...(actionRaw === 'accept' && testGate && testGate.mode === 'pm_signed' ? {
+      actor: 'pm',
+      recordedBy: 'pm',
       decidedBy: 'owner',
       signedBy: 'pm',
       testGate: 'pm_signed',
+      channel: 'proxy',
     } : {}),
   };
   // F-O4 / AC-O6：决定 append-only；旧单对象不改写，只作为 decisions[0] 的只读迁移视图。
