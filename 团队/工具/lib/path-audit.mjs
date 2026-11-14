@@ -83,6 +83,8 @@ export const PATH_WHITELIST = [
   { file: '团队/工具/lib/broadcast.mjs', reason: '播报摘要脱敏正则的敏感词字面量（token/凭据/api_key 等），用于把值替换成 ***，不是硬编码密钥', pending: false },
   { file: '团队/工具/lib/dsh-session.mjs', reason: '读取 DSH 会话凭据的字段名/变量名（browser-session 凭据），同 src/dsh-adapter.js；不含硬编码密钥', pending: false },
   { file: '团队/工具/lib/selftest.mjs', reason: '自测构造样本：脱敏用例故意写入 token=/凭据明文验证被替换为 ***；越界路径用例用系统目录绝对路径验证 PATH_OUTSIDE_REPO；均为测试数据，不是运行时硬编码', pending: false },
+  // B-a163：沙盘启动脚本示例（他人合入）里的绝对路径仅用于演示 _tmp 沙盘目录，不是运行时路径。
+  { file: 'scripts/sandbox-run.ps1', reason: '沙盘启动示例脚本：写死的是 _tmp 沙盘示例目录（D:\\...\\_tmp\\xxx），供人复制后改路径；不参与运行时，不含密钥', pending: false },
 ];
 
 const WHITELIST_FILES = new Set(PATH_WHITELIST.map((row) => row.file));

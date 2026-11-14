@@ -137,8 +137,33 @@ function testerTrqSection() {
   ].join('\n');
 }
 
-export function roleCard(projectName, role, mode = 'full') {
-  const m = normalizeTeamMode(mode);
+/**
+ * R-a163：四人对齐的“本角色补充职责”——新增职能说明（决策箱/代管/路由/AC 四段式），
+ * 与 full 同口径，fast 只少角色不少职能。
+ */
+function roleAlignment(role, mode) {
+  const fast = normalizeTeamMode(mode) === 'fast';
+  const common = '- **AC 四段式**：每条验收标准必须写清「这是什么 / 怎么做 / 卡在哪 / 怎么判通过」；正文头必须带 \ersion\ 与 \change\，改正文不升版会被评审判 \VERSION_NOT_BUMPED\。\n'
+    + '- **证据门**：	ask done --evidence 按 \EVIDENCE_*\ 口径，路径相对项目根、文件存在非空、mtime ≥ 认领时间。\n'
+    + '- **路由与唤醒**：状态一变由路由守护叫下一角色；唤醒只带 taskId+action，正文去任务/需求里读。\n';
+  const byRole = {
+    pm: '- **决策箱**：只放非评审类拍板（取舍/优先级/口径/阻塞）；评审/验收一律走评审列表与验收列表。\n'
+      + '- **代管**：owner proxy start --scope all（写 expiresAt），需求收口自动结束；代签测试结论时 channel=proxy、signedBy=pm。\n'
+      + (fast ? '- **fast 派单**：四角色 pm/analyst/programmer1/tester；派单字段集合与 full 一致（type/requirementId/owner/evidence/round）。\n' : ''),
+    product: '- **需求评审**（full）：对照当前代码基线核“已有实现/真缺口”，产出带「基线核对」一节；fast 下评审由需求分析师执行，产品只给优先级建议。\n'
+      + '- **AC 结构化**：评审时校验四段式是否齐全，缺段退回补写，不自行改写 AC。\n',
+    analyst: '- **需求评审执行人**（fast）：核 AC 四段式与 version/change 头，缺一退回补写。\n'
+      + '- **拆解**：把需求拆成可判定 AC；不替开发设计实现、不替测试写用例。\n',
+    programmer1: '- **认领前读 AC**：按四段式理解验收口径；实现完成写证据（报告/截图路径），按 	ask done --evidence 交。\n'
+      + '- **bug 同权**：修复 	ype=bug 任务与开发任务同权推进（六条件，见 ops.advance）。\n',
+    programmer2: '- **认领前读 AC**：按四段式理解验收口径；实现完成写证据（报告/截图路径），按 	ask done --evidence 交。\n'
+      + '- **bug 同权**：修复 	ype=bug 任务与开发任务同权推进（六条件，见 ops.advance）。\n',
+    tester: '- **TR-Q 可测性评审**：需求定稿后审 AC 是否可判定，结论 	estable/not_testable + 缺项清单；需求改版后必须重做。\n'
+      + '- **验收证据两件套**：测试报告（含 PASS/FAIL 逐条）+ 截图；不代签、不改代码。\n',
+  };
+  return '\n## 本角色补充职责（四人对齐 R-a163）\n\n' + common + (byRole[role] || '');
+}
+export function roleCard(projectName, role, mode = 'full') {  const m = normalizeTeamMode(mode);
   const model = MODEL_BY_ROLE[role];
   const outSpec = OUTPUT_DOCS[role];
   const outHint = outSpec
@@ -185,7 +210,8 @@ export function roleCard(projectName, role, mode = 'full') {
       : '')
     + (role === 'pm'
       ? `\n## 叫醒角色模板\n\n**先完成《项目信息.md》和任务分配，再叫角色；没写清不要叫。**\n\nPM 叫角色时只发这一段（替换占位）：\n\n> 任务 <任务id>；先读 项目信息.md、项目索引.md、你的 文件索引.md 和 角色卡.md；回“角色 id + 任务 id + 交付物 + 边界”确认，并 **ack 回执（只算已回执）**。随后执行本条正文任务，产出写 <本角色目录>；完成后发完成回执 + task done --evidence（才算已完成）。目标文件：<路径>。\n\n发送时带 --ack；**一次只发一个人，发完停，等回执再发下一个。**\n`
-      : '');
+      : '')
+    + roleAlignment(role, m);
 }
 
 export function roleIndex(role) {
@@ -329,10 +355,15 @@ export function reqOverview(projectName) {
 
 export function reqTemplate(projectName) {
   return `# R-YYYYMMDD-xxxx · 需求标题\n\n`
+    + `> version: v1 ｜ change: 初稿（每次改正文必须同时改这两项，否则评审判 VERSION_NOT_BUMPED）\n\n`
     + `> 单个需求文件；≤ 16KB。新需求复制本模板另存为 \`R-...md\`，不要把所有需求堆进一个文件。\n\n`
     + `## 场景 / 用户\n\n（谁、在什么场景、要解决什么）\n\n`
     + `## 目标 / 不做什么\n\n（边界；明确排除项）\n\n`
-    + `## 验收标准\n\n（可测试、可判定）\n\n`
+    + `## 验收标准\n\n` + `（可测试、可判定；**每条 AC 用四段式**：\n`
+    + `1. **这是什么**：一句话说清要什么行为；\n`
+    + `2. **怎么做**：实现/操作路径（谁在哪一步做什么）；\n`
+    + `3. **卡在哪**：失败条件与错误码（没有就写“无”）；\n`
+    + `4. **怎么判通过**：给定期望结果，能一条命令或一次点击复验。）\n\n`
     + `## 依赖 / 风险\n\n（上下游、数据、权限、时间）\n\n`
     + `## 关联任务\n\n（T-... / 提案 / 文件）\n\n`
     + `## 变更记录\n\n| 时间 | 变更 | 负责人 | 提案/提交 |\n|---|---|---|---|\n`;
