@@ -6890,10 +6890,19 @@ function createTeamTools(options = {}) {
     // 不同状态（如通过后打回）仍然允许，append-only。
     const existingTarget = findStateRequirementRow(read.state, requirementId);
     const existingDecisions = existingTarget && Array.isArray(existingTarget.row.decisions) ? existingTarget.row.decisions : [];
-    const rowRound = Number((existingTarget && existingTarget.row.round) || 1);
+    // B-96e9：轮次用 d225 的 deliveryRound（缺失回退 round）；早于 gateInvalidatedAt 的旧决定视为已失效，
+    // 不再参与“同状态去重”（否则返工后复审的 approved 会被上一轮的 rejected/approved 挡住）。
+    const rowRound = Number((existingTarget && existingTarget.row.deliveryRound) || (existingTarget && existingTarget.row.round) || 1);
+    const gateAtMs = Date.parse(String((existingTarget && existingTarget.row.gateInvalidatedAt) || ''));
+    const stillValid = (d) => {
+      const at = Date.parse(String((d && (d.at || d.decidedAt)) || ''));
+      if (!Number.isFinite(at) || !Number.isFinite(gateAtMs)) return true;
+      return at >= gateAtMs;
+    };
     if (existingDecisions.some((d) => d
       && String(d.status || d.decision || '') === status
-      && Number(d.round || rowRound) === rowRound)) {
+      && Number(d.round || rowRound) === rowRound
+      && stillValid(d))) {
       return failure('DUPLICATE_DECISION', `需求 ${requirementId} 本轮已有相同决定（${status}），不重复落账`, {
         requirementId, status, round: rowRound,
       });

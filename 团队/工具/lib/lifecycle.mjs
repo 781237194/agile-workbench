@@ -164,6 +164,33 @@ export function rejectionEvidence(projectName, task) {
  * 按需求行状态推导项目相位。只在生命周期动作（iterate / terminate）里用：
  * 有在办需求时按状态优先级取，全部收口/迭代时才写 iteration / terminated / accepted。
  */
+/**
+ * B-96e9：取“当前有效”的最近一条 Owner 决定。
+ * 有效 = 决定时间不早于 gateInvalidatedAt（返工失效标记）；兼容旧记录（无 at 视为有效）。
+ * 轮次口径：d225 的 deliveryRound 优先，缺失回退 row.round（1）。
+ */
+export function latestValidOwnerDecision(row) {
+  const list = row && Array.isArray(row.decisions) ? row.decisions.filter(Boolean) : [];
+  const inv = Date.parse(String((row && row.gateInvalidatedAt) || ''));
+  const valid = list.filter((d) => {
+    const at = Date.parse(String((d && (d.at || d.decidedAt)) || ''));
+    if (!Number.isFinite(at)) return true;
+    if (!Number.isFinite(inv)) return true;
+    return at >= inv;
+  });
+  if (valid.length) return valid[valid.length - 1];
+  const legacy = row && row.ownerReview && typeof row.ownerReview === 'object' ? row.ownerReview : null;
+  if (legacy && legacy.status && legacy.at) return { status: legacy.status, at: legacy.at, legacyMigrated: true };
+  return null;
+}
+
+/** B-96e9：当前轮次（d225 deliveryRound 优先，缺失回退 round，再缺失按 1）。 */
+export function currentDeliveryRound(row) {
+  const d = Number(row && row.deliveryRound);
+  if (Number.isFinite(d) && d > 0) return d;
+  const r = Number(row && row.round);
+  return Number.isFinite(r) && r > 0 ? r : 1;
+}
 export function deriveProjectPhase(state) {
   const rows = Object.values((state && state.requirements) || {});
   if (!rows.length) return '';

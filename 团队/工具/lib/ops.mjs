@@ -46,7 +46,7 @@ import { memoryCheck } from './memory-check.mjs';
 import { checkEvidenceGate } from './evidence.mjs';
 import { bumpRound, archiveSession, confirmArchive, ROUNDS_MAX } from './session-archive.mjs';
 import {
-  transitionRequirement, syncWorkflowRow, stampRejected, workflowAction, readWorkflowState, writeWorkflowState,
+  transitionRequirement, syncWorkflowRow, stampRejected, workflowAction, readWorkflowState, writeWorkflowState, latestValidOwnerDecision, currentDeliveryRound,
 } from './lifecycle.mjs';
 import {
   issueOwnerConfirmation, consumeOwnerConfirmation, ownerConfirmHint,
@@ -4023,8 +4023,10 @@ export async function cmdOwner(args) {
   let testGate = null;
   if (actionRaw === 'accept') {
     // 验收前 Owner 决定必须已通过/跳过；被 Owner 打回的需求不能直接验收。
-    const ownerStatus = String((row && row.ownerReview && row.ownerReview.status) || '');
-    if (ownerStatus && !['approved', 'skipped'].includes(ownerStatus)) {
+    // B-96e9：只认“当前有效”的最近一条决定（忽略早于 gateInvalidatedAt 的旧打回），不再只看 legacy ownerReview。
+    const latestOwner = latestValidOwnerDecision(row);
+    const ownerStatus = String((latestOwner && (latestOwner.status || latestOwner.decision)) || '');
+    if (ownerStatus && !['approved', 'skipped', 'accept', 'accepted'].includes(ownerStatus)) {
       fail('REQUIREMENT_STATE_INVALID', `需求 ${requirementId} 的 Owner 决定是 ${ownerStatus}，不能验收`, {
         requirementId, ownerReview: row.ownerReview,
       });
