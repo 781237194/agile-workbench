@@ -4359,6 +4359,286 @@ function registerIpc() {
     }
     return JSON.parse(String(r.stdout || '{}').trim());
   });
+  // --------------------------------------------------------------------------
+  // R-9fbe F-9fbe-5：账本分叉处置（收口旧任务 / 重开需求记录）。
+  // 口径（需求 §六「权限/并发/降级」+ 品评 v2 §六·六）：
+  //   · 只走团队工具协议命令（task release / req reopen），壳层绝不直接改 工作流.json / 任务/*.json；
+  //   · 只认 PM 通道：读 团队/状态/启动/ 里现成的 pm 启动令牌，壳层不自 boot PM 代签；没有就 PM_TOKEN_REQUIRED；
+  //   · 处置前 fresh 读快照，与界面快照不一致 → WORKFLOW_STATE_CHANGED，零副作用；分叉已消失 → NOOP；
+  //   · 成功后 append-only 写 团队/状态/项目/<项目>/账本处置.jsonl；审计写不进就不执行（失败不留半条）。
+  // --------------------------------------------------------------------------
+  const LEDGER_AUDIT_NAME = '账本处置.jsonl';
+
+  function ledgerTeamRoot() {
+    return (teamTools && teamTools.layout && teamTools.layout.teamRoot)
+      || process.env.TEAM_ROOT
+      || path.join(ROOT, '团队');
+  }
+  /** 处置用的 team.mjs：优先团队沙盘里的那份（TEAM_ROOT 被换掉时与状态同源），否则用仓库内的。 */
+  function ledgerTeamMjsPath() {
+    const sandboxTool = path.join(ledgerTeamRoot(), '工具', 'team.mjs');
+    try { if (fs.statSync(sandboxTool).isFile()) return sandboxTool; } catch { /* 用仓库内的 */ }
+    return TEAM_MJS_PATH;
+  }
+  /**
+   * 最新启动令牌（只读，找现成的不代签）。B-b8d0 起后端启动令牌不再按 expiresAt 拒
+   * （团队/工具/lib/store.mjs 的 requireBoot），所以这里也不拿时间淘汰；旧文件里的 expiresAt 只回放审计。
+   */
+  function latestProjectBootToken(projectName, role) {
+    const want = String(role || 'pm');
+    const dir = path.join(ledgerTeamRoot(), '状态', '启动');
+    let names = [];
+    try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return null; }
+    let best = null;
+    for (const file of names) {
+      try {
+        const row = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8').replace(/^\uFEFF/, ''));
+        if (String(row.role || '') !== want) continue;
+        if (projectName && String(row.project || '') !== String(projectName)) continue;
+        const token = String(row.token || file.replace(/\.json$/, ''));
+        if (!token) continue;
+        const issuedAt = String(row.issuedAt || row.createdAt || '');
+        if (!best || issuedAt > best.issuedAt) {
+          best = { token, file, issuedAt, expiresAt: String(row.expiresAt || ''), role: want, sessionId: String(row.sessionId || '') };
+        }
+      } catch { /* 跳过损坏令牌文件，不中断查找 */ }
+    }
+    return best;
+  }
+  function ledgerAuditFile(project) {
+    const slug = teamTools.teamSlug(String(project.teamName || project.name || ''));
+    return path.join(ledgerTeamRoot(), '状态', '项目', slug, LEDGER_AUDIT_NAME);
+  }
+  /**
+   * 审计可写预检：目录不存在就建，不可写直接拒。
+   * 协议命令不可回滚，所以「审计写不进 → 操作回滚并报错」用「先预检、写不进就不执行」兜住（零副作用）。
+   */
+  function ledgerAuditPreflight(project) {
+    const file = ledgerAuditFile(project);
+    const dir = path.dirname(file);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.accessSync(dir, fs.constants.W_OK);
+    } catch (error) {
+      throw codedError('LEDGER_AUDIT_UNWRITABLE', `账本处置审计目录不可写（${dir}）：${String((error && error.message) || error).slice(0, 160)}；已中止，未执行任何处置命令`);
+    }
+    return file;
+  }
+  /** append-only 审计：一次写一整条 JSONL（字段固定），失败不吞。 */
+  function appendLedgerAudit(file, record) {
+    fs.appendFileSync(file, JSON.stringify(record) + '\n', 'utf8');
+    return file;
+  }
+  /** 快照里的账本摘要（处置前后回放给界面，不含令牌）。 */
+  function ledgerSummaryOf(snapshot) {
+    const ledger = snapshot && snapshot.ledger && typeof snapshot.ledger === 'object' ? snapshot.ledger : null;
+    const counts = snapshot && snapshot.counts && typeof snapshot.counts === 'object' ? snapshot.counts : null;
+    const forks = ledger && Array.isArray(ledger.forks)
+      ? ledger.forks.map((row) => ({ requirementId: String((row && row.requirementId) || ''), kind: String((row && row.kind) || '') }))
+      : null;
+    const inFlight = ledger && Array.isArray(ledger.inFlight) ? ledger.inFlight.length : null;
+    return {
+      known: Boolean(snapshot && snapshot.ok !== false),
+      forks,
+      forkCount: forks ? forks.length : (counts && Number.isFinite(Number(counts.ledgerForks)) ? Number(counts.ledgerForks) : null),
+      inFlightCount: inFlight !== null ? inFlight : (counts && Number.isFinite(Number(counts.ledgerInFlight)) ? Number(counts.ledgerInFlight) : null)
+    };
+  }
+  /** 给界面只读的处置通道路由：有没有通道 + 有没有 PM 令牌（含禁用原因；不含令牌值）。 */
+  function ledgerActionAvailability(teamName) {
+    const pm = latestProjectBootToken(teamName, 'pm');
+    return {
+      supported: true,
+      taskRelease: true,
+      requirementReopen: true,
+      auditFile: LEDGER_AUDIT_NAME,
+      pmToken: {
+        ok: Boolean(pm),
+        role: 'pm',
+        known: true,
+        // 只回放文件名与时间，绝不回放令牌值。
+        file: pm ? `状态/启动/${pm.file}` : '',
+        issuedAt: pm ? pm.issuedAt : '',
+        expiresAt: pm ? pm.expiresAt : '',
+        reason: pm ? '' : '需要 PM 令牌：团队里没有可用的 pm 启动令牌（请 PM 执行 team.mjs boot --role pm，或由 PM 在终端处置）'
+      }
+    };
+  }
+  function ledgerRowState(row) {
+    const fork = row && row.ledgerFork && typeof row.ledgerFork === 'object' ? row.ledgerFork : null;
+    return {
+      status: String((row && row.status) || ''),
+      taskStatus: String((row && row.taskStatus) || ''),
+      ledgerForkKind: fork ? String(fork.kind || '') : '',
+      taskId: fork ? String(fork.taskId || '') : '',
+      taskDoneAt: fork ? String(fork.taskDoneAt || '') : '',
+      reopenedAt: String((row && row.reopenedAt) || (fork && fork.reopenedAt) || ''),
+      ledgerInFlight: String((row && row.ledgerInFlight) || '')
+    };
+  }
+  /**
+   * 处置公共流程：fresh 快照校验 → 并发比对 → PM 令牌 → 审计预检 → 协议命令 → 复读快照 → append 审计。
+   * action: close_old_task（team.mjs task release）| reopen_requirement（team.mjs req reopen）
+   */
+  async function runLedgerAction(ctx, payload, action) {
+    const p = payload || {};
+    const teamName = String(ctx.teamName || '');
+    const projectPath = String(ctx.projectPath || '');
+    const project = ctx.project || {};
+    const requirementId = String(p.requirementId || p.reqId || '').trim();
+    if (!requirementId) throw codedError('BAD_ARGS', '需要 requirementId（要处置的需求 id）');
+    const closeTask = action === 'close_old_task';
+    const reason = String(p.reason || '').trim()
+      || (closeTask ? '账本分叉处置：旧任务收口（界面发起，PM 令牌执行）' : '账本分叉处置：需求返工重开（界面发起，PM 令牌执行）');
+
+    // ① fresh 读：界面快照可能已经旧了（并发/别人先处置）。
+    const fresh = teamTools.readWorkflowSnapshot(teamName, projectPath);
+    if (!fresh || fresh.ok === false) {
+      throw codedError('WORKFLOW_STATE_UNREADABLE', `工作流快照读取失败，无法核对分叉：${String((fresh && (fresh.message || fresh.code)) || '无返回').slice(0, 200)}；已中止，零副作用`);
+    }
+    const rows = Array.isArray(fresh.requirements) ? fresh.requirements : [];
+    const row = rows.find((item) => String((item && item.id) || '') === requirementId) || null;
+    if (!row) throw codedError('REQUIREMENT_NOT_FOUND', `工作流里没有需求 ${requirementId}（先 req sync 登记，再处置）`);
+    const before = ledgerRowState(row);
+    // ② 重复点 = NOOP：分叉已不存在（上次已处置/别人先处置/已自动消解）就不重复执行、不重复写审计。
+    if (!before.ledgerForkKind) {
+      return {
+        ok: true,
+        code: 'LEDGER_ACTION_NOOP',
+        noop: true,
+        action,
+        requirementId,
+        message: `需求 ${requirementId} 当前没有账本分叉（已处置过或已自动消解），未重复执行`,
+        before,
+        after: before,
+        audit: { ok: true, skipped: true },
+        ledger: ledgerSummaryOf(fresh)
+      };
+    }
+    // ③ 并发：界面快照与磁盘不一致就停（零副作用），把两侧状态给界面。
+    const expect = p.expect && typeof p.expect === 'object' ? p.expect : null;
+    if (expect) {
+      const changed = [];
+      const expectKind = String(expect.ledgerForkKind || expect.kind || '');
+      const expectTask = String(expect.taskId || '');
+      const expectStatus = String(expect.status || '');
+      if (expectKind && expectKind !== before.ledgerForkKind) changed.push(`分叉类型 ${expectKind} → ${before.ledgerForkKind}`);
+      if (expectTask && before.taskId && expectTask !== before.taskId) changed.push(`任务 ${expectTask} → ${before.taskId}`);
+      if (expectStatus && expectStatus !== before.status) changed.push(`需求状态 ${expectStatus} → ${before.status}`);
+      if (changed.length) {
+        throw codedError('WORKFLOW_STATE_CHANGED', `账本状态已变化（${changed.join('；')}），已中止，零副作用；刷新面板后按最新分叉再处置`);
+      }
+    }
+    // ④ 目标任务：收口旧任务必须有任务 id（分叉自带；界面也可以显式传）。
+    const taskId = String(p.taskId || before.taskId || '').trim();
+    if (closeTask && !taskId) {
+      throw codedError('LEDGER_TASK_MISSING', `需求 ${requirementId} 的分叉里没有任务 id，无法收口旧任务；请改用「重开需求记录」或用 team.mjs 手动处置`);
+    }
+    // ⑤ 权限：处置只对 PM 通道可用（Owner 侧只读）；壳层不自 boot PM 代签。
+    const boot = latestProjectBootToken(teamName, 'pm');
+    if (!boot) {
+      throw codedError('PM_TOKEN_REQUIRED', `处置需要 PM 启动令牌：团队里没有可用的 pm 令牌。请 PM 执行 team.mjs boot --role pm --project ${teamName} 后重试，或由 PM 在终端直接处置（界面不自代签）`);
+    }
+    // ⑥ 审计预检：写不进就不执行。
+    const auditFile = ledgerAuditPreflight(project);
+
+    // ⑦ 只走协议命令（团队工具会自己写事件审计；界面不改 JSON）。
+    const commandArgs = closeTask
+      ? ['task', 'release', '--boot', boot.token, '--project', teamName, '--id', taskId, '--reason', reason, '--json']
+      : ['req', 'reopen', '--boot', boot.token, '--project', teamName, '--requirement', requirementId, '--reason', reason, '--json'];
+    const startedAt = Date.now();
+    const run = spawnSync(process.execPath, [ledgerTeamMjsPath(), ...commandArgs], { encoding: 'utf8', timeout: 120000 });
+    const rawText = String((run.stdout || '') + (run.stderr || ''));
+    let parsed = null;
+    const jsonAt = rawText.indexOf('{');
+    if (jsonAt >= 0) { try { parsed = JSON.parse(rawText.slice(jsonAt)); } catch { parsed = null; } }
+    const ok = parsed ? parsed.ok === true : (run.status === 0);
+    const code = (parsed && parsed.code)
+      || (rawText.match(/\[([A-Z_]+)\]/) || [])[1]
+      || (ok ? 'OK' : 'LEDGER_COMMAND_FAILED');
+
+    // ⑧ 复读快照：处置后分叉应消失；复读失败不回滚已执行的命令，审计里照实记 null。
+    let freshAfter = null;
+    let after = null;
+    try {
+      freshAfter = teamTools.readWorkflowSnapshot(teamName, projectPath);
+      const rowAfter = (Array.isArray(freshAfter && freshAfter.requirements) ? freshAfter.requirements : [])
+        .find((item) => String((item && item.id) || '') === requirementId) || null;
+      after = rowAfter ? ledgerRowState(rowAfter) : null;
+    } catch { freshAfter = null; after = null; }
+
+    const record = {
+      at: now(),
+      action,
+      requirementId,
+      taskId: taskId || '',
+      before,
+      after,
+      actor: 'pm',
+      channel: 'ui',
+      source: closeTask ? 'team.mjs task release' : 'team.mjs req reopen',
+      result: {
+        ok,
+        code,
+        message: String((parsed && parsed.message) || (ok ? '命令已执行' : rawText)).slice(0, 400),
+        ms: Date.now() - startedAt,
+        bootFile: `状态/启动/${boot.file}`
+      }
+    };
+    const audit = { ok: false, file: auditFile };
+    try {
+      appendLedgerAudit(auditFile, record);
+      audit.ok = true;
+    } catch (error) {
+      // 命令已执行但审计写不进：不静默，把整条记录回放给界面，便于人工补录。
+      return {
+        ok: false,
+        code: 'LEDGER_AUDIT_FAILED',
+        action,
+        requirementId,
+        taskId,
+        message: `处置命令已执行（${code}），但审计写入失败：${String((error && error.message) || error).slice(0, 200)}；请人工补录到 ${LEDGER_AUDIT_NAME}`,
+        before,
+        after,
+        audit,
+        record,
+        ledger: ledgerSummaryOf(freshAfter)
+      };
+    }
+    if (!ok) {
+      return {
+        ok: false,
+        code,
+        action,
+        requirementId,
+        taskId,
+        message: String((parsed && parsed.message) || rawText.slice(0, 400) || `team.mjs 拒绝执行：${code}`),
+        why: String((parsed && parsed.message) || '').slice(0, 400),
+        details: (parsed && parsed.details) || {},
+        before,
+        after,
+        audit,
+        ledger: ledgerSummaryOf(freshAfter)
+      };
+    }
+    return {
+      ok: true,
+      code: 'LEDGER_ACTION_OK',
+      action,
+      requirementId,
+      taskId,
+      message: closeTask
+        ? `已收口旧任务 ${taskId}：走 team.mjs task release（任务退回未收口，账本分叉消解），审计已追加`
+        : `已重开需求 ${requirementId}：走 team.mjs req reopen（lastReopenAt / gateInvalidatedAt 已写），审计已追加`,
+      before,
+      after,
+      audit,
+      // 处置成功后该需求不再判分叉（分叉行应消失、计数应下降）。
+      forkCleared: Boolean(after && !after.ledgerForkKind),
+      ledger: ledgerSummaryOf(freshAfter),
+      command: { ok: true, code: 'OK', ms: record.result.ms }
+    };
+  }
   ipcMain.handle('project:open', (_e, projectId) => {
     const store = readStore();
     const p = store.projects.find((x) => x.id === projectId);
@@ -5579,7 +5859,10 @@ function registerIpc() {
   });
 
   ipcMain.handle('workflow:state', runWorkflowIpc(async (ctx) => {
-    return workflowSnapshot(ctx.project);
+    const snapshot = workflowSnapshot(ctx.project);
+    // R-9fbe F-9fbe-5：把两个账本处置通道的可用性一起下发（只读、不含令牌值）——
+    // 面板据此给按钮禁用原因；真点下去仍由 owner:ledger-* 复核（PM_TOKEN_REQUIRED 等）。
+    return { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName) };
   }));
   ipcMain.handle('workflow:boot', runWorkflowIpc(async (ctx, p, meta) => {
     if (!ROLES.some((role) => role.id === meta.role)) throw codedError('BAD_ROLE', `角色无效：${meta.role || '(空)'}`);
@@ -8383,6 +8666,11 @@ function registerIpc() {
       label: maxRow ? `会话用量 ${fmtTokens(maxRow.tokens)} / 阈值 ${fmtTokens(warnThreshold)}` : '会话用量未知 / 阈值 ' + fmtTokens(warnThreshold)
     };
   });
+
+  // R-9fbe F-9fbe-5：账本分叉两个处置入口（放在 runWorkflowIpc 定义之后注册，避免 TDZ）。
+  // 逻辑在 runLedgerAction（本文件上方「账本分叉处置」段），这里只接线。
+  ipcMain.handle('owner:ledger-close-task', runWorkflowIpc(async (ctx, p) => runLedgerAction(ctx, p, 'close_old_task')));
+  ipcMain.handle('owner:ledger-reopen', runWorkflowIpc(async (ctx, p) => runLedgerAction(ctx, p, 'reopen_requirement')));
 
   ipcMain.handle('workspace:plan', async (_e, payload) => {
     const p = payload || {};

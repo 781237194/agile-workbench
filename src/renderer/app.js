@@ -5517,20 +5517,51 @@ function ledgerWhenText(value) {
 }
 
 /**
+ * F-9fbe-5：处置结果的人话横幅（成功/失败/NOOP 都留痕，失败带错误码；不静默）。
+ * 纯函数：只用 esc，抽段断言可直接跑（见 scripts/test-ledger-actions.cjs）。
+ */
+function ledgerBannerMarkup(banner) {
+  if (!banner || typeof banner !== 'object') return '';
+  const text = String(banner.text || '');
+  if (!text) return '';
+  const kind = ['ok', 'bad', 'warn', 'info'].includes(String(banner.kind)) ? String(banner.kind) : 'info';
+  const code = String(banner.code || '');
+  const mark = kind === 'ok' ? '✓ ' : (kind === 'bad' ? '⚠ ' : '· ');
+  return `<div class="legacy-action-warn" data-ledger-banner="1" data-ledger-banner-kind="${kind}" data-ledger-code="${esc(code)}" data-panel-level="${kind === 'ok' ? 'info' : 'warn'}">${mark}${esc(text)}${code ? `（错误码 <code>${esc(code)}</code>）` : ''}</div>`;
+}
+
+/**
  * F-9fbe-5：分叉处置行。两个按钮只在后端真有 IPC 时出现；否则行内写清手动命令（壳不自写 JSON）。
- * options: {statusLabel(req), actionAvailable:{taskRelease,requirementReopen}, projectName}
+ * 按钮不可点时必须带原因：title + 行内说明（data-ledger-disabled）。
+ * options: {statusLabel(req), actionAvailable:{taskRelease,requirementReopen},
+ *           actionEnabled:{taskRelease,requirementReopen,reason}, banner, projectName}
  */
 function ledgerMarkupFromView(view, options) {
   const v = view && typeof view === 'object' ? view : {};
   const opts = options && typeof options === 'object' ? options : {};
   if (!v.known) return '';
+  const banner = ledgerBannerMarkup(opts.banner);
   const forks = Array.isArray(v.forks) ? v.forks : [];
   const inFlight = Array.isArray(v.inFlight) ? v.inFlight : [];
   const count = Number(v.count) || 0;
-  if (!count && !inFlight.length) return '';
+  if (!count && !inFlight.length) return banner;
   const source = v.source === 'legacy' ? 'legacy' : 'snapshot';
   const statusLabel = typeof opts.statusLabel === 'function' ? opts.statusLabel : (req) => String((req && req.status) || '');
   const actions = opts.actionAvailable && typeof opts.actionAvailable === 'object' ? opts.actionAvailable : {};
+  // 不可点原因：并发（正在处置）/ 没有 PM 令牌 / 其它由主进程下发的禁用原因。禁用必须写在 title 与行内。
+  const enabled = opts.actionEnabled && typeof opts.actionEnabled === 'object' ? opts.actionEnabled : null;
+  const whyOf = (key) => {
+    if (!enabled) return '';
+    if (enabled[key] === true) return '';
+    return String(enabled.reason || '按钮已禁用');
+  };
+  const actionButton = (key, attrs, label, title) => {
+    const why = whyOf(key);
+    if (why) {
+      return `<span class="legacy-ledger-why" data-ledger-disabled="${esc(key)}" title="${esc(`${label} 暂不可点：${why}`)}"><button class="ghost small" type="button" ${attrs} disabled title="${esc(`${title}（暂不可点：${why}）`)}">${label}</button><span class="legacy-ledger-why-text">${esc(why)}</span></span>`;
+    }
+    return `<button class="ghost small" type="button" ${attrs} title="${esc(title)}">${label}</button>`;
+  };
   const level = count ? 'warn' : 'info';
   const projectName = String(opts.projectName || '');
   const head = count
@@ -5542,9 +5573,9 @@ function ledgerMarkupFromView(view, options) {
     const doneAt = ledgerWhenText(item.taskDoneAt);
     const reopenedAt = ledgerWhenText(item.reopenedAt);
     const buttons = (actions.taskRelease || actions.requirementReopen)
-      ? `<span class="legacy-ledger-actions">${actions.taskRelease && item.taskId ? `<button class="ghost small" type="button" data-ledger-action="task-release" data-ledger-task="${esc(item.taskId)}" title="把旧任务退回未收口（走 team.mjs task release + 审计）">收口旧任务</button>` : ''}${actions.requirementReopen ? `<button class="ghost small" type="button" data-ledger-action="requirement-reopen" data-ledger-req="${esc(req.id || '')}" title="把需求记录重开为返工（走 team.mjs req reopen + 审计）">重开需求记录</button>` : ''}</span>`
+      ? `<span class="legacy-ledger-actions">${actions.taskRelease && item.taskId ? actionButton('taskRelease', `data-ledger-action="task-release" data-ledger-task="${esc(item.taskId)}" data-ledger-req="${esc(req.id || '')}"`, '收口旧任务', '把旧任务退回未收口（走 team.mjs task release + 审计）') : ''}${actions.requirementReopen ? actionButton('requirementReopen', `data-ledger-action="requirement-reopen" data-ledger-req="${esc(req.id || '')}" data-ledger-task="${esc(item.taskId || '')}"`, '重开需求记录', '把需求记录重开为返工（走 team.mjs req reopen + 审计）') : ''}</span>`
       : `<span class="legacy-ledger-nocmd" data-ledger-no-command="1">本版后端无处置命令，请手动执行 <code>team.mjs task release --project ${esc(projectName)} --id ${esc(item.taskId || '<任务id>')}</code> 或 <code>team.mjs req reopen --project ${esc(projectName)} --requirement ${esc(req.id || '')}</code>（带 --boot 令牌，写审计）</span>`;
-    return `<div class="legacy-ledger-row" data-panel-level="warn" data-ledger-fork="${esc(req.id || '')}" data-ledger-kind="${esc(item.kind || '')}">
+    return `<div class="legacy-ledger-row" data-panel-level="warn" data-ledger-fork="${esc(req.id || '')}" data-ledger-status="${esc(item.status || '')}" data-ledger-kind="${esc(item.kind || '')}">
       <code>${esc(req.id || '')}</code><span>${esc(statusLabel(req))}</span><b>${esc(item.label || '')}</b>
       <span class="legacy-ledger-when">${item.taskId ? `任务 <code>${esc(item.taskId)}</code>` : ''}${doneAt ? ` 完成于 ${esc(doneAt)}` : ''}${reopenedAt ? ` · 重开 ${esc(reopenedAt)}` : ''}</span>
       ${buttons}
@@ -5558,7 +5589,7 @@ function ledgerMarkupFromView(view, options) {
       <code>${esc(req.id || '')}</code><span>${esc(statusLabel(req))}</span><b>${esc(kindText)}</b><span class="legacy-ledger-when">不计分叉</span>
     </div>`;
   }).join('');
-  return `<div class="legacy-ledger ${level}" data-ledger-source="${source}" data-ledger-count="${count}" data-ledger-inflight="${Number(v.inFlightCount) || inFlight.length}" data-panel-level="${level}">
+  return `${banner}<div class="legacy-ledger ${level}" data-ledger-source="${source}" data-ledger-count="${count}" data-ledger-inflight="${Number(v.inFlightCount) || inFlight.length}" data-panel-level="${level}">
     <div class="legacy-ledger-head">
       <b>账本核对</b>
       <span>${esc(head)}</span>
@@ -5703,22 +5734,194 @@ function legacyLedgerDivergences() {
   return legacyLedgerView().forks;
 }
 
-/** F-9fbe-5：处置按钮只在后端真有 IPC 时才出现（当前主进程没有 task release / req reopen 接口）。 */
+/**
+ * F-9fbe-5：处置按钮只在后端真有 IPC 时才出现。
+ * R-9fbe / T-ed7：主进程已新增 owner:ledger-close-task / owner:ledger-reopen（preload 名
+ * ownerLedgerCloseTask / ownerLedgerReopen）；旧 preload 里的 taskRelease / requirementReopen 仍认。
+ */
 function legacyLedgerActionAvailable() {
   const wb = window.workbench || null;
+  const has = (...names) => names.some((name) => Boolean(wb && typeof wb[name] === 'function'));
   return {
-    taskRelease: Boolean(wb && typeof wb.taskRelease === 'function'),
-    requirementReopen: Boolean(wb && typeof wb.requirementReopen === 'function')
+    taskRelease: has('ownerLedgerCloseTask', 'taskRelease'),
+    requirementReopen: has('ownerLedgerReopen', 'requirementReopen')
+  };
+}
+
+/** F-9fbe-5：处置动作的界面状态（并发：点击后按钮立即禁用直到刷新完成；结果横幅不静默）。 */
+const ledgerActionUi = { busy: false, busyKey: '', banner: null, lastAt: 0 };
+
+/** 从 IPC 异常里取结构化错误码（主进程 codedError 会把 [CODE] 写进 message）。 */
+function ledgerErrorCodeOf(error) {
+  const text = String((error && error.message) || error || '');
+  const hit = text.match(/\[([A-Z][A-Z0-9_]+)\]/);
+  if (hit) return hit[1];
+  return String((error && error.code) || '');
+}
+
+/**
+ * F-9fbe-5：处置按钮三态（没有接口 / 有接口但需要 PM 令牌 / 可点），禁用原因一律给文案。
+ * PM 令牌状态来自 workflow:state 的 ledgerActions（主进程只读下发，不含令牌值）。
+ */
+function legacyLedgerActionState() {
+  const ipc = legacyLedgerActionAvailable();
+  const wf = legacyWorkflow();
+  const meta = wf && wf.ledgerActions && typeof wf.ledgerActions === 'object' ? wf.ledgerActions : null;
+  const pm = meta && meta.pmToken && typeof meta.pmToken === 'object' ? meta.pmToken : null;
+  const busy = Boolean(ledgerActionUi.busy);
+  // 主进程没下发字段时不假装禁用（点下去仍会被主进程复核）；下发了 ok=false 才禁用并给原因。
+  const pmOk = pm ? pm.ok !== false : true;
+  const reasons = [];
+  if (busy) reasons.push('正在处置，等刷新完成');
+  if (pm && pm.ok === false) reasons.push(String(pm.reason || '需要 PM 令牌：团队里没有可用的 pm 启动令牌（请 PM 先 boot，或由 PM 处置）'));
+  const disabledReason = reasons.join('；');
+  const canAct = !busy && pmOk;
+  return {
+    taskRelease: ipc.taskRelease,
+    requirementReopen: ipc.requirementReopen,
+    canCloseTask: ipc.taskRelease && canAct,
+    canReopen: ipc.requirementReopen && canAct,
+    busy,
+    pmKnown: Boolean(pm),
+    pmOk,
+    disabledReason,
+    auditFile: meta ? String(meta.auditFile || '') : ''
   };
 }
 
 function legacyLedgerMarkup() {
   const view = legacyLedgerView();
+  const actions = legacyLedgerActionState();
   return ledgerMarkupFromView(view, {
     statusLabel: legacyReqStatus,
-    actionAvailable: legacyLedgerActionAvailable(),
+    actionAvailable: { taskRelease: actions.taskRelease, requirementReopen: actions.requirementReopen },
+    actionEnabled: {
+      taskRelease: actions.canCloseTask,
+      requirementReopen: actions.canReopen,
+      reason: actions.disabledReason
+    },
+    banner: ledgerActionUi.banner,
     projectName: (activeProject() && activeProject().name) || ''
   });
+}
+
+/** 只重画账本块（概览页 + 流程页同源），不整块重排流程。 */
+function ledgerRenderLedgerBlock() {
+  const p = activeProject();
+  if (!p) return;
+  try { renderLegacyGate(p); } catch { /* 概览页没渲染出来时忽略 */ }
+  const flowBox = $('#legacy-flow-ledger');
+  if (flowBox) flowBox.innerHTML = legacyLedgerMarkup();
+}
+
+/** 处置后刷新：强制重绘一次流程（签名没变也要重画），失败退回一次只读重读。 */
+async function ledgerRefreshAfterAction() {
+  flowRenderUi.projectId = '';
+  flowRenderUi.sig = '';
+  let ok = false;
+  try { ok = await refreshFlowLive(); } catch { ok = false; }
+  if (!ok) {
+    // 浮窗/抽屉未打开时 refreshFlowLive 会主动跳过；这里退回一次只读重读（仍不写任何文件）。
+    try { await loadLegacyDocs(true); } catch { /* 下一次 5 秒轮询会补上，横幅已经在 */ }
+  }
+  return ok;
+}
+
+/**
+ * F-9fbe-5：处置失败码 → 人话补齐（错误码原样保留，另给「接下来怎么办」）。
+ * 需求 §六「并发/权限/降级」：状态已变、缺 PM 令牌、审计写不进都要说清且零副作用。
+ */
+function ledgerActionHint(code) {
+  const key = String(code || '');
+  const table = {
+    WORKFLOW_STATE_CHANGED: '账本状态已变化（可能别人先处置了），本次零副作用；面板已刷新，请按最新分叉再处置',
+    PM_TOKEN_REQUIRED: '需要 PM 令牌：请让 PM 先 boot，或由 PM 在终端处置；界面不自代签',
+    LEDGER_TASK_MISSING: '分叉里没有任务 id，收口不了旧任务；可改用「重开需求记录」',
+    LEDGER_AUDIT_UNWRITABLE: '审计目录不可写，已中止，零副作用；先修目录权限再处置',
+    LEDGER_AUDIT_FAILED: '命令已执行但审计没落盘，需要人工补录（记录已回放在返回里）',
+    LEDGER_IPC_MISSING: '当前 preload 没有处置 IPC，重启工作台或更新版本',
+    WORKFLOW_STATE_UNREADABLE: '工作流快照读不出来，先修读取再处置（零副作用）',
+    REQUIREMENT_NOT_FOUND: '工作流里没有这条需求，先 req sync 登记',
+    REOPEN_NOT_APPLICABLE: '该需求当前状态不适用返工（req reopen 只接受 dev_done / test_done）'
+  };
+  return table[key] || '';
+}
+
+/**
+ * F-9fbe-5：点处置按钮 → 调 owner:ledger-close-task / owner:ledger-reopen。
+ * 约定：点击后按钮立即禁用直到刷新完成；失败给人话横幅 + 错误码；成功后重读快照重绘。
+ * 处置前 fresh 读在工作主进程做，界面只把当前快照的 status/kind/taskId 当 expect 传过去。
+ */
+async function ledgerActionRun(button) {
+  const wb = window.workbench || null;
+  const p = activeProject();
+  const el = button && button.dataset ? button : null;
+  const kind = String((el && el.ledgerAction) || '');
+  const requirementId = String((el && el.ledgerReq) || '');
+  const taskId = String((el && el.ledgerTask) || '');
+  if (!p || !kind) {
+    toast('账本处置入口不可用：先选中项目', 'bad');
+    return;
+  }
+  if (ledgerActionUi.busy) {
+    toast('上一次处置还没刷新完，等面板刷新后再点', 'warn');
+    return;
+  }
+  const row = el ? el.closest('[data-ledger-fork]') : null;
+  const expect = {
+    status: row ? String(row.getAttribute('data-ledger-status') || '') : '',
+    ledgerForkKind: row ? String(row.getAttribute('data-ledger-kind') || '') : '',
+    taskId
+  };
+  // 并发：点击后立刻进入 busy，所有处置按钮同时禁用，直到刷新完成。
+  ledgerActionUi.busy = true;
+  ledgerActionUi.busyKey = `${kind}:${requirementId}`;
+  ledgerActionUi.banner = { kind: 'info', text: `正在按团队工具协议处置 ${requirementId}（PM 令牌执行 + append-only 审计）…` };
+  ledgerActionUi.lastAt = Date.now();
+  ledgerRenderLedgerBlock();
+  try {
+    const fn = kind === 'task-release'
+      ? (wb && (wb.ownerLedgerCloseTask || wb.taskRelease))
+      : (wb && (wb.ownerLedgerReopen || wb.requirementReopen));
+    if (typeof fn !== 'function') throw new Error('[LEDGER_IPC_MISSING] 当前 preload 没有账本处置 IPC（ownerLedgerCloseTask / ownerLedgerReopen），请重启工作台');
+    const res = await fn({
+      projectId: p.id,
+      requirementId,
+      taskId,
+      reason: kind === 'task-release' ? '账本分叉处置：旧任务收口（界面发起）' : '账本分叉处置：需求返工重开（界面发起）',
+      expect
+    }) || {};
+    if (res.ok === false) {
+      const code = String(res.code || 'LEDGER_ACTION_FAILED');
+      const msg = humanError(res.message || res.why || code);
+      const hint = ledgerActionHint(code);
+      ledgerActionUi.banner = { kind: 'bad', text: `处置失败，界面没有改任何文件：${msg}${hint ? `。${hint}` : ''}`, code };
+      toast(`处置失败（${code}）：${msg}`, 'bad');
+    } else if (res.noop || res.code === 'LEDGER_ACTION_NOOP') {
+      ledgerActionUi.banner = { kind: 'info', text: humanError(res.message || '分叉已不存在（重复点 = NOOP），未重复执行'), code: 'LEDGER_ACTION_NOOP' };
+      toast('分叉已不存在，未重复执行（NOOP）', 'ok');
+    } else {
+      const left = res.ledger && Number.isFinite(Number(res.ledger.forkCount)) ? Number(res.ledger.forkCount) : null;
+      const auditFile = res.audit && res.audit.file ? String(res.audit.file) : '';
+      const auditName = auditFile ? auditFile.split(/[\\/]/).pop() : '';
+      ledgerActionUi.banner = {
+        kind: 'ok',
+        text: `${humanError(res.message || '处置完成')}${left === null ? '' : `；当前剩余分叉 ${left} 条`}${auditName ? `；审计已追加 ${auditName}` : ''}`
+      };
+      toast('账本处置完成，正在刷新面板…', 'ok');
+    }
+  } catch (error) {
+    const code = ledgerErrorCodeOf(error);
+    const msg = humanError((error && error.message) || error);
+    const hint = ledgerActionHint(code);
+    ledgerActionUi.banner = { kind: 'bad', text: `处置失败，界面没有改任何文件：${msg}${hint ? `。${hint}` : ''}`, code };
+    toast(`处置失败${code ? `（${code}）` : ''}：${msg}`, 'bad');
+  } finally {
+    await ledgerRefreshAfterAction();
+    ledgerActionUi.busy = false;
+    ledgerActionUi.busyKey = '';
+    ledgerRenderLedgerBlock();
+  }
 }
 
 function legacyPlaceholderDocs(keys = null) {
@@ -14824,15 +15027,22 @@ function bind() {
     const ledgerLink = target.closest('[data-legacy-ledger]');
     if (ledgerLink) {
       e.preventDefault();
+      // 处置行在「流程」页：先切到该页再滚过去，否则在概览页点了没反应。
+      showTab('flow');
       const box = document.getElementById('legacy-flow-ledger');
       if (box && box.scrollIntoView) box.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      toast('账本分叉的处置行在「流程」页 #legacy-flow-ledger；处置走 team.mjs（界面不改 JSON）', 'warn');
+      toast('账本分叉的处置行在「流程」页 #legacy-flow-ledger；处置走 team.mjs 协议命令（PM 令牌）+ append-only 审计（界面不改 JSON）', 'warn');
       return;
     }
+    // R-9fbe F-9fbe-5（T-ed7）：分叉处置按钮 → owner:ledger-close-task / owner:ledger-reopen。
     const ledgerAction = target.closest('[data-ledger-action]');
     if (ledgerAction) {
       e.preventDefault();
-      toast('本版后端没有 task release / req reopen 的界面 IPC：请按行内提示手动执行 team.mjs（会写审计）', 'bad');
+      if (ledgerAction.disabled) {
+        toast(ledgerAction.title || '该处置按钮当前不可点（行内已写原因）', 'warn');
+        return;
+      }
+      ledgerActionRun(ledgerAction);
       return;
     }
     // R-c651 F-c651-4/5：团队行的「一键唤醒」「全部已读」（口径由主进程 → 团队工具 presence/mark-read/wake 执行）

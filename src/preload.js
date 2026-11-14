@@ -117,6 +117,10 @@ if (IS_BOARD_WINDOW) {
     requirementDispatchBatch: (payload) => ipcRenderer.invoke('requirement:dispatch-batch', payload),
     taskClaim: (payload) => ipcRenderer.invoke('task:claim', payload),
     taskDone: (payload) => ipcRenderer.invoke('task:done', payload),
+    // R-9fbe F-9fbe-5：账本分叉两个处置入口（只走团队工具协议命令 task release / req reopen + append-only 审计）。
+    // 主进程只认现成的 PM 令牌，没有就返回 PM_TOKEN_REQUIRED（壳层不自 boot PM 代签）；Owner 侧只读。
+    ownerLedgerCloseTask: (payload) => ipcRenderer.invoke('owner:ledger-close-task', payload),
+    ownerLedgerReopen: (payload) => ipcRenderer.invoke('owner:ledger-reopen', payload),
     devSubmit: (payload) => ipcRenderer.invoke('dev:submit', payload),
     devReview: (payload) => ipcRenderer.invoke('dev:review', payload),
     devApply: (payload) => ipcRenderer.invoke('dev:apply', payload),
