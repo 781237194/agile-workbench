@@ -5422,10 +5422,13 @@ function legacyBootEvidence(roleId) {
 }
 
 function legacyEvidenceDocChip(doc) {
-  const state = doc.exists ? (doc.changed ? 'changed' : 'ok') : 'bad';
-  const mark = doc.exists ? (doc.changed ? '变更' : '已读') : '缺失';
-  const hash = doc.hash ? `<code>${esc(legacyHashShort(doc.hash))}</code>` : '<code>无哈希</code>';
-  return `<span class="legacy-evidence-doc ${state}" title="${esc(doc.path)} · ${doc.exists ? '存在' : '缺失'}${doc.changed ? ' · boot 后已变更' : ''}">${esc(doc.label)} ${mark} ${hash}</span>`;
+  // B-2e5：roleCard 这类「按角色才有路径」的文档在没有 boot 记录时无法判存在，
+  // 旧代码一律显示红「缺失」是误报；没有路径可查时写「未记录」，不当红项。
+  const unknown = !doc.exists && !String(doc.path || '').trim();
+  const state = doc.exists ? (doc.changed ? 'changed' : 'ok') : (unknown ? 'muted' : 'bad');
+  const mark = doc.exists ? (doc.changed ? '变更' : '已读') : (unknown ? '未记录' : '缺失');
+  const hash = doc.hash ? `<code>${esc(legacyHashShort(doc.hash))}</code>` : (unknown ? '<code>—</code>' : '<code>无哈希</code>');
+  return `<span class="legacy-evidence-doc ${state}" title="${esc(doc.path || '该文档按角色路径记录，缺少 boot 记录时无法核对')} · ${doc.exists ? '存在' : (unknown ? '未记录' : '缺失')}${doc.changed ? ' · boot 后已变更' : ''}">${esc(doc.label)} ${mark} ${hash}</span>`;
 }
 
 function legacyPanelOldRed() {  // B-2e5 自检用：仅用于「前/后对照」截图（旧口径：未 boot/过期/无简报哈希都算红）。
@@ -6993,7 +6996,7 @@ function legacyGateResultMarkup() {
       <b>${title}</b>
       <p>${detail}</p>
       <div class="legacy-gate-facts">
-        <span class="${boot.allComplete ? (warn ? 'warn' : 'ok') : 'bad'}">boot/已读 ${boot.complete}/${boot.total}</span>
+        <span class="${boot.allComplete ? (warn ? 'warn' : 'ok') : 'warn'}">boot/已读 ${boot.complete}/${boot.total}</span>
         <span class="${readiness.ok ? 'ok' : (readiness.pendingRead ? 'warn' : 'bad')}">${esc(readiness.label)} · 文件 ${readyCount}/${readyTotal}</span>
         <span class="${legacyPanelOldRed() && expired ? 'bad' : 'muted'}" data-legacy-expired-summary="1" title="B-2e5：boot 记录超 TTL 只作提示，不再作为门槛/红项">${expired ? `${expired} 个角色 boot 记录超 TTL（只提示，不拦推进）` : 'boot 记录均在 TTL 内'}</span>
         ${readiness.bootPlaceholders.length ? `<span class="bad">项目信息/铁律占位 ${readiness.bootPlaceholders.length}</span>` : '<span class="ok">项目信息/铁律已写实</span>'}
@@ -7243,7 +7246,7 @@ function legacyRoleTableMarkup(project) {
         <td class="${index ? 'legacy-cell-ok' : 'legacy-cell-bad'}">${index ? '存在' : '缺失'}</td>
         <td class="legacy-cell-dim">${others} 份</td>
         <td>${session ? '<span class="legacy-cell-ok">已映射</span><br><code>' + esc(sessionShort(session)) + '</code>' : '<span class="legacy-cell-warn">未建</span>'}</td>
-        <td><span class="${boot.ready ? 'legacy-cell-ok' : (bootDisplay.key === 'booted' ? 'legacy-cell-warn' : 'legacy-cell-bad')}" title="${esc(bootDisplay.title)}">${esc(bootDisplay.label)}</span><br><span class="legacy-cell-dim">${esc(boot.at ? '工作台 ' + fmtTime(boot.at) : '工作台未记录')}</span></td>
+        <td><span class="${boot.ready ? 'legacy-cell-ok' : 'legacy-cell-warn'}" title="${esc(bootDisplay.title)}">${esc(bootDisplay.label)}</span><br><span class="legacy-cell-dim">${esc(boot.at ? '工作台 ' + fmtTime(boot.at) : '工作台未记录')}</span></td>
         <td class="legacy-cell-dim">${esc(evidence)}</td>
         <td><div class="legacy-table-actions">
           <button type="button" data-legacy-role-card="${esc(role.id)}" title="只读查看 ${esc(legacyRoleCardRel(role))}">角色卡</button>
@@ -7428,7 +7431,7 @@ function legacyRoleDirsMarkup(project) {
         <span class="${cardState.key === 'ok' ? 'ok' : (cardState.key === 'unmapped' ? 'warn' : 'bad')}" title="${esc(cardState.title)}">角色卡 ${esc(cardState.label)}</span>
         <span class="${index ? 'ok' : 'bad'}">文件索引 ${index ? '有' : '缺'}</span>
         <span>其他文档 ${others}</span>
-        <span class="${boot.ready ? 'ok' : 'bad'}" title="${esc(boot.missing.join('、') || boot.at || '')}">${esc(boot.label)}</span>
+        <span class="${boot.ready ? 'ok' : 'warn'}" title="${esc(boot.missing.join('、') || boot.at || '')}">${esc(boot.label)}</span>
       </div>
       <div class="legacy-role-dir-evidence" title="${esc(ev.source)}">${esc(evidence)}</div>
       <div class="legacy-role-dir-foot">
@@ -9225,7 +9228,7 @@ function renderLegacyTeamGate() {
       if (legacyUi.briefingError) return `<b class="bad">boot 核验不可用</b><span>${esc(legacyUi.briefingError.code)} · ${esc(legacyUi.briefingError.message)}</span>`;
       if (!boot.allComplete) {
         const expiredText = '缺哪个角色就直接点该行的 boot（boot 记录超 TTL 只提示，不拦推进）。';
-        return `<b class="bad">${boot.expired ? 'boot 已过期 · 禁止推进' : '未 boot / 未读 · 禁止推进'}</b><span>boot ${boot.complete}/${boot.total}；${expiredText}</span>`;
+        return `<b class="warn">${boot.expired ? 'boot 记录超 TTL（仅提示，不拦推进）' : 'boot 记录未齐（仅提示；真实动作以后端校验为准）'}</b><span>boot ${boot.complete}/${boot.total}；${expiredText}</span>`;
       }
       if (placeholders.length) {
         return `<b class="bad">项目信息/铁律占位 · 禁止推进</b><span>${esc(placeholders.join('、'))} 仍是模板；boot 与推进会返回 PLACEHOLDER_DOC，先把正文写清。${commandGaps.length ? `缺旧命令：${esc(commandGaps.join('、'))}。` : ''}${commandUnknowns.length ? `旧命令未核验：${esc(commandUnknowns.join('、'))}（不写成缺失）。` : ''}</span>`;
@@ -10497,11 +10500,11 @@ function legacyOwnerPanelMarkup(p) {
     ? `<span>by=<code>${esc(ownerBy || '未记录')}</code></span>${ownerActor
       ? `<span>actor=<code>${esc(ownerActor)}</code>${ownerActorLocal ? '（本机点击）' : ''}</span>`
       : '<span class="bad">actor=记录人未认证</span>'}`
-    : '<span class="bad">待 Owner（尚无决定记录）</span>';
+    : '<span class="warn" title="还没有 Owner 决定记录：可在评审弹窗决定，或继续等待">待 Owner（尚无决定记录）</span>';
   const reqLine = req
     ? `<div class="legacy-owner-req-head"><b>${esc(req.title || '未写标题')}</b><code>${esc(req.id)}</code><span class="badge ${reqOwner.status === 'rejected' ? 'badge-rejected' : (['approved', 'skipped'].includes(reqOwner.status) ? 'badge-approved' : 'badge-skipped')}">Owner ${esc(reqOwner.label)}</span></div>
       <p>需求状态：<b>${esc(legacyReqStatus(req))}</b> · ${esc(reviewLabel)}：${req.productReview ? esc(req.productReview.verdict || '未写结论') + ' · ' + esc(legacyActorText(req.productReview.by, 'actor ' + (req.productReview.actor || '未记录'))) : '未记录'}</p>
-      <div class="legacy-owner-fields">${ownerRecordFields}<span>at=${esc(ownerDecided && reqOwner.owner && reqOwner.owner.at ? fmtTime(reqOwner.owner.at) : '未记录')}</span><span class="${reviewReady ? 'ok' : 'bad'}">${esc(roleById(reviewRole).name)}：${esc(reviewBoot.label)}</span></div>
+      <div class="legacy-owner-fields">${ownerRecordFields}<span>at=${esc(ownerDecided && reqOwner.owner && reqOwner.owner.at ? fmtTime(reqOwner.owner.at) : '未记录')}</span><span class="${reviewReady ? 'ok' : 'warn'}" title="B-2e5：boot 记录只作记录，不再把未 boot 当红项">${esc(roleById(reviewRole).name)}：${esc(reviewBoot.label)}</span></div>
       ${reqOwner.owner && reqOwner.owner.opinion ? `<p>Owner 意见：${esc(reqOwner.owner.opinion)}</p>` : '<p>还没有需求级 Owner 意见；Owner 可参与评审，也可明确跳过。</p>'}
       ${req && String(req.status) === 'approved'
         ? `<div class="legacy-req-actions">
