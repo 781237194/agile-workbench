@@ -2874,7 +2874,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       if (!/HANDOFF_FORBIDDEN/.test(String(hopFake.stdout + hopFake.stderr))) failStep('R-8f68 伪造 from 未被拒', String(hopFake.stdout).slice(0, 200));
       if (JSON.parse(read(queueFileH)).items.length !== qCountBefore) failStep('R-8f68 被拒的直连仍写了队列', 'queue grew');
       // ⑤ AC2 测试打回：fix 直连 → reopenCount+1，再打回 → 2
-      const hBug = json(['task', 'create', '--boot', hPm.token, '--title', '8f68 缺陷', '--priority', 'P1', '--owner', 'programmer1', '--requirement', hReq, '--type', 'bug', '--json']).task.id;
+      const hBug = json(['task', 'create', '--boot', hPm.token, '--title', '8f68 缺陷', '--priority', 'P1', '--owner', 'programmer1', '--requirement', hReq, '--type', 'bug', '--acceptance', '缺陷修复后验收通过', '--repro', 'selftest 复现步骤', '--json']).task.id;
       const hFix1 = json(['handoff', '--boot', hTester.token, '--project', '试点', '--from', 'tester', '--to', 'programmer1', '--task', hBug, '--action', 'fix', '--json']);
       if (!hFix1.ok) failStep('R-8f68 测试打回直连失败', JSON.stringify(hFix1).slice(0, 160));
       const bugRowH = JSON.parse(read(path.join(teamRoot, '状态', '项目', '试点', '任务', `${hBug}.json`)));
