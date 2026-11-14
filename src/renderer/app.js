@@ -5204,7 +5204,7 @@ function legacyBootFor(roleId) {
   const expired = Boolean(row.booted) && (!Number.isFinite(bootAtMs) || Date.now() > expiresAt);
   const reasons = [];
   if (roundMismatch) reasons.push(`boot 属于第 ${bootRound} 轮（当前第 ${currentRound} 轮）`);
-  if (expired) reasons.push(Number.isFinite(bootAtMs) ? `boot 已过期（超过 ${ttlMinutes} 分钟）` : 'boot 时间未记录');
+  if (expired) reasons.push(Number.isFinite(bootAtMs) ? `boot 记录超 TTL（超过 ${ttlMinutes} 分钟，仅提示，不拦推进）` : 'boot 时间未记录');
   if (row.stale) reasons.push('boot 后文档已变更');
   if (!row.complete) reasons.push('必读未读全');
   const label = !row.booted ? '未 boot'
@@ -5256,11 +5256,12 @@ function legacyBootDisplay(roleId) {
     return { key: boot.booted ? 'booted' : 'never', label: boot.label, title: '工作台未记录 boot（workflow:briefing）', at: boot.at, evidence: null };
   }
   const time = ev.at ? fmtTime(ev.at) : '';
+  // B-2e5 AC2：boot 记录只作记录，不再把「过期 / 未 boot」写成门槛型红字（令牌概念已移除）。
   const label = ev.state === 'booted' ? `已 BOOT${time ? '（' + time + '）' : ''}`
-    : ev.state === 'expired' ? `BOOT 过期${time ? '（' + time + '）' : ''}`
-      : ev.state === 'stale-session' ? '未 BOOT（本会话未 boot）'
-        : ev.state === 'unbound' ? '未 BOOT（当前会话未绑定）'
-          : '未 BOOT';
+    : ev.state === 'expired' ? `已 BOOT（记录超 TTL，仅提示）${time ? '（' + time + '）' : ''}`
+      : ev.state === 'stale-session' ? '未 BOOT（本会话未 boot，只作记录）'
+        : ev.state === 'unbound' ? '未 BOOT（当前会话未绑定，只作记录）'
+          : '未 BOOT（只作记录）';
   const title = [
     `证据：${ev.evidenceSource || '启动令牌'}${time ? ' · ' + time : ''}`,
     ev.sessionId ? `boot 会话 ${ev.sessionId}` : '',
@@ -6961,7 +6962,7 @@ function legacyGateResultMarkup() {
   const blockReasons = [];
   if (bootBlocked) {
     blockReasons.push(expired
-      ? `${expired} 个角色 boot 已过期`
+      ? `${expired} 个角色 boot 记录超 TTL（仅提示）`
       : `六角色 boot/已读 ${boot.complete}/${boot.total}`);
   }
   if (placeholderBlocked) blockReasons.push(`项目信息/项目铁律仍是模板占位：${placeholders.join('、')}`);
@@ -6969,7 +6970,7 @@ function legacyGateResultMarkup() {
   const warn = open && (commandGaps.length > 0 || commandUnknowns.length > 0);
   const firstPlaceholder = LEGACY_PROJECT_DOCS.find((doc) => placeholders.includes(doc.label));
   const actions = [];
-  if (expired) actions.push(`<button class="ghost small" type="button" id="legacy-gate-reboot" title="依次重新 boot 已过期角色；界面发起不冒充角色本人">重新 boot（过期 ${expired}）</button>`);
+  if (expired) actions.push(`<button class="ghost small" type="button" id="legacy-gate-reboot" title="重新 boot 记录超 TTL 的角色；界面发起不冒充角色本人（不拦推进）">重新 boot（记录超 TTL ${expired}）</button>`);
   if (placeholderBlocked && firstPlaceholder) actions.push(`<button class="ghost small" type="button" data-legacy-doc="${esc(firstPlaceholder.key)}" title="打开第一份模板占位文档；先把正文写清再推进">查看模板占位</button>`);
   if (bootBlocked && !expired) actions.push('<button class="ghost small" type="button" data-legacy-go="roles" title="到六角色卡逐角色 boot">去六角色 boot</button>');
   const title = terminated
@@ -6985,7 +6986,7 @@ function legacyGateResultMarkup() {
     ? '工作流阶段：<code>terminated</code>。迭代/终止/新需求按钮已禁用；历史需求、评审与回执只读保留。'
     : (open
       ? `后端 <code>workflow:briefing</code> 记录六角色 boot 完成且必读文件齐全；执行动作前若所需角色未 boot，界面会先补一次真实 boot，后端仍校验该角色的阅读证据；Owner 是外部角色、不跑 boot。当前工作流阶段：<code>${esc(phase)}</code>。${overviewPlaceholder ? ' 需求总览仍是模板表头：第一条需求落盘时会被重写，不挡 boot。' : ''}${commandUnknown ? ' 旧命令矩阵尚未由 workflow:state 返回；当前按 team:status 的 team.mjs 存在放行基础动作，真实执行以后端返回为准。' : ''}${commandGaps.length ? ` 当前 team.mjs 缺旧命令：${commandGaps.map((name) => `<code>${esc(name)}</code>`).join('、')}；对应动作按钮已禁用，不能把“有缺口”显示成全绿。` : ''}${commandUnknowns.length ? ` 旧命令未核验：${commandUnknowns.map((name) => `<code>${esc(name)}</code>`).join('、')}；能力矩阵没有返回这些命令，对应按钮暂时禁用，不写成缺失。` : ''}`
-      : `${expired ? `有 ${expired} 个角色的 boot 已过期（默认 ${legacyBootTtlMinutes()} 分钟），后端会按 <code>BOOT_EXPIRED</code> 拒绝推进；点下方「重新 boot」或到六角色卡逐角色重新 boot。` : ''}${placeholderBlocked ? ` ${placeholders.map((name) => `<code>${esc(name)}</code>`).join('、')} 仍是模板占位；boot 与推进都会被后端拒绝（<code>PLACEHOLDER_DOC</code>），先把项目目标/边界/铁律正文写清。` : ''}${bootBlocked && !expired ? ` 六角色 boot ${boot.booted}/${boot.total}，可用 ${boot.complete}/${boot.total}；缺哪个角色先点该角色的 boot。` : ''}${boot.stale ? ` 有 ${boot.stale} 个角色在 boot 后文档变更，需重新 boot。` : ''}${boot.roundMismatch ? ` 有 ${boot.roundMismatch} 个角色的 boot 属于上一轮，需重新 boot。` : ''}${legacyUi.briefingError ? ` boot 核验不可用：${legacyUi.briefingError.code}。` : (legacyUi.briefing ? '' : ' 后端 briefing 尚未读取。')}`);
+      : `${expired ? `有 ${expired} 个角色的 boot 记录超过 ${legacyBootTtlMinutes()} 分钟（仅提示，不再拒绝推进）；要刷新记录可点「重新 boot」。` : ''}${placeholderBlocked ? ` ${placeholders.map((name) => `<code>${esc(name)}</code>`).join('、')} 仍是模板占位；boot 与推进都会被后端拒绝（<code>PLACEHOLDER_DOC</code>），先把项目目标/边界/铁律正文写清。` : ''}${bootBlocked && !expired ? ` 六角色 boot ${boot.booted}/${boot.total}，可用 ${boot.complete}/${boot.total}；缺哪个角色先点该角色的 boot。` : ''}${boot.stale ? ` 有 ${boot.stale} 个角色在 boot 后文档变更，需重新 boot。` : ''}${boot.roundMismatch ? ` 有 ${boot.roundMismatch} 个角色的 boot 属于上一轮，需重新 boot。` : ''}${legacyUi.briefingError ? ` boot 核验不可用：${legacyUi.briefingError.code}。` : (legacyUi.briefing ? '' : ' 后端 briefing 尚未读取。')}`);
   return `<div class="legacy-gate-result ${open ? (warn ? 'warn' : 'ok') : ''}">
     <span class="legacy-gate-mark" aria-hidden="true">${open ? (warn ? '▲' : '●') : '■'}</span>
     <div>
