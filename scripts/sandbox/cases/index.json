@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "requirement": "R-20261115-030035-7841",
+  "note": "第四节的六类测试在沙盘里的可执行示例；needsSelftest=true 表示会改状态/发消息，漏设 TEAM_SELFTEST 必须拒跑（AC5）。",
+  "cases": [
+    {
+      "name": "01-rotate",
+      "file": "01-rotate.cjs",
+      "category": "①换人/rotate",
+      "needsSelftest": true,
+      "desc": "boot + session rotate 到沙盘标记会话，校验名册/轮换记录/workbench 四处映射都在沙盘"
+    },
+    {
+      "name": "02-rules",
+      "file": "02-rules.cjs",
+      "category": "②名册/角色卡/铁律变更",
+      "needsSelftest": true,
+      "desc": "改沙盘团队宪法 → 旧令牌 RULES_CHANGED；改名册成员 → rulesHash 变化"
+    },
+    {
+      "name": "03-message",
+      "file": "03-message.cjs",
+      "category": "③消息与唤醒",
+      "needsSelftest": true,
+      "desc": "沙盘内 send 到 pm（--no-wake），消息只落沙盘邮箱"
+    },
+    {
+      "name": "04-archive",
+      "file": "04-archive.cjs",
+      "category": "④迁移/归档/清理",
+      "needsSelftest": true,
+      "desc": "PM 在沙盘归档 programmer2，记录落沙盘 会话归档/"
+    },
+    {
+      "name": "05-gate",
+      "file": "05-gate.cjs",
+      "category": "⑤权限与门禁",
+      "needsSelftest": true,
+      "desc": "非 PM 落 Owner 决定被拒；无代管时代管落账被拒"
+    },
+    {
+      "name": "06-destructive",
+      "file": "06-destructive.cjs",
+      "category": "⑥破坏性脚本",
+      "needsSelftest": true,
+      "desc": "批量写入/批量删除任务文件、写坏工作流模拟崩溃留脏"
+    },
+    {
+      "name": "07-restart",
+      "file": "07-restart.cjs",
+      "category": "AC8 再启动",
+      "needsSelftest": true,
+      "desc": "保留目录再启动：能读到需求/任务/工作流并再次 boot"
+    },
+    {
+      "name": "99-fail",
+      "file": "99-fail.cjs",
+      "category": "AC8 失败保留",
+      "needsSelftest": false,
+      "desc": "故意失败，供 clean 保留策略断言"
+    }
+  ]
+}

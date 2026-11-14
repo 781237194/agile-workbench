@@ -68,3 +68,6 @@ token.json
 *.pem
 .dsh/
 dsh-home/
+
+# ── R-7841 沙盘（每次 seed 重建，不入库；AC1 要求工作树 git status 不被沙盘污染）──
+.sandbox/
