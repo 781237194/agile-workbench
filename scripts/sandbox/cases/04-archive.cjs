@@ -31,9 +31,9 @@ if (pm.ok) {
     const archived = lib.teamJson(['session', 'archive', '--project', lib.PROJECT, '--boot', pm.token, '--role', 'pm', '--self', '--reason', '沙盘归档（R-7841 AC3④）']);
     archivedOk = archived.ok === true;
     archivedCode = String(archived.code || (archived.ok ? 'OK' : 'FAILED'));
-    checks.add('沙盘内 session archive --self 成功（首次）', archivedOk, { code: archivedCode, file: archived.file });
   }
-  if (pendingSelf) checks.add('重复跑幂等：已存在待 Owner 确认的自归档记录，跳过重复归档', true, { code: archivedCode });
+  // 断言名在「首次跑」和「重复跑」下保持一致（AC2 按 checks 深度相等比两次结果）
+  checks.add('PM 自归档状态成立（首次执行 / 重复跑幂等）', archivedOk, { mode: pendingSelf ? 'ALREADY_SELF_ARCHIVED' : 'ARCHIVED', code: archivedCode });
 
   const files = listArchives();
   checks.add('归档记录落盘到沙盘 会话归档/*.json', files.length > 0, { files: files.slice(0, 5) });

@@ -21,15 +21,16 @@ if (booted.ok) {
   const rosterBefore = lib.readJsonSandbox('团队', '状态', '团队.json');
   const alreadyMarked = Boolean(((rosterBefore && rosterBefore.members) || []).find((row) => row.role === 'programmer2' && String(row.sessionId || '') === MARKER));
   let rotated = { ok: true, code: 'ALREADY_MARKED', to: MARKER, from: MARKER };
+  let rotatedThisRun = false;
   if (!alreadyMarked) {
     rotated = lib.teamJson(
       ['session', 'rotate', '--role', 'programmer2', '--project', lib.PROJECT, '--session', MARKER, '--force', '--reason', '沙盘 rotate（R-7841 AC1 破坏性跑）'],
       { TEAM_DSH_FAKE: JSON.stringify([{ sessionId: MARKER }]) },
     );
-    checks.add('rotate 成功且换到沙盘标记会话（首次）', rotated.ok === true && String(rotated.to || '') === MARKER, { code: rotated.code || 'OK', from: rotated.from, to: rotated.to });
-  } else {
-    checks.add('重复跑幂等：名册已是标记会话，不再重复 rotate（避免 SESSION_SAME）', true, { code: rotated.code });
+    rotatedThisRun = rotated.ok === true;
   }
+  // 断言名在「首次跑」和「重复跑」下保持一致（AC2 要按 checks 深度相等比两次结果）
+  checks.add('rotate 达到目标状态（首次执行 / 重复跑幂等）', alreadyMarked ? true : (rotated.ok === true && String(rotated.to || '') === MARKER), { mode: alreadyMarked ? 'ALREADY_MARKED' : 'ROTATED', code: rotated.code || 'OK', from: rotated.from, to: rotated.to, rotatedThisRun });
 
   const roster = lib.readJsonSandbox('团队', '状态', '团队.json');
   const member = (roster && roster.members || []).find((row) => row.role === 'programmer2');
@@ -46,9 +47,9 @@ if (booted.ok) {
   const queue = lib.readJsonSandbox('团队', '状态', '项目', lib.PROJECT, '待启动队列.json');
   const queued = JSON.stringify(queue || {});
   // 待启动队列是 rotate 的一次性副作用：首次跑要求出现标记会话；重复跑（幂等、不再 rotate）只要求文件可读
-  checks.add(alreadyMarked ? '重复跑：不再产生新的待启动项（队列文件可读即可）' : 'rotate 后续动作（待启动队列）也写在沙盘',
+  checks.add('rotate 的待启动队列副作用在沙盘内（首次产生 / 重复跑不再新增）',
     alreadyMarked ? (queue === null || typeof queue === 'object') : (queued === '{}' || queued.includes(MARKER)),
-    { queueFile: Boolean(queue), alreadyMarked });
+    { queueFile: Boolean(queue), mode: alreadyMarked ? 'ALREADY_MARKED' : 'ROTATED' });
 
   lib.emit({
     ok: checks.ok,

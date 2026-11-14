@@ -580,11 +580,23 @@ function run(args) {
   };
   updateMeta(root, (doc) => { doc.runs = (doc.runs || []).concat([record]); });
 
+  /**
+   * 稳定结果（AC2 可重复的对外契约）：只保留「用例名 + 每项断言是否通过」。
+   * 两次跑的路径/时间戳/pid/计数都会变（例如邮箱里累计的探针条数），不能进这个对象；
+   * 测试的复测脚本按 `result` 深度相等判「同一输入同一输出」。
+   */
+  const stableResult = {
+    ok: record.ok,
+    case: label,
+    category: record.category,
+    checks: (result && Array.isArray(result.checks) ? result.checks : []).map((row) => ({ name: String(row.name || ''), ok: Boolean(row.ok) })),
+  };
+
   if (codeDirty) {
     emit({ ok: false, code: 'SANDBOX_CODE_DIRTY', runId: record.runId, case: label, git: record.git, hint: '沙盘里禁止直接改工作树源码；验代码改动请用 worktree --root <id> 后 run --in-worktree' });
     process.exit(EXIT.CODE_DIRTY);
   }
-  emit({ ok: record.ok, code: record.ok ? 'SANDBOX_RUN_OK' : 'SANDBOX_CASE_FAILED', runId: record.runId, case: label, exitCode: record.exitCode, durationMs, git: { head: gitAfter.headShort, statusClean: gitAfter.status.length === 0, sandboxOwned: split.owned, external: split.external } });
+  emit({ ok: record.ok, code: record.ok ? 'SANDBOX_RUN_OK' : 'SANDBOX_CASE_FAILED', runId: record.runId, case: label, exitCode: record.exitCode, durationMs, git: { head: gitAfter.headShort, statusClean: gitAfter.status.length === 0, sandboxOwned: split.owned, external: split.external }, result: stableResult });
   process.exit(record.ok ? 0 : 1);
 }
 
