@@ -4868,7 +4868,7 @@ function registerIpc() {
       let proxy = null;
       if (String(p.channel || '') === 'proxy') {
         const project = requireProject(readStore(), p.projectId);
-        const data = readOwnerProxy(project);
+        const data = readOwnerProxyStrict(project);
         const records = Array.isArray(data.records) ? data.records : [];
         const record = records.filter((row) => !row.endedAt && String(row.scope || '') === 'all').slice(-1)[0] || null;
         if (!record) {
@@ -6213,7 +6213,25 @@ function registerIpc() {
   const readOwnerProxy = (project) => {
     const file = ownerProxyFile(project);
     if (!file || !fs.existsSync(file)) return { records: [] };
-    try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return { records: [] }; }
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+    } catch (error) {
+      // B-20261115-070547-2ed0（R-b28f AC7）：解析失败不能吞成「空的记录」——
+      // 否则 IPC 仍 ok:true，界面会把「读不出来」显示成「未启用」，Owner 以为没开代管。
+      // 这里显式带回 readError，由 owner:proxy-status 透出，界面渲染「读取失败 · 重试」。
+      const detail = String((error && error.message) || error || '未知原因').slice(0, 160);
+      console.warn('PROXY_STATE_UNREADABLE ' + JSON.stringify({ file, detail }));
+      return {
+        records: [],
+        readError: { code: 'PROXY_STATE_UNREADABLE', message: `评审代管.json 读取失败：${detail}` }
+      };
+    }
+  };
+  // 读失败要显式失败（写操作绝不能把「读不出来」当「没有生效记录」继续写）。
+  const readOwnerProxyStrict = (project) => {
+    const data = readOwnerProxy(project);
+    if (data && data.readError) throw codedError(data.readError.code, data.readError.message);
+    return data;
   };
   const writeOwnerProxy = (project, data) => {
     const file = ownerProxyFile(project);
@@ -6283,6 +6301,9 @@ function registerIpc() {
       allRecord,
       allActive: Boolean(allRecord) && !allExpired,
       allExpired,
+      // B-20261115-070547-2ed0（R-b28f AC7）：读盘失败要透出，界面才能渲染「读取失败 · 重试」，
+      // 而不是把「读不出来」当成「未启用」（前者可恢复，后者会误导 Owner 重复开启代管）。
+      readError: data.readError || null,
     };
   });
   ipcMain.handle('owner:proxy-start', async (_e, payload) => {
@@ -6314,7 +6335,7 @@ function registerIpc() {
     // 支持单条（requirementId）/批量（requirementIds）/全项目（scope=all，7849 AC1）。
     const scope = String(p.scope || 'once');
     if (!['once', 'always', 'all'].includes(scope)) throw codedError('BAD_SCOPE', '代管范围只能是一轮（once）/每轮（always）/全部（all）');
-    const data = readOwnerProxy(project);
+    const data = readOwnerProxyStrict(project);
     data.records = Array.isArray(data.records) ? data.records : [];
     const at = now();
     // 7849 AC1：scope=all = 一条全项目记录（没有 requirementId），带 expiresAt（默认 8 小时）。

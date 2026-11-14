@@ -519,6 +519,22 @@
     }
     try {
       const r = await window.workbench.ownerProxyStatus({ projectId: state.projectId });
+      // B-20261115-070547-2ed0（R-b28f AC7）：主进程读盘失败会带回 readError（IPC 仍 ok:true），
+      // 这里必须当成「读取失败」而不是「没有代管」，否则会显示成未启用。
+      if (r && r.readError) {
+        const reason = String((r.readError && (r.readError.message || r.readError.code)) || '评审代管.json 读取失败').slice(0, 160);
+        state.proxyReadError = reason;
+        state.proxy = null;
+        state.proxyAllActive = false;
+        state.proxyAllRecord = null;
+        state.proxyAllExpiresAt = '';
+        state.proxyRecords = [];
+        state.proxyIdSet = new Set();
+        state.proxyCount = 0;
+        syncProxyAllButton();
+        syncProxyNote();
+        return;
+      }
       state.proxyReadError = '';
       const active = (r && r.active) || null;
       // 代管落账判定要用：本需求代管中 → decide 传 recordedBy=pm、channel=proxy（R-6f60 AC24.4）。
