@@ -5067,7 +5067,351 @@ function legacyActiveRequirement() {
   return open.slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0];
 }
 
-/** 工作流状态与旧 任务/ 的账本是否分叉；只显示，不替后端同步。 */
+/* #region panel-hints-core ──────────────────────────────────────────────
+ * R-9fbe / T-20261115-063058-cda1：面板提示分级、账本分叉、boot 口径的唯一判定核心。
+ * 约束：本段是纯函数（输入什么就判什么，不读 DOM / legacyUi / state / window），
+ *      只允许依赖 esc() 这一个纯工具函数。scripts/test-panel-hints.cjs 直接按
+ *      `#region panel-hints-core` / `#endregion panel-hints-core` 抽取本段跑夹具。
+ * 标记名 panel-hints-core 被断言脚本依赖，不要改名。
+ */
+
+/** 后端确实会拒的错误码白名单：只有命中这里的 topic 才是 block（红），其余一律 warn/info。 */
+const PANEL_SEVERITY_BLOCK_CODES = new Set([
+  'PLACEHOLDER_DOC',
+  'WORKFLOW_TERMINATED',
+  'RULES_CHANGED',
+  'BOOT_REQUIRED',
+  'BOOT_INCOMPLETE',
+  'BOOT_EXPIRED',
+  'REQUIREMENT_NOT_FOUND',
+  'PROJECT_DIR_MISSING',
+  'MISSING_DOC',
+  'IPC_MISSING',
+  'WORKFLOW_STATE_FAILED',
+  'WORKFLOW_STATE_CHANGED',
+  'OWNER_REVIEW_REQUIRED',
+  'DEV_TASKS_UNDONE',
+  'TASK_OPEN',
+  'LEGACY_PROTOCOL_REQUIRED',
+  'PERMISSION_DENIED',
+  'PROPOSAL_SCOPE_UNHASHED'
+]);
+
+/**
+ * 拦截词（block 级专用）：全页只有这一处字符串定义。
+ * warn/info 一律走 panelLevelLabel()（「可推进 · 待核验 N 项」/「可推进」），
+ * 源码级断言（scripts/test-panel-hints.cjs）按「本串全场只出现一次且落在 block 常量上」校验。
+ */
+const PANEL_BLOCK_LABEL = '禁止推进';
+
+/** F-9fbe-1：渲染层唯一分级入口，返回 {level,text,action}（外加 id/code 便于断言）。 */
+function panelSeverity(topic) {
+  const item = topic && typeof topic === 'object' ? topic : {};
+  const code = String(item.code || '').trim().toUpperCase();
+  // 只有白名单里的错误码才是 block；topic 自己写 level:'block' 也不算（防越权分级）。
+  const level = PANEL_SEVERITY_BLOCK_CODES.has(code) ? 'block' : (item.level === 'info' ? 'info' : 'warn');
+  const action = item.action && typeof item.action === 'object' ? { ...item.action } : null;
+  return {
+    id: String(item.id || ''),
+    code,
+    level,
+    text: String(item.text || ''),
+    action,
+    attrs: String(item.attrs || '')
+  };
+}
+
+/** 分级 → 人话文案；只有 block 会出现拦截词。 */
+function panelLevelLabel(level, count) {
+  if (level === 'block') return PANEL_BLOCK_LABEL;
+  if (level === 'warn') {
+    const n = Math.max(0, Number(count) || 0);
+    return n ? `可推进 · 待核验 ${n} 项` : '可推进 · 待核验';
+  }
+  if (level === 'info') return '可推进 · boot 待核验';
+  return '可推进 · 已核验';
+}
+
+/** 分级 → 现有配色 class（bad=红 / warn=橙 / muted=灰 / ok=绿）。 */
+function panelLevelClass(level) {
+  return level === 'block' ? 'bad' : (level === 'warn' ? 'warn' : (level === 'info' ? 'muted' : 'ok'));
+}
+
+function panelLevelMark(level) {
+  return level === 'block' ? '■' : (level === 'warn' ? '▲' : (level === 'info' ? '●' : '+'));
+}
+
+/** 原因行里的动作按钮（只认已接线的 data-legacy-* 锚点，不造新 IPC）。 */
+function panelActionMarkup(action) {
+  const a = action && typeof action === 'object' ? action : {};
+  const kind = String(a.kind || '');
+  const value = String(a.value || '');
+  const attr = kind === 'go' ? `data-legacy-go="${esc(value)}"`
+    : kind === 'doc' ? `data-legacy-doc="${esc(value)}"`
+      : kind === 'missing' ? 'data-legacy-missing="1"'
+        : kind === 'refresh' ? 'data-legacy-refresh="1"'
+          : kind === 'reboot' ? 'data-legacy-reboot="1"'
+            : kind === 'ledger' ? 'data-legacy-ledger="1"'
+              : kind === 'fix' ? `data-legacy-fix="${esc(value)}"`
+                : '';
+  if (!attr) return '';
+  const title = a.title ? ` title="${esc(a.title)}"` : '';
+  return `<button class="ghost small" type="button" ${attr}${title}>${esc(a.label || '处理')}</button>`;
+}
+
+/**
+ * F-9fbe-2/F-9fbe-3/F-9fbe-6：把「面板事实快照」分级成一个 gate 结果。
+ * input 是纯数据（见 legacyGateInput），本函数不读任何全局：
+ *   level/label/open/topics（逐条带 data-panel-level）/facts（数字只留属性不给可见文案）/title/detail
+ */
+function panelGateState(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const boot = src.boot && typeof src.boot === 'object' ? src.boot : {};
+  const ledger = src.ledger && typeof src.ledger === 'object' ? src.ledger : {};
+  const terminated = Boolean(src.terminated);
+  const topics = [];
+  const add = (topic) => { const row = panelSeverity(topic); topics.push(row); return row; };
+  const hasBlock = () => topics.some((row) => row.level === 'block');
+
+  // ① 真阻塞（后端会拒）：preload/IPC、工作流、终止、项目目录、模板占位、必读缺失。
+  if (src.hasPreload === false) {
+    add({ id: 'preload', code: 'IPC_MISSING', text: 'preload 没有加载：项目文件与 workflow 动作全部不可用', action: { kind: 'refresh', label: '重新读取' } });
+  }
+  if (src.filesError) {
+    add({ id: 'files-error', code: 'FILES_READ_FAILED', text: `项目文件清单读取失败：${src.filesError}`, action: { kind: 'refresh', label: '重试读取' } });
+  }
+  if (src.workflowError) {
+    add({
+      id: 'workflow-error',
+      code: src.workflowError.code || 'WORKFLOW_STATE_FAILED',
+      text: `工作流状态读取失败：${src.workflowError.code || 'WORKFLOW_STATE_FAILED'}`,
+      action: { kind: 'refresh', label: '重试读取' }
+    });
+  } else if (src.workflowPending) {
+    add({ id: 'workflow-pending', code: 'WORKFLOW_PENDING', level: 'info', text: '工作流尚未读取：先刷新项目状态', action: { kind: 'refresh', label: '重试读取' } });
+  }
+  if (terminated) {
+    add({ id: 'terminated', code: 'WORKFLOW_TERMINATED', text: src.terminateReason || '工作流已终止：不再接受推进动作' });
+  }
+  if (src.projectMissing) {
+    add({ id: 'project-dir', code: 'PROJECT_DIR_MISSING', text: '项目目录不存在或被移动：先恢复目录再推进', action: { kind: 'refresh', label: '重新检测' } });
+  }
+  if (src.presenceError) {
+    add({
+      id: 'presence-error',
+      code: 'PRESENCE_FAILED',
+      level: 'info',
+      text: `文档存在性未核验：${src.presenceError.code || 'PRESENCE_FAILED'}（不判缺失，也不说成齐全）`,
+      action: { kind: 'refresh', label: '重试' }
+    });
+  }
+  const placeholders = Array.isArray(src.placeholders) ? src.placeholders.filter(Boolean) : [];
+  if (placeholders.length) {
+    add({
+      id: 'placeholder',
+      code: 'PLACEHOLDER_DOC',
+      text: `项目信息/项目铁律仍是模板占位：${placeholders.join('、')}`,
+      action: src.placeholderDoc ? { kind: 'doc', value: src.placeholderDoc, label: '查看模板占位' } : null
+    });
+  }
+  const missingDocs = Array.isArray(src.missingDocs) ? src.missingDocs.filter(Boolean) : [];
+  if (missingDocs.length) {
+    add({
+      id: 'missing-doc',
+      code: 'MISSING_DOC',
+      text: `必读文档缺失：${missingDocs.join('、')}`,
+      action: { kind: 'missing', label: '打开缺文档清单' }
+    });
+  }
+  if (src.emptyRoles) {
+    add({ id: 'no-roles', code: 'NO_ROLES', text: '当前团队模式没有角色定义：先建团队', action: { kind: 'go', value: 'roles', label: '看团队' } });
+  }
+  const docReadErrors = Array.isArray(src.docReadErrors) ? src.docReadErrors.filter(Boolean) : [];
+  if (docReadErrors.length) {
+    add({ id: 'doc-read-error', code: 'DOC_READ_FAILED', text: '有必读文档读取失败：界面读不到正文，不代表文件缺失', action: { kind: 'go', value: 'docs', label: '重读文档' } });
+  } else if (src.docPendingRead) {
+    add({ id: 'doc-pending', code: 'DOC_PENDING', level: 'info', text: '文档正文读取中：读完再判模板占位' });
+  }
+
+  // ② 只提示（橙）：boot 未齐/文档变更/round/账本分叉/文件截断/命令缺口。
+  if (!boot.known) {
+    const code = boot.error && boot.error.code ? String(boot.error.code) : '';
+    add({
+      id: 'boot-unverified',
+      code: 'BRIEFING_UNAVAILABLE',
+      level: 'info',
+      text: `boot 待核验${code ? `：${code}` : '：后端 briefing 尚未读取'}（不写 0/N，也不当红项）`,
+      action: { kind: 'refresh', label: '重试核验' }
+    });
+  } else {
+    if (boot.pending) {
+      add({ id: 'boot-pending', code: 'BOOT_PENDING', text: 'boot 未齐：有角色没读全必读（只提示；动作前会自动补 boot）', action: { kind: 'go', value: 'roles', label: '去六角色 boot' } });
+    }
+    if (boot.stale) {
+      add({ id: 'boot-stale', code: 'BOOT_STALE', text: 'boot 之后有必读文档变更（只提示；动作前会重新 boot）', action: { kind: 'go', value: 'roles', label: '重新 boot' } });
+    }
+    if (boot.roundMismatch) {
+      add({ id: 'boot-round', code: 'BOOT_ROUND', text: 'boot 记录属于上一次 round（只提示；动作前会重新 boot）', action: { kind: 'go', value: 'roles', label: '重新 boot' } });
+    }
+    // F-9fbe-3：TTL 只作橙色 chip，且不得与红字同屏（有 block 时不出现）。
+    if (boot.expired && !hasBlock()) {
+      add({
+        id: 'boot-ttl',
+        code: 'BOOT_TTL',
+        text: `${boot.expired} 个角色 boot 记录超 TTL（只提示，不拦推进）`,
+        attrs: 'data-legacy-expired-summary="1"',
+        action: { kind: 'reboot', label: '重新 boot' }
+      });
+    }
+  }
+  if (Number(ledger.count) > 0) {
+    add({ id: 'ledger-fork', code: 'LEDGER_FORK', text: '账本分叉：旧任务与工作流状态不一致（见下方账本处置行）', action: { kind: 'ledger', label: '看账本处置' } });
+  } else if (Number(ledger.inFlight) > 0) {
+    add({ id: 'ledger-inflight', code: 'LEDGER_IN_FLIGHT', level: 'info', text: '账本有在途条目：返工在途/任务在办（不计分叉）' });
+  }
+  if (src.truncated) {
+    add({ id: 'truncated', code: 'FILES_TRUNCATED', text: '文件清单已截断（600 项上限）：未列出的不等于缺失' });
+  }
+  if (src.commandAssumed) {
+    add({ id: 'command-assumed', code: 'COMMAND_ASSUMED', text: '旧命令矩阵待核验：按 team.mjs 存在放行基础动作' });
+  }
+  const commandGaps = Array.isArray(src.commandGaps) ? src.commandGaps.filter(Boolean) : [];
+  if (commandGaps.length) {
+    add({
+      id: 'command-missing',
+      code: 'COMMAND_MISSING',
+      text: `缺 ${commandGaps.length} 条旧命令：${commandGaps.join('、')}；相关动作已禁用`,
+      action: { kind: 'go', value: 'flow', label: '看流程' }
+    });
+  }
+  const commandUnknowns = Array.isArray(src.commandUnknowns) ? src.commandUnknowns.filter(Boolean) : [];
+  if (commandUnknowns.length) {
+    add({ id: 'command-unknown', code: 'COMMAND_UNKNOWN', text: `旧命令未核验 ${commandUnknowns.length} 条：${commandUnknowns.join('、')}（不写成缺失）` });
+  }
+  if (src.overviewPlaceholder) {
+    add({ id: 'overview-placeholder', code: 'OVERVIEW_PLACEHOLDER', level: 'info', text: '需求总览待首条需求（不挡 boot）' });
+  }
+
+  const blocks = topics.filter((row) => row.level === 'block');
+  const warns = topics.filter((row) => row.level === 'warn');
+  const infos = topics.filter((row) => row.level === 'info');
+  const level = blocks.length ? 'block' : (warns.length ? 'warn' : (infos.length ? 'info' : 'ok'));
+  const open = blocks.length === 0;
+  const label = blocks.length ? panelLevelLabel('block')
+    : (warns.length ? panelLevelLabel('warn', warns.length) : (infos.length ? panelLevelLabel('info') : panelLevelLabel('ok')));
+
+  // 补齐入口：把 warn/info 行内的动作去重后放到底部按钮条（F-9fbe-2 的「补齐按钮」）。
+  const followUps = [];
+  const followSeen = new Set();
+  for (const row of [...warns, ...infos]) {
+    const action = row.action;
+    if (!action || !['go', 'doc', 'missing', 'refresh', 'reboot'].includes(String(action.kind || ''))) continue;
+    const key = String(action.kind) + ':' + String(action.value || '');
+    if (followSeen.has(key)) continue;
+    followSeen.add(key);
+    followUps.push(action);
+  }
+
+  const bootText = boot.known ? (boot.pending ? 'boot 未齐' : 'boot 已齐/已读') : 'boot 待核验';
+  const docText = src.docPendingRead ? '文档读取中'
+    : (docReadErrors.length ? '文档读取失败'
+      : (missingDocs.length ? '文档待补'
+        : (placeholders.length ? '模板占位'
+          : (src.hasDocs === false ? '文档 未核验' : '文档已就绪'))));
+  const facts = [
+    {
+      id: 'boot',
+      level: boot.known ? (boot.pending ? 'warn' : 'ok') : 'info',
+      text: bootText,
+      attrs: `data-boot-source="${esc(String(boot.source || 'roles'))}" data-boot-complete="${Number(boot.complete) || 0}" data-boot-total="${Number(boot.total) || 0}" title="boot/已读数字只在顶部「数据真源」条出现一次；N=当前团队角色数（来源：${esc(String(boot.sourceLabel || '团队模式角色'))}）"`
+    },
+    {
+      id: 'docs',
+      level: src.docPendingRead ? 'info' : (missingDocs.length || placeholders.length ? 'warn' : (docReadErrors.length ? 'warn' : (src.hasDocs === false ? 'info' : 'ok'))),
+      text: docText,
+      attrs: `data-missing-doc-count="${missingDocs.length}" title="与缺文档清单 #missing-list 同源（docs:presence 缺口）；数字只在顶部「数据真源」条出现一次"`
+    },
+    {
+      id: 'origin-docs',
+      level: placeholders.length ? 'warn' : 'ok',
+      text: placeholders.length ? '项目信息/铁律 占位' : '项目信息/铁律 已写实'
+    },
+    {
+      id: 'commands',
+      level: src.commandAssumed ? 'warn' : (commandGaps.length || commandUnknowns.length ? 'warn' : 'ok'),
+      text: src.commandAssumed ? '旧命令矩阵待核验'
+        : (commandGaps.length ? '旧命令有缺口' : (commandUnknowns.length ? '旧命令未核验' : '旧命令齐全'))
+    },
+    { id: 'phase', level: terminated ? 'block' : 'ok', text: `阶段 ${String(src.phase || '未读取')}` }
+  ];
+
+  const title = terminated ? '工作流已终止：不再接受推进'
+    : (blocks.length
+      ? `${blocks[0].text}${blocks.length > 1 ? `（另有 ${blocks.length - 1} 项阻塞）` : ''} → ${PANEL_BLOCK_LABEL}当前`
+      : (warns.length
+        ? `${panelLevelLabel('warn', warns.length)}（不影响推进；逐条补齐入口见下）`
+        : (infos.length ? `${panelLevelLabel('info')}（不写 0/N，也不当红项）` : '当前必读已核验：六角色 boot 完成，可按角色推进')));
+  const detail = blocks.length
+    ? '下列阻塞项都是后端真会拒的（<code>PLACEHOLDER_DOC</code> / <code>RULES_CHANGED</code> 等）：先按行内入口处理，界面不绕过、不改 JSON。'
+    : `后端 <code>workflow:briefing</code> 与 <code>docs:presence</code> 是唯一真源；橙色/灰色项只提示，动作执行前界面会先补一次真实 boot，后端仍校验阅读证据。当前工作流阶段：<code>${esc(String(src.phase || '未读取'))}</code>。`;
+  return {
+    level,
+    label,
+    open,
+    terminated,
+    phase: String(src.phase || '未读取'),
+    blockCount: blocks.length,
+    warnCount: warns.length,
+    infoCount: infos.length,
+    blocks,
+    warns,
+    infos,
+    topics,
+    facts,
+    followUps,
+    title,
+    detail,
+    bootText,
+    docText,
+    missingDocCount: missingDocs.length
+  };
+}
+
+/** gate 结果渲染（纯函数）：根节点与每条原因都带 data-panel-level，供 AC1 直接断言。 */
+function panelGateMarkup(gate, options) {
+  const g = gate && typeof gate === 'object' ? gate : { topics: [], facts: [], level: 'ok', title: '', detail: '', label: '', followUps: [] };
+  const opts = options && typeof options === 'object' ? options : {};
+  const level = String(g.level || 'ok');
+  const cls = level === 'ok' ? ' ok' : (level === 'warn' ? ' warn' : (level === 'info' ? ' info' : ''));
+  const facts = (g.facts || []).map((fact) => {
+    const factLevel = String(fact.level || 'ok');
+    return `<span class="${panelLevelClass(factLevel)}" data-panel-level="${factLevel}"${fact.attrs ? ' ' + fact.attrs : ''}>${esc(fact.text)}</span>`;
+  }).join('');
+  const rows = (g.topics || []).map((row) => {
+    const rowLevel = String(row.level || 'warn');
+    return `<div class="legacy-gate-reason ${panelLevelClass(rowLevel)}" data-panel-level="${rowLevel}" data-panel-topic="${esc(row.id)}" data-panel-code="${esc(row.code)}"${row.attrs ? ' ' + row.attrs : ''}>
+      <span class="legacy-gate-reason-mark" aria-hidden="true">${panelLevelMark(rowLevel)}</span>
+      <span class="legacy-gate-reason-text">${esc(row.text)}</span>
+      ${row.action ? panelActionMarkup(row.action) : ''}
+    </div>`;
+  }).join('');
+  const followUps = (g.followUps || []).map((action) => panelActionMarkup(action)).join('');
+  return `<div class="legacy-gate-result${cls}" data-panel-level="${level}" data-gate-open="${g.open ? '1' : '0'}" data-gate-block="${Number(g.blockCount) || 0}" data-gate-warn="${Number(g.warnCount) || 0}" data-gate-info="${Number(g.infoCount) || 0}">
+    <span class="legacy-gate-mark" aria-hidden="true">${panelLevelMark(level)}</span>
+    <div>
+      <b>${esc(g.title || '')}</b>
+      <p>${g.detail || ''}</p>
+      <div class="legacy-gate-facts">${facts}</div>
+      ${rows ? `<div class="legacy-gate-reasons">${rows}</div>` : ''}
+      ${opts.actions || followUps ? `<div class="legacy-gate-actions">${opts.actions || ''}${followUps}</div>` : ''}
+    </div>
+  </div>`;
+}
+
+/**
+ * 旧算法：只比 工作流.json 状态 × 任务状态（无「重开时间」维度）。
+ * 只在快照缺 ledger 字段时由 ledgerViewFromSnapshot 回退调用。
+ */
 function legacyRequirementLedger(req) {
   const status = String((req && req.status) || '');
   const taskStatus = String((req && req.taskStatus) || '');
@@ -5075,34 +5419,306 @@ function legacyRequirementLedger(req) {
   const staleOpen = Boolean(taskStatus && taskStatus !== 'done' && closed);
   const staleDone = Boolean(taskStatus === 'done' && !closed);
   return {
+    kind: 'legacy',
     status,
     taskStatus,
     staleOpen,
     staleDone,
     label: staleOpen
-      ? `旧任务 ${taskStatus} · 工作流已${status === 'terminated' ? '终止' : '收口'}，账本未同步`
-      : (staleDone ? '旧任务 done · 工作流未收口' : '')
+      ? `任务 ${taskStatus} · 工作流已${status === 'terminated' ? '终止' : '收口'}，账本未同步（旧判据）`
+      : (staleDone ? '任务已完成 · 工作流未收口（旧判据，待后端快照升级）' : '')
   };
 }
 
+/**
+ * F-9fbe-4：账本分叉唯一取数（快照优先，缺字段才回退旧算法）。
+ * input: {hasWorkflow, requirements, ledger, counts}
+ * 返回 {known, source:'snapshot'|'legacy'|'none', forks, inFlight, count, inFlightCount, rowsComplete}
+ */
+function ledgerViewFromSnapshot(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const requirements = Array.isArray(src.requirements) ? src.requirements : [];
+  const ledger = src.ledger && typeof src.ledger === 'object' ? src.ledger : null;
+  const counts = src.counts && typeof src.counts === 'object' ? src.counts : null;
+  const view = { known: Boolean(src.hasWorkflow), source: 'none', forks: [], inFlight: [], count: 0, inFlightCount: 0, rowsComplete: true };
+  if (!view.known) return view;
+  const hasField = (row, key) => Boolean(row) && Object.prototype.hasOwnProperty.call(row, key);
+  const hasRowFields = requirements.some((row) => hasField(row, 'ledgerFork') || hasField(row, 'ledgerInFlight'));
+  const topForks = ledger && Array.isArray(ledger.forks) ? ledger.forks : null;
+  const topInFlight = ledger && Array.isArray(ledger.inFlight) ? ledger.inFlight : null;
+  const countForks = counts && Number.isFinite(Number(counts.ledgerForks)) ? Number(counts.ledgerForks) : null;
+  const countInFlight = counts && Number.isFinite(Number(counts.ledgerInFlight)) ? Number(counts.ledgerInFlight) : null;
+  const snapshotReady = hasRowFields || Boolean(topForks) || Boolean(topInFlight) || countForks !== null;
+  if (!snapshotReady) {
+    // 快照缺 ledger 字段（旧主进程/旧工具）：回退旧算法，容器照实标 data-ledger-source="legacy"。
+    view.source = 'legacy';
+    for (const req of requirements) {
+      const row = legacyRequirementLedger(req);
+      if (row.staleDone || row.staleOpen) view.forks.push({ req, ledger: row });
+    }
+    view.count = view.forks.length;
+    return view;
+  }
+  view.source = 'snapshot';
+  const reqOf = (id) => requirements.find((row) => String((row && row.id) || '') === String(id || '')) || { id: String(id || ''), status: '' };
+  if (hasRowFields) {
+    for (const req of requirements) {
+      if (req && req.ledgerFork) view.forks.push({ req, ledger: ledgerForkRow(req, req.ledgerFork) });
+    }
+    for (const req of requirements) {
+      if (req && req.ledgerInFlight) {
+        view.inFlight.push({ req, kind: String(req.ledgerInFlight), reopenedAt: String(req.reopenedAt || ''), taskDoneAt: '' });
+      }
+    }
+  }
+  if (!view.forks.length && topForks) {
+    for (const fork of topForks) {
+      const req = reqOf(fork && fork.requirementId);
+      view.forks.push({ req, ledger: ledgerForkRow(req, fork) });
+    }
+  }
+  if (!view.inFlight.length && topInFlight) {
+    for (const row of topInFlight) {
+      const req = reqOf(row && row.requirementId);
+      view.inFlight.push({ req, kind: String((row && row.kind) || ''), reopenedAt: String((row && row.reopenedAt) || ''), taskDoneAt: String((row && row.taskDoneAt) || '') });
+    }
+  }
+  view.count = Math.max(view.forks.length, Number.isFinite(countForks) ? countForks : 0);
+  view.inFlightCount = Math.max(view.inFlight.length, Number.isFinite(countInFlight) ? countInFlight : 0);
+  view.rowsComplete = view.forks.length >= view.count;
+  return view;
+}
+
+/** 分叉行文案（不写「任务已完成 · 工作流未收口」这类旧误导口径）。 */
+function ledgerForkRow(req, fork) {
+  const src = fork && typeof fork === 'object' ? fork : {};
+  const kind = String(src.kind || '');
+  const status = String((req && req.status) || src.status || '');
+  const label = kind === 'dev_ledger_ahead'
+    ? '开发任务已全部完成 · 工作流还停在开发前/开发中'
+    : (kind === 'test_ledger_ahead'
+      ? '测试任务已全部完成 · 工作流还停在开发完成/测试'
+      : (kind === 'legacy' ? String(src.label || '任务状态与工作流不一致') : '任务状态与工作流不一致'));
+  return {
+    kind: kind || 'unknown',
+    taskId: String(src.taskId || ''),
+    taskDoneAt: String(src.taskDoneAt || ''),
+    reopenedAt: String(src.reopenedAt || (req && req.reopenedAt) || ''),
+    status,
+    label
+  };
+}
+
+/** 时间只做截断显示，不引入额外格式化依赖（纯函数，测试可直接跑）。 */
+function ledgerWhenText(value) {
+  const text = String(value || '');
+  if (!text) return '';
+  return text.replace('T', ' ').replace(/\.\d+Z?$/, '').replace(/Z$/, '').slice(0, 19);
+}
+
+/**
+ * F-9fbe-5：分叉处置行。两个按钮只在后端真有 IPC 时出现；否则行内写清手动命令（壳不自写 JSON）。
+ * options: {statusLabel(req), actionAvailable:{taskRelease,requirementReopen}, projectName}
+ */
+function ledgerMarkupFromView(view, options) {
+  const v = view && typeof view === 'object' ? view : {};
+  const opts = options && typeof options === 'object' ? options : {};
+  if (!v.known) return '';
+  const forks = Array.isArray(v.forks) ? v.forks : [];
+  const inFlight = Array.isArray(v.inFlight) ? v.inFlight : [];
+  const count = Number(v.count) || 0;
+  if (!count && !inFlight.length) return '';
+  const source = v.source === 'legacy' ? 'legacy' : 'snapshot';
+  const statusLabel = typeof opts.statusLabel === 'function' ? opts.statusLabel : (req) => String((req && req.status) || '');
+  const actions = opts.actionAvailable && typeof opts.actionAvailable === 'object' ? opts.actionAvailable : {};
+  const level = count ? 'warn' : 'info';
+  const projectName = String(opts.projectName || '');
+  const head = count
+    ? '账本对不上：下列需求的任务状态与工作流不一致；界面只读显示，处置走 team.mjs（不改 JSON）'
+    : '账本有在途条目：返工在途/任务在办，不计分叉';
+  const rows = forks.map((row) => {
+    const req = row.req || {};
+    const item = row.ledger || {};
+    const doneAt = ledgerWhenText(item.taskDoneAt);
+    const reopenedAt = ledgerWhenText(item.reopenedAt);
+    const buttons = (actions.taskRelease || actions.requirementReopen)
+      ? `<span class="legacy-ledger-actions">${actions.taskRelease && item.taskId ? `<button class="ghost small" type="button" data-ledger-action="task-release" data-ledger-task="${esc(item.taskId)}" title="把旧任务退回未收口（走 team.mjs task release + 审计）">收口旧任务</button>` : ''}${actions.requirementReopen ? `<button class="ghost small" type="button" data-ledger-action="requirement-reopen" data-ledger-req="${esc(req.id || '')}" title="把需求记录重开为返工（走 team.mjs req reopen + 审计）">重开需求记录</button>` : ''}</span>`
+      : `<span class="legacy-ledger-nocmd" data-ledger-no-command="1">本版后端无处置命令，请手动执行 <code>team.mjs task release --project ${esc(projectName)} --id ${esc(item.taskId || '<任务id>')}</code> 或 <code>team.mjs req reopen --project ${esc(projectName)} --requirement ${esc(req.id || '')}</code>（带 --boot 令牌，写审计）</span>`;
+    return `<div class="legacy-ledger-row" data-panel-level="warn" data-ledger-fork="${esc(req.id || '')}" data-ledger-kind="${esc(item.kind || '')}">
+      <code>${esc(req.id || '')}</code><span>${esc(statusLabel(req))}</span><b>${esc(item.label || '')}</b>
+      <span class="legacy-ledger-when">${item.taskId ? `任务 <code>${esc(item.taskId)}</code>` : ''}${doneAt ? ` 完成于 ${esc(doneAt)}` : ''}${reopenedAt ? ` · 重开 ${esc(reopenedAt)}` : ''}</span>
+      ${buttons}
+    </div>`;
+  }).join('');
+  const inFlightRows = inFlight.map((row) => {
+    const req = row.req || {};
+    const kind = String(row.kind || '');
+    const kindText = kind === 'rework_in_flight' ? '返工在途（任务完成时间早于重开时间）' : (kind === 'task_in_progress' ? '任务在办' : '在途');
+    return `<div class="legacy-ledger-row in-flight" data-panel-level="info" data-ledger-inflight="${esc(kind)}">
+      <code>${esc(req.id || '')}</code><span>${esc(statusLabel(req))}</span><b>${esc(kindText)}</b><span class="legacy-ledger-when">不计分叉</span>
+    </div>`;
+  }).join('');
+  return `<div class="legacy-ledger ${level}" data-ledger-source="${source}" data-ledger-count="${count}" data-ledger-inflight="${Number(v.inFlightCount) || inFlight.length}" data-panel-level="${level}">
+    <div class="legacy-ledger-head">
+      <b>账本核对</b>
+      <span>${esc(head)}</span>
+      <span class="legacy-ledger-source" data-ledger-source-label="${source}">${source === 'snapshot' ? '来源：workflow:state 快照（ledgerFork / ledger.inFlight）' : '来源：旧算法（快照缺 ledger 字段）'}</span>
+    </div>
+    ${rows}
+    ${inFlightRows}
+  </div>`;
+}
+
+/** 单角色 boot 口径：round 相同 + 非旧会话 + 必读读全 才算「本轮有效」；TTL 过期只提示。 */
+function bootRowFrom(context, roleId) {
+  const ctx = context && typeof context === 'object' ? context : {};
+  const briefing = ctx.briefing || null;
+  const briefingRoles = briefing && briefing.roles ? briefing.roles : {};
+  const row = roleId && briefingRoles[roleId] ? briefingRoles[roleId] : null;
+  const evidence = (row && row.evidence)
+    || (briefing && briefing.evidence && briefing.evidence.roles ? briefing.evidence.roles[roleId] : null)
+    || null;
+  const ttlMinutes = Number(ctx.ttlMinutes) > 0 ? Number(ctx.ttlMinutes) : 480;
+  const now = Number.isFinite(Number(ctx.now)) ? Number(ctx.now) : Date.now();
+  const currentRound = Number(ctx.round) > 0 ? Number(ctx.round) : null;
+  const staleSession = Boolean(evidence && evidence.state === 'stale-session');
+  if (!row) {
+    return {
+      known: Boolean(briefing),
+      booted: false,
+      complete: false,
+      valid: false,
+      ready: false,
+      stale: false,
+      round: null,
+      roundMismatch: false,
+      staleSession,
+      unbound: Boolean(evidence && evidence.state === 'unbound'),
+      at: null,
+      missing: [],
+      expired: false,
+      expiresAt: null,
+      remainingMs: null,
+      ttlMinutes,
+      label: evidence ? '已 BOOT' : (briefing ? '未 boot' : '未核验'),
+      evidence
+    };
+  }
+  const bootRound = row.round ? Number(row.round) : null;
+  // 后端 requireWorkflowBoot 会拒绝跨 round 的 boot；界面同步标出来，但只作提示。
+  const roundMismatch = Boolean(bootRound && currentRound && bootRound !== currentRound);
+  const bootAtMs = row.at ? Date.parse(String(row.at)) : NaN;
+  const expiresAt = Number.isFinite(bootAtMs) ? bootAtMs + ttlMinutes * 60000 : null;
+  // B-2e5：boot 记录超 TTL 只作记录/提示，不再当作红项或门槛。
+  const expired = Boolean(row.booted) && (!Number.isFinite(bootAtMs) || now > expiresAt);
+  const reasons = [];
+  if (roundMismatch) reasons.push(`boot 记录属于上一次 round（当前第 ${currentRound} 轮，只提示）`);
+  if (expired) reasons.push(Number.isFinite(bootAtMs) ? `boot 记录超 TTL（超过 ${ttlMinutes} 分钟，仅提示）` : 'boot 时间未记录（仅提示）');
+  if (row.stale) reasons.push('boot 后文档已变更');
+  if (!row.complete) reasons.push('必读未读全');
+  if (staleSession) reasons.push('boot 来自旧会话');
+  const label = !row.booted ? '未 boot' : (reasons.length ? reasons.join(' · ') : '已 boot / 已读全');
+  // 「本轮且有效」：round 相同 + 非旧会话 + 必读读全 + boot 后文档未变；TTL 单独只提示。
+  const valid = Boolean(row.booted && row.complete && !row.stale && !roundMismatch && !staleSession);
+  return {
+    known: true,
+    booted: Boolean(row.booted),
+    complete: Boolean(row.complete),
+    valid,
+    ready: valid && !expired,
+    stale: Boolean(row.stale),
+    round: bootRound,
+    roundMismatch,
+    staleSession,
+    unbound: Boolean(evidence && evidence.state === 'unbound'),
+    at: row.at || null,
+    missing: Array.isArray(row.missing) ? row.missing : [],
+    expired,
+    expiresAt,
+    remainingMs: expiresAt ? Math.max(0, expiresAt - now) : null,
+    ttlMinutes,
+    label,
+    evidence
+  };
+}
+
+/** boot 汇总：N = 当前团队角色数；briefing 没取到就写「待核验」，不给出 0/N。 */
+function bootSummaryFrom(context) {
+  const ctx = context && typeof context === 'object' ? context : {};
+  const ids = (Array.isArray(ctx.roleIds) ? ctx.roleIds : []).map((id) => String(id || '')).filter(Boolean);
+  const rows = ids.map((id) => ({ roleId: id, boot: bootRowFrom(ctx, id) }));
+  const known = Boolean(ctx.briefing);
+  const countOf = (predicate) => rows.filter((row) => predicate(row.boot)).length;
+  const valid = countOf((boot) => boot.valid);
+  return {
+    known,
+    rows,
+    total: rows.length,
+    complete: valid,
+    valid,
+    booted: countOf((boot) => boot.booted),
+    stale: countOf((boot) => boot.stale),
+    roundMismatch: countOf((boot) => boot.roundMismatch),
+    staleSession: countOf((boot) => boot.staleSession),
+    expired: countOf((boot) => boot.expired),
+    pending: rows.length ? rows.length - valid : 0,
+    allBooted: rows.length > 0 && rows.every((row) => row.boot.booted),
+    allComplete: known && rows.length > 0 && valid === rows.length,
+    source: String(ctx.source || 'roles'),
+    sourceLabel: String(ctx.sourceLabel || ''),
+    countText: known ? `${valid}/${rows.length}` : '待核验'
+  };
+}
+
+/** boot 数字唯一显示口：没取到 briefing 时返回「待核验」（绝不返回 0/N）。 */
+function bootCountText(summary) {
+  const s = summary && typeof summary === 'object' ? summary : {};
+  if (!s.known) return '待核验';
+  const complete = Number(s.complete) || 0;
+  const total = Number(s.total) || 0;
+  return `${complete}/${total}`;
+}
+
+/** boot 状态文案（不带数字，供目录/团队/流程等第二处引用）。 */
+function bootStatusText(summary) {
+  const s = summary && typeof summary === 'object' ? summary : {};
+  if (!s.known) return 'boot 待核验';
+  return s.allComplete ? 'boot 已齐/已读' : 'boot 未齐';
+}
+
+/* #endregion panel-hints-core */
+
+/** F-9fbe-4：面板读账本只走这里——快照字段优先，缺字段才回退旧算法。 */
+function legacyLedgerView() {
+  const wf = legacyWorkflow();
+  return ledgerViewFromSnapshot({
+    hasWorkflow: Boolean(wf),
+    requirements: legacyRequirements(),
+    ledger: wf && wf.ledger ? wf.ledger : null,
+    counts: wf && wf.counts ? wf.counts : null
+  });
+}
+
 function legacyLedgerDivergences() {
-  return legacyRequirements()
-    .map((req) => ({ req, ledger: legacyRequirementLedger(req) }))
-    .filter((row) => row.ledger.staleOpen || row.ledger.staleDone);
+  return legacyLedgerView().forks;
+}
+
+/** F-9fbe-5：处置按钮只在后端真有 IPC 时才出现（当前主进程没有 task release / req reopen 接口）。 */
+function legacyLedgerActionAvailable() {
+  const wb = window.workbench || null;
+  return {
+    taskRelease: Boolean(wb && typeof wb.taskRelease === 'function'),
+    requirementReopen: Boolean(wb && typeof wb.requirementReopen === 'function')
+  };
 }
 
 function legacyLedgerMarkup() {
-  const rows = legacyLedgerDivergences();
-  if (!rows.length) return '';
-  return `<div class="legacy-ledger">
-    <div class="legacy-ledger-head">
-      <b>账本分叉 ${rows.length} 条</b>
-      <span><code>工作流.json</code> 与旧 <code>任务/</code> 状态不一致；界面只如实显示，不替后端把旧任务改成已关闭或已领取。</span>
-    </div>
-    ${rows.map(({ req, ledger }) => `<div class="legacy-ledger-row">
-      <code>${esc(req.id)}</code><span>${esc(legacyReqStatus(req))}</span><b>${esc(ledger.label)}</b>
-    </div>`).join('')}
-  </div>`;
+  const view = legacyLedgerView();
+  return ledgerMarkupFromView(view, {
+    statusLabel: legacyReqStatus,
+    actionAvailable: legacyLedgerActionAvailable(),
+    projectName: (activeProject() && activeProject().name) || ''
+  });
 }
 
 function legacyPlaceholderDocs(keys = null) {
@@ -5121,7 +5737,7 @@ function legacyPlaceholderDocs(keys = null) {
 
 /**
  * 只有项目信息/项目铁律的占位会挡 boot（与后端 bootPlaceholderDocs 对齐）。
- * 需求总览的第一行占位会在第一条需求落盘时被重写，不应被说成“文档未就绪/禁止推进”。
+ * 需求总览的第一行占位会在第一条需求落盘时被重写，不应被说成“文档未就绪/无法推进”。
  */
 function legacyBootPlaceholderDocs() {
   return legacyPlaceholderDocs(['rules', 'info']);
@@ -5190,81 +5806,54 @@ function legacyBootTtlMinutes() {
   return Math.max(1, value);
 }
 
-function legacyBootFor(roleId) {
-  const briefing = legacyUi.briefing;
-  const row = briefing && briefing.roles && roleId ? briefing.roles[roleId] : null;
-  // B-20261114-003257-0a46（R-d734 F-4）：角色真实 boot 证据（启动令牌/阅读记录），只用于显示，不改闸门。
-  const evidence = (row && row.evidence)
-    || (briefing && briefing.evidence && briefing.evidence.roles ? briefing.evidence.roles[roleId] : null)
-    || null;
-  const wf = legacyWorkflow();
-  const currentRound = wf && Number(wf.round) ? Number(wf.round) : null;
-  const ttlMinutes = legacyBootTtlMinutes();
-  if (!row) {
-    return {
-      known: Boolean(briefing),
-      booted: false,
-      complete: false,
-      stale: false,
-      round: null,
-      roundMismatch: false,
-      at: null,
-      missing: [],
-      expired: false,
-      expiresAt: null,
-      remainingMs: null,
-      ttlMinutes,
-      label: evidence ? '已 BOOT' : (briefing ? '未 boot' : '未核验'),
-      evidence
-    };
+/**
+ * F-9fbe-3：boot 分母的唯一取数——当前团队角色数。
+ * 名册（团队.json → members[].role）优先，名册缺失退回项目 sessions，再退回团队模式角色定义；
+ * 三种来源都会标在 data-boot-source 上，不让「4/6」「0/6」这类口径互相冒充。
+ */
+function legacyBootRoster(project) {
+  const p = project || activeProject();
+  const known = new Set((state?.roles || []).map((role) => role.id));
+  const projectIds = teamRoleIds(p);
+  const team = teamStatusUi.data && teamStatusUi.data.team ? teamStatusUi.data.team : null;
+  const members = Array.isArray(team && team.members) ? team.members : [];
+  const rosterIds = [...new Set(members
+    .map((member) => String((member && (member.role || member.id)) || '').trim())
+    .filter(Boolean))];
+  if (rosterIds.length) {
+    const scoped = projectIds.filter((id) => rosterIds.includes(id) && (!known.size || known.has(id)));
+    if (scoped.length) return { ids: scoped, source: 'roster', label: '名册 members' };
+    return { ids: projectIds, source: 'roster-partial', label: '名册 members（本项目未对上，按项目角色集合）' };
   }
-  const bootRound = row.round ? Number(row.round) : null;
-  // 后端 requireWorkflowBoot 会拒绝跨轮 boot；这里同步显示，避免界面说“可推进”而动作被拒。
-  const roundMismatch = Boolean(bootRound && currentRound && bootRound !== currentRound);
-  const bootAtMs = row.at ? Date.parse(String(row.at)) : NaN;
-  const expiresAt = Number.isFinite(bootAtMs) ? bootAtMs + ttlMinutes * 60000 : null;
-  // 后端对“没有有效 boot 时间”同样按 BOOT_EXPIRED 拒绝，界面不能把它当可复用。
-  const expired = Boolean(row.booted) && (!Number.isFinite(bootAtMs) || Date.now() > expiresAt);
-  const reasons = [];
-  if (roundMismatch) reasons.push(`boot 属于当前（当前当前）`);
-  if (expired) reasons.push(Number.isFinite(bootAtMs) ? `boot 记录超 TTL（超过 ${ttlMinutes} 分钟，仅提示，不拦推进）` : 'boot 时间未记录');
-  if (row.stale) reasons.push('boot 后文档已变更');
-  if (!row.complete) reasons.push('必读未读全');
-  const label = !row.booted ? '未 boot'
-    : (reasons.length ? reasons.join(' · ') + ' · 需重新 boot' : '已 boot / 已读全');
+  const sessions = (p && p.sessions) || {};
+  const sessionIds = [...new Set(Object.keys(sessions).filter((id) => (!known.size || known.has(id)) && sessions[id]))];
+  if (sessionIds.length) return { ids: sessionIds, source: 'sessions', label: '项目 sessions（名册缺失）' };
+  return { ids: projectIds, source: 'roles', label: '团队模式角色定义（名册与 sessions 都缺）' };
+}
+
+function legacyBootContext() {
+  const wf = legacyWorkflow();
+  const roster = legacyBootRoster();
   return {
-    known: true,
-    booted: Boolean(row.booted),
-    complete: Boolean(row.complete),
-    ready: Boolean(row.complete && !row.stale && !roundMismatch && !expired),
-    stale: Boolean(row.stale),
-    round: bootRound,
-    roundMismatch,
-    at: row.at || null,
-    missing: Array.isArray(row.missing) ? row.missing : [],
-    expired,
-    expiresAt,
-    remainingMs: expiresAt ? Math.max(0, expiresAt - Date.now()) : null,
-    ttlMinutes,
-    label,
-    evidence
+    briefing: legacyUi.briefing,
+    round: wf && Number(wf.round) ? Number(wf.round) : null,
+    ttlMinutes: legacyBootTtlMinutes(),
+    now: Date.now(),
+    roleIds: roster.ids,
+    source: roster.source,
+    sourceLabel: roster.label
   };
 }
 
+function legacyBootFor(roleId) {
+  return bootRowFrom(legacyBootContext(), roleId);
+}
+
 function legacyBootSummary() {
-  const rows = teamRoles(activeProject()).map((role) => ({ role, boot: legacyBootFor(role.id) }));
-  return {
-    known: Boolean(legacyUi.briefing),
-    rows,
-    booted: rows.filter((row) => row.boot.booted).length,
-    complete: rows.filter((row) => row.boot.ready).length,
-    stale: rows.filter((row) => row.boot.stale).length,
-    roundMismatch: rows.filter((row) => row.boot.roundMismatch).length,
-    expired: rows.filter((row) => row.boot.expired).length,
-    allBooted: rows.length > 0 && rows.every((row) => row.boot.booted),
-    allComplete: rows.length > 0 && rows.every((row) => row.boot.ready),
-    total: rows.length
-  };
+  const summary = bootSummaryFrom(legacyBootContext());
+  // 兼容旧调用：rows 里补回 role 对象（角色卡/团队行仍按 role 渲染）。
+  summary.rows = summary.rows.map((row) => ({ ...row, role: roleById(row.roleId) }));
+  return summary;
 }
 
 /**
@@ -5291,7 +5880,7 @@ function legacyBootDisplay(roleId) {
     ev.currentSessionId ? `当前会话 ${ev.currentSessionId}（${ev.currentSessionSource || '团队.json'}）` : '当前会话未绑定（团队.json members[].sessionId 为空）',
     ev.state === 'stale-session' ? '旧会话的 boot 不算已 BOOT；用当前会话重新 boot' : '',
     ev.state === 'unbound' ? '团队.json 没有该角色的当前会话：先在团队台把角色绑到会话再 boot' : '',
-    ev.state === 'expired' ? `超过 ${ev.ttlMinutes} 分钟，后端按 BOOT_EXPIRED 拒绝，需重新 boot` : '',
+    ev.state === 'expired' ? `超过 ${ev.ttlMinutes} 分钟（只作记录，不拦推进；要刷新记录可点「重新 boot」）` : '',
     boot.booted ? '' : '工作台动作仍要求 workflow:boot（在本角色卡片点一次 boot）'
   ].filter(Boolean).join('；');
   return { key: ev.state, label, title, at: ev.at, evidence: ev };
@@ -5332,8 +5921,8 @@ function legacyRoleBootReason(roleId) {
     return `boot 核验不可用（${legacyUi.briefingError.code}）：不能确认 ${role.name} 已读，动作禁用`;
   }
   if (!legacyUi.briefing) return `boot 尚未读取：不能确认 ${role.name} 已读，动作禁用；先刷新必读/流程`;
-  if (boot.expired) return `${role.name} 的 ${boot.label}；后端会拒绝该动作，先点该角色的「重新 boot」或「全队 boot」`;
-  if (boot.roundMismatch) return `${role.name} 的 ${boot.label}；后端会拒绝跨版本动作，先重新 boot`;
+  if (boot.expired) return `${role.name} 的 ${boot.label}；动作前会先补一次 boot（TTL 只提示，不当作门槛），也可点该角色的「重新 boot」`;
+  if (boot.roundMismatch) return `${role.name} 的 ${boot.label}；先重新 boot（后端只认本轮记录）`;
   if (boot.stale) return `${role.name} 的 ${boot.label}；旧阅读证据已作废，先重新 boot`;
   if (!boot.booted) return `${role.name} 未 boot/未读全（workflow:briefing），后端会拒绝该动作，界面先禁用`;
   return `${role.name} 必读未读全（workflow:briefing），后端会拒绝该动作，界面先禁用`;
@@ -6814,15 +7403,20 @@ async function loadLegacyDocs(force = false) {
   }
 }
 
-/** 项目/团队浮层顶部的“真源条”：IPC、旧命令、boot、账本分叉一屏可见。 */
+/**
+ * 项目/团队浮层顶部的“真源条”：IPC、旧命令、boot、账本、文档一屏可见。
+ * F-9fbe-6：三个数字（boot X/N、文档待补 N、账本分叉 N）全页只在这里出现一次，
+ * 其它位置只写状态（已齐/待核验/一致/分叉），不再各算一遍数字。
+ */
 function legacyTruthMarkup() {
   const wb = window.workbench || null;
   const missing = LEGACY_IPC.filter((item) => !(wb && typeof wb[item.fn] === 'function'));
   const { caps } = legacyCapabilityData();
   const boot = legacyBootSummary();
-  const ledger = legacyLedgerDivergences();
+  const ledger = legacyLedgerView();
   const readiness = legacyDocReadiness();
-  const chip = (cls, text, title, fix) => `<span class="truth-chip ${cls}" data-legacy-fix="${esc(fix || '')}" title="${esc(title || '')}"><b>${esc(text)}</b></span>`;
+  const gate = legacyGateState();
+  const chip = (cls, text, title, fix, attrs) => `<span class="truth-chip ${cls}" data-panel-level="${cls === 'bad' ? 'block' : (cls === 'warn' ? 'warn' : (cls === 'muted' ? 'info' : 'ok'))}" data-legacy-fix="${esc(fix || '')}" title="${esc(title || '')}"${attrs ? ' ' + attrs : ''}><b>${esc(text)}</b></span>`;
   const rows = [];
   if (!wb) rows.push(chip('bad', 'preload 未加载', 'window.workbench 不存在：所有项目/团队数据不可用'));
   else rows.push(chip('ok', 'preload 已加载', 'preload IPC 桥已加载'));
@@ -6832,16 +7426,17 @@ function legacyTruthMarkup() {
   if (!wb || typeof wb.filesList !== 'function') rows.push(chip('bad', 'files:list 缺', '无法读取六角色目录与项目文档'));
   else if (legacyUi.error) rows.push(chip('bad', 'files 读取失败', legacyUi.error));
   else if (legacyUi.loading) rows.push(chip('muted', 'files 读取中', 'files:list / files:read 正在读取'));
-  else if (legacyUi.files) rows.push(chip('ok', `文件 ${legacyFiles().length}`, 'files:list 实际返回的条目；截断时会另标'));
+  // 这里只报 files:list 的条目数（截断口径），不是「文档待补 N」，两者不能混。
+  else if (legacyUi.files) rows.push(chip('ok', `清单 ${legacyFiles().length} 项`, 'files:list 实际返回的条目数；截断时会另标'));
   else rows.push(chip('muted', 'files 未读取', '打开项目面板或刷新后读取'));
   if (!wb || (typeof wb.workflowState !== 'function' && typeof wb.workflow !== 'function')) rows.push(chip('bad', 'workflow 缺', '缺少 workflow:state / workflow:get，无法核验旧工作流'));
   else if (legacyUi.workflow) rows.push(chip('ok', 'workflow 已读', `工作流阶段 ${legacyUi.workflow.phase || '未写'}；来源 工作流.json`));
   else if (legacyUi.workflowError) rows.push(chip('bad', 'workflow 读取失败', `${legacyUi.workflowError.code}：${legacyUi.workflowError.message}`));
   else rows.push(chip('muted', 'workflow 未读取', '等待 workflow:state'));
   if (!wb || typeof wb.workflowBriefing !== 'function') rows.push(chip('bad', 'briefing 缺', '没有 workflow:briefing，每次 boot 证据不可核验'));
-  else if (legacyUi.briefingError) rows.push(chip('bad', 'briefing 失败', `${legacyUi.briefingError.code}：${legacyUi.briefingError.message}`));
+  else if (legacyUi.briefingError) rows.push(chip('warn', 'briefing 失败', `${legacyUi.briefingError.code}：${legacyUi.briefingError.message}（boot 只写待核验，不当红项）`));
   else if (legacyUi.briefing) rows.push(chip('ok', 'briefing 已读', '每次 boot / 必读核验来自后端'));
-  else rows.push(chip('muted', 'briefing 未读取', '等待 workflow:briefing'));
+  else rows.push(chip('muted', 'briefing 未读取', '等待 workflow:briefing：boot 只写待核验，不写 0/N'));
   if (!caps) rows.push(chip('muted', '旧命令 待核验', '正在从 workflow:state / team:status 读取旧命令能力；矩阵返回前不显示成“齐全”，也不伪造可用'));
   else if (!caps.available) rows.push(chip('bad', 'team.mjs 缺', caps.file || '旧团队工具不存在：旧命令会明确失败'));
   else if (caps.assumed) rows.push(chip('warn', '旧命令 按 team.mjs 放行', caps.note || 'team:status 确认 team.mjs 存在；命令矩阵待 workflow:state 返回'));
@@ -6852,17 +7447,44 @@ function legacyTruthMarkup() {
       ? chip('warn', `旧命令 未核验 ${unknown.length}`, `能力矩阵没有返回这些命令：${unknown.join('、')}；只写“未核验”，不显示成缺失，也不说成齐全`)
       : chip('ok', '旧命令齐全', (caps.commands ? Object.keys(caps.commands).length : 0) + ' 条命令可用'));
   }
-  // B-2e5 AC2：boot 记录数字只作记录——不再把「过期 N」写进红项/文案。
-  const bootText = `boot ${boot.complete}/${boot.total}`;
-  rows.push(chip(boot.allComplete ? 'ok' : 'muted', bootText, `六角色可用 boot：${boot.complete}/${boot.total}（boot 记录只作记录，不拦推进；过期仅提示，不再算红）`));
-  // B-65df AC3：红项分级——账本分叉是数据问题但不是“阻止推进”，降为橙色提示（真阻塞才红）。
-  rows.push(chip(ledger.length ? 'warn' : 'ok', ledger.length ? `账本分叉 ${ledger.length}` : '账本一致', ledger.length ? ledger.map(({ req, ledger: row }) => `${req.id}：${row.label}`).join('；') : '工作流.json 与旧 任务/ 状态一致', ledger.length ? 'ledger' : ''));
+  // F-9fbe-3：boot X/N 的全页唯一出处；briefing 没取到就写「待核验」，绝不写 0/N。
+  // N = 当前团队角色数（名册 members 优先，缺失退回 sessions），来源挂 data-boot-source。
+  rows.push(chip(
+    boot.known ? (boot.allComplete ? 'ok' : 'warn') : 'muted',
+    boot.known ? `boot ${bootCountText(boot)}` : 'boot 待核验',
+    boot.known
+      ? `boot/已读 ${bootCountText(boot)}：只数本轮且有效（round 相同、非旧会话、必读读全）；N=当前团队角色数（来源：${boot.sourceLabel || '团队模式角色'}）。TTL 过期只提示，不拦推进。`
+      : `boot 待核验${legacyUi.briefingError ? `（${legacyUi.briefingError.code}）` : ''}：没有 briefing 就不写 0/N，也不当红项；点「重试核验」重新读取。`,
+    '',
+    `data-boot-source="${esc(boot.source || 'roles')}" data-boot-complete="${Number(boot.complete) || 0}" data-boot-total="${Number(boot.total) || 0}"`
+  ));
+  // F-9fbe-4/6：账本分叉 N 的全页唯一出处；来源挂 data-ledger-source（snapshot / legacy）。
+  const ledgerFix = ledger.count ? 'ledger' : '';
+  rows.push(chip(
+    ledger.count ? 'warn' : (ledger.known ? 'ok' : 'muted'),
+    ledger.count ? `账本分叉 ${ledger.count}` : (ledger.known ? '账本一致' : '账本 未核验'),
+    ledger.count
+      ? ledger.forks.map(({ req, ledger: row }) => `${req.id}：${row.label}`).join('；')
+      : '任务状态与工作流一致；返工在途/任务在办不计分叉',
+    ledgerFix,
+    `data-ledger-source="${ledger.source === 'legacy' ? 'legacy' : (ledger.known ? 'snapshot' : 'none')}" data-ledger-count="${Number(ledger.count) || 0}" data-ledger-inflight="${Number(ledger.inFlightCount) || 0}"`
+  ));
+  // F-9fbe-6：文档待补 N 的全页唯一出处，与 #missing-list 的 data-missing-count 同源（docs:presence 缺口）。
+  const docChipCls = ((!legacyUi.files && !legacyUi.presence) || readiness.pendingRead) ? 'muted'
+    : (readiness.missing.length ? 'bad'
+      : (readiness.bootPlaceholders.length ? 'bad' : (readiness.readErrors.length ? 'warn' : 'ok')));
   rows.push(readiness.ok
-    ? chip('ok', '文档已就绪', `必要文档齐全，且项目信息/项目铁律不是模板占位；六角色目录 ${readiness.dirs}/${readiness.total}、角色卡 ${readiness.cards}/${readiness.total}、文件索引 ${readiness.indexes}/${readiness.total}`)
-    : chip((!legacyUi.files || readiness.pendingRead) ? 'muted' : 'bad', readiness.label, `缺文件：${readiness.missing.join('、') || '无'}；boot 阻断占位：${readiness.bootPlaceholders.join('、') || '无'}；读取失败：${readiness.readErrors.join('、') || '无'}`, 'docs'));
+    ? chip('ok', '文档已就绪', `必要文档齐全，且项目信息/项目铁律不是模板占位；六角色目录 ${readiness.dirs}/${readiness.total}、角色卡 ${readiness.cards}/${readiness.total}、文件索引 ${readiness.indexes}/${readiness.total}`, 'docs', `data-missing-doc-count="${readiness.missing.length}"`)
+    : chip(
+      docChipCls,
+      readiness.label,
+      `缺文件：${readiness.missing.join('、') || '无'}；boot 阻断占位：${readiness.bootPlaceholders.join('、') || '无'}；读取失败：${readiness.readErrors.join('、') || '无'}（缺文档清单 #missing-list 与这里同源同数）`,
+      'docs',
+      `data-missing-doc-count="${readiness.missing.length}"`
+    ));
   if (readiness.overviewPlaceholder) rows.push(chip('muted', '需求总览待首条需求', '需求/00-需求总览.md 还是模板表头；第一条需求落盘时会被重写，不挡 boot'));
   if (legacyUi.truncated) rows.push(chip('warn', '文件清单已截断', 'files:list 达到 600 项 / 4 层上限；未列出的文件不能当“缺失”'));
-  return `<span class="truth-label">数据真源</span>${rows.join('')}`;
+  return `<span class="truth-label">数据真源</span>${rows.join('')}<span class="truth-chip ${panelLevelClass(gate.level)}" data-panel-level="${gate.level}" data-gate-label="1" title="分级结论来自 panelSeverity / panelGateState 单一判定"><b>${esc(gate.label)}</b></span>`;
 }
 
 function renderTruthStrip() {
@@ -6962,104 +7584,79 @@ function renderLegacyPanels() {
 
 /* ── 总览 ─────────────────────────────────────────────── */
 
-function legacyGateResultMarkup() {
-  const ready = legacyDocumentsReady();
-  // “其他文档 0 份”是新项目常态，不是缺一项；就绪分母只算 8 个必要项。
-  const checks = [
-    ready.rules, ready.info, ready.index, ready.overview, ready.guide,
-    ready.dirs === ready.total, ready.cards === ready.total, ready.indexes === ready.total
-  ];
-  const readyCount = checks.filter(Boolean).length;
-  const readyTotal = checks.length;
+/**
+ * F-9fbe-1/F-9fbe-2：面板原因的唯一取数（纯数据），分级交给 panelGateState。
+ * 页面各处（gate 结果 / 真源条 / 团队台 / 流程浮窗）都从这里取，不再各算一套红橙。
+ */
+function legacyGateInput() {
+  const wf = legacyWorkflow();
   const boot = legacyBootSummary();
   const readiness = legacyDocReadiness();
-  const placeholders = readiness.bootPlaceholders;
-  const overviewPlaceholder = readiness.overviewPlaceholder;
-  const commandSummary = legacyFlowCommandGapSummary();
-  const commandGaps = commandSummary.missing;
-  const commandUnknowns = commandSummary.unknown;
+  const ledger = legacyLedgerView();
+  const command = legacyFlowCommandGapSummary();
   const capability = legacyCapabilityData();
-  const commandUnknown = Boolean(capability.caps && capability.caps.assumed);
-  const expired = boot.expired;
-  const wf = legacyWorkflow();
-  const phase = wf && wf.phase ? String(wf.phase) : '未读取';
-  const terminated = phase === 'terminated';
-  const placeholderBlocked = placeholders.length > 0;
-  const bootBlocked = !boot.allComplete;
-  const blockReasons = [];
-  if (bootBlocked) {
-    blockReasons.push(expired
-      ? `${expired} 个角色 boot 记录超 TTL（仅提示）`
-      : `六角色 boot/已读 ${boot.complete}/${boot.total}`);
-  }
-  if (placeholderBlocked) blockReasons.push(`项目信息/项目铁律仍是模板占位：${placeholders.join('、')}`);
-  const open = !terminated && !bootBlocked && !placeholderBlocked;
-  const warn = open && (commandGaps.length > 0 || commandUnknowns.length > 0);
-  const firstPlaceholder = LEGACY_PROJECT_DOCS.find((doc) => placeholders.includes(doc.label));
-  const actions = [];
-  if (expired) actions.push(`<button class="ghost small" type="button" id="legacy-gate-reboot" title="重新 boot 记录超 TTL 的角色；界面发起不冒充角色本人（不拦推进）">重新 boot（记录超 TTL ${expired}）</button>`);
-  if (placeholderBlocked && firstPlaceholder) actions.push(`<button class="ghost small" type="button" data-legacy-doc="${esc(firstPlaceholder.key)}" title="打开第一份模板占位文档；先把正文写清再推进">查看模板占位</button>`);
-  if (bootBlocked && !expired) actions.push('<button class="ghost small" type="button" data-legacy-go="roles" title="到六角色卡逐角色 boot">去六角色 boot</button>');
-  const title = terminated
-    ? '工作流已终止：不再接受推进'
-    : (open
-      ? (commandGaps.length
-        ? `当前必读已核验，但缺 ${commandGaps.length} 条旧命令：可推进的部分仍可用，相关动作已禁用`
-        : (commandUnknowns.length
-          ? `当前必读已核验，但旧命令 ${commandUnknowns.length} 条未核验：相关动作暂时禁用，不写成缺失`
-          : '当前必读已核验：六角色 boot 完成，可按角色推进'))
-      : `${blockReasons.join('；')} → 禁止推进当前`);
-  const detail = terminated
-    ? '工作流阶段：<code>terminated</code>。迭代/终止/新需求按钮已禁用；历史需求、评审与回执只读保留。'
-    : (open
-      ? `后端 <code>workflow:briefing</code> 记录六角色 boot 完成且必读文件齐全；执行动作前若所需角色未 boot，界面会先补一次真实 boot，后端仍校验该角色的阅读证据；Owner 是外部角色、不跑 boot。当前工作流阶段：<code>${esc(phase)}</code>。${overviewPlaceholder ? ' 需求总览仍是模板表头：第一条需求落盘时会被重写，不挡 boot。' : ''}${commandUnknown ? ' 旧命令矩阵尚未由 workflow:state 返回；当前按 team:status 的 team.mjs 存在放行基础动作，真实执行以后端返回为准。' : ''}${commandGaps.length ? ` 当前 team.mjs 缺旧命令：${commandGaps.map((name) => `<code>${esc(name)}</code>`).join('、')}；对应动作按钮已禁用，不能把“有缺口”显示成全绿。` : ''}${commandUnknowns.length ? ` 旧命令未核验：${commandUnknowns.map((name) => `<code>${esc(name)}</code>`).join('、')}；能力矩阵没有返回这些命令，对应按钮暂时禁用，不写成缺失。` : ''}`
-      : `${expired ? `有 ${expired} 个角色的 boot 记录超过 ${legacyBootTtlMinutes()} 分钟（仅提示，不再拒绝推进）；要刷新记录可点「重新 boot」。` : ''}${placeholderBlocked ? ` ${placeholders.map((name) => `<code>${esc(name)}</code>`).join('、')} 仍是模板占位；boot 与推进都会被后端拒绝（<code>PLACEHOLDER_DOC</code>），先把项目目标/边界/铁律正文写清。` : ''}${bootBlocked && !expired ? ` 六角色 boot ${boot.booted}/${boot.total}，可用 ${boot.complete}/${boot.total}；缺哪个角色先点该角色的 boot。` : ''}${boot.stale ? ` 有 ${boot.stale} 个角色在 boot 后文档变更，需重新 boot。` : ''}${boot.roundMismatch ? ` 有 ${boot.roundMismatch} 个角色的 boot 属于上一次，需重新 boot。` : ''}${legacyUi.briefingError ? ` boot 核验不可用：${legacyUi.briefingError.code}。` : (legacyUi.briefing ? '' : ' 后端 briefing 尚未读取。')}`);
-  return `<div class="legacy-gate-result ${open ? (warn ? 'warn' : 'ok') : ''}">
-    <span class="legacy-gate-mark" aria-hidden="true">${open ? (warn ? '▲' : '●') : '■'}</span>
-    <div>
-      <b>${title}</b>
-      <p>${detail}</p>
-      <div class="legacy-gate-facts">
-        <span class="${boot.allComplete ? (warn ? 'warn' : 'ok') : 'warn'}">boot/已读 ${boot.complete}/${boot.total}</span>
-        <span class="${readiness.ok ? 'ok' : (readiness.pendingRead ? 'warn' : 'bad')}">${esc(readiness.label)} · 文件 ${readyCount}/${readyTotal}</span>
-        <span class="${legacyPanelOldRed() && expired ? 'bad' : 'muted'}" data-legacy-expired-summary="1" title="B-2e5：boot 记录超 TTL 只作提示，不再作为门槛/红项">${expired ? `${expired} 个角色 boot 记录超 TTL（只提示，不拦推进）` : 'boot 记录均在 TTL 内'}</span>
-        ${readiness.bootPlaceholders.length ? `<span class="bad">项目信息/铁律占位 ${readiness.bootPlaceholders.length}</span>` : '<span class="ok">项目信息/铁律已写实</span>'}
-        ${overviewPlaceholder ? '<span class="warn">需求总览待首条需求</span>' : ''}
-        <span class="${commandUnknown ? 'warn' : (commandGaps.length || commandUnknowns.length ? 'warn' : 'ok')}">${commandUnknown ? '旧命令 矩阵待核验' : (commandGaps.length ? '缺旧命令 ' + commandGaps.length + (commandUnknowns.length ? ' · 未核验 ' + commandUnknowns.length : '') : (commandUnknowns.length ? '旧命令 未核验 ' + commandUnknowns.length : '旧命令齐全'))}</span>
-        <span class="${boot.stale ? 'warn' : 'ok'}">文档变更 ${boot.stale} 个角色</span>
-        <span class="${terminated ? 'bad' : 'ok'}">阶段 <code>${esc(phase)}</code></span>
-      </div>
-      ${actions.length ? `<div class="legacy-gate-actions">${actions.join('')}</div>` : ''}
-    </div>
-  </div>`;
+  const project = activeProject();
+  const wfError = legacyUi.workflowError;
+  const briefingError = legacyUi.briefingError;
+  const docKnown = Boolean(legacyUi.files || legacyUi.presence);
+  const placeholderDocs = legacyBootPlaceholderDocs();
+  const firstPlaceholder = LEGACY_PROJECT_DOCS.find((doc) => placeholderDocs.includes(doc.label)) || null;
+  return {
+    phase: wf && wf.phase ? String(wf.phase) : (wfError ? '读取失败' : '未读取'),
+    hasPreload: Boolean(window.workbench),
+    filesError: legacyUi.error ? String(legacyUi.error) : '',
+    terminated: Boolean(wf && String(wf.phase) === 'terminated'),
+    terminateReason: legacyTerminateReasonText(),
+    workflowError: wfError ? { code: wfError.code || 'WORKFLOW_STATE_FAILED', message: wfError.message || '' } : null,
+    workflowPending: !legacyUi.workflow && !wfError,
+    projectMissing: Boolean(project && project.exists === false),
+    presenceError: legacyUi.presenceError
+      ? { code: legacyUi.presenceError.code || 'PRESENCE_FAILED', message: legacyUi.presenceError.message || '' }
+      : null,
+    placeholders: readiness.bootPlaceholders,
+    placeholderDoc: firstPlaceholder ? firstPlaceholder.key : '',
+    // 文档缺口只在真的读到（files:list 或 docs:presence 有返回）时才算缺失，读不到不能当缺失。
+    missingDocs: docKnown ? readiness.missing : [],
+    hasDocs: docKnown,
+    docPendingRead: !docKnown || readiness.pendingRead,
+    docReadErrors: readiness.readErrors,
+    overviewPlaceholder: readiness.overviewPlaceholder,
+    boot: {
+      known: boot.known,
+      error: briefingError ? { code: briefingError.code || 'BRIEFING_FAILED', message: briefingError.message || '' } : null,
+      pending: boot.pending,
+      expired: boot.expired,
+      stale: boot.stale,
+      roundMismatch: boot.roundMismatch,
+      complete: boot.complete,
+      total: boot.total,
+      source: boot.source,
+      sourceLabel: boot.sourceLabel
+    },
+    ledger: { known: ledger.known, source: ledger.source, count: ledger.count, inFlight: ledger.inFlightCount },
+    truncated: Boolean(legacyUi.truncated),
+    commandGaps: command.missing,
+    commandUnknowns: command.unknown,
+    commandAssumed: Boolean(capability.caps && capability.caps.assumed),
+    emptyRoles: boot.total === 0
+  };
 }
 
-/** 数据缺口 / IPC 缺口 / 文件截断：一律显式列出，不藏在“未核验”里。 */
-function legacyIssueMarkup() {
-  const rows = [];
-  if (!window.workbench) {
-    rows.push(['bad', 'preload 没有加载：window.workbench 不存在，项目文件、boot 证据与 workflow 动作全部不可用。']);
-  } else if (legacyUi.ipcMissing.length) {
-    rows.push(['bad', `preload 缺少 IPC：${legacyUi.ipcMissing.map((ipc) => `<code>${esc(ipc)}</code>`).join('、')}；缺失功能保持“不可核验”，不会显示成功。`]);
-  }
-  if (legacyUi.error) rows.push(['bad', `读取失败：${esc(legacyUi.error)}`]);
-  if (legacyUi.briefingError) rows.push(['bad', `boot 核验不可用：<code>${esc(legacyUi.briefingError.code)}</code> ${esc(legacyUi.briefingError.message)}`]);
-  if (legacyUi.workflowError) rows.push(['bad', `工作流状态读取失败：<code>${esc(legacyUi.workflowError.code)}</code> ${esc(legacyUi.workflowError.message)}`]);
-  if (legacyUi.truncated) rows.push(['warn', 'files:list 返回已截断（600 项 / 4 层上限）；未列出的角色目录可能只是没扫到，不能当成“缺失”下结论。']);
-  const ready = legacyDocumentsReady();
-  const missingDocs = [];
-  if (!ready.rules) missingDocs.push('项目铁律.md');
-  if (!ready.info) missingDocs.push('项目信息.md');
-  if (!ready.index) missingDocs.push('项目索引.md');
-  if (!ready.overview) missingDocs.push('需求/00-需求总览.md');
-  if (!ready.guide) missingDocs.push('协作准则.md');
-  if (missingDocs.length) rows.push(['warn', `项目文档缺失：${missingDocs.map((name) => `<code>${esc(name)}</code>`).join('、')}。界面不生成模板、不补造内容。`]);
-  const placeholders = legacyBootPlaceholderDocs();
-  if (placeholders.length) rows.push(['bad', `项目信息/项目铁律仍是模板占位：${placeholders.map((name) => `<code>${esc(name)}</code>`).join('、')}。boot 与推进都会被后端拒绝（<code>PLACEHOLDER_DOC</code>）；先把项目目标/边界/铁律正文写清。`]);
-  const overviewPlaceholder = legacyPlaceholderDocs(['overview']).length > 0;
-  if (overviewPlaceholder) rows.push(['warn', '需求/00-需求总览.md 还是模板表头；它不影响 boot，第一条需求落盘时会被重写为真实需求表。']);
-  if (!rows.length) return '';
-  return `<div class="legacy-issues">${rows.map(([kind, text]) => `<p class="legacy-issue ${kind}">${text}</p>`).join('')}</div>`;
+/** 分级后的面板状态（全页唯一判定；所有渲染都从这里取红/橙/灰）。 */
+function legacyGateState() {
+  return panelGateState(legacyGateInput());
+}
+
+function legacyGateResultMarkup() {
+  return panelGateMarkup(legacyGateState());
+}
+
+/** block 原因串（按钮 title / 提示用）：没有阻塞项时返回可推进说明，不出现 block 级措辞。 */
+function panelBlockReasonText(gate) {
+  const g = gate && typeof gate === 'object' ? gate : {};
+  const blocks = Array.isArray(g.blocks) ? g.blocks : [];
+  if (!blocks.length) return '当前没有阻塞项：可推进（真实动作仍以后端返回为准）';
+  return `${blocks.map((row) => row.text).join('；')}。先按行内入口处理，界面不绕过、不改 JSON。`;
 }
 
 function legacyReadStepsMarkup() {
@@ -7082,7 +7679,7 @@ function legacyReadStepsMarkup() {
     <b>${esc(step.label)}</b>
     <p>${esc(step.note)}</p>
     <span class="legacy-read-state">文件 ${esc(meta[step.key])}</span>
-    <span class="legacy-read-state ${boot.allComplete ? '' : 'warn'}">${boot.known ? '已读 ' + boot.complete + '/' + boot.total : '已读 · 未核验'}</span>
+    <span class="legacy-read-state ${boot.known ? (boot.allComplete ? '' : 'warn') : 'warn'}">${boot.known ? (boot.allComplete ? '已读 · 已核验' : '已读 · 有未读全') : '已读 · 待核验'}</span>
   </article>`).join('')}</div>
   <div class="legacy-doc-strip" aria-label="项目文档与索引真实状态">
     ${LEGACY_PROJECT_DOCS.map((doc) => {
@@ -7146,48 +7743,28 @@ function renderLegacyGate(project) {
   const box = $('#legacy-gate');
   if (!box) return;
   if (!project) { box.innerHTML = '<div class="empty-row">先选择工作区。</div>'; return; }
-  const boot = legacyBootSummary();
-  const terminated = Boolean(legacyUi.workflow && legacyUi.workflow.phase === 'terminated');
-  const placeholders = legacyBootPlaceholderDocs();
-  const overviewPlaceholder = legacyPlaceholderDocs(['overview']).length > 0;
-  const commandSummary = legacyFlowCommandGapSummary();
-  const commandGaps = commandSummary.missing;
-  const commandUnknowns = commandSummary.unknown;
-  const commandUnknown = Boolean(legacyCapabilityData().caps && legacyCapabilityData().caps.assumed);
-  const expired = boot.expired;
-  const placeholderBlocked = placeholders.length > 0;
-  const open = boot.allComplete && !terminated && !placeholderBlocked;
-  const warn = open && (commandGaps.length > 0 || commandUnknowns.length > 0);
+  // F-9fbe-1/F-2：红/橙/灰只由 legacyGateState()（panelSeverity 单源）给，页面各块共用一份结论。
+  const gate = legacyGateState();
+  const terminated = gate.terminated;
+  const open = gate.open;
   const pmReady = legacyRoleReady('pm') && !terminated;
-  box.innerHTML = legacyIssueMarkup() + legacyReadStepsMarkup() + legacyGateResultMarkup() + legacyLedgerMarkup() + legacyBootEvidenceMarkup();
+  box.innerHTML = legacyReadStepsMarkup() + legacyGateResultMarkup() + legacyLedgerMarkup() + legacyBootEvidenceMarkup();
   // AC4：红项/警示项可点直达（哈希未命中 → 滚到证据区；已终止 → 滚到终止入口并说明原因）。
   bindLegacyFixLinks(box);
   const badge = $('#legacy-gate-badge');
   if (badge) {
-    const blocks = [];
-    if (!boot.allComplete) blocks.push('未 boot/未读');
-    if (placeholderBlocked) blocks.push(`项目信息/铁律占位 ${placeholders.length}`);
-    badge.textContent = terminated ? (legacyTerminateReasonText() || '工作流已终止')
-      : (open
-        ? (commandGaps.length
-          ? `可推进 · 缺命令 ${commandGaps.length}${commandUnknowns.length ? ` · 未核验 ${commandUnknowns.length}` : ''}`
-          : (commandUnknowns.length ? `可推进 · 未核验 ${commandUnknowns.length}` : '已 boot/已读 · 可推进'))
-        : `${blocks.join(' · ')} · 禁止推进`);
-    badge.className = 'badge ' + (terminated || !open ? 'badge-rejected' : (warn ? 'badge-skipped' : 'badge-approved'));
-    badge.title = legacyUi.briefingError
-      ? `boot 核验不可用：${legacyUi.briefingError.code} · ${legacyUi.briefingError.message}`
-      : (legacyUi.briefing
-        ? `briefing：boot ${boot.booted}/${boot.total}，可用 ${boot.complete}/${boot.total}，已过期 ${expired} 个角色${placeholders.length ? `，项目信息/铁律仍有占位 ${placeholders.length} 份（禁止推进）` : ''}${overviewPlaceholder ? '，需求总览待首条需求（不挡 boot）' : ''}${commandUnknown ? '，旧命令矩阵待核验' : (commandGaps.length ? `，缺旧命令 ${commandGaps.join('、')}` : (commandUnknowns.length ? `，旧命令未核验 ${commandUnknowns.join('、')}` : ''))}`
-        : 'workflow:briefing 尚未读取');
+    badge.textContent = gate.label;
+    badge.setAttribute('data-panel-level', gate.level);
+    badge.className = 'badge ' + (gate.level === 'block' ? 'badge-rejected' : (gate.level === 'warn' ? 'badge-skipped' : (gate.level === 'info' ? 'muted-badge' : 'badge-approved')));
+    badge.title = gate.topics.length
+      ? gate.topics.map((row) => `${row.level === 'block' ? '阻塞' : (row.level === 'warn' ? '待核验' : '提示')}：${row.text}`).join(' / ')
+      : '后端 briefing 与 docs:presence 核验通过：没有待处理项。';
   }
   const advanceBadge = $('#legacy-advance-badge');
   if (advanceBadge) {
-    advanceBadge.textContent = open
-      ? (commandGaps.length
-        ? `可推进（缺命令 ${commandGaps.length}${commandUnknowns.length ? ` · 未核验 ${commandUnknowns.length}` : ''}）`
-        : (commandUnknowns.length ? `可推进（未核验 ${commandUnknowns.length}）` : '可按角色推进'))
-      : '禁止推进';
-    advanceBadge.className = 'badge ' + (open ? (warn ? 'badge-skipped' : 'badge-approved') : 'badge-rejected');
+    advanceBadge.textContent = gate.label;
+    advanceBadge.setAttribute('data-panel-level', gate.level);
+    advanceBadge.className = 'badge ' + (gate.level === 'block' ? 'badge-rejected' : (gate.level === 'warn' ? 'badge-skipped' : (gate.level === 'info' ? 'muted-badge' : 'badge-approved')));
   }
   const advance = $('#legacy-advance-box');
   if (advance) {
@@ -7208,17 +7785,16 @@ function renderLegacyGate(project) {
           : 'PM 未 boot；owner:demand 会由后端自动 boot PM 后代办建档'));
     const terminateWhy = terminated ? (legacyTerminateReasonText() || '工作流已终止')
       : (!terminateGate.ok ? terminateGate.reason : (pmReady ? '终止工作流（PM）' : 'PM 未 boot/未读全；点击执行会先自动 boot，再调用 workflow:terminate'));
+    // warn/info 不再是门槛：只有 block 才写拦截词并禁用按钮。
     const advanceWhy = open
-      ? (commandGaps.length
-        ? `缺 ${commandGaps.length} 条旧命令；可用动作仍以后端返回为准。`
-        : (commandUnknowns.length
-          ? `旧命令 ${commandUnknowns.length} 条未核验；对应动作暂时禁用，能力矩阵返回后自动恢复（不写成缺失）。`
-          : '六角色已 boot/读全；按需求卡片上的动作推进。动作执行前若所需角色未 boot，界面会先补一次真实 boot。'))
-      : `${placeholderBlocked ? `项目信息/项目铁律仍有模板占位：${placeholders.join('、')}；先写清正文。` : ''}${expired ? `有 ${expired} 个角色 boot 已过期；后端会拒绝推进，先点「重新 boot」。` : ''}${!boot.allComplete && !expired ? '未 boot / 未读的角色不能推进；先在六角色卡或团队台点 boot。' : ''}`;
+      ? (gate.warns.length
+        ? `${panelLevelLabel('warn', gate.warns.length)}：${gate.warns.map((row) => row.text).join('；')}。这些都不拦推进，动作执行前界面会先补一次真实 boot。`
+        : '当前必读已核验；按需求卡片上的动作推进。动作执行前若所需角色未 boot，界面会先补一次真实 boot。')
+      : `阻塞项：${gate.blocks.map((row) => row.text).join('；')}。先在团队工具侧处理，界面不绕过、不改 JSON。`;
     advance.innerHTML = `
       <div class="legacy-advance-row">
         <div><b>推进当前</b><p>${advanceWhy}</p></div>
-        <button class="primary small" type="button" id="legacy-advance" ${open ? '' : 'disabled'} data-legacy-go="flow" title="${open ? '打开旧流程与需求队列' : (placeholderBlocked ? '项目信息/铁律占位：禁止推进，先写清正文' : (expired ? 'boot 已过期：先重新 boot' : '六角色未全部 boot/读全'))}">${open ? '查看当前动作' : '禁止推进'}</button>
+        <button class="primary small" type="button" id="legacy-advance" ${open ? '' : 'disabled'} data-legacy-go="flow" data-panel-level="${gate.level}" title="${open ? '打开旧流程与需求队列' : panelBlockReasonText(gate)}">${open ? '查看当前动作' : PANEL_BLOCK_LABEL}</button>
       </div>
       <div class="legacy-advance-row">
         <div><b>向 PM 提交需求（Owner）</b><p>调用 <code>owner:demand</code>：只提需求描述、优先级、验收标准（每条一行，可多条）；PM 会自动 boot 代办建档，项目开始 / 评审 / 迭代时提交。</p></div>
@@ -7293,19 +7869,22 @@ function renderLegacyRoleTable(project) {
   const badge = $('#legacy-role-badge');
   if (badge) {
     const boot = legacyBootSummary();
-    badge.textContent = `目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 索引 ${ready.indexes}/${ready.total} · boot ${boot.complete}/${boot.total}`;
-    badge.className = 'badge ' + (ready.dirs === ready.total && ready.cards === ready.total && ready.indexes === ready.total && boot.allComplete ? 'badge-approved' : (boot.expired ? 'badge-rejected' : 'badge-skipped'));
+    // F-9fbe-6：数字只留在顶部真源条；这里只报目录/角色卡/索引（presence 同源）与 boot 状态。
+    badge.textContent = `目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 索引 ${ready.indexes}/${ready.total} · ${bootStatusText(boot)}`;
+    badge.className = 'badge ' + (ready.dirs === ready.total && ready.cards === ready.total && ready.indexes === ready.total && boot.allComplete
+      ? 'badge-approved'
+      : (boot.known ? (boot.allComplete ? 'badge-approved' : 'badge-skipped') : 'muted-badge'));
   }
   const indexBadge = $('#legacy-role-index-badge');
   if (indexBadge) {
     const boot = legacyBootSummary();
-    indexBadge.textContent = `boot ${boot.complete}/${boot.total} · 文件索引 ${ready.indexes}/${ready.total} · 项目索引 ${ready.index ? '存在' : '缺失'}`;
-    indexBadge.className = 'badge ' + (boot.allComplete && ready.indexes === ready.total ? 'badge-approved' : 'badge-rejected');
+    indexBadge.textContent = `${bootStatusText(boot)} · 文件索引 ${ready.indexes}/${ready.total} · 项目索引 ${ready.index ? '存在' : '缺失'}`;
+    indexBadge.className = 'badge ' + (boot.allComplete && ready.indexes === ready.total ? 'badge-approved' : 'badge-skipped');
   }
   const summary = $('#legacy-docs-summary');
   if (summary) {
     const boot = legacyBootSummary();
-    summary.textContent = `目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 文件索引 ${ready.indexes}/${ready.total} · 其他文档 ${ready.others} 份 · 项目索引 ${ready.index ? '存在' : '缺失'} · boot ${boot.complete}/${boot.total}${boot.expired ? ` · 过期 ${boot.expired}` : ''} · ${legacyUi.loading ? '读取中…' : '只读'}`;
+    summary.textContent = `目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 文件索引 ${ready.indexes}/${ready.total} · 其他文档 ${ready.others} 份 · 项目索引 ${ready.index ? '存在' : '缺失'} · ${bootStatusText(boot)} · ${legacyUi.loading ? '读取中…' : '只读'}`;
   }
 }
 
@@ -9243,55 +9822,26 @@ function renderLegacyTeamGate() {
     <div class="legacy-team-docs">${LEGACY_PROJECT_DOCS.map((doc) => `<button type="button" class="${legacyHas(doc.rel) ? 'ok' : 'bad'}" data-legacy-doc="${esc(doc.key)}" title="${esc(doc.rel)} · ${legacyHas(doc.rel) ? '存在' : '缺失'}">${esc(doc.label)} ${legacyHas(doc.rel) ? '有' : '缺'}</button>`).join('')}</div>
     <div class="legacy-team-list">${rows}</div>
     <div class="legacy-team-result">${(() => {
-      const boot = legacyBootSummary();
-      const placeholders = legacyBootPlaceholderDocs();
-      const overviewPlaceholder = legacyPlaceholderDocs(['overview']).length > 0;
-      const commandSummary = legacyFlowCommandGapSummary();
-      const commandGaps = commandSummary.missing;
-      const commandUnknowns = commandSummary.unknown;
-      if (legacyUi.briefingError) return `<b class="bad">boot 核验不可用</b><span>${esc(legacyUi.briefingError.code)} · ${esc(legacyUi.briefingError.message)}</span>`;
-      if (!boot.allComplete) {
-        const expiredText = '缺哪个角色就直接点该行的 boot（boot 记录超 TTL 只提示，不拦推进）。';
-        return `<b class="warn">${boot.expired ? 'boot 记录超 TTL（仅提示，不拦推进）' : 'boot 记录未齐（仅提示；真实动作以后端校验为准）'}</b><span>boot ${boot.complete}/${boot.total}；${expiredText}</span>`;
+      // F-9fbe-1/F-2：团队台红橙与项目面板同一判定（只有 block 才红、才写拦截词）。
+      const gate = legacyGateState();
+      const shown = gate.topics.filter((row) => row.level !== 'info').slice(0, 3);
+      if (!shown.length) {
+        return `<b class="ok" data-panel-level="ok">${esc(gate.label)}</b><span>动作执行前会自动补 boot 所需角色；Owner 是外部角色${gate.topics.some((row) => row.id === 'overview-placeholder') ? '；需求总览待首条需求，不挡 boot' : ''}</span>`;
       }
-      if (placeholders.length) {
-        return `<b class="bad">项目信息/铁律占位 · 禁止推进</b><span>${esc(placeholders.join('、'))} 仍是模板；boot 与推进会返回 PLACEHOLDER_DOC，先把正文写清。${commandGaps.length ? `缺旧命令：${esc(commandGaps.join('、'))}。` : ''}${commandUnknowns.length ? `旧命令未核验：${esc(commandUnknowns.join('、'))}（不写成缺失）。` : ''}</span>`;
-      }
-      if (commandGaps.length) {
-        return `<b class="warn">六角色已 boot / 读全（有命令缺口）</b><span>缺旧命令：${esc(commandGaps.join('、'))}；对应动作已禁用，动作执行前会自动补 boot 所需角色。${overviewPlaceholder ? ' 需求总览待首条需求，不挡 boot。' : ''}</span>`;
-      }
-      if (commandUnknowns.length) {
-        return `<b class="warn">六角色已 boot / 读全（旧命令未核验）</b><span>旧命令未核验：${esc(commandUnknowns.join('、'))}；能力矩阵没有返回这些命令，对应动作暂时禁用，不写成缺失。${overviewPlaceholder ? ' 需求总览待首条需求，不挡 boot。' : ''}</span>`;
-      }
-      return `<b class="ok">六角色已 boot / 读全 · 可按角色推进</b><span>动作执行前会自动补 boot 所需角色；Owner 是外部角色${overviewPlaceholder ? '；需求总览待首条需求，不挡 boot' : ''}</span>`;
+      const text = shown.map((row) => `<b class="${panelLevelClass(row.level)}" data-panel-level="${row.level}" data-panel-topic="${esc(row.id)}">${esc(row.text)}</b>`).join('<span> · </span>');
+      const more = gate.topics.filter((row) => row.level !== 'info').length > shown.length
+        ? `<span>另有 ${gate.topics.filter((row) => row.level !== 'info').length - shown.length} 项，见项目面板逐条原因。</span>`
+        : '<span>逐条补齐入口在项目面板「本轮必读」。</span>';
+      return `${text}${more}`;
     })()} <button id="team-boot-all" class="ghost small" type="button" title="依次调用 workflow:boot；界面发起不冒充角色本人">全队 boot</button></div>`;
   if (badge) {
-    const boot = legacyBootSummary();
-    const placeholders = legacyBootPlaceholderDocs();
-    const overviewPlaceholder = legacyPlaceholderDocs(['overview']).length > 0;
-    const commandSummary = legacyFlowCommandGapSummary();
-    const commandGaps = commandSummary.missing;
-    const commandUnknowns = commandSummary.unknown;
-    const commandUnknown = Boolean(legacyCapabilityData().caps && legacyCapabilityData().caps.assumed);
-    const terminated = Boolean(legacyUi.workflow && legacyUi.workflow.phase === 'terminated');
-    const placeholderBlocked = placeholders.length > 0;
-    const open = boot.allComplete && !terminated && !placeholderBlocked;
-    const warn = open && (commandGaps.length > 0 || commandUnknowns.length > 0);
-    const blocks = [];
-    if (!boot.allComplete) blocks.push(boot.expired ? `boot 已过期 ${boot.expired}` : '未 boot/未读');
-    if (placeholderBlocked) blocks.push(`项目信息/铁律占位 ${placeholders.length}`);
-    badge.textContent = terminated ? (legacyTerminateReasonText() || '工作流已终止')
-      : (open
-        ? (commandGaps.length
-          ? `可推进 · 缺命令 ${commandGaps.length}${commandUnknowns.length ? ` · 未核验 ${commandUnknowns.length}` : ''}`
-          : (commandUnknowns.length ? `可推进 · 未核验 ${commandUnknowns.length}` : '已 boot/已读 · 可推进'))
-        : `${blocks.join(' · ')} · 禁止推进`);
-    badge.className = 'badge ' + (terminated || !open ? 'badge-rejected' : (warn ? 'badge-skipped' : 'badge-approved'));
-    badge.title = legacyUi.briefingError
-      ? `boot 核验不可用：${legacyUi.briefingError.code} · ${legacyUi.briefingError.message}`
-      : (legacyUi.briefing
-        ? `briefing：boot ${boot.booted}/${boot.total}，可用 ${boot.complete}/${boot.total}，已过期 ${boot.expired} 个角色${placeholders.length ? `，项目信息/铁律仍有占位 ${placeholders.length} 份（禁止推进）` : ''}${overviewPlaceholder ? '，需求总览待首条需求（不挡 boot）' : ''}${commandUnknown ? '，旧命令矩阵待核验' : (commandGaps.length ? `，缺旧命令 ${commandGaps.join('、')}` : (commandUnknowns.length ? `，旧命令未核验 ${commandUnknowns.join('、')}` : ''))}`
-        : 'workflow:briefing 尚未读取');
+    const gate = legacyGateState();
+    badge.textContent = gate.label;
+    badge.setAttribute('data-panel-level', gate.level);
+    badge.className = 'badge ' + (gate.level === 'block' ? 'badge-rejected' : (gate.level === 'warn' ? 'badge-skipped' : (gate.level === 'info' ? 'muted-badge' : 'badge-approved')));
+    badge.title = gate.topics.length
+      ? gate.topics.map((row) => `${row.level === 'block' ? '阻塞' : (row.level === 'warn' ? '待核验' : '提示')}：${row.text}`).join(' / ')
+      : '团队台与项目面板同一判定：没有待处理项。';
   }
 
   if (!actorBox) return;
@@ -10518,8 +11068,9 @@ function flowMeta(p) {
   const reqText = req
     ? `${poolTypeLabel(req)} ${req.id}（${legacyReqStatus(req)}）· Owner ${reqOwner.label}`
     : '还没有需求';
-  const ledgerText = evidence.ledger.length ? `账本分叉 ${evidence.ledger.length} 条` : '账本一致';
-  return `当前 ｜ 阶段：${evidence.phase} ｜ boot/已读 ${boot.complete}/${boot.total} ｜ 需求 ${evidence.requirementCount}（已验收 ${evidence.accepted}）｜ 当前需求：${reqText} ｜ 任务 ${evidence.tasks.length} ｜ 项目级 Owner：${projectOwner.label}（不参与派单）｜ 收口：${closure} ｜ 待回执：${evidence.pending ? roleById(evidence.pending.to).name : '无'} ｜ 旧命令缺失：${missing === null ? '未知' : missing} ｜ ${ledgerText}`;
+  // F-9fbe-6：这里只报状态，分叉/待补的具体数字只在顶部真源条出现一次。
+  const ledgerText = evidence.ledger.length ? '账本分叉（见处置行）' : '账本一致';
+  return `当前 ｜ 阶段：${evidence.phase} ｜ ${bootStatusText(boot)} ｜ 需求 ${evidence.requirementCount}（已验收 ${evidence.accepted}）｜ 当前需求：${reqText} ｜ 任务 ${evidence.tasks.length} ｜ 项目级 Owner：${projectOwner.label}（不参与派单）｜ 收口：${closure} ｜ 待回执：${evidence.pending ? roleById(evidence.pending.to).name : '无'} ｜ 旧命令缺失：${missing === null ? '未知' : missing} ｜ ${ledgerText}`;
 }
 
 function renderLegacyCapabilities() {
@@ -10616,8 +11167,8 @@ function legacyOwnerPanelMarkup(p) {
 }
 
 function renderLegacyFlowExtras(p) {
-  const gate = $('#legacy-flow-gate');
-  if (gate) gate.innerHTML = legacyIssueMarkup() + legacyGateResultMarkup();
+  const gateBox = $('#legacy-flow-gate');
+  if (gateBox) gateBox.innerHTML = legacyGateResultMarkup();
   const ledgerBox = $('#legacy-flow-ledger');
   if (ledgerBox) ledgerBox.innerHTML = legacyLedgerMarkup();
   renderLegacyCapabilities();
@@ -10625,12 +11176,12 @@ function renderLegacyFlowExtras(p) {
   if (ownerBox) ownerBox.innerHTML = legacyOwnerPanelMarkup(p);
   const actions = $('#legacy-flow-actions');
   if (actions) {
-    const boot = legacyBootSummary();
-    const placeholders = legacyBootPlaceholderDocs();
-    const overviewPlaceholder = legacyPlaceholderDocs(['overview']).length > 0;
-    const terminated = Boolean(legacyWorkflow() && legacyWorkflow().phase === 'terminated');
+    // F-9fbe-1/F-2：流程页的「推进当前」与项目面板同一分级——只有 block 才禁用并出现拦截词。
+    const gateState = legacyGateState();
+    const overviewPlaceholder = gateState.topics.some((row) => row.id === 'overview-placeholder');
+    const terminated = gateState.terminated;
     const pmReady = legacyRoleReady('pm') && !terminated;
-    const canAdvance = boot.allComplete && !terminated && !placeholders.length;
+    const canAdvance = gateState.open;
     const iterateGate = legacyActionCommandGate('iterate');
     const shellOwnedIterate = Boolean(iterateGate.shellOwned);
     const terminateGate = legacyActionCommandGate('terminate');
@@ -10663,12 +11214,13 @@ function renderLegacyFlowExtras(p) {
       gateReasonParts.push(`<span class="legacy-action-note">闸门判定：team.mjs 返回 ${gateData.gates.size} 项${denied.length ? ' · 未满足：' + denied.map((entry) => esc(entry.gate || entry.code || entry.action)).join('、') : ' · 全部满足'}</span>`);
     }
     actions.innerHTML = `
-      <button class="primary small" type="button" id="legacy-flow-advance" ${canAdvance ? '' : 'disabled'} data-legacy-scroll="requirements" title="${canAdvance ? '跳到需求队列' : (terminated ? (legacyTerminateReasonText() || '工作流已终止') : (placeholders.length ? '项目信息/铁律占位：禁止推进，先写清正文' : '六角色未全部 boot/读全（或已过期）'))}">${canAdvance ? '查看当前动作' : '禁止推进'}</button>
+      <button class="primary small" type="button" id="legacy-flow-advance" ${canAdvance ? '' : 'disabled'} data-legacy-scroll="requirements" data-panel-level="${gateState.level}" title="${canAdvance ? '跳到需求队列' : panelBlockReasonText(gateState)}">${canAdvance ? '查看当前动作' : PANEL_BLOCK_LABEL}</button>
       <button class="ghost small" type="button" id="legacy-flow-iterate" ${iterateReady ? '' : 'disabled'} data-legacy-req-action="iterate" title="${esc(iterateGuard.reason || '启动下一次（PM）；执行前会自动补 boot')}">迭代（下一次）</button>
       <button class="ghost small danger" type="button" id="legacy-flow-terminate" ${terminateReady ? '' : 'disabled'} data-legacy-req-action="terminate" title="${esc(!terminateGate.ok ? terminateGate.reason : (terminated ? (legacyTerminateReasonText() || '工作流已终止') : (pmReady ? 'workflow:terminate（PM）' : 'PM 未 boot/未读全；点击执行会先自动 boot，再调用 workflow:terminate')))}">终止</button>
       <button class="ghost small" type="button" data-legacy-req-action="owner-demand" ${ownerDemandVisible ? '' : 'hidden'} ${ownerDemandReady ? '' : 'disabled'} title="${esc(!ownerDemandGate.ok ? ownerDemandGate.reason : (terminated ? (legacyTerminateReasonText() || '工作流已终止') : '向 PM 提交需求（Owner）：owner:demand，描述 / 优先级 / 验收标准（可多条），PM 自动 boot 代办建档'))}">向 PM 提交需求（Owner）</button>
       <button class="ghost small" type="button" data-legacy-go="docs">必读与目录</button>
       <button class="ghost small" type="button" data-open-team>团队台 / 派单</button>
+      ${gateState.warns.length ? `<span class="legacy-action-note">${esc(panelLevelLabel('warn', gateState.warns.length))}：${esc(gateState.warns.map((row) => row.text).join('；'))}（不拦推进）</span>` : ''}
       ${iterateVisibleWhy ? `<span class="legacy-action-warn">迭代不可用：${esc(iterateVisibleWhy)}</span>` : ''}
       ${overviewPlaceholder ? '<span class="legacy-action-note">需求总览待首条需求：第一条需求落盘时会被重写，不挡 boot。</span>' : ''}
       ${missingCommands.length ? `<span class="legacy-action-warn">当前缺旧命令：${missingCommands.map((name) => `<code>${esc(name)}</code>`).join('、')}；${blockedByMissing.length ? blockedByMissing.join('、') + ' 按钮已禁用，' : ''}先升级团队工具，界面不会伪造成功。${shellOwnedIterate ? '（迭代在 Fast 由工作台壳层推进，不依赖旧 workflow 命令）' : ''}</span>` : ''}
@@ -10910,9 +11462,10 @@ function renderFlow() {
   if (meta) meta.textContent = text;
   if (miniMeta) miniMeta.textContent = text;
   const boot = legacyBootSummary();
+  const flowGate = legacyGateState();
   const activeReq = legacyActiveRequirement();
   const activeOwner = legacyReqOwnerView(activeReq);
-  if (summary) summary.textContent = `boot/已读 ${boot.complete}/${boot.total} · ${boot.allComplete ? '可按角色推进' : '禁止推进'} ｜ 需求级 Owner：${activeReq ? `${activeOwner.label} · ${activeReq.id}` : '无在办需求'}`;
+  if (summary) summary.textContent = `${bootStatusText(boot)} · ${flowGate.open ? panelLevelLabel('warn', flowGate.warnCount) : flowGate.label} ｜ 需求级 Owner：${activeReq ? `${activeOwner.label} · ${activeReq.id}` : '无在办需求'}`;
   if (projectEl) projectEl.textContent = p.name;
   renderFlowDerivation();
   renderGateAudit();
@@ -10963,7 +11516,7 @@ function renderRoles() {
     const boot = legacyBootSummary();
     summary.textContent = `${teamModeLabel(p)} · 目录 ${docs.dirs}/${docs.total} · 角色卡 ${docs.cards}/${docs.total} · 文件索引 ${docs.indexes}/${docs.total} · 其他文档 ${docs.others} 份 · 项目索引 ${docs.index ? '存在' : '缺失'} · `
       + (verified === null ? `本地会话 ${ready}/${docs.total}（DSH 待核验）` : `DSH 已核验 ${verified}/${docs.total}`)
-      + ` · boot ${boot.complete}/${boot.total}${boot.expired ? ` · 过期 ${boot.expired}` : ''}`;
+      + ` · ${bootStatusText(boot)}`;
   }
   grid.innerHTML = visibleRoles.map((role) => {
     const cardRel = legacyRoleCardRel(role);
@@ -12470,7 +13023,7 @@ function openNewProject() {
           toast(
             teamFailed
               ? '项目已创建，但团队登记失败：' + (r.team.message || r.team.code || '未知原因')
-              : (readiness.ok ? '项目已创建 · 文档已就绪' : `项目已创建 · ${readiness.label}`),
+              : (readiness.ok ? '项目已创建 · 文档已就绪' : '项目已创建 · 文档未就绪（缺几项见项目面板顶部「数据真源」条）'),
             teamFailed ? 'error' : 'ok'
           );
         } catch (e) { error(e.message); }
@@ -14244,6 +14797,42 @@ function bind() {
       e.preventDefault();
       setDrawer('project');
       showTab(go.dataset.legacyGo);
+      return;
+    }
+    // R-9fbe：分级原因行/补齐按钮的入口（缺文档清单 / 重读文档 / 重新 boot / 账本处置）。
+    const missingLink = target.closest('[data-legacy-missing]');
+    if (missingLink) {
+      e.preventDefault();
+      setDrawer('project');
+      showTab('overview');
+      const list = document.getElementById('missing-list');
+      if (list && list.scrollIntoView) list.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (typeof toast === 'function') toast(`缺文档清单 #missing-list：${list ? String(list.getAttribute('data-missing-count') || '0') : '0'} 项（与「文档待补」同源）`, 'warn');
+      return;
+    }
+    if (target.closest('[data-legacy-refresh]')) {
+      e.preventDefault();
+      loadLegacyDocs(true);
+      toast('正在重新读取项目文档、boot 记录与工作流（只读）', 'ok');
+      return;
+    }
+    if (target.closest('[data-legacy-reboot]')) {
+      e.preventDefault();
+      legacyBootAll(target.closest('[data-legacy-reboot]'));
+      return;
+    }
+    const ledgerLink = target.closest('[data-legacy-ledger]');
+    if (ledgerLink) {
+      e.preventDefault();
+      const box = document.getElementById('legacy-flow-ledger');
+      if (box && box.scrollIntoView) box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      toast('账本分叉的处置行在「流程」页 #legacy-flow-ledger；处置走 team.mjs（界面不改 JSON）', 'warn');
+      return;
+    }
+    const ledgerAction = target.closest('[data-ledger-action]');
+    if (ledgerAction) {
+      e.preventDefault();
+      toast('本版后端没有 task release / req reopen 的界面 IPC：请按行内提示手动执行 team.mjs（会写审计）', 'bad');
       return;
     }
     // R-c651 F-c651-4/5：团队行的「一键唤醒」「全部已读」（口径由主进程 → 团队工具 presence/mark-read/wake 执行）

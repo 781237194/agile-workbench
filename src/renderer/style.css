@@ -2498,9 +2498,12 @@ html[data-theme="light"] .modal-mask { background: rgba(40, 32, 22, .46); }
 }
 .legacy-gate-result.ok { border-color: rgba(95, 213, 163, .36); background: rgba(95, 213, 163, .07); }
 .legacy-gate-result.warn { border-color: rgba(214, 178, 92, .42); background: rgba(214, 178, 92, .08); }
+/* R-9fbe：info = 中性（读不到/待核验），用灰而不是红/橙，避免把「没取到」画成阻塞。 */
+.legacy-gate-result.info { border-color: var(--line-strong); background: rgba(148, 163, 184, .06); }
 .legacy-gate-result .legacy-gate-mark { flex: 0 0 auto; color: var(--red); font-size: 14px; line-height: 1.2; }
 .legacy-gate-result.ok .legacy-gate-mark { color: var(--green); }
 .legacy-gate-result.warn .legacy-gate-mark { color: var(--gold-2); }
+.legacy-gate-result.info .legacy-gate-mark { color: var(--dim); }
 .legacy-gate-result b { display: block; color: var(--text); font-size: 10.5px; font-weight: 650; }
 .legacy-gate-result p { margin-top: 2px; color: var(--muted); font-size: 9px; line-height: 1.6; }
 .legacy-gate-result code { color: var(--gold); font-family: var(--mono); font-size: 8.5px; }
@@ -2509,6 +2512,33 @@ html[data-theme="light"] .modal-mask { background: rgba(40, 32, 22, .46); }
 .legacy-gate-facts span.bad { border-color: rgba(225, 139, 123, .34); color: var(--red); }
 .legacy-gate-facts span.ok { border-color: rgba(95, 213, 163, .3); color: var(--green); }
 .legacy-gate-facts span.warn { border-color: rgba(214, 178, 92, .4); color: var(--gold-2); }
+/* R-9fbe F-1/F-2：每条原因单独一行并带 data-panel-level；block 红 / warn 橙 / info 灰。 */
+.legacy-gate-reasons { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+.legacy-gate-reason {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  font-size: 8.5px;
+  line-height: 1.55;
+}
+.legacy-gate-reason.block { border-color: rgba(225, 139, 123, .42); border-left-color: var(--red); background: rgba(225, 139, 123, .07); }
+.legacy-gate-reason.warn { border-color: var(--gold-line); border-left-color: var(--gold-2); background: var(--gold-soft); }
+.legacy-gate-reason.info, .legacy-gate-reason.muted { border-color: var(--line-strong); border-left-color: var(--dim); }
+.legacy-gate-reason .legacy-gate-reason-mark { flex: 0 0 auto; font-size: 8px; }
+.legacy-gate-reason.block .legacy-gate-reason-mark { color: var(--red); }
+.legacy-gate-reason.warn .legacy-gate-reason-mark { color: var(--gold-2); }
+.legacy-gate-reason.info .legacy-gate-reason-mark, .legacy-gate-reason.muted .legacy-gate-reason-mark { color: var(--dim); }
+.legacy-gate-reason .legacy-gate-reason-text { color: var(--muted); }
+.legacy-gate-reason.block .legacy-gate-reason-text { color: var(--red); }
+.legacy-gate-reason.warn .legacy-gate-reason-text { color: var(--gold); }
+.legacy-gate-reason.info .legacy-gate-reason-text, .legacy-gate-reason.muted .legacy-gate-reason-text { color: var(--dim); }
+.legacy-gate-reason button { height: 20px; padding: 0 7px; font-size: 8px; }
 .legacy-gate-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .legacy-gate-actions button { height: 22px; padding: 0 8px; font-size: 8px; }
 .legacy-iterate-why { margin: -1px 8px 0; color: var(--gold); font-size: 8px; line-height: 1.55; }
@@ -2991,6 +3021,19 @@ body.drawer-open #dsh-off { visibility: hidden; }
   border-radius: 6px;
   background: rgba(225, 139, 123, .06);
 }
+/* R-9fbe：账本分叉属「数据要处置」不是「禁止推进」→ 橙色；在途条目 → 中性灰。 */
+.legacy-ledger.warn {
+  border-color: var(--gold-line);
+  border-left-color: var(--gold-2);
+  background: var(--gold-soft);
+}
+.legacy-ledger.warn .legacy-ledger-head b { color: var(--gold-2); }
+.legacy-ledger.info {
+  border-color: var(--line-strong);
+  border-left-color: var(--dim);
+  background: var(--panel-2);
+}
+.legacy-ledger.info .legacy-ledger-head b { color: var(--muted); }
 .legacy-ledger.clean {
   border-color: rgba(95, 213, 163, .30);
   border-left-color: var(--green);
@@ -3000,6 +3043,7 @@ body.drawer-open #dsh-off { visibility: hidden; }
 .legacy-ledger-head b { color: var(--red); font-size: 9px; font-weight: 650; }
 .legacy-ledger.clean .legacy-ledger-head b { color: var(--green); }
 .legacy-ledger-head span { color: var(--dim); font-size: 7.5px; line-height: 1.5; }
+.legacy-ledger-source { font-family: var(--mono); font-size: 6.8px; }
 .legacy-ledger-row {
   display: flex;
   flex-wrap: wrap;
@@ -3014,6 +3058,18 @@ body.drawer-open #dsh-off { visibility: hidden; }
 .legacy-ledger-row code { color: var(--gold); font-family: var(--mono); font-size: 7px; }
 .legacy-ledger-row span { color: var(--muted); }
 .legacy-ledger-row b { color: var(--red); font-weight: 600; }
+.legacy-ledger.warn .legacy-ledger-row b { color: var(--gold); }
+.legacy-ledger.info .legacy-ledger-row b { color: var(--muted); }
+.legacy-ledger-when { color: var(--dim); font-size: 7px; }
+.legacy-ledger-actions { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.legacy-ledger-actions button { height: 19px; padding: 0 7px; font-size: 7.5px; }
+.legacy-ledger-nocmd {
+  flex: 1 1 100%;
+  color: var(--gold);
+  font-size: 7.2px;
+  line-height: 1.55;
+}
+.legacy-ledger-nocmd code { color: var(--gold-2); font-size: 6.8px; }
 
 .legacy-req.is-active { border-color: var(--gold-line); box-shadow: inset 2px 0 var(--gold); }
 .legacy-req-ledger {
