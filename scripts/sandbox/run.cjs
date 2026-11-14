@@ -95,7 +95,7 @@ function emit(payload) {
 function parseArgs(argv) {
   const args = argv.slice(2);
   const cmd = args.shift() || '';
-  const out = { cmd, root: '', project: '', case: '', command: [], full: false, strict: false, noSelftest: false, noWake: false, inWorktree: false, all: false, yes: false, dryRun: false, keep: 3, timeout: 120000 };
+  const out = { cmd, root: '', project: '', case: '', command: [], full: false, strict: false, assertCode: false, noSelftest: false, noWake: false, inWorktree: false, all: false, yes: false, dryRun: false, keep: 3, timeout: 120000 };
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a === '--') { out.command = args.slice(i + 1); break; }
@@ -105,6 +105,7 @@ function parseArgs(argv) {
       case '--case': out.case = args[++i] || ''; break;
       case '--full': out.full = true; break;
       case '--strict': out.strict = true; break;
+      case '--assert-code': out.assertCode = true; break;
       case '--no-selftest': out.noSelftest = true; break;
       case '--no-wake': out.noWake = true; break;
       case '--in-worktree': out.inWorktree = true; break;
@@ -195,6 +196,23 @@ function diffStatus(before, after) {
     added: after.filter((line) => !b.has(line)),
     removed: before.filter((line) => !a.has(line)),
   };
+}
+
+/**
+ * git status 行 → 是否「沙盘自己能写出来的路径」。
+ * 沙盘写的东西全在 .sandbox/_tmp/data/项目/团队状态 里（且多数已被 .gitignore 覆盖）；
+ * 其它被改动的 src/scripts/docs 只可能是**别的角色在同时编辑共享工作树**（本项目多角色并行），
+ * 不能算沙盘污染 —— 这类差异只作 external 提示，--strict 时才判 FAIL。
+ */
+const SANDBOX_OWNED_RE = /(^|\/)(\.sandbox|_tmp|data|项目|团队\/状态)(\/|$)/i;
+function splitCodeDiff(diff) {
+  const owned = [];
+  const external = [];
+  for (const line of [...diff.added, ...diff.removed]) {
+    const file = line.replace(/^[ \t]*[A-Z?!]{1,2}[ \t]+/, '').replace(/^"|"$/g, '').replace(/\\/g, '/');
+    (SANDBOX_OWNED_RE.test(file) ? owned : external).push(line);
+  }
+  return { owned, external };
 }
 
 /* ───────────────────────── 真实文件基线（生产零改动证明） ───────────────────────── */
@@ -534,7 +552,8 @@ function run(args) {
   // AC7：代码工作树必须干净且 HEAD 不变（沙盘隔离的是数据，代码仍是同一工作树）
   const codeDiff = diffStatus(gitBefore.status, gitAfter.status);
   const headChanged = gitBefore.head !== gitAfter.head;
-  const codeDirty = headChanged || codeDiff.added.length > 0 || codeDiff.removed.length > 0;
+  const split = splitCodeDiff(codeDiff);
+  const codeDirty = headChanged || split.owned.length > 0;
 
   const result = (() => {
     const text = String(child.stdout || '').trim();
@@ -554,7 +573,7 @@ function run(args) {
     exitCode: child.status === null ? 1 : child.status,
     ok: (child.status === 0) && !codeDirty,
     codeDirty,
-    git: { before: gitBefore.headShort, after: gitAfter.headShort, added: codeDiff.added, removed: codeDiff.removed },
+    git: { before: gitBefore.headShort, after: gitAfter.headShort, added: codeDiff.added, removed: codeDiff.removed, sandboxOwned: split.owned, external: split.external },
     result,
     stdoutTail: String(child.stdout || '').trim().split(/\r?\n/).slice(-40).join('\n'),
     stderrTail: String(child.stderr || '').trim().split(/\r?\n/).slice(-20).join('\n'),
@@ -565,7 +584,7 @@ function run(args) {
     emit({ ok: false, code: 'SANDBOX_CODE_DIRTY', runId: record.runId, case: label, git: record.git, hint: '沙盘里禁止直接改工作树源码；验代码改动请用 worktree --root <id> 后 run --in-worktree' });
     process.exit(EXIT.CODE_DIRTY);
   }
-  emit({ ok: record.ok, code: record.ok ? 'SANDBOX_RUN_OK' : 'SANDBOX_CASE_FAILED', runId: record.runId, case: label, exitCode: record.exitCode, durationMs, git: { head: gitAfter.headShort, statusClean: gitAfter.status.length === 0, statusChanged: false } });
+  emit({ ok: record.ok, code: record.ok ? 'SANDBOX_RUN_OK' : 'SANDBOX_CASE_FAILED', runId: record.runId, case: label, exitCode: record.exitCode, durationMs, git: { head: gitAfter.headShort, statusClean: gitAfter.status.length === 0, sandboxOwned: split.owned, external: split.external } });
   process.exit(record.ok ? 0 : 1);
 }
 
@@ -595,7 +614,13 @@ function verify(args) {
   const gitNow = gitSnapshot(ROOT);
   const base = meta.codeBaseline || { head: '', status: [] };
   const codeDiff = diffStatus(base.status || [], gitNow.status);
-  const codeDirty = base.head !== gitNow.head || codeDiff.added.length > 0 || codeDiff.removed.length > 0;
+  const split = splitCodeDiff(codeDiff);
+  const headChanged = base.head !== gitNow.head;
+  // 硬判：HEAD 变了 / 出现沙盘自有路径（.sandbox|_tmp|data|项目|团队状态）被改动。
+  // 软判：其它 src/scripts/docs 改动可能是别的角色在并行编辑共享工作树（external），
+  //        默认只报告；--assert-code（AC7 用）或 --strict 时判 FAIL。
+  const codeDirty = headChanged || split.owned.length > 0 || ((args.assertCode || args.strict) && split.external.length > 0);
+  const externalDirty = split.external.length > 0;
   const snap = snapshotCheck(root, meta);
 
   const payload = {
@@ -606,13 +631,22 @@ function verify(args) {
     leaks,
     drift,
     driftNote: '真实工作台/团队实例运行时会周期性写 workbench.json、团队.json，mtime/sha 漂移默认只报告（噪声）；泄漏以沙盘标记为准，--strict 时漂移也判 FAIL。',
-    git: { head: gitNow.headShort, baselineHead: String(base.head || '').slice(0, 7), added: codeDiff.added, removed: codeDiff.removed, clean: gitNow.status.length === 0 },
+    git: {
+      head: gitNow.headShort,
+      baselineHead: String(base.head || '').slice(0, 7),
+      added: codeDiff.added,
+      removed: codeDiff.removed,
+      sandboxOwned: split.owned,
+      external: split.external,
+      clean: gitNow.status.length === 0,
+      externalNote: '共享工作树里 src/scripts/docs 的改动可能来自其它角色（本项目多角色并行），默认只报告；--strict 时才判 SANDBOX_CODE_DIRTY。',
+    },
     snapshot: snap,
   };
 
   if (leaks.length) { payload.ok = false; payload.code = 'SANDBOX_LEAK'; emit(payload); process.exit(EXIT.LEAK); }
   if (args.strict && drift.length) { payload.ok = false; payload.code = 'SANDBOX_LEAK'; payload.strict = true; emit(payload); process.exit(EXIT.LEAK); }
-  if (codeDirty) { payload.ok = false; payload.code = 'SANDBOX_CODE_DIRTY'; emit(payload); process.exit(EXIT.CODE_DIRTY); }
+  if (codeDirty) { payload.ok = false; payload.code = 'SANDBOX_CODE_DIRTY'; if (args.assertCode || args.strict) payload.strict = true; emit(payload); process.exit(EXIT.CODE_DIRTY); }
   if (!snap.ok) { payload.ok = false; payload.code = 'SANDBOX_SNAPSHOT_INCOMPLETE'; emit(payload); process.exit(EXIT.SNAPSHOT_INCOMPLETE); }
   emit(payload);
 }
