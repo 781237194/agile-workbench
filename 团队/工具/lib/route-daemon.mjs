@@ -290,7 +290,10 @@ export function diffSnapshot(prev, curr) {
 export function carrierOf(requirementId, tasks) {
   const hit = tasks
     .filter((t) => String(t.requirementId || '') === String(requirementId || '')
-      && ['programmer1', 'programmer2'].includes(String(t.owner || '')))
+      && ['programmer1', 'programmer2'].includes(String(t.owner || ''))
+      // B-3db4（2026-11-14）：只看在办任务。以前不排除 done，会拿已完成的缺陷任务当载体，
+      // 把新派的 develop 丢给那个早就收工的人（45c7 就被派给了已 done 的 a1cf 的 owner）。
+      && !['done', 'rejected', 'terminated', 'cancelled'].includes(String(t.status || '')))
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0];
   return hit ? String(hit.owner) : '';
 }
