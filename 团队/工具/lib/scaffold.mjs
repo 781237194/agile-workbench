@@ -176,6 +176,12 @@ export function roleCard(projectName, role, mode = 'full') {
     + `8. **子代理**：可开——${subagentAllow(role)}；不可外包——${subagentDeny(role)}。子代理只回结论 ≤300 字 + 产出路径，过程写文件；主角色复核后才算产出。\n`
     + (role === 'pm'
       ? `9. **决策箱（Owner ↔ PM 专用）**：**只放非评审类的拍板（取舍、优先级、口径、阻塞）；需求评审、缺陷评审、验收一律走评审列表/验收列表，禁止放进决策箱。** 需要 Owner 拍板的事一律用 \`decision add --project <P> --boot <T> --title "≤40字" --summary "≤120字" --question "≤200字" --options "A,B,C" --source-kind requirement|message|file --source-ref <R-…|M-…|路径>\` 放进决策箱，**不发消息催**；消息只发进展与已办结论。**每轮收尾前自查：本轮有没有该放决策箱而没放的事。** 其他角色不得往决策箱放任何东西（程序拒 \`DECISION_BOX_FORBIDDEN\`）。\n`
+        + `   **放不进去的两类（程序拒收，按码处理，不要绕过）**：\n`
+        + `   - \`DECISION_SCOPE_FORBIDDEN\`：需求不在 accepted/terminated/rejected，或标题不以「复盘」开头 → 这是评审/验收类，**去评审列表，或验收列表 \`#accept-list\`（\`?accept=1\`）**；\n`
+        + `   - \`DECISION_REVIEW_ACTION_FORBIDDEN\`：意图词（通过/打回/驳回/验收/批准/approve/reject/accept）或选项全是通过/打回 → **去评审弹窗直接点，不要用决策箱代替拍板**；\n`
+        + `   - \`DECISION_COPY_CODE_NAME\`：标题/摘要/问题里出现 \`R-…\`/\`B-…\`/\`T-…\`/\`D-…\` 等内部代号（放括号里也不行）→ **改用人话需求名**，代号只允许出现在 --source-ref。\n`
+        + `   **文案人话规则**：标题 ≤40 字、摘要 ≤120 字、问题 ≤200 字；写「谁要做什么、卡在什么」，不写内部代号、不写命令行；一条只问一个拍板点，选项给 2–4 个可执行动作。\n`
+        + `   **模板自带回归入口**：模板改动后跑 \`node scripts/test-decision-scope.cjs\`（范围/语义/文案断言）与 \`node 团队/工具/team.mjs selftest\`，全绿才算改完。\n`
       : '')
     + (role === 'pm'
       ? `\n## 叫醒角色模板\n\n**先完成《项目信息.md》和任务分配，再叫角色；没写清不要叫。**\n\nPM 叫角色时只发这一段（替换占位）：\n\n> 任务 <任务id>；先读 项目信息.md、项目索引.md、你的 文件索引.md 和 角色卡.md；回“角色 id + 任务 id + 交付物 + 边界”确认，并 **ack 回执（只算已回执）**。随后执行本条正文任务，产出写 <本角色目录>；完成后发完成回执 + task done --evidence（才算已完成）。目标文件：<路径>。\n\n发送时带 --ack；**一次只发一个人，发完停，等回执再发下一个。**\n`
@@ -309,7 +315,8 @@ export function projectInfo(projectName, desc = '', mode = 'full') {
     + `1. 唤醒：所有类型默认唤醒（\`--no-wake\` 唯一退出阀）；\n`
     + `2. 回执：\`ack\` 只是内部记账，系统会自动补静默 notice，不需要再手动补；\n`
     + `3. 证据：\`task done --evidence\` 路径按项目基准写、文件存在非空、mtime ≥ 任务开始（\`claimedAt\`）；\n`
-    + `4. 决策箱：需要 Owner 拍板的放决策箱，不发消息催（PM 专用，其他角色不适用）。\n`;
+    + `4. 决策箱：需要 Owner 拍板的放决策箱，不发消息催（PM 专用，其他角色不适用）。\n`
+    + `5. 决策箱拒绝码与去处：\`DECISION_SCOPE_FORBIDDEN\`（评审/验收类）→ 去评审列表或验收列表 \`#accept-list\`；\`DECISION_REVIEW_ACTION_FORBIDDEN\`（想代拍板）→ 去评审弹窗点通过/打回；\`DECISION_COPY_CODE_NAME\`（标题/摘要/问题含内部代号）→ 改人话需求名，代号只放 \`--source-ref\`。文案规则：标题 ≤40 字、摘要 ≤120 字、问题 ≤200 字，一条只问一个拍板点。回归入口：\`node scripts/test-decision-scope.cjs\`。\n`;
 }
 
 export function reqOverview(projectName) {
