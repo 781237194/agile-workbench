@@ -58,6 +58,8 @@ if (IS_BOARD_WINDOW) {
     teamRouteStatus: (payload) => ipcRenderer.invoke('team:route-status', payload),
     // R-9db6 F-1：Owner 决策箱（只读：未读计数 + 逐条列表）。
     teamDecisionBox: (payload) => ipcRenderer.invoke('team:decision-box', payload),
+    // R-9db6 AC4（T-20261114-130838-5dfc）：决策箱「回执 PM」——单条或批量，落账 + 发 PM 并唤醒 PM。
+    ownerDecisionAck: (payload) => ipcRenderer.invoke('owner:decision-ack', payload),
     teamMarkRead: (payload) => ipcRenderer.invoke('team:mark-read', payload),
     teamWakeRole: (payload) => ipcRenderer.invoke('team:wake-role', payload),
     teamWorkspaces: (payload) => ipcRenderer.invoke('team:workspaces', payload),

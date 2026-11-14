@@ -209,6 +209,8 @@ export async function acknowledgeDecision(projectName, input = {}) {
   const id = String(input.id || '').trim();
   const choice = clean(input.choice, 40);
   const opinion = clean(input.opinion, 500);
+  const channel = clean(input.channel, 20) || 'tty';
+  const source = clean(input.source, 40) || 'decision_box_ack';
   if (!id) fail('DECISION_ID_REQUIRED', '需要 --id D-...');
   const read = readDecisionBox(projectName);
   if (read.corrupt) fail('DECISION_BOX_CORRUPT', '决策箱文件损坏，请先重建', { file: read.file });
@@ -241,7 +243,7 @@ export async function acknowledgeDecision(projectName, input = {}) {
   } catch (e) {
     fail('RECEIPT_FAILED', `回执消息发送失败，条目保持待决可重试：${String((e && e.message) || e)}`, { id, code: e && e.code });
   }
-  return withDecisionBoxLock(projectName, () => {
+  const acked = withDecisionBoxLock(projectName, () => {
     const again = readDecisionBox(projectName);
     const fresh = again.box.items.find((row) => String(row.id) === id);
     if (!fresh) fail('DECISION_NOT_FOUND', `决策箱里没有 ${id}`, { id });
@@ -252,12 +254,21 @@ export async function acknowledgeDecision(projectName, input = {}) {
     fresh.status = 'answered';
     fresh.answeredAt = at;
     fresh.updatedAt = at;
-    fresh.decision = { choice, opinion, by: 'owner', at };
+    fresh.decision = { choice, opinion, by: 'owner', decidedBy: 'owner', channel, at, source };
     fresh.receipt = { messageId: message.id, at, choice, opinion, seq };
     fresh.receiptSeq = seq;
+    fresh.readAt = String(fresh.readAt || at);
     writeDecisionBox(projectName, again.box);
+    appendEvent({
+      role: 'owner', sessionId: channel === 'ui' ? 'ui' : 'tty', action: 'decision_box_ack',
+      project: projectName, target: id, note: `choice=${choice} channel=${channel} source=${source}`,
+      data: { id, choice, opinion: truncate(opinion, 160), receiptSeq: seq, messageId: message.id, decidedBy: 'owner', channel, source },
+    });
     return { ok: true, item: fresh, receiptMessage: message, messageId: message.id };
   });
+  // R-9db6 AC4 / Owner 2026-11-14 新规：Owner 回执消息必须唤醒 PM（以前默认静默）。
+  const wake = await wakeDecisionRecipient(projectName, message);
+  return { ...acked, wake };
 }
 
 /** 回执消息是否仍未被 PM 读（在 pm/new 里就算未读）。 */
@@ -336,4 +347,137 @@ export function unreadReceiptCount(projectName) {
   const read = readDecisionBox(projectName);
   if (read.corrupt) return 0;
   return read.box.items.filter((row) => row.receipt && row.receipt.messageId && receiptUnread(row.receipt.messageId)).length;
+}
+
+/** 计数快照（IPC 返回给界面刷新用）：open/unread/answered。 */
+export function decisionCounts(projectName) {
+  try {
+    const read = readDecisionBox(projectName);
+    if (read.corrupt) return { open: 0, unread: 0, answered: 0 };
+    const items = read.box.items || [];
+    const open = items.filter((row) => String(row.status) === 'open');
+    return {
+      open: open.length,
+      unread: open.filter((row) => !row.readAt).length,
+      answered: items.filter((row) => String(row.status) === 'answered').length,
+    };
+  } catch { return { open: 0, unread: 0, answered: 0 }; }
+}
+
+/** 回执消息发出去以后唤醒 PM（失败不阻断落账，只带回 why）。 */
+async function wakeDecisionRecipient(projectName, message) {
+  if (!message || !message.id) return null;
+  try {
+    const { wakeMailboxRecipient } = await import('./ops.mjs');
+    return await wakeMailboxRecipient(projectName, 'pm', {
+      reason: 'owner_decision_receipt',
+      subject: message.subject || 'Owner 决策回执',
+      messageId: message.id,
+    });
+  } catch (e) {
+    return { ok: false, why: String((e && e.message) || e) };
+  }
+}
+
+/**
+ * R-9db6 AC4（T-20261114-130838-5dfc）：决策箱「回执 PM」——单条或批量。
+ *
+ * - 单条：复用 acknowledgeDecision（历史失败码/幂等语义不变），补 channel/source 审计与唤醒；
+ * - 批量：先整批校验（存在、未回执、候选合法、同批 id 不重复），任一不满足 → 零副作用失败；
+ *   通过后只发 1 条汇总 owner_decision_receipt，再在同一把锁里逐条落账（receiptSeq 逐条 +1）。
+ */
+export async function acknowledgeDecisions(projectName, input = {}) {
+  const channel = clean(input.channel, 20) || 'ui';
+  const source = clean(input.source, 40) || 'decision_box_ack';
+  const raw = Array.isArray(input.items) ? input.items : [{ id: input.id, choice: input.choice, opinion: input.opinion }];
+  const entries = raw.map((row) => ({
+    id: String((row && row.id) || '').trim(),
+    choice: clean(row && row.choice, 40),
+    opinion: clean(row && row.opinion, 500),
+  }));
+  if (!entries.length || entries.some((row) => !row.id)) {
+    fail('DECISION_ID_REQUIRED', '需要 id（单条给 id/choice，批量给 items[].id）', { count: entries.length });
+  }
+  if (entries.length === 1) {
+    const r = await acknowledgeDecision(projectName, { ...entries[0], channel, source });
+    return {
+      ok: true, project: projectName, batch: false,
+      results: [{
+        id: entries[0].id,
+        status: r.idempotent ? 'already' : 'answered',
+        idempotent: Boolean(r.idempotent),
+        receiptSeq: r.item && r.item.receiptSeq,
+        messageId: r.messageId || '',
+      }],
+      receiptMessage: r.receiptMessage ? { id: r.receiptMessage.id, to: 'pm' } : null,
+      wake: r.wake || null,
+      counts: decisionCounts(projectName),
+      decidedBy: 'owner', channel, at: (r.item && (r.item.answeredAt || nowIso())) || nowIso(),
+    };
+  }
+  // 批量：整批先校验，任一不满足 → 零副作用（不改箱、不发消息、不唤醒）
+  const pre = readDecisionBox(projectName);
+  if (pre.corrupt) fail('DECISION_BOX_CORRUPT', '决策箱文件损坏，请先重建', { file: pre.file });
+  const seen = new Set();
+  for (const entry of entries) {
+    if (seen.has(entry.id)) fail('DECISION_ID_DUPLICATE', `同一次提交里 id 重复：${entry.id}`, { id: entry.id });
+    seen.add(entry.id);
+    const item = pre.box.items.find((row) => String(row.id) === entry.id);
+    if (!item) fail('DECISION_NOT_FOUND', `决策箱里没有 ${entry.id}`, { id: entry.id });
+    if (String(item.status) !== 'open') fail('DECISION_ALREADY_ANSWERED', `条目已回执，不能重复提交：${entry.id}`, { id: entry.id, status: item.status });
+    if (!Array.isArray(item.options) || !item.options.includes(entry.choice)) {
+      fail('DECISION_CHOICE_INVALID', `回执只能从候选中选：${(item.options || []).join(' / ')}`, { id: entry.id, choice: entry.choice, options: item.options });
+    }
+  }
+  const at = nowIso();
+  let message = null;
+  try {
+    message = sendMessage({
+      from: 'system', to: 'pm', type: 'owner_decision_receipt', project: projectName,
+      subject: `Owner 回执 ${entries.length} 条决策`,
+      body: [
+        `决策箱回执（共 ${entries.length} 条，Owner 在界面一次提交）：`,
+        ...entries.map((entry) => `- ${entry.id}｜选择：${entry.choice}｜意见：${entry.opinion || '（未写）'}`),
+        `回执时间：${at}`,
+        '点【回执 PM】不等于评审通过/验收；门禁仍走原入口。',
+      ].join('\n'),
+      ackRequired: false,
+    });
+  } catch (e) {
+    fail('RECEIPT_FAILED', `回执消息发送失败，条目保持待决可重试：${String((e && e.message) || e)}`, { code: e && e.code });
+  }
+  const acked = withDecisionBoxLock(projectName, () => {
+    const again = readDecisionBox(projectName);
+    if (again.corrupt) fail('DECISION_BOX_CORRUPT', '决策箱文件损坏，请先重建', { file: again.file });
+    let seq = Number((again.box.meta && again.box.meta.receiptSeq) || 0);
+    const results = [];
+    for (const entry of entries) {
+      const fresh = again.box.items.find((row) => String(row.id) === entry.id);
+      if (!fresh) fail('DECISION_NOT_FOUND', `决策箱里没有 ${entry.id}`, { id: entry.id });
+      if (String(fresh.status) !== 'open') {
+        results.push({ id: entry.id, status: 'already', idempotent: true });
+        continue;
+      }
+      seq += 1;
+      fresh.status = 'answered';
+      fresh.answeredAt = at;
+      fresh.updatedAt = at;
+      fresh.readAt = String(fresh.readAt || at);
+      fresh.decision = { choice: entry.choice, opinion: entry.opinion, by: 'owner', decidedBy: 'owner', channel, at, source };
+      fresh.receipt = { messageId: message.id, at, choice: entry.choice, opinion: entry.opinion, seq };
+      fresh.receiptSeq = seq;
+      results.push({ id: entry.id, status: 'answered', receiptSeq: seq, messageId: message.id });
+    }
+    again.box.meta = { ...(again.box.meta || {}), receiptSeq: seq };
+    writeDecisionBox(projectName, again.box);
+    appendEvent({
+      role: 'owner', sessionId: channel === 'ui' ? 'ui' : 'tty', action: 'decision_box_ack',
+      project: projectName, target: entries.map((entry) => entry.id).join(','),
+      note: `batch=${entries.length} channel=${channel} source=${source}`,
+      data: { ids: entries.map((entry) => entry.id), messageId: message.id, receiptSeq: seq, decidedBy: 'owner', channel, source },
+    });
+    return { ok: true, project: projectName, batch: true, results, receiptMessage: { id: message.id, to: 'pm' }, decidedBy: 'owner', channel, at };
+  });
+  const wake = await wakeDecisionRecipient(projectName, message);
+  return { ...acked, wake, counts: decisionCounts(projectName) };
 }

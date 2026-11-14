@@ -156,6 +156,15 @@ const { DshAdapter, discoverDshWeb } = require('./dsh-adapter');
 // 自测会把 teamTools 换成一个带 mock 旧协议命令的实例；生产始终保持默认工具。
 let teamTools = require('./team-tools');
 const APP_VERSION = require(path.join(ROOT, 'package.json')).version;
+// 2a69 发版：菜单里的「版本 x.y.z · <commit 短号>」用真实 git 短号，取不到就留空（界面只显示版本）。
+// 只在启动时读一次；git 缺失 / 不是仓库 / 超时都吞掉，不影响启动。
+const APP_COMMIT = (() => {
+  try {
+    return String(require('node:child_process').execFileSync('git', ['rev-parse', '--short=7', 'HEAD'], {
+      cwd: ROOT, encoding: 'utf8', timeout: 3000, windowsHide: true
+    }) || '').trim();
+  } catch { return ''; }
+})();
 
 async function syncTeamProject(project, options = {}) {
   try {
@@ -2444,6 +2453,7 @@ function statePayload(options = {}) {
   const active = store.projects.find((p) => p.id === store.activeProjectId) || store.projects[0] || null;
   return {
     version: APP_VERSION,
+    commit: APP_COMMIT,
     roles: ROLES,
     teamModes: TEAM_MODES.map((mode) => ({ ...mode, roleIds: mode.roleIds.slice() })),
     defaultTeamMode: DEFAULT_TEAM_MODE,
@@ -4761,6 +4771,29 @@ function registerIpc() {
       };
     } catch (e) {
       return { ok: false, code: 'DECISION_BOX_READ_FAILED', message: String((e && e.message) || e).slice(0, 300) };
+    }
+  });
+  // R-9db6 AC4（T-20261114-130838-5dfc）：Owner 决策箱「回执 PM」——单条或批量。
+  // 界面点【回执 PM】→ 这里 → 团队工具 decision-ack-ipc.mjs（channel=ui、decidedBy=owner；落账 + 发 PM 消息 + 唤醒 PM）。
+  // 失败返回 {ok:false, code, message}，团队工具侧保证零副作用。
+  ipcMain.handle('owner:decision-ack', async (_e, payload) => {
+    try {
+      const p = payload || {};
+      const { name } = teamProjectNameOf(p);
+      if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
+      const items = Array.isArray(p.items) ? p.items : [{ id: p.id, choice: p.choice, opinion: p.opinion }];
+      const cleaned = items
+        .map((row) => ({
+          id: String((row && row.id) || '').trim(),
+          choice: String((row && row.choice) || '').trim(),
+          opinion: String((row && row.opinion) || '').trim(),
+        }))
+        .filter((row) => row.id);
+      if (!cleaned.length) return { ok: false, code: 'DECISION_ID_REQUIRED', message: '缺少决策条目 id（D-...）' };
+      const result = await teamTools.decisionAck({ projectName: name, items: cleaned });
+      return { ...result, project: name };
+    } catch (e) {
+      return { ok: false, code: 'DECISION_ACK_FAILED', message: String((e && e.message) || e).slice(0, 300) };
     }
   });
   ipcMain.handle('team:presence', async (_e, payload) => {
@@ -15624,8 +15657,19 @@ async function installDshCookie() {
 }
 
 // 单实例：两个窗口同时写 workbench.json / 团队状态会丢更新。自测/布局自检用独立 userData，不参与锁。
-const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK) ? true : app.requestSingleInstanceLock();
+const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK) ? true : app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
+  // T-ece6：锁冲突不许静默退出——2026-11-14 的黑屏就是「另一个实例（含僵尸进程）占着锁，
+  // 新进程拿不到锁直接 app.quit()，用户只看到窗口没了/黑屏」。这里显式打日志 + 弹一次人话提示。
+  const lockMsg = '另一个「PM工作台」实例正在运行（或上次残留的进程还占着单实例锁），本次启动已取消。'
+    + '\n排查：①先在任务栏找有没有已打开的工作台窗口，切过去即可；'
+    + '\n②如果没有窗口却起不来，运行 start.cmd --kill-orphans 清掉残留进程再启动；'
+    + '\n③日志关键字：SINGLE_INSTANCE_LOCK_DENIED。';
+  console.error('SINGLE_INSTANCE_LOCK_DENIED ' + JSON.stringify({ at: new Date().toISOString(), userData: app.getPath('userData') }));
+  try {
+    const { dialog } = require('electron');
+    if (dialog && typeof dialog.showErrorBox === 'function') dialog.showErrorBox('PM工作台：已有实例在运行', lockMsg);
+  } catch { /* 无 GUI 环境只留日志 */ }
   app.quit();
 } else if (!IS_SELFTEST && !IS_LAYOUT_CHECK) {
   app.on('second-instance', () => {

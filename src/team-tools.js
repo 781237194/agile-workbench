@@ -2498,6 +2498,40 @@ function createTeamTools(options = {}) {
     };
   }
 
+  // R-9db6 AC4：决策箱「回执 PM」后端通道（单条或批量；壳层 IPC owner:decision-ack 调用）。
+  async function decisionAck(input = {}) {
+    const projectName = String(input.projectName || input.project || '').trim();
+    if (!projectName) return failure('PROJECT_REQUIRED', '缺少团队项目名');
+    const tool = path.join(layout.toolRoot, 'decision-ack-ipc.mjs');
+    if (!fs.existsSync(tool)) return failure('TOOL_MISSING', '决策箱回执脚本不存在：' + tool);
+    const items = Array.isArray(input.items)
+      ? input.items
+      : [{ id: input.id, choice: input.choice, opinion: input.opinion }];
+    const payload = { items };
+    const run = await runNode(tool, [projectName, JSON.stringify(payload)], { timeoutMs: TIMEOUTS.send || 30000 });
+    const value = run.value || {};
+    if (value.ok === false) {
+      return { ...failure(value.code || 'DECISION_ACK_FAILED', value.message || '决策箱回执失败', value.details || {}), project: projectName };
+    }
+    if (!run.ok) return { ...publicRun(run), ok: false, code: run.errorCode || 'DECISION_ACK_FAILED', project: projectName };
+    return {
+      ok: true,
+      code: 'OK',
+      project: projectName,
+      batch: Boolean(value.batch),
+      results: Array.isArray(value.results) ? value.results : [],
+      receiptMessage: value.receiptMessage || null,
+      wake: value.wake || null,
+      counts: value.counts || null,
+      decidedBy: String(value.decidedBy || 'owner'),
+      channel: String(value.channel || 'ui'),
+      at: String(value.at || ''),
+      stdout: tail(run.stdout),
+      stderr: tail(run.stderr),
+      ms: run.ms
+    };
+  }
+
   async function wakeRole(input = {}) {
     const projectName = String(input.projectName || input.project || '').trim();
     const role = String(input.role || '').trim();
@@ -9752,6 +9786,8 @@ function createTeamTools(options = {}) {
     presenceFor,
     markReadFor,
     wakeRole,
+    // R-9db6 AC4：决策箱「回执 PM」（单条/批量；IPC owner:decision-ack）
+    decisionAck,
     // 供测试/诊断使用
     _paths: () => ({ ...layout }),
     _runNode: runNode,
