@@ -151,9 +151,42 @@ function workflowRowFor(project, requirementId) {
  * - 不满足条件只记 requirement_advance_skipped 事件，不改任何状态。
  */
 function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
-  if (!task || task.type !== 'task') return null; // BUG/chore/需求任务不推进需求状态
+  // R-1623 F-1623-1：type=bug 与 type=task 同权参与开发推进；chore/requirement 仍不推进。
+  if (!task || !['task', 'bug'].includes(String(task.type || ''))) return null;
+  const isBug = String(task.type || '') === 'bug';
   const requirementId = String(task.requirementId || '').trim();
-  if (!requirementId) return null;
+  if (!requirementId) {
+    // F-1623-4：没绑定需求的 done 不计入，留痕 no_requirement_binding。
+    try {
+      appendEvent({
+        role, sessionId: '', action: 'requirement_advance_skipped', project: projectName,
+        target: '', note: 'no_requirement_binding（任务未绑定需求）',
+        data: { taskId: task.id, reason: 'no_requirement_binding' },
+      });
+    } catch { /* 留痕失败不阻断 task done */ }
+    return null;
+  }
+  // F-1623-5：历史 bug 不回溯——bug 必须晚于 团队.json → advanceRule.legacyBugBefore；配置缺失默认全部不计入。
+  if (isBug) {
+    let cutoff = '';
+    try {
+      const team = loadTeam();
+      cutoff = String((team && team.config && team.config.advanceRule && team.config.advanceRule.legacyBugBefore) || '');
+    } catch { cutoff = ''; }
+    const doneAt = String(task.doneAt || task.updatedAt || '');
+    const cutoffMs = cutoff ? Date.parse(cutoff) : NaN;
+    const doneMs = doneAt ? Date.parse(doneAt) : NaN;
+    if (!cutoff || !Number.isFinite(cutoffMs) || !Number.isFinite(doneMs) || doneMs <= cutoffMs) {
+      try {
+        appendEvent({
+          role, sessionId: '', action: 'requirement_advance_skipped', project: projectName,
+          target: requirementId, note: `legacy_bug（doneAt=${doneAt || '(空)'} ≤ legacyBugBefore=${cutoff || '(未配置)'}）`,
+          data: { taskId: task.id, reason: 'legacy_bug', doneAt, legacyBugBefore: cutoff || '' },
+        });
+      } catch { /* 留痕失败不阻断 */ }
+      return null;
+    }
+  }
   let reqTask;
   try { reqTask = loadTask(projectName, requirementId); } catch { return null; }
   if (!reqTask || reqTask.type !== 'requirement') return null;
@@ -174,6 +207,12 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
     return null;
   };
 
+  // R-1623 F-1623-1 ④：证据必需——evidenceFiles 非空才计入开发完成；
+  // 沙盘（证据门 skipped）与历史任务没有 evidenceFiles，但 evidence 文本非空，按“有证据”兼容放行。
+  const hasEvidenceFiles = Array.isArray(task.evidenceFiles) && task.evidenceFiles.length > 0;
+  const hasEvidenceText = String(task.evidence || '').trim().length > 0;
+  if (!hasEvidenceFiles && !hasEvidenceText) return skip('no_evidence');
+
   const stage = String((task.workflow && task.workflow.stage) || '');
   const owner = String(task.owner || '');
   const isTest = stage === 'test' || (owner === 'tester' && stage !== 'dev');
@@ -188,7 +227,7 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
 
   // ② 无 Owner decision 不得越过 owner_review 门：还在该门（approved 或更早）时必须有落账决定。
   if (current !== 'iteration' && statusRank(current) <= statusRank('approved') && !ownerDecisionsOf(row).length) {
-    return skip('no_owner_decision');
+    return skip('owner_gate');
   }
 
   let target = '';
@@ -200,7 +239,7 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
     // 受控校准（2026-11-14 ff86 诊断）：历史遗留的「无 owner 的 open 任务」不是真实派工，
     // 只有显式 --allow-unowned-open 时才把它们排除出阻塞清单，并在事件里记下忽略了哪些任务。
     const ignoreUnowned = Boolean(opts.ignoreUnowned);
-    const allDevTasks = listTasks(projectName).filter((rowTask) => rowTask && rowTask.type === 'task'
+    const allDevTasks = listTasks(projectName).filter((rowTask) => rowTask && ['task', 'bug'].includes(String(rowTask.type || ''))
       && String(rowTask.requirementId || '') === requirementId)
       .filter((rowTask) => !(String((rowTask.workflow && rowTask.workflow.stage) || '') === 'test'))
       .filter((rowTask) => !(ignoreUnowned && !String(rowTask.owner || '').trim()))
@@ -236,7 +275,7 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
     const trqVerdict = String((row.trq && row.trq.verdict) || '');
     if (trqVerdict && trqVerdict !== 'testable') return skip('trq_not_testable', { verdict: trqVerdict });
     if (/(?:FAIL|不通过|未通过)/i.test(String(task.evidence || ''))) return skip('test_not_passed');
-    const tests = listTasks(projectName).filter((rowTask) => rowTask && rowTask.type === 'task'
+    const tests = listTasks(projectName).filter((rowTask) => rowTask && ['task', 'bug'].includes(String(rowTask.type || ''))
       && String(rowTask.requirementId || '') === requirementId)
       .filter((rowTask) => String(rowTask.owner || '') === 'tester'
         || String((rowTask.workflow && rowTask.workflow.stage) || '') === 'test');
