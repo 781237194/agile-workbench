@@ -729,6 +729,8 @@
   <!-- R-30e2：需求/缺陷池纯逻辑（池行构建 / 筛选 / 行与详情 HTML），必须在 app.js 之前引入。 -->
   <script src="pool-core.js"></script>
   <script src="app.js"></script>
+  <!-- B-d100：打回后复审判定（owner-review.js 之前引入，Node 也可 require 做断言） -->
+  <script src="owner-review-state.js"></script>
   <script src="owner-review.js"></script>
 <!-- R-20261114-001014-e29f：工作区残留（额外会话）单一展示 + 清理 + 清理历史 -->
 <script src="workspace-clean.js"></script>

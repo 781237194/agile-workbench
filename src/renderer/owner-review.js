@@ -6,6 +6,8 @@
   const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', reject: null, listFilter: 'all', listOpen: new Set(), closedCollapsed: true };
   const KEY_LATER = 'awb.ownerReview.laterUntil';
   const KEY_NO_AUTO = 'awb.ownerReview.noAuto';
+  // B-d100：打回后复审的判定收在 owner-review-state.js（Node 可单测）；脚本缺失时退回本文件旧逻辑。
+  const OR_STATE = (typeof window !== 'undefined' && window.OwnerReviewState) ? window.OwnerReviewState : null;
 
   function el(tag, cls, text) {
     const node = document.createElement(tag);
@@ -39,11 +41,23 @@
     return 'pending';
   }
   function isPending(req) {
+    // B-d100：打回后已修改的需求要重新进待评审队列（旧实现只看 ownerReview.status='rejected' 就永久隐藏）。
+    if (OR_STATE) return OR_STATE.isPending(req);
     const status = String((req && req.status) || '');
     const owner = decidedStatusOf(req);
     if (['accepted', 'terminated', 'iteration', 'rejected'].includes(status)) return false;
     if (['approved', 'skipped', 'rejected'].includes(owner)) return false;
     return status === 'approved' || status === 'owner_review';
+  }
+  /** B-d100：这一条是不是「打回后改完、等你复审」，以及复审标记文案。 */
+  function reworkInfoOf(req) {
+    if (OR_STATE) return OR_STATE.reworkInfo(req);
+    return { isRework: false, label: '' };
+  }
+  function reworkChipHtml(req) {
+    const info = reworkInfoOf(req);
+    if (!info.isRework) return '';
+    return `<span class="or-rework" data-or-rework="1" title="上次评审被你打回，修改后重新进入评审">${esc(info.label || '已修改待复审')}</span>`;
   }
   function pendingRows() {
     const rows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
@@ -553,6 +567,9 @@
     item.setAttribute('data-or-req', id);
     item.setAttribute('data-or-status', String(req.status || ''));
     item.setAttribute('data-or-bucket', listBucketOf(req));
+    // B-d100：复审标记（打回后改完重新进队列的那条）。首次评审不带这个标记。
+    const rework = reworkInfoOf(req);
+    if (rework.isRework) item.setAttribute('data-or-rework', '1');
     item.setAttribute('data-or-expanded', open ? '1' : '0');
     // 三要素同时挂在行上（便于自检/读屏按行取），文案仍写在行内三行里。
     item.setAttribute('data-what', what);
@@ -566,7 +583,7 @@
     headRow.setAttribute('data-what', what);
     headRow.setAttribute('data-blocked', blocked);
     headRow.setAttribute('data-advice', advise);
-    headRow.innerHTML = `<b>${esc(what)}</b>`
+    headRow.innerHTML = `<b>${esc(what)}</b>` + reworkChipHtml(req)
       + `<span class="or-all-k">这是什么</span><span class="or-all-v">${esc(what)}</span>`
       + `<span class="or-all-k">卡在哪</span><span class="or-all-v">${esc(blocked)}</span>`
       + `<span class="or-all-k">建议你拍什么</span><span class="or-all-v">${esc(advise)}</span>`
@@ -1287,8 +1304,9 @@
       item.setAttribute('data-eval-why', triple.why);
       item.setAttribute('data-eval-risk', triple.risk);
       item.setAttribute('data-id', String(req.id || ''));
+      if (reworkInfoOf(req).isRework) item.setAttribute('data-or-rework', '1');
       if (String(req.id) === state.selected) item.classList.add('selected');
-      item.innerHTML = `<b>${esc(triple.what)}</b>`
+      item.innerHTML = `<b>${esc(triple.what)}</b>` + reworkChipHtml(req)
         + `<span>为什么需要你定：${esc(triple.why)}</span>`
         + `<span>不定会怎样：${esc(triple.risk)}</span>`;
       item.addEventListener('click', () => selectRequirement(req.id));

@@ -1656,6 +1656,9 @@ html[data-theme="light"] .modal-mask { background: rgba(40, 32, 22, .46); }
 .or-all-row.selected { border-color: var(--gold); }
 .or-all-head { display: grid; grid-template-columns: 74px 1fr; gap: 2px 6px; width: 100%; text-align: left; background: transparent; border: 0; cursor: pointer; padding: 6px 8px; font: inherit; color: var(--text); }
 .or-all-head b { grid-column: 1 / -1; font-size: 12.5px; margin-bottom: 1px; }
+/* B-d100：打回后改完重新进队列的那条，带「已修改待复审」标记（首次评审不带）。 */
+.or-rework { display: inline-block; margin-left: 6px; padding: 0 6px; border: 1px solid #d9a441; border-radius: 999px; background: rgba(217, 164, 65, .16); color: #a9751a; font-size: 10.5px; font-weight: 600; vertical-align: middle; }
+.or-all-head .or-rework, .or-eval-item .or-rework { flex: 0 0 auto; }
 .or-all-head em { grid-column: 1 / -1; font-size: 10px; color: var(--dim); font-style: normal; text-align: right; }
 .or-all-k { font-size: 10.5px; color: var(--dim); }
 .or-all-v { font-size: 11px; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }

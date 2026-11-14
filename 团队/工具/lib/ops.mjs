@@ -3632,6 +3632,83 @@ function ownerTestGate(projectName, requirementId) {
  * Owner 决定的依据（basis）：需求正文路径+sha256，设计文件路径+版本+sha256。
  * fast 无产品设计，用需求分析 vN 作为设计依据；都没有时留空并在 reason 里写明原因。
  */
+/**
+ * B-7738（Owner 2026-11-14 报）：验收打回必须自动落一张缺陷单。
+ * 以前 Owner 点「打回」只把需求打回（rejected），「为什么打回 / 缺什么 / 谁修」全丢在口头里。
+ * 这里统一在建单侧补齐三件事：
+ *   1) title = 「验收打回：<需求号> <打回原因摘要>」，type=bug 并绑定 requirementId；
+ *   2) acceptance 写死「修复后要交什么」（测试报告 + 截图），detail 里逐条写「缺什么」；
+ *   3) Owner 打回意见全文进 detail。
+ * 幂等：同一条需求 + 同一打回时刻只建一次（键落在任务的 workflow.acceptRejectKey）。
+ * 失败不阻断打回落账：由调用方 try/catch 记事件。
+ */
+function autoCreateAcceptRejectBug({ projectName, project, requirementId, row, task, opinion, at, decisionIndex }) {
+  const reason = String(opinion || '').replace(/\s+/g, ' ').trim();
+  const key = `${requirementId}|${at}`;
+  const existing = listTasks(projectName).find((item) => item && item.type === 'bug'
+    && String((item.workflow && item.workflow.acceptRejectKey) || '') === key);
+  if (existing) return { ok: true, reused: true, taskId: existing.id, key };
+  const summary = reason ? (reason.length > 40 ? reason.slice(0, 40) + '…' : reason) : '未写打回原因';
+  const ownerRole = String((row && row.owner) || (task && task.owner) || '').trim();
+  const priority = ['P0', 'P1', 'P2', 'P3'].includes(String((row && row.priority) || '')) ? String(row.priority) : 'P1';
+  // 「缺什么」：把验收时该有而没有的证据逐条点名（不猜、不写空话）。
+  const missing = [];
+  const acceptanceRecord = (row && row.acceptanceRecord) || (task && task.acceptanceRecord) || null;
+  const existingEvidence = acceptanceRecord && Array.isArray(acceptanceRecord.evidence) ? acceptanceRecord.evidence : [];
+  const hasReport = existingEvidence.some((item) => String(item && item.kind) === 'report')
+    || Boolean(acceptanceRecord && acceptanceRecord.testReport);
+  const hasShot = existingEvidence.some((item) => String(item && item.kind) === 'image');
+  if (!hasReport) missing.push('测试报告（含 PASS、不含 FAIL）');
+  if (!hasShot) missing.push('界面截图');
+  if (!existingEvidence.length) missing.push('验收记录里的证据清单（acceptanceRecord.evidence 为空）');
+  const detail = [
+    '【验收打回自动建单】B-7738',
+    `需求：${requirementId}`,
+    `打回时间：${at}${Number.isInteger(decisionIndex) ? '（决定序号 ' + decisionIndex + '）' : ''}`,
+    `打回人：Owner${acceptanceRecord && acceptanceRecord.channel === 'proxy' ? '（PM 代记）' : ''}`,
+    '',
+    'Owner 打回原话：',
+    reason || '（Owner 未写原因——需要 PM 补齐再派）',
+    '',
+    '缺什么（验收时该有而没有）：',
+    ...missing.map((item) => '· ' + item),
+    '',
+    `谁修：${ownerRole || '待 PM 指派（需求行没有负责人）'}`,
+    '修好后怎么交：需求回到 test_done → 缺陷单附测试报告（PASS）+ 截图 → Owner 再验收。',
+  ].join('\n');
+  const bug = createTask({
+    project: projectName,
+    title: `验收打回：${requirementId} ${summary}`,
+    detail,
+    priority,
+    priorityBy: 'owner',
+    createdBy: 'owner',
+    owner: ownerRole || null,
+    type: 'bug',
+    requirementId,
+    acceptance: '修复后必须附：①测试报告（含 PASS、不含 FAIL）②界面截图；两件套齐才算修好，验收时用 --evidence <报告>:report 落 acceptanceRecord。',
+    repro: reason || '（Owner 未写复现原因）',
+    expected: '修复后需求能重新走到 test_done 并通过 Owner 验收',
+    actual: 'Owner 在验收里打回，需求被退回 rejected',
+  });
+  bug.workflow = {
+    ...(bug.workflow && typeof bug.workflow === 'object' ? bug.workflow : {}),
+    stage: 'accept_reject',
+    acceptRejectKey: key,
+    acceptRejectFor: requirementId,
+    acceptRejectAt: at,
+    source: 'owner_accept_reject',
+    missing,
+  };
+  saveTask(projectName, bug);
+  appendEvent({
+    role: 'owner', action: 'accept_reject_bug_created', project: projectName,
+    target: bug.id, note: truncate(`验收打回自动建缺陷单：${requirementId} → ${bug.id}`, 160),
+    data: { requirementId, bugId: bug.id, key, missing, priority, owner: ownerRole || null, createdAt: at },
+  });
+  return { ok: true, reused: false, taskId: bug.id, key, missing };
+}
+
 function buildOwnerBasis(projectName, project, task, teamMode) {
   const base = path.resolve(project.path);
   let requirement = { path: '', sha256: '', contentHash: '' };
@@ -4169,6 +4246,55 @@ export async function cmdOwner(args) {
   task._action = actionName;
   task._note = truncate(`${decision}${opinion ? '：' + opinion : ''}`, 100);
   saveTask(projectName, task);
+
+  // B-7738：验收打回自动建缺陷单（建单失败不阻断打回落账，但必须留痕给 PM）。
+  if (actionRaw === 'accept' && decision !== 'accepted') {
+    try {
+      const created = autoCreateAcceptRejectBug({
+        projectName,
+        project,
+        requirementId,
+        row,
+        task,
+        opinion,
+        at: record.at || at,
+        decisionIndex: record.decisionIndex,
+      });
+      task.workflow.acceptRejectBug = {
+        taskId: created.taskId,
+        reused: Boolean(created.reused),
+        key: created.key,
+        at: nowIso(),
+      };
+      saveTask(projectName, task);
+      appendEvent({
+        role: 'owner',
+        action: created.reused ? 'accept_reject_bug_reused' : 'accept_reject_bug_linked',
+        project: projectName,
+        target: created.taskId,
+        note: truncate(`验收打回关联缺陷单 ${created.taskId}`, 160),
+        data: { requirementId, bugId: created.taskId, reused: Boolean(created.reused) },
+      });
+      try {
+        notify({
+          from: 'owner',
+          to: 'pm',
+          subject: `验收打回已建缺陷单 ${created.taskId}`,
+          body: `需求 ${requirementId} 验收被打回，已自动建缺陷单 ${created.taskId}（缺：${(created.missing || []).join('、') || '见缺陷单正文'}）。请派修，修好后需求再走验收。`,
+          project: projectName,
+          task: created.taskId,
+        });
+      } catch { /* 通知失败不影响建单与打回落账 */ }
+    } catch (error) {
+      appendEvent({
+        role: 'owner',
+        action: 'accept_reject_bug_failed',
+        project: projectName,
+        target: requirementId,
+        note: truncate('验收打回自动建缺陷单失败：' + String(error && error.message || error), 220),
+      });
+    }
+  }
 
   const stateOwnerReview = actionRaw === 'accept'
     ? {
