@@ -4848,9 +4848,10 @@ function legacySize(rel) {
 }
 
 // 文档 key ↔ 相对路径：与后端 PROJECT_DOC_CHECKS 同口径（B-65df：五项必读全部进 presence）
+// 注：前两项沿用后端历史 key（projectInfo / iron，团队工具 selftest 第十五轮按它断言）；新增三项 key=index/overview/guide。
 const LEGACY_PRESENCE_DOCS = [
-  { key: 'rules', rel: '项目铁律.md' },
-  { key: 'info', rel: '项目信息.md' },
+  { key: 'projectInfo', rel: '项目信息.md' },
+  { key: 'iron', rel: '项目铁律.md' },
   { key: 'index', rel: '项目索引.md' },
   { key: 'overview', rel: '需求/00-需求总览.md' },
   { key: 'guide', rel: '协作准则.md' }

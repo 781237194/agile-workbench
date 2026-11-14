@@ -4625,9 +4625,10 @@ function createTeamTools(options = {}) {
 
   // B-20261115-050245-65df（测试 v156 D1）：presence 必须覆盖全部必读项目文档，
   // 否则前端只能用 files:list 判存在，600 项截断会把根目录文档误报成“缺失”（项目索引/需求总览实测假报警）。
+  // 注意：原两项的 key 保持 projectInfo/iron 不变（团队工具 selftest 第十五轮按这两个 key 断言，改 key 会红）。
   const PROJECT_DOC_CHECKS = [
-    { key: 'rules', label: '项目铁律', file: '项目铁律.md' },
-    { key: 'info', label: '项目信息', file: '项目信息.md' },
+    { key: 'projectInfo', label: '项目信息', file: '项目信息.md' },
+    { key: 'iron', label: '项目铁律', file: '项目铁律.md' },
     { key: 'index', label: '项目索引', file: '项目索引.md' },
     { key: 'overview', label: '需求总览', file: '需求/00-需求总览.md' },
     { key: 'guide', label: '协作准则', file: '协作准则.md' }
