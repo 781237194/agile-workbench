@@ -175,7 +175,7 @@ export function roleCard(projectName, role, mode = 'full') {
     + `7. 提交/回执只写一句 ≤160 字日志（对象+动作+单号/时间）。\n`
     + `8. **子代理**：可开——${subagentAllow(role)}；不可外包——${subagentDeny(role)}。子代理只回结论 ≤300 字 + 产出路径，过程写文件；主角色复核后才算产出。\n`
     + (role === 'pm'
-      ? `9. **决策箱（Owner ↔ PM 专用）**：需要 Owner 拍板的事（功能取舍、优先级、口径选择、需要他点头的阻塞）一律用 \`decision add --project <P> --boot <T> --title "≤40字" --summary "≤120字" --question "≤200字" --options "A,B,C" --source-kind requirement|message|file --source-ref <R-…|M-…|路径>\` 放进决策箱，**不发消息催**；消息只发进展与已办结论。**每轮收尾前自查：本轮有没有该放决策箱而没放的事。** 其他角色不得往决策箱放任何东西（程序拒 \`DECISION_BOX_FORBIDDEN\`）。\n`
+      ? `9. **决策箱（Owner ↔ PM 专用）**：**只放非评审类的拍板（取舍、优先级、口径、阻塞）；需求评审、缺陷评审、验收一律走评审列表/验收列表，禁止放进决策箱。** 需要 Owner 拍板的事一律用 \`decision add --project <P> --boot <T> --title "≤40字" --summary "≤120字" --question "≤200字" --options "A,B,C" --source-kind requirement|message|file --source-ref <R-…|M-…|路径>\` 放进决策箱，**不发消息催**；消息只发进展与已办结论。**每轮收尾前自查：本轮有没有该放决策箱而没放的事。** 其他角色不得往决策箱放任何东西（程序拒 \`DECISION_BOX_FORBIDDEN\`）。\n`
       : '')
     + (role === 'pm'
       ? `\n## 叫醒角色模板\n\n**先完成《项目信息.md》和任务分配，再叫角色；没写清不要叫。**\n\nPM 叫角色时只发这一段（替换占位）：\n\n> 任务 <任务id>；先读 项目信息.md、项目索引.md、你的 文件索引.md 和 角色卡.md；回“角色 id + 任务 id + 交付物 + 边界”确认，并 **ack 回执（只算已回执）**。随后执行本条正文任务，产出写 <本角色目录>；完成后发完成回执 + task done --evidence（才算已完成）。目标文件：<路径>。\n\n发送时带 --ack；**一次只发一个人，发完停，等回执再发下一个。**\n`
@@ -303,7 +303,7 @@ export function projectInfo(projectName, desc = '', mode = 'full') {
     + `| 只回已读 | 收到后回一句“已读/收到” | 低成本确认，不触发新一轮 | 不要求再回执 |\n`
     + `| 完成回执 | \`send --type receipt\` + \`task done --evidence\` | 两者都齐才算完成 | 必唤醒 |\n`
     + `| 问询 | \`ask --to --question\` / \`answer --id\` | 不占派单锁；问题 ≤600 字 | 必唤醒 |\n`
-    + `| 决策箱（仅 PM ↔ Owner） | \`decision add ...\` | 需要 Owner 拍板的事由 PM 放进决策箱；其他角色不得放（\`DECISION_BOX_FORBIDDEN\`） | 默认静默，未读 ≥5 或超 2 小时升级唤醒一次 |\n`
+    + `| 决策箱（仅 PM ↔ Owner） | \`decision add ...\` | **只放非评审类拍板（取舍/优先级/口径/阻塞）；需求评审、缺陷评审、验收一律走评审列表/验收列表，禁止放进决策箱。** 其他角色不得放（\`DECISION_BOX_FORBIDDEN\`） | 默认静默，未读 ≥5 或超 2 小时升级唤醒一次 |\n`
     + `| 显式静默 | \`send --no-wake\` | 仅限明确不打扰的场景，日常协作不用 | 不唤醒（唯一例外） |\n\n`
     + `**四条最容易踩的坑**：\n`
     + `1. 唤醒：所有类型默认唤醒（\`--no-wake\` 唯一退出阀）；\n`
