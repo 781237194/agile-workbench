@@ -99,6 +99,7 @@ export function buildDispatchPrompt({
     : '';
   return `这是派单，不是通知：${messageId}（${subject}）。\n`
     + `${taskLine}\n`
+    + `AC 引用：见需求正文 §验收标准（写清路径 + sha256）；version/change 指回需求正文当前版本，不在任务/模板里复制 AC。\n`
     + `中文思考、中文回复、中文写文档；先读 ${path.join(projectPath, '项目铁律.md')}（每轮都读），再读 项目信息.md / 项目索引.md / 你的 文件索引.md 与 角色卡.md。\n`
     + reading
     + `按顺序做完，不要只回“收到”：\n${numbered}\n`
@@ -116,6 +117,7 @@ export function buildNoticePrompt({ to, project, messageId, subject, from = '', 
   const excerpt = String(body || '').trim().slice(0, 600);
   return `【团队消息 ${messageId}】${subject}\n`
     + `${from ? from + ' → ' : ''}${to} · 项目：${project}\n`
+    + `AC 引用：见需求正文 §验收标准（路径 + sha256）；version/change 指回需求正文当前版本。\n`
     + (excerpt ? `正文（已截断 600 字，全文用 read --id ${messageId}）：\n${excerpt}\n` : '')
     + `这条是回复/通知，不是新派单；按需读取并按正常流程回执即可，不必为它新建任务。\n`
     + `请按需读取：${tool}inbox --all，再 read --id ${messageId}；需要回执时只 ack。\n`
