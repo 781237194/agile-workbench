@@ -64,7 +64,8 @@ function setStatus(id, status, decisions = []) {
   fs.writeFileSync(tf, JSON.stringify(t, null, 2) + '\n', 'utf8');
 }
 function mkTask(title, reqId, { type = 'bug', owner = 'programmer1' } = {}) {
-  const r = run(['task', 'create', '--boot', pm.token, '--project', PROJECT, '--title', title, '--priority', 'P0', '--type', type, '--owner', owner, ...(reqId ? ['--requirement', reqId] : []), '--json'], true);
+  const extra = (type === 'bug' || type === 'scenario-bug') ? ['--acceptance', '修好验收', '--repro', 'selftest 复现'] : [];
+  const r = run(['task', 'create', '--boot', pm.token, '--project', PROJECT, '--title', title, '--priority', 'P0', '--type', type, '--owner', owner, ...extra, ...(reqId ? ['--requirement', reqId] : []), '--json'], true);
   return r.task && r.task.id;
 }
 const reqStatus = (id) => {
