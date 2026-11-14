@@ -387,8 +387,8 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     if ((pmInbox2.messages || []).some((m) => String(m.subject || '').startsWith('回执: 回执:'))) failStep('回执递归未修好');
     pass('消息 → 已读 → 回执 → 回信（回执不再回执）');
 
-    // Owner 2026-11-14 09:10：纯回执（ack/已认领）不唤醒，只落已读存档；
-    // 回执类消息被 ack 后不得再生成回执（防套娃）。两条都从 唤醒.jsonl / PM 邮箱取证。
+    // Owner 2026-11-14 09:10 / 13:06 合并口径：ack 自动生成的回执/通知不走 cmdSend，不额外唤醒（防套娃）；
+    // 但 send --type receipt 必须唤醒（见 B-1e4a）。回执类消息被 ack 后不得再生成回执。两条都从 唤醒.jsonl / PM 邮箱取证。
     {
       const ackWakeFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl');
       const ackWakeRows = fs.existsSync(ackWakeFile)
@@ -416,10 +416,10 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       if (rows.some((row) => String(row.source || '') === 'batch' || /batch/.test(String(row.reason || '')))) {
         failStep('仍出现批量唤醒（应已取消）', JSON.stringify(rows.filter((row) => /batch/.test(String(row.source) + String(row.reason))).slice(0, 2)).slice(0, 300));
       }
-      // Owner 09:10：纯回执不唤醒（只落已读存档）——这里断言“没有因回执而唤醒 PM”
+      // ack 自动生成的回执不走 cmdSend，不额外唤醒；这里断言没有因回执而唤醒 PM
       const receiptWake = rows.filter((row) => String(row.to) === 'pm' && /ack:|回执/.test(String(row.reason || '') + String(row.subject || '')));
-      if (receiptWake.length) failStep('纯回执仍在唤醒 PM（Owner 09:10 规定不唤醒）', JSON.stringify(receiptWake.slice(0, 2)).slice(0, 300));
-      pass('取消合并/分级：无待投递池、无批量唤醒、纯回执不唤醒（只落已读存档）');
+      if (receiptWake.length) failStep('ack 自动回执仍在额外唤醒 PM', JSON.stringify(receiptWake.slice(0, 2)).slice(0, 300));
+      pass('取消合并/分级：无待投递池、无批量唤醒、ack 自动回执不额外唤醒');
     }
 
     // B-719f：Owner 在评审浮窗拍板后，owner-note.mjs 写 PM 邮箱的同时必须唤醒 PM。
@@ -1885,6 +1885,39 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     }
     pass('B-2736：ack 完成回执 → 原发送者 +1 条静默 notice（含被 ack 消息/回执人/备注/时间），只一层不扩散，回执.jsonl 不重复');
 
+    // ===== B-1e4a（R-45c7，Owner 13:06）：任何消息类型都唤醒——receipt 不再例外；--no-wake 是唯一退出阀 =====
+    {
+      const wakeAllFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl');
+      const wakeAllRows = () => (fs.existsSync(wakeAllFile) ? read(wakeAllFile).split(/\r?\n/).filter(Boolean)
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean) : []);
+      // ① receipt 类型 send 也必须唤醒并留痕
+      const before1 = wakeAllRows().length;
+      const recW = json(['send', '--boot', qDev.token, '--to', 'pm', '--subject', 'receipt也要唤醒', '--body', 'x', '--type', 'receipt', '--json']);
+      if (!(recW.wake && recW.wake.to === 'pm')) failStep('B-1e4a ①：receipt 类型 send 未唤醒', JSON.stringify(recW.wake).slice(0, 240));
+      const after1 = wakeAllRows().length;
+      if (after1 !== before1 + 1) failStep('B-1e4a ①：receipt 未新增唤醒留痕', JSON.stringify({ before1, after1 }));
+      // ② 收到 notice 后 ack：不再产生新消息、也不再新增唤醒（只回"已读"）
+      const ackReceipt = json(['ack', '--boot', gatePm2.token, '--id', recW.message.id, '--note', '收到完成回执', '--json']);
+      if (!(ackReceipt.receiptMessage && ackReceipt.receiptMessage.type === 'notice')) failStep('B-1e4a ②：ack 完成回执未投 notice', JSON.stringify(ackReceipt.receiptMessage).slice(0, 200));
+      const noticeMsg = json(['inbox', '--boot', qDev.token, '--all', '--json']).messages.find((m) => m.id === ackReceipt.receiptMessage.id);
+      if (!noticeMsg) failStep('B-1e4a ②：原发送者没收到 notice', '');
+      const beforeAckNotice = wakeAllRows().length;
+      const ackNotice2 = json(['ack', '--boot', qDev.token, '--id', noticeMsg.id, '--note', '已读', '--json']);
+      if (ackNotice2.receiptMessage) failStep('B-1e4a ②：ack notice 又产生了消息', JSON.stringify(ackNotice2.receiptMessage).slice(0, 200));
+      const afterAckNotice = wakeAllRows().length;
+      if (afterAckNotice !== beforeAckNotice) failStep('B-1e4a ②：ack notice 产生了新唤醒', JSON.stringify({ beforeAckNotice, afterAckNotice }));
+      // ③ 连发 3 条各唤醒（不合并）
+      const three2 = [];
+      for (let i = 1; i <= 3; i += 1) three2.push(json(['send', '--boot', qDev.token, '--to', 'pm', '--subject', `全唤醒连发 ${i}`, '--body', 'x', '--type', 'escalation', '--json']));
+      if (!three2.every((row) => row.wake && row.wake.ok === true && row.wake.skipped !== 'MERGED_PENDING')) failStep('B-1e4a ③：连发 3 条未各自唤醒', JSON.stringify(three2.map((r) => r.wake && r.wake.skipped)).slice(0, 200));
+      // ④ --no-wake 是唯一退出阀
+      const beforeSilent2 = wakeAllRows().length;
+      const silent2 = json(['send', '--boot', qDev.token, '--to', 'pm', '--subject', '静默', '--body', 'x', '--no-wake', '--json']);
+      if (silent2.wake !== null) failStep('B-1e4a ④：--no-wake 未关闭唤醒', JSON.stringify(silent2.wake).slice(0, 200));
+      if (wakeAllRows().length !== beforeSilent2) failStep('B-1e4a ④：--no-wake 仍新增唤醒留痕', '');
+    }
+    pass('B-1e4a（R-45c7）：receipt 也唤醒、notice 被 ack 不再唤醒、连发 3 条各唤醒、--no-wake 唯一退出阀');
+
     // ===== B-d111（已按 Owner 08:08 改口径）：不再有窗口合并；保留 delivered 去重、失败重试、兜底补发 =====
     const wakeQueueFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒队列.json');
     const wakeQueue = fs.existsSync(wakeQueueFile) ? JSON.parse(read(wakeQueueFile)) : {};
@@ -2572,11 +2605,11 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       wq743.targets.pm = { windowStart: 0, pending: [], attempts: 0 };
       write(wakeQ743, JSON.stringify(wq743, null, 2) + '\n');
     }
-    // Owner 09:10：纯回执（type=receipt）不唤醒，只落盘；完成回执与 task done 通知按 taskId 只叫一次（那条由 task done 侧负责）。
+    // Owner 2026-11-14 13:06（B-1e4a）：receipt 类型也必须唤醒；原 09:10「纯回执不唤醒」口径废止。
     const receiptSend743 = JSON.parse(run(['send', '--boot', p2b405.token, '--to', 'pm', '--subject', '完成回执用例', '--body', 'x', '--type', 'receipt', '--json']).stdout.trim());
-    if (receiptSend743.wake) failStep('纯回执不该唤醒（Owner 09:10）', JSON.stringify(receiptSend743.wake).slice(0, 200));
+    if (!(receiptSend743.wake && receiptSend743.wake.ok === true && receiptSend743.wake.to === 'pm')) failStep('receipt 类型必须唤醒（Owner 13:06）', JSON.stringify(receiptSend743.wake).slice(0, 200));
     const receiptSend743b = JSON.parse(run(['send', '--boot', p2b405.token, '--to', 'pm', '--subject', '完成回执用例二', '--body', 'x', '--type', 'receipt', '--json']).stdout.trim());
-    if (receiptSend743b.wake) failStep('第二条纯回执也不该唤醒', JSON.stringify(receiptSend743b.wake).slice(0, 200));
+    if (!(receiptSend743b.wake && receiptSend743b.wake.ok === true && receiptSend743b.wake.to === 'pm')) failStep('第二条 receipt 也必须唤醒', JSON.stringify(receiptSend743b.wake).slice(0, 200));
     const wq743b = JSON.parse(read(wakeQ743));
     const pmPending743 = (wq743b.targets && wq743b.targets.pm && Array.isArray(wq743b.targets.pm.pending)) ? wq743b.targets.pm.pending : [];
     if (pmPending743.length) failStep('取消合并后仍在积 pending', JSON.stringify(pmPending743).slice(0, 300));

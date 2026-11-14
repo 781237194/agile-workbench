@@ -2286,11 +2286,10 @@ export async function cmdSend(args) {
   });
   if (pmDispatch) writeDispatchLock(b.project, msg, { targetSessionId: targetAlive && targetAlive.probe ? targetAlive.probe.sessionId : '' });
   let wake = null;
-  // B-01d6（R-45c7）：send 默认唤醒——除「纯回执」与显式 --no-wake 外，一律唤醒接收方，
-  // 不再区分是否派单、是否发往 PM（直连队友也走唤醒，不靠对端轮询）。
-  // 仍然：Owner 09:10 纯回执（type=receipt）不唤醒；完成回执与 task done 通知按 taskId 只叫一次（见 cmdTask done 的 dedupeKey）。
-  // 唤醒失败/去抖/重试都走 wakeWithGuard。
-  const wantWake = !args['no-wake'] && msgType !== 'receipt';
+  // B-1e4a（R-45c7，Owner 2026-11-14 13:06）：本项目不存在"不唤醒"——任何消息类型（含 receipt）
+  // 落盘后都立即唤醒接收方；--no-wake 是唯一退出阀。唤醒≠要回执：ack 通知仍是 ackRequired=false + noEcho，
+  // 收到通知的人只需 ack（已读），那条 ack 不会再触发新的唤醒链（见 store.mjs ackMessage 的 noEcho 分支）。
+  const wantWake = !args['no-wake'];
   // B-743e：把首行归属随发送结果一起返回，便于自测与排障核对格式。
   const wakeHeader = wantWake && msg ? wakeHeaderFor(msg, to) : '';
   if (wantWake) {
