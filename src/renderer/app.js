@@ -4847,11 +4847,21 @@ function legacySize(rel) {
   return item && Number.isFinite(Number(item.size)) ? Number(item.size) : 0;
 }
 
-// 文档 key ↔ 相对路径：与后端 PROJECT_DOC_CHECKS 同口径。
+// 文档 key ↔ 相对路径：与后端 PROJECT_DOC_CHECKS 同口径（B-65df：五项必读全部进 presence）
 const LEGACY_PRESENCE_DOCS = [
-  { key: 'projectInfo', rel: '项目信息.md' },
-  { key: 'iron', rel: '项目铁律.md' }
+  { key: 'rules', rel: '项目铁律.md' },
+  { key: 'info', rel: '项目信息.md' },
+  { key: 'index', rel: '项目索引.md' },
+  { key: 'overview', rel: '需求/00-需求总览.md' },
+  { key: 'guide', rel: '协作准则.md' }
 ];
+
+/** B-65df AC2：文档缺口唯一取数——只认 docs:presence 的 checks（含六角色目录/角色卡/文件索引）。 */
+function legacyPresenceGapRows() {
+  const presence = legacyUi.presence;
+  if (!presence || !Array.isArray(presence.checks)) return null;
+  return presence.checks.filter((row) => row && row.state !== 'present');
+}
 
 function legacyPresenceCheck(key) {
   const presence = legacyUi.presence;
@@ -5119,12 +5129,18 @@ function legacyBootPlaceholderDocs() {
 /** 文档就绪：必要文件齐全 + 六角色目录/角色卡/文件索引齐全 + 没有 boot 阻断占位。 */
 function legacyDocReadiness() {
   const ready = legacyDocumentsReady();
+  // B-65df AC2：缺口只认 docs:presence（同一取数），不再让 files:list 的 600 项截断参与判定。
+  const presenceGaps = legacyPresenceGapRows();
   const missing = [];
-  if (!ready.rules) missing.push('项目铁律.md');
-  if (!ready.info) missing.push('项目信息.md');
-  if (!ready.index) missing.push('项目索引.md');
-  if (!ready.overview) missing.push('需求/00-需求总览.md');
-  if (!ready.guide) missing.push('协作准则.md');
+  if (presenceGaps) {
+    for (const row of presenceGaps) missing.push(row.label || row.rel || row.key || '未命名文档');
+  } else {
+    if (!ready.rules) missing.push('项目铁律.md');
+    if (!ready.info) missing.push('项目信息.md');
+    if (!ready.index) missing.push('项目索引.md');
+    if (!ready.overview) missing.push('需求/00-需求总览.md');
+    if (!ready.guide) missing.push('协作准则.md');
+  }
   const bootPlaceholders = legacyBootPlaceholderDocs();
   const overviewPlaceholder = legacyPlaceholderDocs(['overview']).length > 0;
   const rolesOk = ready.total > 0 && ready.dirs === ready.total && ready.cards === ready.total && ready.indexes === ready.total;
@@ -5141,17 +5157,23 @@ function legacyDocReadiness() {
   const readErrors = docsToRead.filter((rel) => { const entry = legacyDocRecord(rel); return Boolean(entry && entry.ok === false); });
   const pendingRead = missing.length === 0 && !docsRead && readErrors.length === 0 && docsToRead.length === LEGACY_PROJECT_DOCS.length;
   const ok = missing.length === 0 && bootPlaceholders.length === 0 && rolesOk && !pendingRead && readErrors.length === 0;
+  // AC2（B-65df）：「文档待补 N」的 N 必须与 #missing-list 的 data-missing-count 同一个数（都来自 presence 缺口）；
+  // 模板占位是另一件事，单独出「模板占位 N」，不混进缺文件数字（否则又会出现 chip 2 / 清单 0）。
+  const label = (!legacyUi.files || pendingRead) ? '文档读取中'
+    : (readErrors.length ? `文档读取失败 ${readErrors.length}`
+      : (missing.length ? `文档待补 ${missing.length}`
+        : (bootPlaceholders.length ? `模板占位 ${bootPlaceholders.length}` : '文档已就绪')));
   return {
     ...ready,
     ok,
     pendingRead,
     readErrors,
     missing,
+    presenceGaps,
     bootPlaceholders,
     overviewPlaceholder,
     rolesOk,
-    label: (!legacyUi.files || pendingRead) ? '文档读取中'
-      : (readErrors.length ? `文档读取失败 ${readErrors.length}` : (ok ? '文档已就绪' : `文档待补 ${missing.length + bootPlaceholders.length}`))
+    label
   };
 }
 
@@ -6094,7 +6116,7 @@ function ownerDecisionsMarkup(req, options = {}) {
   const rows = data.rows.map((row) => {
     const status = String(row.status || row.decision || '');
     const channel = String(row.channel || '');
-    const channelOk = ['ui', 'tty'].includes(channel);
+    const channelOk = ['ui', 'tty', 'proxy', 'skip_committee'].includes(channel);
     const channelBad = channel && !channelOk;
     const at = row.at || row.confirmedAt || '';
     const basis = ownerBasisBits(row.basis);
@@ -6105,7 +6127,7 @@ function ownerDecisionsMarkup(req, options = {}) {
     return `<div class="owner-decision${cls}" data-decision-status="${esc(status)}">
       <div class="od-top">
         <span class="od-badge status-${esc(status || 'unknown')}">${esc(ownerDecisionLabel(status))}</span>
-        <code class="od-channel ${channelOk ? 'ok' : (channelBad ? 'bad' : '')}" title="channel 只允许 ui / tty">${esc(channel || 'channel 未记录')}</code>
+        <code class="od-channel ${channelOk ? 'ok' : (channelBad ? 'bad' : '')}" title="channel=ui/tty 为 Owner 本人；proxy=PM 代管；skip_committee=三方共决（均合规）">${esc(channel || 'channel 未记录')}</code>
         ${at ? `<time>${esc(fmtTime(at))}</time>` : '<span class="od-time muted">时间未记录</span>'}
         ${data.legacy ? '<span class="badge badge-skipped">历史（未落账）· 只读</span>' : ''}
         ${channelBad ? '<span class="badge badge-rejected">通道不合规 · 不计验收</span>' : ''}
@@ -6832,7 +6854,8 @@ function legacyTruthMarkup() {
   // B-2e5 AC2：boot 记录数字只作记录——不再把「过期 N」写进红项/文案。
   const bootText = `boot ${boot.complete}/${boot.total}`;
   rows.push(chip(boot.allComplete ? 'ok' : 'muted', bootText, `六角色可用 boot：${boot.complete}/${boot.total}（boot 记录只作记录，不拦推进；过期仅提示，不再算红）`));
-  rows.push(chip(ledger.length ? 'bad' : 'ok', ledger.length ? `账本分叉 ${ledger.length}` : '账本一致', ledger.length ? ledger.map(({ req, ledger: row }) => `${req.id}：${row.label}`).join('；') : '工作流.json 与旧 任务/ 状态一致', ledger.length ? 'ledger' : ''));
+  // B-65df AC3：红项分级——账本分叉是数据问题但不是“阻止推进”，降为橙色提示（真阻塞才红）。
+  rows.push(chip(ledger.length ? 'warn' : 'ok', ledger.length ? `账本分叉 ${ledger.length}` : '账本一致', ledger.length ? ledger.map(({ req, ledger: row }) => `${req.id}：${row.label}`).join('；') : '工作流.json 与旧 任务/ 状态一致', ledger.length ? 'ledger' : ''));
   rows.push(readiness.ok
     ? chip('ok', '文档已就绪', `必要文档齐全，且项目信息/项目铁律不是模板占位；六角色目录 ${readiness.dirs}/${readiness.total}、角色卡 ${readiness.cards}/${readiness.total}、文件索引 ${readiness.indexes}/${readiness.total}`)
     : chip((!legacyUi.files || readiness.pendingRead) ? 'muted' : 'bad', readiness.label, `缺文件：${readiness.missing.join('、') || '无'}；boot 阻断占位：${readiness.bootPlaceholders.join('、') || '无'}；读取失败：${readiness.readErrors.join('、') || '无'}`, 'docs'));
@@ -7002,7 +7025,7 @@ function legacyGateResultMarkup() {
         ${readiness.bootPlaceholders.length ? `<span class="bad">项目信息/铁律占位 ${readiness.bootPlaceholders.length}</span>` : '<span class="ok">项目信息/铁律已写实</span>'}
         ${overviewPlaceholder ? '<span class="warn">需求总览待首条需求</span>' : ''}
         <span class="${commandUnknown ? 'warn' : (commandGaps.length || commandUnknowns.length ? 'warn' : 'ok')}">${commandUnknown ? '旧命令 矩阵待核验' : (commandGaps.length ? '缺旧命令 ' + commandGaps.length + (commandUnknowns.length ? ' · 未核验 ' + commandUnknowns.length : '') : (commandUnknowns.length ? '旧命令 未核验 ' + commandUnknowns.length : '旧命令齐全'))}</span>
-        <span class="${boot.stale ? 'bad' : 'ok'}">文档变更 ${boot.stale} 个角色</span>
+        <span class="${boot.stale ? 'warn' : 'ok'}">文档变更 ${boot.stale} 个角色</span>
         <span class="${terminated ? 'bad' : 'ok'}">阶段 <code>${esc(phase)}</code></span>
       </div>
       ${actions.length ? `<div class="legacy-gate-actions">${actions.join('')}</div>` : ''}
@@ -7107,7 +7130,7 @@ function legacyDocPresenceMarkup() {
         <code>${esc(cand.path)}</code><span>${cand.state === 'present' ? '存在' : (cand.state === 'unreadable' ? '无法读取' + (cand.error ? `（${esc(cand.error)}）` : '') : '不存在')}</span><span>${esc(cand.sourceLabel || cand.source)}</span><span>${esc(at)}</span>
       </div>`).join('')).join('')}
     </div>`
-    : '<div class="legacy-missing-list is-empty" id="missing-list" data-missing-count="0"><b>检查路径</b><span>项目信息、项目铁律两处都命中，无缺失。</span></div>';
+    : '<div class="legacy-missing-list is-empty" id="missing-list" data-missing-count="0"><b>检查路径</b><span>五项必读文档（铁律/信息/索引/需求总览/协作准则）与六角色目录、角色卡、文件索引都命中，无缺失。</span></div>';
   return `<div class="legacy-presence" data-presence-state="${bad.length ? 'missing' : 'ok'}">
     ${rows}
     ${missingMarkup}
@@ -9211,7 +9234,7 @@ function renderLegacyTeamGate() {
       <span class="${cardState.key === 'ok' ? 'ok' : (cardState.key === 'unmapped' ? 'warn' : 'bad')}" title="${esc(cardState.title)}">角色卡 ${esc(cardState.label)}</span>
       <span class="${index ? 'ok' : 'bad'}">索引 ${index ? '有' : '缺'}</span>
       <span class="${session ? 'ok' : 'warn'}">${session ? '会话已映射' : '无会话'}</span>
-      <span class="${boot.ready ? 'ok' : (boot.expired || boot.roundMismatch ? 'bad' : (boot.booted ? 'warn' : 'bad'))}" title="${esc(boot.missing.join('、') || boot.at || '')}">${esc(boot.label)}</span>
+      <span class="${boot.ready ? 'ok' : (boot.roundMismatch ? 'warn' : 'muted')}" title="${esc(boot.missing.join('、') || boot.at || '')}">${esc(boot.label)}</span>
       <button type="button" class="legacy-boot-mini" data-legacy-boot="${esc(role.id)}" ${bootCtl.disabled ? 'disabled' : ''} title="${esc(bootCtl.title)}">${esc(bootCtl.text)}</button>
     </div>`;
   }).join('');
@@ -10152,6 +10175,12 @@ function poolPanelEnsure() {
     </div>
     <div class="pool-kinds" id="pool-kinds" role="group" aria-label="按类型筛选"></div>
     <div class="pool-filters" id="pool-filters" role="group" aria-label="按状态筛选"></div>
+    <div class="pool-ghost-bar" id="pool-ghost-bar" hidden>
+      <span class="pool-ghost-text" id="pool-ghost-text">有 0 条需求不在工作流里（推不动）</span>
+      <input type="text" id="pool-ghost-reason" class="pool-ghost-reason" placeholder="作废原因（必填）" aria-label="作废原因" autocomplete="off">
+      <button type="button" class="ghost small" id="pool-ghost-register">一键登记</button>
+      <button type="button" class="ghost small" id="pool-ghost-void">一键作废</button>
+    </div>
     <div class="pool-cols">
       <section class="pool-col"><h4>需求池 <span class="pool-n" id="pool-req-n">0</span></h4><div class="pool-list" id="pool-req-list"></div></section>
       <section class="pool-col"><h4>缺陷池 <span class="pool-n" id="pool-def-n">0</span></h4><div class="pool-list" id="pool-def-list"></div></section>
@@ -10196,7 +10225,44 @@ function poolPanelEnsure() {
   $('#pool-nomatch-clear')?.addEventListener('click', () => clearPoolSearch());
   $('#pool-nomatch-reset')?.addEventListener('click', () => resetPoolFilters());
   $('#pool-close')?.addEventListener('click', closePool);
+  // B-a17d AC4：未登记需求的一键登记 / 作废（走 requirement:ghost-* IPC，PM 代办）。
+  $('#pool-ghost-register')?.addEventListener('click', () => runPoolGhostAction('register'));
+  $('#pool-ghost-void')?.addEventListener('click', () => runPoolGhostAction('void'));
   return mask;
+}
+/** 未登记需求的批量动作：登记（进工作流 review）/ 作废（写项目根作废登记并从面板剔除）。 */
+async function runPoolGhostAction(kind) {
+  const rows = (poolUi.rows || []).filter((row) => row.kind === 'requirement' && row.unregistered === true);
+  const ids = rows.map((row) => String(row.id)).filter(Boolean);
+  if (!ids.length) { toast('当前没有未登记需求', 'warn'); return; }
+  const p = activeProject();
+  if (!p || !window.workbench) { toast('还没有激活项目', 'warn'); return; }
+  const isVoid = kind === 'void';
+  let reason = '';
+  if (isVoid) {
+    const input = $('#pool-ghost-reason');
+    reason = String((input && input.value) || '').trim();
+    if (!reason) { toast('作废要先填原因（写清为什么作废）', 'warn'); if (input) input.focus(); return; }
+  }
+  const api = isVoid ? window.workbench.requirementGhostVoid : window.workbench.requirementGhostRegister;
+  if (typeof api !== 'function') { toast('当前版本不支持一键处理未登记需求', 'bad'); return; }
+  let result = null;
+  try {
+    result = await api({ projectId: p.id, ids, ...(isVoid ? { reason } : {}) });
+  } catch (error) {
+    toast(`${isVoid ? '作废' : '登记'}失败：${String((error && error.message) || error).slice(0, 120)}`, 'bad');
+    return;
+  }
+  if (!result || result.ok === false) {
+    toast(`${isVoid ? '作废' : '登记'}失败：${String((result && (result.message || result.code)) || '未知错误').slice(0, 120)}`, 'bad');
+    return;
+  }
+  const failed = Array.isArray(result.result && result.result.results)
+    ? result.result.results.filter((row) => row && row.ok === false && row.code !== 'ALREADY_VOIDED' && row.code !== 'ALREADY_REGISTERED') : [];
+  toast(failed.length
+    ? `${isVoid ? '作废' : '登记'}完成：成功 ${ids.length - failed.length} / ${ids.length}，失败 ${failed.length}（${failed[0].code || '未知'}）`
+    : `已${isVoid ? '作废' : '登记'} ${ids.length} 条未登记需求`, failed.length ? 'warn' : '');
+  await refreshPool();
 }
 /** 行 HTML：委托纯逻辑模块。行结构固定为 徽标 → 编号 → 标题 → 状态 → 负责人（F-30e2-1）；
  *  本函数体内不含 await / fs 读取 / IPC 调用（F-8 静态断言）。 */
@@ -10280,6 +10346,24 @@ function applyPoolFilters() {
   // 筛选后详情不能继续指向被筛掉的行（F-30e2-4）。
   if (poolUi.detailId && !visibleIds.has(poolUi.detailId)) closePoolDetail(false);
 }
+/** 未登记需求条：只有存在未登记需求时才显示（B-a17d AC4）。 */
+function renderPoolGhostBar(rows) {
+  const bar = $('#pool-ghost-bar');
+  if (!bar) return;
+  const ghosts = (Array.isArray(rows) ? rows : []).filter((row) => row && row.kind === 'requirement' && row.unregistered === true);
+  bar.hidden = ghosts.length === 0;
+  const text = $('#pool-ghost-text');
+  if (text) {
+    text.textContent = ghosts.length
+      ? `有 ${ghosts.length} 条需求不在工作流里（面板看得到、流程推不动）：登记进工作流，或作废掉`
+      : '';
+  }
+  const reg = $('#pool-ghost-register');
+  const vd = $('#pool-ghost-void');
+  if (reg) reg.textContent = ghosts.length > 1 ? `一键登记（${ghosts.length}）` : '一键登记';
+  if (vd) vd.textContent = ghosts.length > 1 ? `一键作废（${ghosts.length}）` : '一键作废';
+  bar.dataset.count = String(ghosts.length);
+}
 /** 渲染池子：数据集合变化才重建行节点；筛选/搜索只切 hidden。 */
 function renderPool() {
   poolPanelEnsure();
@@ -10294,6 +10378,7 @@ function renderPool() {
   const signature = POOL_CORE.poolRowsSignature(rows);
   const reqList = $('#pool-req-list');
   const defList = $('#pool-def-list');
+  renderPoolGhostBar(rows);
   // 重建条件：数据集合变了、容器缺了、或两列都还没渲染过（空数据首次打开也要出空态文案）。
   const needsRebuild = signature !== poolUi.signature || !reqList || !defList
     || !reqList.childElementCount || !defList.childElementCount;

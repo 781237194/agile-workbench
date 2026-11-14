@@ -168,9 +168,12 @@
     return 'other';
   }
 
-  /** 行内状态标签：需求沿用既有语义；任务按 F-1b。 */
+  /** 行内状态标签：需求沿用既有语义；任务按 F-1b。
+   *  B-a17d：未登记（只有需求任务文件、工作流没有行）显示「未登记」，已作废显示「已作废」。 */
   function poolStatusLabel(row) {
     if (kindOf(row) !== 'requirement') return taskStatusLabel(row);
+    if (row && row.voided === true) return '已作废';
+    if (row && row.unregistered === true) return '未登记';
     const b = poolBucket(row);
     return b === 'accepted' ? '已验收' : b === 'active' ? '进行中' : b === 'approved' ? '已通过' : '待评审';
   }
@@ -178,10 +181,12 @@
   /**
    * 是否进池：
    *   - 缺陷/场景缺陷任务行：全量进池（F-1b 要求新开缺陷也能看到）；
-   *   - 需求行：保留既有口径（bucket 不是 other，或已有 reviewedAt）。
+   *   - 需求行：保留既有口径（bucket 不是 other，或已有 reviewedAt）；
+   *   - 未登记需求（B-a17d）：必须进池，否则 Owner 看不到也就没法一键登记/作废。
    */
   function poolEntered(row) {
     if (kindOf(row) !== 'requirement') return true;
+    if (row && (row.unregistered === true || row.voided === true)) return true;
     return poolBucket(row) !== 'other' || !!(row && row.reviewedAt);
   }
 
@@ -475,10 +480,12 @@
     return { status: statusCounts, kind: kindCounts };
   }
 
-  /** 行集合签名：数据变了才重建行 DOM；纯筛选/搜索不重建。 */
+  /** 行集合签名：数据变了才重建行 DOM；纯筛选/搜索不重建。
+   *  B-a17d：未登记/已作废标记也算数据（否则标记变了不重建）。 */
   function poolRowsSignature(rows) {
     const list = Array.isArray(rows) ? rows : [];
-    return list.map((row) => [row.id, kindOf(row), row.bucket, row.statusLabel, row.title].join('~')).join('|');
+    return list.map((row) => [row.id, kindOf(row), row.bucket, row.statusLabel, row.title,
+      row.unregistered === true ? 'U' : '', row.voided === true ? 'V' : ''].join('~')).join('|');
   }
 
   /* ── 行 HTML（F-30e2-1：徽标 → 编号 → 标题 → 状态 → 负责人）────────── */
@@ -495,10 +502,16 @@
     const bucket = poolBucket(row);
     const statusLabel = poolStatusLabel(row);
     const owner = textOf(row && row.owner) || EMPTY_OWNER;
-    return `<div class="pool-row kind-${kind}" data-id="${esc(id)}" data-bucket="${bucket}" data-kind="${kind}" role="button" tabindex="0" aria-label="${esc(id)} ${esc(title)}" aria-expanded="false">`
+    // B-a17d：未登记 / 已作废标记（只由快照字段驱动，行内不读文件、不发 IPC）。
+    const ghost = row && row.unregistered === true
+      ? `<span class="req-ghost" title="工作流里没有这条需求，推不动：请一键登记或作废">未登记</span>` : '';
+    const voided = row && row.voided === true
+      ? `<span class="req-ghost voided" title="${esc(textOf(row.voidedReason) || '已作废')}">已作废</span>` : '';
+    return `<div class="pool-row kind-${kind}" data-id="${esc(id)}" data-bucket="${bucket}" data-kind="${kind}"${ghost ? ' data-unregistered="1"' : ''}${voided ? ' data-voided="1"' : ''} role="button" tabindex="0" aria-label="${esc(id)} ${esc(title)}" aria-expanded="false">`
       + `<span class="req-type ${kind}" title="${esc(typeLabel)}">${esc(typeLabel)}</span>`
       + `<span class="pool-id">${esc(id)}</span>`
       + `<span class="pool-title" title="${esc(title)}">${esc(title)}</span>`
+      + ghost + voided
       + `<span class="pool-state s-${bucket}">${esc(statusLabel)}</span>`
       + `<span class="pool-who">${esc(owner)}</span>`
       + '</div>';

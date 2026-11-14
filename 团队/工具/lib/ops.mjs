@@ -53,6 +53,9 @@ import {
 } from './owner-confirm.mjs';
 import { activeProxyFor, assertProxyUsable, autoEndProxyForClosedRequirement } from './owner-proxy.mjs';
 import { readDecisionBox as readDecisionBoxFile } from './decision-box.mjs';
+import {
+  voidRegistryFile, legacyVoidRegistryFile, readVoidRegistry, appendVoidEntry,
+} from './req-void-registry.mjs';
 
 const RISK_RANK = { normal: 1, sensitive: 2, critical: 3 };
 const PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -3299,16 +3302,104 @@ function cmdReqReopen(args) {
   });
 }
 
+/** 需求行定位：完整 id 精确优先 → 唯一兼容匹配（同秒撞号时取 Object.values 里 id 全等的那条）。 */
+function findRequirementRow(rows, id) {
+  const table = rows && typeof rows === 'object' ? rows : {};
+  const key = String(id || '').trim();
+  if (!key) return null;
+  if (table[key]) return table[key];
+  return Object.values(table).find((r) => r && String(r.id || '') === key) || null;
+}
+
+/**
+ * B-a17d AC2：批量入口解析。支持三种写法（可混用，按 id 去重）：
+ *   --id R-…           单条（老写法，兼容）
+ *   --ids "a,b,c"      逗号 / 中文逗号 / 顿号 / 空白分隔
+ *   --from-file <file> 每行一个 JSON（{id|requirementId,title,acceptance,priority,reason}）或纯 id
+ * 返回 [{id, title, acceptance, priority, reason, source}]
+ */
+function collectReqSpecs(args) {
+  const specs = [];
+  const seen = new Set();
+  const add = (raw) => {
+    if (!raw || typeof raw !== 'object') return;
+    const id = String(raw.id || raw.requirementId || raw.requirement || '').trim();
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    specs.push({
+      id,
+      title: String(raw.title || '').trim(),
+      acceptance: String(raw.acceptance || '').trim(),
+      priority: String(raw.priority || '').trim(),
+      reason: String(raw.reason || '').trim(),
+      source: String(raw.source || 'arg'),
+    });
+  };
+  if (args.id) add({ id: args.id });
+  if (args.ids) String(args.ids).split(/[,，、;；\s]+/).forEach((id) => add({ id }));
+  if (args['from-file']) {
+    const file = path.resolve(String(args['from-file']));
+    if (!exists(file)) fail('BAD_ID', `--from-file 文件不存在：${file}`, { file });
+    const text = fs.readFileSync(file, 'utf8');
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      if (line.startsWith('{')) {
+        try { add({ ...JSON.parse(line), source: 'file' }); continue; } catch { /* 坏行按纯 id 处理 */ }
+      }
+      add({ id: line, source: 'file' });
+    }
+  }
+  return specs;
+}
+
 /**
  * B-155a：把「只在工作台本地缓存里、工作流没有」的幽灵需求登记进工作流（可评审/派单）。
  * 幂等：已在工作流 → ALREADY_REGISTERED（零副作用）。
+ * B-a17d AC2：支持 --ids / --from-file 批量（一条命令处理多条）。
  */
 function cmdReqRegister(args) {
   const b = bootFor(args, 'req');
   if (!['pm', 'analyst', 'product'].includes(String(b.role))) {
     fail('PERMISSION_DENIED', '只有 PM / 需求分析 / 产品能登记幽灵需求', { role: b.role });
   }
-  const id = String(args.id || args.requirement || '').trim();
+  const specs = collectReqSpecs(args);
+  if (!specs.length) fail('BAD_ID', '需要 --id R-... / --ids a,b / --from-file <文件>');
+  if (specs.length > 1) return cmdReqRegisterBatch(args, b, specs);
+  const id = specs[0].id;
+  if (!/^R-\d{8}-\d{6}-[0-9a-f]{4}$/.test(id)) fail('BAD_ID', '需求 id 形态应为 R-YYYYMMDD-HHMMSS-xxxx', { id });
+  const registered = registerOneRequirement(args, b, {
+    ...specs[0],
+    title: String(args.title || specs[0].title || ''),
+    acceptance: String(args.acceptance || specs[0].acceptance || ''),
+    priority: String(args.priority || specs[0].priority || ''),
+  });
+  out(args, `已登记幽灵需求 ${id}（${registered.title}）→ 工作流 status=review\n工作流：${registered.workflowFile || ''}`, registered);
+  return null;
+}
+
+/** 批量登记：逐条 registerOneRequirement，汇总结果；部分失败不中断。 */
+function cmdReqRegisterBatch(args, b, specs) {
+  const results = [];
+  for (const spec of specs) {
+    if (!/^R-\d{8}-\d{6}-[0-9a-f]{4}$/.test(spec.id)) { results.push({ id: spec.id, ok: false, code: 'BAD_ID' }); continue; }
+    try { results.push(registerOneRequirement({ json: false }, b, spec)); } catch (e) {
+      results.push({ id: spec.id, ok: false, code: e instanceof TeamError ? e.code : 'INTERNAL', message: String((e && e.message) || e) });
+    }
+  }
+  const failed = results.filter((r) => !r.ok && r.code !== 'ALREADY_REGISTERED');
+  const okCount = results.length - failed.length;
+  if (failed.length) process.exitCode = 1;
+  out(args, [
+    `批量登记：成功 ${okCount} / ${results.length}，失败 ${failed.length}`,
+    ...results.map((r) => `- ${r.id} ${r.ok ? `OK status=${r.status}` : (r.code === 'ALREADY_REGISTERED' ? '已登记（幂等）' : `FAIL ${r.code}`)}`),
+  ].join('\n'), { ok: failed.length === 0, batch: true, total: results.length, okCount, failed: failed.length, results });
+  return null;
+}
+
+/** 单条登记实现（单条模式与批量模式共用）。 */
+function registerOneRequirement(args, b, spec) {
+  const id = String(spec.id || '').trim();
   if (!id) fail('BAD_ID', '需要 --id R-...');
   if (!/^R-\d{8}-\d{6}-[0-9a-f]{4}$/.test(id)) fail('BAD_ID', '需求 id 形态应为 R-YYYYMMDD-HHMMSS-xxxx', { id });
   const stateRead = readWorkflowState(b.project, { fresh: true });
@@ -3316,7 +3407,7 @@ function cmdReqRegister(args) {
   const rows = wf.requirements || {};
   const existing = rows[id] || Object.values(rows).find((r) => r && String(r.id || '') === id);
   if (existing) fail('ALREADY_REGISTERED', `需求已在工作流：${id}（status=${existing.status || '?'}）`, { requirementId: id, status: existing.status });
-  const title = String(args.title || '').trim() || id;
+  const title = String(spec.title || args.title || '').trim() || id;
   const at = nowIso();
   let task = null;
   try { task = loadTask(b.project, id); } catch { task = null; }
@@ -3324,8 +3415,8 @@ function cmdReqRegister(args) {
     task = {
       id, project: b.project, type: 'requirement', requirementId: '',
       title: truncate(title, 120), detail: truncate(String(args.detail || '从工作台本地缓存登记（无需求正文）'), 1000),
-      acceptance: truncate(String(args.acceptance || ''), 1000), story: '',
-      priority: String(args.priority || 'P2'), priorityBy: b.role, priorityReason: '',
+      acceptance: truncate(String(spec.acceptance || args.acceptance || ''), 1000), story: '',
+      priority: String(spec.priority || args.priority || 'P2'), priorityBy: b.role, priorityReason: '',
       owner: null, status: 'open', createdBy: b.role, createdAt: at, claimedAt: null, due: '',
       doneAt: null, evidence: '', rev: 0,
       history: [],
@@ -3341,56 +3432,199 @@ function cmdReqRegister(args) {
     role: b.role, sessionId: b.sessionId, action: 'requirement_registered', project: b.project,
     target: id, note: truncate(title, 120), data: { requirementId: id, from: 'cache', workflowFile: sync && sync.file },
   });
-  out(args, `已登记幽灵需求 ${id}（${title}）→ 工作流 status=review\n工作流：${sync && sync.file ? sync.file : ''}`, {
-    ok: true, requirementId: id, title, status: 'review', workflowFile: sync && sync.file,
-  });
+  return { ok: true, requirementId: id, title, status: 'review', workflowFile: sync && sync.file };
 }
 
 /**
- * B-155a：把幽灵需求作废（登记到 需求/作废登记.jsonl，工作流行置 terminated，原因 ghost_void）。
- * 幂等：已 terminated/voided → ALREADY_VOIDED。
+ * B-155a / B-a17d：把幽灵需求作废。
+ *   - 作废登记落 <项目根>/需求/作废登记.jsonl（带 project 字段，AC5）；
+ *   - 有工作流行 → status=terminated + gateInvalidatedBy=ghost_void；
+ *   - 无工作流行 → 只登记；同时把同 id 的需求任务文件收口（否则快照会把它造回 review）；
+ *   - 幂等：工作行已 terminated/accepted 或登记里已有该 id → ALREADY_VOIDED（零副作用）；
+ *   - 批量：--ids / --from-file（AC2，一条命令处理多条）。
  */
 function cmdReqVoid(args) {
   const b = bootFor(args, 'req');
   if (!['pm', 'analyst', 'product'].includes(String(b.role))) fail('PERMISSION_DENIED', '只有 PM / 需求分析 / 产品能作废幽灵需求', { role: b.role });
-  const id = String(args.id || args.requirement || '').trim();
-  const reason = String(args.reason || '').trim();
-  if (!id) fail('BAD_ID', '需要 --id R-...');
-  if (!reason) fail('REASON_REQUIRED', '作废必须带 --reason（为什么作废）', { requirementId: id });
-  const stateRead = readWorkflowState(b.project, { fresh: true });
-  const wf = stateRead.state || {};
-  const rows = wf.requirements || {};
-  const row = rows[id] || Object.values(rows).find((r) => r && String(r.id || '') === id) || null;
-  const at = nowIso();
-  if (row && ['terminated', 'accepted'].includes(String(row.status || ''))) {
-    fail('ALREADY_VOIDED', `需求已是 ${row.status}，不能重复作废`, { requirementId: id, status: row.status });
+  const specs = collectReqSpecs(args);
+  if (!specs.length) fail('BAD_ID', '需要 --id R-... / --ids a,b / --from-file <文件>');
+  const baseReason = String(args.reason || '').trim();
+  if (!baseReason && !specs.some((spec) => spec.reason)) {
+    fail('REASON_REQUIRED', '作废必须带 --reason（为什么作废）', { requirementId: specs[0].id });
   }
-  const registry = path.join(projectStatePaths(b.project).dir, '..', '..', '..', '..', '需求', '作废登记.jsonl');
-  const line = JSON.stringify({ at, requirementId: id, reason: truncate(reason, 300), by: b.role, hadWorkflowRow: Boolean(row) });
-  try {
-    ensureDir(path.dirname(registry));
-    fs.appendFileSync(registry, line + '\n', 'utf8');
-  } catch { /* 登记失败不阻断作废 */ }
-  if (row) {
-    row.status = 'terminated';
-    row.gateInvalidatedAt = at;
-    row.gateInvalidatedBy = 'ghost_void';
-    row.voidReason = truncate(reason, 300);
-    writeWorkflowState(b.project, stateRead.state);
+  const batch = specs.length > 1 || !args.id;
+  const project = loadProject(b.project);
+  const projectDir = String(project.path || '');
+  const registryFile = voidRegistryFile(projectDir);
+  const stateRead = readWorkflowState(b.project, { fresh: true });
+  const rows = (stateRead.state && stateRead.state.requirements) || {};
+  const known = readVoidRegistry(projectDir);
+  const results = [];
+  let workflowDirty = false;
+  for (const spec of specs) {
+    const id = String(spec.id || '').trim();
+    const reason = spec.reason || baseReason;
+    const at = nowIso();
+    const row = findRequirementRow(rows, id);
+    if (row && ['terminated', 'accepted'].includes(String(row.status || ''))) {
+      results.push({ id, ok: false, code: 'ALREADY_VOIDED', status: String(row.status), hadWorkflowRow: true, registry: registryFile });
+      continue;
+    }
+    if (known.byId[id]) {
+      results.push({ id, ok: false, code: 'ALREADY_VOIDED', status: 'voided', hadWorkflowRow: Boolean(row), registry: registryFile });
+      continue;
+    }
+    try {
+      appendVoidEntry(projectDir, {
+        at, project: b.project, requirementId: id, reason: truncate(reason, 300),
+        by: b.role, hadWorkflowRow: Boolean(row), source: 'req_void',
+      });
+    } catch (e) {
+      results.push({ id, ok: false, code: 'REGISTRY_WRITE_FAILED', message: String((e && e.message) || e), registry: registryFile });
+      continue;
+    }
+    known.byId[id] = { id, requirementId: id, at, project: b.project, reason, by: b.role, hadWorkflowRow: Boolean(row) };
+    if (row) {
+      row.status = 'terminated';
+      row.gateInvalidatedAt = at;
+      row.gateInvalidatedBy = 'ghost_void';
+      row.voidReason = truncate(reason, 300);
+      row.voidRegistry = registryFile;
+      workflowDirty = true;
+    }
+    // 任务文件收口：不管有没有工作流行都写，避免「作废了但任务文件又把同 id 造回 review」。
     try {
       const task = loadTask(b.project, id);
-      task.status = 'done'; task.doneAt = at; task.workflow = { ...(task.workflow || {}), requirementStatus: 'terminated' };
+      task.status = 'done';
+      task.doneAt = at;
+      task.workflow = {
+        ...(task.workflow || {}),
+        requirementStatus: 'terminated',
+        voided: true,
+        voidedAt: at,
+        voidReason: truncate(reason, 200),
+      };
       task._by = b.role; task._action = 'req_void'; task._note = truncate(reason, 200);
       saveTask(b.project, task);
-    } catch { /* 没任务文件也能作废工作流行 */ }
+    } catch { /* 没有任务文件也能作废（快照靠作废登记剔除） */ }
+    appendEvent({
+      role: b.role, sessionId: b.sessionId, action: 'requirement_voided', project: b.project,
+      target: id, note: truncate(reason, 120),
+      data: { requirementId: id, hadWorkflowRow: Boolean(row), registry: registryFile, project: b.project, batch: Boolean(batch) },
+    });
+    results.push({ id, ok: true, code: 'OK', status: row ? 'terminated' : 'voided', hadWorkflowRow: Boolean(row), registry: registryFile });
   }
-  appendEvent({
-    role: b.role, sessionId: b.sessionId, action: 'requirement_voided', project: b.project,
-    target: id, note: truncate(reason, 120), data: { requirementId: id, hadWorkflowRow: Boolean(row), registry },
+  if (workflowDirty) writeWorkflowState(b.project, stateRead.state);
+  const succeeded = results.filter((r) => r.ok);
+  const failed = results.filter((r) => !r.ok && r.code !== 'ALREADY_VOIDED');
+  const first = results[0] || {};
+  if (!batch) {
+    if (!first.ok) {
+      if (first.code === 'ALREADY_VOIDED') {
+        fail('ALREADY_VOIDED', `需求已作废/已是终态：${first.id}`, { requirementId: first.id, status: first.status, registry: registryFile });
+      }
+      fail(first.code || 'VOID_FAILED', `作废失败：${first.id}`, { requirementId: first.id, registry: registryFile, message: first.message });
+    }
+    out(args, `已作废 ${first.id}（${first.status === 'terminated' ? '工作流置 terminated' : '仅登记作废（工作流无此行）'}）\n原因：${truncate(specs[0].reason || baseReason, 300)}\n登记：${registryFile}`, {
+      ok: true, requirementId: first.id, status: first.status, registry: registryFile, hadWorkflowRow: first.hadWorkflowRow, results,
+    });
+    return;
+  }
+  if (failed.length) process.exitCode = 1;
+  out(args, [
+    `批量作废：成功 ${succeeded.length} / ${results.length}，失败 ${failed.length}`,
+    ...results.map((r) => `- ${r.id} ${r.ok ? `OK status=${r.status}` : (r.code === 'ALREADY_VOIDED' ? '已作废（幂等）' : `FAIL ${r.code}`)}`),
+    `登记：${registryFile}`,
+  ].join('\n'), {
+    ok: failed.length === 0, batch: true, total: results.length, okCount: succeeded.length,
+    failed: failed.length, registry: registryFile, results,
   });
-  out(args, `已作废 ${id}（${row ? '工作流置 terminated' : '仅登记作废（工作流无此行）'}）\n原因：${reason}\n登记：${registry}`, {
-    ok: true, requirementId: id, status: row ? 'terminated' : 'voided', registry, hadWorkflowRow: Boolean(row),
+}
+
+/** B-a17d：读作废登记（消费方先看这里，不必自己解析 jsonl）。 */
+function cmdReqVoided(args) {
+  const b = bootFor(args, 'req');
+  const project = loadProject(b.project);
+  const reg = readVoidRegistry(String(project.path || ''));
+  out(args, [
+    `作废登记：${reg.file}`,
+    `存在：${reg.exists ? '是' : '否'} ｜ 条数：${reg.count}`,
+    ...reg.entries.map((e) => `- ${e.id} ｜ ${e.at || '(无时间)'} ｜ ${e.by || '-'} ｜ ${truncate(e.reason, 60)}`),
+  ].join('\n'), {
+    ok: true, project: b.project, registry: reg.file, exists: reg.exists, count: reg.count,
+    entries: reg.entries, ids: reg.ids, errors: reg.errors,
   });
+}
+
+/**
+ * B-a17d AC3：双向同步断言（工作流 ↔ 需求任务文件 ↔ 作废登记）。
+ * 违规即 exit 1；无违规返回 ok=true。测试与 PM 巡检共用这一条口径。
+ */
+function cmdReqSync(args) {
+  const b = bootFor(args, 'req');
+  const project = loadProject(b.project);
+  const projectDir = String(project.path || '');
+  const registry = readVoidRegistry(projectDir);
+  const legacy = legacyVoidRegistryFile(PATHS.teamRoot);
+  const stateRead = readWorkflowState(b.project, { fresh: true });
+  const rows = (stateRead.state && stateRead.state.requirements) || {};
+  const violations = [];
+  const warnings = [];
+  if (fs.existsSync(legacy)) {
+    violations.push({ rule: 'R0_LEGACY_REGISTRY_ROOT', file: legacy, message: '作废登记还在仓库根（跨项目共用、污染 git status），应迁到项目根 需求/作废登记.jsonl' });
+  }
+  for (const entry of registry.entries) {
+    if (!entry.project) violations.push({ rule: 'R1_REGISTRY_PROJECT_MISSING', id: entry.id, message: '作废登记行缺 project 字段（跨项目无法区分）' });
+    else if (String(entry.project) !== String(b.project)) violations.push({ rule: 'R2_REGISTRY_PROJECT_MISMATCH', id: entry.id, project: entry.project, message: '作废登记行属于别的项目' });
+    const row = findRequirementRow(rows, entry.id);
+    if (row && !['terminated', 'accepted'].includes(String(row.status || ''))) {
+      violations.push({ rule: 'R3_VOID_ROW_NOT_TERMINATED', id: entry.id, status: row.status, message: '已作废但工作流行不是 terminated（快照可能仍当它待评审）' });
+    }
+    try {
+      const task = loadTask(b.project, entry.id);
+      const voidedInTask = Boolean(task.workflow && task.workflow.voided);
+      if (String(task.status || '') !== 'done' || !voidedInTask) {
+        violations.push({ rule: 'R4_VOID_TASK_NOT_CLOSED', id: entry.id, taskStatus: task.status, voided: voidedInTask, message: '已作废但需求任务文件没收口（会被快照造回 review）' });
+      }
+    } catch { /* 没任务文件不是违规 */ }
+  }
+  // 反向：工作流里没有行的需求（幽灵）必须有出路 —— 已登记的不算，剩余应出现在作废登记里；
+  // 这里只核对「任务文件里 type=requirement 且不在工作流」的那批，正文类旧文档不阻断。
+  const ghosts = [];
+  for (const task of listTasks(b.project)) {
+    if (!task || task.type !== 'requirement') continue;
+    const id = String(task.id || '');
+    if (!id) continue;
+    if (findRequirementRow(rows, id)) continue;
+    if (registry.byId[id]) continue;
+    ghosts.push({ id, title: truncate(task.title, 60), status: String(task.status || '') });
+  }
+  if (ghosts.length) {
+    warnings.push({ rule: 'W1_UNREGISTERED_GHOSTS', count: ghosts.length, ids: ghosts.slice(0, 20).map((g) => g.id), message: '任务文件有、工作流没有、也没作废：面板会显示为需求（未登记标记），需登记或作废' });
+  }
+  if (registry.errors && registry.errors.length) {
+    violations.push({ rule: 'R5_REGISTRY_BAD_LINES', count: registry.errors.length, sample: registry.errors.slice(0, 3), message: '作废登记有坏行' });
+  }
+  const payload = {
+    ok: violations.length === 0,
+    project: b.project,
+    projectDir,
+    registry: registry.file,
+    registryExists: registry.exists,
+    registryCount: registry.count,
+    registryIds: registry.ids,
+    workflowRows: Object.keys(rows).length,
+    violations,
+    warnings,
+    ghosts,
+  };
+  if (violations.length) process.exitCode = 1;
+  out(args, [
+    `同步检查：${violations.length ? `FAIL（${violations.length} 条违规）` : 'PASS（0 违规）'}`,
+    `作废登记：${registry.file}（${registry.exists ? `${registry.count} 条` : '不存在'}）`,
+    ...violations.map((v) => `- [${v.rule}] ${v.id || v.file || ''} ${v.message}`),
+    ...warnings.map((w) => `- 提醒 [${w.rule}] ${w.count} 条：${w.message}`),
+  ].join('\n'), payload);
 }
 
 export function cmdReq(args) {
@@ -3407,6 +3641,9 @@ export function cmdReq(args) {
   // B-155a：幽灵需求登记 / 作废（工作流没有但工作台缓存里有）。
   if (sub === 'register') return cmdReqRegister(args);
   if (sub === 'void') return cmdReqVoid(args);
+  // B-a17d：作废登记的消费口与双向同步断言（面板/测试都从这里取口径）。
+  if (sub === 'voided') return cmdReqVoided(args);
+  if (sub === 'sync') return cmdReqSync(args);
   const b = bootFor(args, 'req');
   if (sub === 'create') {
     if (!['pm', 'product', 'analyst'].includes(b.role)) fail('NOT_PM', '只有 PM / 产品 / 需求分析能建需求');

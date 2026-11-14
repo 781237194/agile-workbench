@@ -98,6 +98,9 @@ if (IS_BOARD_WINDOW) {
     workflowIterate: (payload) => ipcRenderer.invoke('workflow:iterate', payload),
     workflowTerminate: (payload) => ipcRenderer.invoke('workflow:terminate', payload),
     requirementCreate: (payload) => ipcRenderer.invoke('requirement:create', payload),
+    // B-a17d：未登记需求（工作流无行）的一键登记 / 作废（批量 ids；落点与身份由团队工具决定）。
+    requirementGhostRegister: (payload) => ipcRenderer.invoke('requirement:ghost-register', payload),
+    requirementGhostVoid: (payload) => ipcRenderer.invoke('requirement:ghost-void', payload),
     requirementOwnerCreate: (payload) => ipcRenderer.invoke('requirement:owner-create', payload),
     // Owner 提需求：描述 + 优先级 + 验收标准[]；PM 自动 boot 并建档 R-，进入当前模式的需求评审。
     ownerDemand: (payload) => ipcRenderer.invoke('owner:demand', payload),

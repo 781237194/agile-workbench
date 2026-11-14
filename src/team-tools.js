@@ -2962,11 +2962,15 @@ function createTeamTools(options = {}) {
         ...base,
         available: true,
         mocked: true,
-        commands: { ...commands, taskClaim: true, taskDone: true, reqCreate: true, reqReview: true },
+        commands: { ...commands, taskClaim: true, taskDone: true, reqCreate: true, reqReview: true, reqRegister: true, reqVoid: true, reqVoided: true, reqSync: true },
         taskClaim: true,
         taskDone: true,
         reqCreate: true,
         reqReview: true,
+        reqRegister: true,
+        reqVoid: true,
+        reqVoided: true,
+        reqSync: true,
         missing: [],
         optionalMissing: []
       };
@@ -3033,6 +3037,13 @@ function createTeamTools(options = {}) {
     const reqReview = /sub\s*===\s*['"]review['"]/.test(reqSection)
       && !reqReviewRejected
       && (reqReviewDispatch || !/NOT_IMPLEMENTED/.test(reviewBranch));
+    // B-a17d：幽灵需求登记 / 作废 / 对照（cmdReq* 定义在 cmdReq 之前，所以只在 implText 里找函数体，
+    // 在 cmdReq 段里找分发分支）。缺省不并入 missing 列表（避免打断既有「缺命令」计数与面板文案），
+    // 但 requireLegacyCommand 会按这四个开关给出 LEGACY_PROTOCOL_REQUIRED。
+    const reqRegister = /sub\s*===\s*['"]register['"]/.test(reqSection) && /function\s+cmdReqRegister\b/.test(implText);
+    const reqVoid = /sub\s*===\s*['"]void['"]/.test(reqSection) && /function\s+cmdReqVoid\b/.test(implText);
+    const reqVoided = /sub\s*===\s*['"]voided['"]/.test(reqSection) && /function\s+cmdReqVoided\b/.test(implText);
+    const reqSync = /sub\s*===\s*['"]sync['"]/.test(reqSection) && /function\s+cmdReqSync\b/.test(implText);
     const missing = [];
     for (const [name, ok] of Object.entries(commands)) if (!ok) missing.push(name);
     if (!taskClaim) missing.push('task claim');
@@ -3046,11 +3057,15 @@ function createTeamTools(options = {}) {
     legacyCapabilityCache = {
       ...base,
       available: true,
-      commands: { ...commands, taskClaim, taskDone, reqCreate, reqReview },
+      commands: { ...commands, taskClaim, taskDone, reqCreate, reqReview, reqRegister, reqVoid, reqVoided, reqSync },
       taskClaim,
       taskDone,
       reqCreate,
       reqReview,
+      reqRegister,
+      reqVoid,
+      reqVoided,
+      reqSync,
       missing,
       optionalMissing
     };
@@ -3074,6 +3089,10 @@ function createTeamTools(options = {}) {
     else if (name === 'task done') available = caps.taskDone;
     else if (name === 'req create') available = caps.reqCreate;
     else if (name === 'req review') available = caps.reqReview;
+    else if (name === 'req register') available = caps.reqRegister;
+    else if (name === 'req void') available = caps.reqVoid;
+    else if (name === 'req voided') available = caps.reqVoided;
+    else if (name === 'req sync') available = caps.reqSync;
     else if (name === 'req') available = caps.commands.req;
     else available = Boolean(caps.commands[name]);
     if (!available) {
@@ -4604,9 +4623,14 @@ function createTeamTools(options = {}) {
 
   /* ── B-20261114-003257-0a46（R-d734）：文档真实存在性 + 角色 BOOT 真实证据 ──── */
 
+  // B-20261115-050245-65df（测试 v156 D1）：presence 必须覆盖全部必读项目文档，
+  // 否则前端只能用 files:list 判存在，600 项截断会把根目录文档误报成“缺失”（项目索引/需求总览实测假报警）。
   const PROJECT_DOC_CHECKS = [
-    { key: 'projectInfo', label: '项目信息', file: '项目信息.md' },
-    { key: 'iron', label: '项目铁律', file: '项目铁律.md' }
+    { key: 'rules', label: '项目铁律', file: '项目铁律.md' },
+    { key: 'info', label: '项目信息', file: '项目信息.md' },
+    { key: 'index', label: '项目索引', file: '项目索引.md' },
+    { key: 'overview', label: '需求总览', file: '需求/00-需求总览.md' },
+    { key: 'guide', label: '协作准则', file: '协作准则.md' }
   ];
 
   /**
@@ -5536,8 +5560,56 @@ function createTeamTools(options = {}) {
   }
 
   /**
+   * B-a17d AC1/AC5：需求「作废登记」的唯一读取口（壳层）。
+   * 落点固定 = <项目根>/需求/作废登记.jsonl；团队工具侧的同口径实现在
+   * 团队/工具/lib/req-void-registry.mjs，两边字段必须一致（测试脚本会对比）。
+   */
+  function requirementVoidRegistryFile(projectPath) {
+    const base = String(projectPath || '').trim();
+    if (!base) return '';
+    return path.join(path.resolve(base), '需求', '作废登记.jsonl');
+  }
+
+  /** 读作废登记：{file, exists, count, entries, ids, byId, errors}。坏行只记 errors，不抛错。 */
+  function readRequirementVoidRegistry(projectPath) {
+    const file = requirementVoidRegistryFile(projectPath);
+    const out = { file, exists: false, count: 0, entries: [], ids: [], byId: {}, errors: [] };
+    if (!file) return out;
+    out.exists = fs.existsSync(file);
+    if (!out.exists) return out;
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch (e) { out.errors.push({ error: String((e && e.message) || e) }); return out; }
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line) continue;
+      let row = null;
+      try { row = JSON.parse(line); } catch { out.errors.push({ line: line.slice(0, 120), error: 'JSON 解析失败' }); continue; }
+      const id = String((row && (row.requirementId || row.id)) || '').trim();
+      if (!id) { out.errors.push({ line: line.slice(0, 120), error: 'requirementId 缺失' }); continue; }
+      const entry = {
+        id,
+        requirementId: id,
+        at: String(row.at || ''),
+        project: String(row.project || ''),
+        reason: String(row.reason || ''),
+        by: String(row.by || ''),
+        hadWorkflowRow: row.hadWorkflowRow === true
+      };
+      out.byId[id] = entry;
+      out.entries.push(entry);
+    }
+    out.ids = Object.keys(out.byId);
+    out.count = out.entries.length;
+    return out;
+  }
+
+  /**
    * 只读快照：需求/任务从旧 任务/ 目录读，阶段从旧 工作流.json 读。
    * 读不到旧状态时返回空快照，不拿本地 workbench.json 冒充真相。
+   * B-a17d：必须消费 <项目根>/需求/作废登记.jsonl——
+   *   ①已作废 id 不得再用需求任务文件/正文造回需求行（旧 bug：team-tools 5380/5561）；
+   *   ②工作流行本身已 terminated 的照常显示（真工作流不隐瞒），但强制 status=terminated 并打 voided 标记；
+   *   ③未登记（只有任务文件、工作流无行）的需求行打 registered=false / unregistered=true，供面板标「未登记」。
    */
   function readWorkflowSnapshot(projectName, projectPath) {
     const name = String(projectName || '').trim();
@@ -5552,21 +5624,46 @@ function createTeamTools(options = {}) {
     const projectMode = normalizeTeamMode((readJsonSafe(path.join(projectStateDir(name), '项目.json')) || {}).teamMode);
     const tasks = readLegacyTasks(name);
     const byId = new Map(tasks.map((task) => [String(task.id), task]));
+    const resolvedProjectPath = projectPath ? path.resolve(projectPath) : ((registrationFor(name) || {}).path || '');
+    const voidRegistry = readRequirementVoidRegistry(resolvedProjectPath);
+    // id 比对：全等优先，其次唯一前缀兼容（同一秒撞号的两条 id 只有后缀不同，不会误判）。
+    const voidEntryOf = (id) => {
+      const key = String(id || '').trim();
+      if (!key) return null;
+      if (voidRegistry.byId[key]) return voidRegistry.byId[key];
+      return voidRegistry.entries.find((e) => e.id.startsWith(key) && e.id.length > key.length) || null;
+    };
     const requirements = [];
     const seen = new Set();
     for (const [id, meta] of Object.entries(state.requirements || {})) {
       seen.add(String(id));
-      requirements.push(requirementView(byId.get(String(id)), meta));
+      const view = requirementView(byId.get(String(id)), meta);
+      const voidEntry = voidEntryOf(view.id || id);
+      if (voidEntry) {
+        if (!['terminated', 'accepted'].includes(String(view.status || ''))) view.status = 'terminated';
+        view.voided = true;
+        view.voidedAt = voidEntry.at || null;
+        view.voidedReason = voidEntry.reason || '';
+        view.voidedBy = voidEntry.by || '';
+      }
+      view.registered = true;
+      requirements.push(view);
     }
     for (const task of tasks) {
       if (task.type !== 'requirement' || seen.has(String(task.id))) continue;
-      requirements.push(requirementView(task, null));
+      // ①作废优先：已作废的 id 不再从需求任务文件造回需求行（否则面板一直显示待评审）。
+      if (voidEntryOf(task.id)) continue;
+      const view = requirementView(task, null);
+      view.registered = false;
+      view.unregistered = true;
+      view.source = 'task-only';
+      requirements.push(view);
     }
     // 旧项目可能只有 需求/R-*.md 正文，没有 工作流.json 行/任务。
     // 这些需求也必须进入工作流扫描，否则界面显示“没有需求”、迭代守卫也会放行。
     // 注意：同一份需求正文不能因为文件 id 与真实需求 id 写法不同（4 位/6 位/截断）
     // 被重复登记成第二条“幽灵需求”，否则界面会一直显示 requirements 里还有 review。
-    const resolvedProjectPath = projectPath ? path.resolve(projectPath) : ((registrationFor(name) || {}).path || '');
+    // B-a17d：已作废的正文同样不得造回需求行（作废优先于正文）。
     if (resolvedProjectPath) {
       const knownDocs = requirements.map((row) => String(row.doc || '').replace(/\\/g, '/')).filter(Boolean);
       const knownIds = requirements.map((row) => String(row.id || '')).filter(Boolean);
@@ -5574,11 +5671,12 @@ function createTeamTools(options = {}) {
         const rel = String(doc.rel || '').replace(/\\/g, '/');
         if (knownDocs.includes(rel)) continue;
         const docId = String(doc.id || '');
+        if (voidEntryOf(docId)) continue;
         const sameId = knownIds.some((id) => id === docId || id.startsWith(docId) || docId.startsWith(id));
         if (sameId) continue;
         knownIds.push(docId);
         knownDocs.push(rel);
-        requirements.push(requirementView(null, {
+        const docView = requirementView(null, {
           id: doc.id,
           title: doc.title || doc.id,
           priority: doc.priority || 'P2',
@@ -5593,7 +5691,10 @@ function createTeamTools(options = {}) {
           story: '',
           detail: '',
           doc: doc.rel
-        }));
+        });
+        docView.registered = false;
+        docView.source = 'legacy-doc';
+        requirements.push(docView);
       }
     }
     requirements.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
@@ -5645,6 +5746,25 @@ function createTeamTools(options = {}) {
       ownerReview: state.ownerReview || { required: false, status: 'optional' },
       boots: state.boots || {},
       nextRound,
+      // B-a17d：作废登记的消费结果（AC1）。面板/评审弹窗按 voidedIds 剔除，
+      // 需要看历史时用 voided 全量；二者同源 <项目根>/需求/作废登记.jsonl。
+      voided: voidRegistry.entries,
+      voidedIds: voidRegistry.ids,
+      voidRegistry: {
+        file: voidRegistry.file,
+        exists: voidRegistry.exists,
+        count: voidRegistry.count,
+        errors: voidRegistry.errors
+      },
+      // 未登记（只有需求任务文件、工作流无行）——面板应标「未登记」并给登记/作废入口。
+      unregistered: requirements.filter((row) => row.unregistered).map((row) => ({
+        id: row.id,
+        title: row.title,
+        status: row.status,
+        taskStatus: row.taskStatus,
+        owner: row.owner || '',
+        createdAt: row.createdAt || null
+      })),
       counts: {
         requirements: requirements.length,
         tasks: tasks.length,
@@ -5652,7 +5772,9 @@ function createTeamTools(options = {}) {
         done: tasks.length - open.length,
         commits,
         votes: votes.length,
-        accepted: requirements.filter((row) => row.status === 'accepted').length
+        accepted: requirements.filter((row) => row.status === 'accepted').length,
+        voided: voidRegistry.count,
+        unregistered: requirements.filter((row) => row.unregistered).length
       },
       roundKey: `${name}|${state.round || 1}|${requirements.length}|${open.length}`,
       updatedAt: state.updatedAt || null,
@@ -5672,6 +5794,60 @@ function createTeamTools(options = {}) {
   }
 
   /** 工作流动作前置：项目必须已在旧团队登记，六角色目录/文档/索引必须齐。 */
+  /**
+   * B-a17d AC2/AC4：面板上「未登记」需求的一键登记 / 作废。
+   * 身份固定 pm（团队工具只允许 pm / 需求分析 / 产品操作），走 team.mjs 的批量入口，
+   * 不新造第二份状态；作废登记的落点与消费口径都由团队工具决定。
+   */
+  function ghostRequirementIds(input = {}) {
+    const raw = input.ids || input.requirementIds || (input.id ? [input.id] : []);
+    const list = Array.isArray(raw) ? raw : String(raw || '').split(/[,，、;；\s]+/);
+    const out = [];
+    for (const item of list) {
+      const id = String(item || '').trim();
+      if (id && !out.includes(id)) out.push(id);
+    }
+    return out;
+  }
+
+  async function registerGhostRequirements(input = {}) {
+    const ctx = await ensureWorkflowProject(input);
+    if (!ctx.ok) return ctx;
+    const guard = requireLegacyCommand('req register');
+    if (guard) return guard;
+    const ids = ghostRequirementIds(input);
+    if (!ids.length) return failure('BAD_ID', '缺少需求 id');
+    const single = ids.length === 1;
+    const run = await runLegacyCommand(ctx.name, 'pm', 'req register', (token) => [
+      'req', 'register', '--boot', token,
+      ...(single ? ['--id', ids[0]] : ['--ids', ids.join(',')]),
+      ...(single && input.title ? ['--title', String(input.title).slice(0, 120)] : []),
+      ...(input.acceptance ? ['--acceptance', String(input.acceptance).slice(0, 900)] : []),
+      ...(input.priority ? ['--priority', String(input.priority).toUpperCase()] : [])
+    ], { sessionId: input.sessionId });
+    if (!run.ok) return run;
+    return { ok: true, code: 'OK', project: ctx.name, ids, result: run.value };
+  }
+
+  async function voidGhostRequirements(input = {}) {
+    const ctx = await ensureWorkflowProject(input);
+    if (!ctx.ok) return ctx;
+    const guard = requireLegacyCommand('req void');
+    if (guard) return guard;
+    const ids = ghostRequirementIds(input);
+    if (!ids.length) return failure('BAD_ID', '缺少需求 id');
+    const reason = String(input.reason || '').trim();
+    if (!reason) return failure('REASON_REQUIRED', '作废必须写原因（为什么作废）', { ids });
+    const single = ids.length === 1;
+    const run = await runLegacyCommand(ctx.name, 'pm', 'req void', (token) => [
+      'req', 'void', '--boot', token,
+      ...(single ? ['--id', ids[0]] : ['--ids', ids.join(',')]),
+      '--reason', reason.slice(0, 300)
+    ], { sessionId: input.sessionId });
+    if (!run.ok) return run;
+    return { ok: true, code: 'OK', project: ctx.name, ids, result: run.value };
+  }
+
   async function ensureWorkflowProject(input = {}) {
     const name = String(input.projectName || '').trim();
     if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
@@ -9774,6 +9950,12 @@ function createTeamTools(options = {}) {
     readWorkflowState,
     writeWorkflowState,
     readWorkflowSnapshot,
+    // B-a17d：作废登记的唯一读取口（落点 <项目根>/需求/作废登记.jsonl，与团队工具同口径）。
+    readRequirementVoidRegistry,
+    requirementVoidRegistryFile,
+    // B-a17d AC2/AC4：面板一键登记/作废（走 PM 身份 + 批量入口）。
+    registerGhostRequirements,
+    voidGhostRequirements,
     listLegacyProposals,
     workflowFile,
     legacyCapabilities,

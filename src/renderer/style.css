@@ -4131,6 +4131,12 @@ html[data-theme="light"] #titlebar .titlebar-center .owner-review-proxy { color:
 .pool-head b { font-size:15px; }
 .pool-sub { font-size:11px; color:var(--dim); }
 .pool-close { margin-left:auto; border:0; background:transparent; color:var(--dim); font-size:18px; cursor:pointer; }
+.pool-ghost-bar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:8px 14px 0; padding:8px 10px; border:1px solid var(--gold-line); border-radius:8px; background:var(--gold-soft); }
+.pool-ghost-bar[hidden] { display:none; }
+.pool-ghost-text { font-size:12px; color:var(--muted); }
+.pool-ghost-reason { flex:1 1 180px; min-width:140px; height:26px; padding:0 8px; border-radius:6px; border:1px solid var(--line); background:var(--input); color:var(--text); font-size:12px; }
+.req-ghost { font-size:11px; line-height:16px; padding:0 6px; border-radius:9px; background:var(--gold-soft); color:var(--gold); border:1px solid var(--gold-line); white-space:nowrap; }
+.req-ghost.voided { background:transparent; color:var(--dim); border-color:var(--line); }
 .pool-filters { display:flex; gap:6px; padding:8px 14px; border-bottom:1px dashed var(--line); flex-wrap:wrap; }
 .pool-chip { border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:999px; padding:3px 10px; font-size:12px; cursor:pointer; }
 .pool-chip i { font-style:normal; font-size:10px; margin-left:4px; color:var(--dim); }

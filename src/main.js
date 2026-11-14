@@ -5635,6 +5635,24 @@ function registerIpc() {
       sessionId: meta.sessionId
     });
   }));
+  // B-a17d AC2/AC4：幽灵需求（工作流没有行）的一键登记 / 作废。
+  // 面板只传 ids + reason，身份与落点由团队工具决定（PM 代办，批量入口）。
+  ipcMain.handle('requirement:ghost-register', runWorkflowIpc(async (ctx, p, meta) => {
+    return teamTools.registerGhostRequirements({
+      ...p,
+      projectName: ctx.teamName,
+      projectPath: ctx.projectPath,
+      sessionId: meta.sessionId
+    });
+  }));
+  ipcMain.handle('requirement:ghost-void', runWorkflowIpc(async (ctx, p, meta) => {
+    return teamTools.voidGhostRequirements({
+      ...p,
+      projectName: ctx.teamName,
+      projectPath: ctx.projectPath,
+      sessionId: meta.sessionId
+    });
+  }));
   ipcMain.handle('requirement:review', runWorkflowIpc(async (ctx, p, meta) => {
     return teamTools.reviewRequirement({
       ...p,
