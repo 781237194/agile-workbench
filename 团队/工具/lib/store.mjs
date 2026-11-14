@@ -7,6 +7,7 @@ import {
   relPath, truncate, randomHex, stamp, acquireLock, releaseLock, withLock, appendEvent,
 } from './core.mjs';
 import { ROLES, ROLE_DIRS, ROLE_NAMES, LIMITS, MODEL_BY_ROLE, normalizeTeamMode, rolesForMode, roleIdsForMode } from './roles.mjs';
+import { initialScenarioConfirm } from './scenario-confirm.mjs';
 import { DEFAULT_IRON, bootDocSpecs, readDocRecord, readRequirementDocs } from './scaffold.mjs';
 
 // 角色常量单一真相在 roles.mjs；这里重导出，保持旧调用方向不变。
@@ -943,6 +944,8 @@ export function createTask({ project, title, detail = '', priority, priorityBy, 
       expectedFlow: Array.isArray(expectedFlow) ? expectedFlow.slice(0, 20) : [],
       actualFlow: Array.isArray(actualFlow) ? actualFlow.slice(0, 20) : [],
       blockedRoles: Array.isArray(blockedRoles) ? blockedRoles.slice(0, 10) : [],
+      // R-43ad F-43ad-4：场景确认的初始状态（10 分钟超时口径，可注入 TEAM_SCENARIO_CONFIRM_TIMEOUT_MS）。
+      scenarioConfirm: initialScenarioConfirm({ mode: 'full' }),
     } : {}),
   };
   ensureDir(path.dirname(taskPath(project, id)));

@@ -57,6 +57,9 @@ import {
   voidRegistryFile, legacyVoidRegistryFile, readVoidRegistry, appendVoidEntry,
 } from './req-void-registry.mjs';
 import { detectLedgerForks, requirementLedger, reopenedAtOf } from './ledger.mjs';
+import {
+  scenarioConfirmState, applyScenarioTimeout, scenarioConfirmerFor, scenarioTimeoutMs,
+} from './scenario-confirm.mjs';
 
 const RISK_RANK = { normal: 1, sensitive: 2, critical: 3 };
 const PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -2925,6 +2928,92 @@ export async function cmdTask(args) {
   }
   // R-b5fc F-4：缺陷旁路——测试打回 B-* 时 reopenCount+1（history 记 reopen），reopenCount≥2 交给路由守护升级 PM。
   // 只改缺陷任务自己的计数与状态，不碰需求状态机（bug 有独立任务）。
+  if (sub === 'confirm-scenario') {
+    // R-43ad F-43ad-4：产品（full）/ 分析师（fast）确认「是不是场景缺陷」；确认不是 → 改判 bug（场景字段保留）。
+    if (!args.id) fail('BAD_ID', '需要 --id');
+    if (!['product', 'analyst', 'pm'].includes(String(b.role))) {
+      fail('NOT_CONFIRMER', '只有产品设计师 / 需求分析师（PM 兜底）能确认场景缺陷', { role: b.role });
+    }
+    const task = loadTask(b.project, String(args.id));
+    if (String(task.type || '') !== 'scenario-bug') {
+      fail('NOT_SCENARIO_BUG', `${task.id} 不是场景缺陷（type=${task.type}）`, { id: task.id, type: task.type });
+    }
+    const verdict = String(args.verdict || '').trim().toLowerCase();
+    if (!['yes', 'no'].includes(verdict)) fail('BAD_VERDICT', '--verdict 只支持 yes（是场景缺陷）/ no（不是）', { verdict });
+    const reason = truncate(String(args.reason || ''), 300);
+    const at = nowIso();
+    const mode = projectTeamMode(loadProject(b.project));
+    task.scenarioConfirm = {
+      ...(task.scenarioConfirm || {}),
+      status: verdict === 'yes' ? 'confirmed' : 'rejected',
+      by: b.role, at, reason,
+      confirmer: scenarioConfirmerFor(mode),
+      treatAs: verdict === 'yes' ? '' : 'bug',
+      ...(verdict === 'no' ? { reclassifiedAt: at } : {}),
+    };
+    const reclassified = verdict === 'no';
+    if (reclassified) task.type = 'bug';   // type 与 bugClass 并存，场景字段原样保留
+    task.updatedAt = at;
+    task._by = b.role;
+    task._action = reclassified ? 'scenario_rejected' : 'scenario_confirmed';
+    task._note = truncate(reason || (verdict === 'yes' ? '确认是场景缺陷' : '确认不是场景缺陷，改判 bug'), 200);
+    const saved = saveTask(b.project, task);
+    appendEvent({
+      role: b.role, sessionId: b.sessionId, action: reclassified ? 'scenario_rejected' : 'scenario_confirmed',
+      project: b.project, target: saved.id,
+      note: truncate(`verdict=${verdict} ${reason}`, 160),
+      data: { taskId: saved.id, verdict, reclassified, type: saved.type, scenarioConfirm: saved.scenarioConfirm },
+    });
+    out(args, [
+      `${saved.id} 场景确认：${verdict === 'yes' ? '是场景缺陷（保持 scenario-bug）' : `不是 → 已改判 bug（原因：${reason || '未写'}）`}`,
+      `确认人：${b.role} ｜ 时间：${at}`,
+    ].join('\n'), { ok: true, task: saved, verdict, reclassified, type: saved.type, scenarioConfirm: saved.scenarioConfirm });
+    return;
+  }
+  if (sub === 'scenario-sweep') {
+    // R-43ad F-43ad-4：场景确认超时扫描（守护/PM 都可调）——到点按 bug 先行 + PM 收 SCENARIO_CONFIRM_TIMEOUT 告警。
+    const mode = projectTeamMode(loadProject(b.project));
+    const now = Date.now();
+    const summary = { scanned: 0, timedOut: [], escalated: [], timeoutMs: scenarioTimeoutMs() };
+    for (const task of listTasks(b.project)) {
+      if (!task || String(task.type || '') !== 'scenario-bug') continue;
+      const state = scenarioConfirmState(task, { mode, env: process.env });
+      if (!state.pending) continue;
+      summary.scanned += 1;
+      if (!state.timedOut) continue;
+      const applied = applyScenarioTimeout(task, { mode, env: process.env });
+      if (!applied.changed) continue;
+      const next = applied.task;
+      if (!next.scenarioConfirm.escalatedAt) {
+        try {
+          sendMessage({
+            from: 'system', to: 'pm', type: 'escalation', project: b.project,
+            subject: `场景确认超时：${next.id}（按 bug 先行）`,
+            body: clipMessage(`任务 ${next.id} 的场景确认已超时（${state.timeoutMs}ms，确认人 ${state.confirmer}）。\n按口径先按 bug 推进，不卡开发。\ncode=SCENARIO_CONFIRM_TIMEOUT\n开单时间：${state.requestedAt}\n截止：${state.dueAt}`),
+          });
+          next.scenarioConfirm.escalatedAt = nowIso();
+          summary.escalated.push(next.id);
+        } catch { /* 告警发不出去不阻断按 bug 先行 */ }
+      }
+      next.updatedAt = nowIso();
+      next._by = b.role;
+      next._action = 'scenario_timeout';
+      next._note = '场景确认超时，按 bug 先行';
+      saveTask(b.project, next);
+      appendEvent({
+        role: b.role, sessionId: b.sessionId, action: 'scenario_confirm_timeout', project: b.project, target: next.id,
+        note: `code=SCENARIO_CONFIRM_TIMEOUT timeoutMs=${state.timeoutMs}`,
+        data: { taskId: next.id, code: 'SCENARIO_CONFIRM_TIMEOUT', timeoutMs: state.timeoutMs, confirmer: state.confirmer },
+      });
+      summary.timedOut.push(next.id);
+    }
+    out(args, [
+      `场景确认超时扫描：检查 ${summary.scanned} 条在等确认，超时 ${summary.timedOut.length} 条（timeoutMs=${summary.timeoutMs}）`,
+      ...(summary.timedOut.length ? [`已按 bug 先行：${summary.timedOut.join(', ')}`] : []),
+      ...(summary.escalated.length ? [`已告警 PM（SCENARIO_CONFIRM_TIMEOUT）：${summary.escalated.join(', ')}`] : []),
+    ].join('\n'), { ok: true, ...summary });
+    return;
+  }
   if (sub === 'reopen') {
     if (!args.id) fail('BAD_ID', '需要 --id');
     if (!['tester', 'pm'].includes(b.role)) fail('NOT_OWNER', '只有测试人员（或 PM 兜底）能打回缺陷任务');
@@ -4431,6 +4520,94 @@ function cmdOwnerConfirm(args) {
  * Owner 决定 / 验收。Owner 是外部角色，没有 boot；必须先有 owner confirm 的一次性确认码。
  * 只写需求任务、工作流.json 与事件链；需求正文/总览由工作台壳层消费返回值后同步。
  */
+/**
+ * R-43ad F-43ad-3 / AC2（T-f203）：缺陷单（bug / scenario-bug）验收。
+ * 落点写死任务行：task.acceptanceRecord = {status, by, channel, at, evidence[], testReport}；
+ * 不建镜像需求行、不动需求行 decisions[]；`acceptance`（验收标准字符串）原样不改。
+ * 门槛与 PM 代验收同码：缺测试报告/证据 → PM_ACCEPT_EVIDENCE_REQUIRED（Owner 通道不放宽）。
+ */
+function acceptDefectTask(args, { project, projectName, task, decision, opinion, proxyMode }) {
+  const at = nowIso();
+  const channelArg = String(args.channel || '').trim().toLowerCase();
+  let channel = 'ui';
+  if (proxyMode) {
+    channel = 'proxy';
+    const reqId = String(task.requirementId || '').trim();
+    if (!reqId) fail('PROXY_UNAUTHORIZED', '缺陷单没有绑需求，代管不适用；缺陷验收必须 Owner 本人', { taskId: task.id });
+    const proxy = activeProxyFor(projectName, reqId);
+    if (!proxy) fail('PROXY_UNAUTHORIZED', `需求 ${reqId} 没有未结束的评审代管，不能代验收缺陷单`, { taskId: task.id, requirementId: reqId });
+  } else if (channelArg) {
+    if (!['ui', 'tty'].includes(channelArg)) {
+      fail('OWNER_CHANNEL_INVALID', `Owner 验收通道只允许 ui / tty（收到 ${channelArg}）`, { channel: channelArg, allowed: ['ui', 'tty'] });
+    }
+    if (channelArg === 'tty' && !process.stdin.isTTY) {
+      fail('OWNER_TTY_REQUIRED', '--channel tty 必须在真实终端运行；界面确认请用 --channel ui', { tty: false });
+    }
+    channel = channelArg;
+  }
+  const items = parseEvidenceArg(args.evidence);
+  const verdict = validatePmAcceptEvidence({ items, projectPath: project.path });
+  const report = verdict.evidence.find((item) => String(item.kind) === 'report');
+  if (!report) {
+    fail('PM_ACCEPT_EVIDENCE_REQUIRED', '缺陷单验收必须带测试报告（含 PASS、不含 FAIL）：--evidence <报告>:report', {
+      taskId: task.id,
+      missing: verdict.missing.length ? verdict.missing : [{ kind: 'report', path: '', reason: 'TEST_REPORT_REQUIRED' }],
+    });
+  }
+  if (verdict.evidence.length < 2) {
+    fail('PM_ACCEPT_EVIDENCE_REQUIRED', '缺陷单验收证据两件套：测试报告 + 至少一件其它证据（截图/记录）', {
+      taskId: task.id,
+      missing: [{ kind: 'screenshot|record', path: '', reason: 'SECOND_EVIDENCE_REQUIRED' }],
+      given: verdict.evidence.map((item) => `${item.path}#${item.kind}`),
+    });
+  }
+  const accepted = String(decision) === 'accepted';
+  const record = {
+    status: String(decision),
+    by: proxyMode ? 'pm' : 'owner',
+    channel,
+    at,
+    opinion: truncate(opinion, 300),
+    evidence: verdict.evidence.map((item) => ({ path: item.path, sha256: item.sha256, kind: item.kind })),
+    testReport: String(report.path || ''),
+  };
+  task.acceptanceRecord = record;
+  task.workflow = task.workflow && typeof task.workflow === 'object' ? task.workflow : {};
+  task.workflow.acceptanceRecord = record;
+  if (accepted) {
+    task.status = 'accepted';
+    task.acceptedAt = at;
+    task.updatedAt = at;
+  } else {
+    // 打回：reopenCount+1，回开发队列（b5fc 缺陷旁路），证据清空等下轮修完再交。
+    task.status = task.owner ? 'working' : 'open';
+    task.reopenCount = Number(task.reopenCount || 0) + 1;
+    task.reopenedAt = at;
+    task.reopenedBy = proxyMode ? 'pm' : 'owner';
+    task.updatedAt = at;
+  }
+  task._by = proxyMode ? 'pm' : 'owner';
+  task._action = accepted ? 'defect_accept' : 'defect_reject';
+  task._note = truncate(opinion || (accepted ? '缺陷单验收通过' : '缺陷单验收打回'), 200);
+  const saved = saveTask(projectName, task);
+  appendEvent({
+    role: proxyMode ? 'pm' : 'owner', sessionId: sessionOf(args), action: accepted ? 'defect_accepted' : 'defect_rejected',
+    project: projectName, target: saved.id,
+    note: truncate(`${saved.type} ${accepted ? '验收通过' : '验收打回'}${proxyMode ? '（PM 代记）' : ''}`, 160),
+    data: { taskId: saved.id, status: decision, channel, testReport: record.testReport, evidence: record.evidence, reopenCount: saved.reopenCount || 0 },
+  });
+  out(args, [
+    `${saved.id}（${saved.type}）验收${accepted ? '通过' : '打回'}（${proxyMode ? 'PM 代记' : 'Owner'}，通道 ${channel}）`,
+    `测试报告：${record.testReport}`,
+    `证据 ${record.evidence.length} 件：${record.evidence.map((item) => `${item.kind}:${item.path}`).join('，')}`,
+    accepted ? '任务已置 accepted（不再进开发队列）' : `已打回 → ${saved.owner || '待认领'}（reopenCount=${saved.reopenCount}）`,
+    `验收标准保持原样：${String(saved.acceptance || '（空）').slice(0, 80)}`,
+  ].join('\n'), {
+    ok: true, task: saved, acceptanceRecord: record, channel, by: record.by,
+    action: accepted ? 'accept' : 'reject', requirementRowsTouched: 0,
+  });
+}
+
 export async function cmdOwner(args) {
   const sub = String(args._[1] || '').trim().toLowerCase();
   if (sub === 'confirm') { cmdOwnerConfirm(args); return; }
@@ -4470,8 +4647,15 @@ export async function cmdOwner(args) {
   }
   const teamMode = projectTeamMode(project);
   const task = loadTask(projectName, requirementId);
-  if (task.type !== 'requirement') {
+  const defectTask = ['bug', 'scenario-bug'].includes(String(task.type || ''));
+  if (task.type !== 'requirement' && !defectTask) {
     fail('NOT_REQUIREMENT', `${requirementId} 不是需求（type=${task.type}），Owner 命令只处理需求`, { id: requirementId, type: task.type });
+  }
+  // R-43ad F-43ad-3 / AC2（T-f203）：缺陷单验收走独立分支——任务行落 acceptanceRecord，
+  // 不建镜像需求行、不碰需求行 decisions[]；门槛与 PM 代验收同码（缺测试报告 → PM_ACCEPT_EVIDENCE_REQUIRED）。
+  if (defectTask) {
+    acceptDefectTask(args, { project, projectName, task, decision, opinion, proxyMode });
+    return;
   }
   const read = readWorkflowState(projectName);
   let row = read.state.requirements[requirementId];

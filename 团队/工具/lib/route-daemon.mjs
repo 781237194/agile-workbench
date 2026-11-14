@@ -32,6 +32,7 @@ import { requirementReviewer } from './roles.mjs';
 import { activeProxyFor } from './owner-proxy.mjs';
 import { addDecision } from './decision-box.mjs';
 import { ROLE_QUEUE_FILE, buildRoleQueues, writeRoleQueues } from './route-queues.mjs';
+import { scenarioConfirmState } from './scenario-confirm.mjs';
 import { DshClient } from './dsh-session.mjs';
 
 // ---------- 文件名与常量（三个新文件在此处集中声明，便于产品登记字段表） ----------
@@ -489,10 +490,16 @@ export function transitionGate(event, row, ctx) {
   return null;
 }
 
-/** B-* 缺陷任务的旁路计划（F-4）：working → 开发 fix；done → 测试 verify。 */
+/** B-* 缺陷任务的旁路计划（F-4）：scenario-bug 先确认场景 → working 开发 fix → done 测试 verify。 */
 export function planForBugTask(task) {
   const status = String(task.status || '');
   const owner = String(task.owner || '');
+  // R-43ad F-43ad-4（T-f203）：场景缺陷在「场景确认」未给结论前先叫产品/分析师确认；
+  // 超时（默认 10 分钟、可注入）按 bug 先行——不再等确认，直接走 fix 流程，PM 另行收告警。
+  if (String(task.type || '') === 'scenario-bug') {
+    const confirm = scenarioConfirmState(task);
+    if (confirm.pending && !confirm.timedOut) return { role: confirm.confirmer, action: 'confirm_scenario', gate: null };
+  }
   if (status === 'done') return { role: 'tester', action: 'verify', gate: null };
   if (status === 'working' || status === 'open') {
     if (!owner) return { skip: 'bug_without_owner', alertPm: true };
