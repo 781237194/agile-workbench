@@ -64,6 +64,31 @@ const req = run(['req', 'create', '--boot', pm.token, '--project', PROJECT, '--t
   const again = ensureTestTask(PROJECT, row, [devTask, made.task]);
   check('⑤ 再调一次复用不重复建', again.ok === true && again.reused === true, again);
 
+
+  // ⑥ 补单 T-eeff ①②③：新任务 status=open、createdBy=route-daemon、detail 带报告/证据要求
+  check('⑥ 新任务 status=open', String(saved.status) === 'open', saved.status);
+  check('⑥ createdBy=route-daemon', String(saved.createdBy) === 'route-daemon', saved.createdBy);
+  check('⑥ detail 含测试报告与 EVIDENCE 口径', /测试报告/.test(String(saved.detail)) && /EVIDENCE_/.test(String(saved.detail)), String(saved.detail).slice(0, 80));
+
+  // ⑦ 补单 T-eeff ④：第二次调用留痕 test_task_skipped_existing
+  const logFile = path.join(TEAM_ROOT, '状态', '项目', PROJECT, '路由守护.jsonl');
+  const logs = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : [];
+  check('⑦ 复用时有 test_task_skipped_existing 事件', logs.some((l) => l.event === 'test_task_skipped_existing'), logs.filter((l) => l.event === 'test_task_skipped_existing').length);
+
+  // ⑧ 补单 T-eeff ⑥：失败注入钩子
+  process.env.TEAM_TASK_CREATE_FAIL = '1';
+  const injected = ensureTestTask(PROJECT, { ...row, id: req.id }, []);
+  delete process.env.TEAM_TASK_CREATE_FAIL;
+  check('⑧ TEAM_TASK_CREATE_FAIL 注入 → ok=false', injected.ok === false && /TEAM_TASK_CREATE_FAIL/.test(String(injected.why)), injected);
+
+  // ⑨ 补单 T-eeff ⑤：roleIds 无 tester → noTesterRole，不建
+  const noRole = ensureTestTask(PROJECT, { ...row, id: req.id, roleIds: ['pm', 'analyst', 'programmer1'] }, []);
+  check('⑨ 无 tester 角色 → noTesterRole 且不建', noRole.ok === false && noRole.noTesterRole === true, noRole);
+
+  // ⑩ 补单 T-eeff ④b：当前轮测试任务被 terminated → 不再叫 tester
+  const terminated = { id: 'T-term', type: 'task', owner: 'tester', status: 'terminated', requirementId: req.id, workflow: { round: 2 } };
+  const p10 = planForRow(row, { tasks: [devTask, terminated], projectPath: path.join(PROJECTS, PROJECT), mode: 'fast' });
+  check('⑩ 测试任务全 terminated → skip:test_task_terminated', p10.skip === 'test_task_terminated' && p10.alertPm === true, p10);
   const passed = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => !r.ok).length;
   console.log(`\nR-464f 断言：${passed}/${results.length} PASS${failed ? `，${failed} FAIL` : ''}`);

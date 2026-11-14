@@ -312,33 +312,57 @@ export function isCurrentRound(row, task) {
  * R-464f：dev_done 且当前轮没有 tester 任务时，守护**唯一写例外**——先建测试任务，再由调用方唤醒。
  * 失败不抛（返回 {ok:false, why}），由调用方告警且不空唤醒。
  */
-export function ensureTestTask(projectName, row, tasks = [], { by = 'router' } = {}) {
+export function ensureTestTask(projectName, row, tasks = [], { by = 'route-daemon' } = {}) {
   const requirementId = String((row && row.id) || '');
   if (!requirementId) return { ok: false, why: 'NO_REQUIREMENT_ID' };
+  // 补单 T-eeff ⑤：项目 roleIds 不含 tester（无测试角色）→ 不建任务，交给调用方告警。
+  try {
+    const roleIds = Array.isArray(row && row.roleIds) ? row.roleIds : null;
+    if (roleIds && !roleIds.includes('tester')) return { ok: false, why: 'NO_TESTER_ROLE', noTesterRole: true };
+  } catch { /* 读不到 roleIds 按有 tester 处理 */ }
+  // 补单 T-eeff ⑥：失败注入钩子（测试专用，生产不得设置）。
+  if (String(process.env.TEAM_TASK_CREATE_FAIL || '') === '1') {
+    return { ok: false, why: 'TEAM_TASK_CREATE_FAIL（测试注入）' };
+  }
   const cur = Number((row && (row.deliveryRound ?? row.round)) ?? 0) || 0;
   const existing = (tasks || []).filter((t) => String(t.requirementId || '') === requirementId
     && String(t.owner || '') === 'tester'
     && isCurrentRound(row, t));
-  if (existing.length) return { ok: true, reused: true, task: existing[0] };
+  if (existing.length) {
+    // 补单 T-eeff ④：第二拍/已存在时留痕 test_task_skipped_existing，不再重复建。
+    appendRouteLog(projectName, {
+      at: nowIso(), event: 'test_task_skipped_existing', source: 'route', requirementId,
+      taskId: existing[0].id, role: 'tester', action: 'test', ok: true, existing: existing.length,
+    });
+    return { ok: true, reused: true, task: existing[0] };
+  }
   try {
     const task = createTask({
       project: projectName,
       title: ('测试：' + String(row.title || requirementId)).slice(0, 40),
-      detail: '由路由守护自动创建（R-464f）：需求 ' + requirementId + ' 已 dev_done 且当前轮没有测试任务。',
+      // 补单 T-eeff ③：detail 必须写清交付物（测试报告 + 证据，含 EVIDENCE_* 口径）。
+      detail: '由路由守护自动创建（R-464f）：需求 ' + requirementId + ' 已 dev_done 且当前轮没有测试任务。\n'
+        + '完成标准：测试报告（含 PASS/FAIL 逐条结论）+ 证据文件；task done 时按 EVIDENCE_* 证据门提交（EVIDENCE_FILE_MISSING/EVIDENCE_STALE/EVIDENCE_HASH_MISMATCH 均视为未交）。',
       priority: String(row.priority || 'P1'),
       priorityBy: by,
       createdBy: by,
-      owner: 'tester',
       type: 'task',
       requirementId,
       acceptance: String(row.acceptance || '按需求验收标准复验').slice(0, 500),
     });
+    // 补单 T-eeff ①②：自动建的任务必须 open（不占为 working），owner 直接写 tester。
     try {
-      if (cur) {
-        const raw = readJson(projectTaskFile(projectName, task.id), null);
-        if (raw) { raw.workflow = { ...(raw.workflow || {}), round: cur }; writeJson(projectTaskFile(projectName, task.id), raw); }
+      const raw = readJson(projectTaskFile(projectName, task.id), null);
+      if (raw) {
+        raw.owner = 'tester';
+        raw.status = 'open';
+        raw.claimedAt = null;
+        raw.createdBy = by;
+        raw.workflow = { ...(raw.workflow || {}), ...(cur ? { round: cur } : {}) };
+        writeJson(projectTaskFile(projectName, task.id), raw);
+        Object.assign(task, { owner: 'tester', status: 'open', claimedAt: null, createdBy: by });
       }
-    } catch { /* 轮次标记失败不影响建单 */ }
+    } catch { /* 状态/轮次标记失败不影响建单 */ }
     appendRouteLog(projectName, { at: nowIso(), event: 'test_task_created', source: 'route', requirementId, taskId: task.id, role: 'tester', action: 'test', ok: true });
     return { ok: true, reused: false, task };
   } catch (e) {
@@ -426,6 +450,9 @@ export function planForRow(row, ctx) {
     // R-464f：当前轮没有测试任务 → 先建再叫（needTestTask 由调用方执行 = 守护唯一写例外）。
     const testsCur = tasksOf(id, tasks, (t) => String(t.owner || '') === 'tester' && isCurrentRound(row, t));
     if (!testsCur.length) return { role: 'tester', action: 'test', needTestTask: true };
+    // 补单 T-eeff ④：当前轮测试任务全被终止/取消 → 不再叫 tester（否则死循环空转），交 PM 处理。
+    const liveTests = testsCur.filter((t) => !['terminated', 'cancelled'].includes(String(t.status || '')));
+    if (!liveTests.length) return { skip: 'test_task_terminated', alertPm: true };
     return { role: 'tester', action: 'test' };
   }
   if (status === 'test_done') {
@@ -933,7 +960,20 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
     }
     // R-464f：dev_done 且当前轮没有测试任务 → 先建任务再叫（守护唯一写例外）；建失败告警、不空唤醒。
     if (plan.needTestTask) {
-      const made = ensureTestTask(name, { ...row, id: event.requirementId }, ctx.tasks || []);
+      let roleIds = null;
+      try { const proj = loadProject(name); roleIds = Array.isArray(proj && proj.roleIds) ? proj.roleIds : null; } catch { roleIds = null; }
+      const made = ensureTestTask(name, { ...row, id: event.requirementId, roleIds }, ctx.tasks || []);
+      if (made && made.noTesterRole) {
+        appendRouteLog(name, { ...base, event: 'skip', why: 'no_tester_role', role: 'tester', action: 'test', ok: false });
+        out.skips.push({ ...base, why: 'no_tester_role' });
+        alertPm(name, {
+          type: 'escalation',
+          subject: '无测试角色：' + event.requirementId,
+          body: '项目 roleIds 不含 tester（无测试角色）。需求 ' + event.requirementId + ' 已 dev_done，但无法自动建测试任务；请 PM 补 tester 角色或手工指定测试人后重派。',
+          key: 'no_tester_role|' + event.requirementId,
+        });
+        continue;
+      }
       if (!made.ok) {
         appendRouteLog(name, { ...base, event: 'skip', why: `test_task_create_failed:${made.why}`, role: 'tester', action: 'test', ok: false });
         out.skips.push({ ...base, why: 'test_task_create_failed' });
