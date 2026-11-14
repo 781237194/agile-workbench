@@ -9,6 +9,13 @@
 
 > 本仓库是独立实现的新项目（clean-room），不复制其他工作台项目的源码、模板、文档或图片，约定见 [`docs/CLEAN-ROOM.md`](docs/CLEAN-ROOM.md)。
 
+### 核心零插件可跑 · 可选插件按需装
+
+- **核心不依赖任何可选插件**：boot / 派单 / 回执 / 提案 / 评审 / 签字 / apply / 验收 / 看板 / 会话轮换，没装插件也能完整跑。
+- **可选插件**（装了更好，不装不坏）：`memory-evolve` 记忆、`modlens` 视觉、`web-search-safe` 搜索。
+- **缺插件自动降级**：只标 `memory:off` / `vision:off` / `search:off`，不报错、不阻断核心；`node 团队\工具\team.mjs status`（或 `doctor`）随时看 on/off、版本、数据目录与读取源。
+- **安装 / 卸载 / 回滚**：见 [`docs/可选插件.md`](docs/可选插件.md)（含双轨验证与故障处理）。
+
 ---
 
 ## 新用户最短说明
@@ -139,7 +146,7 @@ dsh plugin --profile desktop add dsh-pm-workbench
 安装器会：
 
 1. 检查 Git（可选）和系统 Node.js 20+。系统已有 20+ 就直接用；没有就自动下载 Windows x64 便携 Node.js LTS 到 `<安装目录>\.runtime\node`，只给本安装器与 npm 使用，**不写系统 PATH、不改系统环境、不需要管理员权限**；官方源失败会自动换 npmmirror 镜像。
-2. 当前目录是仓库 → 直接使用；否则下载 main 分支 zip 到 `D:\PM工作台`（D 盘不存在或不可写时用 `%USERPROFILE%\PM工作台`），解压后使用。
+2. 当前目录是仓库 → 直接使用；否则下载 main 分支 zip 到安装目录（默认本机 `PM工作台` 文件夹，D 盘不存在或不可写时回退 `%USERPROFILE%\PM工作台`），解压后使用。
 3. 在仓库目录执行 `npm install`（首次会下载 Electron，可能需要几分钟）。
 4. 创建桌面快捷方式 `PM工作台.lnk`，指向 `start.cmd`，图标 `assets\pm-workbench.ico`。
 5. 可选立即启动：给命令加 `-Launch`（例如 `安装PM工作台.cmd -Launch`）。
@@ -150,7 +157,7 @@ dsh plugin --profile desktop add dsh-pm-workbench
 
 | 参数 | 作用 |
 |---|---|
-| `-InstallDir <目录>` | 指定安装目录（默认 `D:\PM工作台`，回退 `%USERPROFILE%\PM工作台`） |
+| `-InstallDir <目录>` | 指定安装目录（默认本机 `PM工作台` 文件夹，回退 `%USERPROFILE%\PM工作台`） |
 | `-Launch` | 装完立即启动 |
 | `-NoShortcut` | 不创建桌面快捷方式 |
 | `-ZipPath <zip>` | 用本地 zip，不联网下载 |
@@ -240,8 +247,8 @@ DSH（DeepSeek Harness）是外部会话引擎，用于登记工作区、创建/
   `session/list`、`session/create`、`session/rename`、`session/prompt`、
   `workspace/create`、`workspace/archiveSession`；
 - 认证：从 `DSH_HOME`（默认 `~/.dsh`）的 `.credentials.yaml` 读取
-  `client-connection/browser-session` secret，在本地派生 HMAC cookie；
-  secret 只读，不写入项目、日志或界面；
+  `client-connection/browser-session` 会话凭据，在本地派生 HMAC cookie；
+  凭据只读，不写入项目、日志或界面；
 - 离线行为：返回真实错误码（如 `DSH_OFFLINE`、`DSH_TIMEOUT`、`DSH_AUTH_MISSING`、
   `DSH_AUTH_REJECTED`、`DSH_RPC`），界面不伪造会话。
 
@@ -302,7 +309,7 @@ node 团队\工具\launch.mjs --project "示例项目" --workspace "<项目目�
    [`src/preload.js`](src/preload.js) 暴露的白名单 IPC；主进程对参数做路径与类型校验。
 3. **文件访问受限**：预览/打开文件先解析真实路径并校验是否在允许根内，文本上限 512 KB、图片上限 8 MB；
    索引扫描限制深度与文件数。
-4. **凭据只读**：DSH secret 只从 `DSH_HOME` 读取，用于本地派生 cookie；不写入项目文件、日志、界面或状态库。
+4. **凭据只读**：DSH 会话凭据只从 `DSH_HOME` 读取，用于本地派生 cookie；不写入项目文件、日志、界面或状态库。
 5. **写入有闸门**：文件变更只走 `propose → show → review → sign → apply`；apply 前备份并做 CAS 校验；
    Owner 决策与签字必须由界面显式操作。
 6. **私有数据不入库**：`.gitignore` 覆盖 `项目/`、`data/`、`团队/状态/`、`团队/日志/`、`团队/看板.*`、

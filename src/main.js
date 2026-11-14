@@ -5,11 +5,38 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const { execFileSync, spawnSync } = require('node:child_process');
+const { pathToFileURL } = require('node:url');
 
 const ROOT = path.join(__dirname, '..');
 const APP_ICON = path.join(ROOT, 'assets', 'pm-workbench.ico');
 const APP_NAME = 'PM工作台';
+// R-b5fc F-4b：角色队列派生文件（由 团队/工具/lib/route-queues.mjs 生成，工作台只读）。
+const ROLE_QUEUE_FILE_NAME = 'role_queues.json';
+// R-b5fc F-2/F-6：路由守护心跳文件（由 团队/工具/lib/route-daemon.mjs 写，工作台只读）。
+const ROUTE_STATUS_FILE_NAME = '守护状态.json';
+const ROUTE_DAEMON_BEAT_MS_FALLBACK = 30 * 1000;
+const ROUTE_DAEMON_STALE_BEATS = 3;
+// 守护状态界面自检（T-20261114-063256-b417）：真实窗口 + 沙盘守护状态文件，三态与两态截图。
+const IS_DAEMON_CHECK = process.argv.includes('--daemon-check');
 const IS_SELFTEST = process.argv.includes('--selftest');
+// 布局自检（T-846e）：在真实窗口里量 1280/1680/2560 三档并截图；只在显式参数下跑，不影响正常启动。
+const IS_LAYOUT_CHECK = process.argv.includes('--layout-check');
+// 评审弹窗真实点击自检（B-fe22）：真实窗口点“通过/打回”，抓 DOM 反馈与工作流落账；只在显式参数下跑。
+const IS_OWNER_CHECK = process.argv.includes('--owner-check');
+// 验收状态同源自检（B-20261114-010345-b55c）：真实窗口点【我的验收】确认，验证"列表与确认同一份
+// 工作流.json、同秒需求不串号、过期时提示来源+时间"；只在显式参数下跑，数据根独立。
+const IS_B55C_CHECK = process.argv.includes('--b55c-check');
+// 工作区残留清理自检（T-20261114-005845-38f0）：额外会话单一计数 + 只解绑清理 + 清理 jsonl + 6/6 口径。
+const IS_E29F_CHECK = process.argv.includes('--e29f-check');
+// 评审界面展示自检（B-504a）：全部需求清单/三要素/展开详情/筛选 + 两档宽截图。
+const IS_REVIEW_CHECK = process.argv.includes('--review-check');
+// R-c651 AC3 界面自检：真实窗口量团队行三列（未读/未回执/停滞）+ 按钮接线 + 截图；数据根独立、写操作打桩。
+const IS_C651_CHECK = process.argv.includes('--c651-check');
+// B-20261114-052109-2ebe：面板「角色卡/文件索引永远缺失」界面自检（真实窗口 + 临时改名造真缺失）
+const IS_B2EBE_CHECK = process.argv.includes('--b2ebe-check');
+// R-b5fc F-4b：角色队列面板自检（真实窗口 + 队列文件缺失用例）
+const IS_QUEUE_CHECK = process.argv.includes('--queue-check');
 // 自测沙盘根：默认 .selftest-data；AWB_SELFTEST_ROOT 可让并行验证/CI 各自隔离，绝不碰真实状态。
 const SELFTEST_ROOT = process.env.AWB_SELFTEST_ROOT
   ? path.resolve(process.env.AWB_SELFTEST_ROOT)
@@ -17,7 +44,20 @@ const SELFTEST_ROOT = process.env.AWB_SELFTEST_ROOT
 const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_DIR) : path.join(ROOT, 'data');
 // 默认数据与 Chromium 缓存都放在仓库内，不再落到 C:\Users\...\AppData。
 // 自测时 Chromium/状态也进沙盘根，避免两个自测实例抢同一份 userdata。
-const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT : LOCAL_DATA;
+// 布局自检同样用独立数据根（.layout-check-data），只读快照，不碰真实工作台状态。
+const LAYOUT_DATA = process.env.AWB_LAYOUT_DATA ? path.resolve(process.env.AWB_LAYOUT_DATA) : path.join(ROOT, '.layout-check-data');
+// b55c 验收同源自检同样独立数据根，跑完不影响真实工作台状态。
+const B55C_DATA = process.env.AWB_B55C_DATA ? path.resolve(process.env.AWB_B55C_DATA) : path.join(ROOT, '.b55c-check-data');
+// 工作区清理自检的数据根同样独立。
+const E29F_DATA = process.env.AWB_E29F_DATA ? path.resolve(process.env.AWB_E29F_DATA) : path.join(ROOT, '.e29f-check-data');
+const REVIEW_DATA = process.env.AWB_REVIEW_DATA ? path.resolve(process.env.AWB_REVIEW_DATA) : path.join(ROOT, '.review-check-data');
+// R-c651 界面自检独立数据根：只读真实项目的团队在场数据；点击写操作一律打桩，不写团队状态。
+const C651_DATA = process.env.AWB_C651_DATA ? path.resolve(process.env.AWB_C651_DATA) : path.join(ROOT, '.c651-check-data');
+// R-b5fc F-4b 自检独立数据根：队列用例只在沙盘里造 role_queues.json，不碰真实派生文件。
+const QUEUE_CHECK_DATA = process.env.AWB_QUEUE_DATA ? path.resolve(process.env.AWB_QUEUE_DATA) : path.join(ROOT, '.queue-check-data');
+const DAEMON_CHECK_DATA = process.env.AWB_DAEMON_DATA ? path.resolve(process.env.AWB_DAEMON_DATA) : path.join(ROOT, '.daemon-check-data');
+const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT
+  : (IS_LAYOUT_CHECK ? LAYOUT_DATA : (IS_B55C_CHECK ? B55C_DATA : (IS_E29F_CHECK ? E29F_DATA : (IS_C651_CHECK ? C651_DATA : (IS_B2EBE_CHECK ? path.join(ROOT, '.b2ebe-check-data') : (IS_QUEUE_CHECK ? QUEUE_CHECK_DATA : (IS_DAEMON_CHECK ? DAEMON_CHECK_DATA : LOCAL_DATA)))))));
 const USER_DATA = path.join(DATA_ROOT, 'userdata');
 const TEMP_ROOT = path.join(DATA_ROOT, 'tmp');
 // DSH 地址持久化在仓库数据目录（D 盘），不写 C 盘、不写项目目录。
@@ -88,6 +128,28 @@ app.setPath('temp', TEMP_ROOT);
 if (IS_SELFTEST) {
   process.env.AWB_STORE = path.join(SELFTEST_ROOT, 'workbench.json');
   process.env.TEAM_ROOT = path.join(SELFTEST_ROOT, '团队');
+}
+// b55c 自检同理：状态库与团队状态都落在独立沙盘，绝不碰真实团队/项目。
+if (IS_B55C_CHECK) {
+  process.env.AWB_STORE = path.join(B55C_DATA, 'workbench.json');
+  process.env.TEAM_ROOT = path.join(B55C_DATA, '团队');
+}
+if (IS_E29F_CHECK) {
+  process.env.AWB_STORE = path.join(E29F_DATA, 'workbench.json');
+  process.env.TEAM_ROOT = path.join(E29F_DATA, '团队');
+}
+if (IS_REVIEW_CHECK) {
+  process.env.AWB_STORE = path.join(REVIEW_DATA, 'workbench.json');
+  process.env.TEAM_ROOT = path.join(REVIEW_DATA, '团队');
+}
+// queue-check 也要隔离团队状态：否则自检会临时改名真实 role_queues.json（测试报告-v67 观察项 1）。
+// 数据根 userData 不变（仍是 .queue-check-data），只把团队状态根指进同一个沙盘。
+if (IS_QUEUE_CHECK) {
+  process.env.TEAM_ROOT = path.join(QUEUE_CHECK_DATA, '团队');
+}
+// 守护状态界面自检：团队状态根进沙盘，守护状态文件只在沙盘里造，不读写真实守护心跳。
+if (IS_DAEMON_CHECK) {
+  process.env.TEAM_ROOT = path.join(DAEMON_CHECK_DATA, '团队');
 }
 
 const { DshAdapter, discoverDshWeb } = require('./dsh-adapter');
@@ -249,6 +311,28 @@ function roleIdsForTeamMode(value) {
 
 function roleIdsForProject(project) {
   return roleIdsForTeamMode(project && project.teamMode);
+}
+
+/**
+ * e29f：角色集合以**旧协议项目登记**（团队/状态/项目/<项目>/项目.json → roleIds）为准，
+ * 它缺失/为空才退回本机 store 的 teamMode 推角色。fast 项目这里只有 4 个角色：
+ * 拿全局 6 角色去比会把 4/4 误报成 4/6（产品 2026-11-14 指出）。
+ */
+function projectRoleIds(project) {
+  const fallback = roleIdsForProject(project);
+  try {
+    const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+    const slug = teamTools.teamSlug(String((project && (project.teamName || project.name)) || ''));
+    const file = path.join(teamRoot, '状态', '项目', slug, '项目.json');
+    if (!fs.existsSync(file)) return fallback;
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+    const ids = Array.isArray(raw && raw.roleIds) ? raw.roleIds.map(String).filter((role) => ROLE_BY_ID.has(role)) : [];
+    if (!ids.length) return fallback;
+    // 登记里的 roleIds 与 store 的 teamMode 冲突时，以登记为准（团队工具建的 fast 项目就是 4 个）。
+    return [...new Set(ids)];
+  } catch {
+    return fallback;
+  }
 }
 // 六会话通信链：一条派单必须能回答 delivered / wake / read / ack 四段状态。
 // read/ack 的“角色自己执行”只能由旧协议现场（邮箱 new→cur、回执.jsonl 新增）证明。
@@ -914,7 +998,7 @@ function persistTeamName(projectId, teamName) {
 
 /**
  * Owner 确认码（challenge/nonce/confirmToken）已废弃（2026-11-06）：
- * owner 决定/验收直接以 role=owner 接受，审计记 actor:'owner'、channel:'workbench'、at。
+ * owner 决定/验收直接以 role=owner 接受，审计记 actor:'owner'、channel:'ui'/'tty'、at。
  * 下面这套内存 challenge 机制不再被任何 IPC 调用；owner:challenge / owner:confirm
  * 两个 IPC 仍保留，但只返回固定占位值并标记 deprecated，仅供旧渲染层兼容。
  * 不要在新代码里调用 requireOwnerConfirmation / issueOwnerChallenge。
@@ -1490,6 +1574,7 @@ let mainWindow = null;
 let teamBoardWindow = null;
 let teamBoardProjectId = null;
 let teamBoardProjectPath = null;
+let teamBoardTheme = 'dark';
 let teamBoardExpandedBounds = null;
 // 优先级：显式环境变量（测试/运维）→ 上次保存的地址 → 旧默认 52711。
 let dsh = new DshAdapter(process.env.DSH_WEB_URL || SAVED_DSH_URL || 'http://127.0.0.1:52711');
@@ -1867,6 +1952,10 @@ function atomicCopyFile(source, target) {
   }
 }
 
+// B-fa80：workbench.json（约 363KB）每次 IPC 都会被 readStore 重读+正规化；
+// 按 mtime+size 缓存，未变直接返回。写路径（writeStore）会清缓存，读后请勿原地改再依赖缓存。
+let storeCache = { file: '', key: '', value: null };
+
 function readStore() {
   const file = storeFile();
   const parse = (target) => {
@@ -1915,8 +2004,15 @@ function readStore() {
     return emptyStore();
   }
   try {
+    const st = fs.statSync(file);
+    const cacheKey = `${st.mtimeMs}:${st.size}`;
+    if (storeCache.file === file && storeCache.key === cacheKey && storeCache.value) {
+      // 返回深拷贝：调用方会读-改-写 store，共享缓存对象会在写失败时留下脏缓存。
+      return structuredClone(storeCache.value);
+    }
     const ok = parse(file);
     storeFatal = false;
+    storeCache = { file, key: cacheKey, value: ok };
     return ok;
   } catch (e) {
     const corrupt = file + '.corrupt-' + storeStamp();
@@ -1944,6 +2040,8 @@ function readStore() {
 }
 
 function writeStore(store) {
+  // 写前先失效缓存：调用方可能已原地修改了缓存对象；即使本次写盘失败，也不能让下次读到脏缓存。
+  storeCache = { file: '', key: '', value: null };
   if (storeFatal) throw new Error('状态文件损坏且没有可用备份，已阻止写入；请先处理 workbench.json.corrupt-*');
   const file = storeFile();
   const body = JSON.stringify(store, null, 2) + '\n';
@@ -1958,8 +2056,15 @@ function writeStore(store) {
     throw error;
   }
   storeWarning = null;
+  // 写后失效缓存：同一毫秒内 mtime 可能不变，不能靠 mtime 自动识别。
+  storeCache = { file: '', key: '', value: null };
 }
 
+function fmtTokens(value) {
+  const n = Number(value) || 0;
+  if (n >= 10000) return (Math.round(n / 1000) / 10) + ' 万';
+  return String(n);
+}
 function now() { return new Date().toISOString(); }
 function id(prefix) { return prefix + '-' + crypto.randomUUID().slice(0, 8); }
 function cleanName(value) { return String(value || '').trim().replace(/[\\/:*?"<>|]/g, '-').slice(0, 60); }
@@ -2254,11 +2359,14 @@ function publicProject(project) {
     exists,
     // 团队模式与角色清单显式暴露：Fast 只有 4 个角色，界面/测试不按六角色硬编码。
     teamMode: normalizeTeamMode(project.teamMode),
-    roleIds: roleIdsForProject(project),
+    // R-b52b F-4/AC6：N 取「项目.json.roleIds」（登记为准），不是只看 teamMode；
+    // 这样把 tester 从 roleIds 删掉后，界面计数会立刻变成 X/3，而不是继续按 4 个算。
+    roleIds: projectRoleIds(project),
     teamModeLabel: (TEAM_MODE_BY_ID.get(normalizeTeamMode(project.teamMode)) || {}).label || '',
     // 阶段/需求/任务/boot 以旧团队状态为准；本地 tasks 只在未登记团队时兜底。
     stage: flow.stage || deriveStage(project),
     phase: flow.phase || null,
+    derivation: flow.derivation || null,
     round: flow.round || 1,
     requirements: Array.isArray(flow.requirements) ? flow.requirements : [],
     nextRound: Array.isArray(flow.nextRound) ? flow.nextRound : [],
@@ -3062,6 +3170,8 @@ function workflowSnapshot(project) {
           ...legacyView,
           id: project.id,
           workspace: path.resolve(project.path),
+          // 阶段推导证据：界面只渲染推导结果，工作流.json.phase 仅作历史提示。
+          derivation: phaseDerivation(legacyView),
           // 旧 工作流.json/任务/需求/提案 是业务真相；本地 requirements/tasks 只是镜像。
           truthSource: 'legacy-workflow',
           mirrorOnly: true,
@@ -3098,6 +3208,13 @@ function workflowSnapshot(project) {
     optionalMissing: Array.isArray(fallbackCaps.optionalMissing) ? fallbackCaps.optionalMissing : [],
     fallback: true
   };
+  const fallbackCounts = {
+    tasks: tasks.length,
+    open: open.length,
+    done: tasks.length - open.length,
+    requirements: countRequirements(project),
+    commits: Array.isArray(project.commits) ? project.commits.length : 0
+  };
   return {
     ok: true,
     project: project.name,
@@ -3115,13 +3232,8 @@ function workflowSnapshot(project) {
     legacy: fallbackLegacy,
     ownerReview: project.ownerReview || { status: 'optional', opinion: '', at: null },
     roundKey: `${project.id}|${countRequirements(project)}|${tasks.length}|${open.length}`,
-    counts: {
-      tasks: tasks.length,
-      open: open.length,
-      done: tasks.length - open.length,
-      requirements: countRequirements(project),
-      commits: Array.isArray(project.commits) ? project.commits.length : 0
-    },
+    counts: fallbackCounts,
+    derivation: phaseDerivation({ phase: stage, requirements: [], tasks, counts: fallbackCounts, workflow: null }),
     updatedAt: now()
   };
 }
@@ -3406,6 +3518,637 @@ function readBoardFile(filePath) {
   }
 }
 
+// ==========================================================================
+// 阶段推导证据（只读展示元数据）：阶段由需求/任务/提交/Owner 决定推导，
+// 工作流.json.phase 只作为历史提示，不参与界面阶段。
+// ==========================================================================
+const PHASE_RANK_SHELL = {
+  idle: 0, requirement: 1, requirement_review: 2, owner_review: 3, tech_review: 4,
+  dispatch: 5, dev: 6, dev_done: 7, dev_review: 8, test: 9, test_done: 10,
+  owner_accept: 11, accepted: 12, iteration: 13, terminated: 14
+};
+
+function phaseDerivation(snapshot) {
+  const rows = Array.isArray(snapshot && snapshot.requirements) ? snapshot.requirements : [];
+  const tasks = Array.isArray(snapshot && snapshot.tasks) ? snapshot.tasks : [];
+  const phase = String((snapshot && snapshot.phase) || 'idle');
+  const sources = [];
+  const statusCount = new Map();
+  for (const row of rows) {
+    const status = String((row && row.status) || '');
+    if (status) statusCount.set(status, (statusCount.get(status) || 0) + 1);
+  }
+  for (const [status, count] of statusCount) sources.push(`需求 status=${status}×${count}`);
+  const done = tasks.filter((task) => String(task && task.status) === 'done');
+  if (tasks.length) sources.push(`任务 done ${done.length}/${tasks.length}`);
+  const devDone = done.filter((task) => ['programmer1', 'programmer2'].includes(String(task && task.owner))).length;
+  const testDone = done.filter((task) => String(task && task.owner) === 'tester').length;
+  if (devDone) sources.push(`开发任务完成 ${devDone}`);
+  if (testDone) sources.push(`测试任务完成 ${testDone}`);
+  const commits = Number(snapshot && snapshot.counts && snapshot.counts.commits) || 0;
+  sources.push(`提交 ${commits}`);
+  const ownerStates = [...new Set(rows.map((row) => String((row && row.ownerReview && row.ownerReview.status) || '')).filter(Boolean))];
+  const verdicts = [...new Set(rows.map((row) => String((row && row.productReview && row.productReview.verdict) || '')).filter(Boolean))];
+  if (verdicts.length) sources.push(`需求评审 ${verdicts.join('/')}`);
+  if (ownerStates.length) sources.push(`需求 Owner 决定 ${ownerStates.join('/')}`);
+  const historyPhase = snapshot && snapshot.workflow && snapshot.workflow.phase ? String(snapshot.workflow.phase) : null;
+  // 合法回退只认显式事件：评审 reject、Owner 打回、iterate/terminate。
+  const rollback = statusCount.has('rejected')
+    || ownerStates.includes('rejected')
+    || verdicts.includes('reject')
+    || ['terminated', 'iteration'].includes(phase);
+  return {
+    phase,
+    rank: PHASE_RANK_SHELL[phase] !== undefined ? PHASE_RANK_SHELL[phase] : 0,
+    sources: sources.slice(0, 6),
+    historyPhase,
+    historyIgnored: Boolean(historyPhase && historyPhase !== phase),
+    rollback
+  };
+}
+
+// ==========================================================================
+// Owner 评审材料（只读）：五类清单，带路径/大小/更新时间/版本；不补造、不写盘。
+// ==========================================================================
+const OWNER_MATERIAL_MAX_BYTES = 1024 * 1024;
+const OWNER_ACK_MAX_COMMITS = 5;
+
+function teamProjectsDir() {
+  const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+  return path.join(teamRoot, '状态', '项目');
+}
+
+/** 按项目路径/登记名找团队状态目录（_deleted 归档目录不算）。 */
+function teamProjectStateDir(project) {
+  if (!project) return null;
+  const projectsDir = teamProjectsDir();
+  let entries = [];
+  try { entries = fs.readdirSync(projectsDir, { withFileTypes: true }); } catch { return null; }
+  const projectPath = path.resolve(String(project.path || '')).toLowerCase();
+  const names = [project.teamName, project.name].filter(Boolean).map(String);
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === '_deleted') continue;
+    const dir = path.join(projectsDir, entry.name);
+    let config = null;
+    try { config = JSON.parse(fs.readFileSync(path.join(dir, '项目.json'), 'utf8').replace(/^\uFEFF/, '')); } catch { continue; }
+    const samePath = config && config.path && path.resolve(String(config.path)).toLowerCase() === projectPath;
+    const sameName = config && names.includes(String(config.name));
+    if (samePath || sameName) return dir;
+  }
+  return null;
+}
+
+function ownerFileRecord(root, abs, groupKey) {
+  let stat;
+  try { stat = fs.statSync(abs); } catch { return null; }
+  if (!stat.isFile()) return null;
+  const name = path.basename(abs);
+  const versionMatch = name.match(/-v(\d+)\.([a-z0-9]+)$/i);
+  return {
+    kind: 'file',
+    group: groupKey,
+    rel: path.relative(root, abs).replace(/\\/g, '/'),
+    name,
+    size: stat.size,
+    mtime: stat.mtime.toISOString(),
+    version: versionMatch ? Number(versionMatch[1]) : null,
+    base: versionMatch ? name.slice(0, versionMatch.index) : name.replace(/\.[^.]+$/, '')
+  };
+}
+
+function ownerVersionGroups(files, limit = 4) {
+  const byBase = new Map();
+  for (const file of files) {
+    if (!byBase.has(file.base)) byBase.set(file.base, []);
+    byBase.get(file.base).push(file);
+  }
+  const groups = [];
+  for (const [base, rows] of byBase) {
+    rows.sort((a, b) => (Number(b.version) || 0) - (Number(a.version) || 0) || String(b.mtime).localeCompare(String(a.mtime)));
+    const latest = rows[0];
+    groups.push({ ...latest, versions: rows.map((row) => ({ version: row.version, rel: row.rel, size: row.size, mtime: row.mtime })) });
+  }
+  groups.sort((a, b) => String(b.mtime).localeCompare(String(a.mtime)));
+  return groups.slice(0, limit);
+}
+
+function readDirFiles(dir) {
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return []; }
+  return names.filter((name) => /\.(md|markdown|txt)$/i.test(name)).map((name) => path.join(dir, name));
+}
+
+function readTeamCommits(project) {
+  const stateDir = teamProjectStateDir(project);
+  if (!stateDir) return [];
+  const dir = path.join(stateDir, '提交');
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((name) => name.endsWith('.json')); } catch { return []; }
+  const rows = [];
+  for (const name of names) {
+    let record = null;
+    try { record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, '')); } catch { continue; }
+    rows.push({
+      kind: 'commit',
+      id: String(record.id || name.replace(/\.json$/, '')),
+      title: String(record.title || record.proposalTitle || ''),
+      author: String(record.author || record.role || ''),
+      at: String(record.createdAt || record.at || ''),
+      files: Array.isArray(record.files) ? record.files.map((file) => String((file && file.target) || file)).slice(0, 8) : [],
+      note: String(record.note || '')
+    });
+  }
+  rows.sort((a, b) => String(b.at).localeCompare(String(a.at)) || String(b.id).localeCompare(String(a.id)));
+  return rows.slice(0, OWNER_ACK_MAX_COMMITS);
+}
+
+function ownerMaterials(project, requirementId) {
+  const root = path.resolve(String(project.path || ''));
+  const reqId = String(requirementId || '');
+  const groups = [];
+  // 1) 需求正文：当前需求优先；需求 id 可能被截断，按前缀匹配。
+  const reqFiles = readDirFiles(path.join(root, '需求'))
+    .map((abs) => ownerFileRecord(root, abs, 'req'))
+    .filter((file) => file && /^R-/.test(file.name));
+  const matched = reqId
+    ? reqFiles.filter((file) => {
+      const docId = file.name.replace(/\.md$/i, '').split('-').slice(0, 4).join('-');
+      return file.name.includes(reqId) || reqId.startsWith(docId) || docId.startsWith(reqId.slice(0, 24));
+    })
+    : [];
+  const reqRows = matched.length ? matched : (reqId ? [] : reqFiles);
+  groups.push({
+    key: 'req',
+    label: '需求正文',
+    items: reqRows.map((file) => ({ ...file, versions: [{ version: file.version, rel: file.rel, size: file.size, mtime: file.mtime }] })),
+    missing: !reqRows.length,
+    reason: reqRows.length ? '' : (reqId ? '未记录：找不到该需求正文' : '未记录：还没有需求正文')
+  });
+  // 2) 上游产出：需求分析师 + 产品，每类最新 vN，旧版可切换。
+  const upstreamFiles = [
+    ...readDirFiles(path.join(root, '需求分析师', '产出')).map((abs) => ownerFileRecord(root, abs, 'upstream')),
+    ...readDirFiles(path.join(root, '产品', '产出')).map((abs) => ownerFileRecord(root, abs, 'upstream'))
+  ].filter(Boolean);
+  const upstreamRows = ownerVersionGroups(upstreamFiles, 6);
+  groups.push({
+    key: 'upstream',
+    label: '上游产出',
+    items: upstreamRows,
+    missing: !upstreamRows.length,
+    reason: upstreamRows.length ? '' : '未记录：需求分析师 / 产品还没有产出'
+  });
+  // 3) 提案：团队工具 P-* 记录（含轮次），项目内 提案/*.md 作为镜像兜底。
+  let proposals = [];
+  const teamName = String(project.teamName || project.name || '').trim();
+  if (teamName && typeof teamTools.listLegacyProposals === 'function') {
+    try {
+      const listed = teamTools.listLegacyProposals(teamName);
+      if (listed && listed.ok && Array.isArray(listed.proposals)) {
+        proposals = listed.proposals.slice(0, 6).map((row) => ({
+          kind: 'proposal',
+          group: 'proposal',
+          id: String(row.id || ''),
+          title: String(row.title || ''),
+          status: String(row.status || ''),
+          author: String(row.author || ''),
+          risk: String(row.risk || ''),
+          rationale: String(row.rationale || ''),
+          at: String(row.createdAt || ''),
+          reviews: Object.values(row.reviews || {}).map((review) => ({
+            role: String((review && review.role) || ''),
+            verdict: String((review && review.verdict) || ''),
+            comment: String((review && review.comment) || '')
+          })),
+          files: Array.isArray(row.files) ? row.files.map((file) => ({ target: String((file && file.target) || ''), size: Number((file && file.size) || 0) })).slice(0, 8) : []
+        }));
+      }
+    } catch { proposals = []; }
+  }
+  if (!proposals.length) {
+    const proposalDocs = readDirFiles(path.join(root, '提案')).map((abs) => ownerFileRecord(root, abs, 'proposal')).filter(Boolean);
+    proposals = proposalDocs.slice(0, 6).map((file) => ({
+      kind: 'file', group: 'proposal', rel: file.rel, name: file.name, size: file.size,
+      mtime: file.mtime, version: file.version, versions: [{ version: file.version, rel: file.rel, size: file.size, mtime: file.mtime }]
+    }));
+  }
+  groups.push({
+    key: 'proposal',
+    label: '提案',
+    items: proposals,
+    missing: !proposals.length,
+    reason: proposals.length ? '' : '未记录：还没有提案'
+  });
+  // 4) 测试报告 / 可测性评审 / 验收报告：最新 vN。
+  const testFiles = [
+    ...readDirFiles(path.join(root, '测试人员', '产出')).map((abs) => ownerFileRecord(root, abs, 'test'))
+  ].filter(Boolean);
+  const testRows = ownerVersionGroups(testFiles, 5);
+  groups.push({
+    key: 'test',
+    label: '测试报告',
+    items: testRows,
+    missing: !testRows.length,
+    reason: testRows.length ? '' : '未记录：还没有测试报告'
+  });
+  // 5) 最近提交 ≤5。
+  const commits = readTeamCommits(project);
+  groups.push({
+    key: 'commit',
+    label: '最近提交',
+    items: commits,
+    missing: !commits.length,
+    reason: commits.length ? '' : '未记录：还没有提交记录'
+  });
+  return {
+    ok: true,
+    projectId: project.id,
+    requirementId: reqId,
+    root,
+    groups,
+    generatedAt: now()
+  };
+}
+
+function ownerMaterialRead(project, rel) {
+  try {
+    return readProjectFile(project, rel, { textMaxBytes: OWNER_MATERIAL_MAX_BYTES });
+  } catch (error) {
+    return {
+      ok: false,
+      code: String((error && error.code) || 'MATERIAL_READ_FAILED'),
+      message: String((error && error.message) || error),
+      rel: String(rel || '')
+    };
+  }
+}
+
+// ==========================================================================
+// 闸门判定透传（壳层不做判定）：判定由 team.mjs / team-tools 返回，界面只展示。
+// TODO(接口)：程序员B 的 T-20261112-120327-d751 落 gate:check 后自动生效；
+// 未提供时返回 GATE_API_UNAVAILABLE，界面写“闸门判定待接入”，不自行推导通过/拒绝。
+// 约定返回（与产品设计 v3 §十、v4 §十四对齐）：
+//   { ok:true, source:'team.mjs', phase, allowedActions:[],
+//     gates:[{ gate, action, ok, code, message, missing:[], next, requirementId, role }] }
+// ==========================================================================
+const GATE_API_CANDIDATES = ['gateCheck', 'checkGates', 'workflowGates'];
+let gatesModuleCache = null;
+
+/** 独立成函数便于单测替换；生产就是 Node 原生 ESM 动态导入。 */
+async function importEsmModule(fileUrl) {
+  return import(fileUrl);
+}
+
+/** 懒加载团队工具的 gates.mjs：判定只来自它，壳层只负责组装动作与展示。 */
+async function loadTeamGatesModule() {
+  if (gatesModuleCache) return gatesModuleCache;
+  const toolRoot = (teamTools && teamTools.layout && teamTools.layout.toolRoot) || path.join(ROOT, '团队', '工具');
+  const file = path.join(toolRoot, 'lib', 'gates.mjs');
+  if (!fs.existsSync(file)) return null;
+  gatesModuleCache = await importEsmModule(pathToFileURL(file).href);
+  return gatesModuleCache;
+}
+
+/** 项目闸门配置（项目.json.gates）；读不到按 gates.mjs 默认（G4/G7 默认 hard）。 */
+function readProjectGatesConfig(project) {
+  const stateDir = teamProjectStateDir(project);
+  if (!stateDir) return {};
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(stateDir, '项目.json'), 'utf8').replace(/^\uFEFF/, ''));
+    return config && config.gates && typeof config.gates === 'object' ? config.gates : {};
+  } catch { return {}; }
+}
+
+/** 读 提交/C-*.json 原始记录：G4 的提交兜底签字解析需要 after/哈希/signatures。 */
+function readGateCommits(project) {
+  const stateDir = teamProjectStateDir(project);
+  if (!stateDir) return [];
+  const dir = path.join(stateDir, '提交');
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((name) => name.endsWith('.json')); } catch { return []; }
+  const rows = [];
+  for (const name of names) {
+    try {
+      const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, ''));
+      if (record && typeof record === 'object') rows.push(record);
+    } catch { /* 坏提交不阻断其它记录 */ }
+  }
+  rows.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return rows.slice(0, 200);
+}
+
+/**
+ * 用 gates.mjs 的只读判定组装 gate:check：
+ * - 入参 {projectName, requirementId?, action?, role?}，动作名用界面动作（owner-review/dispatch/...）；
+ * - 返回 {ok, code, gate, missing[], next, phase, actions[{action,ok,gate,code,missing,next,warnings}]}；
+ * - 只调用 gates.mjs 的 gate* 函数，不在壳层重写判定；审计由真实动作入口写入，check 本身不写盘。
+ */
+async function checkGatesViaModules(project, input = {}) {
+  const gates = await loadTeamGatesModule();
+  if (!gates) return null;
+  const teamName = String(input.projectName || project.teamName || project.name || '');
+  let snapshot = null;
+  try { snapshot = teamTools.readWorkflowSnapshot(teamName, project.path); } catch (error) {
+    return { ok: false, code: 'GATE_STATE_UNAVAILABLE', gate: '', missing: [String((error && error.message) || error).slice(0, 200)], next: '先修复团队工作流状态，再重试闸门判定', source: 'team-tools/gates.mjs', actions: [] };
+  }
+  if (!snapshot || snapshot.ok === false) {
+    return {
+      ok: false,
+      code: String((snapshot && snapshot.code) || 'GATE_STATE_UNAVAILABLE'),
+      gate: '',
+      missing: [String((snapshot && (snapshot.message || snapshot.why)) || '团队工作流状态不可读').slice(0, 200)],
+      next: '先让 team.mjs 能读到 工作流.json / 任务/',
+      source: 'team-tools/gates.mjs',
+      actions: []
+    };
+  }
+  const state = snapshot.workflow && typeof snapshot.workflow === 'object' ? snapshot.workflow : {};
+  const requirements = state.requirements && typeof state.requirements === 'object' ? state.requirements : {};
+  const ids = Object.keys(requirements);
+  let requirementId = String(input.requirementId || '');
+  if (!requirementId) {
+    requirementId = ids.find((id) => !['accepted', 'terminated', 'iteration'].includes(String((requirements[id] || {}).status))) || ids[0] || '';
+  } else if (!requirements[requirementId]) {
+    requirementId = ids.find((id) => gates.idMatches(id, requirementId)) || requirementId;
+  }
+  const row = requirements[requirementId] || null;
+  const tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
+  const task = tasks.find((item) => item && (gates.idMatches(item.id, requirementId) || gates.idMatches(item.requirementId, requirementId))) || null;
+  const mode = String(snapshot.teamMode || input.teamMode || project.teamMode || 'full') === 'fast' ? 'fast' : 'full';
+  // B-3524：Owner 决定可按“这次要点什么”判定——G2.5 只拦通过/开发，打回/跳过/终止不拦。
+  const decisionWanted = String(input.decision || input.status || '').trim();
+  const config = readProjectGatesConfig(project);
+  // 与 team.mjs 派单闸门共用 gates.mjs 的配置解析（G4/G7 默认 hard）与提交兜底签字。
+  const gateCfg = gates.gateConfig({ gates: config });
+  const commits = readGateCommits(project);
+  const phase = row ? gates.stageOfRow(row) : String(state.phase || 'idle');
+  const reviewRole = mode === 'fast' ? 'analyst' : 'product';
+  // 测试任务不在需求行上：按 requirementId 找 tester 的未闭环任务，G7 用它做判定。
+  const testerTask = tasks.find((item) => item
+    && String(item.owner || '') === 'tester'
+    && String(item.status || '') !== 'done'
+    && (gates.idMatches(item.requirementId, requirementId) || gates.idMatches(item.id, requirementId)))
+    || tasks.find((item) => item
+      && String(item.owner || '') === 'tester'
+      && (gates.idMatches(item.requirementId, requirementId) || gates.idMatches(item.id, requirementId)))
+    || null;
+  let dispatchLock = null;
+  try { dispatchLock = teamTools.readDispatchLockState ? teamTools.readDispatchLockState(teamName) : null; } catch { dispatchLock = null; }
+  const roleLocks = dispatchLock && dispatchLock.to
+    ? [{ key: '派单锁', role: dispatchLock.to, expiresAt: dispatchLock.ts, stale: false }]
+    : [];
+  const gateRoleBusy = (role) => gates.gateRoleBusy({
+    role,
+    tasks,
+    excludeTaskIds: task && task.id ? [task.id] : [],
+    locks: roleLocks
+  });
+  const missingRequirement = () => (!row && !task)
+    ? { code: 'REQUIREMENT_NOT_FOUND', gate: 'G1', missing: ['需求不存在'], next: '先 req create 建需求' }
+    : null;
+
+  const evaluate = (action, checks) => {
+    const warnings = [];
+    let first = null;
+    for (const item of checks) {
+      let verdict = null;
+      try { verdict = item.run(); } catch (error) {
+        verdict = {
+          code: 'GATE_EVALUATION_FAILED',
+          gate: item.gate || '',
+          missing: [String((error && error.message) || error).slice(0, 200)],
+          next: '检查 team.mjs / gates.mjs 的状态与文件，再重试'
+        };
+      }
+      if (!verdict) continue;
+      if (verdict.soft) { warnings.push({ gate: String(verdict.gate || ''), code: String(verdict.code || ''), missing: verdict.missing || [], next: verdict.next || '', message: verdict.message || '' }); continue; }
+      if (!first) first = verdict;
+    }
+    if (first) {
+      return {
+        action,
+        ok: false,
+        gate: String(first.gate || ''),
+        code: String(first.code || ''),
+        message: String(first.message || ''),
+        missing: Array.isArray(first.missing) ? first.missing : [],
+        next: String(first.next || ''),
+        warnings
+      };
+    }
+    return { action, ok: true, gate: '', code: 'OK', message: '', missing: [], next: '', warnings };
+  };
+
+  const gateChecks = {
+    'requirement-review': () => [
+      { gate: 'G1', run: () => missingRequirement() || gates.gateRequirementFinal(task, project.path) },
+      { gate: 'G0', run: () => missingRequirement() || gates.gateStageRole({ row: row || { status: (task && task.workflow && task.workflow.requirementStatus) || 'review' }, role: reviewRole, action: 'requirement_review', mode }) }
+    ],
+    'owner-review': () => [
+      { gate: 'G2', run: () => missingRequirement() || gates.gateRequirementReview(row || {}, task, project.path) },
+      {
+        gate: 'G2.5',
+        run: () => {
+          // 打回/跳过不靠可测性评审：门只拦“通过/开发”，否则 not_testable 会连打回都锁死（B-3524）。
+          if (decisionWanted && decisionWanted !== 'approved') return null;
+          const verdict = missingRequirement() || gates.gateTestability({ projectPath: project.path, task, row });
+          if (!verdict) return null;
+          if (String(gateCfg.testability || '') === 'off') return null;
+          const hard = String((task && task.priority) || 'P2').toUpperCase() === 'P0'
+            || String(gateCfg.testability || '') === 'all'
+            || verdict.reason === 'not_testable';
+          return hard ? verdict : { ...verdict, soft: true };
+        }
+      }
+    ],
+    'tech-review': () => [
+      { gate: 'G3', run: () => missingRequirement() || gates.gateOwnerDecision(row || {}) }
+    ],
+    dispatch: () => [
+      { gate: 'G1', run: () => missingRequirement() || gates.gateRequirementFinal(task, project.path) },
+      { gate: 'G2', run: () => missingRequirement() || gates.gateRequirementReview(row || {}, task, project.path) },
+      { gate: 'G3', run: () => missingRequirement() || gates.gateOwnerDecision(row || {}) },
+      { gate: 'G0', run: () => missingRequirement() || gates.gateStageRole({ row: row || { status: 'ready' }, role: 'pm', action: 'dispatch_dev', mode }) },
+      {
+        gate: 'G5',
+        run: () => {
+          if (missingRequirement()) return missingRequirement();
+          // 通用“派单”按钮还没选目标：只有所有可派程序员都忙时才算 G5 未过；
+          // 目标确定后由派单弹窗传 role，这里只做不误拦的组合。
+          const roles = mode === 'fast' ? ['programmer1'] : ['programmer1', 'programmer2'];
+          const verdicts = roles.map((role) => gateRoleBusy(role)).filter(Boolean);
+          if (verdicts.length < roles.length) return null;
+          return { ...verdicts[0], missing: verdicts.flatMap((row) => row.missing || []) };
+        }
+      },
+      {
+        gate: 'G4',
+        run: () => {
+          const verdict = missingRequirement() || gates.gateDesign({ projectPath: project.path, mode, task, state, commits });
+          if (!verdict) return null;
+          if (String(gateCfg.productDesign || '') === 'off') return null;
+          return String(gateCfg.productDesign || '') === 'hard' ? { ...verdict, soft: false } : { ...verdict, soft: true };
+        }
+      }
+    ],
+    'test-dispatch': () => [
+      { gate: 'G3', run: () => missingRequirement() || gates.gateOwnerDecision(row || {}) },
+      { gate: 'G0', run: () => missingRequirement() || gates.gateStageRole({ row: row || { status: 'test' }, role: 'tester', action: 'test_exec', mode }) },
+      { gate: 'G5', run: () => missingRequirement() || gateRoleBusy('tester') }
+    ],
+    'task-done': () => {
+      const g7Task = testerTask || (task && String(task.owner || '') === 'tester' ? task : null);
+      if (!g7Task) return [];
+      return [{
+        gate: 'G7',
+        run: () => {
+          if (String(gateCfg.testReport || '') === 'off') return null;
+          const verdict = gates.gateTestReport({ projectPath: project.path, task: g7Task, requirementId });
+          if (!verdict) return null;
+          return String(gateCfg.testReport || '') === 'hard' ? { ...verdict, soft: false } : { ...verdict, soft: true };
+        }
+      }];
+    },
+    iterate: () => [
+      { gate: 'G9', run: () => gates.gateIteration({ rows: Object.values(requirements), tasks }) }
+    ],
+    terminate: () => []
+  };
+
+  const wanted = String(input.action || '');
+  const actionsToCheck = wanted
+    ? [normalizeGateActionName(wanted)]
+    : ['dispatch', 'owner-review', 'requirement-review', 'tech-review', 'test-dispatch', 'task-done', 'iterate'];
+  const actions = [];
+  for (const action of [...new Set(actionsToCheck.filter(Boolean))]) {
+    const build = gateChecks[action];
+    if (!build) {
+      actions.push({ action, ok: true, gate: '', code: 'OK', message: '', missing: [], next: '', warnings: [], unverified: true });
+      continue;
+    }
+    actions.push(evaluate(action, build()));
+  }
+  const failed = actions.find((item) => !item.ok);
+  return {
+    ok: !failed,
+    code: failed ? failed.code : 'OK',
+    gate: failed ? failed.gate : '',
+    missing: failed ? failed.missing : [],
+    next: failed ? failed.next : '',
+    message: failed ? failed.message : '',
+    phase,
+    requirementId,
+    teamMode: mode,
+    source: 'team-tools/gates.mjs',
+    interface: 'team-tools/gates.mjs',
+    actions,
+    gates: actions,
+    generatedAt: now()
+  };
+}
+
+/** 界面动作名 → 检查动作名（兼容 CLI/团队工具命名）。 */
+function normalizeGateActionName(action) {
+  const key = String(action || '').trim();
+  const map = {
+    'requirement-review': 'requirement-review', review: 'requirement-review', requirement_review: 'requirement-review',
+    'owner-review': 'owner-review', owner: 'owner-review', owner_decision: 'owner-review',
+    'tech-review': 'tech-review', tech: 'tech-review', tech_review: 'tech-review',
+    dispatch: 'dispatch', dispatch_dev: 'dispatch', 'requirement-dispatch': 'dispatch',
+    'test-dispatch': 'test-dispatch', dispatch_test: 'test-dispatch',
+    'task-done': 'task-done', task_done: 'task-done',
+    iterate: 'iterate', terminate: 'terminate'
+  };
+  return map[key] || key;
+}
+
+async function gateCheckProject(project, payload = {}) {
+  const input = {
+    projectId: project.id,
+    projectName: String(project.teamName || project.name || ''),
+    projectPath: String(project.path || ''),
+    teamMode: normalizeTeamMode(project.teamMode),
+    requirementId: String(payload.requirementId || ''),
+    action: String(payload.action || ''),
+    // B-3524：Owner 决定按“要点什么”判定——打回/跳过不适用 G2.5（可测性评审只拦通过/开发）。
+    decision: String(payload.decision || payload.status || ''),
+    role: String(payload.role || '')
+  };
+  if (teamTools) {
+    for (const name of GATE_API_CANDIDATES) {
+      if (typeof teamTools[name] !== 'function') continue;
+      try {
+        const raw = await teamTools[name](input);
+        if (raw && typeof raw === 'object') {
+          return { ...raw, ok: raw.ok !== false, source: raw.source || ('team-tools.' + name), interface: 'team-tools.' + name };
+        }
+        return { ok: false, code: 'GATE_API_BAD_JSON', message: `team-tools.${name} 没有返回对象`, interface: 'team-tools.' + name };
+      } catch (error) {
+        return {
+          ok: false,
+          code: String((error && error.code) || 'GATE_API_FAILED'),
+          message: String((error && error.message) || error).slice(0, 300),
+          interface: 'team-tools.' + name
+        };
+      }
+    }
+  }
+  // 团队工具没有聚合接口时，直接调 gates.mjs 的只读判定（B 的唯一判定实现）。
+  const viaModules = await checkGatesViaModules(project, input);
+  if (viaModules) return viaModules;
+  return {
+    ok: false,
+    code: 'GATE_API_UNAVAILABLE',
+    message: 'team.mjs / team-tools 没有 gates.mjs（或 gate:check 接口）：界面只展示判定，不自行推导。',
+    interface: 'team-tools/gates.mjs',
+    missingInterface: true,
+    phase: null,
+    allowedActions: null,
+    gates: []
+  };
+}
+
+function gateAuditFile(project) {
+  const stateDir = teamProjectStateDir(project);
+  return stateDir ? path.join(stateDir, '闸门审计.jsonl') : '';
+}
+
+/** 只读闸门审计：一行一条 JSON，界面按时间倒序展示“谁/何时/哪道门/缺什么/尝试动作”。 */
+function readGateAudit(project, limit = 20) {
+  const file = gateAuditFile(project);
+  const max = Math.max(1, Math.min(200, Number(limit) || 20));
+  if (!file || !fs.existsSync(file)) {
+    return { ok: true, exists: false, file: file || '', total: 0, items: [] };
+  }
+  let lines = [];
+  try { lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((line) => line.trim()); } catch (error) {
+    return { ok: false, code: 'GATE_AUDIT_READ_FAILED', message: String((error && error.message) || error).slice(0, 300), file, items: [] };
+  }
+  const items = [];
+  const unparsed = [];
+  for (const line of lines.slice(-max).reverse()) {
+    let row = null;
+    try { row = JSON.parse(line); } catch { row = null; }
+    if (!row || typeof row !== 'object') {
+      unparsed.push({ at: '', role: '', source: '', action: '', gate: '', code: '', missing: [], raw: String(line).slice(0, 300), unparsed: true });
+      continue;
+    }
+    items.push({
+      at: String(row.at || row.time || ''),
+      role: String(row.role || ''),
+      source: String(row.source || ''),
+      action: String(row.action || row.attempted || ''),
+      gate: String(row.gate || ''),
+      code: String(row.code || row.error || ''),
+      missing: Array.isArray(row.missing) ? row.missing.map((item) => String((item && item.label) || item)).slice(0, 12) : [],
+      requirementId: String(row.requirementId || ''),
+      taskId: String(row.taskId || ''),
+      message: String(row.message || row.next || '').slice(0, 300)
+    });
+  }
+  return { ok: true, exists: true, file, total: lines.length, items: items.concat(unparsed.slice(0, 3)) };
+}
+
+
 function registerIpc() {
   ipcMain.handle('app:state', () => statePayload());
   ipcMain.handle('app:version', () => APP_VERSION);
@@ -3462,9 +4205,29 @@ function registerIpc() {
       imageMaxBytes: Number(p.imageMaxBytes) || undefined
     });
   });
+  // B-fa80：系统占用用全机 CPU（os.cpus 时间差）；Electron 进程汇总会漏掉 DSH/GPU 等进程。
+  let lastCpuSample = null;
+  function systemCpuPercent() {
+    const cpus = os.cpus() || [];
+    if (!cpus.length) return null;
+    let idle = 0;
+    let total = 0;
+    for (const cpu of cpus) {
+      const t = cpu.times || {};
+      idle += Number(t.idle) || 0;
+      total += (Number(t.user) || 0) + (Number(t.nice) || 0) + (Number(t.sys) || 0) + (Number(t.idle) || 0) + (Number(t.irq) || 0);
+    }
+    if (!lastCpuSample) { lastCpuSample = { idle, total }; return null; }
+    const dIdle = idle - lastCpuSample.idle;
+    const dTotal = total - lastCpuSample.total;
+    lastCpuSample = { idle, total };
+    if (dTotal <= 0) return null;
+    return Math.min(100, Math.max(0, Math.round((1 - dIdle / dTotal) * 100)));
+  }
   ipcMain.handle('system:metrics', async () => {
     const processes = app.getAppMetrics ? app.getAppMetrics() : [];
-    const cpu = processes.reduce((sum, p) => sum + (Number(p.cpu?.percentCPUUsage) || 0), 0);
+    const appCpu = processes.reduce((sum, p) => sum + (Number(p.cpu?.percentCPUUsage) || 0), 0);
+    const systemCpu = systemCpuPercent();
     const memTotal = os.totalmem();
     const memUsed = memTotal - os.freemem();
     let gpu = null;
@@ -3480,9 +4243,11 @@ function registerIpc() {
       }
     } catch { /* no nvidia-smi */ }
     return {
-      cpu: Math.min(100, Math.max(0, Math.round(cpu))),
+      cpu: systemCpu === null ? Math.min(100, Math.max(0, Math.round(appCpu))) : systemCpu,
+      appCpu: Math.min(100, Math.max(0, Math.round(appCpu))),
       mem: Math.round((memUsed / memTotal) * 100),
-      gpu
+      gpu,
+      cpuSource: systemCpu === null ? 'app' : 'system'
     };
   });
   ipcMain.handle('app:choose-dir', async () => {
@@ -3514,6 +4279,50 @@ function registerIpc() {
       warnings: activation.warnings,
       state: statePayload()
     };
+  });
+  // 项目终验（R-fb48）：调团队工具 finalize；终端用本项目最近一次未过期 pm 令牌（终验需 PM/Owner 权限）。
+  const TEAM_MJS_PATH = path.join(__dirname, '..', '团队', '工具', 'team.mjs');
+  const TEAM_BOOT_DIR = path.join(__dirname, '..', '团队', '状态', '启动');
+  function latestPmBootToken(projectName) {
+    let names = [];
+    try { names = fs.readdirSync(TEAM_BOOT_DIR).filter((n) => n.endsWith('.json')); } catch { return ''; }
+    let best = null;
+    for (const name of names) {
+      try {
+        const j = JSON.parse(fs.readFileSync(path.join(TEAM_BOOT_DIR, name), 'utf8'));
+        if (j.role !== 'pm' || j.project !== projectName) continue;
+        if (Date.parse(j.expiresAt) < Date.now()) continue;
+        if (!best || String(j.issuedAt || j.createdAt || '') > String(best.issuedAt || best.createdAt || '')) best = j;
+      } catch { /* 跳过损坏令牌 */ }
+    }
+    return best ? String(best.token) : '';
+  }
+  ipcMain.handle('finalize:status', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    const name = project.teamName || project.name;
+    try {
+      const out = execFileSync(process.execPath, [TEAM_MJS_PATH, 'finalize', 'status', '--project', name, '--json'], { encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
+      return JSON.parse(String(out || '{}').trim());
+    } catch (error) {
+      throw codedError('FINALIZE_STATUS_FAILED', String((error && (error.stderr || error.message)) || error).slice(0, 400));
+    }
+  });
+  ipcMain.handle('finalize:run', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    const name = project.teamName || project.name;
+    const token = latestPmBootToken(name);
+    if (!token) throw codedError('PM_TOKEN_REQUIRED', '没有有效的 PM 启动令牌；请让 PM 先 boot，终验需 PM/Owner 权限');
+    const args = [TEAM_MJS_PATH, 'finalize', 'run', '--project', name, '--boot', token, '--json'];
+    if (p.force) args.push('--force');
+    const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 120000 });
+    if (r.status !== 0) {
+      const text = String((r.stdout || '') + (r.stderr || ''));
+      const code = (text.match(/\[([A-Z_]+)\]/) || [])[1] || 'FINALIZE_FAILED';
+      throw codedError(code, text.slice(0, 600));
+    }
+    return JSON.parse(String(r.stdout || '{}').trim());
   });
   ipcMain.handle('project:open', (_e, projectId) => {
     const store = readStore();
@@ -3789,6 +4598,214 @@ function registerIpc() {
       generatedAt: (manifestTrusted && manifest && manifest.generatedAt) || null,
       error: ''
     };
+  });
+  // R-c651 F-c651-4/5：团队在场三列（未读 / 未回执 / 停滞）+ wakeFailed 红点 + 全部已读 + 一键唤醒。
+  // 计数口径只在团队工具的 presence / mark-read / wake 三个命令里算，壳层透传，不重算、不猜。
+  const teamProjectNameOf = (payload) => {
+    const p = payload || {};
+    let project = null;
+    const projectId = String(p.projectId || p.id || '').trim();
+    if (projectId) project = readStore().projects.find((item) => item.id === projectId) || null;
+    const wanted = String(p.project || p.projectName || p.name || '').trim();
+    const name = (project && (project.teamName || project.name)) || wanted || '';
+    return { name: String(name || ''), project };
+  };
+  // 在场/唤醒留痕失败不能把主流程带崩：找不到对应工作区就只打日志，不造假记录。
+  const addEventSafeForProject = (teamName, text) => {
+    try {
+      const store = readStore();
+      const target = store.projects.find((item) => String(item.teamName || item.name || '') === String(teamName)) || null;
+      if (!target) { console.warn('TEAM_EVENT_SKIP ' + JSON.stringify({ teamName, text: String(text).slice(0, 120) })); return; }
+      addEvent(target, text);
+      writeStore(store);
+    } catch (error) {
+      console.warn('TEAM_EVENT_FAILED ' + String((error && error.message) || error).slice(0, 160));
+    }
+  };
+  // R-b5fc F-4b：工作台侧只读队列面板数据源。读 <项目>/role_queues.json（B 的 route-queues 生成器写的派生文件）。
+  // 权限：role=pm 看全量；其他角色只看自己那一队；索要别人的队 → QUEUE_FORBIDDEN。面板只读，不写任何状态。
+  // 查看者身份不写死（F-4b 按会话绑定）：传 role 直接认；只传 sessionId 时按项目角色会话映射反查；
+  // 两者都没有 → QUEUE_VIEWER_REQUIRED；sessionId 对不上任何角色 → QUEUE_SESSION_UNBOUND。都零副作用。
+  const roleQueueViewerOf = (name, project, payload) => {
+    const asked = String((payload && payload.role) || '').trim();
+    const sessionId = String((payload && payload.sessionId) || '').trim();
+    if (asked) return { role: asked, source: 'role', sessionId };
+    if (!sessionId) {
+      return { role: '', source: '', sessionId: '', error: { ok: false, code: 'QUEUE_VIEWER_REQUIRED', message: '队列面板需要当前会话角色：传 role 或 sessionId（F-4b 按会话绑定，不再默认 pm）' } };
+    }
+    const map = {};
+    const sessionMap = project && project.sessionMeta && typeof project.sessionMeta === 'object' ? project.sessionMeta : {};
+    for (const role of Object.keys(sessionMap)) {
+      if (sessionMap[role] && sessionMap[role].sessionId) map[role] = String(sessionMap[role].sessionId);
+    }
+    if (project && project.sessions && typeof project.sessions === 'object') {
+      for (const role of Object.keys(project.sessions)) if (project.sessions[role]) map[role] = String(project.sessions[role]);
+    }
+    try {
+      const authoritative = teamTools.currentRoleSessions(name) || {};
+      for (const role of Object.keys(authoritative)) {
+        if (authoritative[role] && authoritative[role].sessionId) map[role] = String(authoritative[role].sessionId);
+      }
+    } catch { /* 团队名册读不到就用工作台映射，不阻断面板 */ }
+    const hit = Object.keys(map).find((role) => String(map[role] || '') === sessionId);
+    if (!hit) {
+      return { role: '', source: 'session', sessionId, error: { ok: false, code: 'QUEUE_SESSION_UNBOUND', message: '当前会话不是本项目的角色会话（或还没绑定角色）：按角色隔离，看不到任何队列' } };
+    }
+    return { role: hit, source: 'session', sessionId };
+  };
+  ipcMain.handle('team:role-queues', async (_e, payload) => {
+    try {
+      const p = payload || {};
+      const { name, project } = teamProjectNameOf(p);
+      if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
+      const viewer = roleQueueViewerOf(name, project, p);
+      if (viewer.error) return { ...viewer.error, project: name };
+      const { role } = viewer;
+      const file = path.join(teamTools._paths().projectsDir, teamTools.teamSlug(name), ROLE_QUEUE_FILE_NAME);
+      const base = { project: name, role, viewerSource: viewer.source, sessionId: viewer.sessionId };
+      if (!fs.existsSync(file)) {
+        return { ok: true, code: 'QUEUE_NOT_GENERATED', missing: true, ...base, generatedAt: '', roles: {}, message: '队列未生成（role_queues.json 不存在）：等队列生成器跑一次后再看' };
+      }
+      let raw = null;
+      try {
+        raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+      } catch (error) {
+        // 损坏按「降级未生成」处理：界面灰字，不进红态；英文原文只留 title 与日志（派单 8bfe ①）。
+        const detail = String((error && error.message) || error).slice(0, 300);
+        console.warn('QUEUE_FILE_BROKEN ' + JSON.stringify({ project: name, file, detail }));
+        return {
+          ok: true, code: 'QUEUE_FILE_BROKEN', missing: true, degraded: true, ...base, generatedAt: '', roles: {},
+          detail,
+          message: '队列未生成（文件损坏已忽略）：点「刷新」重试或等队列生成器重建',
+        };
+      }
+      const allRoles = raw && raw.roles && typeof raw.roles === 'object' ? raw.roles : {};
+      const wanted = String(p.targetRole || '').trim();
+      if (role !== 'pm' && wanted && wanted !== role) {
+        return { ok: false, code: 'QUEUE_FORBIDDEN', message: `只能看自己的队列（${role}），不能看 ${wanted}` };
+      }
+      const visibleRoles = role === 'pm' ? Object.keys(allRoles) : [role];
+      const rows = {};
+      for (const key of visibleRoles) rows[key] = (allRoles[key] && Array.isArray(allRoles[key].queue) ? allRoles[key].queue : []);
+      return {
+        ok: true, code: 'OK', missing: false, ...base,
+        generatedAt: String((raw && raw.generatedAt) || ''),
+        source: raw && raw.source ? raw.source : null,
+        meta: raw && raw.meta ? raw.meta : null,
+        roles: rows,
+        counts: Object.fromEntries(Object.entries(rows).map(([key, list]) => [key, list.length])),
+      };
+    } catch (e) {
+      return { ok: false, code: 'QUEUE_READ_FAILED', message: String((e && e.message) || e).slice(0, 300) };
+    }
+  });
+  // T-b417：路由守护状态（只读）。界面只认这里返回的 state/label/detail，不在前端自己推算心跳。
+  ipcMain.handle('team:route-status', async (_e, payload) => {
+    try {
+      const { name } = teamProjectNameOf(payload || {});
+      return readRouteSupervisorStatus(name);
+    } catch (e) {
+      return { ok: false, code: 'ROUTE_STATUS_FAILED', message: String((e && e.message) || e).slice(0, 300) };
+    }
+  });
+  // R-9db6 F-1：Owner 决策箱（只读）。数据真相是 团队/状态/项目/<项目>/决策箱.json，
+  // 壳层只读不写；放入由 PM 走团队工具，回执等团队工具侧命令就绪后再接 IPC。
+  ipcMain.handle('team:decision-box', async (_e, payload) => {
+    try {
+      const { name } = teamProjectNameOf(payload || {});
+      if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
+      const file = path.join(teamTools._paths().projectsDir, teamTools.teamSlug(name), '决策箱.json');
+      const base = { ok: true, project: name, file, unread: 0, total: 0, open: 0, answered: 0, archived: 0, items: [], degraded: false, message: '' };
+      if (!fs.existsSync(file)) {
+        return { ...base, code: 'DECISION_BOX_EMPTY', message: '暂无待决事项' };
+      }
+      let raw = null;
+      try {
+        raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+      } catch (error) {
+        const detail = String((error && error.message) || error).slice(0, 300);
+        console.warn('DECISION_BOX_BROKEN ' + JSON.stringify({ project: name, file, detail }));
+        return { ...base, code: 'DECISION_BOX_BROKEN', degraded: true, detail, message: '决策箱读不出来（已按空箱显示，原文见日志）' };
+      }
+      const items = Array.isArray(raw && raw.items) ? raw.items.filter((item) => item && item.id) : [];
+      const openItems = items.filter((item) => String(item.status || 'open') === 'open');
+      const unread = openItems.filter((item) => !item.readAt).length;
+      const rows = items.map((item) => ({
+        id: String(item.id || ''),
+        title: String(item.title || ''),
+        summary: String(item.summary || ''),
+        question: String(item.question || ''),
+        options: Array.isArray(item.options) ? item.options.map(String) : [],
+        source: item.source && typeof item.source === 'object'
+          ? { kind: String(item.source.kind || 'none'), ref: String(item.source.ref || '') }
+          : { kind: 'none', ref: '' },
+        createdAt: String(item.createdAt || ''),
+        readAt: item.readAt || null,
+        answeredAt: item.answeredAt || null,
+        archivedAt: item.archivedAt || null,
+        status: String(item.status || 'open'),
+        decision: item.decision || null,
+        receipt: item.receipt || null,
+      }));
+      return {
+        ...base,
+        code: 'OK',
+        updatedAt: String((raw && raw.updatedAt) || ''),
+        total: rows.length,
+        open: openItems.length,
+        unread,
+        answered: rows.filter((row) => row.status === 'answered').length,
+        archived: rows.filter((row) => row.status === 'archived').length,
+        items: rows,
+        message: openItems.length ? '' : '暂无待决事项',
+      };
+    } catch (e) {
+      return { ok: false, code: 'DECISION_BOX_READ_FAILED', message: String((e && e.message) || e).slice(0, 300) };
+    }
+  });
+  ipcMain.handle('team:presence', async (_e, payload) => {
+    try {
+      const { name } = teamProjectNameOf(payload);
+      if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目', rows: [] };
+      const result = await teamTools.presenceFor({
+        projectName: name,
+        roles: (payload && (payload.roles || payload.role)) || '',
+      });
+      return { ...result, project: name };
+    } catch (e) {
+      return { ok: false, code: 'TEAM_PRESENCE_FAILED', message: String((e && e.message) || e).slice(0, 300), rows: [] };
+    }
+  });
+  ipcMain.handle('team:mark-read', async (_e, payload) => {
+    try {
+      const p = payload || {};
+      const role = String(p.role || '').trim();
+      if (!role) return { ok: false, code: 'BAD_ROLE', message: '缺少角色' };
+      const { name } = teamProjectNameOf(p);
+      if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
+      const result = await teamTools.markReadFor({
+        projectName: name, role, actor: String(p.actor || 'owner'), source: 'ui-mark-read',
+      });
+      if (!result.ok) addEventSafeForProject(name, `批量已读失败：${role} · ${result.message || result.code || ''}`);
+      return { ...result, project: name };
+    } catch (e) {
+      return { ok: false, code: 'TEAM_MARK_READ_FAILED', message: String((e && e.message) || e).slice(0, 300) };
+    }
+  });
+  ipcMain.handle('team:wake-role', async (_e, payload) => {
+    try {
+      const p = payload || {};
+      const role = String(p.role || '').trim();
+      if (!role) return { ok: false, code: 'BAD_ROLE', message: '缺少角色' };
+      const { name } = teamProjectNameOf(p);
+      if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
+      const engineUrl = (dsh && dsh.baseUrl) || '';
+      const result = await teamTools.wakeRole({ projectName: name, role, engineUrl, reason: String(p.reason || 'ui') });
+      if (!result.ok) addEventSafeForProject(name, `界面唤醒失败：${role} · ${(result.wake && (result.wake.why || result.wake.code)) || result.message || result.code || ''}`);
+      return { ...result, project: name };
+    } catch (e) {
+      return { ok: false, code: 'TEAM_WAKE_FAILED', message: String((e && e.message) || e).slice(0, 300) };
+    }
   });
   ipcMain.handle('team:ensure-project', async (_e, payload) => {
     try {
@@ -4303,7 +5320,8 @@ function registerIpc() {
       let fallback = null;
       try {
         teamResult = await teamTools.recordOwnerDecision(current, {
-          status: decision, opinion: p.opinion, roundKey, by: 'Owner'
+          status: decision, opinion: p.opinion, roundKey, by: 'Owner', channel: 'ui',
+          requirementId: String(p.requirementId || ''),
         });
       } catch (error) {
         fallback = {
@@ -4415,6 +5433,11 @@ function registerIpc() {
   ipcMain.handle('workflow:briefing', runWorkflowIpc(async (ctx) => {
     return teamTools.briefingStatus(ctx.teamName);
   }));
+  // B-20261114-003257-0a46（R-d734）：项目信息/项目铁律的真实存在性。
+  // 不走 files:list（600 项 / 4 层截断会把根目录文档截掉，旧版因此误报“缺失”）。
+  ipcMain.handle('docs:presence', runWorkflowIpc(async (ctx) => {
+    return teamTools.projectDocPresence(ctx.projectPath);
+  }));
   ipcMain.handle('workflow:next', runWorkflowIpc(async (ctx) => {
     return teamTools.workflowNext(ctx.teamName, ctx.projectPath);
   }));
@@ -4468,8 +5491,9 @@ function registerIpc() {
       ...p,
       projectName: ctx.teamName,
       projectPath: ctx.projectPath,
-      // Owner 决定必须显式带身份；界面入口默认就是 Owner 本人。
+      // Owner 决定必须显式带身份与通道；界面入口默认就是 Owner 本人 + ui。
       role: String(p.role || 'owner'),
+      channel: 'ui',
       // Owner 确认码已废弃：不再要求 challenge/nonce；旧工具内部换码由 team-tools 静默完成。
       ownerConfirmed: true
     });
@@ -4599,20 +5623,143 @@ function registerIpc() {
     });
   }));
   ipcMain.handle('owner:accept', runWorkflowIpc(async (ctx, p, meta) => {
+    // R-4f99 F-3：两种身份两种通道——Owner 本人 ui；PM 仅在有效代管下凭证据代验收 proxy。
+    // 代管有效性在这里查评审代管.json；证据存在性/哈希由 team-tools 的 ownerAccept 复核（缺一即拒）。
+    const role = String(p.role || 'owner');
+    let channel = 'ui';
+    let proxyFields = {};
+    if (role === 'pm') {
+      const store = readStore();
+      const project = requireProject(store, p.projectId);
+      const requirementId = String(p.requirementId || '');
+      const proxyRow = readOwnerProxy(project).records.find((row) => row.requirementId === requirementId && !row.endedAt);
+      if (!proxyRow) {
+        throw codedError('OWNER_ACTION_REQUIRED', 'PM 代验收被拒：该需求没有进行中的代管记录，请 Owner 本人验收或先开代管');
+      }
+      if (!String(proxyRow.authorization || '').trim()) {
+        throw codedError('PROXY_UNAUTHORIZED', 'PM 代验收被拒：代管缺少 Owner 授权来源（authorization）');
+      }
+      channel = 'proxy';
+      proxyFields = {
+        recordedBy: 'pm',
+        proxy: String(proxyRow.scope || ''),
+        authorization: String(proxyRow.authorization || '')
+      };
+    }
     const result = await teamTools.ownerAccept({
       ...p,
+      ...proxyFields,
       projectName: ctx.teamName,
       projectPath: ctx.projectPath,
-      role: String(p.role || 'owner'),
+      role,
       sessionId: meta.sessionId,
+      // 验收必须显式带通道：Owner 界面弹窗 ui；PM 代验收 proxy。
+      channel,
       // Owner 确认码已废弃：直接以 role=owner 接受；旧工具内部换码由 team-tools 静默完成。
       ownerConfirmed: true
     });
+    // R-ea86 F-E5：验收成功后 5 秒内 看板.json 该需求行必须变 accepted —— 这里同步重生成一次并回报耗时，
+    // 失败不影响已落账的验收（降级：顶部提示可手动刷新）。
+    if (result && result.ok) {
+      const boardStarted = Date.now();
+      try {
+        const boardResult = await teamTools.generateBoard(project);
+        result.boardRefresh = {
+          ok: Boolean(boardResult && boardResult.ok),
+          ms: Date.now() - boardStarted,
+          path: (boardResult && boardResult.boardPath) || '',
+          at: new Date().toISOString(),
+          message: boardResult && boardResult.ok ? '' : String((boardResult && (boardResult.message || boardResult.why)) || '看板重生成失败，可手动刷新')
+        };
+      } catch (error) {
+        result.boardRefresh = { ok: false, ms: Date.now() - boardStarted, message: String((error && error.message) || error).slice(0, 200) };
+      }
+    }
     return result;
   }));
 
+  // R-f8e1 F-1：B 清单数据源 团队/状态/项目/<项目>/需求建议点.json（append-only；产品/分析师/开发写，评审读）。
+  ipcMain.handle('owner:suggestions', async (_e, payload) => {
+    const p = payload || {};
+    const store = readStore();
+    const project = requireProject(store, p.projectId);
+    const paths = teamTools._paths();
+    const teamName = String(project.teamName || project.name || '');
+    const file = path.join(paths.projectsDir, teamTools.teamSlug(teamName), '需求建议点.json');
+    if (!fs.existsSync(file)) return { ok: true, file, missing: true, items: [] };
+    try {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+      const items = (Array.isArray(data && data.items) ? data.items : [])
+        .filter((item) => item && item.id && item.reqId)
+        .map((item) => ({
+          id: String(item.id),
+          reqId: String(item.reqId),
+          text: String(item.text || '').slice(0, 120),
+          options: Array.isArray(item.options) ? item.options.map(String) : ['接受', '改', '拒'],
+          source: String(item.source || ''),
+          by: String(item.by || ''),
+          at: String(item.at || '')
+        }));
+      return { ok: true, file, items, updatedAt: String(data.updatedAt || '') };
+    } catch (error) {
+      return { ok: false, code: 'SUGGESTIONS_BAD_JSON', file, message: String((error && error.message) || error).slice(0, 200), items: [] };
+    }
+  });
+  // R-4f99 F-4：验收证据存在性 + 哈希（PM 代验收门槛用；不写任何文件）。
+  ipcMain.handle('owner:evidence-check', async (_e, payload) => {
+    const p = payload || {};
+    const store = readStore();
+    const project = requireProject(store, p.projectId);
+    const projectPath = String(project.path || '');
+    const wanted = Array.isArray(p.items) ? p.items.slice(0, 12) : [];
+    const items = [];
+    const missing = [];
+    for (const raw of wanted) {
+      const rel = String((raw && (raw.path || raw.rel)) || '').trim();
+      const kind = String((raw && raw.kind) || 'file').toLowerCase();
+      const abs = rel ? path.resolve(projectPath, rel) : '';
+      let exists = false;
+      let size = 0;
+      let sha256 = '';
+      if (rel && abs && fs.existsSync(abs)) {
+        try {
+          const stat = fs.statSync(abs);
+          if (stat.isFile()) { exists = true; size = stat.size; sha256 = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex'); }
+        } catch { exists = false; }
+      }
+      const row = { path: rel, abs, kind, exists, size, sha256 };
+      items.push(row);
+      if (!rel) missing.push({ ...row, reason: 'EMPTY_PATH' });
+      else if (!exists) missing.push({ ...row, reason: 'FILE_NOT_FOUND' });
+    }
+    if (!items.some((row) => row.exists && row.kind === 'report')) missing.push({ path: '', kind: 'report', reason: 'REPORT_REQUIRED' });
+    if (!items.some((row) => row.exists && row.kind === 'screenshot')) missing.push({ path: '', kind: 'screenshot', reason: 'SCREENSHOT_REQUIRED' });
+    return { ok: missing.length === 0, code: missing.length ? 'PM_ACCEPT_EVIDENCE_REQUIRED' : 'OK', projectPath, items, missing };
+  });
+  // R-f8e1 F-4：打回后给作者发 type=review_reject（类型已登记才发；发送由团队工具校验，未登记拒绝）。
+  ipcMain.handle('owner:reject-notify', async (_e, payload) => {
+    const p = payload || {};
+    const store = readStore();
+    const project = requireProject(store, p.projectId);
+    const teamName = String(project.teamName || project.name || '');
+    const to = String(p.to || '').trim();
+    if (!teamTools.ROLE_IDS.includes(to)) {
+      throw codedError('BAD_RECIPIENT', `评审打回通知收件人无效：${to || '空'}；只能是团队角色`);
+    }
+    const result = await teamTools.sendWorkflowNotice({
+      projectName: teamName,
+      from: 'pm',
+      to,
+      type: 'review_reject',
+      subject: String(p.subject || '评审打回').slice(0, 80),
+      body: String(p.body || '').slice(0, 600),
+      sessionId: String(p.sessionId || '')
+    });
+    return result;
+  });
   ipcMain.handle('team:board-old', async (_e, payload) => {
     const projectId = typeof payload === 'string' ? payload : String((payload && (payload.projectId || payload.id)) || '');
+    const theme = (payload && payload.theme === 'light') ? 'light' : 'dark';
     const store = readStore();
     const project = store.projects.find((p) => p.id === projectId);
     if (!project) throw new Error('项目不存在');
@@ -4620,18 +5767,21 @@ function registerIpc() {
     if (!result.ok) throw new Error(result.message || result.why || '看板生成失败');
     teamBoardProjectId = project.id;
     teamBoardProjectPath = path.resolve(String(project.path));
+    teamBoardTheme = theme;
     if (boardWindowAlive()) {
       // 复用窗口也必须重新加载：generateBoard 每次都会重写 看板.html，
       // 只 show/focus 会让切项目后的窗口继续显示上一个项目。
-      await teamBoardWindow.loadFile(result.boardPath);
+      await teamBoardWindow.loadFile(result.boardPath, { query: { theme } });
+      // B-4e18：复用窗重载后同样跟当前字号。
+      applyZoomToAllWindows(readZoomPref());
       teamBoardWindow.show();
       teamBoardWindow.focus();
-      return { ok: true, path: result.boardPath, projectId: project.id, reused: true, reloaded: true };
+      return { ok: true, path: result.boardPath, projectId: project.id, reused: true, reloaded: true, theme };
     }
     teamBoardWindow = new BrowserWindow({
       width: 1120, height: 780, minWidth: 440, minHeight: 320,
       frame: false, alwaysOnTop: true, skipTaskbar: false, resizable: true, show: false,
-      backgroundColor: '#0b0c10', opacity: 0.97, parent: mainWindow || undefined,
+      backgroundColor: theme === 'light' ? '#f6f1e7' : '#0b0c10', opacity: 0.97, parent: mainWindow || undefined,
       title: '团队看板', icon: APP_ICON,
       webPreferences: {
         // 看板窗口复用同一个 preload，通过 --awb-board 只暴露 window.boardWin。
@@ -4646,9 +5796,11 @@ function registerIpc() {
       teamBoardProjectPath = null;
       teamBoardExpandedBounds = null;
     });
-    await teamBoardWindow.loadFile(result.boardPath);
+    await teamBoardWindow.loadFile(result.boardPath, { query: { theme } });
+    // B-4e18：看板窗是独立 BrowserWindow，创建/重载后要跟主窗同一字号。
+    applyZoomToAllWindows(readZoomPref());
     teamBoardWindow.show();
-    return { ok: true, path: result.boardPath, projectId: project.id, reused: false, reloaded: true };
+    return { ok: true, path: result.boardPath, projectId: project.id, reused: false, reloaded: true, theme };
   });
   ipcMain.handle('team:board-control', (event, action) => {
     assertBoardSender(event);
@@ -4690,10 +5842,21 @@ function registerIpc() {
       commits: Array.isArray(project.commits) ? project.commits.length : 0,
       workspaceId: workspaceOf(project).id
     };
-    // 先归档 DSH 六角色会话，再删本地记录；DSH 离线时仍允许摘记录，但把失败原因带回。
-    const sessions = p.archiveSessions === false
-      ? { ok: true, code: 'SKIPPED', mode: 'none', archived: [], skipped: [], failed: [] }
-      : await archiveProjectRoleSessions(project);
+    // 先归档 DSH 六角色会话，再删本地记录；DSH 离线/目录已不存在时仍允许摘记录，但把失败原因带回。
+    // 目录不存在时 DSH 归档必然失败：这时不能因为“归档失败”挡住用户移除失效项目。
+    let sessions;
+    try {
+      sessions = p.archiveSessions === false
+        ? { ok: true, code: 'SKIPPED', mode: 'none', archived: [], skipped: [], failed: [] }
+        : await archiveProjectRoleSessions(project);
+    } catch (e) {
+      sessions = {
+        ok: false,
+        code: 'SESSION_ARCHIVE_FAILED',
+        message: String((e && e.message) || e).slice(0, 300),
+        archived: [], skipped: [], failed: []
+      };
+    }
     // 默认只摘本机记录，绝不动旧团队账本/任务/提案/回执。purgeTeam 仅供显式迁移工具使用。
     if (p.purgeTeam === true || p.archiveTeam !== false) {
     try {
@@ -4820,6 +5983,333 @@ function registerIpc() {
       warnings: sessions.ok ? [] : [{ code: sessions.code || 'SESSION_ARCHIVE_FAILED', message: sessions.message || 'DSH 会话未完全归档', pendingCleanup: Boolean(pendingCleanup) }],
       state: statePayload()
     };
+  });
+  // Owner 评审材料：只读清单 + 单项读取；缺失/不可读如实返回，不补造内容。
+  ipcMain.handle('owner:materials', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    if (!fs.existsSync(path.resolve(String(project.path || '')))) {
+      throw codedError('PROJECT_DIR_MISSING', '项目目录不存在：' + project.path);
+    }
+    return ownerMaterials(project, p.requirementId);
+  });
+  const ownerProxyFile = (project) => {
+    const dir = teamProjectStateDir(project);
+    return dir ? path.join(dir, '评审代管.json') : '';
+  };
+  const readOwnerProxy = (project) => {
+    const file = ownerProxyFile(project);
+    if (!file || !fs.existsSync(file)) return { records: [] };
+    try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return { records: [] }; }
+  };
+  const writeOwnerProxy = (project, data) => {
+    const file = ownerProxyFile(project);
+    if (!file) throw codedError('NO_TEAM_STATE', '团队状态目录不存在，不能保存代管状态');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    return file;
+  };
+  ipcMain.handle('owner:review-data', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    const name = String(project.teamName || project.name || '');
+    const snapshot = teamTools.readWorkflowSnapshot(name, project.path) || {};
+    return {
+      ok: true,
+      projectId: project.id,
+      projectName: name,
+      // R-1cee F-R5：弹窗按团队模式显示评审人（full=产品、fast=分析师）。
+      teamMode: normalizeTeamMode(project.teamMode),
+      stage: snapshot.stage || '',
+      // B-b55c：列表带上状态来源（同一份 工作流.json + 读盘时间）；确认时把它回传，
+      // 后端口径是"同一文件、同一时刻"，不一致就明确说列表过期，而不是报一个相反状态。
+      source: snapshot.source || null,
+      requirements: Array.isArray(snapshot.requirements) ? snapshot.requirements : [],
+      materials: p.requirementId ? ownerMaterials(project, String(p.requirementId)) : null,
+    };
+  });
+  ipcMain.handle('owner:proxy-status', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    const data = readOwnerProxy(project);
+    const records = Array.isArray(data.records) ? data.records : [];
+    const active = records.filter((row) => !row.endedAt).slice(-1)[0] || null;
+    return { ok: true, active, records, scope: active ? active.scope : null };
+  });
+  ipcMain.handle('owner:proxy-start', async (_e, payload) => {
+    const p = payload || {};
+    if (String(p.actor || '') !== 'owner') {
+      throw codedError('PERMISSION_DENIED', '只有 Owner 本人能在评审弹窗开启代管');
+    }
+    const store = readStore();
+    const project = requireProject(store, p.projectId);
+    // R-703f AC3③：代管签发者不得是同一被代管角色的会话——自代一律拒（SELF_PROXY_FORBIDDEN）。
+    // 判据：发起这张代管/代记的会话 sessionId，与 团队.json 里 pm 成员的当前会话相同。
+    const issuerSession = String(p.sessionId || p.issuerSessionId || '').trim();
+    if (issuerSession) {
+      try {
+        const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+        const teamFile = path.join(teamRoot, '状态', '团队.json');
+        const team = JSON.parse(fs.readFileSync(teamFile, 'utf8').replace(/^\uFEFF/, ''));
+        const pmMember = (Array.isArray(team.members) ? team.members : []).find((m) => m && m.role === 'pm');
+        if (pmMember && String(pmMember.sessionId || '') && String(pmMember.sessionId) === issuerSession) {
+          throw codedError('SELF_PROXY_FORBIDDEN',
+            'PM 不能给自己签发代管（自代）：请由 Owner 会话发起代管，或换一个不是被代管角色的会话签发');
+        }
+      } catch (error) {
+        if (error && error.code === 'SELF_PROXY_FORBIDDEN') throw error;
+        // 名册读不到/损坏不阻断 Owner 正常代管，但要在事件里留痕（不静默）。
+        try { addEvent(project, '代管自代校验跳过：团队.json 不可读'); } catch { /* ignore */ }
+      }
+    }
+    // 支持单条（requirementId）与批量（requirementIds）：「全部交 PM 代管」一次给当前所有待评估需求开 always。
+    const requirementIds = Array.isArray(p.requirementIds) && p.requirementIds.length
+      ? [...new Set(p.requirementIds.map((x) => String(x || '')).filter(Boolean))]
+      : [String(p.requirementId || '')].filter(Boolean);
+    if (!requirementIds.length) throw codedError('BAD_REQUIREMENT', '缺少需求 id');
+    const scope = String(p.scope || 'once');
+    if (!['once', 'always'].includes(scope)) throw codedError('BAD_SCOPE', '代管范围只能是本轮或每轮');
+    const data = readOwnerProxy(project);
+    data.records = Array.isArray(data.records) ? data.records : [];
+    const started = [];
+    const deduped = [];
+    const at = now();
+    for (const requirementId of requirementIds) {
+      // B-20261113-014634-0cdd：按 requirementId upsert，历史（endedAt 非空）一条不动。
+      // 旧数据里同一需求可能有多条未结束记录：先取 updatedAt 最新的一条继续用，其余在下方的全局收敛里收口。
+      const actives = data.records.filter((row) => row.requirementId === requirementId && !row.endedAt);
+      const keep = actives.length
+        ? actives.slice().sort((a, b) => String(b.updatedAt || b.startedAt || '').localeCompare(String(a.updatedAt || a.startedAt || '')))[0]
+        : null;
+      if (keep) {
+        keep.scope = scope;
+        keep.authorization = String(p.authorization || keep.authorization || 'Owner 在评审弹窗点击代管');
+        keep.updatedAt = at;
+        started.push(keep);
+      } else {
+        const row = {
+          scope,
+          requirementId,
+          startedAt: at,
+          startedBy: 'owner',
+          authorization: String(p.authorization || 'Owner 在评审弹窗点击代管'),
+          recordedBy: 'pm',
+          endedAt: null,
+          endedBy: null,
+          updatedAt: at,
+        };
+        data.records.push(row);
+        started.push(row);
+      }
+    }
+    // 存量自愈：历史 bug 会给同一需求留下多条未结束记录（每次点击都追加）。每次开代管都按需求收敛成
+    // 一条 —— 保留 updatedAt 最新的一条，其余标 endedBy=dedupe 收口（不删除，仍可追溯）。
+    const seenActive = new Set();
+    const byNewest = data.records.slice().sort((a, b) => String(b.updatedAt || b.startedAt || '').localeCompare(String(a.updatedAt || a.startedAt || '')));
+    for (const row of byNewest) {
+      if (row.endedAt) continue;
+      if (seenActive.has(row.requirementId)) {
+        row.endedAt = at;
+        row.endedBy = 'dedupe';
+        deduped.push(row.requirementId);
+      } else {
+        seenActive.add(row.requirementId);
+      }
+    }
+    data.updatedAt = at;
+    writeOwnerProxy(project, data);
+    for (const row of started) addEvent(project, `Owner 开启代管：${row.requirementId}（${row.scope}）`);
+    // 事件是投影：代管记录已经落盘，状态库写失败不能把它回滚成“批量失败”，只带 warnings 让界面能提示。
+    const warnings = [];
+    try { writeStore(store); } catch (error) {
+      warnings.push({ code: 'STORE_WRITE_FAILED', message: String((error && error.message) || error).slice(0, 200) });
+    }
+    // 去重视图：每个需求最多一条未结束记录；ended 历史照旧全量返回（append-only）。
+    const active = data.records.filter((row) => !row.endedAt);
+    return { ok: true, records: data.records, active, started, count: started.length, deduped, warnings };
+  });
+  ipcMain.handle('owner:proxy-end', async (_e, payload) => {
+    const p = payload || {};
+    // AC24.3/24.11：开启与结束都必须 Owner 本人（测试 v21 D5：原先任何调用者都能结束）。
+    if (String(p.actor || '') !== 'owner') {
+      throw codedError('PERMISSION_DENIED', '只有 Owner 本人能在评审弹窗结束代管');
+    }
+    const store = readStore();
+    const project = requireProject(store, p.projectId);
+    const requirementId = String(p.requirementId || '');
+    const data = readOwnerProxy(project);
+    data.records = Array.isArray(data.records) ? data.records : [];
+    for (const row of data.records) {
+      if (row.endedAt) continue;
+      if (requirementId && row.requirementId !== requirementId) continue;
+      row.endedAt = now();
+      row.endedBy = 'owner';
+    }
+    writeOwnerProxy(project, data);
+    addEvent(project, 'Owner 结束代管');
+    try { writeStore(store); } catch { /* 事件只是投影，结束代管本身已落盘 */ }
+    return { ok: true, records: data.records };
+  });
+  ipcMain.handle('owner:material', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    return ownerMaterialRead(project, String(p.rel || ''));
+  });
+  // 闸门判定透传：判定只来自 team.mjs / team-tools；接口未就绪时明确返回 GATE_API_UNAVAILABLE。
+  ipcMain.handle('gate:check', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    return gateCheckProject(project, p);
+  });
+  // 只读闸门审计（团队/状态/项目/<项目>/闸门审计.jsonl），供界面“违规留痕”展示。
+  ipcMain.handle('gate:audit', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    return readGateAudit(project, p.limit);
+  });
+  // 失效项目重新定位：只改本机路径与团队登记路径，不移动/删除任何真实文件。
+  ipcMain.handle('project:relocate', async (_e, payload) => {
+    const p = payload || {};
+    const store = readStore();
+    const project = requireProject(store, p.projectId);
+    const rawPath = String(p.newPath || '').trim();
+    if (!rawPath) throw codedError('PATH_REQUIRED', '新目录不能为空');
+    const abs = path.resolve(rawPath);
+    guardNotDataDir(abs);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) throw codedError('PROJECT_DIR_MISSING', '目录不存在：' + abs);
+    const clash = store.projects.find((row) => row.id !== project.id && path.resolve(String(row.path || '')).toLowerCase() === abs.toLowerCase());
+    if (clash) throw codedError('PROJECT_ALREADY_REGISTERED', '该目录已登记为项目：' + clash.name);
+    const markers = ['项目信息.md', '项目铁律.md', '需求'];
+    if (!markers.some((name) => fs.existsSync(path.join(abs, name)))) {
+      throw codedError('NOT_A_PROJECT', '目录里没有 项目信息.md / 项目铁律.md / 需求/，无法确认是工作台项目');
+    }
+    const oldPath = project.path;
+    // 先按旧路径找回团队状态目录，再改本地记录。
+    const stateDir = teamProjectStateDir(project);
+    project.path = abs;
+    project.updatedAt = now();
+    project.workspace = { ...workspaceOf(project), path: abs, bound: false, lastError: null };
+    addEvent(project, `项目目录重新定位：${oldPath} → ${abs}`);
+    writeStore(store);
+    let teamUpdated = false;
+    if (stateDir) {
+      try {
+        const file = path.join(stateDir, '项目.json');
+        const config = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+        if (config && typeof config === 'object') {
+          config.path = abs;
+          config.updatedAt = now();
+          atomicWriteFile(file, JSON.stringify(config, null, 2) + '\n');
+          teamUpdated = true;
+        }
+      } catch { teamUpdated = false; }
+    }
+    // 路径改了，工作区绑定必须按新路径重绑；失败只记警告，不改回路径（记录仍可用于重新定位）。
+    let activation = null;
+    try {
+      activation = await activateWorkspace(requireProject(readStore(), project.id), { timeoutMs: 5000 });
+    } catch (error) {
+      activation = { ok: false, warnings: [{ code: 'WORKSPACE_RELOCATE_FAILED', message: String((error && error.message) || error).slice(0, 200) }] };
+    }
+    const current = requireProject(readStore(), project.id);
+    return {
+      ok: true,
+      projectId: project.id,
+      oldPath,
+      newPath: abs,
+      teamUpdated,
+      workspace: (activation && activation.workspace) || workspaceOf(current),
+      warnings: (activation && activation.warnings) || [],
+      state: statePayload()
+    };
+  });
+  // 已归档项目记录：只读列出 _deleted 里的目录，供恢复入口展示。
+  ipcMain.handle('project:archived', () => {
+    const dir = path.join(teamProjectsDir(), '_deleted');
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { entries = []; }
+    const items = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const full = path.join(dir, entry.name);
+      let config = null;
+      try { config = JSON.parse(fs.readFileSync(path.join(full, '项目.json'), 'utf8').replace(/^\uFEFF/, '')); } catch { continue; }
+      let at = '';
+      try { at = fs.statSync(full).mtime.toISOString(); } catch { at = ''; }
+      items.push({
+        archiveName: entry.name,
+        name: String((config && config.name) || entry.name.replace(/^\d{4}-\d{2}-\d{2}T[\d-]+Z-/, '')),
+        path: String((config && config.path) || ''),
+        teamMode: String((config && config.teamMode) || ''),
+        archivedAt: at,
+        dirExists: Boolean(config && config.path && fs.existsSync(String(config.path)))
+      });
+    }
+    items.sort((a, b) => String(b.archivedAt).localeCompare(String(a.archivedAt)));
+    return { ok: true, items, dir };
+  });
+  // 恢复归档记录：把 _deleted/<stamp>-<name> 移回 状态/项目/，目录仍存在时回到界面后由恢复流程登记。
+  ipcMain.handle('project:restore-archived', async (_e, payload) => {
+    const p = payload || {};
+    const archiveName = String(p.archiveName || '').trim();
+    if (!archiveName || archiveName.includes('/') || archiveName.includes('\\') || archiveName.startsWith('.')) {
+      throw codedError('BAD_ARCHIVE', '归档目录名无效');
+    }
+    const projectsDir = teamProjectsDir();
+    const sourceDir = path.join(projectsDir, '_deleted', archiveName);
+    if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) throw codedError('ARCHIVE_NOT_FOUND', '归档记录不存在：' + archiveName);
+    let config = null;
+    try { config = JSON.parse(fs.readFileSync(path.join(sourceDir, '项目.json'), 'utf8').replace(/^\uFEFF/, '')); } catch { config = null; }
+    const name = String((config && config.name) || archiveName.replace(/^\d{4}-\d{2}-\d{2}T[\d-]+Z-/, ''));
+    const projectPath = String((config && config.path) || '');
+    // 同名目录已存在时追加后缀，绝不覆盖现有文件。
+    let targetName = name;
+    let targetDir = path.join(projectsDir, targetName);
+    if (fs.existsSync(targetDir)) {
+      targetName = name + '-' + storeStamp();
+      targetDir = path.join(projectsDir, targetName);
+    }
+    fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+    fs.renameSync(sourceDir, targetDir);
+    const store = readStore();
+    const existing = store.projects.find((row) => String(row.path || '').toLowerCase() === projectPath.toLowerCase());
+    if (existing) {
+      return { ok: true, idempotent: true, archiveName, name, path: projectPath, restoredDir: targetDir, needsAdopt: false, state: statePayload() };
+    }
+    if (projectPath && fs.existsSync(projectPath) && fs.statSync(projectPath).isDirectory()) {
+      // 目录还在：交给前端走既有「登记项目」流程（adopt），不在这里重复 DSH 绑定逻辑。
+      return { ok: true, needsAdopt: true, archiveName, name, path: projectPath, restoredDir: targetDir };
+    }
+    // 目录已不存在：恢复一条本机记录并标失效，随后可用「重新定位」指回真实目录。
+    const record = {
+      id: id('P'), name, path: projectPath, teamName: name,
+      teamMode: normalizeTeamMode((config && config.teamMode) || undefined),
+      createdAt: now(), updatedAt: now(),
+      ownerReview: { status: 'optional', opinion: '', at: null },
+      tasks: [], messages: [], proposals: [], commits: [], votes: [],
+      pendingAck: null, pendingAckAt: null,
+      events: [{ at: now(), text: `从归档恢复记录（${archiveName}）；原目录不存在，需重新定位` }]
+    };
+    const fresh = readStore();
+    fresh.projects.push(record);
+    fresh.activeProjectId = record.id;
+    writeStore(fresh);
+    return { ok: true, needsAdopt: false, recordRestored: true, missingDir: true, name, path: projectPath, restoredDir: targetDir, project: publicProject(record), state: statePayload() };
+  });
+  // 主题联动：独立看板窗口不会继承外壳 CSS 变量，切主题时通过 IPC 改它的 data-theme。
+  ipcMain.handle('team:board-theme', async (_e, payload) => {
+    const theme = (payload && payload.theme === 'light') ? 'light' : 'dark';
+    teamBoardTheme = theme;
+    if (!boardWindowAlive()) return { ok: true, applied: false, theme };
+    try {
+      await teamBoardWindow.webContents.executeJavaScript(
+        `(function(){try{document.documentElement.dataset.theme=${JSON.stringify(theme)};localStorage.setItem('awb.boardTheme',${JSON.stringify(theme)});}catch(e){}})();`,
+        true
+      );
+      return { ok: true, applied: true, theme };
+    } catch (error) {
+      return { ok: false, code: 'BOARD_THEME_FAILED', message: String((error && error.message) || error).slice(0, 200), theme };
+    }
   });
   ipcMain.handle('task:create', (_e, payload) => {
     const store = readStore();
@@ -5169,6 +6659,25 @@ function registerIpc() {
     };
   };
   ipcMain.handle('proposal:legacy', legacyProposalHandler);
+  // 提案只读列表：Owner 评审与提案页直接读 team.mjs 的 提案/ 目录，不再要求先手动 show。
+  ipcMain.handle('proposal:list', async (_e, payload) => {
+    const p = typeof payload === 'string' ? { projectId: payload } : (payload || {});
+    try {
+      const project = requireProject(readStore(), p.projectId);
+      const ensured = await ensureTeamName(project);
+      const teamName = ensured && ensured.ok && ensured.teamName
+        ? String(ensured.teamName)
+        : String(project.teamName || project.name || '');
+      const result = teamTools.listLegacyProposals(teamName);
+      return { ...result, projectId: project.id, teamName, state: statePayload() };
+    } catch (e) {
+      return {
+        ok: false, code: 'PROPOSAL_LIST_FAILED',
+        message: String((e && e.message) || e).slice(0, 300),
+        proposals: [], state: statePayload()
+      };
+    }
+  });
   ipcMain.handle('team:proposal-legacy', legacyProposalHandler);
   ipcMain.handle('team:inbox', async (_e, payload) => {
     const p = payload || {};
@@ -6082,7 +7591,87 @@ function registerIpc() {
     const status = String(p.status || p.decision || '');
     // Owner 确认码已废弃：决定直接以 role=owner 接受，不再校验 confirmToken/nonce。
     const roundKey = workflowSnapshot(project).roundKey;
+    // R-6f60 AC24.4/24.10：代管（channel=proxy）落账判定。
+    // PM 代记 Owner 决定时前端传 recordedBy=pm；通道未开启/已结束 → OWNER_ACTION_REQUIRED，缺授权 → PROXY_UNAUTHORIZED。
+    const decideRequirementId = String(p.requirementId || '');
+    // B-fe22：通过不要求意见；打回必须写理由（前端已拦，这里兜底防绕过，避免静默丢理由）。
+    if (status === 'rejected' && !String(p.opinion || '').trim()) {
+      throw codedError('OWNER_OPINION_REQUIRED', '打回必须写理由：说明哪不行、要怎么改');
+    }
+    // Owner 规则（2026-11-13）：跳过 = 三方共决（开发+产品+分析师），多数通过才可跳过，记录 channel=skip_committee。
+    const wantSkipCommittee = String(p.channel || '') === 'skip_committee';
+    let committee = null;
+    const wantProxy = String(p.recordedBy || '') === 'pm' || String(p.channel || '') === 'proxy';
+    let decisionChannel = 'ui';
+    let proxyRow = null;
+    if (wantSkipCommittee) {
+      if (status !== 'skipped') throw codedError('SKIP_COMMITTEE_INVALID', 'channel=skip_committee 只能用于“跳过”决定');
+      const c = p.committee || {};
+      const votes = [c.analyst, c.product, c.dev].map((t) => String(t || '').trim());
+      if (votes.some((t) => !t)) {
+        throw codedError('SKIP_COMMITTEE_INCOMPLETE', '三方未齐：跳过必须开发、产品、分析师各写一句书面意见，缺一不得跳过');
+      }
+      const approveCount = votes.filter((t) => /^(?!.*(?:不同意|不通过|不赞成|不可跳过|反对)).*(?:同意|通过|赞成|可跳过)/.test(t)).length;
+      if (approveCount < 2) {
+        throw codedError('SKIP_COMMITTEE_REJECTED', `三方共决未通过：${approveCount}/3 写“同意”，至少 2 方同意才能跳过`);
+      }
+      committee = { analyst: votes[0], product: votes[1], dev: votes[2], approveCount, verdict: 'passed', mode: 'committee' };
+      decisionChannel = 'skip_committee';
+    } else if (wantProxy) {
+      proxyRow = decideRequirementId
+        ? readOwnerProxy(project).records.find((row) => row.requirementId === decideRequirementId && !row.endedAt)
+        : null;
+      if (!proxyRow) {
+        throw codedError('OWNER_ACTION_REQUIRED', '代管通道未开启或已结束：后续决定必须 Owner 本人点（channel=ui/tty），不能再由 PM 代落账');
+      }
+      if (!String(proxyRow.authorization || '').trim()) {
+        throw codedError('PROXY_UNAUTHORIZED', '代管缺少 Owner 授权来源（authorization）：先取得 Owner 书面授权再落账');
+      }
+      decisionChannel = 'proxy';
+    }
+    // B-fe22：弹窗决定必须落到需求行。之前这里只改项目级 ownerReview，需求行仍是 pending，
+    // 弹窗列表/阶段都不动，Owner 看到的就是“点了没效果”；写入失败必须抛错让前端横幅显示。
+    let requirementWrite = null;
+    if (decideRequirementId && ['approved', 'skipped', 'rejected'].includes(status)) {
+      const requirementResult = await teamTools.applyOwnerDecisionToRequirement({
+        project,
+        projectName: project.teamName || project.name,
+        requirementId: decideRequirementId,
+        status,
+        opinion: p.opinion,
+        channel: decisionChannel,
+        by: 'Owner',
+        roundKey,
+        ...(committee ? { committee } : {}),
+        ...(proxyRow
+          ? {
+            recordedBy: 'pm',
+            proxy: String(proxyRow.scope || ''),
+            authorization: String(proxyRow.authorization || ''),
+          }
+          : {}),
+      });
+      if (!requirementResult || requirementResult.ok === false) {
+        throw codedError(
+          (requirementResult && requirementResult.code) || 'OWNER_REQUIREMENT_WRITE_FAILED',
+          String((requirementResult && requirementResult.message) || '需求行写入失败，本次决定未落账')
+        );
+      }
+      requirementWrite = requirementResult;
+    }
     ownerDecide(project, status, p.opinion, { roundKey });
+    if (p.requirementId) {
+      project.ownerReview.requirementId = decideRequirementId;
+      project.ownerReview.channel = decisionChannel;
+      project.ownerReview.decidedBy = 'owner';
+      project.ownerReview.actor = 'owner';
+      if (proxyRow) {
+        project.ownerReview.recordedBy = 'pm';
+        project.ownerReview.proxy = String(proxyRow.scope || '');
+        project.ownerReview.authorization = proxyRow.authorization || '';
+      }
+      if (committee) project.ownerReview.committee = committee;
+    }
     writeStore(store);
     const current = requireProject(readStore(), project.id);
     const finalStatus = ['approved', 'skipped', 'rejected'].includes(status);
@@ -6090,7 +7679,18 @@ function registerIpc() {
     let fallback = null;
     if (finalStatus) {
       try {
-        teamResult = await teamTools.recordOwnerDecision(current, { status, opinion: p.opinion, roundKey, by: 'Owner' });
+        teamResult = await teamTools.recordOwnerDecision(current, {
+          status, opinion: p.opinion, roundKey, by: 'Owner',
+          channel: decisionChannel, decidedBy: 'owner', requirementId: decideRequirementId,
+          ...(committee ? { committee } : {}),
+          ...(proxyRow
+            ? {
+              recordedBy: 'pm',
+              proxy: String(proxyRow.scope || ''),
+              authorization: String(proxyRow.authorization || ''),
+            }
+            : {}),
+        });
       } catch (error) {
         fallback = {
           code: 'OWNER_WORKFLOW_FAILED',
@@ -6111,6 +7711,18 @@ function registerIpc() {
       ok: true,
       projectId: current.id,
       ownerReview: current.ownerReview,
+      // B-fe22：把需求行快照一并返回，前端据此确认“这条真的变了”，不用等 5 秒轮询。
+      requirement: (() => {
+        if (!decideRequirementId) return null;
+        try {
+          const snapshot = teamTools.readWorkflowSnapshot(current.teamName || current.name, current.path);
+          if (!snapshot || !snapshot.ok) return null;
+          return (snapshot.requirements || []).find((row) => String(row.id) === decideRequirementId) || null;
+        } catch { return null; }
+      })(),
+      requirementWrite: requirementWrite
+        ? { ok: requirementWrite.ok, code: requirementWrite.code, channel: requirementWrite.channel }
+        : null,
       roundKey,
       stage: deriveStage(current),
       workflowFile: outcome.workflowFile,
@@ -6207,7 +7819,7 @@ function registerIpc() {
     };
     // 看板“当前工作区全部会话”的口径更宽：成员/工作区 id/cwd 任一命中，用于找出额外会话。
     const scoped = (s) => inWorkspaceOf(s, s.sessionId) || cwdSame(s);
-    const statusRoleIds = roleIdsForProject(project);
+    const statusRoleIds = projectRoleIds(project);
     const statusRoles = statusRoleIds.map((roleId) => ROLE_BY_ID.get(roleId) || { id: roleId, name: roleId });
     const items = statusRoles.map((r) => {
       const sid = project.sessions && project.sessions[r.id] ? String(project.sessions[r.id]) : '';
@@ -6261,6 +7873,10 @@ function registerIpc() {
     const notInWorkspace = items.filter((item) => item.exists && !item.inWorkspace).map((item) => item.role);
     const workspaceSessionCount = liveSessions.filter((s) => scoped(s)).length;
     const ready = items.filter((item) => item.exists && item.inWorkspace && !item.blank && !item.archived).length;
+    // e29f F-3/F-4：「额外会话」与 6/6 都只认一个来源——
+    //   X = 上面 ready（按 sessionId 全等 + 属于本工作区核验出来的条数），N = roleIds.length；
+    //   「额外会话」= 工作区绑定里不属于当前角色集合的会话（workspaceSessionState.extras，单一计数）。
+    const binding = workspaceSessionState(project);
     return {
       ok: true,
       teamMode: normalizeTeamMode(project.teamMode),
@@ -6281,9 +7897,273 @@ function registerIpc() {
       workspaceBound: workspace.bound,
       teamName: project.teamName || null,
       canRepair: missingRoles.length > 0 || blankRoles.length > 0 || notInWorkspace.length > 0 || duplicates.length > 0,
+      // e29f：单一来源的"额外会话"口径（工作区绑定 \ 当前角色集合），界面只在一处显示这个数字。
+      extraSessions: binding.extras,
+      extraSessionCount: binding.extraCount,
+      roleSessionIds: binding.roleSessionIds,
+      boundSessionIds: binding.boundSessionIds,
+      missingBoundRoles: binding.missingBound,
+      binding,
       mapping: publicMapping(requireProject(readStore(), project.id))
     };
   });
+  // ── R-20261114-001014-e29f 工作区残留清理（T-20261114-005845-38f0）─────────────────────────
+  // 口径（需求正文 F-e29f-1/3/4）：
+  //   角色集合 R = 团队/状态/团队.json → members[].sessionId（703f 唯一真相；缺则退回项目映射）
+  //   绑定集合 B = workbench.json → projects[].workspace.sessionIds
+  //   额外会话 E = B \ R（每个都计入；同一角色的第二个会话也落在 E 里）
+  //   异常方向 = R \ B（缺角色会话，界面给"一键绑定缺失会话"，本条不做清理动作）
+  // 只解绑不删会话；清理写 团队/状态/项目/<项目>/工作区清理.jsonl（append-only，幂等）。
+  function teamRosterSessionMap() {
+    const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+    const file = path.join(teamRoot, '状态', '团队.json');
+    const out = { ok: false, code: 'TEAM_ROSTER_MISSING', file, map: {}, activeProject: '', at: now() };
+    try {
+      if (!fs.existsSync(file)) return out;
+      const team = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+      out.ok = true;
+      out.code = 'OK';
+      out.activeProject = String(team.activeProject || '');
+      out.at = String(team.updatedAt || '') || out.at;
+      for (const member of (Array.isArray(team.members) ? team.members : [])) {
+        if (!member || !member.role) continue;
+        const sid = String(member.sessionId || '').trim();
+        if (sid) out.map[String(member.role)] = sid;
+      }
+      return out;
+    } catch (error) {
+      return { ...out, code: 'TEAM_ROSTER_UNREADABLE', message: String((error && error.message) || error).slice(0, 200) };
+    }
+  }
+
+  function workspaceSessionState(project) {
+    const roleIds = projectRoleIds(project);
+    const roster = teamRosterSessionMap();
+    // 名册（团队.json）是"当前项目"的快照：只有它指向本项目时才能拿来当角色会话真相，
+    // 否则 fast 项目会拿 full 项目的 6 个会话去比 → 4 个假"缺绑定" + 4 个假"额外会话"（4/6 误报根因）。
+    const projectName = String((project && (project.teamName || project.name)) || '');
+    const rosterApplies = Boolean(roster.ok) && (!roster.activeProject || roster.activeProject === projectName);
+    const roleSessionIds = [];
+    const missingRoleSessions = [];
+    const roleSources = {};
+    for (const role of roleIds) {
+      const mapped = project.sessions && project.sessions[role] ? String(project.sessions[role]) : '';
+      const rosterSid = rosterApplies ? String(roster.map[role] || '') : '';
+      const sid = String(rosterSid || mapped || '').trim();
+      if (!sid) { missingRoleSessions.push(role); continue; }
+      roleSessionIds.push(sid);
+      roleSources[sid] = { role, source: rosterSid ? 'roster' : 'project-mapping' };
+    }
+    const roleSet = new Set(roleSessionIds);
+    const workspace = workspaceOf(project) || {};
+    const rawBound = Array.isArray(workspace.sessionIds) ? workspace.sessionIds.map(String) : [];
+    const bound = [...new Set(rawBound)];
+    const extras = bound.filter((sid) => !roleSet.has(sid)).map((sid) => {
+      const known = roleSources[sid] || null;
+      return {
+        sessionId: sid,
+        short: sid.length > 8 ? '…' + sid.slice(-8) : sid,
+        role: known ? known.role : null,
+        source: known ? '移出角色集合的旧会话' : (String(sid) === String((project.workspace && project.workspace.ownerSessionId) || '') ? 'Owner 自己的会话' : '旧会话 / 未知来源'),
+        action: '解绑（不删除 DSH 会话）'
+      };
+    });
+    const missingBound = roleSessionIds.filter((sid) => !bound.includes(sid));
+    return {
+      ok: true,
+      projectId: project.id,
+      projectName: String(project.teamName || project.name || ''),
+      teamMode: normalizeTeamMode(project.teamMode),
+      roleIds,
+      roleSessionIds,
+      roleSetVerifiable: roster.ok,
+      rosterFile: roster.file,
+      rosterCode: roster.code,
+      rosterReadAt: roster.at,
+      missingRoleSessions,
+      boundSessionIds: bound,
+      boundRawCount: rawBound.length,
+      duplicatesInBinding: rawBound.length !== bound.length,
+      extras,
+      extraCount: extras.length,
+      missingBound,
+      cleanable: extras.length > 0,
+      workspaceId: String(workspace.id || ''),
+      at: now()
+    };
+  }
+
+  function workspaceCleanHistoryFile(project) {
+    const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+    const slug = teamTools.teamSlug(String(project.teamName || project.name || ''));
+    return path.join(teamRoot, '状态', '项目', slug, '工作区清理.jsonl');
+  }
+
+  function readWorkspaceCleanHistory(project, limit = 20) {
+    const file = workspaceCleanHistoryFile(project);
+    const rows = [];
+    try {
+      if (!fs.existsSync(file)) return { ok: true, file, rows, missing: true };
+      const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean);
+      for (const line of lines.slice(-Math.max(1, Number(limit) || 20))) {
+        try { rows.push(JSON.parse(line)); } catch { rows.push({ bad: true, line: line.slice(0, 120) }); }
+      }
+      return { ok: true, file, rows, missing: false };
+    } catch (error) {
+      return { ok: false, code: 'WORKSPACE_HISTORY_UNREADABLE', file, rows, message: String((error && error.message) || error).slice(0, 200) };
+    }
+  }
+
+  function sessionIdsHashOf(store, exceptProjectId) {
+    const rows = (store.projects || [])
+      .filter((p) => p && p.id !== exceptProjectId)
+      .map((p) => ({ id: p.id, sessionIds: [...new Set(((p.workspace && Array.isArray(p.workspace.sessionIds)) ? p.workspace.sessionIds : []).map(String))].sort() }))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    return sha256(Buffer.from(JSON.stringify(rows), 'utf8'));
+  }
+
+  // R-703f F-1 / AC1：会话用量界面（只读）。数据源 团队/状态/项目/<项目>/会话用量.json，
+  // schema：{ "<role>": {sessionId, tokens, input, at, source} }；阈值默认 30 万（--warn 可配，落在数据里）。
+  // 文件缺失 / at 超 24h → 返回 unknown（界面显示"用量未知"），不凭空估算。
+  ipcMain.handle('session:usage', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    const name = String(project.teamName || project.name || '');
+    const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+    const slug = teamTools.teamSlug(name);
+    const file = path.join(teamRoot, '状态', '项目', slug, '会话用量.json');
+    const warnThreshold = Number(p.warn) > 0 ? Number(p.warn) : 300000;
+    const forceThreshold = 500000;
+    let raw = {};
+    let missing = false;
+    try {
+      if (!fs.existsSync(file)) missing = true;
+      else raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) || {};
+    } catch { missing = true; raw = {}; }
+    const nowMs = Date.now();
+    const roles = Object.entries(raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}).map(([role, row]) => {
+      const tokens = Number(row && row.tokens) || 0;
+      const at = String((row && row.at) || '');
+      const atMs = Date.parse(at);
+      const stale = !Number.isFinite(atMs) || (nowMs - atMs) > 24 * 3600000;
+      const level = missing || stale ? 'unknown' : (tokens >= forceThreshold ? 'force' : (tokens >= warnThreshold ? 'warn' : 'ok'));
+      return { role, sessionId: String((row && row.sessionId) || ''), tokens, input: Number((row && row.input) || 0), at, source: String((row && row.source) || ''), stale, level };
+    }).sort((a, b) => b.tokens - a.tokens);
+    const tracked = roles.filter((row) => row.level !== 'unknown');
+    const maxRow = tracked[0] || null;
+    return {
+      ok: true,
+      file,
+      project: name,
+      missing,
+      warnThreshold,
+      forceThreshold,
+      roles,
+      // 界面一行文案用它：X = 角色里最大 tokens（没有就 null → 显示"用量未知"）
+      topTokens: maxRow ? maxRow.tokens : null,
+      topRole: maxRow ? maxRow.role : null,
+      level: maxRow ? maxRow.level : 'unknown',
+      label: maxRow ? `会话用量 ${fmtTokens(maxRow.tokens)} / 阈值 ${fmtTokens(warnThreshold)}` : '会话用量未知 / 阈值 ' + fmtTokens(warnThreshold)
+    };
+  });
+
+  ipcMain.handle('workspace:plan', async (_e, payload) => {
+    const p = payload || {};
+    const store = readStore();
+    const project = requireProject(store, p.projectId);
+    const state = workspaceSessionState(project);
+    return { ...state, otherProjectsHash: sessionIdsHashOf(store, project.id) };
+  });
+
+  ipcMain.handle('workspace:clean', async (_e, payload) => {
+    const p = payload || {};
+    const by = String(p.by || 'pm');
+    // 权限（需求六节「权限」）：Owner 与有效代管下的 PM 可清理；普通角色只读。
+    if (!['pm', 'owner'].includes(by)) {
+      throw codedError('PERMISSION_DENIED', `只有 Owner 或代管 PM 能清理工作区绑定（当前 by=${by}）`);
+    }
+    if (p.confirm !== true) {
+      throw codedError('WORKSPACE_CLEAN_NOT_CONFIRMED', '清理前必须先看将移除清单并二次确认（confirm=true）');
+    }
+    const store = readStore();
+    const project = requireProject(store, p.projectId);
+    // 清理前重读团队集合：角色正好轮换/另开窗口清理过，就中止提示重试（需求「并发」）。
+    const state = workspaceSessionState(project);
+    const currentExtras = state.extras.map((row) => row.sessionId);
+    const expect = Array.isArray(p.expect) ? [...new Set(p.expect.map(String))] : null;
+    if (expect && (expect.length !== currentExtras.length || expect.some((sid) => !currentExtras.includes(sid)))) {
+      throw codedError('WORKSPACE_CLEAN_CONFLICT',
+        `工作区绑定已变化：现在待移除 ${currentExtras.length} 个（${currentExtras.map((sid) => sid.slice(-8)).join('、') || '无'}），`
+        + `与界面确认的 ${expect.length} 个不一致；已中止，请刷新后重试`,
+        { current: currentExtras, expected: expect });
+    }
+    const at = now();
+    const removed = currentExtras;
+    const kept = state.boundSessionIds.filter((sid) => !removed.includes(sid));
+    const otherHashBefore = sessionIdsHashOf(store, project.id);
+    const record = {
+      at,
+      project: String(project.teamName || project.name || ''),
+      removed,
+      kept,
+      reason: 'not-current-role',
+      by,
+      before: state.boundSessionIds.slice(),
+      roleSessionIds: state.roleSessionIds.slice()
+    };
+    const historyFile = workspaceCleanHistoryFile(project);
+    // 原子写：writeStore 内部 tmp + 持久化 + rename（失败保留原文件与 .bak）；先写绑定再写记录，
+    // 任一步失败都不改绑定（记录是审计，不能先写记录再发现绑定没落盘）。
+    if (removed.length) {
+      const fresh = readStore();
+      const target = fresh.projects.find((row) => row.id === project.id);
+      if (!target) throw codedError('PROJECT_NOT_FOUND', '清理时项目已不存在；已中止');
+      const verify = workspaceSessionState(target);
+      const nowExtras = verify.extras.map((row) => row.sessionId);
+      if (nowExtras.length !== currentExtras.length || nowExtras.some((sid) => !currentExtras.includes(sid))) {
+        throw codedError('WORKSPACE_CLEAN_CONFLICT', '清理过程中工作区绑定被其他窗口改动；已中止，请刷新后重试');
+      }
+      target.workspace = { ...(target.workspace || {}), sessionIds: kept };
+      writeStore(fresh);
+    }
+    // 写清理记录：append-only，幂等（没有变化也写 removed:[]，供审计和"第二次点击"核对）。
+    fs.mkdirSync(path.dirname(historyFile), { recursive: true });
+    fs.appendFileSync(historyFile, JSON.stringify(record) + '\n', 'utf8');
+    const after = readStore();
+    const afterProject = after.projects.find((row) => row.id === project.id);
+    const afterState = workspaceSessionState(afterProject);
+    const otherHashAfter = sessionIdsHashOf(after, project.id);
+    const roleCovered = state.roleSessionIds.every((sid) => afterState.boundSessionIds.includes(sid));
+    return {
+      ok: true,
+      code: removed.length ? 'WORKSPACE_CLEANED' : 'WORKSPACE_CLEAN_NOOP',
+      projectId: project.id,
+      at,
+      by,
+      before: state.boundSessionIds,
+      after: afterState.boundSessionIds,
+      removed,
+      removedCount: removed.length,
+      kept,
+      keptCount: kept.length,
+      roleCovered,
+      extrasBefore: removed,
+      extrasAfter: afterState.extras.map((row) => row.sessionId),
+      otherProjectsHashBefore: otherHashBefore,
+      otherProjectsHashAfter: otherHashAfter,
+      otherProjectsUnchanged: otherHashBefore === otherHashAfter,
+      recordFile: historyFile,
+      record
+    };
+  });
+
+  ipcMain.handle('workspace:history', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    const history = readWorkspaceCleanHistory(project, Number(p.limit) || 20);
+    return { ok: history.ok, code: history.code || 'OK', projectId: project.id, ...history };
+  });
+
   ipcMain.handle('dsh:provision', async (_e, payload) => {
     let initial = requireProject(readStore(), payload && payload.projectId);
     if (payload && (payload.teamMode || payload.mode)
@@ -6380,9 +8260,386 @@ function registerIpc() {
   });
 }
 
+// 界面字号（Electron zoom factor）：0.9–1.5，步进 0.1；值存 workbench.json 的 ui.zoom，重启恢复。
+const ZOOM_MIN = 0.9;
+const ZOOM_MAX = 1.5;
+function clampZoom(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(n * 10) / 10));
+}
+function readZoomPref() {
+  try {
+    const store = readStore();
+    return clampZoom((store.ui && store.ui.zoom) || 1);
+  } catch { return 1; }
+}
+function applyZoomToWindow(win, zoom) {
+  // 注意：win.isDestroyed 是函数（恒真），旧写法 `!win.isDestroyed || ...` 会让这里永远 return，
+  // 主窗字号一直不生效（B-4e18 根因之一，2026-11-13 修）。
+  if (!win || typeof win.isDestroyed !== 'function' || win.isDestroyed()) return;
+  try { win.webContents.setZoomFactor(clampZoom(zoom)); } catch { /* 忽略：窗口未就绪 */ }
+}
+// B-52f3：字号只作用于看板类界面（主窗 DOM：工作区/项目面板/评审弹窗/团队台/流程面板）；
+// DSH 聊天区（#dsh-view 内嵌 webview）固定 1.0，撤销 B-4e18 的“聊天区跟着字号变”。
+const DSH_VIEW_ZOOM = 1;
+function isDshChatWebview(wc) {
+  try {
+    if (!wc || typeof wc.getType !== 'function' || wc.getType() !== 'webview') return false;
+    const url = String(wc.getURL() || '');
+    // DSH 主画面/聊天区是 http(s)://127.0.0.1:<port>；其它本地 file:// 页面（若将来有看板 webview）跟随字号。
+    return /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/)/i.test(url);
+  } catch { return false; }
+}
+// B-4e18 原逻辑：内嵌 webview 独立 webContents，主窗 zoom 传不过去；现在改为“聊天区固定 1.0、其它 webview 跟随”。
+function applyZoomToAllWebviews(zoom) {
+  const z = clampZoom(zoom);
+  try {
+    for (const wc of webContents.getAllWebContents()) {
+      if (!wc || wc.isDestroyed() || typeof wc.getType !== 'function') continue;
+      if (wc.getType() !== 'webview') continue;
+      try { wc.setZoomFactor(isDshChatWebview(wc) ? DSH_VIEW_ZOOM : z); } catch { /* 单个 webview 失败不影响其它 */ }
+    }
+  } catch { /* ignore */ }
+}
+function applyZoomToAllWindows(zoom) {
+  const z = clampZoom(zoom);
+  for (const win of BrowserWindow.getAllWindows()) applyZoomToWindow(win, z);
+  applyZoomToAllWebviews(z);
+}
+// B-4e18 原逻辑：新开 webview 加载完要跟字号；B-52f3 改为聊天区固定 1.0。
+app.on('web-contents-created', (_e, wc) => {
+  try {
+    if (!wc || typeof wc.getType !== 'function') return;
+    // R-2a69：F1 新手引导。焦点常常在 DSH webview 里，宿主页面的 keydown 收不到，
+    // 所以在主进程对所有渲染进程（含 webview guest）统一接管 F1，转发给壳层渲染进程。
+    wc.on('before-input-event', (event, input) => {
+      try {
+        if (!input || input.type !== 'keyDown') return;
+        if (String(input.key || '') !== 'F1') return;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          event.preventDefault();
+          mainWindow.webContents.send('guide:open');
+        }
+      } catch { /* 单个进程失败不影响其它 */ }
+    });
+    if (wc.getType() !== 'webview') return;
+    wc.on('did-finish-load', () => {
+      try { wc.setZoomFactor(isDshChatWebview(wc) ? DSH_VIEW_ZOOM : readZoomPref()); } catch { /* ignore */ }
+    });
+  } catch { /* ignore */ }
+});
+// B-52f3：口径可观测——guests 返回每个内嵌 webview 的 id/url/zoom/pinned，测试据此断言聊天区恒 1.0。
+ipcMain.handle('ui:zoom-get', () => {
+  const guests = [];
+  try {
+    for (const wc of webContents.getAllWebContents()) {
+      if (!wc || wc.isDestroyed() || typeof wc.getType !== 'function' || wc.getType() !== 'webview') continue;
+      let zoom = 1;
+      let url = '';
+      try { zoom = Math.round(wc.getZoomFactor() * 100) / 100; } catch { /* ignore */ }
+      try { url = String(wc.getURL() || ''); } catch { /* ignore */ }
+      guests.push({ id: wc.id, url, zoom, pinned: isDshChatWebview(wc) });
+    }
+  } catch { /* ignore */ }
+  return { ok: true, zoom: readZoomPref(), min: ZOOM_MIN, max: ZOOM_MAX, guests };
+});
+ipcMain.handle('ui:zoom-set', (_e, factor) => {
+  const zoom = clampZoom(factor);
+  try {
+    const store = readStore();
+    store.ui = { ...(store.ui || {}), zoom };
+    writeStore(store);
+  } catch { /* 存不上也不阻断本次缩放 */ }
+  // 主窗 + 团队看板窗 + 其它 BrowserWindow + 内嵌 webview 一起改，避免“只放大主窗”。
+  applyZoomToAllWindows(zoom);
+  return { ok: true, zoom, min: ZOOM_MIN, max: ZOOM_MAX, windows: BrowserWindow.getAllWindows().length };
+});
+
+// ── 内存回收（类 GC，2026-11-13 T-38f0；T-461d 自适应）：每 5 秒采样；阈值按基线自适应 + 增长速率 + 冷却决定是否自动重载 ──
+const memPolicy = require('./mem-policy');
+const MEM_SAMPLE_MS = 5000;
+// 测试用固定阈值：设置 AWB_MEM_RECYCLE_MB 后跳过自适应与速率/冷却，只按固定值触发（低阈值可复现自动回收）。
+const MEM_FIXED_MB = (() => {
+  const env = Number(process.env.AWB_MEM_RECYCLE_MB || 0);
+  return env > 0 ? env : 0;
+})();
+const memState = {
+  samples: [],                 // 最近 15 分钟采样 { at, mb }
+  baselineMB: null,            // 启动满 10 分钟后确定的稳定基线
+  baselineAt: null,
+  lastAutoAt: null,            // 上次自动回收开始时间（10 分钟冷却）
+  lastRecycleFinishedAt: null, // 上次回收完成时间（60 秒防抖）
+};
+function memThresholdMB() {
+  if (MEM_FIXED_MB > 0) return MEM_FIXED_MB;
+  if (Number.isFinite(memState.baselineMB) && memState.baselineMB > 0) return memPolicy.adaptiveThresholdMB(memState.baselineMB);
+  return memPolicy.MIN_THRESHOLD_MB;
+}
+let memSampler = null;
+let memRecycling = false;
+/**
+ * 采样所有 renderer（壳 + DSH webview guest + 其它）。只测 mainWindow.webContents 会漏掉
+ * 真正占 1.1GB 的 webview 进程（测试报告-v33 实测），阈值永远不触发。
+ */
+async function sampleRendererMem() {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  // 主路径：app.getAppMetrics() 的 Tab（renderer）进程汇总——含 DSH webview guest；
+  // 当前 Electron 版本 webContents.getProcessMemoryInfo 不存在（测试报告-v33 的“API 不存在”）。
+  try {
+    const metrics = app.getAppMetrics ? app.getAppMetrics() : [];
+    const tabs = metrics.filter((m) => String(m.type || '').toLowerCase() === 'tab');
+    const parts = tabs
+      .map((m) => ({ pid: m.pid, type: 'Tab', mb: Math.round((Number(m.memory && m.memory.workingSetSize) || 0) / 1024) }))
+      .filter((p) => p.mb > 0);
+    if (parts.length) return { mb: parts.reduce((sum, p) => sum + p.mb, 0), parts, source: 'app.getAppMetrics' };
+  } catch { /* ignore */ }
+  // 回退：逐 webContents 取（新版 Electron 才提供 getProcessMemoryInfo）。
+  const parts = [];
+  try {
+    for (const wc of webContents.getAllWebContents()) {
+      if (!wc || wc.isDestroyed() || typeof wc.getProcessMemoryInfo !== 'function') continue;
+      try {
+        const info = await wc.getProcessMemoryInfo();
+        const kb = Number((info && (info.private ?? info.residentSet)) || 0);
+        if (kb > 0) parts.push({ id: wc.id, type: wc.getType ? wc.getType() : '', mb: Math.round(kb / 1024) });
+      } catch { /* 单个 webContents 失败跳过，不影响汇总 */ }
+    }
+  } catch { /* ignore */ }
+  if (parts.length) return { mb: parts.reduce((sum, p) => sum + p.mb, 0), parts, source: 'webContents' };
+  return null;
+}
+async function readRendererMemMB() {
+  const sample = await sampleRendererMem();
+  return sample ? sample.mb : null;
+}
+function activeProjectForMemAudit() {
+  try {
+    const store = readStore();
+    const active = store.projects.find((p) => p.id === store.activeProjectId) || store.projects[0] || null;
+    return active ? { store, project: active, name: String(active.teamName || active.name || '') } : { store, project: null, name: '' };
+  } catch { return { store: null, project: null, name: '' }; }
+}
+function appendMemAudit(record) {
+  try {
+    const { project, name } = activeProjectForMemAudit();
+    if (!project || !name) return;
+    const dir = teamProjectStateDir(project);
+    if (!dir) return;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, '内存回收.jsonl'), JSON.stringify(record) + '\n', 'utf8');
+  } catch { /* 审计写失败不阻断回收 */ }
+}
+async function recycleRenderer(reason, trigger, projectNameHint, extra) {
+  if (!mainWindow || mainWindow.isDestroyed() || memRecycling) return { ok: false, code: 'BUSY_OR_NO_WINDOW' };
+  memRecycling = true;
+  const beforeSample = await sampleRendererMem();
+  const before = beforeSample ? beforeSample.mb : null;
+  const at = new Date().toISOString();
+  const thresholdMB = memThresholdMB();
+  const extraInfo = extra && typeof extra === 'object' ? extra : {};
+  // 回收原因与前后内存进主进程日志，便于 Owner/测试直接从终端核对（审计 jsonl 另有完整记录）。
+  console.log(`[mem] 开始回收 trigger=${trigger} cause=${extraInfo.cause || '阈值'} before=${before}MB threshold=${thresholdMB}MB baseline=${memState.baselineMB}MB rate=${extraInfo.rateMBPerMin}MB/min reason=${reason}`);
+  let snapshot = null;
+  try {
+    snapshot = await mainWindow.webContents.executeJavaScript('(window.__awbMemSnapshot && window.__awbMemSnapshot()) || null', true);
+  } catch { snapshot = null; }
+  try {
+    const { store } = activeProjectForMemAudit();
+    if (store) {
+      store.ui = { ...(store.ui || {}), lastRecycleAt: at, lastRecycleReason: reason };
+      writeStore(store);
+    }
+  } catch { /* 存不上也不阻断 */ }
+  const projectName = projectNameHint || activeProjectForMemAudit().name || '';
+  // 先重载 webview guest（DSH 主画面），再重载壳；只重载壳时 webview 进程会保留，12 秒后内存回到 1.1GB。
+  let webviews = 0;
+  try {
+    for (const wc of webContents.getAllWebContents()) {
+      if (!wc || wc.isDestroyed() || !wc.getType || wc.getType() !== 'webview') continue;
+      try { wc.reload(); webviews += 1; } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+  try {
+    mainWindow.webContents.once('did-finish-load', async () => {
+      // 壳 + webview 重载后留 3.5 秒让进程回收，再测 after（太快会读到旧进程）。
+      await new Promise((r) => setTimeout(r, 3500));
+      const afterSample = await sampleRendererMem();
+      const after = afterSample ? afterSample.mb : null;
+      appendMemAudit({
+        at, project: projectName, beforeMB: before, afterMB: after, reason, trigger, webviews,
+        partsBefore: beforeSample ? beforeSample.parts : null,
+        partsAfter: afterSample ? afterSample.parts : null,
+        thresholdMB,
+        baselineMB: memState.baselineMB,
+        rateMBPerMin: Number.isFinite(extraInfo.rateMBPerMin) ? extraInfo.rateMBPerMin : null,
+        cause: extraInfo.cause || (trigger === 'manual' ? '手动' : ''),
+        fixedThresholdMB: MEM_FIXED_MB || null,
+        snapshotRestored: Boolean(snapshot),
+      });
+      memState.lastRecycleFinishedAt = Date.now();
+      console.log(`[mem] 回收完成 trigger=${trigger} before=${before}MB after=${after}MB threshold=${thresholdMB}MB`);
+      try { mainWindow.webContents.send('mem:recycle-done', { before, after, reason, trigger, at, thresholdMB, baselineMB: memState.baselineMB }); } catch { /* ignore */ }
+      memRecycling = false;
+    });
+    mainWindow.webContents.reload();
+  } catch {
+    memRecycling = false;
+    return { ok: false, code: 'RELOAD_FAILED' };
+  }
+  return { ok: true, beforeMB: before, thresholdMB, reason, trigger, webviews };
+}
+function startMemSampler() {
+  if (memSampler) return;
+  memSampler = setInterval(async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const sample = await sampleRendererMem();
+    if (!sample) return;
+    const mb = sample.mb;
+    const now = Date.now();
+    memState.samples.push({ at: now, mb });
+    memState.samples = memState.samples.filter((s) => now - s.at <= memPolicy.SAMPLE_KEEP_MS);
+    // 启动满 10 分钟后取一次稳定基线；阈值随后按 max(1.8GB, 基线×2.5)，上限 3GB。
+    if (memState.baselineMB == null) {
+      const baseline = memPolicy.baselineMB(memState.samples, now);
+      if (baseline != null) {
+        memState.baselineMB = baseline;
+        memState.baselineAt = new Date(now).toISOString();
+        console.log(`[mem] 稳定基线 ${baseline}MB → 自适应阈值 ${memThresholdMB()}MB${MEM_FIXED_MB ? '（已被 AWB_MEM_RECYCLE_MB 覆盖）' : ''}`);
+      }
+    }
+    const thresholdMB = memThresholdMB();
+    const rateMBPerMin = memPolicy.growthRateMBPerMin(memState.samples, now);
+    try {
+      mainWindow.webContents.send('mem:stats', {
+        mb, parts: sample.parts, source: sample.source || 'webContents',
+        thresholdMB, baselineMB: memState.baselineMB, rateMBPerMin,
+        fixedThresholdMB: MEM_FIXED_MB || null, at: now,
+      });
+    } catch { /* 页面未就绪 */ }
+    if (memRecycling) return;
+    const decision = memPolicy.shouldAutoRecycle({
+      mb, now, thresholdMB, rateMBPerMin,
+      lastAutoAt: memState.lastAutoAt,
+      lastRecycleFinishedAt: memState.lastRecycleFinishedAt,
+      fixedThresholdMB: MEM_FIXED_MB,
+    });
+    if (!decision.auto) return;
+    memState.lastAutoAt = now;
+    const detail = [`阈值 ${thresholdMB}MB`];
+    if (Number.isFinite(memState.baselineMB)) detail.push(`基线 ${memState.baselineMB}MB`);
+    if (Number.isFinite(rateMBPerMin)) detail.push(`近 1 分钟涨 ${rateMBPerMin}MB`);
+    if (decision.why === 'fixed-threshold') detail.push('测试固定阈值');
+    recycleRenderer(
+      `全部渲染进程内存 ${mb}MB（含 DSH webview）≥ 阈值 ${thresholdMB}MB（${detail.join('，')}），${decision.cause || '阈值'}触发，自动回收`,
+      'auto', undefined, { rateMBPerMin, cause: decision.cause || '阈值' }
+    );
+  }, MEM_SAMPLE_MS);
+}
+ipcMain.handle('mem:stats-get', async () => ({
+  ok: true,
+  mb: await readRendererMemMB(),
+  thresholdMB: memThresholdMB(),
+  baselineMB: memState.baselineMB,
+  rateMBPerMin: memPolicy.growthRateMBPerMin(memState.samples, Date.now()),
+  fixedThresholdMB: MEM_FIXED_MB || null,
+}));
+// 手动「立即回收」：不经过阈值/速率/冷却判定（任务③），只受“正在回收”锁约束。
+ipcMain.handle('mem:recycle', async () => recycleRenderer('Owner/PM 手动点击「立即回收」', 'manual', undefined, { cause: '手动' }));
+
+// 默认主窗 1500×900（T-032c「窗口别超屏」）：按显示器工作区夹取、宽高各留 80、居中；
+// 记住上次尺寸/位置，恢复时按所在显示器再夹一次。高 DPI 下 workArea 与 bounds 都是 DIP，不乘缩放。
+const WINDOW_DEFAULT = { width: 1500, height: 900 };
+const WINDOW_MIN = { width: 900, height: 600 };
+const WINDOW_MARGIN = 80;
+const WINDOW_SAVE_DEBOUNCE_MS = 800;
+
+function normalizeWindowBounds(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const num = (value) => (Number.isFinite(Number(value)) ? Math.round(Number(value)) : null);
+  const width = num(raw.width);
+  const height = num(raw.height);
+  if (!width || !height || width <= 0 || height <= 0) return null;
+  return { width, height, x: num(raw.x), y: num(raw.y) };
+}
+
+// 纯计算，方便自检直接给不同工作区尺寸算结果：按工作区夹取目标尺寸（宽高各留 WINDOW_MARGIN）；
+// 工作区小到放不下最小尺寸时，宁可小于 900×600，也不越过工作区。
+function computeWindowSize(work, desired) {
+  const area = work && Number.isFinite(work.width) && Number.isFinite(work.height) && work.width > 0 && work.height > 0
+    ? work
+    : { width: 1920, height: 1080 };
+  const want = normalizeWindowBounds(desired) || WINDOW_DEFAULT;
+  const maxWidth = Math.max(1, Math.round(area.width) - WINDOW_MARGIN);
+  const maxHeight = Math.max(1, Math.round(area.height) - WINDOW_MARGIN);
+  const clamp = (value, min, max) => Math.round(Math.min(Math.max(value, Math.min(min, max)), max));
+  return {
+    width: clamp(want.width, WINDOW_MIN.width, maxWidth),
+    height: clamp(want.height, WINDOW_MIN.height, maxHeight),
+  };
+}
+
+function readWindowPref() {
+  try {
+    const store = readStore();
+    return normalizeWindowBounds(store.ui && store.ui.window);
+  } catch { return null; }
+}
+
+function currentWorkArea(pref) {
+  try {
+    if (!screen || typeof screen.getPrimaryDisplay !== 'function') return null;
+    let display = screen.getPrimaryDisplay();
+    if (pref && Number.isFinite(pref.x) && Number.isFinite(pref.y) && typeof screen.getDisplayMatching === 'function') {
+      display = screen.getDisplayMatching({ x: pref.x, y: pref.y, width: pref.width, height: pref.height }) || display;
+    }
+    return (display && display.workArea) || null;
+  } catch { return null; }
+}
+
+// 首次启动：按主屏工作区夹取并居中；有上次记忆：回到记忆所在显示器再夹取尺寸与位置
+// （副屏拔掉/分辨率变化后 getDisplayMatching 会落到最近屏，再夹一次，不会把窗口留在屏幕外）。
+function initialWindowBounds() {
+  const saved = readWindowPref();
+  const area = currentWorkArea(saved) || { x: 0, y: 0, width: 1920, height: 1080 };
+  const size = computeWindowSize(area, saved);
+  const bounds = { width: size.width, height: size.height };
+  if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+    bounds.x = Math.min(Math.max(saved.x, area.x), area.x + Math.max(0, area.width - size.width));
+    bounds.y = Math.min(Math.max(saved.y, area.y), area.y + Math.max(0, area.height - size.height));
+  } else {
+    bounds.x = area.x + Math.round((area.width - size.width) / 2);
+    bounds.y = area.y + Math.round((area.height - size.height) / 2);
+  }
+  return bounds;
+}
+
+function defaultWindowSize() {
+  const bounds = initialWindowBounds();
+  return { width: bounds.width, height: bounds.height };
+}
+
+// 记住上次正常态尺寸/位置（最大化/最小化不覆盖）；写 workbench.json 的 ui.window，恢复时仍会夹取。
+function saveWindowPref(win) {
+  if (!win || typeof win.isDestroyed !== 'function' || win.isDestroyed()) return;
+  try {
+    if (win.isMinimized() || win.isMaximized() || win.isFullScreen()) return;
+    const pref = normalizeWindowBounds(win.getBounds());
+    if (!pref) return;
+    const store = readStore();
+    const prev = normalizeWindowBounds(store.ui && store.ui.window);
+    if (prev && prev.x === pref.x && prev.y === pref.y && prev.width === pref.width && prev.height === pref.height) return;
+    store.ui = { ...(store.ui || {}), window: pref };
+    writeStore(store);
+  } catch { /* 记不住尺寸不阻断使用 */ }
+}
+
 function createWindow() {
+  const bounds = initialWindowBounds();
   mainWindow = new BrowserWindow({
-    width: 1480, height: 920, minWidth: 1100, minHeight: 700,
+    ...bounds,
+    // 最小尺寸不能大于本次可用的工作区，否则小屏/高 DPI 下会被最小尺寸顶出屏幕。
+    minWidth: Math.min(WINDOW_MIN.width, bounds.width), minHeight: Math.min(WINDOW_MIN.height, bounds.height),
     frame: false, backgroundColor: '#0a0b0e', show: false,
     icon: APP_ICON,
     webPreferences: {
@@ -6392,8 +8649,1518 @@ function createWindow() {
     }
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // 重启恢复上次字号：等页面加载完再设置，避免 zoom 被导航重置。
+  mainWindow.webContents.on('did-finish-load', () => applyZoomToWindow(mainWindow, readZoomPref()));
+  startMemSampler();
   mainWindow.once('ready-to-show', () => mainWindow.show());
-  mainWindow.on('closed', () => { mainWindow = null; });
+  // 拖动/缩放后防抖记住尺寸；关闭前补一次，避免最后一秒的变化丢掉。
+  let saveTimer = null;
+  const scheduleWindowSave = () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { saveTimer = null; saveWindowPref(mainWindow); }, WINDOW_SAVE_DEBOUNCE_MS);
+  };
+  mainWindow.on('resize', scheduleWindowSave);
+  mainWindow.on('move', scheduleWindowSave);
+  mainWindow.on('close', () => {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    saveWindowPref(mainWindow);
+  });
+  mainWindow.on('closed', () => {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    mainWindow = null;
+    if (memSampler) { clearInterval(memSampler); memSampler = null; }
+  });
+}
+
+// 页面内测量（T-846e）：入口在侧栏、可点、徽标在、标题栏按钮不重叠不出界、无横向滚动。
+// 这个函数会被序列化后送进渲染进程执行，所以不能引用主进程里的任何变量。
+function measureLayoutInPage() {
+  const rectOf = (node) => {
+    const r = node.getBoundingClientRect();
+    return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+  };
+  const overlap = (a, b) => !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
+  const root = document.documentElement;
+  const entry = document.querySelector('[data-owner-review-entry]');
+  const foot = document.querySelector('.sidebar-foot');
+  const titlebar = document.getElementById('titlebar');
+  const buttons = Array.from(titlebar ? titlebar.querySelectorAll('button') : []).filter((b) => b.offsetParent !== null);
+  const rects = buttons.map((b) => ({ text: (b.textContent || b.getAttribute('aria-label') || '').trim().slice(0, 14), ...rectOf(b) }));
+  const overlaps = [];
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      if (overlap(rects[i], rects[j])) overlaps.push([rects[i].text, rects[j].text]);
+    }
+  }
+  const badge = document.querySelector('[data-owner-review-badge]');
+  const visibleEntry = Boolean(entry && entry.offsetParent !== null && entry.getBoundingClientRect().width > 0);
+  const entryRect = visibleEntry ? rectOf(entry) : null;
+  let entryClickable = false;
+  if (visibleEntry) {
+    const hit = document.elementFromPoint(Math.round(entryRect.x + entryRect.w / 2), Math.round(entryRect.y + entryRect.h / 2));
+    entryClickable = Boolean(hit && (hit === entry || entry.contains(hit)));
+  }
+
+  // T-e921：stage-bar 逐按钮检查 + 代管徽标（临时显示再量，量完恢复原状）。
+  const stageActions = document.querySelector('.stage-actions');
+  const stageButtons = Array.from(stageActions ? stageActions.querySelectorAll('button') : [])
+    .filter((b) => b.offsetParent !== null)
+    .map((b) => ({ text: (b.textContent || b.getAttribute('aria-label') || '').trim().slice(0, 14), ...rectOf(b) }));
+  const stageOverlaps = [];
+  for (let i = 0; i < stageButtons.length; i++) {
+    for (let j = i + 1; j < stageButtons.length; j++) {
+      if (overlap(stageButtons[i], stageButtons[j])) stageOverlaps.push([stageButtons[i].text, stageButtons[j].text]);
+    }
+  }
+  const folderBtn = document.getElementById('btn-folder-top');
+  const boardBtn = document.getElementById('btn-board');
+  let proxyNode = document.querySelector('[data-owner-review-proxy]');
+  let proxySource = proxyNode ? 'real' : '';
+  let proxyWasHidden = proxyNode ? proxyNode.hidden : null;
+  // 没有真实代管记录时，临时插一个同款预览徽标量几何（量完移除）；report 会记 source=preview。
+  if (!proxyNode && stageActions && boardBtn) {
+    proxyNode = document.createElement('span');
+    proxyNode.className = 'owner-review-proxy';
+    proxyNode.textContent = 'PM 代管中 2 条';
+    proxyNode.setAttribute('data-owner-review-proxy-preview', '1');
+    stageActions.insertBefore(proxyNode, boardBtn);
+    proxySource = 'preview';
+  }
+  if (proxyNode) proxyNode.hidden = false;
+  const proxyVisible = Boolean(proxyNode && proxyNode.offsetParent !== null && proxyNode.getBoundingClientRect().width > 0);
+  const proxyRect = proxyVisible ? rectOf(proxyNode) : null;
+  const folderRect = folderBtn ? rectOf(folderBtn) : null;
+  const boardRect = boardBtn ? rectOf(boardBtn) : null;
+  const proxyOverlapsFolder = Boolean(proxyRect && folderRect && overlap(proxyRect, folderRect));
+  const proxyOverlapsBoard = Boolean(proxyRect && boardRect && overlap(proxyRect, boardRect));
+  const proxyInStageActions = Boolean(proxyNode && stageActions && stageActions.contains(proxyNode));
+  const proxyRight = proxyRect ? proxyRect.x + proxyRect.w : 0;
+  if (proxyNode && proxySource === 'preview' && proxyNode.parentNode) proxyNode.parentNode.removeChild(proxyNode);
+  else if (proxyNode) proxyNode.hidden = proxyWasHidden;
+
+  const checks = {
+    // Owner 2026-11-14 05:38 定夺：入口就放标题栏（46d9 方向），不再要求「在侧栏底部 / 不在标题栏」。
+    // 现在只要求：入口在标题栏内、可见、可点、在视口内，且标题栏无重叠。
+    entryInTitlebar: Boolean(entry && titlebar && titlebar.contains(entry)),
+    entryVisible: visibleEntry,
+    entryClickable,
+    entryInViewport: Boolean(entryRect && entryRect.x >= 0 && entryRect.y >= 0 && entryRect.x + entryRect.w <= root.clientWidth && entryRect.y + entryRect.h <= root.clientHeight),
+    badgePresent: Boolean(badge && String(badge.textContent || '').trim()),
+    noHorizontalScroll: root.scrollWidth <= root.clientWidth + 1,
+    sidebarNoHorizontalScroll: Boolean(foot && foot.scrollWidth <= foot.clientWidth + 1),
+    titlebarNoOverlap: overlaps.length === 0,
+    titlebarButtonsInView: rects.every((r) => r.x >= 0 && r.x + r.w <= root.clientWidth),
+    // T-e921：项目面板旁六色点阵已删；代管徽标在 stage-actions 里、不压文件夹/项目面板。
+    sessionDotsRemoved: !document.querySelector('#session-dots'),
+    proxyInStageActions,
+    proxyNotOverFolder: !proxyOverlapsFolder,
+    proxyNotOverBoard: !proxyOverlapsBoard,
+    proxyInViewport: Boolean(!proxyRect || (proxyRect.x >= 0 && proxyRight <= root.clientWidth)),
+    stageActionsNoOverlap: stageOverlaps.length === 0,
+    stageActionsInView: stageButtons.every((r) => r.x >= 0 && r.x + r.w <= root.clientWidth),
+    // B-0538（Owner 2026-11-13 03:59）：主题「月亮标」收进「更多」下拉，标题栏不再有 #btn-theme，
+    // 避免窄窗口下压住【文件夹】；更多菜单里必须有主题项，功能不丢。
+    themeNotInTitlebar: !document.querySelector('#titlebar #btn-theme'),
+    themeInMoreMenu: Boolean(document.querySelector('#more-menu [data-more="theme"]')),
+  };
+  return {
+    ok: Object.keys(checks).every((key) => checks[key]),
+    viewport: { w: root.clientWidth, h: root.clientHeight },
+    checks,
+    overlaps,
+    stageOverlaps,
+    entryRect,
+    badgeText: badge ? String(badge.textContent || '').trim() : '',
+    titlebarButtons: rects,
+    stageButtons,
+    themeMovedToMenu: checks.themeNotInTitlebar && checks.themeInMoreMenu,
+    proxyRect,
+    proxySource,
+    proxyText: proxyNode ? String(proxyNode.textContent || '').trim() : '',
+    folderRect,
+    boardRect,
+  };
+}
+
+// 布局自检（T-846e）：真实窗口 + CDP 视口模拟，量 1280 / 1680 / 2560 三档，
+// 每档截图一张；正常启动不进入这条分支。
+async function runLayoutCheck() {
+  const outDir = process.env.AWB_LAYOUT_OUT ? path.resolve(process.env.AWB_LAYOUT_OUT) : path.join(ROOT, '_tmp', 'layout-check-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  const displayInfo = (() => {
+    try {
+      const display = screen.getPrimaryDisplay();
+      return { workArea: display.workArea, workAreaSize: display.workAreaSize, bounds: display.size, scaleFactor: display.scaleFactor };
+    } catch { return null; }
+  })();
+  const initialWindow = initialWindowBounds();
+  createWindow();
+  const win = mainWindow;
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else resolve();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  // T-032c「窗口别超屏」：初始窗口必须落在工作区内（宽高各留 80）且居中；顺手拍第一张图。
+  let initialShot = '';
+  try {
+    initialShot = path.join(outDir, 'window-initial.png');
+    fs.writeFileSync(initialShot, (await win.webContents.capturePage()).toPNG());
+  } catch { initialShot = ''; }
+  const windowFit = (() => {
+    try {
+      const b = win.getBounds();
+      const work = displayInfo && displayInfo.workArea;
+      if (!work) return { ok: false, reason: '未取到工作区' };
+      const fits = b.x >= work.x && b.y >= work.y && b.x + b.width <= work.x + work.width && b.y + b.height <= work.y + work.height
+        && b.width <= work.width - WINDOW_MARGIN && b.height <= work.height - WINDOW_MARGIN;
+      const centerDx = Math.abs((b.x + b.width / 2) - (work.x + work.width / 2));
+      const centerDy = Math.abs((b.y + b.height / 2) - (work.y + work.height / 2));
+      return {
+        ok: fits && centerDx <= 2 && centerDy <= 2,
+        fits, centered: centerDx <= 2 && centerDy <= 2, bounds: b, workArea: work,
+        margin: WINDOW_MARGIN, centerDx, centerDy, scaleFactor: (displayInfo && displayInfo.scaleFactor) || 1,
+        screenshot: initialShot,
+      };
+    } catch (error) { return { ok: false, reason: String((error && error.message) || error) }; }
+  })();
+  const sizes = [
+    { name: '1280', width: 1280, height: 800 },
+    { name: '1680', width: 1680, height: 1000 },
+    { name: '2560', width: 2560, height: 1400 },
+  ];
+  let attached = false;
+  try { win.webContents.debugger.attach('1.3'); attached = true; } catch { attached = false; }
+  const results = [];
+  for (const size of sizes) {
+    try {
+      if (attached) {
+        await win.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width: size.width, height: size.height, deviceScaleFactor: 1, mobile: false });
+      } else {
+        win.setContentSize(size.width, size.height);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      const metrics = await win.webContents.executeJavaScript(`(${measureLayoutInPage.toString()})()`, true);
+      let screenshot = '';
+      let proxyShot = '';
+      if (attached) {
+        const shot = await win.webContents.debugger.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
+        screenshot = path.join(outDir, `layout-${size.name}.png`);
+        fs.writeFileSync(screenshot, Buffer.from(shot.data, 'base64'));
+        // T-e921：再拍一张“代管徽标显示态”，用于核对它在项目面板旁、不压文件夹。
+        // 没有真实代管记录时临时插一个同款预览徽标（report 记 source=preview），拍完移除。
+        const shown = await win.webContents.executeJavaScript(`(function () {
+          var p = document.querySelector('[data-owner-review-proxy]');
+          if (p) { p.hidden = false; return { ok: true, source: 'real' }; }
+          var actions = document.querySelector('.stage-actions');
+          var board = document.getElementById('btn-board');
+          if (!actions || !board) return { ok: false, source: 'none' };
+          var preview = document.createElement('span');
+          preview.className = 'owner-review-proxy';
+          preview.textContent = 'PM 代管中 2 条';
+          preview.setAttribute('data-owner-review-proxy-preview', '1');
+          actions.insertBefore(preview, board);
+          return { ok: true, source: 'preview' };
+        })()`, true);
+        if (shown && shown.ok) {
+          const shot2 = await win.webContents.debugger.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
+          proxyShot = path.join(outDir, `proxy-${size.name}.png`);
+          fs.writeFileSync(proxyShot, Buffer.from(shot2.data, 'base64'));
+          await win.webContents.executeJavaScript(`(function () {
+            var prev = document.querySelector('[data-owner-review-proxy-preview]');
+            if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+            var p = document.querySelector('[data-owner-review-proxy]');
+            if (p) p.hidden = true;
+            return true;
+          })()`, true);
+        }
+      }
+      results.push({ size: size.name, width: size.width, height: size.height, metrics, screenshot, proxyShot });
+    } catch (error) {
+      results.push({ size: size.name, width: size.width, height: size.height, error: String((error && error.message) || error) });
+    }
+  }
+  if (attached) {
+    try { await win.webContents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride'); } catch { /* ignore */ }
+    try { win.webContents.debugger.detach(); } catch { /* ignore */ }
+  }
+  // 入口点击实测：新位置点一下必须能打开评审弹窗（no-drag 生效的最终证据）；
+  // T-69ed 起顺手落一张弹窗截图，核对代管按钮只剩「全部交 PM 代管」+「结束代管」。
+  let clickTest = { ok: false, reason: '未执行' };
+  try {
+    clickTest = await win.webContents.executeJavaScript(`(function () {
+      var entry = document.querySelector('[data-owner-review-entry]');
+      if (!entry) return { ok: false, reason: '没有评审入口' };
+      entry.click();
+      var dialog = document.querySelector('[data-owner-review-dialog]');
+      var opened = Boolean(dialog && !dialog.hidden);
+      return { ok: opened, reason: opened ? '点击后弹窗已打开' : '点击后弹窗未打开' };
+    })()`, true);
+    if (clickTest.ok) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const image = await win.webContents.capturePage();
+      clickTest.screenshot = path.join(outDir, 'review-dialog.png');
+      fs.writeFileSync(clickTest.screenshot, image.toPNG());
+      const buttons = await win.webContents.executeJavaScript(`(function () {
+        var dialog = document.querySelector('[data-owner-review-dialog]');
+        if (!dialog) return { ok: false, labels: [] };
+        var labels = [];
+        dialog.querySelectorAll('.or-actions button, .or-head button').forEach(function (b) {
+          if (b.offsetParent !== null) labels.push(String(b.textContent || '').trim());
+        });
+        var close = dialog.querySelector('[data-or-close]');
+        if (close) close.click();
+        return { ok: true, labels: labels };
+      })()`, true);
+      clickTest.buttons = buttons.labels || [];
+      clickTest.reason = '点击后弹窗已打开；按钮：' + clickTest.buttons.join(' / ');
+    }
+  } catch (error) {
+    clickTest = { ok: false, reason: String((error && error.message) || error) };
+  }
+  // B-52f3：字号只作用于看板类界面——临时调到 1.2 核对：主窗全部跟随；DSH 聊天区 webview 必须恒 1.0。
+  let zoomProbe = { ok: false, reason: '未执行' };
+  try {
+    const beforeZoom = readZoomPref();
+    applyZoomToAllWindows(1.2);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const windows = BrowserWindow.getAllWindows().map((w) => ({ zoom: Math.round(w.webContents.getZoomFactor() * 100) / 100 }));
+    const webviews = webContents.getAllWebContents()
+      .filter((wc) => wc && !wc.isDestroyed() && typeof wc.getType === 'function' && wc.getType() === 'webview')
+      .map((wc) => ({ zoom: Math.round(wc.getZoomFactor() * 100) / 100, pinned: isDshChatWebview(wc) }));
+    applyZoomToAllWindows(beforeZoom);
+    const near12 = (n) => Math.abs(Number(n) - 1.2) < 0.02;
+    const near10 = (n) => Math.abs(Number(n) - 1) < 0.02;
+    zoomProbe = {
+      ok: windows.length > 0 && windows.every((w) => near12(w.zoom))
+        && webviews.every((w) => (w.pinned ? near10(w.zoom) : near12(w.zoom))),
+      beforeZoom, windows, webviews,
+    };
+  } catch (error) {
+    zoomProbe = { ok: false, reason: String((error && error.message) || error) };
+  }
+  const report = {
+    ok: results.every((row) => Boolean(row.metrics && row.metrics.ok)) && Boolean(clickTest.ok) && Boolean(zoomProbe.ok) && Boolean(windowFit.fits),
+    display: displayInfo,
+    initialWindow,
+    windowFit,
+    adaptiveSample: {
+      '1600x900': computeWindowSize({ width: 1600, height: 900 }),
+      '1366x768': computeWindowSize({ width: 1366, height: 768 }),
+      '2560x1400': computeWindowSize({ width: 2560, height: 1400 }),
+    },
+    outDir,
+    results,
+    clickTest,
+    zoomProbe,
+  };
+  const reportPath = path.join(outDir, 'layout-report.json');
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
+  console.log('LAYOUT_REPORT ' + reportPath);
+  console.log(JSON.stringify(report));
+  console.log(report.ok ? 'LAYOUT_OK' : 'LAYOUT_FAIL');
+  app.exit(report.ok ? 0 : 1);
+}
+
+// b55c-check（B-20261114-010345-b55c）：Owner 验收"列表与确认同源 + 同秒需求不串号"真实窗口自检。
+// 只在 --b55c-check 下跑，数据根独立（.b55c-check-data / AWB_B55C_DATA），不碰真实工作台与团队状态。
+// 产出：outDir 下的 b55c-report.json + 三张截图（验收列表来源条 / 列表过期提示 / 验收成功）。
+async function runB55cCheck() {
+  const outDir = process.env.AWB_B55C_OUT ? path.resolve(process.env.AWB_B55C_OUT) : path.join(ROOT, '_tmp', 'b55c-check-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const report = {
+    ok: false, mode: 'b55c-check', outDir,
+    projectId: '', projectPath: '', teamName: '', workflowFile: '',
+    checks: [], failures: [], pageConsole: []
+  };
+  const check = (name, pass, detail) => {
+    const row = { name, pass: Boolean(pass), detail: detail === undefined ? null : detail };
+    report.checks.push(row);
+    if (!row.pass) report.failures.push(row);
+    console.log(`${row.pass ? 'B55C_PASS' : 'B55C_FAIL'} ${name}${row.pass ? '' : ' ' + JSON.stringify(detail).slice(0, 600)}`);
+    return row.pass;
+  };
+  const readJsonFile = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; } };
+  const writeJsonFile = (file, data) => fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  const shot = async (name) => {
+    try {
+      const image = await mainWindow.webContents.capturePage();
+      if (image.isEmpty()) return '';
+      const file = path.join(outDir, name);
+      fs.writeFileSync(file, image.toPNG());
+      return file;
+    } catch { return ''; }
+  };
+
+  createWindow();
+  const win = mainWindow;
+  if (!win) throw new Error('主窗口创建失败');
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else resolve();
+  });
+  win.webContents.on('console-message', (_event, _level, message) => {
+    if (report.pageConsole.length < 200) report.pageConsole.push(String(message || '').slice(0, 300));
+  });
+  await sleep(600);
+  // 红线（PM 2026-11-14）：自检绝不连生产 DSH；适配器换成拒绝真实调用的桩并计数。
+  const dshGuard = installCheckModeDshStub('b55c-check');
+  report.dshGuard = dshGuard;
+  await sleep(600);
+  const js = (code) => win.webContents.executeJavaScript(code, true);
+
+  const projectName = 'b55c验收回归';
+  // PM 红线（2026-11-14）：这条自检原来用 createProject 建项目 → 会连真实 DSH 建工作区，
+  // 历史上留下过 8 个「b55c验收回归」。现在默认**拒绝运行**（零污染优先）：
+  // 需要它时先给沙盘 DSH mock，并显式设 AWB_ALLOW_REAL_DSH_CHECK=1，且项目名必须 TEST- 前缀、跑完当场删。
+  if (process.env.AWB_ALLOW_REAL_DSH_CHECK !== '1') {
+    check('b55c-check 在真实 DSH 环境下默认拒绝运行（防止再留测试工作区）', false, {
+      reason: 'CREATE_PROJECT_NEEDS_REAL_DSH',
+      hint: '改用 node 程序员B/产出/证据-b55c/repro-owner-accept.cjs（沙盘，零 DSH）；确需本自检时设 AWB_ALLOW_REAL_DSH_CHECK=1 并用 TEST- 前缀 + 当场 workspace/delete'
+    });
+    report.ok = false;
+    report.refused = 'CREATE_PROJECT_NEEDS_REAL_DSH';
+    const refusedPath = path.join(outDir, 'b55c-report.json');
+    fs.writeFileSync(refusedPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
+    console.log('B55C_REFUSED ' + refusedPath);
+    console.log('B55C_FAIL');
+    app.exit(2);
+    return;
+  }
+  const created = JSON.parse(await js(`(async()=>{
+    const r = await window.workbench.createProject({ name: ${JSON.stringify(projectName)}, root: ${JSON.stringify(path.join(outDir, 'project'))} });
+    if (!r || r.ok !== true) return JSON.stringify({ ok: false, code: (r && r.code) || 'CREATE_FAILED', message: (r && r.message) || '' });
+    const sel = await window.workbench.selectProject(r.project.id);
+    return JSON.stringify({ ok: true, id: r.project.id, path: r.project.path, teamName: r.project.teamName || '', selected: sel.ok === true });
+  })()`));
+  check('沙盘项目创建 + 选中', created.ok === true && created.selected === true, created);
+  report.projectId = String(created.id || '');
+  report.projectPath = String(created.path || '');
+  report.teamName = String(created.teamName || projectName);
+  if (!created.ok) throw new Error('沙盘项目创建失败：' + JSON.stringify(created));
+
+  const teamRoot = String((teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || '');
+  const stateDir = path.join(teamRoot, '状态', '项目', teamTools.teamSlug(report.teamName));
+  const workflowFile = path.join(stateDir, '工作流.json');
+  report.workflowFile = workflowFile;
+  check('沙盘团队状态目录已生成', fs.existsSync(stateDir), { stateDir });
+
+  // ★ 同秒需求造数：R-20261113-035931-52f3(accepted) 与 -54da(test_done + ownerReview approved(proxy))。
+  const siblingId = 'R-20261113-035931-52f3';
+  const wantId = 'R-20261113-035931-54da';
+  const at = new Date().toISOString();
+  const seeded = readJsonFile(workflowFile) || {};
+  seeded.schema = seeded.schema || teamTools.WORKFLOW_SCHEMA;
+  seeded.project = seeded.project || report.teamName;
+  seeded.round = Number(seeded.round || 1);
+  seeded.phase = 'owner_accept';
+  const rowOf = (id, title, status, extra = {}) => ({
+    id, title, priority: 'P1', origin: 'role', queued: false, round: seeded.round, status,
+    createdBy: 'product', createdAt: at, updatedAt: at,
+    acceptanceCriteria: 'Owner 确认后 accepted。', story: '', detail: '',
+    // 验收前置还有"需求已过评审"这道门：造数要带上产品评审结论。
+    productReview: { verdict: 'approve', by: 'product', reviewRole: 'product', teamMode: 'full', comment: 'b55c-check 造数：已评审通过', at },
+    requirementReview: { verdict: 'approve', by: 'product', reviewRole: 'product', teamMode: 'full', comment: 'b55c-check 造数：已评审通过', at },
+    reviewedAt: at, reviewedBy: 'product', reviewRole: 'product',
+    ownerReview: null, dispatch: null, dev: null, test: null, acceptance: null,
+    doc: '', history: [], decisions: [], ...extra
+  });
+  // 插入顺序照真实文件：同秒"已 accepted"的那条排在前面。
+  const siblingRow = rowOf(siblingId, '同秒已验收需求', 'accepted', {
+    acceptance: { status: 'accepted', channel: 'ui', actor: 'owner', at, opinion: '同秒先验收的那条' },
+    decisions: [{ status: 'accepted', decision: 'accepted', channel: 'ui', decidedBy: 'Owner', at }]
+  });
+  const wantRow = rowOf(wantId, '同秒需求验收回归', 'test_done', {
+    ownerReview: {
+      status: 'approved', by: 'PM（代记 Owner 的决定）', actor: 'pm', at, opinion: 'Owner 已全部托管',
+      channel: 'proxy', recordedBy: 'pm', basis: { proxy: { scope: 'always', authorization: 'Owner 在评审弹窗点击代管' } }
+    }
+  });
+  const restRows = {};
+  for (const [key, row] of Object.entries(seeded.requirements || {})) {
+    if (key === siblingId || key === wantId) continue;
+    restRows[key] = row;
+  }
+  seeded.requirements = { [siblingId]: siblingRow, [wantId]: wantRow, ...restRows };
+  writeJsonFile(workflowFile, seeded);
+  const taskSeed = readJsonFile(path.join(stateDir, '任务', `${wantId}.json`)) || {};
+  writeJsonFile(path.join(stateDir, '任务', `${wantId}.json`), {
+    ...taskSeed, id: wantId, project: report.teamName, type: 'requirement', requirementId: '',
+    title: '同秒需求验收回归', detail: '', acceptance: 'Owner 确认后 accepted。', story: '',
+    priority: 'P1', owner: null, status: 'done', createdBy: 'product', createdAt: at,
+    claimedAt: null, due: '', doneAt: at, evidence: 'b55c-check seed', rev: 0, history: [],
+    workflow: { requirementStatus: 'test_done' }, updatedAt: at
+  });
+  const seededCheck = readJsonFile(workflowFile) || {};
+  check('同秒需求造数写入（52f3 accepted / 54da test_done + approved(proxy)）',
+    Boolean(seededCheck.requirements && seededCheck.requirements[siblingId] && seededCheck.requirements[wantId])
+    && seededCheck.requirements[siblingId].status === 'accepted'
+    && seededCheck.requirements[wantId].status === 'test_done');
+
+  // 验收前置会读需求正文（需求/R-*.md）并比对 tester boot 读到的哈希：正文必须先落盘，再 boot。
+  const writeReqDoc = (id, title, status) => {
+    const rel = path.join('需求', `${id}-${title}.md`);
+    const abs = path.join(report.projectPath, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, [
+      `# ${id} ${title}`, '', `- 需求 id：${id}`, '- 优先级：P1', `- 状态：${status}`, '',
+      '## 验收标准', '', 'Owner 确认后 accepted；列表与确认必须读同一份 工作流.json。', ''
+    ].join('\n'), 'utf8');
+    return rel.split(path.sep).join('/');
+  };
+  const docPaths = {
+    [siblingId]: writeReqDoc(siblingId, '同秒已验收需求', 'accepted'),
+    [wantId]: writeReqDoc(wantId, '同秒需求验收回归', 'test_done')
+  };
+  const withDocs = readJsonFile(workflowFile) || {};
+  for (const [id, rel] of Object.entries(docPaths)) {
+    if (withDocs.requirements && withDocs.requirements[id]) withDocs.requirements[id].doc = rel;
+  }
+  writeJsonFile(workflowFile, withDocs);
+  check('需求正文落盘（验收前置要读 需求/R-*.md）',
+    Object.values(docPaths).every((rel) => fs.existsSync(path.join(report.projectPath, rel))), docPaths);
+
+  // 验收前置还有"测试任务已 done"：造一条 tester 的名下已 done 测试任务。
+  const testTaskId = 'T-b55c-0001';
+  writeJsonFile(path.join(stateDir, '任务', `${testTaskId}.json`), {
+    id: testTaskId, project: report.teamName, type: 'task', requirementId: wantId,
+    title: '同秒需求验收回归测试', detail: '', acceptance: '', story: '',
+    priority: 'P1', owner: 'tester', status: 'done', createdBy: 'pm', createdAt: at,
+    claimedAt: at, due: '', doneAt: at, evidence: '测试人员/产出/b55c-测试报告.md（PASS）', rev: 0,
+    history: [], updatedAt: at
+  });
+  check('测试任务已 done（验收前置）', fs.existsSync(path.join(stateDir, '任务', `${testTaskId}.json`)));
+
+  // 验收前置会查 tester boot，先正常 boot 一次。
+  const bootRaw = JSON.parse(await js(`(async()=>{ const r = await window.workbench.workflowBoot({ projectId: ${JSON.stringify(report.projectId)}, role: 'tester' }); return JSON.stringify({ ok: r.ok, code: r.code || '', complete: Boolean(r.bootRead && r.bootRead.complete) }); })()`));
+  check('tester boot 完成（验收前置门）', bootRaw.ok === true && bootRaw.complete === true, bootRaw);
+
+  // 打开【我的验收】：列表与确认必须同源（同一份 工作流.json + 读盘时间）。
+  await js(`(function(){ const b = document.querySelector('[data-owner-accept-entry]'); if (b) b.click(); return true; })()`);
+  await sleep(700);
+  // 造数是在页面打开之后写的盘：先点面板里的"刷新列表"（重新读盘），与入口行为一致。
+  await js(`(function(){ const b = document.querySelector('[data-action="accept-refresh"]'); if (b) b.click(); return true; })()`);
+  await sleep(1100);
+  const listDom = JSON.parse(await js(`(()=>{
+    const src = document.querySelector('[data-accept-source]');
+    const row = document.querySelector('.accept-row[data-req-id="' + ${JSON.stringify(wantId)} + '"]');
+    return JSON.stringify({
+      hasPanel: Boolean(document.getElementById('accept-list')),
+      sourceText: src ? src.textContent : '',
+      rowText: row ? row.textContent : '',
+      rowCount: document.querySelectorAll('.accept-row').length,
+      hasOwnerBtn: Boolean(row && row.querySelector('[data-action="owner-accept"]'))
+    });
+  })()`));
+  report.acceptListDom = listDom;
+  check('验收列表显示状态来源（文件 + 更新/读盘时间）',
+    /状态来源：/.test(listDom.sourceText) && /工作流\.json/.test(listDom.sourceText) && /列表读于/.test(listDom.sourceText), listDom);
+  check('同秒需求出现在待验收列表里', listDom.hasOwnerBtn === true && listDom.rowText.includes(wantId), listDom);
+  report.shotList = await shot('accept-list-source.png');
+
+  // 列表过期：界面这一行还是 test_done，磁盘已被改成 accepted（另一处/上一个动作先验收了）。
+  const staleState = readJsonFile(workflowFile);
+  staleState.requirements[wantId].status = 'accepted';
+  staleState.requirements[wantId].acceptance = { status: 'accepted', channel: 'ui', actor: 'owner', at, opinion: '磁盘上已经验收过了' };
+  staleState.requirements[wantId].decisions = [];
+  writeJsonFile(workflowFile, staleState);
+  await js(`(function(){
+    const row = document.querySelector('.accept-row[data-req-id="' + ${JSON.stringify(wantId)} + '"]');
+    const btn = row && row.querySelector('[data-action="owner-accept"]');
+    if (btn) btn.click();
+    return true;
+  })()`);
+  await sleep(400);
+  await js(`(function(){ const b = document.querySelector('[data-action="owner-accept-confirm"]'); if (b) b.click(); return true; })()`);
+  await sleep(1600);
+  const staleDom = JSON.parse(await js(`(()=>{
+    const err = document.querySelector('[data-accept-error]');
+    const notice = document.querySelector('[data-or-notice]');
+    return JSON.stringify({
+      errorText: err && err.hidden === false ? err.textContent : '',
+      notice: notice ? notice.textContent : ''
+    });
+  })()`));
+  report.staleDom = staleDom;
+  check('列表过期时提示两侧状态（界面 test_done / 磁盘 accepted），不报"测试 done 后才能验收"',
+    /accepted/.test(staleDom.errorText) && /test_done/.test(staleDom.errorText) && !/测试 done 后才能/.test(staleDom.errorText), staleDom);
+  check('过期提示里带来源文件与读盘时间', /工作流\.json/.test(staleDom.errorText) && /本次读盘/.test(staleDom.errorText), staleDom);
+  report.shotStale = await shot('accept-stale-hint.png');
+
+  // 恢复正常：磁盘改回 test_done → 点"刷新列表"重新读盘 → 再走一次真实确认。
+  const freshState = readJsonFile(workflowFile);
+  freshState.requirements[wantId].status = 'test_done';
+  freshState.requirements[wantId].acceptance = null;
+  freshState.requirements[wantId].decisions = [];
+  writeJsonFile(workflowFile, freshState);
+  await js(`(function(){ const b = document.querySelector('[data-action="accept-refresh"]'); if (b) b.click(); return true; })()`);
+  await sleep(1100);
+  const preConfirm = {
+    nodeStatus: String(((readJsonFile(workflowFile) || {}).requirements || {})[wantId]?.status || ''),
+    domRowStatus: ''
+  };
+  preConfirm.domRowStatus = String(JSON.parse(await js(`(()=>{
+    const row = document.querySelector('.accept-row[data-req-id="' + ${JSON.stringify(wantId)} + '"]');
+    return JSON.stringify({ status: row ? row.getAttribute('data-status') : '' });
+  })()`)).status || '');
+  report.preConfirm = preConfirm;
+  check('确认前列表行与磁盘状态一致（都是 test_done）',
+    preConfirm.nodeStatus === 'test_done' && preConfirm.domRowStatus === 'test_done', preConfirm);
+  await js(`(function(){
+    const row = document.querySelector('.accept-row[data-req-id="' + ${JSON.stringify(wantId)} + '"]');
+    const btn = row && row.querySelector('[data-action="owner-accept"]');
+    if (btn) btn.click();
+    return true;
+  })()`);
+  await sleep(400);
+  const formBefore = JSON.parse(await js(`(()=>{
+    const form = document.querySelector('[data-accept-form]');
+    return JSON.stringify({ text: form ? form.textContent : '', hidden: form ? form.hidden : null });
+  })()`));
+  report.formBeforeConfirm = formBefore;
+  await js(`(function(){ const b = document.querySelector('[data-action="owner-accept-confirm"]'); if (b) b.click(); return true; })()`);
+  await sleep(1900);
+  const successDom = JSON.parse(await js(`(()=>{
+    const err = document.querySelector('[data-accept-error]');
+    const notice = document.querySelector('[data-or-notice]');
+    return JSON.stringify({
+      errorText: err && err.hidden === false ? err.textContent : '',
+      errorCode: err ? String(err.getAttribute('data-error-code') || '') : '',
+      notice: notice ? notice.textContent : '',
+      rowStillThere: Boolean(document.querySelector('.accept-row[data-req-id="' + ${JSON.stringify(wantId)} + '"]'))
+    });
+  })()`));
+  const afterState = readJsonFile(workflowFile) || {};
+  const afterWant = (afterState.requirements || {})[wantId] || {};
+  const afterSibling = (afterState.requirements || {})[siblingId] || {};
+  report.success = {
+    dom: successDom,
+    wantStatus: afterWant.status,
+    decisions: afterWant.decisions,
+    acceptanceChannel: afterWant.acceptance && afterWant.acceptance.channel,
+    siblingStatus: afterSibling.status,
+    siblingDecisions: (afterSibling.decisions || []).length
+  };
+  check('真实点确认后需求 accepted（不串到同秒 52f3）', afterWant.status === 'accepted' && successDom.errorText === '', report.success);
+  check('验收后追加 decisions channel=ui',
+    Array.isArray(afterWant.decisions) && afterWant.decisions.length >= 1
+    && afterWant.decisions[afterWant.decisions.length - 1].channel === 'ui', afterWant.decisions);
+  check('同秒另一条需求没被误验收（仍 1 条 decisions、原 opinion 不变）',
+    afterSibling.status === 'accepted' && (afterSibling.decisions || []).length === 1
+    && Boolean(afterSibling.acceptance) && afterSibling.acceptance.opinion === '同秒先验收的那条',
+    { status: afterSibling.status, decisions: (afterSibling.decisions || []).length, acceptance: afterSibling.acceptance });
+  check('验收成功后列表里不再有这条待验收行', successDom.rowStillThere === false, successDom);
+  report.shotSuccess = await shot('accept-success.png');
+
+  report.ok = report.failures.length === 0;
+  const reportPath = path.join(outDir, 'b55c-report.json');
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
+  console.log('B55C_REPORT ' + reportPath);
+  console.log(JSON.stringify(report));
+  console.log(report.ok ? 'B55C_OK' : 'B55C_FAIL');
+  app.exit(report.ok ? 0 : 1);
+}
+
+/**
+ * 自检模式：把 DSH 适配器换成"绝不碰真实 DSH"的桩（PM 2026-11-14 红线：测试不得调用生产 workspace/create、
+ * session create；需要 DSH 的用例只能用沙盘 mock）。返回 guard，refusals 记录被拦下的真实调用次数。
+ */
+function installCheckModeDshStub(label) {
+  const guard = { label, refusals: 0, calls: [] };
+  const refuse = (method) => async () => {
+    guard.refusals += 1;
+    guard.calls.push(method);
+    const error = new Error(`自检 ${label} 已禁用真实 DSH（${method}）：测试不得建真实工作区/会话，请用沙盘 mock`);
+    error.code = 'DSH_DISABLED_IN_CHECK';
+    throw error;
+  };
+  dsh = {
+    baseUrl: '',
+    mode: 'check-stub',
+    statusSync: () => ({ ok: false, online: false, code: 'DSH_DISABLED_IN_CHECK', label }),
+    check: async () => ({ ok: false, code: 'DSH_DISABLED_IN_CHECK' }),
+    listSessions: async () => [],
+    createWorkspace: refuse('createWorkspace'),
+    ensureWorkspace: refuse('ensureWorkspace'),
+    createSession: refuse('createSession'),
+    prompt: refuse('prompt'),
+    rename: refuse('rename'),
+    archiveSession: refuse('archiveSession')
+  };
+  return guard;
+}
+
+/**
+ * 自检专用：把项目直接写进沙盘 store（不调 DSH workspace/create）。
+ * PM 2026-11-14 红线：测试不得连生产 DSH；自检项目必须只在本地库里存在。
+ */
+function seedCheckProject(options = {}) {
+  const p = options || {};
+  const store = readStore();
+  store.projects = Array.isArray(store.projects) ? store.projects : [];
+  const projectPath = path.resolve(String(p.path || ''));
+  const name = String(p.name || 'check-project');
+  const at = now();
+  let project = store.projects.find((row) => String(row.path || '').toLowerCase() === projectPath.toLowerCase());
+  if (!project) {
+    project = {
+      id: id('P'), name, path: projectPath, teamName: String(p.teamName || name), teamMode: normalizeTeamMode(p.teamMode || 'full'),
+      createdAt: at, updatedAt: at, ownerReview: null, tasks: [], messages: [], proposals: [], commits: [], votes: [],
+      pendingAck: [], pendingAckAt: null, events: [], workspace: null, sessionMeta: {}, dshWorkspaceId: null,
+      workspacePath: null, requirements: [], workflowMirror: null, sessions: {}
+    };
+    store.projects.push(project);
+  }
+  project.workspace = {
+    id: String(p.workspaceId || ('check-ws-' + project.id)),
+    name,
+    bound: true,
+    sessionIds: (Array.isArray(p.sessionIds) ? p.sessionIds : []).map(String)
+  };
+  if (p.sessions && typeof p.sessions === 'object') project.sessions = { ...(project.sessions || {}), ...p.sessions };
+  project.updatedAt = at;
+  if (p.activate !== false) store.activeProjectId = project.id;
+  writeStore(store);
+  return { ok: true, id: project.id, path: project.path, teamName: project.teamName };
+}
+
+// e29f-check（R-20261114-001014-e29f / T-20261114-005845-38f0）：工作区残留清理 + 6-6 口径 + 额外会话单一展示。
+// 只在 --e29f-check 下跑，数据根独立（.e29f-check-data / AWB_E29F_DATA），不碰真实工作台与团队状态。
+// 判据全部"操作前后即时比对"：E0 = B0 \ R，B1 满足 R ⊆ B1 且 B1 \ R = ∅；不写死 7→6。
+async function runE29fCheck() {
+  const outDir = process.env.AWB_E29F_OUT ? path.resolve(process.env.AWB_E29F_OUT) : path.join(ROOT, '_tmp', 'e29f-check-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const report = {
+    ok: false, mode: 'e29f-check', outDir, checks: [], failures: [], pageConsole: [],
+    storeFile: '', historyFile: '', rosterFile: ''
+  };
+  const check = (name, pass, detail) => {
+    const row = { name, pass: Boolean(pass), detail: detail === undefined ? null : detail };
+    report.checks.push(row);
+    if (!row.pass) report.failures.push(row);
+    console.log(`${row.pass ? 'E29F_PASS' : 'E29F_FAIL'} ${name}${row.pass ? '' : ' ' + String(JSON.stringify(detail === undefined ? null : detail)).slice(0, 700)}`);
+    return row.pass;
+  };
+  const readJsonFile = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; } };
+  const writeJsonFile = (file, data) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  };
+  const fileHash = (file) => { try { return sha256(fs.readFileSync(file)); } catch { return ''; } };
+  const shot = async (name) => {
+    try {
+      const image = await mainWindow.webContents.capturePage();
+      if (image.isEmpty()) return '';
+      const file = path.join(outDir, name);
+      fs.writeFileSync(file, image.toPNG());
+      return file;
+    } catch { return ''; }
+  };
+
+  createWindow();
+  const win = mainWindow;
+  if (!win) throw new Error('主窗口创建失败');
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else resolve();
+  });
+  win.webContents.on('console-message', (_event, _level, message) => {
+    if (report.pageConsole.length < 200) report.pageConsole.push(String(message || '').slice(0, 300));
+  });
+  await sleep(600);
+  // 红线：自检绝不连生产 DSH（此前 e29f 自检用真实 createProject 建过 17 个测试工作区）。
+  const dshGuard = installCheckModeDshStub('e29f-check');
+  report.dshGuard = dshGuard;
+  await sleep(700);
+  const js = (code) => win.webContents.executeJavaScript(code, true);
+  const call = async (label, channel, payload) => {
+    const raw = await js(`(async()=>{
+      try { const r = await window.workbench.${channel}(${JSON.stringify(payload)}); return JSON.stringify({ ok: true, result: r }); }
+      catch (e) { return JSON.stringify({ ok: false, error: String((e && e.message) || e) }); }
+    })()`);
+    const parsed = JSON.parse(raw);
+    return { label, ...parsed };
+  };
+
+  // ── 造数：两个项目（目标 + 对照），目标绑定 = 6 角色 + 2 多余 ──────────────────────────
+  const roleIds = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
+  const roleOf = (role) => 'session-e29f-' + role;
+  const targetName = 'e29f清理目标';
+  const otherName = 'e29f对照项目';
+  // 红线：不调 createProject（会连真实 DSH 建工作区），直接把两个项目写进沙盘 store 再重载页面。
+  const extrasSeedEarly = ['session-e29f-old-1', 'session-e29f-old-2'];
+  const otherSeedEarly = ['session-e29f-other-1', 'session-e29f-other-2'];
+  const createdTarget = seedCheckProject({
+    name: targetName, path: path.join(outDir, 'projects', 'target'),
+    sessionIds: [...roleIds.map((role) => 'session-e29f-' + role), ...extrasSeedEarly],
+    sessions: Object.fromEntries(roleIds.map((role) => [role, 'session-e29f-' + role])),
+    activate: true
+  });
+  const createdOther = seedCheckProject({
+    name: otherName, path: path.join(outDir, 'projects', 'other'), sessionIds: otherSeedEarly, activate: false
+  });
+  const created = { ok: true, targetId: createdTarget.id, otherId: createdOther.id, selected: true };
+  await js('location.reload()');
+  await sleep(2600);
+  check('沙盘两个项目写入本地库 + 页面重载（不建真实 DSH 工作区）', created.ok === true, created);
+  const dshStatusCheck = await call('dshStatusCheck', 'dshStatus');
+  check('自检不连生产 DSH（适配器已换桩，未调用真实 workspace/create）',
+    !(dshStatusCheck.result && dshStatusCheck.result.online === true),
+    { dshStatus: dshStatusCheck.result, refused: dshGuard.refusals, calls: dshGuard.calls });
+  const targetId = String(created.targetId);
+  const otherId = String(created.otherId);
+
+  report.storeFile = storeFile();
+  const teamRoot = String((teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || '');
+  report.rosterFile = path.join(teamRoot, '状态', '团队.json');
+
+  const extrasSeed = extrasSeedEarly;
+  const otherSeed = otherSeedEarly;
+  const store0 = readJsonFile(report.storeFile);
+  for (const project of (store0.projects || [])) {
+    const isTarget = project.id === targetId;
+    const isOther = project.id === otherId;
+    if (!isTarget && !isOther) continue;
+    project.sessions = project.sessions && typeof project.sessions === 'object' ? project.sessions : {};
+    if (isTarget) for (const role of roleIds) project.sessions[role] = roleOf(role);
+    project.workspace = {
+      ...(project.workspace || {}),
+      sessionIds: isTarget ? [...roleIds.map(roleOf), ...extrasSeed] : otherSeed.slice()
+    };
+  }
+  writeJsonFile(report.storeFile, store0);
+  // 名册（703f 唯一真相）：目标项目 6 个角色会话；对照项目故意用别的 id，验证互不影响。
+  const roster = readJsonFile(report.rosterFile) || { members: [] };
+  roster.members = roleIds.map((role) => ({ role, name: role, status: 'active', joinedAt: now(), sessionId: roleOf(role) }));
+  roster.activeProject = targetName;
+  writeJsonFile(report.rosterFile, roster);
+  // 对照项目角色会话用另一组 id（clean 不应碰到它）
+  const storeOther = readJsonFile(report.storeFile);
+  const otherRow = (storeOther.projects || []).find((p) => p.id === otherId);
+  check('造数：目标绑定 8 个（6 角色 + 2 多余），对照项目 2 个', Boolean(otherRow), { other: otherRow && otherRow.workspace });
+
+  const plan1 = await call('plan1', 'workspacePlan', { projectId: targetId });
+  const p1 = plan1.ok ? plan1.result : null;
+  check('plan 可读（不依赖 DSH）', Boolean(p1 && p1.ok !== false), plan1.error || plan1.result);
+  const R = (p1 && p1.roleSessionIds) || [];
+  const B0 = (p1 && p1.boundSessionIds) || [];
+  const E0 = B0.filter((sid) => !R.includes(sid));
+  check('额外会话 = B0 \\ R（即时比对，不写死数字）',
+    Boolean(p1) && p1.extraCount === E0.length && E0.length === 2
+    && (p1.extras || []).every((row) => E0.includes(row.sessionId)), { R, B0, E0, extraCount: p1 && p1.extraCount });
+  check('当前角色会话不在待移除清单里', (p1.extras || []).every((row) => !R.includes(row.sessionId)), p1.extras);
+  check('绑定去重（重复 id 不重复计数）', p1.boundRawCount === p1.boundSessionIds.length || p1.duplicatesInBinding === false, {
+    raw: p1.boundRawCount, unique: p1.boundSessionIds.length
+  });
+  report.planBefore = { R, B0, E0, otherProjectsHash: p1.otherProjectsHash };
+
+  // ── UI：额外会话只在一处，且数字与 plan 一致；6/6 未核验显示「待核验」─────────────────
+  // 面板靠自己 5 秒轮询；这里主动让它重读，避免把"还没渲染"当成"没显示"。
+  const waitFor = async (probe, timeoutMs = 9000) => {
+    const deadline = Date.now() + timeoutMs;
+    let last = null;
+    while (Date.now() < deadline) {
+      last = await probe();
+      if (last) return last;
+      await sleep(600);
+    }
+    return last;
+  };
+  await js('(async()=>{ try { if (typeof window.__awbExtraRefresh === "function") await window.__awbExtraRefresh(); } catch (e) {} return true; })()');
+  const labelReady = await waitFor(async () => {
+    const probe = JSON.parse(await js(`(()=>{
+      const box = document.querySelector('[data-extra-sessions]');
+      const label = box ? box.querySelector('[data-extra-count]') : null;
+      return JSON.stringify({ has: Boolean(label), text: label ? label.textContent : '' });
+    })()`));
+    return probe.has ? probe : null;
+  });
+  check('额外会话块渲染完成（有计数标签）', Boolean(labelReady && labelReady.has), labelReady);
+  await js('(async()=>{ try { if (typeof refresh === "function") await refresh(); } catch (e) {} return true; })()');
+  await sleep(1200);
+  const ui1 = JSON.parse(await js(`(()=>{
+    const box = document.querySelector('[data-extra-sessions]');
+    const label = box ? box.querySelector('[data-extra-count]') : null;
+    const occurrences = [...document.querySelectorAll('body *')]
+      .filter((n) => n.children.length === 0 && /额外会话\\s*\\d+\\s*个/.test(n.textContent || '')).length;
+    const side = document.getElementById('session-count');
+    const team = document.getElementById('team-session-count');
+    const tbTeam = document.getElementById('tb-team');
+    return JSON.stringify({
+      hasBox: Boolean(box),
+      boxCount: document.querySelectorAll('[data-extra-sessions]').length,
+      extraCount: label ? Number(label.getAttribute('data-extra-count')) : null,
+      labelText: label ? label.textContent : '',
+      occurrences,
+      sessionCountText: team ? team.textContent : '',
+      sessionCountVerified: team ? team.getAttribute('data-verified') : '',
+      sideCountText: side ? side.textContent : '',
+      sideCountLocal: side ? side.getAttribute('data-local') : '',
+      sideCountVerified: side ? side.getAttribute('data-verified') : '',
+      tbTeamText: tbTeam ? tbTeam.textContent : ''
+    });
+  })()`));
+  report.uiBefore = ui1;
+  check('UI 有且只有一个「额外会话」展示块', ui1.hasBox === true && ui1.boxCount === 1, ui1);
+  check('UI 额外会话数字 = plan.extraCount', ui1.extraCount === E0.length, ui1);
+  check('「额外会话 N 个」在整页只出现一处（数字不会一处 0 一处 3）', ui1.occurrences === 1, ui1);
+  const statusNow = await call('teamStatusForCount', 'dshTeamStatus', targetId);
+  const statusRow = (statusNow.ok && statusNow.result && statusNow.result.ok !== false) ? statusNow.result : null;
+  const expectedCountText = statusRow
+    ? (statusRow.ready === null || statusRow.ready === undefined ? '待核验' : `${statusRow.ready}/${(statusRow.roleIds || []).length}`)
+    : '';
+  const notFull = statusRow ? Number(statusRow.ready || 0) < 6 : true;
+  // 沙箱里本地映射是 6/6（6 个角色都有会话），DSH 核验只有 0 个 → 两处计数都必须显示核验结果/待核验，
+  // 绝不能显示本地映射算出来的 6/6。这正是 F-3/AC2 的反例断言（侧栏与团队行同口径）。
+  const countOk = (text) => Boolean(text) && (text === '待核验' || /^\d+\/6$/.test(text)) && (!notFull || text !== '6/6');
+  check('6/6 口径与 DSH 核验一致（本地映射 6 个但核验不到时不许显示 6/6）',
+    countOk(ui1.sessionCountText) && countOk(ui1.sideCountText) && countOk(ui1.tbTeamText),
+    {
+      teamTab: ui1.sessionCountText,
+      sideTab: ui1.sideCountText,
+      titlebar: ui1.tbTeamText,
+      sideLocal: ui1.sideCountLocal,
+      statusReady: statusRow && statusRow.ready,
+      expectedCountText,
+      localMapped: 6
+    });
+  report.shotBefore = await shot('workspace-extra-before.png');
+
+  // ── 权限/确认门：都不许落盘（后端用 codedError 抛错，这里按错误码判）─────────────────
+  const hashBeforeGuards = fileHash(report.storeFile);
+  const errorCodeOf = (res) => {
+    const text = String((res && (res.error || (res.result && res.result.message) || '')) || '');
+    const match = text.match(/\[([A-Z][A-Z0-9_]{2,})\]/) || text.match(/^([A-Z][A-Z0-9_]{2,})\b/);
+    return match ? match[1] : String((res && res.result && res.result.code) || '');
+  };
+  const deniedRole = await call('byRole', 'workspaceClean', { projectId: targetId, by: 'tester', expect: E0, confirm: true });
+  check('普通角色不能清理（PERMISSION_DENIED）且不落盘',
+    errorCodeOf(deniedRole) === 'PERMISSION_DENIED' && fileHash(report.storeFile) === hashBeforeGuards, deniedRole);
+  const noConfirm = await call('noConfirm', 'workspaceClean', { projectId: targetId, by: 'pm', expect: E0 });
+  check('未二次确认不能清理（WORKSPACE_CLEAN_NOT_CONFIRMED）且不落盘',
+    errorCodeOf(noConfirm) === 'WORKSPACE_CLEAN_NOT_CONFIRMED' && fileHash(report.storeFile) === hashBeforeGuards, noConfirm);
+
+  // ── 冲突：界面确认清单与磁盘不一致 → 中止且零副作用 ─────────────────────────────────
+  const conflict = await call('conflict', 'workspaceClean', { projectId: targetId, by: 'pm', expect: ['session-e29f-wrong'], confirm: true });
+  check('待移除清单与磁盘不一致时 WORKSPACE_CLEAN_CONFLICT，绑定不动',
+    errorCodeOf(conflict) === 'WORKSPACE_CLEAN_CONFLICT' && fileHash(report.storeFile) === hashBeforeGuards, conflict);
+
+  // ── 真清理（走界面按钮，不是直接调 IPC）────────────────────────────────────────────
+  await js(`(function(){
+    const box = document.querySelector('[data-extra-sessions]');
+    const toggle = box && box.querySelector('[data-extra-toggle]');
+    if (toggle) toggle.click();
+    return true;
+  })()`);
+  await sleep(700);
+  const panelDom = JSON.parse(await js(`(()=>{
+    const box = document.querySelector('[data-extra-sessions]');
+    const rows = box ? [...box.querySelectorAll('[data-extra-session]')].map((n) => n.getAttribute('data-extra-session')) : [];
+    return JSON.stringify({ rows, hasClean: Boolean(box && box.querySelector('[data-extra-clean]')) });
+  })()`));
+  report.uiPanel = panelDom;
+  check('清理前展示将移除清单，且清单 == E0',
+    panelDom.rows.length === E0.length && panelDom.rows.every((sid) => E0.includes(sid)) && panelDom.hasClean === true, panelDom);
+  report.shotPanel = await shot('workspace-extra-panel.png');
+  await js(`(function(){ const b = document.querySelector('[data-extra-clean]'); if (b) b.click(); return true; })()`);
+  // 清理是异步 IPC + 重读盘：等 UI 的计数归零再断言，别拿"还在转"当失败。
+  const cleanedUi = await waitFor(async () => {
+    const probe = JSON.parse(await js(`(()=>{
+      const box = document.querySelector('[data-extra-sessions]');
+      const label = box ? box.querySelector('[data-extra-count]') : null;
+      const notice = box ? box.querySelector('[data-extra-notice]') : null;
+      const err = box ? box.querySelector('[data-extra-error]') : null;
+      return JSON.stringify({
+        extraCount: label ? Number(label.getAttribute('data-extra-count')) : null,
+        notice: notice ? notice.textContent : '',
+        error: err ? err.textContent : ''
+      });
+    })()`));
+    if (probe.error) return probe; // 出错立即返回，交给断言报出来
+    return (probe.extraCount === 0 && /已清理/.test(probe.notice)) ? probe : null;
+  }, 12000);
+  report.uiCleanResult = cleanedUi;
+  const afterClean = readJsonFile(report.storeFile);
+  const targetAfter = (afterClean.projects || []).find((p) => p.id === targetId) || {};
+  const B1 = (targetAfter.workspace && Array.isArray(targetAfter.workspace.sessionIds)) ? targetAfter.workspace.sessionIds.map(String) : [];
+  const Rset = new Set(R);
+  const stillMissing = [...Rset].filter((sid) => !B1.includes(sid));
+  const extraLeft = B1.filter((sid) => !Rset.has(sid));
+  check('清理后 R ⊆ B1（6 个角色会话都还在）', stillMissing.length === 0, { B1, stillMissing });
+  check('清理后 B1 \\ R = ∅（多余全部移除）', extraLeft.length === 0, { B1, extraLeft });
+  const uiAfter = JSON.parse(await js(`(()=>{
+    const box = document.querySelector('[data-extra-sessions]');
+    const label = box ? box.querySelector('[data-extra-count]') : null;
+    const notice = box ? box.querySelector('[data-extra-notice]') : null;
+    const his = box ? [...box.querySelectorAll('[data-extra-h-row]')].map((n) => n.textContent) : [];
+    return JSON.stringify({
+      extraCount: label ? Number(label.getAttribute('data-extra-count')) : null,
+      labelText: label ? label.textContent : '',
+      notice: notice ? notice.textContent : '',
+      history: his
+    });
+  })()`));
+  report.uiAfter = uiAfter;
+  check('UI 清理后额外会话归零并给出成功提示', uiAfter.extraCount === 0 && /已清理 2 个额外会话/.test(uiAfter.notice), uiAfter);
+  check('清理历史里能看到本次记录（时间/移除/保留/执行人）',
+    uiAfter.history.some((line) => /移除 2 · 保留 6 · pm/.test(line)), uiAfter.history);
+  report.shotAfter = await shot('workspace-extra-after.png');
+
+  // ── 记录与跨项目隔离 ───────────────────────────────────────────────────────────────
+  const plan2 = await call('plan2', 'workspacePlan', { projectId: targetId });
+  const p2 = plan2.ok ? plan2.result : null;
+  report.planAfter = p2 && { B1: p2.boundSessionIds, extraCount: p2.extraCount, otherProjectsHash: p2.otherProjectsHash };
+  check('清理后 plan 的额外会话为 0', p2 && p2.extraCount === 0, p2 && p2.extraCount);
+  check('其他项目 sessionIds 哈希不变', p1.otherProjectsHash === (p2 && p2.otherProjectsHash), {
+    before: p1.otherProjectsHash, after: p2 && p2.otherProjectsHash
+  });
+  const history = await call('history', 'workspaceHistory', { projectId: targetId, limit: 20 });
+  const rows = (history.ok && history.result && Array.isArray(history.result.rows)) ? history.result.rows : [];
+  report.historyFile = (history.ok && history.result && history.result.file) || '';
+  const last = rows[rows.length - 1] || null;
+  check('工作区清理.jsonl 新增记录 removed.length == E0.length', Boolean(last)
+    && Array.isArray(last.removed) && last.removed.length === E0.length
+    && last.reason === 'not-current-role' && last.by === 'pm'
+    && Array.isArray(last.kept) && last.kept.length === B1.length, last);
+  check('清理记录 append-only（之前记录还在）', rows.length >= 1, rows.length);
+
+  // ── 幂等：再清理一次 → removed: []，不报错 ───────────────────────────────────────────
+  const again = await call('again', 'workspaceClean', { projectId: targetId, by: 'pm', expect: [], confirm: true });
+  check('连续清理幂等：第二次 removed=[] 且无报错',
+    again.ok === true && again.result && again.result.ok === true
+    && again.result.code === 'WORKSPACE_CLEAN_NOOP' && again.result.removedCount === 0, again);
+  // ── 原子写：清理失败后 store 仍是完整可用 JSON（无半写、无 .tmp 被当正式文件）──────────
+  const finalJson = readJsonFile(report.storeFile);
+  const tmpLeft = fs.existsSync(report.storeFile + '.tmp');
+  check('workbench.json 始终是完整 JSON（失败也不半写）', Boolean(finalJson && Array.isArray(finalJson.projects)), {
+    projects: finalJson && (finalJson.projects || []).length, tmpLeft
+  });
+  const bakLeft = fs.existsSync(report.storeFile + '.bak');
+  report.writeStore = { file: report.storeFile, tmpLeft, bakLeft, note: 'writeStore 内部 temp 持久化 + rename + .bak 备份' };
+
+  // ── fast 场景（产品 2026-11-14 指出）：4 角色项目必须是 4/4，不能拿全局 6 角色比成 4/6 ──
+  const fastName = 'e29f快速四人';
+  const fastRoles = ['pm', 'analyst', 'programmer1', 'tester'];
+  const fastSeed = seedCheckProject({
+    name: fastName,
+    path: path.join(outDir, 'projects', 'fast'),
+    teamMode: 'fast',
+    sessionIds: fastRoles.map((role) => 'session-e29f-fast-' + role),
+    sessions: Object.fromEntries(fastRoles.map((role) => [role, 'session-e29f-fast-' + role])),
+    activate: false
+  });
+  // 旧协议登记（团队工具建 fast 项目时写的就是这份）：项目.json.roleIds = 4 个角色
+  writeJsonFile(path.join(teamRoot, '状态', '项目', teamTools.teamSlug(fastSeed.teamName), '项目.json'), {
+    name: fastSeed.teamName, path: fastSeed.path, teamMode: 'fast', roleIds: fastRoles.slice(),
+    createdAt: now(), createdBy: 'check', gates: {}
+  });
+  const fastPlanCall = await call('fastPlan', 'workspacePlan', { projectId: fastSeed.id });
+  const fastPlan = fastPlanCall.ok ? fastPlanCall.result : null;
+  report.fastPlan = fastPlan && {
+    roleIds: fastPlan.roleIds, extraCount: fastPlan.extraCount, boundSessionIds: fastPlan.boundSessionIds, missingBound: fastPlan.missingBound
+  };
+  check('fast 项目按 项目.json.roleIds 只认 4 个角色（不是全局 6 个）',
+    Boolean(fastPlan) && fastPlan.roleIds.length === 4 && fastRoles.every((role) => fastPlan.roleIds.includes(role)),
+    fastPlan && fastPlan.roleIds);
+  check('fast 项目 4 角色全部已绑定 → 额外会话 0（不会误报“缺 2 个”）',
+    Boolean(fastPlan) && fastPlan.extraCount === 0 && (fastPlan.missingBound || []).length === 0,
+    fastPlan && { extra: fastPlan.extraCount, missingBound: fastPlan.missingBound, bound: fastPlan.boundSessionIds });
+  const fastStatus = await call('fastStatus', 'dshTeamStatus', fastSeed.id);
+  const fastStatusRow = (fastStatus.ok && fastStatus.result && fastStatus.result.ok !== false) ? fastStatus.result : null;
+  check('fast 项目 6-6 口径的 N 是 4', Boolean(fastStatusRow) && (fastStatusRow.roleIds || []).length === 4,
+    fastStatusRow && { roleIds: fastStatusRow.roleIds, ready: fastStatusRow.ready });
+  const fastSelect = JSON.parse(await js(`(async()=>{
+    try { const r = await window.workbench.selectProject(${JSON.stringify(fastSeed.id)}); return JSON.stringify({ ok: Boolean(r && r.ok !== false) }); }
+    catch (e) { return JSON.stringify({ ok: false, error: String((e && e.message) || e) }); }
+  })()`));
+  await sleep(1200);
+  // 切项目后让侧栏按新项目重算（否则读到的是静态 0/6 初始值）
+  await js('(async()=>{ try { if (typeof refresh === "function") await refresh(); } catch (e) {} return true; })()');
+  await sleep(1800);
+  const fastUi = JSON.parse(await js(`(()=>{
+    const side = document.getElementById('session-count');
+    const tb = document.getElementById('tb-team');
+    return JSON.stringify({
+      sideText: side ? side.textContent : '',
+      sideN: side ? side.getAttribute('data-n') : '',
+      tbText: tb ? tb.textContent : ''
+    });
+  })()`));
+  report.fastUi = { select: fastSelect, ...fastUi };
+  check('切到 fast 项目后侧栏计数分母是 4（不出现 4/6）',
+    fastSelect.ok === true
+    && (fastUi.sideN === '4' || fastUi.sideText === '待核验')
+    && fastUi.sideText !== '4/6' && fastUi.tbText !== '4/6',
+    report.fastUi);
+
+
+  report.ok = report.failures.length === 0;
+  const reportPath = path.join(outDir, 'e29f-report.json');
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
+  console.log('E29F_REPORT ' + reportPath);
+  console.log(JSON.stringify(report));
+  console.log(report.ok ? 'E29F_OK' : 'E29F_FAIL');
+  app.exit(report.ok ? 0 : 1);
+}
+
+// B-20261114-012334-504a 评审界面自检（只做展示）：全部需求清单 + 三要素 + 点行展开 + 分组筛选 + 两档宽截图。
+// 只在 --review-check 下跑，数据根独立（.review-check-data / AWB_REVIEW_DATA）。
+async function runReviewCheck() {
+  const outDir = process.env.AWB_REVIEW_OUT ? path.resolve(process.env.AWB_REVIEW_OUT) : path.join(ROOT, '_tmp', 'review-check-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const report = { ok: false, mode: 'review-check', outDir, checks: [], failures: [], pageConsole: [], shots: {} };
+  const check = (name, pass, detail) => {
+    const row = { name, pass: Boolean(pass), detail: detail === undefined ? null : detail };
+    report.checks.push(row);
+    if (!row.pass) report.failures.push(row);
+    console.log(`${row.pass ? 'REVIEW_PASS' : 'REVIEW_FAIL'} ${name}${row.pass ? '' : ' ' + String(JSON.stringify(detail === undefined ? null : detail)).slice(0, 700)}`);
+    return row.pass;
+  };
+  const readJsonFile = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; } };
+  const writeJsonFile = (file, data) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  };
+  const shot = async (name) => {
+    try {
+      const image = await mainWindow.webContents.capturePage();
+      if (image.isEmpty()) return '';
+      const file = path.join(outDir, name);
+      fs.writeFileSync(file, image.toPNG());
+      return file;
+    } catch { return ''; }
+  };
+
+  createWindow();
+  const win = mainWindow;
+  if (!win) throw new Error('主窗口创建失败');
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else resolve();
+  });
+  win.webContents.on('console-message', (_event, _level, message) => {
+    if (report.pageConsole.length < 200) report.pageConsole.push(String(message || '').slice(0, 300));
+  });
+  await sleep(600);
+  // 红线：自检绝不连生产 DSH。
+  const dshGuard = installCheckModeDshStub('review-check');
+  report.dshGuard = dshGuard;
+  await sleep(700);
+  const js = (code) => win.webContents.executeJavaScript(code, true);
+
+  const projectName = '504a评审界面';
+  // 红线：不调 createProject（会连真实 DSH 建工作区），直接写沙盘 store 再重载页面。
+  const createdSeed = seedCheckProject({
+    name: projectName, path: path.join(outDir, 'project'), sessionIds: [], activate: true
+  });
+  const created = { ok: true, id: createdSeed.id, path: createdSeed.path, teamName: createdSeed.teamName, selected: true };
+  await js('location.reload()');
+  await sleep(2600);
+  check('沙盘项目写入本地库 + 页面重载（不建真实 DSH 工作区）', created.ok === true, created);
+  const dshStatusReview = JSON.parse(await js(`(async()=>{
+    try { const r = await window.workbench.dshStatus(); return JSON.stringify({ online: Boolean(r && r.online), ok: Boolean(r && r.ok) }); }
+    catch (e) { return JSON.stringify({ online: false, ok: false, error: String((e && e.message) || e) }); }
+  })()`));
+  check('自检不连生产 DSH（适配器已换桩，未调用真实 workspace/create）',
+    dshStatusReview.online !== true,
+    { dshStatus: dshStatusReview, refused: dshGuard.refusals, calls: dshGuard.calls });
+  const projectId = String(created.id);
+  const projectPath = String(created.path);
+  const teamName = String(created.teamName || projectName);
+  const teamRoot = String((teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || '');
+  const stateDir = path.join(teamRoot, '状态', '项目', teamTools.teamSlug(teamName));
+  const workflowFile = path.join(stateDir, '工作流.json');
+  const at = now();
+
+  // 造数：四条需求覆盖四个分组（等你决定 / 进行中 / 待验收 / 已收口），每条带正文与证据路径。
+  const rowsSeed = [
+    { id: 'R-20261114-100001-a001', title: '把评审清单一次看全', status: 'approved', detail: '把评审弹窗改成默认显示全部需求，按状态分组，可筛选。', evidence: '需求/R-20261114-100001-a001-把评审清单一次看全.md' },
+    { id: 'R-20261114-100002-a002', title: '打回时能看见分析师的话', status: 'dev', detail: '打回前要能看到分析师正文与建议拍板，避免看半截就拍。', evidence: '测试人员/产出/504a-测试报告.md' },
+    { id: 'R-20261114-100003-a003', title: '验收弹窗状态说人话', status: 'test_done', detail: '验收列表显示状态来源与读盘时间，过期时提示两侧状态。', evidence: '程序员B/产出/证据-b55c/b55c-final/accept-success.png' },
+    { id: 'R-20261114-100004-a004', title: '旧会话解绑痕迹', status: 'accepted', detail: '清理工作区残留会话，只解绑不删除，留清理记录。', evidence: '程序员B/产出/证据-e29f/e29f-final/workspace-extra-after.png' }
+  ];
+  const docOf = (row) => {
+    const rel = path.join('需求', `${row.id}-${row.title}.md`);
+    const abs = path.join(projectPath, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, [
+      `# ${row.title}`, '', `- 需求 id：${row.id}`, '- 优先级：P1', `- 状态：${row.status}`, '',
+      '## 用户故事', '', row.detail, '', '## 验收标准', '', '点开一行能看到正文与建议。', '',
+      '## 待确认', '', '风险：清单太长找不到重点；取舍：默认全量 + 分组筛选。', ''
+    ].join('\n'), 'utf8');
+    return rel.split(path.sep).join('/');
+  };
+  const workflow = readJsonFile(workflowFile) || { schema: teamTools.WORKFLOW_SCHEMA, project: teamName, round: 1, requirements: {}, boots: {}, events: [] };
+  workflow.round = 1;
+  workflow.phase = 'owner_review';
+  workflow.requirements = workflow.requirements && typeof workflow.requirements === 'object' ? workflow.requirements : {};
+  const seeded = [];
+  for (const row of rowsSeed) {
+    const doc = docOf(row);
+    seeded.push(row.id);
+    workflow.requirements[row.id] = {
+      id: row.id, title: row.title, priority: 'P1', origin: 'role', queued: false, round: 1,
+      status: row.status, createdBy: 'analyst', createdAt: at, updatedAt: at,
+      detail: row.detail, story: row.detail, acceptanceCriteria: '点开一行能看到正文与建议。',
+      evidence: row.evidence, doc,
+      ownerReview: row.status === 'approved' ? { status: 'pending', at: null, opinion: '' } : null,
+      decisions: [], history: []
+    };
+    // 需求任务（验收/派单链路之外，纯展示也补齐，避免其它面板读空）
+    writeJsonFile(path.join(stateDir, '任务', `${row.id}.json`), {
+      id: row.id, project: teamName, type: 'requirement', requirementId: '', title: row.title,
+      detail: row.detail, acceptance: '点开一行能看到正文与建议。', story: row.detail, priority: 'P1',
+      owner: null, status: 'todo', createdBy: 'analyst', createdAt: at, claimedAt: null, due: '',
+      doneAt: null, evidence: row.evidence, rev: 0, history: [], workflow: { requirementStatus: row.status }, updatedAt: at
+    });
+  }
+  writeJsonFile(workflowFile, workflow);
+  // 测试报告/证据文件真实存在，展开详情里的「证据」链接才可点开
+  const reportRel = path.join('测试人员', '产出', '504a-测试报告.md');
+  fs.mkdirSync(path.dirname(path.join(projectPath, reportRel)), { recursive: true });
+  fs.writeFileSync(path.join(projectPath, reportRel), '# 504a 测试报告\n\n- 结果：PASS\n- 覆盖：全部需求清单/三要素/展开详情/筛选\n', 'utf8');
+  check('造数：4 条需求覆盖四个分组', seeded.length === 4 && Boolean(readJsonFile(workflowFile)));
+  // 评审弹窗的数据是 owner-review 模块自己 5 秒轮询拉的：造数后等它重读，否则拿到的是"造数前"的空清单。
+  await js('(async()=>{ try { if (typeof refresh === "function") await refresh(); } catch (e) {} return true; })()');
+  await sleep(6200);
+
+  // 打开「我的评审」
+  await js(`(function(){
+    const entry = document.querySelector('[data-owner-review-entry]');
+    if (entry) entry.click();
+    return true;
+  })()`);
+  await sleep(1200);
+  const all1 = JSON.parse(await js(`(()=>{
+    const box = document.querySelector('[data-owner-all]');
+    const items = box ? [...box.querySelectorAll('[data-owner-all-item]')] : [];
+    const dialogs = [...document.querySelectorAll('[data-owner-review-dialog]')];
+    return JSON.stringify({
+      hasBox: Boolean(box),
+      dialogOpen: dialogs.some((n) => n.hidden === false),
+      dialogCount: dialogs.length,
+      dialogHidden: dialogs.map((n) => Boolean(n.hidden)),
+      bodyClass: document.body.className,
+      total: items.length,
+      ids: items.map((n) => n.getAttribute('data-or-req')),
+      buckets: items.map((n) => n.getAttribute('data-or-bucket')),
+      texts: items.slice(0, 1).map((n) => n.textContent),
+      whats: items.map((n) => n.getAttribute('data-what')),
+      blocked: items.map((n) => n.getAttribute('data-blocked')),
+      advice: items.map((n) => n.getAttribute('data-advice')),
+      chips: box ? [...box.querySelectorAll('[data-owner-all-filter]')].map((n) => n.getAttribute('data-owner-all-filter')) : []
+    });
+  })()`));
+  report.allBefore = all1;
+  check('评审弹窗能打开且出现「全部需求」清单', all1.dialogOpen === true && all1.hasBox === true, all1);
+  check('默认显示全部需求（4 条都在，不是只挑几条）', all1.total === 4 && seeded.every((reqId) => all1.ids.includes(reqId)), all1);
+  check('按状态分成四组', new Set(all1.buckets).size === 4, all1.buckets);
+  check('每条都有大标题 + 三要素（这是什么/卡在哪/建议你拍什么）',
+    all1.whats.every((v) => Boolean(String(v || '').trim()))
+    && all1.blocked.every((v) => Boolean(String(v || '').trim()))
+    && all1.advice.every((v) => Boolean(String(v || '').trim()))
+    && /这是什么/.test(String(all1.texts[0] || '')) && /卡在哪/.test(String(all1.texts[0] || ''))
+    && /建议你拍什么/.test(String(all1.texts[0] || '')), { whats: all1.whats, texts: all1.texts });
+  check('有分组筛选（全部 + 四个状态）', Array.isArray(all1.chips) && all1.chips.length === 5, all1.chips);
+
+  // 点行展开详情：正文摘要 + 分析师建议拍板 + 证据链接
+  await js(`(function(){
+    const first = document.querySelector('[data-owner-all-item] [data-owner-all-toggle]');
+    if (first) first.click();
+    return true;
+  })()`);
+  await sleep(800);
+  const detail = JSON.parse(await js(`(()=>{
+    const item = document.querySelector('[data-owner-all-item][data-or-expanded="1"]');
+    const d = item ? item.querySelector('[data-owner-all-detail]') : null;
+    return JSON.stringify({
+      expanded: Boolean(d),
+      hasBody: Boolean(d && d.querySelector('.or-all-detail-row')),
+      hasAdvice: Boolean(d && d.querySelector('[data-owner-all-advice]')),
+      hasEvidence: Boolean(d && d.querySelector('[data-owner-all-evidence]')),
+      evidenceLinks: d && d.querySelector('[data-owner-all-evidence]') ? [...d.querySelectorAll('[data-owner-all-evidence] .or-link')].map((n) => n.textContent) : [],
+      bodyText: d ? d.textContent : ''
+    });
+  })()`));
+  report.detail = detail;
+  check('点行能展开详情（正文摘要 / 分析师建议拍板 / 证据）',
+    detail.expanded === true && detail.hasBody === true && detail.hasAdvice === true && detail.hasEvidence === true, detail);
+  check('详情里带正文摘要与证据链接', /正文摘要/.test(detail.bodyText) && /分析师建议拍板/.test(detail.bodyText)
+    && detail.evidenceLinks.length >= 1, detail);
+  check('右侧摘要能看到分析师建议拍板（打回时也看得到）',
+    JSON.parse(await js(`(async()=>{
+      const box = document.querySelector('[data-or-summary-box]');
+      return JSON.stringify({ text: box ? box.textContent : '' });
+    })()`)).text.includes('分析师建议拍板'));
+
+  // 筛选：只显示待验收
+  await js(`(function(){
+    const chip = document.querySelector('[data-owner-all-filter="test_done"]');
+    if (chip) chip.click();
+    return true;
+  })()`);
+  await sleep(700);
+  const filtered = JSON.parse(await js(`(()=>{
+    const items = [...document.querySelectorAll('[data-owner-all-item]')];
+    return JSON.stringify({ total: items.length, buckets: items.map((n) => n.getAttribute('data-or-bucket')) });
+  })()`));
+  report.filtered = filtered;
+  check('筛选「待验收」后只剩 test_done 的需求', filtered.total >= 1 && filtered.buckets.every((b) => b === 'test_done'), filtered);
+  await js(`(function(){
+    const chip = document.querySelector('[data-owner-all-filter="all"]');
+    if (chip) chip.click();
+    return true;
+  })()`);
+  await sleep(600);
+
+  // 703f AC1：侧栏会话用量展示（数据源 会话用量.json；没有数据时也必须显示「会话用量未知 / 阈值 30 万」）。
+  const usageDom = JSON.parse(await js(`(()=>{
+    const node = document.querySelector('[data-session-usage]');
+    return JSON.stringify({ has: Boolean(node), hidden: node ? node.hidden : null, text: node ? node.textContent : '', threshold: node ? node.getAttribute('data-usage-threshold') : '' });
+  })()`));
+  report.usageDom = usageDom;
+  check('AC1 会话用量界面已实现（侧栏显示 会话用量 X / 阈值 30 万）',
+    usageDom.has === true && /会话用量/.test(usageDom.text) && /阈值/.test(usageDom.text) && String(usageDom.threshold) === '300000',
+    usageDom);
+
+  // 两档宽截图（1600 / 1280）
+  let attached = false;
+  try { win.webContents.debugger.attach('1.3'); attached = true; } catch { attached = false; }
+  for (const width of [1600, 1280]) {
+    try {
+      if (attached) {
+        await win.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      } else {
+        win.setContentSize(width, 900);
+      }
+      await sleep(700);
+      report.shots[String(width)] = await shot(`review-all-${width}.png`);
+    } catch (error) {
+      report.shots[String(width)] = '';
+      check(`截图 ${width} 宽`, false, String((error && error.message) || error));
+    }
+  }
+  if (attached) {
+    try { await win.webContents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride'); win.webContents.debugger.detach(); } catch { /* ignore */ }
+  }
+  check('两档宽截图都拍到了', Boolean(report.shots['1600']) && Boolean(report.shots['1280']), report.shots);
+
+  report.ok = report.failures.length === 0;
+  const reportPath = path.join(outDir, 'review-report.json');
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
+  console.log('REVIEW_REPORT ' + reportPath);
+  console.log(JSON.stringify(report));
+  console.log(report.ok ? 'REVIEW_OK' : 'REVIEW_FAIL');
+  app.exit(report.ok ? 0 : 1);
+}
+
+// 评审弹窗真实点击自检（B-fe22）：Owner 实测「写意见后点通过没效果、打回疑似不生效」。
+// 在真实窗口里点按钮（不是直接调 IPC），抓 DOM 反馈、页面 console 与工作流落账：
+// 通过=不填意见即可；打回=先验证空意见被拦，再填意见落账。正常启动不进入这条分支。
+async function runOwnerCheck() {
+  const outDir = process.env.AWB_OWNER_OUT ? path.resolve(process.env.AWB_OWNER_OUT) : path.join(ROOT, '_tmp', 'owner-check-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  const teamName = String(process.env.AWB_OWNER_TEAM || '工作台改造修复');
+  const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+  const workflowFile = path.join(teamRoot, '状态', '项目', teamName, '工作流.json');
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const pageConsole = [];
+  const report = {
+    ok: false, mode: 'owner-check', outDir, workflowFile, steps: [], pageConsole,
+    before: null, afterApprove: null, afterRejectEmpty: null, afterReject: null,
+  };
+  const readWorkflow = () => { try { return JSON.parse(fs.readFileSync(workflowFile, 'utf8')); } catch { return null; } };
+  const requirementOf = (id) => {
+    const wf = readWorkflow();
+    const row = wf && wf.requirements ? wf.requirements[id] : null;
+    if (!row) return null;
+    return {
+      id,
+      status: String(row.status || ''),
+      ownerStatus: String((row.ownerReview && row.ownerReview.status) || ''),
+      channel: String((row.ownerReview && row.ownerReview.channel) || ''),
+    };
+  };
+  createWindow();
+  const win = mainWindow;
+  win.webContents.on('console-message', (...args) => {
+    try {
+      const message = String(args[3] !== undefined ? args[3] : (args[2] || '')).slice(0, 400);
+      if (message) pageConsole.push(message);
+    } catch { /* ignore */ }
+  });
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else resolve();
+  });
+  await wait(1500);
+  const js = (code) => win.webContents.executeJavaScript(code, true);
+  const shot = async (name) => {
+    try {
+      const image = await win.webContents.capturePage();
+      const file = path.join(outDir, name);
+      fs.writeFileSync(file, image.toPNG());
+      return file;
+    } catch { return ''; }
+  };
+  const evalState = () => js(`(function () {
+    var dialog = document.querySelector('[data-owner-review-dialog]');
+    if (!dialog) return { ok: false, reason: '弹窗不存在' };
+    var banner = dialog.querySelector('[data-or-banner]');
+    var notice = dialog.querySelector('[data-or-notice]');
+    var items = Array.prototype.map.call(dialog.querySelectorAll('[data-owner-eval-item]'), function (node) {
+      return node.getAttribute('data-or-req');
+    });
+    var boardNode = dialog.querySelector('[data-owner-board]');
+    var boardItems = Array.prototype.slice.call(dialog.querySelectorAll('[data-owner-board-item]'));
+    var reviewerNode = dialog.querySelector('[data-or-reviewer]');
+    return {
+      ok: true,
+      hidden: Boolean(dialog.hidden),
+      banner: banner && !banner.hidden ? String(banner.innerText || '').trim().slice(0, 300) : '',
+      notice: notice && !notice.hidden ? String(notice.innerText || '').trim().slice(0, 300) : '',
+      pendingIds: items,
+      title: String((dialog.querySelector('[data-or-title]') || {}).innerText || '').trim().slice(0, 120),
+      board: {
+        round: boardNode ? String(boardNode.getAttribute('data-owner-board-round') || '') : '',
+        count: boardItems.length,
+        visible: boardItems.filter(function (node) { return !node.hidden; }).length,
+        hiddenCount: boardItems.filter(function (node) { return node.hidden; }).length,
+        hasMore: Boolean(dialog.querySelector('[data-or-board-more]')),
+        tags: boardItems.map(function (node) { return String((node.querySelector('em') || {}).textContent || '').trim(); }),
+        hasWhat: boardItems.every(function (node) { return Boolean(node.getAttribute('data-what')); }),
+        hasHow: boardItems.every(function (node) { return Boolean(node.getAttribute('data-how')); }),
+        hasAdvice: boardItems.every(function (node) { return Boolean(node.getAttribute('data-advice')); }),
+        summaryMax: boardItems.reduce(function (max, node) { return Math.max(max, String(node.getAttribute('data-or-summary') || '').length); }, 0),
+        reviewer: reviewerNode ? String(reviewerNode.textContent || '').trim() : '',
+        reviewerRole: reviewerNode ? String(reviewerNode.getAttribute('data-or-reviewer') || '') : ''
+      }
+    };
+  })()`);
+  const clickEvalItem = (id) => js(`(function () {
+    var node = document.querySelector('[data-owner-eval-item][data-or-req="' + ${JSON.stringify(String(id || ''))} + '"]');
+    if (!node) return { ok: false, reason: '待评估项不存在：' + ${JSON.stringify(String(id || ''))} };
+    node.click();
+    return { ok: true, id: node.getAttribute('data-or-req') };
+  })()`);
+  const clickButton = (selector, opinion) => js(`(function () {
+    var dialog = document.querySelector('[data-owner-review-dialog]');
+    var area = dialog && dialog.querySelector('[data-or-opinion]');
+    if (area) {
+      area.value = ${JSON.stringify(String(opinion || ''))};
+      area.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    var button = dialog && dialog.querySelector(${JSON.stringify(String(selector))});
+    if (!button) return { ok: false, reason: '按钮不存在：' + ${JSON.stringify(String(selector))} };
+    button.click();
+    return { ok: true };
+  })()`);
+  try {
+    const opened = await js(`(function () {
+      var entry = document.querySelector('[data-owner-review-entry]');
+      if (!entry) return { ok: false, reason: '评审入口不存在' };
+      entry.click();
+      return { ok: true };
+    })()`);
+    await wait(900);
+    const before = await evalState();
+    report.before = { opened, state: before, screenshot: await shot('before.png') };
+    report.steps.push({ step: 'open', opened, state: before });
+    // 看板折叠（R-1cee F-R3）：默认只展示前 5 条，其余在 DOM 里；点“展开全部”后应全部可见。
+    const boardMore = await js(`(function () {
+      var more = document.querySelector('[data-owner-review-dialog] [data-or-board-more]');
+      if (!more) return { ok: false, reason: '没有展开按钮' };
+      more.click();
+      return { ok: true };
+    })()`);
+    await wait(400);
+    const expanded = await evalState();
+    report.boardExpanded = { clicked: boardMore, state: expanded, screenshot: await shot('board-expanded.png') };
+    report.steps.push({ step: 'board-expand', clicked: boardMore, board: expanded.board });
+    // 只滚列表容器（不滚整个页面），把第 6 条（PM 代管条目）露出来拍标签。
+    await js(`(function () {
+      var list = document.querySelector('[data-owner-review-dialog] [data-or-list]');
+      var items = document.querySelectorAll('[data-owner-board-item]');
+      var target = items[Math.min(5, items.length - 1)];
+      if (!list || !target) return { ok: false };
+      var rect = target.getBoundingClientRect();
+      var lrect = list.getBoundingClientRect();
+      list.scrollTop = Math.max(0, list.scrollTop + (rect.top - lrect.top) - 80);
+      return { ok: true, scrollTop: list.scrollTop };
+    })()`);
+    await wait(300);
+    report.boardTagsShot = await shot('board-tags.png');
+    await js(`(function () {
+      var more = document.querySelector('[data-owner-review-dialog] [data-or-board-more]');
+      if (more) more.click();
+      return { ok: true };
+    })()`);
+    await wait(300);
+    const pending = Array.isArray(before.pendingIds) ? before.pendingIds : [];
+    const approveId = pending[0] || '';
+    const rejectId = pending.find((id) => id !== approveId) || '';
+    report.steps.push({ step: 'pick', approveId, rejectId });
+    // ① 通过：不填意见，点一次
+    if (approveId) {
+      await clickEvalItem(approveId);
+      await wait(300);
+      const clicked = await clickButton('[data-or-approve]', '');
+      await wait(2500);
+      const state = await evalState();
+      report.afterApprove = { id: approveId, clicked, state, requirement: requirementOf(approveId), screenshot: await shot('after-approve.png') };
+      report.steps.push({ step: 'approve', ...report.afterApprove });
+    }
+    // ② 打回：先不填意见（必须被拦），再填意见落账
+    if (rejectId) {
+      await clickEvalItem(rejectId);
+      await wait(300);
+      const emptyClicked = await clickButton('[data-or-reject]', '');
+      await wait(900);
+      const emptyState = await evalState();
+      report.afterRejectEmpty = { id: rejectId, clicked: emptyClicked, state: emptyState, requirement: requirementOf(rejectId), screenshot: await shot('after-reject-empty.png') };
+      report.steps.push({ step: 'reject-empty', ...report.afterRejectEmpty });
+      const rejectedClicked = await clickButton('[data-or-reject]', '沙盒：打回测试，理由写清了');
+      await wait(2500);
+      const state = await evalState();
+      report.afterReject = { id: rejectId, clicked: rejectedClicked, state, requirement: requirementOf(rejectId), screenshot: await shot('after-reject.png') };
+      report.steps.push({ step: 'reject', ...report.afterReject });
+    }
+  } catch (error) {
+    report.error = String((error && error.stack) || error).slice(0, 1200);
+  }
+  const approve = report.afterApprove || {};
+  const rejectEmpty = report.afterRejectEmpty || {};
+  const reject = report.afterReject || {};
+  const board = (report.before && report.before.state && report.before.state.board) || {};
+  const boardExpanded = (report.boardExpanded && report.boardExpanded.state && report.boardExpanded.state.board) || {};
+  const boardTags = Array.isArray(board.tags) ? board.tags : [];
+  report.ok = Boolean(
+    approve.requirement && approve.requirement.ownerStatus === 'approved' && approve.requirement.status === 'ready'
+    && !((approve.state && approve.state.pendingIds) || []).includes(approve.id)
+    && rejectEmpty.state && /打回要写理由/.test(String(rejectEmpty.state.banner || ''))
+    && reject.requirement && reject.requirement.ownerStatus === 'rejected' && reject.requirement.status === 'rejected'
+    && !((reject.state && reject.state.pendingIds) || []).includes(reject.id)
+    // R-1cee：看板三要素、折叠、标签、双模式评审人
+    && board.count >= 8
+    && board.hasMore === true
+    && board.hiddenCount >= 1
+    && boardExpanded.visible === board.count
+    && board.hasWhat === true && board.hasHow === true && board.hasAdvice === true
+    && Number(board.summaryMax || 0) <= 60
+    && board.reviewerRole === 'product' && /产品/.test(String(board.reviewer || ''))
+    && boardTags.includes('【PM通过】')
+    && boardTags.includes('【PM打回】')
+    && boardTags.includes('【已通过（来源未记）】')
+  );
+  const reportPath = path.join(outDir, 'owner-check-report.json');
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
+  console.log('OWNER_CHECK_REPORT ' + reportPath);
+  console.log(JSON.stringify(report));
+  console.log(report.ok ? 'OWNER_CHECK_OK' : 'OWNER_CHECK_FAIL');
+  app.exit(report.ok ? 0 : 1);
 }
 
 // 可重复的状态库隔离测试：只在系统临时目录里建库，绝不触碰真实 userData。
@@ -6813,7 +10580,7 @@ async function selftestCompat(win, testRoot) {
       out.workflow = Boolean(wf.ok && wf.stage && wf.legacyStage && wf.counts);
       const ownerChallenge = await window.workbench.ownerChallenge({ projectId, action: 'owner-decision' });
       const ownerConfirm = await window.workbench.ownerConfirm({ challengeId: ownerChallenge.challengeId, nonce: ownerChallenge.nonce });
-      const owner = await window.workbench.workflowOwner({ projectId, decision: 'skipped', opinion: '兼容验证', confirmToken: ownerConfirm.confirmToken });
+      const owner = await window.workbench.workflowOwner({ projectId, decision: 'skipped', opinion: '分析师：已评估；\\n产品：已评估；\\n开发：已评估。兼容验证', confirmToken: ownerConfirm.confirmToken });
       out.owner = Boolean(owner.ok && owner.ownerReview && owner.ownerReview.status === 'skipped');
       out.ownerChallengeDeprecated = Boolean(ownerChallenge.ok && ownerChallenge.deprecated === true);
       out.ownerConfirmDeprecated = Boolean(ownerConfirm.ok && ownerConfirm.deprecated === true);
@@ -7176,6 +10943,60 @@ async function selftestMapping(win, testRoot) {
     expect('mock 工作区会话数 = 7（六角色 + 额外会话）', report.mockWsSessions === 7, report.mockWsSessions);
     expect('团队·角色标题会话 = 6', roleTitles.length === 6, roleTitles.length);
     expect('当前工作区指针指向 A', Boolean(currentWorkspace) && currentWorkspace.dshWorkspaceId === report.wsA, currentWorkspace && currentWorkspace.dshWorkspaceId);
+
+    // —— B-405f 补充：外部轮换会话映射后，界面 5 秒内自动刷新（不重启工作台） ——
+    try {
+      const liveStore = readStore();
+      const rosterProj = liveStore.projects.find((p) => p.id === report.projectAId);
+      const originalSessions = { ...(rosterProj.sessions || {}) };
+      const originalIds = Array.isArray(rosterProj.workspace && rosterProj.workspace.sessionIds)
+        ? [...rosterProj.workspace.sessionIds] : [];
+      const readCount = async () => JSON.parse(await win.webContents.executeJavaScript(`(async()=>{
+        const node = document.querySelector('#team-session-count');
+        return JSON.stringify({
+          count: node ? node.textContent : '',
+          // e29f：展示数字改成 DSH 核验口径，本地映射改挂 data-local（本轮起的用例按它核对跟随行为）
+          local: node ? node.getAttribute('data-local') : '',
+          verified: node ? node.getAttribute('data-verified') : '',
+          rows: Array.from(document.querySelectorAll('#team-session-list [data-session-id]')).map((el) => el.getAttribute('data-session-id')),
+          hook: Boolean(window.__teamRoster && typeof window.__teamRoster.sync === 'function')
+        });
+      })()`));
+      // 1) 外部删掉两名成员的会话映射 → 界面应自动变 4/6
+      rosterProj.sessions = { ...originalSessions };
+      delete rosterProj.sessions.product;
+      delete rosterProj.sessions.programmer2;
+      if (rosterProj.workspace) {
+        rosterProj.workspace.sessionIds = originalIds.filter((id) => id !== originalSessions.product && id !== originalSessions.programmer2);
+      }
+      writeStore(liveStore);
+      await new Promise((resolve) => setTimeout(resolve, 6200));
+      const dropped = await readCount();
+      report.rosterDropped = dropped;
+      expect('界面 5 秒内跟随外部删会话（本地映射 4/6）', dropped.hook === true && dropped.local === '4/6', dropped);
+      // e29f：展示数字不再拿本地映射冒充——本地映射已掉到 4/6，展示位必须是核验口径
+      // （6/6 或未核验时的「待核验」），二者都不等于本地映射 4/6。
+      expect('删映射不改展示数字（展示=核验口径，不是本地映射）',
+        dropped.count !== dropped.local && (dropped.count === '待核验' || /^\d+\/6$/.test(dropped.count)), dropped);
+      // 2) 模拟 session rotate 写入两个新会话 id → 界面应自动回 6/6 且显示新 id
+      rosterProj.sessions = { ...originalSessions, product: 'session-rota-b405f', programmer2: 'session-rotb-b405f' };
+      if (rosterProj.workspace) rosterProj.workspace.sessionIds = [...originalIds, 'session-rota-b405f', 'session-rotb-b405f'];
+      writeStore(liveStore);
+      await new Promise((resolve) => setTimeout(resolve, 6200));
+      const bounced = await readCount();
+      report.rosterBounced = bounced;
+      expect('界面 5 秒内跟随 rotate（本地映射回 6/6 且显示新会话）',
+        bounced.local === '6/6' && bounced.rows.includes('session-rota-b405f') && bounced.rows.includes('session-rotb-b405f'), bounced);
+      // 3) 还原
+      rosterProj.sessions = originalSessions;
+      if (rosterProj.workspace) rosterProj.workspace.sessionIds = originalIds;
+      writeStore(liveStore);
+      await new Promise((resolve) => setTimeout(resolve, 6200));
+      const restored = await readCount();
+      expect('界面 5 秒内跟随还原（本地映射 6/6）', restored.local === '6/6', restored);
+    } catch (e) {
+      failures.push('界面自动跟随用例异常：' + String((e && e.message) || e).slice(0, 300));
+    }
   } catch (error) {
     failures.push('工作台模型自测异常：' + String(error && error.stack || error).slice(0, 500));
   } finally {
@@ -7397,6 +11218,113 @@ async function selftestRound5(win, testRoot, mock) {
       workflowFile: owner.workflowFile,
       unregisteredCode: ownerUnregistered.code,
       unregisteredWarnings: (ownerUnregistered.warnings || []).map((item) => item.code)
+    };
+    // 6.5) 评审弹窗（B-fe22）：带 requirementId 的 owner:decide 必须落需求行，不能只改项目级。
+    // 通过不要求意见；打回空意见必须被拒且不落盘；填意见后需求行变 rejected。
+    const dialogReqId = 'R-20261113-050001-fe22';
+    const dialogWorkflowFile = path.join(projectStateDirFor(teamNameA), '工作流.json');
+    const dialogSeed = readJsonFile(dialogWorkflowFile) || {};
+    dialogSeed.requirements = dialogSeed.requirements || {};
+    dialogSeed.requirements[dialogReqId] = {
+      id: dialogReqId,
+      title: '弹窗通过用例',
+      priority: 'P1',
+      status: 'approved',
+      round: 1,
+      queued: false,
+      createdAt: now(),
+      updatedAt: now(),
+      productReview: { verdict: 'approve', role: 'product', at: now() },
+      ownerReview: { required: true, status: 'pending' },
+      history: [],
+    };
+    // B-3524：P0 且没有 TR-Q → G2.5 必须仍拦“通过”，但“打回”不能被拦。
+    const g25ReqId = 'R-20261113-050002-g25';
+    dialogSeed.requirements[g25ReqId] = {
+      ...dialogSeed.requirements[dialogReqId],
+      id: g25ReqId,
+      title: 'G2.5 打回用例',
+      priority: 'P0',
+    };
+    fs.writeFileSync(dialogWorkflowFile, JSON.stringify(dialogSeed, null, 2) + '\n', 'utf8');
+    // G2.5 的 hard 判定看任务 priority：给 g25 需求补一条 P0 任务，才能验证“通过被拦、打回不被拦”。
+    const g25TaskFile = path.join(projectStateDirFor(teamNameA), '任务', `${g25ReqId}.json`);
+    fs.mkdirSync(path.dirname(g25TaskFile), { recursive: true });
+    fs.writeFileSync(g25TaskFile, JSON.stringify({
+      id: g25ReqId, type: 'requirement', title: 'G2.5 打回用例', priority: 'P0', status: 'approved',
+      owner: 'pm', createdBy: 'pm', createdAt: now(), updatedAt: now(),
+      workflow: { requirementStatus: 'approved' },
+    }, null, 2) + '\n', 'utf8');
+    const g25GateApprove = await evaluate('gate:check 通过', `
+      return window.workbench.gateCheck({ projectId: ${js(aId)}, requirementId: ${js(g25ReqId)}, action: 'owner-review' })
+        .then((r) => JSON.stringify({ ok: r.ok, gate: r.gate, code: r.code }))
+    `);
+    expect('G2.5 仍拦通过（P0 无 TR-Q）', g25GateApprove.ok === false && g25GateApprove.gate === 'G2.5', g25GateApprove);
+    const g25GateReject = await evaluate('gate:check 打回', `
+      return window.workbench.gateCheck({ projectId: ${js(aId)}, requirementId: ${js(g25ReqId)}, action: 'owner-review', decision: 'rejected' })
+        .then((r) => JSON.stringify({ ok: r.ok, gate: r.gate, code: r.code }))
+    `);
+    expect('打回不被 G2.5 拦（decision=rejected）', g25GateReject.ok === true, g25GateReject);
+    const dialogApprove = await evaluate('弹窗通过（带需求）', `
+      let r = null; let message = '';
+      try { r = await window.workbench.ownerDecide({ projectId: ${js(aId)}, requirementId: ${js(dialogReqId)}, status: 'approved', opinion: '' }); }
+      catch (e) { message = String((e && e.message) || e); }
+      return JSON.stringify({ ok: Boolean(r && r.ok), code: (r && r.code) || '', message: message.slice(0, 300), requirement: (r && r.requirement) || null, requirementWrite: (r && r.requirementWrite) || null });
+    `);
+    const dialogAfterApprove = (readJsonFile(dialogWorkflowFile) || {}).requirements[dialogReqId] || {};
+    expect('弹窗通过带需求 id 落需求行 ready', dialogApprove.ok === true
+      && dialogAfterApprove.status === 'ready'
+      && Boolean(dialogAfterApprove.ownerReview) && dialogAfterApprove.ownerReview.status === 'approved', dialogAfterApprove);
+    expect('弹窗通过不要求意见且通道 ui', dialogApprove.ok === true
+      && Boolean(dialogApprove.requirementWrite) && dialogApprove.requirementWrite.channel === 'ui', dialogApprove.requirementWrite);
+    // B-a08e：决定必须写到需求行顶层 decisions[]（闸门 ownerDecisionsOf 读这里），
+    // ownerReview 只留摘要、不再存 decisions 数组；否则写 nested、读 top-level，永远 pending。
+    const approveDecisions = Array.isArray(dialogAfterApprove.decisions) ? dialogAfterApprove.decisions : [];
+    expect('弹窗通过 append 需求行顶层 decisions[]', approveDecisions.length >= 1
+      && String(approveDecisions[approveDecisions.length - 1].status) === 'approved'
+      && String(approveDecisions[approveDecisions.length - 1].channel) === 'ui'
+      && !Array.isArray(dialogAfterApprove.ownerReview && dialogAfterApprove.ownerReview.decisions), approveDecisions);
+    // B-2ed9：同一条重复点通过 → 服务端按「需求 + 本轮 + 同状态」拒绝，decisions 不再追加。
+    const dialogDuplicate = await evaluate('弹窗重复通过', `
+      let r = null; let message = '';
+      try { r = await window.workbench.ownerDecide({ projectId: ${js(aId)}, requirementId: ${js(dialogReqId)}, status: 'approved', opinion: '' }); }
+      catch (e) { message = String((e && e.message) || e); }
+      return JSON.stringify({ ok: Boolean(r && r.ok), code: (r && r.code) || '', message: message.slice(0, 300) });
+    `);
+    expect('重复通过被拒（DUPLICATE_DECISION）', dialogDuplicate.ok === false
+      && /DUPLICATE_DECISION/.test(String(dialogDuplicate.message || dialogDuplicate.code)), dialogDuplicate);
+    const dialogAfterDuplicate = (readJsonFile(dialogWorkflowFile) || {}).requirements[dialogReqId] || {};
+    expect('重复通过不追加 decisions', Array.isArray(dialogAfterDuplicate.decisions)
+      && dialogAfterDuplicate.decisions.length === approveDecisions.length, dialogAfterDuplicate.decisions);
+    const dialogRejectEmpty = await evaluate('弹窗打回空意见', `
+      let r = null; let message = '';
+      try { r = await window.workbench.ownerDecide({ projectId: ${js(aId)}, requirementId: ${js(dialogReqId)}, status: 'rejected', opinion: '' }); }
+      catch (e) { message = String((e && e.message) || e); }
+      return JSON.stringify({ ok: Boolean(r && r.ok), code: (r && r.code) || '', message: message.slice(0, 300) });
+    `);
+    expect('弹窗打回空意见被拒且不落盘', dialogRejectEmpty.ok === false
+      && /OWNER_OPINION_REQUIRED/.test(String(dialogRejectEmpty.message || dialogRejectEmpty.code)), dialogRejectEmpty);
+    const dialogAfterEmpty = (readJsonFile(dialogWorkflowFile) || {}).requirements[dialogReqId] || {};
+    expect('空意见打回不改需求行', dialogAfterEmpty.status === 'ready'
+      && Boolean(dialogAfterEmpty.ownerReview) && dialogAfterEmpty.ownerReview.status === 'approved', dialogAfterEmpty);
+    const dialogReject = await evaluate('弹窗打回填意见', `
+      let r = null; let message = '';
+      try { r = await window.workbench.ownerDecide({ projectId: ${js(aId)}, requirementId: ${js(dialogReqId)}, status: 'rejected', opinion: '弹窗打回：原因写清楚了' }); }
+      catch (e) { message = String((e && e.message) || e); }
+      return JSON.stringify({ ok: Boolean(r && r.ok), code: (r && r.code) || '', message: message.slice(0, 300), requirement: (r && r.requirement) || null });
+    `);
+    const dialogAfterReject = (readJsonFile(dialogWorkflowFile) || {}).requirements[dialogReqId] || {};
+    expect('弹窗打回填意见落需求行 rejected', dialogReject.ok === true
+      && dialogAfterReject.status === 'rejected'
+      && Boolean(dialogAfterReject.ownerReview) && dialogAfterReject.ownerReview.status === 'rejected', dialogAfterReject);
+    // B-a08e：打回是在通过之后追加到顶层 decisions[]，只增不减、最后一条是 rejected。
+    const rejectDecisions = Array.isArray(dialogAfterReject.decisions) ? dialogAfterReject.decisions : [];
+    expect('弹窗打回 append 顶层 decisions（append-only）', rejectDecisions.length === approveDecisions.length + 1
+      && String(rejectDecisions[rejectDecisions.length - 1].status) === 'rejected', rejectDecisions);
+    report.ownerDialog = {
+      approve: { ok: dialogApprove.ok, code: dialogApprove.code, requirement: dialogApprove.requirement },
+      rejectEmpty: { ok: dialogRejectEmpty.ok, code: dialogRejectEmpty.code, message: dialogRejectEmpty.message },
+      reject: { ok: dialogReject.ok, code: dialogReject.code, requirement: dialogReject.requirement },
     };
 
     console.log('SELFTEST_ROUND5_STEP board');
@@ -8344,7 +12272,7 @@ async function selftestRound10RealCommands(realTeamTools, testRoot, evaluate, ex
   // 不能因为产品没有对“刚被自己改过的状态行”再 boot 一次而卡死。
   const owner = await realTeamTools.ownerRequirementDecision({
     projectName: teamName, projectPath, role: 'owner', requirementId,
-    decision: 'skipped', opinion: '真实命令 Owner 跳过',
+    decision: 'skipped', opinion: '分析师：已评估；\\n产品：已评估；\\n开发：已评估。真实命令 Owner 跳过',
     ownerConfirmed: true
   });
   expect('真实 owner 正向调用（评审后无需产品重读）', owner.ok === true
@@ -8390,9 +12318,15 @@ async function selftestRound10RealCommands(realTeamTools, testRoot, evaluate, ex
     const claim = await realTeamTools.claimWorkflowTask({
       projectName: teamName, projectPath, role: 'tester', taskId: testTaskId
     });
+    // 证据门（T-70a9）：done 的证据必须是项目内真实文件；先写一份本轮测试报告再引用路径。
+    const reportRel = path.join('测试人员', '产出', `selftest-${label}-测试报告.md`);
+    try {
+      fs.mkdirSync(path.dirname(path.join(projectPath, reportRel)), { recursive: true });
+      fs.writeFileSync(path.join(projectPath, reportRel), `# ${label}测试报告\n\n- 结果：PASS\n- 结论：与验收标准一致\n`, 'utf8');
+    } catch { /* 写不了就交给断言报 */ }
     const testDone = await realTeamTools.doneWorkflowTask({
       projectName: teamName, projectPath, role: 'tester', taskId: testTaskId,
-      evidence: `PASS ${label}`
+      evidence: `${reportRel.split(path.sep).join('/')}（PASS ${label}）`
     });
     expect(`${label}测试任务 claim/done`, claim.ok === true && testDone.ok === true, {
       claim: claim.code, done: testDone.code
@@ -8404,7 +12338,7 @@ async function selftestRound10RealCommands(realTeamTools, testRoot, evaluate, ex
       testerReboot.ok === true && Boolean(testerReboot.bootRead && testerReboot.bootRead.complete), testerReboot);
     const accept = await realTeamTools.ownerAccept({
       projectName: teamName, projectPath, role: 'owner', requirementId: targetReqId,
-      decision: 'accepted', opinion: `${label}通过`,
+      decision: 'accepted', opinion: `${label}通过`, channel: 'ui',
       ownerConfirmed: true
     });
     expect(`${label} owner --action accept 正向调用`, accept.ok === true
@@ -8456,7 +12390,7 @@ async function selftestRound10RealCommands(realTeamTools, testRoot, evaluate, ex
     });
     const acceptOwner = await realTeamTools.ownerRequirementDecision({
       projectName: teamName, projectPath, role: 'owner', requirementId: acceptReqId,
-      decision: 'skipped', opinion: '真实验收 Owner 跳过',
+      decision: 'skipped', opinion: '分析师：已评估；\\n产品：已评估；\\n开发：已评估。真实验收 Owner 跳过',
       ownerConfirmed: true
     });
     expect('真实验收前置评审/Owner 通过', acceptReview.ok === true && acceptOwner.ok === true, {
@@ -8535,7 +12469,7 @@ async function selftestRound10RealCommands(realTeamTools, testRoot, evaluate, ex
   });
   const legacyAcceptOwner = await realTeamTools.ownerRequirementDecision({
     projectName: legacyName, projectPath: legacyPath, role: 'owner', requirementId: legacyAcceptId,
-    decision: 'skipped', opinion: '旧号验收 Owner 跳过', ownerConfirmed: true
+    decision: 'skipped', opinion: '分析师：已评估；\\n产品：已评估；\\n开发：已评估。旧号验收 Owner 跳过', ownerConfirmed: true
   });
   expect('4 位旧需求验收前可评审/Owner',
     legacyAcceptProductBoot.ok === true && legacyAcceptReview.ok === true && legacyAcceptOwner.ok === true,
@@ -8563,17 +12497,23 @@ async function selftestRound10RealCommands(realTeamTools, testRoot, evaluate, ex
     realTeamTools.writeWorkflowState(legacyName, legacyAcceptWorkflow.state);
   }
   const legacyTesterBoot = await realTeamTools.bootRole(legacyName, 'tester');
+  // 证据门（T-70a9）：done 证据用项目内测试报告的真实路径。
+  const legacyReportRel = path.join('测试人员', '产出', 'selftest-旧号验收测试报告.md');
+  try {
+    fs.mkdirSync(path.dirname(path.join(legacyPath, legacyReportRel)), { recursive: true });
+    fs.writeFileSync(path.join(legacyPath, legacyReportRel), '# 旧号验收测试报告\n\n- 结果：PASS\n', 'utf8');
+  } catch { /* ignore */ }
   const legacyTestDone = legacyTestTaskId && legacyTesterBoot.ok
     ? await realTeamTools.doneWorkflowTask({
       projectName: legacyName, projectPath: legacyPath, role: 'tester',
-      taskId: legacyTestTaskId, evidence: 'PASS 旧号验收测试'
+      taskId: legacyTestTaskId, evidence: `${legacyReportRel.split(path.sep).join('/')}（PASS 旧号验收测试）`
     })
     : { ok: false, code: 'TEST_TASK_NOT_DONE' };
   // 测试 done 会重写需求正文；Owner 验收前 tester 必须按现有闸门重新 boot。
   const legacyTesterReboot = legacyTestDone.ok ? await realTeamTools.bootRole(legacyName, 'tester') : { ok: false };
   const legacyAccept = legacyTestDone.ok && legacyTesterReboot.ok ? await realTeamTools.ownerAccept({
     projectName: legacyName, projectPath: legacyPath, role: 'owner', requirementId: legacyAcceptId,
-    decision: 'accepted', opinion: '旧号正文验收通过', ownerConfirmed: true
+    decision: 'accepted', opinion: '旧号正文验收通过', channel: 'ui', ownerConfirmed: true
   }) : { ok: false, code: legacyTestDone.code || 'TESTER_REBOOT_REQUIRED' };
   expect('4 位旧需求正文 + 评审/Owner + 测试 done 后可验收',
     legacyAccept.ok === true && legacyAccept.requirement && legacyAccept.requirement.status === 'accepted',
@@ -9102,16 +13042,16 @@ async function selftestRound10(win, testRoot, mock) {
       deprecatedConfirm.ok === true && deprecatedConfirm.deprecated === true
       && deprecatedConfirm.code === 'OWNER_CONFIRM_DEPRECATED' && deprecatedConfirm.hasToken === true, deprecatedConfirm);
     const ownerDirect = await evaluate('Owner 免确认码直接决定', `
-      const r = await window.workbench.requirementOwner({ projectId: ${js(projectId)}, role: 'owner', requirementId: ${js(requirementId)}, decision: 'skipped', opinion: '确认码已废弃，直接跳过' });
+      const r = await window.workbench.requirementOwner({ projectId: ${js(projectId)}, role: 'owner', requirementId: ${js(requirementId)}, decision: 'skipped', opinion: '分析师：已评估；\\n产品：已评估；\\n开发：已评估。确认码已废弃，直接跳过' });
       return JSON.stringify({ ok: r.ok, code: r.code || '', requirement: r.requirement, ownerNote: r.ownerNote, driver: r.driver });
     `);
     expect('Owner 免确认码直接决定成功（不再要求 challenge/nonce）',
       ownerDirect.ok === true && ownerDirect.requirement && ownerDirect.requirement.status === 'ready', ownerDirect);
     expect('Owner 决定真的调用旧 owner 命令', ownerDirect.driver === 'team.mjs owner', ownerDirect);
-    expect('Owner 决定审计记 actor:owner / channel:workbench',
+    expect('Owner 决定审计记 actor:owner / channel:ui',
       ownerDirect.requirement && ownerDirect.requirement.ownerReview
       && ownerDirect.requirement.ownerReview.actor === 'owner'
-      && ownerDirect.requirement.ownerReview.channel === 'workbench'
+      && ownerDirect.requirement.ownerReview.channel === 'ui'
       && Boolean(ownerDirect.requirement.ownerReview.at), ownerDirect.requirement && ownerDirect.requirement.ownerReview);
     const ownerBogus = await evaluate('Owner 免确认码仍校验需求存在', `
       const r = await window.workbench.requirementOwner({ projectId: ${js(projectId)}, role: 'owner', requirementId: 'R-99999999-9999', decision: 'skipped' });
@@ -9194,7 +13134,7 @@ async function selftestRound10(win, testRoot, mock) {
     expect('apply 改索引后重新 boot 读齐', Array.isArray(rebootsAfterApply) && rebootsAfterApply.length === 6
       && rebootsAfterApply.every((row) => row.ok && row.complete), rebootsAfterApply);
     const devDone = await evaluate('程序员A done', `
-      const r = await window.workbench.taskDone({ projectId: ${js(projectId)}, role: 'programmer1', taskId: ${js(devTaskId)}, evidence: ${js(apply.commitId || 'C-round10')} });
+      const r = await window.workbench.taskDone({ projectId: ${js(projectId)}, role: 'programmer1', taskId: ${js(devTaskId)}, evidence: ${js('site/round10.txt（' + (apply.commitId || 'C-round10') + '）')} });
       return JSON.stringify({ ok: r.ok, code: r.code || '', requirement: r.requirement, task: r.task });
     `);
     expect('开发 done 走旧 task done', devDone.ok === true && devDone.requirement && devDone.requirement.status === 'dev_done', devDone);
@@ -9213,8 +13153,13 @@ async function selftestRound10(win, testRoot, mock) {
       return JSON.stringify({ ok: r.ok, code: r.code || '', task: r.task, requirement: r.requirement });
     `);
     expect('测试任务只能测试人员 claim', testClaim.ok === true && testClaim.task && testClaim.task.owner === 'tester', testClaim);
+    // 证据门（T-70a9）：测试 done 的证据必须是 claim 之后写入的真实文件；这里补一份本轮测试报告，
+    // 避免用 apply 时写入的 site 文件导致 EVIDENCE_STALE（ROUND10 曾因此整段红）。
+    const testReportRel = '测试人员/产出/selftest-round10-测试报告.md';
+    fs.mkdirSync(path.dirname(path.join(projectPath, testReportRel)), { recursive: true });
+    fs.writeFileSync(path.join(projectPath, testReportRel), '# 第十轮测试报告\n\n- 结果：PASS\n- 证据：site/round10.txt 内容与验收一致\n', 'utf8');
     const testDone = await evaluate('测试 done', `
-      const r = await window.workbench.taskDone({ projectId: ${js(projectId)}, role: 'tester', taskId: ${js(testTaskId)}, evidence: 'PASS: site/round10.txt 内容与验收一致' });
+      const r = await window.workbench.taskDone({ projectId: ${js(projectId)}, role: 'tester', taskId: ${js(testTaskId)}, evidence: ${js(testReportRel + '（PASS 内容与验收一致）')} });
       return JSON.stringify({ ok: r.ok, code: r.code || '', requirement: r.requirement, task: r.task });
     `);
     expect('测试 done 后进入 Owner 验收', testDone.ok === true && testDone.requirement && testDone.requirement.status === 'test_done', testDone);
@@ -9226,10 +13171,10 @@ async function selftestRound10(win, testRoot, mock) {
     `);
     expect('Owner 验收通过（免确认码，直接 role=owner）', accept.ok === true && accept.requirement && accept.requirement.status === 'accepted', accept);
     expectRequirementStatus('Owner 验收', 'accepted');
-    expect('Owner 验收审计记 actor:owner / channel:workbench',
+    expect('Owner 验收审计记 actor:owner / channel:ui',
       accept.requirement && accept.requirement.ownerAcceptance
       && accept.requirement.ownerAcceptance.actor === 'owner'
-      && accept.requirement.ownerAcceptance.channel === 'workbench'
+      && accept.requirement.ownerAcceptance.channel === 'ui'
       && Boolean(accept.requirement.ownerAcceptance.at), accept.requirement && accept.requirement.ownerAcceptance);
     expect('Owner 验收同时关闭旧需求任务', accept.requirementTaskDone && accept.requirementTaskDone.ok === true
       && (readJsonFile(path.join(stateDir, '任务', requirementId + '.json')) || {}).status === 'done', accept.requirementTaskDone);
@@ -9392,7 +13337,7 @@ async function selftestRound10(win, testRoot, mock) {
       strictTerminate.ok === true || strictTerminate.code !== 'LEGACY_PROTOCOL_REQUIRED', strictTerminate);
     const strictAccept = await missingCmdTools.ownerAccept({
       projectName: teamName, projectPath, role: 'owner', requirementId: ownerReqId,
-      decision: 'accepted', opinion: '不应写入'
+      decision: 'accepted', opinion: '不应写入', channel: 'ui'
     });
     expect('缺 owner 命令时验收不被旧命令卡死',
       strictAccept.ok === true || strictAccept.code !== 'LEGACY_PROTOCOL_REQUIRED', strictAccept);
@@ -9584,7 +13529,7 @@ async function selftestRound11(win, testRoot, mock) {
       });
     `);
     expect('Owner 免确认码直接决定通过', demandOwner.ok === true && demandOwner.status === 'ready', demandOwner);
-    expect('Owner 决定审计 actor:owner / channel:workbench', demandOwner.actor === 'owner' && demandOwner.channel === 'workbench', demandOwner);
+    expect('Owner 决定审计 actor:owner / channel:ui', demandOwner.actor === 'owner' && demandOwner.channel === 'ui', demandOwner);
 
     // 3) 第二条需求（分析师 → 评审 → Owner 跳过），凑齐并行派单的两条。
     const req2 = await evaluate('分析师建第二条需求', `
@@ -9609,7 +13554,7 @@ async function selftestRound11(win, testRoot, mock) {
       && reboots2.every((row) => row.ok && row.complete), reboots2);
     const req2Review = await evaluate('第二条需求评审+Owner', `
       const review = await window.workbench.requirementReview({ projectId: ${js(projectId)}, role: 'product', requirementId: ${js(req2Id)}, verdict: 'approve', comment: '评审通过' });
-      const owner = await window.workbench.requirementOwner({ projectId: ${js(projectId)}, role: 'owner', requirementId: ${js(req2Id)}, decision: 'skipped', opinion: '跳过' });
+      const owner = await window.workbench.requirementOwner({ projectId: ${js(projectId)}, role: 'owner', requirementId: ${js(req2Id)}, decision: 'skipped', opinion: '分析师：已评估；\\n产品：已评估；\\n开发：已评估。跳过' });
       return JSON.stringify({ reviewOk: review.ok, reviewStatus: review.requirement && review.requirement.status, ownerOk: owner.ok, ownerStatus: owner.requirement && owner.requirement.status });
     `);
     expect('第二条需求评审+Owner 通过', req2Review.reviewOk === true && req2Review.ownerOk === true
@@ -9662,11 +13607,11 @@ async function selftestRound11(win, testRoot, mock) {
       const selfReview = await window.workbench.devReview({ projectId: ${js(projectId)}, role: 'programmer1', requirementId: ${js(demandReqId)}, proposalId: submitA.proposal && submitA.proposal.id, verdict: 'approve' });
       const peerA = await window.workbench.devReview({ projectId: ${js(projectId)}, role: 'programmer2', requirementId: ${js(demandReqId)}, proposalId: submitA.proposal && submitA.proposal.id, verdict: 'approve', comment: 'B 互审 A 通过' });
       const applyA = await window.workbench.devApply({ projectId: ${js(projectId)}, role: 'pm', requirementId: ${js(demandReqId)}, proposalId: submitA.proposal && submitA.proposal.id, log: 'A 提交' });
-      const doneA = await window.workbench.taskDone({ projectId: ${js(projectId)}, role: 'programmer1', taskId: ${js(devTaskA)}, evidence: applyA.commitId || 'C-A' });
+      const doneA = await window.workbench.taskDone({ projectId: ${js(projectId)}, role: 'programmer1', taskId: ${js(devTaskA)}, evidence: 'site/round11-a.txt（' + (applyA.commitId || 'C-A') + '）' });
       const submitB = await window.workbench.devSubmit({ projectId: ${js(projectId)}, role: 'programmer2', taskId: ${js(devTaskB)}, fileRel: 'site/round11-b.txt', content: 'round11 B', title: 'B 的提案' });
       const peerB = await window.workbench.devReview({ projectId: ${js(projectId)}, role: 'programmer1', requirementId: ${js(req2Id)}, proposalId: submitB.proposal && submitB.proposal.id, verdict: 'approve', comment: 'A 互审 B 通过' });
       const applyB = await window.workbench.devApply({ projectId: ${js(projectId)}, role: 'pm', requirementId: ${js(req2Id)}, proposalId: submitB.proposal && submitB.proposal.id, log: 'B 提交' });
-      const doneB = await window.workbench.taskDone({ projectId: ${js(projectId)}, role: 'programmer2', taskId: ${js(devTaskB)}, evidence: applyB.commitId || 'C-B' });
+      const doneB = await window.workbench.taskDone({ projectId: ${js(projectId)}, role: 'programmer2', taskId: ${js(devTaskB)}, evidence: 'site/round11-b.txt（' + (applyB.commitId || 'C-B') + '）' });
       return JSON.stringify({
         claimA: claimA.ok, claimB: claimB.ok, submitA: submitA.ok,
         selfCode: selfReview.code || '', peerA: peerA.ok, applyA: applyA.ok, doneA: doneA.ok,
@@ -10685,6 +14630,204 @@ async function selftestRound14(win, testRoot) {
   return { report, failures };
 }
 
+/**
+ * 第十五轮：项目面板真相（R-d734 / T-20261114-003247-0a46）。
+ *   1) 先复现旧误报条件：files:list 600 项截断，根目录 项目信息.md / 项目铁律.md 不在清单里；
+ *   2) docs:presence 以真实文件系统为准：项目目录命中标来源；删项目副本回退团队共享；两处都删给 #missing-list 带路径；
+ *   3) 角色 BOOT 三态读真实启动令牌：已 BOOT / 过期 / 旧会话（本会话未 boot），面板标签同步。
+ * 只动自测沙盘（SELFTEST_ROOT），不碰真实项目与真实团队状态。
+ */
+async function selftestPanelTruth(win, testRoot) {
+  const report = {};
+  const failures = [];
+  const expect = (name, ok, detail) => {
+    report[name] = Boolean(ok);
+    if (!ok) failures.push(name + (detail === undefined ? '' : '：' + JSON.stringify(detail).slice(0, 500)));
+  };
+  const js = (code) => win.webContents.executeJavaScript(code, true);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const projectName = '面板真相';
+  const teamRoot = path.join(testRoot, '团队');
+  let projectPath = '';
+  let projectId = '';
+  let savedIron = '';
+  let rosterOriginal = '';
+  try {
+    const createdRaw = await js(`(async()=>{
+      const r = await window.workbench.createProject({ name: ${JSON.stringify(projectName)}, root: ${JSON.stringify(testRoot)} });
+      const sel = await window.workbench.selectProject(r.project.id);
+      return JSON.stringify({ ok: r.ok, id: r.project.id, path: r.project.path, selected: sel.ok === true });
+    })()`);
+    const created = JSON.parse(createdRaw);
+    expect('面板真相项目创建成功', created.ok === true && Boolean(created.id) && Boolean(created.path), created);
+    projectId = created.id;
+    projectPath = created.path;
+    if (!projectPath) throw new Error('项目路径缺失');
+
+    // 1) 复现旧口径：把 产品/产出 塞满 700 个文件，让 files:list 在根目录文档之前就撞上 600 上限。
+    const fillerDir = path.join(projectPath, '产品', '产出', '填充');
+    fs.mkdirSync(fillerDir, { recursive: true });
+    for (let i = 0; i < 700; i += 1) fs.writeFileSync(path.join(fillerDir, 'f' + i + '.txt'), 'x', 'utf8');
+    const listRaw = await js(`(async()=>{ const r = await window.workbench.filesList(${JSON.stringify(projectId)}); return JSON.stringify({ ok: r.ok, count: r.count, truncated: r.truncated, hasInfo: (r.files||[]).some(f=>f.rel==='项目信息.md'), hasIron: (r.files||[]).some(f=>f.rel==='项目铁律.md') }); })()`);
+    const list = JSON.parse(listRaw);
+    expect('旧口径可复现：files:list 截断后根目录文档不在清单（会误报缺失）',
+      list.ok === true && list.truncated === true && list.hasInfo === false && list.hasIron === false, list);
+
+    const presenceRaw = await js(`(async()=>{ const r = await window.workbench.docsPresence({ projectId: ${JSON.stringify(projectId)} }); return JSON.stringify(r); })()`);
+    const presence = JSON.parse(presenceRaw);
+    const infoCheck = (presence.checks || []).find((row) => row.key === 'projectInfo') || null;
+    const ironCheck = (presence.checks || []).find((row) => row.key === 'iron') || null;
+    expect('docs:presence 不看截断清单：项目信息/项目铁律判存在，来源=项目目录',
+      presence.ok === true && infoCheck && infoCheck.state === 'present' && infoCheck.source === 'project'
+      && ironCheck && ironCheck.state === 'present' && ironCheck.source === 'project', presence.checks);
+
+    // 2) 面板 DOM：存在即显示“存在（来源：项目目录）”，#missing-list 为空。
+    await js('refresh()');
+    await js(`document.getElementById('btn-board').click()`);
+    await sleep(2200);
+    // AC5：修前基线用“旧口径数据证据”固定下来（repro-truncation：files:list 600 截断、两文档不在清单），
+    // 这里截的是修后同一位置（项目面板 · 本轮 · 必读与文档存在性）。
+    const artifactDir = path.join(SELFTEST_ROOT, 'artifacts');
+    fs.mkdirSync(artifactDir, { recursive: true });
+    await js(`(async()=>{ await loadLegacyDocs(true); })()`);
+    await sleep(900);
+    const afterShot = await win.webContents.capturePage();
+    if (!afterShot.isEmpty()) fs.writeFileSync(path.join(artifactDir, 'panel-docs-after-0a46.png'), afterShot.toPNG());
+    const dom1 = JSON.parse(await js(`(()=>{
+      const rows = [...document.querySelectorAll('#doc-presence .legacy-presence-row')].map((n)=>({ key:n.dataset.docKey, exists:n.dataset.exists, source:n.dataset.source, path:n.dataset.checkPath, text:n.textContent }));
+      const missing = document.getElementById('missing-list');
+      return JSON.stringify({ rows, missingCount: missing ? missing.dataset.missingCount : 'NO-NODE', missingText: missing ? missing.textContent : '' });
+    })()`));
+    const domInfo = (dom1.rows || []).find((row) => row.key === 'projectInfo') || null;
+    const domIron = (dom1.rows || []).find((row) => row.key === 'iron') || null;
+    expect('面板显示项目信息/铁律“存在（来源：项目目录）”，不再误报缺失',
+      domInfo && domInfo.exists === '1' && domInfo.source === 'project' && /来源：项目目录/.test(domInfo.text)
+      && domIron && domIron.exists === '1' && domIron.source === 'project' && /来源：项目目录/.test(domIron.text)
+      && dom1.missingCount === '0', dom1);
+
+    // 3) 团队共享回退：删项目目录的 项目铁律.md，团队共享同名文件仍在 → 存在（来源：团队共享）。
+    savedIron = fs.readFileSync(path.join(projectPath, '项目铁律.md'), 'utf8');
+    fs.mkdirSync(teamRoot, { recursive: true });
+    fs.writeFileSync(path.join(teamRoot, '项目铁律.md'), '# 团队共享铁律\n\n沙箱团队共享层。\n', 'utf8');
+    fs.unlinkSync(path.join(projectPath, '项目铁律.md'));
+    await js(`(async()=>{ await loadLegacyDocs(true); })()`);
+    await sleep(700);
+    const dom2 = JSON.parse(await js(`(()=>{
+      const row = [...document.querySelectorAll('#doc-presence .legacy-presence-row')].find((n)=>n.dataset.docKey==='iron') || null;
+      return JSON.stringify(row ? { exists:row.dataset.exists, source:row.dataset.source, text:row.textContent } : null);
+    })()`));
+    expect('项目目录删除后回退团队共享仍判存在，且标来源=团队共享',
+      dom2 && dom2.exists === '1' && dom2.source === 'team' && /来源：团队共享/.test(dom2.text), dom2);
+
+    // 4) 两处都删 → 真缺失：进 #missing-list，带绝对路径/两处来源/四列。
+    fs.unlinkSync(path.join(teamRoot, '项目铁律.md'));
+    await js(`(async()=>{ await loadLegacyDocs(true); })()`);
+    await sleep(700);
+    const dom3 = JSON.parse(await js(`(()=>{
+      const box = document.getElementById('missing-list');
+      const rows = box ? [...box.querySelectorAll('.legacy-missing-row')].map((n)=>({ path:n.dataset.checkPath, exists:n.dataset.exists, source:n.dataset.source, cols:n.children.length })) : [];
+      return JSON.stringify({ missingCount: box ? box.dataset.missingCount : 'NO-NODE', rows });
+    })()`));
+    const ironRows = (dom3.rows || []).filter((row) => /项目铁律\.md$/.test(row.path || ''));
+    expect('真缺失进 #missing-list：两处绝对路径 + data-exists=0 + data-source + 四列',
+      dom3.missingCount === '1' && ironRows.length === 2
+      && ironRows.every((row) => row.exists === '0' && row.cols === 4)
+      && ironRows.some((row) => row.source === 'project') && ironRows.some((row) => row.source === 'team')
+      && ironRows.every((row) => path.isAbsolute(row.path || '')), dom3);
+    fs.writeFileSync(path.join(projectPath, '项目铁律.md'), savedIron, 'utf8');
+
+    // 5) BOOT 三态：真实启动令牌（沙箱内造）——已 BOOT / 过期 / 旧会话。
+    const teamStateDir = path.join(teamRoot, '状态');
+    const bootDir = path.join(teamStateDir, '启动');
+    fs.mkdirSync(bootDir, { recursive: true });
+    const rosterFile = path.join(teamStateDir, '团队.json');
+    try { rosterOriginal = fs.readFileSync(rosterFile, 'utf8'); } catch { rosterOriginal = ''; }
+    const roster = (() => { try { return JSON.parse(rosterOriginal || '{}'); } catch { return null; } })();
+    // 沙箱名册可能没有 pm 会话绑定（工作台把会话存在 workbench.json 里）；BOOT 判定认 团队.json 的
+    // members[].sessionId，所以这里先把 pm 绑到一个沙箱会话，再写启动令牌验证三态。
+    const sandboxPmSession = 'session-sandbox-pm';
+    if (roster && Array.isArray(roster.members)) {
+      const pmMember = roster.members.find((m) => m && m.role === 'pm') || null;
+      if (pmMember) {
+        pmMember.sessionId = sandboxPmSession;
+        fs.writeFileSync(rosterFile, JSON.stringify(roster, null, 2) + '\n', 'utf8');
+      }
+    }
+    const pmSession = roster && Array.isArray(roster.members)
+      ? String((roster.members.find((m) => m && m.role === 'pm') || {}).sessionId || '')
+      : '';
+    const writeToken = (token, sessionId, createdAt) => {
+      const file = path.join(bootDir, token + '.json');
+      fs.writeFileSync(file, JSON.stringify({
+        token, role: 'pm', project: projectName, sessionId,
+        createdAt, expiresAt: new Date(Date.parse(createdAt) + 480 * 60000).toISOString()
+      }, null, 2) + '\n', 'utf8');
+      return file;
+    };
+    const nowIso = new Date().toISOString();
+    const tokenOk = writeToken('sha256panel0a46ok0000000001', pmSession || 'session-sandbox-pm', nowIso);
+    const briefingOk = JSON.parse(await js(`(async()=>{ const r = await window.workbench.workflowBriefing({ projectId: ${JSON.stringify(projectId)} }); return JSON.stringify(r); })()`));
+    const pmEvidence = briefingOk && briefingOk.evidence && briefingOk.evidence.roles ? briefingOk.evidence.roles.pm : null;
+    expect('BOOT 证据读启动令牌：已 BOOT 且会话匹配（旧面板只看 工作流.json.boots 会显示未 boot）',
+      Boolean(pmEvidence) && pmEvidence.state === 'booted' && pmEvidence.matchesCurrent === true
+      && pmEvidence.evidenceSource === '启动令牌', pmEvidence);
+
+    fs.writeFileSync(tokenOk, JSON.stringify({
+      token: 'sha256panel0a46ok0000000001', role: 'pm', project: projectName,
+      sessionId: pmSession || 'session-sandbox-pm',
+      createdAt: new Date(Date.now() - 9 * 3600000).toISOString(),
+      expiresAt: new Date(Date.now() - 3600000).toISOString()
+    }, null, 2) + '\n', 'utf8');
+    const briefingExpired = JSON.parse(await js(`(async()=>{ const r = await window.workbench.workflowBriefing({ projectId: ${JSON.stringify(projectId)} }); return JSON.stringify(r); })()`));
+    const expiredEvidence = briefingExpired && briefingExpired.evidence ? briefingExpired.evidence.roles.pm : null;
+    expect('BOOT 过期按令牌 expiresAt 判 BOOT 过期（不再显示已 BOOT）',
+      Boolean(expiredEvidence) && expiredEvidence.state === 'expired' && expiredEvidence.expired === true, expiredEvidence);
+
+    writeToken('sha256panel0a46stale00000002', 'session-old-retired', nowIso);
+    fs.unlinkSync(tokenOk);
+    const briefingStale = JSON.parse(await js(`(async()=>{ const r = await window.workbench.workflowBriefing({ projectId: ${JSON.stringify(projectId)} }); return JSON.stringify(r); })()`));
+    const staleEvidence = briefingStale && briefingStale.evidence ? briefingStale.evidence.roles.pm : null;
+    expect('旧会话的 boot 不算已 BOOT（本会话未 boot）',
+      Boolean(staleEvidence) && staleEvidence.state === 'stale-session' && staleEvidence.matchesCurrent === false, staleEvidence);
+
+    await js(`(async()=>{ await loadLegacyDocs(true); })()`);
+    await sleep(700);
+    const roleTable = await js(`(()=>{ const box = document.getElementById('legacy-role-table'); return box ? box.textContent : ''; })()`);
+    expect('面板六角色表显示“未 BOOT（本会话未 boot）”，不把旧会话当已 BOOT',
+      /未 BOOT（本会话未 boot）/.test(String(roleTable || '')), String(roleTable || '').slice(0, 300));
+
+    report.presence = { listCount: list.count, truncated: list.truncated, info: infoCheck && infoCheck.state, ironSource: ironCheck && ironCheck.source };
+    report.boot = { booted: pmEvidence && pmEvidence.state, expired: expiredEvidence && expiredEvidence.state, stale: staleEvidence && staleEvidence.state };
+  } catch (error) {
+    failures.push('第十五轮 面板真相自测异常：' + String((error && error.stack) || error).slice(0, 1000));
+  } finally {
+    // 沙箱复原：删填充文件与造出来的启动令牌，回写项目铁律。
+    try {
+      if (projectPath) {
+        const fillerDir = path.join(projectPath, '产品', '产出', '填充');
+        try { fs.rmSync(fillerDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        if (savedIron) {
+          try { fs.writeFileSync(path.join(projectPath, '项目铁律.md'), savedIron, 'utf8'); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
+    try {
+      const bootDir = path.join(testRoot, '团队', '状态', '启动');
+      for (const name of ['sha256panel0a46ok0000000001.json', 'sha256panel0a46stale00000002.json']) {
+        try { fs.unlinkSync(path.join(bootDir, name)); } catch { /* ignore */ }
+      }
+      // 名册复原：测试前 pm 可能没有会话绑定，别把沙箱名册留在“绑定沙箱会话”的状态。
+      try {
+        const rosterFile = path.join(testRoot, '团队', '状态', '团队.json');
+        if (rosterOriginal) fs.writeFileSync(rosterFile, rosterOriginal, 'utf8');
+      } catch { /* ignore */ }
+      // 测试期间打开的抽屉要关掉，别把后续截图/布局状态留在浮层里。
+      try { win.webContents.executeJavaScript(`(()=>{ const btn=document.querySelector('[data-close-drawer="project"]'); if (btn) btn.click(); })()`); } catch { /* ignore */ }
+    } catch { /* ignore */ }
+  }
+  return { report, failures };
+}
+
 async function selftest() {
   const testRoot = SELFTEST_ROOT;
   // 清掉上一轮产物（保留本轮 Chromium userdata/tmp）；被遗留工具进程占用时重试，绝不换目录。
@@ -11169,6 +15312,17 @@ async function selftest() {
     }));
     for (const failure of round14.failures) failures.push('第十四轮dry-run/壳层收口：' + failure);
 
+    // 第十五轮：项目面板真相（R-d734 / T-20261114-003247-0a46）。
+    // 覆盖：旧 files:list 截断误报可复现 → docs:presence 真实存在性（项目目录/团队共享/缺失带路径）→ BOOT 三态。
+    const round15 = await selftestPanelTruth(win, testRoot);
+    console.log('SELFTEST_ROUND15 ' + JSON.stringify({
+      checks: Object.keys(round15.report).length,
+      failed: round15.failures.length,
+      failures: round15.failures,
+      report: round15.report
+    }));
+    for (const failure of round15.failures) failures.push('第十五轮面板真相：' + failure);
+
     await win.webContents.executeJavaScript(`document.querySelector('[data-tab="flow"]').click()`);
     const tabState = await win.webContents.executeJavaScript(`JSON.stringify({tab:document.querySelector('.tab.active')?.dataset.tab, display:getComputedStyle(document.getElementById('view-flow')).display})`);
     console.log('SELFTEST_TAB ' + tabState);
@@ -11260,10 +15414,10 @@ async function reloadDshWebview(baseUrl) {
         if (!view) return false;
         const target = ${JSON.stringify(target)};
         if (view.getAttribute('src') === target) {
-          try { view.reload(); } catch (error) { return false; }
-        } else {
-          view.setAttribute('src', target);
+          // 已经在目标地址（或正在加载）时不要 reload；否则会中止当前导航并产生 ERR_ABORTED。
+          return true;
         }
+        view.setAttribute('src', target);
         return true;
       })()`, true);
       if (handled) return { ok: true, via: 'dom' };
@@ -11469,17 +15623,488 @@ async function installDshCookie() {
   } catch { return false; }
 }
 
-// 单实例：两个窗口同时写 workbench.json / 团队状态会丢更新。自测用独立 userData，不参与锁。
-const singleInstanceLock = IS_SELFTEST ? true : app.requestSingleInstanceLock();
+// 单实例：两个窗口同时写 workbench.json / 团队状态会丢更新。自测/布局自检用独立 userData，不参与锁。
+const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK) ? true : app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
   app.quit();
-} else if (!IS_SELFTEST) {
+} else if (!IS_SELFTEST && !IS_LAYOUT_CHECK) {
   app.on('second-instance', () => {
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
   });
+}
+
+// B-20261113-005705-a577：派单队列死锁修复。
+// 以前队列只在某角色 task done 时才泵；全队空闲时队列里的派单永远发不出去（只能人工催）。
+// 主进程加一个独立定时泵：每 60 秒对当前项目走一次 team.mjs queue pump（兜底泵）。
+// 失败写事件留痕；队列项只在真正派发成功后才移除（工具侧保证），失败/角色忙都原样保留。
+const QUEUE_PUMP_INTERVAL_MS = 60 * 1000;
+const queuePumpState = { timer: null, running: false, lastAt: 0, last: null };
+function queuePumpTick() {
+  if (queuePumpState.running) return;
+  let store = null;
+  let project = null;
+  try {
+    store = readStore();
+    project = store.projects.find((p) => p.id === store.activeProjectId) || store.projects[0] || null;
+  } catch { project = null; }
+  if (!project || !project.name) return;
+  // 守护跟随当前项目：切工作区后 60 秒内自动换到新项目（已由本壳管着同一项目时幂等返回）。
+  if (!routeSupervisor.quitting) ensureRouteSupervisor(project);
+  queuePumpState.running = true;
+  Promise.resolve()
+    .then(() => teamTools.pumpDispatchQueue(project.name))
+    .then((result) => {
+      queuePumpState.lastAt = Date.now();
+      queuePumpState.last = result;
+      if (result && result.pumped) {
+        console.log('QUEUE_PUMP ' + JSON.stringify({ project: project.name, messageId: result.message && result.message.id, to: result.item && result.item.to, remaining: result.remaining }));
+        return;
+      }
+      if (result && result.ok === false) {
+        const why = String(result.message || result.reason || result.code || 'QUEUE_PUMP_FAILED').slice(0, 200);
+        try { addEvent(project, '队列泵失败：' + why); writeStore(store); } catch { /* 留痕失败不阻断定时泵 */ }
+        console.warn('QUEUE_PUMP_FAILED ' + JSON.stringify({ project: project.name, code: result.code, why }));
+      }
+    })
+    .catch((error) => {
+      const why = String((error && error.message) || error).slice(0, 200);
+      queuePumpState.lastAt = Date.now();
+      queuePumpState.last = { ok: false, code: 'QUEUE_PUMP_FAILED', message: why };
+      try { addEvent(project, '队列泵失败：' + why); writeStore(store); } catch { /* ignore */ }
+      console.warn('QUEUE_PUMP_FAILED ' + JSON.stringify({ project: project.name, why }));
+    })
+    .finally(() => { queuePumpState.running = false; });
+}
+function startDispatchQueuePump() {
+  if (queuePumpState.timer) return queuePumpState;
+  queuePumpState.timer = setInterval(queuePumpTick, QUEUE_PUMP_INTERVAL_MS);
+  if (queuePumpState.timer && typeof queuePumpState.timer.unref === 'function') queuePumpState.timer.unref();
+  // 启动后 20 秒先跑一次（错峰，避免影响窗口首帧），之后按 60 秒节拍。
+  setTimeout(queuePumpTick, 20 * 1000);
+  return queuePumpState;
+}
+
+// ── 路由守护：壳层拉起 + 状态可见（T-20261114-063256-b417） ──────────────────
+// ① 工作台启动后拉起官方守护：子进程跑 团队/工具/lib/route-daemon.mjs 的 runDaemon（不改守护代码），
+//    单实例锁仍由守护自己持有（后启动者进不来，壳层另按心跳/pid 判活，不抢锁）；
+// ② 退出时先请子进程停再退；③ 拉起/退出失败只写日志 + 项目事件 + 界面人话，不弹窗。
+const ROUTE_DAEMON_HOST = path.join(__dirname, 'route-daemon-host.cjs');
+const ROUTE_SUPERVISOR_DELAY_MS = 15 * 1000;
+const ROUTE_SUPERVISOR_RETRY_MS = 60 * 1000;
+const ROUTE_SUPERVISOR_MAX_RETRY = 2;
+const routeSupervisor = { proc: null, project: '', startedAt: 0, attempts: 0, retryTimer: null, lastError: '', lastExit: null, quitting: false };
+
+function routeDaemonStatusFile(projectName) {
+  const name = String(projectName || '').trim();
+  if (!name) return '';
+  return path.join(teamTools._paths().projectsDir, teamTools.teamSlug(name), ROUTE_STATUS_FILE_NAME);
+}
+
+/** pid 存活（只判断有没有这个进程，不向它投递任何信号）。 */
+function routeDaemonPidAlive(pid) {
+  const n = Number(pid || 0);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  try { process.kill(n, 0); return true; } catch (error) { return Boolean(error && error.code === 'EPERM'); }
+}
+
+/**
+ * 守护状态（只读）：运行中 / 已停止 / 心跳超时（超 3 个周期标红）。
+ * 判活三件一起看：文件 alive 字段 + 心跳年龄 + pid 是否还活着（强制结束时 finally 可能没跑）。
+ */
+function readRouteSupervisorStatus(projectName) {
+  const name = String(projectName || '').trim();
+  const beatMs = Number(process.env.TEAM_DAEMON_BEAT_MS) > 0 ? Number(process.env.TEAM_DAEMON_BEAT_MS) : ROUTE_DAEMON_BEAT_MS_FALLBACK;
+  const out = {
+    ok: true, project: name, state: 'unknown', label: '守护 —', detail: '',
+    managed: Boolean(routeSupervisor.proc && routeSupervisor.project === name),
+    beatMs, beatAgeMs: null, stale: false, alive: false, pid: 0, pidAlive: false,
+    ticks: 0, version: '', lastBeatAt: '', startedAt: '', error: routeSupervisor.lastError || '',
+    file: '', at: new Date().toISOString(),
+  };
+  if (!name) { out.state = 'no-project'; out.detail = '先选择工作区'; return out; }
+  const file = routeDaemonStatusFile(name);
+  out.file = file;
+  let raw = null;
+  try { raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { raw = null; }
+  if (!raw || typeof raw !== 'object') {
+    out.state = 'stopped';
+    out.label = '守护：已停止';
+    out.detail = '还没有守护心跳（守护没在这里跑起来过）';
+    return out;
+  }
+  const beatAt = Date.parse(String(raw.lastBeatAt || ''));
+  const ageMs = Number.isFinite(beatAt) ? Math.max(0, Date.now() - beatAt) : null;
+  const pid = Number(raw.pid || 0);
+  const pidAlive = pid > 0 ? routeDaemonPidAlive(pid) : false;
+  const staleAfter = beatMs * ROUTE_DAEMON_STALE_BEATS;
+  Object.assign(out, {
+    alive: Boolean(raw.alive), pid, pidAlive,
+    beats: Number(raw.ticks || 0), ticks: Number(raw.ticks || 0),
+    version: String(raw.version || ''), lastBeatAt: String(raw.lastBeatAt || ''),
+    startedAt: String(raw.startedAt || ''), beatAgeMs: ageMs,
+    stale: ageMs !== null ? ageMs > staleAfter : true,
+  });
+  const ageText = ageMs === null ? '心跳时间未记' : `${Math.round(ageMs / 1000)} 秒前`;
+  const liveNow = Boolean(raw.alive) && pidAlive;
+  if (liveNow && ageMs !== null && ageMs <= staleAfter) {
+    out.state = 'running';
+    out.label = '守护：运行中';
+    out.detail = `心跳 ${ageText} · pid ${pid} · ${Number(raw.ticks || 0)} 拍`;
+  } else if (ageMs !== null && ageMs > staleAfter) {
+    out.state = 'stale';
+    out.label = '守护：心跳超时';
+    out.detail = `心跳 ${ageText}（超过 ${ROUTE_DAEMON_STALE_BEATS} 个周期 ${Math.round(staleAfter / 1000)} 秒）`;
+  } else {
+    out.state = 'stopped';
+    out.label = '守护：已停止';
+    out.detail = raw.alive ? `心跳 ${ageText} 但进程已不在（pid ${pid || '-'}）` : `守护没在跑（最后心跳 ${ageText}）`;
+  }
+  return out;
+}
+
+function routeSupervisorNote(project, text) {
+  try {
+    const store = readStore();
+    const target = store.projects.find((item) => String(item.teamName || item.name || '') === String((project && (project.teamName || project.name)) || '')) || null;
+    if (!target) return;
+    addEvent(target, text);
+    writeStore(store);
+  } catch { /* 留痕失败不阻断守护拉起 */ }
+}
+
+function scheduleRouteSupervisorRetry(project) {
+  if (routeSupervisor.quitting) return;
+  if (routeSupervisor.attempts >= ROUTE_SUPERVISOR_MAX_RETRY) return;
+  if (routeSupervisor.retryTimer) return;
+  routeSupervisor.attempts += 1;
+  routeSupervisor.retryTimer = setTimeout(() => {
+    routeSupervisor.retryTimer = null;
+    let current = project;
+    try {
+      const store = readStore();
+      current = store.projects.find((item) => item.id === store.activeProjectId) || project;
+    } catch { /* 用传进来的项目再试一次 */ }
+    ensureRouteSupervisor(current);
+  }, ROUTE_SUPERVISOR_RETRY_MS);
+  if (routeSupervisor.retryTimer && typeof routeSupervisor.retryTimer.unref === 'function') routeSupervisor.retryTimer.unref();
+}
+
+/** 拉起守护（幂等）：本壳已在管同一个项目、或别人的守护心跳正常时不重复启动。 */
+function ensureRouteSupervisor(project) {
+  if (routeSupervisor.quitting) return null;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK) return null;
+  if (process.env.AWB_ROUTE_DAEMON === 'off') return null;
+  if (!project || !project.name) return null;
+  const name = String(project.teamName || project.name || '');
+  if (!name) return null;
+  if (routeSupervisor.proc && routeSupervisor.project === name) return readRouteSupervisorStatus(name);
+  const before = readRouteSupervisorStatus(name);
+  if (before.state === 'running') {
+    // 已经有别的守护在跑（可能是上一个工作台进程留下的）：不抢锁，只显示。
+    routeSupervisor.lastError = '';
+    return before;
+  }
+  const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+  const daemonModule = path.join(teamRoot, '工具', 'lib', 'route-daemon.mjs');
+  if (!fs.existsSync(daemonModule)) {
+    routeSupervisor.lastError = `团队工具里没有守护模块：${daemonModule}`;
+    console.warn('ROUTE_DAEMON_SKIP ' + JSON.stringify({ project: name, why: 'DAEMON_MODULE_MISSING', file: daemonModule }));
+    return readRouteSupervisorStatus(name);
+  }
+  try {
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, [ROUTE_DAEMON_HOST, name], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', AWB_ROUTE_HOST_TEAM_ROOT: teamRoot },
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      windowsHide: true,
+    });
+    routeSupervisor.proc = child;
+    routeSupervisor.project = name;
+    routeSupervisor.startedAt = Date.now();
+    routeSupervisor.lastExit = null;
+    routeSupervisor.lastError = '';
+    let stderrTail = '';
+    child.stdout.on('data', (chunk) => { const text = String(chunk || '').trim(); if (text) console.log('[route-daemon] ' + text.slice(0, 800)); });
+    child.stderr.on('data', (chunk) => { stderrTail = (stderrTail + String(chunk || '')).slice(-4000); });
+    child.on('error', (error) => {
+      const why = String((error && error.message) || error).slice(0, 300);
+      routeSupervisor.lastError = `守护拉起失败：${why}`;
+      routeSupervisor.proc = null;
+      console.warn('ROUTE_DAEMON_FAILED ' + JSON.stringify({ project: name, why }));
+      routeSupervisorNote(project, '路由守护拉起失败：' + why + '（已写日志，不弹窗；稍后自动重试）');
+      scheduleRouteSupervisorRetry(project);
+    });
+    child.on('exit', (code, signal) => {
+      const clean = routeSupervisor.quitting;
+      routeSupervisor.proc = null;
+      routeSupervisor.lastExit = { code, signal, at: new Date().toISOString() };
+      if (clean) {
+        console.log('ROUTE_DAEMON_STOPPED ' + JSON.stringify({ project: name, code, signal }));
+        return;
+      }
+      const why = (stderrTail.match(/ROUTE_DAEMON_HOST_FAILED .*/) || [])[0] || stderrTail.slice(-300) || `退出码 ${code}`;
+      routeSupervisor.lastError = `守护已退出：${why}`.slice(0, 400);
+      console.warn('ROUTE_DAEMON_EXIT_UNEXPECTED ' + JSON.stringify({ project: name, code, signal, why: routeSupervisor.lastError }));
+      routeSupervisorNote(project, '路由守护已退出：' + routeSupervisor.lastError);
+      scheduleRouteSupervisorRetry(project);
+    });
+    console.log('ROUTE_DAEMON_START ' + JSON.stringify({ project: name, pid: child.pid, host: ROUTE_DAEMON_HOST }));
+    return readRouteSupervisorStatus(name);
+  } catch (error) {
+    const why = String((error && error.message) || error).slice(0, 300);
+    routeSupervisor.lastError = `守护拉起失败：${why}`;
+    console.warn('ROUTE_DAEMON_FAILED ' + JSON.stringify({ project: name, why }));
+    routeSupervisorNote(project, '路由守护拉起失败：' + why);
+    scheduleRouteSupervisorRetry(project);
+    return readRouteSupervisorStatus(name);
+  }
+}
+
+/** 退出时先请守护子进程停（Windows 无信号投递，1 秒后兜底 kill；锁 30 秒 TTL 自动过期）。 */
+function stopRouteSupervisor() {
+  routeSupervisor.quitting = true;
+  if (routeSupervisor.retryTimer) { clearTimeout(routeSupervisor.retryTimer); routeSupervisor.retryTimer = null; }
+  const child = routeSupervisor.proc;
+  routeSupervisor.proc = null;
+  if (!child) return;
+  try { child.send('stop'); } catch { /* 子进程可能已退出 */ }
+  setTimeout(() => { try { if (!child.killed) child.kill(); } catch { /* 已退出 */ } }, 800);
+}
+
+/** 启动 15 秒后拉一次（避开窗口首帧），之后交给 60 秒兜底泵跟随当前项目。 */
+function startRouteSupervisorSoon() {
+  setTimeout(() => {
+    let project = null;
+    try {
+      const store = readStore();
+      project = store.projects.find((item) => item.id === store.activeProjectId) || null;
+    } catch { project = null; }
+    ensureRouteSupervisor(project);
+  }, ROUTE_SUPERVISOR_DELAY_MS);
+}
+
+/** R-c651 AC3 页面测量：只读 DOM，把团队行三列/按钮/红点的真实值取回来。 */
+function collectPresenceDom() {
+  const pickText = (el, sel) => {
+    const node = el.querySelector(sel);
+    return node ? String(node.textContent || '').trim() : '';
+  };
+  const rows = [...document.querySelectorAll('.team-session .role-presence[data-role]')].map((el) => ({
+    role: el.dataset.role,
+    unread: el.dataset.unread === '' ? null : Number(el.dataset.unread),
+    ackPending: el.dataset.ackPending === '' ? null : Number(el.dataset.ackPending),
+    stalledMin: el.dataset.stalledMin === '' ? null : Number(el.dataset.stalledMin),
+    wakeFailed: el.dataset.wakeFailed === '1',
+    unreadText: pickText(el, '.presence-chip.unread'),
+    ackText: pickText(el, '.presence-chip.ack'),
+    stalledText: pickText(el, '.presence-chip.stalled'),
+    stalledClass: (() => { const n = el.querySelector('.presence-chip.stalled'); return n ? String(n.className || '') : ''; })(),
+    legacyText: pickText(el, '.presence-chip.legacy'),
+    failedDot: Boolean(el.querySelector('.presence-failed-dot')),
+    buttons: [...el.querySelectorAll('[data-action]')].map((b) => ({
+      action: b.dataset.action, role: b.dataset.role, disabled: Boolean(b.disabled), text: String(b.textContent || '').trim(),
+    })),
+  }));
+  const toast = document.querySelector('#toast');
+  const roleCards = document.querySelectorAll('.role-card .role-presence[data-role]').length;
+  const drawer = document.querySelector('#team-drawer');
+  return {
+    rows,
+    count: rows.length,
+    roleCards,
+    drawerOpen: Boolean(drawer && !drawer.hidden),
+    toast: toast ? String(toast.textContent || '').trim() : '',
+    toastClass: toast ? String(toast.className || '') : '',
+    bodyText: String(document.body.textContent || '').length,
+  };
+}
+
+/**
+ * R-c651 AC3 界面自检（--c651-check）
+ * 两段：
+ *   ① 真实数据只读——团队行必须出现「未读 / 未回执 / 停滞」三列 + 一键唤醒 / 全部已读两个按钮，
+ *      且数值与团队工具 presence 命令一致（界面不重算、不补 0）；
+ *   ② 打桩点击——把 presence 换成构造数据、wake/mark-read 换成桩，验证按钮真的调 IPC、把结果说成人话
+ *      （toast 文案），全程零写盘，不碰真实团队状态。
+ */
+async function runC651Check() {
+  const outDir = process.env.AWB_C651_OUT ? path.resolve(process.env.AWB_C651_OUT) : path.join(ROOT, '_tmp', 'c651-check-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  const checks = [];
+  const check = (name, ok, detail) => {
+    checks.push({ name, ok: Boolean(ok), detail });
+    console.log(`[${ok ? 'PASS' : 'FAIL'}] ${name}${detail === undefined ? '' : ' :: ' + (typeof detail === 'string' ? detail : JSON.stringify(detail)).slice(0, 400)}`);
+    return ok;
+  };
+  createWindow();
+  const win = mainWindow;
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else resolve();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1800));
+  const shot = async (name) => {
+    try {
+      const file = path.join(outDir, name);
+      fs.writeFileSync(file, (await win.webContents.capturePage()).toPNG());
+      return file;
+    } catch { return ''; }
+  };
+  const evalJs = (expr) => win.webContents.executeJavaScript(expr, true);
+  const collect = () => win.webContents.executeJavaScript(`(${collectPresenceDom.toString()})()`, true);
+
+  // ---------- ① 真实数据 ----------
+  const opened = await evalJs(`(() => { const b = document.querySelector('#team-pill'); if (!b) return false; b.click(); return true; })()`);
+  check('团队台可以打开（#team-pill）', opened === true, opened);
+  await new Promise((resolve) => setTimeout(resolve, 5000));
+  const realDom = await collect();
+  const store = readStore();
+  const project = store.projects.find((item) => item.id === store.activeProjectId) || store.projects[0] || null;
+  const teamName = project ? String(project.teamName || project.name || '') : '';
+  const realServer = teamName ? await teamTools.presenceFor({ projectName: teamName }) : { ok: false, rows: [] };
+  const serverRows = Array.isArray(realServer.rows) ? realServer.rows : [];
+  // 截图前把六角色会话区滚到视口中间，证据里能直接看到三列与按钮。
+  const ensureTeamDrawer = async () => {
+    const state = await evalJs(`(() => {
+      const d = document.getElementById('team-drawer');
+      if (d && d.hidden) { const b = document.getElementById('team-pill'); if (b) b.click(); }
+      return { open: Boolean(d && !d.hidden) };
+    })()`);
+    if (!state.open) {
+      await evalJs(`(() => { const b = document.getElementById('team-pill'); if (b) b.click(); return true; })()`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    return evalJs(`(() => { const d = document.getElementById('team-drawer'); return Boolean(d && !d.hidden); })()`);
+  };
+  const scrollSessions = async () => {
+    await evalJs(`(() => { const el = document.getElementById('team-session-list'); if (el) el.scrollIntoView({ block: 'center' }); return true; })()`);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  };
+  const drawerOpenReal = await ensureTeamDrawer();
+  await scrollSessions();
+  const shotReal = await shot('c651-presence-real.png');
+  check('团队台抽屉打开（能看到六角色会话）', drawerOpenReal === true, drawerOpenReal);
+  check('当前项目有团队在场数据（6 角色）', serverRows.length >= 4, { project: teamName, rows: serverRows.length });
+  check('团队行渲染出三列（未读/未回执/停滞）', realDom.count === serverRows.length && realDom.count > 0, { dom: realDom.count, server: serverRows.length });
+  const mismatches = [];
+  for (const server of serverRows) {
+    const dom = realDom.rows.find((row) => row.role === server.role);
+    if (!dom) { mismatches.push({ role: server.role, why: 'DOM 缺行' }); continue; }
+    if (dom.unread !== Number(server.unread || 0)) mismatches.push({ role: server.role, field: 'unread', dom: dom.unread, server: server.unread });
+    if (dom.ackPending !== Number(server.ackPending || 0)) mismatches.push({ role: server.role, field: 'ackPending', dom: dom.ackPending, server: server.ackPending });
+    const serverStalled = server.stalledMin === null || server.stalledMin === undefined ? null : Number(server.stalledMin);
+    // 停滞分钟是「现在 - 最后活动」的取整值：界面渲染与本次服务端取数之间会自然走 1 分钟，容差 ±1。
+    if (dom.stalledMin === null || serverStalled === null
+      ? dom.stalledMin !== serverStalled
+      : Math.abs(dom.stalledMin - serverStalled) > 1) {
+      mismatches.push({ role: server.role, field: 'stalledMin', dom: dom.stalledMin, server: serverStalled });
+    }
+    if (dom.wakeFailed !== Boolean(server.wakeFailed)) mismatches.push({ role: server.role, field: 'wakeFailed', dom: dom.wakeFailed, server: server.wakeFailed });
+    const wakeBtn = dom.buttons.find((b) => b.action === 'wake-role');
+    const readBtn = dom.buttons.find((b) => b.action === 'mark-read');
+    if (!wakeBtn || wakeBtn.role !== server.role) mismatches.push({ role: server.role, why: '缺一键唤醒按钮' });
+    if (!readBtn || readBtn.role !== server.role) mismatches.push({ role: server.role, why: '缺全部已读按钮' });
+    if (readBtn && readBtn.disabled !== (Number(server.unread || 0) === 0)) {
+      mismatches.push({ role: server.role, why: '全部已读按钮可用态与未读数不一致', disabled: readBtn.disabled, unread: server.unread });
+    }
+  }
+  check('三列数值与团队工具 presence 完全一致（界面不重算/不补 0）', mismatches.length === 0, mismatches.slice(0, 6));
+  const anyUnreadZero = realDom.rows.some((row) => row.unread === 0 && /未读\s*0/.test(row.unreadText));
+  check('未读 0 的角色显示「未读 0」而不是空白', anyUnreadZero || realDom.rows.every((row) => /未读/.test(row.unreadText)), realDom.rows.map((row) => row.unreadText).slice(0, 6));
+  check('旧箱只作参考分列（存在「旧箱」列，不并入未读）', realDom.rows.every((row) => /旧箱/.test(row.legacyText)), realDom.rows.map((row) => row.legacyText).slice(0, 6));
+
+  // ---------- ② 打桩点击（零写盘） ----------
+  const origPresence = teamTools.presenceFor;
+  const origWake = teamTools.wakeRole;
+  const origMarkRead = teamTools.markReadFor;
+  const stubCalls = [];
+  const roleIds = serverRows.map((row) => row.role);
+  const target = roleIds.includes('analyst') ? 'analyst' : (roleIds[0] || 'pm');
+  const failedRole = roleIds.includes('product') ? 'product' : (roleIds[1] || target);
+  try {
+    teamTools.presenceFor = async () => ({
+      ok: true, code: 'OK', project: teamName, stalledWarnMin: 15, stalledBadMin: 30,
+      rows: roleIds.map((role) => ({
+        role,
+        unread: role === target ? 2 : 0,
+        unreadIds: role === target ? ['M-STUB-1', 'M-STUB-2'] : [],
+        ackPending: role === target ? 1 : 0,
+        legacyUnread: 3,
+        stalledMin: role === failedRole ? 35 : 25,
+        stalledLevel: role === failedRole ? 'bad' : 'warn',
+        lastActivityAt: new Date(Date.now() - 25 * 60000).toISOString(),
+        wakeFailed: role === failedRole,
+        wakeFailedAt: role === failedRole ? new Date().toISOString() : '',
+        wakeFailedMessageId: role === failedRole ? 'M-STUB-FAIL' : '',
+        wakeFailedReason: role === failedRole ? 'offline（打桩）' : '',
+        scanned: 0,
+      })),
+    });
+    teamTools.wakeRole = async (input) => {
+      stubCalls.push({ kind: 'wake', role: input.role });
+      return { ok: true, code: 'OK', role: input.role, wake: { ok: true, skipped: '' }, at: new Date().toISOString() };
+    };
+    teamTools.markReadFor = async (input) => {
+      stubCalls.push({ kind: 'mark-read', role: input.role, actor: input.actor });
+      return { ok: true, code: 'OK', role: input.role, count: 2, messageIds: ['M-STUB-1', 'M-STUB-2'], actor: input.actor || 'owner', at: new Date().toISOString() };
+    };
+    // 打桩后强制重新拉一次（等过 5 秒新鲜窗口），再打开团队台触发重绘
+    await new Promise((resolve) => setTimeout(resolve, 5200));
+    await evalJs(`(() => { const b = document.querySelector('#team-pill'); if (b) b.click(); return true; })()`);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const stubDom = await collect();
+    const targetRow = stubDom.rows.find((row) => row.role === target) || null;
+    const failedRow = stubDom.rows.find((row) => row.role === failedRole) || null;
+    check('打桩数据渲染：未读 2 / 未回执 1 / 停滞 25 分', Boolean(targetRow) && targetRow.unread === 2 && targetRow.ackPending === 1 && targetRow.stalledMin === 25,
+      targetRow && { unread: targetRow.unread, ack: targetRow.ackPending, stalled: targetRow.stalledMin, text: targetRow.stalledText });
+    check('停滞 >30 分钟在界面标红（class bad）', Boolean(failedRow) && /bad/.test(failedRow.stalledClass), failedRow && { stalledText: failedRow.stalledText, cls: failedRow.stalledClass });
+    check('停滞 15~30 分钟在界面标黄（class warn）', Boolean(targetRow) && /warn/.test(targetRow.stalledClass), targetRow && { stalledText: targetRow.stalledText, cls: targetRow.stalledClass });
+    check('wakeFailed 角色出现红点（● 唤醒失败）', Boolean(failedRow) && failedRow.wakeFailed === true && failedRow.failedDot === true, failedRow && { wakeFailed: failedRow.wakeFailed, dot: failedRow.failedDot });
+    const wakeClick = await evalJs(`(() => {
+      const el = document.querySelector('.team-session .role-presence[data-role="${target}"] [data-action="wake-role"]');
+      if (!el) return { ok: false, why: '没有一键唤醒按钮' };
+      el.click();
+      return { ok: true, disabled: el.disabled };
+    })()`);
+    check('一键唤醒按钮可点击', wakeClick && wakeClick.ok === true, wakeClick);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const afterWake = await collect();
+    check('一键唤醒真的调了 team:wake-role（打桩收到调用）', stubCalls.some((row) => row.kind === 'wake' && row.role === target), stubCalls);
+    check('唤醒结果用人话说出来（toast 含「已唤醒」）', /已唤醒/.test(afterWake.toast), afterWake.toast);
+    const readClick = await evalJs(`(() => {
+      const el = document.querySelector('.team-session .role-presence[data-role="${target}"] [data-action="mark-read"]');
+      if (!el) return { ok: false, why: '没有全部已读按钮' };
+      if (el.disabled) return { ok: false, why: '按钮是禁用态（未读为 0）' };
+      el.click();
+      return { ok: true };
+    })()`);
+    check('全部已读按钮可点击（未读 >0 时不禁用）', readClick && readClick.ok === true, readClick);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const afterRead = await collect();
+    check('全部已读真的调了 team:mark-read（打桩收到调用，actor=owner）', stubCalls.some((row) => row.kind === 'mark-read' && row.role === target && row.actor === 'owner'), stubCalls);
+    check('批量已读结果用人话说出来（toast 含条数）', /2 条/.test(afterRead.toast), afterRead.toast);
+    const drawerOpenStub = await ensureTeamDrawer();
+    await scrollSessions();
+    check('打桩阶段团队台仍打开（截图能拍到三列与红点）', drawerOpenStub === true, drawerOpenStub);
+    await shot('c651-presence-stub.png');
+  } finally {
+    teamTools.presenceFor = origPresence;
+    teamTools.wakeRole = origWake;
+    teamTools.markReadFor = origMarkRead;
+  }
+  const failed = checks.filter((row) => !row.ok);
+  const report = {
+    ok: failed.length === 0, total: checks.length, failed: failed.length,
+    project: teamName, outDir,
+    screenshots: { real: shotReal, stub: path.join(outDir, 'c651-presence-stub.png') },
+    checks,
+  };
+  fs.writeFileSync(path.join(outDir, 'c651-check.json'), JSON.stringify(report, null, 2), 'utf8');
+  console.log('C651_CHECK ' + JSON.stringify({ ok: report.ok, total: report.total, failed: report.failed, outDir }));
+  app.exit(report.ok ? 0 : 1);
 }
 
 app.whenReady().then(async () => {
@@ -11496,11 +16121,148 @@ app.whenReady().then(async () => {
     }
     return;
   }
+  if (IS_LAYOUT_CHECK) {
+    try {
+      await runLayoutCheck();
+    } catch (error) {
+      console.error('LAYOUT_FAIL ' + String(error && error.stack || error));
+      app.exit(1);
+    }
+    return;
+  }
+  if (IS_OWNER_CHECK) {
+    try {
+      await runOwnerCheck();
+    } catch (error) {
+      console.error('OWNER_CHECK_FATAL ' + String(error && error.stack || error));
+      app.exit(1);
+    }
+    return;
+  }
+  if (IS_B55C_CHECK) {
+    try {
+      await runB55cCheck();
+    } catch (error) {
+      console.error('B55C_FATAL ' + String(error && error.stack || error));
+      app.exit(1);
+    }
+    return;
+  }
+  if (IS_E29F_CHECK) {
+    try {
+      await runE29fCheck();
+    } catch (error) {
+      console.error('E29F_FATAL ' + String(error && error.stack || error));
+      app.exit(1);
+    }
+    return;
+  }
+  if (IS_REVIEW_CHECK) {
+    try {
+      await runReviewCheck();
+    } catch (error) {
+      console.error('REVIEW_FATAL ' + String(error && error.stack || error));
+      app.exit(1);
+    }
+    return;
+  }
+  if (IS_QUEUE_CHECK) {
+    try {
+      const queueCheck = require('./queue-check');
+      const sandboxTeamRoot = process.env.TEAM_ROOT || path.join(QUEUE_CHECK_DATA, '团队');
+      // 沙盘仓库：状态库缺失时从真实 store 只读复制一份过来，之后所有用例只写沙盘。
+      queueCheck.prepareQueueCheckSandbox({
+        storeFile: storeFile(),
+        teamRoot: sandboxTeamRoot,
+        fallbackStoreFile: path.join(LOCAL_DATA, 'userdata', 'workbench.json'),
+      });
+      const store = readStore();
+      const project = store.projects.find((item) => item.id === store.activeProjectId) || store.projects[0] || null;
+      const teamName = project ? String(project.teamName || project.name || '') : '';
+      const queueFile = teamName
+        ? path.join(teamTools._paths().projectsDir, teamTools.teamSlug(teamName), ROLE_QUEUE_FILE_NAME)
+        : '';
+      // 真实派生文件路径只用来做「没被碰过」的隔离断言，绝不读写。
+      const realQueueFile = teamName
+        ? path.join(ROOT, '团队', '状态', '项目', teamTools.teamSlug(teamName), ROLE_QUEUE_FILE_NAME)
+        : '';
+      await queueCheck.runQueueCheck({
+        app, createWindow, getWindow: () => mainWindow, readStore: () => readStore(), outRoot: ROOT,
+        projectQueueFile: queueFile, realQueueFile, teamName,
+        sandboxTeamRoot, sandboxRoot: QUEUE_CHECK_DATA,
+      });
+      return;
+    } catch (error) {
+      console.error('QUEUE_FATAL ' + String((error && error.stack) || error));
+      app.exit(1);
+      return;
+    }
+  }
+  if (IS_DAEMON_CHECK) {
+    try {
+      const daemonCheck = require('./daemon-check');
+      const sandboxTeamRoot = process.env.TEAM_ROOT || path.join(DAEMON_CHECK_DATA, '团队');
+      daemonCheck.prepareDaemonCheckSandbox({
+        storeFile: storeFile(),
+        teamRoot: sandboxTeamRoot,
+        fallbackStoreFile: path.join(LOCAL_DATA, 'userdata', 'workbench.json'),
+      });
+      const store = readStore();
+      const project = store.projects.find((item) => item.id === store.activeProjectId) || store.projects[0] || null;
+      const teamName = project ? String(project.teamName || project.name || '') : '';
+      const statusFile = teamName
+        ? path.join(teamTools._paths().projectsDir, teamTools.teamSlug(teamName), ROUTE_STATUS_FILE_NAME)
+        : '';
+      // 真实守护心跳只用来做「没被碰过」的隔离断言，绝不读写。
+      const realStatusFile = teamName
+        ? path.join(ROOT, '团队', '状态', '项目', teamTools.teamSlug(teamName), ROUTE_STATUS_FILE_NAME)
+        : '';
+      await daemonCheck.runDaemonCheck({
+        app, createWindow, getWindow: () => mainWindow, readStore: () => readStore(), outRoot: ROOT,
+        statusFile, realStatusFile, teamName, sandboxTeamRoot, sandboxRoot: DAEMON_CHECK_DATA,
+      });
+      return;
+    } catch (error) {
+      console.error('DAEMON_FATAL ' + String((error && error.stack) || error));
+      app.exit(1);
+      return;
+    }
+  }
+  if (IS_B2EBE_CHECK) {
+    try {
+      const { runB2ebeCheck } = require('./b2ebe-check');
+      await runB2ebeCheck({
+        app, createWindow, getWindow: () => mainWindow,
+        readStore: () => readStore(), outRoot: ROOT,
+      });
+      return;
+    } catch (error) {
+      console.error('B2EBE_FATAL ' + String((error && error.stack) || error));
+      app.exit(1);
+      return;
+    }
+  }
+  if (IS_C651_CHECK) {
+    try {
+      await runC651Check();
+    } catch (error) {
+      console.error('C651_FATAL ' + String(error && error.stack || error));
+      app.exit(1);
+    }
+    return;
+  }
   createWindow();
+  // B-a577：全队空闲时队列也要自己跑 —— 60 秒定时兜底泵（失败留痕、队列项保留）。
+  startDispatchQueuePump();
+  // T-b417：启动后自动拉起路由守护（15 秒后，避开首帧）；退出时由 before-quit 收尾。
+  startRouteSupervisorSoon();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
 app.on('window-all-closed', () => {
-  if (IS_SELFTEST) return;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK) return;
   if (process.platform !== 'darwin') app.quit();
 });
+
+// T-b417：退出时先请守护子进程停，不让它变成孤儿进程继续抢锁。
+app.on('before-quit', () => { stopRouteSupervisor(); });

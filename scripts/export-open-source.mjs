@@ -21,7 +21,7 @@ const DEFAULT_OUT = path.join(ROOT, '_tmp', 'export-open-source');
 
 // ── 白名单：与 package.json 的 files 保持一致 ────────────────────────────
 const FILE_WHITELIST = [
-  'LICENSE', 'NOTICE.md', 'README.md', 'start.cmd', 'package.json',
+  'LICENSE', 'NOTICE.md', 'README.md', 'start.cmd', 'launch.vbs', 'package.json',
   'install.ps1', '安装PM工作台.cmd',
   'assets/pm-workbench.ico', 'assets/pm-workbench.png',
   'scripts/run-electron.cjs', 'scripts/test-entrypoints.cjs',
@@ -38,7 +38,7 @@ const DENY_SEGMENTS = new Set([
 ]);
 
 const REQUIRED_FILES = [
-  'package.json', 'LICENSE', 'README.md', 'NOTICE.md', 'start.cmd',
+  'package.json', 'LICENSE', 'README.md', 'NOTICE.md', 'start.cmd', 'launch.vbs',
   'install.ps1', '安装PM工作台.cmd',
   'assets/pm-workbench.ico', 'assets/pm-workbench.png',
   'scripts/run-electron.cjs', 'scripts/test-entrypoints.cjs',
@@ -48,7 +48,7 @@ const REQUIRED_FILES = [
 
 const TEXT_EXT = new Set([
   '.js', '.mjs', '.cjs', '.json', '.md', '.txt', '.yml', '.yaml',
-  '.html', '.css', '.cmd', '.ps1', '.sh', '.svg',
+  '.html', '.css', '.cmd', '.ps1', '.sh', '.svg', '.vbs',
 ]);
 
 const SECRET_PATTERNS = [

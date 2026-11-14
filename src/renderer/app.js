@@ -72,6 +72,34 @@ const inboxUi = {
 };
 
 const SOURCE_LABEL = { team: '旧协议', local: '本机降级', 'team-local': '旧协议→本机' };
+// R-c651 F-c651-4：团队行三列（未读 / 未回执 / 停滞）与 wakeFailed 红点的界面缓存。
+// 只存主进程 team:presence 的返回，不在渲染层重算口径（口径在团队工具 presence 命令里）。
+const presenceUi = {
+  projectId: null,
+  projectName: '',
+  at: 0,
+  loading: false,
+  error: null,
+  rows: {},
+  stalledWarnMin: 15,
+  stalledBadMin: 30,
+  busy: {}
+};
+function presenceRow(roleId) {
+  const row = presenceUi.rows[String(roleId || '')];
+  return row || null;
+}
+function presenceCaps() {
+  return Boolean(window.workbench && typeof window.workbench.teamPresence === 'function');
+}
+/** 拉在场数据的统一入口：只有真的重新拉到数据才回调重绘，避免 render→load→render 自激。 */
+function ensurePresence(callback) {
+  if (!presenceCaps()) return;
+  const before = presenceUi.at;
+  loadPresence()
+    .then(() => { if (presenceUi.at !== before && typeof callback === 'function') callback(); })
+    .catch(() => { /* 在场数据拉不到不阻断主界面；错误已记在 presenceUi.error */ });
+}
 // 一次 DSH 核验结果的有效期；过期后界面退回“本地映射/待核验”，不把旧结果当现在。
 const LIVE_TTL_MS = 10 * 60 * 1000;
 
@@ -333,8 +361,12 @@ function teamModeLabel(project) {
 
 function teamRoleIds(project) {
   const p = project || activeProject();
-  const def = teamModeDef(p);
   const known = new Set((state?.roles || []).map((role) => role.id));
+  // R-b52b F-4/AC6：角色集以主进程暴露的 project.roleIds（= 项目.json.roleIds 登记）为准；
+  // 没有才退回团队模式定义的固定 4/6。删掉 tester 的项目计数要跟着变 N，不是继续按模式算。
+  const explicit = Array.isArray(p && p.roleIds) ? p.roleIds.filter((id) => !known.size || known.has(id)) : [];
+  if (explicit.length) return explicit;
+  const def = teamModeDef(p);
   const ids = def.roleIds.filter((id) => !known.size || known.has(id));
   return ids.length ? ids : def.roleIds.slice();
 }
@@ -702,8 +734,13 @@ const legacyUi = {
   roleId: 'pm',
   forceQueued: false,
   workflow: null,
+  // 当前项目的阶段推导结果（只读）：界面只渲染它，工作流.json.phase 仅作历史提示。
+  flowDerive: null,
   briefing: null,
   briefingError: null,
+  // B-20261114-003257-0a46（R-d734）：docs:presence 的真实返回（项目信息/铁律存在性 + 来源）。
+  presence: null,
+  presenceError: null,
   workflowError: null,
   phaseHint: null,
   error: null,
@@ -716,7 +753,12 @@ const legacyUi = {
   lastAction: null,
   // 本机 Owner 记录：只有用户点下 Owner（我）一次点击按钮，才在这里留下 actor；
   // 它只用于界面显示“谁在本机点击”，不冒充后端返回的身份证明。
-  ownerConfirmations: Object.create(null)
+  ownerConfirmations: Object.create(null),
+  // 旧协议提案只读镜像：直接读 team.mjs 的 提案/，不再要求先手动 show。
+  legacyProposals: [],
+  proposalsProjectId: null,
+  proposalsAt: 0,
+  proposalsLoading: false
 };
 
 
@@ -756,6 +798,13 @@ function applyTheme(mode) {
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem('awb.theme', theme); } catch { /* ignore */ }
   syncThemeUi();
+  // 独立看板窗口与内嵌 iframe 不继承外壳变量：切主题时同步过去，避免“先黑后白”。
+  try {
+    if (window.workbench && typeof window.workbench.boardTheme === 'function') {
+      window.workbench.boardTheme({ theme }).catch(() => {});
+    }
+  } catch { /* 看板未打开时忽略 */ }
+  if (typeof boardUi !== 'undefined' && boardUi && boardUi.framePath) loadBoardFrame(boardUi.framePath);
 }
 
 function syncThemeUi() {
@@ -835,7 +884,7 @@ function liveItemFor(project, roleId) {
 function sessionState(project, role) {
   const roleId = typeof role === 'string' ? role : role.id;
   const sessionId = project && project.sessions ? project.sessions[roleId] : null;
-  if (!sessionId) return { cls: 'missing', text: '未启动', title: '还没有 DSH 会话，点「建团队」创建' };
+  if (!sessionId) return { cls: 'missing', text: '待启动', title: '还没有 DSH 会话，点「建团队」创建后启动' };
   const live = liveItemFor(project, roleId);
   if (!live) {
     if (state && state.dsh && state.dsh.online) return { cls: 'unverified', text: '待核验', title: '本地有会话记录；DSH 核验还没返回' };
@@ -844,7 +893,7 @@ function sessionState(project, role) {
   if (!live.exists) return { cls: 'missing', text: 'DSH 中找不到', title: '本地记录了会话，但 DSH 里已不存在；点「建团队」补建' };
   if (live.archived) return { cls: 'missing', text: '已归档', title: 'DSH 里这个会话已归档；点「建团队」会补建一个新的角色会话' };
   if (!live.inWorkspace) return { cls: 'mismatch', text: '不在本工作区', title: '会话不在当前项目绑定的 DSH 工作区里' };
-  if (live.blank) return { cls: 'blank', text: '空会话', title: '会话还没有第一轮对话，DSH 左侧可能不显示；再点「建团队」补发就位' };
+  if (live.blank) return { cls: 'blank', text: '待启动', title: '会话还没有第一轮对话（DSH 左侧可能不显示）；点「建团队」补发就位' };
   if (live.running) return { cls: 'running', text: '运行中', title: 'DSH 会话正在运行' };
   return { cls: 'ready', text: '已就绪', title: '会话已在 DSH 当前工作区里' };
 }
@@ -1098,8 +1147,145 @@ function roleStatusSummary(project, roleId) {
   };
 }
 
-function fmtRemain(ms) {
-  const total = Math.max(0, Math.round(Number(ms) / 1000));
+/**
+ * R-c651 F-c651-4：团队行/角色卡共用的「未读 / 未回执 / 停滞」三列 + 一键唤醒 + 全部已读。
+ * 数字只来自主进程 team:presence（团队工具 presence 命令）；没载入就写“—”，不补 0 冒充。
+ * 旧协议 box=new 另起一列「旧箱」作参考，不并进未读（AC3 判据只看 deliveredAt/readAt）。
+ */
+function presenceMarkup(roleId, opts = {}) {
+  const role = String(roleId || '');
+  const row = presenceRow(role);
+  const compact = Boolean(opts.compact);
+  const loaded = Boolean(row);
+  const unread = loaded ? Number(row.unread || 0) : null;
+  const ackPending = loaded ? Number(row.ackPending || 0) : null;
+  const stalledMin = loaded && row.stalledMin !== null && row.stalledMin !== undefined ? Number(row.stalledMin) : null;
+  const legacy = loaded ? Number(row.legacyUnread || 0) : null;
+  const wakeFailed = Boolean(loaded && row.wakeFailed);
+  const stalledCls = stalledMin === null ? '' : (stalledMin > presenceUi.stalledBadMin ? ' bad' : (stalledMin > presenceUi.stalledWarnMin ? ' warn' : ''));
+  const stalledText = stalledMin === null ? '停滞 —' : `停滞 ${stalledMin} 分`;
+  const stalledTitle = stalledMin === null
+    ? '这个角色还没有可核验的阅读 / 回执 / 唤醒记录，不补造停滞时间'
+    : `最后一次活动（阅读 / 回执 / 唤醒）在 ${row.lastActivityAt || '时间未记录'}；>${presenceUi.stalledWarnMin} 分钟黄、>${presenceUi.stalledBadMin} 分钟红`;
+  const unreadTitle = loaded
+    ? `未读 ${unread} 条＝投递成功（deliveredAt 有值）且没有 readAt；旧协议 box=new 另计「旧箱 ${legacy}」，不并入这个数`
+    : '在场数据还没载入（或项目没有团队会话）：这里不显示 0 冒充';
+  const ackTitle = loaded
+    ? `未回执 ${ackPending} 条＝要回执（--ack）且已读但回执.jsonl 没有该消息的回执记录`
+    : '在场数据还没载入';
+  const failedTitle = wakeFailed
+    ? `唤醒失败（红点）：${row.wakeFailedReason || '原因未记录'}${row.wakeFailedMessageId ? ' · 消息 ' + row.wakeFailedMessageId : ''}${row.wakeFailedAt ? ' · ' + row.wakeFailedAt : ''}`
+    : '';
+  const busy = presenceUi.busy[role] || '';
+  const markDisabled = !loaded || !unread ? 'disabled' : '';
+  return `<div class="role-presence${compact ? ' compact' : ''}${wakeFailed ? ' wake-failed' : ''}" data-role="${esc(role)}" data-unread="${loaded ? unread : ''}" data-ack-pending="${loaded ? ackPending : ''}" data-stalled-min="${stalledMin === null ? '' : stalledMin}" data-wake-failed="${wakeFailed ? '1' : '0'}"${wakeFailed ? ` data-wake-failed-message="${esc(row.wakeFailedMessageId || '')}"` : ''}>
+      <span class="presence-chip unread${unread ? ' on' : ''}" title="${esc(unreadTitle)}">未读 <b>${unread === null ? '—' : unread}</b></span>
+      <span class="presence-chip ack${ackPending ? ' on' : ''}" title="${esc(ackTitle)}">未回执 <b>${ackPending === null ? '—' : ackPending}</b></span>
+      <span class="presence-chip stalled${stalledCls}" title="${esc(stalledTitle)}">${esc(stalledText)}</span>
+      <span class="presence-chip legacy" title="旧协议 box=new 未读，只作参考分列，不进未读/未回执判据">旧箱 <b>${legacy === null ? '—' : legacy}</b></span>
+      ${wakeFailed ? `<span class="presence-failed-dot" title="${esc(failedTitle)}">● 唤醒失败</span>` : ''}
+      <span class="presence-actions">
+        <button class="ghost small" type="button" data-action="wake-role" data-role="${esc(role)}" ${busy === 'wake' ? 'disabled' : ''} title="立刻给这个角色发一次唤醒；失败会自动排 5/15/30 秒重试，3 次仍失败给 PM 发 wake_failed 并在这里标红点">${busy === 'wake' ? '唤醒中…' : '一键唤醒'}</button>
+        <button class="ghost small" type="button" data-action="mark-read" data-role="${esc(role)}" ${markDisabled} ${busy === 'read' ? 'disabled' : ''} title="把这个角色新口径下的未读全部标为已读（写 readAt + 阅读.jsonl kind=read）；旧箱旧消息不动">${busy === 'read' ? '处理中…' : '全部已读'}</button>
+      </span>
+    </div>`;
+}
+
+/** 拉一次在场数据（主进程 → 团队工具 presence）。5 秒内不重复拉，force 强制。 */
+async function loadPresence(opts = {}) {
+  const p = activeProject();
+  if (!p || !presenceCaps()) {
+    presenceUi.rows = {};
+    presenceUi.projectId = p ? p.id : null;
+    presenceUi.error = presenceCaps() ? null : '当前壳层没有 team:presence 接口';
+    return presenceUi;
+  }
+  const fresh = presenceUi.projectId === p.id && (Date.now() - presenceUi.at) < 5000;
+  if (!opts.force && (fresh || presenceUi.loading)) return presenceUi;
+  presenceUi.loading = true;
+  presenceUi.error = null;
+  try {
+    const result = await window.workbench.teamPresence({ projectId: p.id, project: p.teamName || p.name });
+    const rows = Array.isArray(result && result.rows) ? result.rows : [];
+    const map = {};
+    for (const row of rows) if (row && row.role) map[String(row.role)] = row;
+    presenceUi.rows = map;
+    presenceUi.stalledWarnMin = Number((result && result.stalledWarnMin) || 15);
+    presenceUi.stalledBadMin = Number((result && result.stalledBadMin) || 30);
+    presenceUi.projectId = p.id;
+    presenceUi.projectName = String((result && result.project) || p.teamName || p.name || '');
+    presenceUi.at = Date.now();
+    if (result && result.ok === false) presenceUi.error = humanError(String(result.message || result.code || '在场数据读取失败'));
+  } catch (error) {
+    presenceUi.error = humanError(String((error && error.message) || error));
+  } finally {
+    presenceUi.loading = false;
+  }
+  return presenceUi;
+}
+
+/** 一键唤醒：只发一次唤醒（后端失败会自行排重试并最终告警），界面把结果原样说出来。 */
+async function wakeRoleFromRow(roleId, button) {
+  const p = activeProject();
+  const role = String(roleId || '');
+  if (!p || !role) return;
+  const roleInfo = roleById(role);
+  if (!(p.sessions || {})[role]) { toast(`「${roleInfo.name}」还没有 DSH 会话，先点「建团队」再唤醒`, 'bad'); return; }
+  if (!window.workbench || typeof window.workbench.teamWakeRole !== 'function') { toast('当前壳层没有一键唤醒接口', 'bad'); return; }
+  if (presenceUi.busy[role]) return;
+  presenceUi.busy[role] = 'wake';
+  if (button) { button.disabled = true; button.textContent = '唤醒中…'; }
+  try {
+    const result = await window.workbench.teamWakeRole({ projectId: p.id, role, reason: 'ui-one-click' });
+    const skipped = (result && result.wake && result.wake.skipped) || '';
+    if (result && result.ok) {
+      toast(`已唤醒「${roleInfo.name}」${skipped === 'MERGED_PENDING' ? '（30 秒唤醒窗口内，已合并，稍后补发一次，不丢）' : ''}`, 'ok');
+    } else {
+      const why = (result && result.wake && (result.wake.why || result.wake.code)) || (result && (result.message || result.code)) || '未知原因';
+      toast(`唤醒「${roleInfo.name}」失败：${why}。已自动排 5/15/30 秒重试；3 次仍失败会给 PM 发 wake_failed，并在本行标红点`, 'bad');
+    }
+    await loadPresence({ force: true });
+    renderTeamSessions();
+    renderRoles();
+  } catch (error) {
+    toast('唤醒失败：' + humanError(String((error && error.message) || error)), 'bad');
+  } finally {
+    delete presenceUi.busy[role];
+    if (button && button.isConnected) { button.disabled = false; button.textContent = '一键唤醒'; }
+  }
+}
+
+/** 全部已读：清新口径未读（写 readAt + 阅读.jsonl），旧箱旧消息不动。 */
+async function markRoleReadFromRow(roleId, button) {
+  const p = activeProject();
+  const role = String(roleId || '');
+  if (!p || !role) return;
+  const roleInfo = roleById(role);
+  if (!window.workbench || typeof window.workbench.teamMarkRead !== 'function') { toast('当前壳层没有全部已读接口', 'bad'); return; }
+  if (presenceUi.busy[role]) return;
+  presenceUi.busy[role] = 'read';
+  if (button) { button.disabled = true; button.textContent = '处理中…'; }
+  try {
+    const result = await window.workbench.teamMarkRead({ projectId: p.id, role, actor: 'owner' });
+    if (result && result.ok) {
+      toast(result.count
+        ? `已把「${roleInfo.name}」的 ${result.count} 条未读标为已读（阅读.jsonl 已记 kind=read）`
+        : `「${roleInfo.name}」没有新口径下的未读（旧箱旧消息不参与，不冒充已读）`, 'ok');
+    } else {
+      toast('批量已读失败：' + humanError(String((result && (result.message || result.code)) || '未知原因')), 'bad');
+    }
+    await loadPresence({ force: true });
+    renderTeamSessions();
+    renderRoles();
+  } catch (error) {
+    toast('批量已读失败：' + humanError(String((error && error.message) || error)), 'bad');
+  } finally {
+    delete presenceUi.busy[role];
+    if (button && button.isConnected) { button.disabled = false; button.textContent = '全部已读'; }
+  }
+}
+
+function fmtRemain(ms) {  const total = Math.max(0, Math.round(Number(ms) / 1000));
   const mm = String(Math.floor(total / 60)).padStart(2, '0');
   const ss = String(total % 60).padStart(2, '0');
   return mm + ':' + ss;
@@ -1404,7 +1590,7 @@ function openModal({ title, subtitle = '', icon = '', body, actions = [], width 
     }
   };
 
-  const dlg = { close: closeModal, body: bodyEl, foot, error: setError, busy: setBusy };
+  const dlg = { close: closeModal, body: bodyEl, foot, error: setError, busy: setBusy, el: section };
 
   for (const action of actions) {
     const b = document.createElement('button');
@@ -1585,6 +1771,7 @@ function setDrawer(name, opts = {}) {
     loadWorkspaces();
     loadReceipts();
     loadLegacyDocs();
+    loadGateAudit();
   }
 }
 
@@ -1606,6 +1793,7 @@ function showTab(name, opts = {}) {
   if (changed && !opts.fromRender && opts.open !== false) setDrawer('project', { keepScroll: true });
   if (name === 'files') loadFiles();
   if (name === 'docs' || name === 'roles' || name === 'flow') loadLegacyDocs();
+  if (name === 'flow') { loadGateCheck(); loadGateAudit(); }
   if (name === 'proposals') renderProposals();
   if (name === 'roles') loadDshTeamStatus();
 }
@@ -1695,7 +1883,7 @@ function renderLaunchers() {
   }
   const flowBoard = $('#flow-board-open');
   if (flowBoard) flowBoard.disabled = !p;
-  const quick = $('#btn-owner-quick');
+  const quick = $('#legacy-owner-quick-removed');
   if (quick) {
     const os = p ? legacyOwnerHeadline(p) : null;
     const need = Boolean(os && os.pending);
@@ -1730,6 +1918,15 @@ function renderSidebar() {
   const ready = p ? sessionReadyCount(p) : 0;
   const roleTotal = p ? teamRoleCount(p) : 6;
   if (count) count.textContent = String(projects.length);
+  const missing = projects.filter((item) => item.exists === false);
+  const cleanBtn = $('#btn-clean-missing');
+  if (cleanBtn) {
+    cleanBtn.hidden = !missing.length;
+    cleanBtn.textContent = `清理失效项目（${missing.length}）`;
+    cleanBtn.title = missing.length
+      ? `有 ${missing.length} 个项目的目录已不存在：可一次只移除本机记录（不动磁盘）`
+      : '没有失效项目';
+  }
   if (stats) {
     stats.textContent = projects.length
       ? `${projects.length} 个工作区 · ${verified === null ? ready + '/' + roleTotal + ' 本地映射' : verified + '/' + roleTotal + ' 已核验'}`
@@ -1781,12 +1978,8 @@ function renderSidebar() {
       notes.push(`DSH 工作区绑定失败：${ws.lastError.code}${ws.lastError.message ? ' · ' + ws.lastError.message : ''}（切项目或建团队会自动重试）`);
       bad = true;
     }
-    if (live && Array.isArray(live.extras) && live.extras.length) {
-      notes.push(`工作区里还有 ${live.extras.length} 个未映射 DSH 会话，不计入当前团队角色。`);
-    }
-    if (live && Array.isArray(live.duplicates) && live.duplicates.length) {
-      notes.push(`检测到 ${live.duplicates.length} 个重复的「团队·角色」会话，可在团队台查看。`);
-    }
+    // e29f F-4：额外会话（含同一角色多会话）只由侧栏统计那一处统一计数显示，
+    // 这里不再重复报数字，避免同一时刻两处数字不同。
     if (live && live.error) { notes.push('DSH 核验失败：' + live.error); bad = true; }
     if (!p) notes.length = 0;
     warnEl.hidden = !notes.length;
@@ -1827,15 +2020,17 @@ function renderSidebar() {
     const itemTotal = teamRoleCount(item);
     const ws = item.workspace || {};
     const sessionText = itemVerified === null ? `${itemReady}/${itemTotal} 会话` : `${itemVerified}/${itemTotal} 已核验`;
-    return `<button class="project-item ${active ? 'active' : ''}" type="button" data-project="${esc(item.id)}" title="${esc(item.path)}" aria-current="${active ? 'true' : 'false'}">
+    return `<div class="project-item ${active ? 'active' : ''}${item.exists === false ? ' is-missing' : ''}" data-project="${esc(item.id)}" role="button" tabindex="0" title="${esc(item.path)}" aria-current="${active ? 'true' : 'false'}">
+      ${item.exists === false ? `<button class="project-remove" type="button" data-project-remove="${esc(item.id)}" title="项目目录不存在：只移除本机记录">×</button>` : ''}
       <span class="p-top">
         <span class="p-name">${esc(item.name)}</span>
         ${active ? '<span class="p-current">当前</span>' : ''}
+        ${item.exists === false ? '<span class="p-missing">目录不存在</span>' : ''}
         ${ws.pending ? '<span class="p-current">工作区待绑定</span>' : ''}
       </span>
       <span class="p-path">${esc(item.path)}</span>
       <span class="p-meta"><span class="p-stage">${esc(stageById(item.stage).label)}</span><span>${sessionText} · ${done}/${tasks.length} 任务</span></span>
-    </button>`;
+    </div>`;
   }).join('');
 }
 
@@ -1934,6 +2129,36 @@ async function loadWorkspaces(force = false) {
 
 /* ── 六角色会话：侧栏 / 团队台共用 ───────────────────── */
 
+// R-703f AC1：会话用量（只读展示，数据源 团队/状态/项目/<项目>/会话用量.json 经 session:usage）。
+// 现状：文件缺失/超 24h → 「会话用量未知 / 阈值 30 万」；有数据 → 「会话用量 X / 阈值 30 万」+ 角色明细。
+let sessionUsageCache = { projectId: '', at: 0, data: null };
+async function renderSessionUsage(p) {
+  const host = document.getElementById('session-usage');
+  if (!host) return;
+  if (!p) { host.hidden = true; host.textContent = ''; return; }
+  const api = window.workbench;
+  if (!api || typeof api.sessionUsage !== 'function') { host.hidden = true; return; }
+  let data = sessionUsageCache.data;
+  if (sessionUsageCache.projectId !== p.id || (Date.now() - sessionUsageCache.at) > 15000) {
+    try {
+      data = await api.sessionUsage({ projectId: p.id });
+      sessionUsageCache = { projectId: p.id, at: Date.now(), data };
+    } catch { data = null; }
+  }
+  if (!data || data.ok === false) { host.hidden = true; return; }
+  host.hidden = false;
+  host.setAttribute('data-session-usage', '1');
+  host.setAttribute('data-usage-tokens', data.topTokens === null ? '' : String(data.topTokens));
+  host.setAttribute('data-usage-threshold', String(data.warnThreshold || 300000));
+  host.setAttribute('data-usage-level', String(data.level || 'unknown'));
+  const label = String(data.label || ('会话用量未知 / 阈值 ' + Math.round((data.warnThreshold || 300000) / 10000) + ' 万'));
+  const detail = (data.roles || []).slice(0, 3).map((row) => row.role + ':' + (row.stale ? '未知' : Math.round(row.tokens / 1000) + 'k')).join(' · ');
+  host.textContent = label + (detail ? ('（' + detail + '）') : '');
+  host.classList.toggle('warn', data.level === 'warn');
+  host.classList.toggle('bad', data.level === 'force');
+  host.title = '会话用量来自 团队/状态/项目/' + (data.project || '') + '/会话用量.json；阈值 ' + Math.round((data.warnThreshold || 300000) / 10000) + ' 万（session usage --set 可造数）';
+}
+
 function renderSessions() {
   const box = $('#role-sessions');
   const count = $('#session-count');
@@ -1944,9 +2169,17 @@ function renderSessions() {
   const verified = p ? verifiedCount(p) : null;
   const total = p ? teamRoleCount(p) : entries.length || 6;
   if (count) {
-    count.textContent = `${verified === null ? ready : verified}/${total}`;
-    count.title = verified === null ? '本地会话映射；DSH 未核验' : 'DSH 工作区里已核验的角色会话数';
+    // e29f F-3：展示数字只认 DSH 核验（sessionId 全等 + 属于本工作区）；未核验/过期显示「待核验」。
+    // 本地映射不再冒充展示数字，但保留在 data-local 上（5 秒跟随外部轮换的用例靠它核对）。
+    count.textContent = verified === null ? '待核验' : `${verified}/${total}`;
+    count.title = verified === null
+      ? `DSH 未核验：本地映射 ${ready}/${total} 只作参考`
+      : `DSH 核验 ${verified}/${total}（本地映射 ${ready}/${total}）`;
+    count.setAttribute('data-local', `${ready}/${total}`);
+    count.setAttribute('data-verified', verified === null ? '0' : '1');
   }
+  // AC1：用量展示与团队会话同一块刷新（异步，不阻塞主渲染）
+  try { renderSessionUsage(p).catch(() => { /* 用量展示失败不阻断会话渲染 */ }); } catch { /* ignore */ }
   if (!p) {
     box.innerHTML = '<div class="empty-row">先选择工作区；当前团队模式的角色会话会显示在这里。</div>';
     return;
@@ -1958,7 +2191,12 @@ function renderSessions() {
     const sub = sessionId
       ? esc(sessionShort(sessionId)) + (titleMismatch ? ' · 标题不一致' : '')
       : 'DSH 会话未创建';
-    return `<div class="session-row ${sessionId ? '' : 'missing'}" role="button" tabindex="0" data-role-session="${esc(role.id)}" title="${esc(titleMismatch ? `DSH 标题是「${live.currentTitle}」，应为「${roleSessionTitle(p, role.id)}」` : (sessionId ? '打开 ' + role.name + ' 的 DSH 会话操作' : '先建团队'))}">
+    // AC2b：会话行要有可断言的选中态 data 属性（当前角色会话行标 aria-selected/data-selected=true，
+    // 其余 false；会话 id 也落到 data-session-id 上，便于 tester 按 id 断言而不是看样式）。
+    const isCurrent = Boolean(sessionId) && Boolean(p) && String((p.sessions && p.sessions[role.id]) || '') === String(sessionId);
+    return `<div class="session-row ${sessionId ? '' : 'missing'}" role="button" tabindex="0" data-role-session="${esc(role.id)}"
+      data-session-id="${esc(sessionId || '')}" data-selected="${isCurrent ? 'true' : 'false'}" aria-selected="${isCurrent ? 'true' : 'false'}"
+      title="${esc(titleMismatch ? `DSH 标题是「${live.currentTitle}」，应为「${roleSessionTitle(p, role.id)}」` : (sessionId ? '打开 ' + role.name + ' 的 DSH 会话操作' : '先建团队'))}">
       <span class="session-dot" style="--role-color:${esc(role.color)}" aria-hidden="true"></span>
       <span class="session-main"><b>${esc(role.name)}</b><small>${sub}</small></span>
       <span class="session-state ${st.cls}" title="${esc(st.title)}">${esc(st.text)}</span>
@@ -1979,7 +2217,7 @@ function renderTeamSessions() {
   const p = activeProject();
   if (!box) return;
   if (!p) {
-    if (count) count.textContent = '0/6';
+    if (count) count.textContent = '—';
     if (note) note.textContent = '会话状态以 DSH 核验为准；先选择工作区。';
     box.innerHTML = '<div class="empty-row">先新建或选择一个工作区，当前团队模式的角色会话会显示在这里。</div>';
     return;
@@ -1992,15 +2230,23 @@ function renderTeamSessions() {
   const extras = live && Array.isArray(live.extras) ? live.extras.length : 0;
   const dupes = live && Array.isArray(live.duplicates) ? live.duplicates.length : 0;
   if (count) {
-    count.textContent = `${verified === null ? ready : verified}/${total}`;
-    count.title = verified === null ? '本地会话映射；DSH 未核验' : 'DSH 已核验';
+    // e29f F-3：6/6 (X/N) 只认 DSH 核验（sessionId 全等 + 属于本工作区）的条数；
+    // 未核验/核验过期就显示「待核验」，不能拿本地映射冒充满员。
+    count.textContent = verified === null ? '待核验' : `${verified}/${total}`;
+    count.title = verified === null
+      ? `DSH 未核验：本地映射 ${ready}/${total} 只作参考，不计入 ${total} 分母之外的满员判定`
+      : `DSH 核验 ${verified}/${total}（本地映射 ${ready}/${total}）`;
+    count.setAttribute('data-x', verified === null ? '' : String(verified));
+    count.setAttribute('data-n', String(total));
+    count.setAttribute('data-verified', verified === null ? '0' : '1');
+    count.setAttribute('data-local', `${ready}/${total}`);
   }
   if (note) {
     const wsName = (p.workspace && p.workspace.name) || p.teamName || p.name;
+    // e29f F-4：额外会话的提示只在侧栏统计一处显示（workspace-clean.js 统一渲染），
+    // 这里不再重复"未映射会话/重复角色会话"数字，避免一处 0 一处 3。
     if (verified !== null) {
       note.textContent = `DSH 核验：${verified}/${total} 在「${wsName}」工作区（${teamModeLabel(p)}）`
-        + (extras ? ` · 另有 ${extras} 个未映射会话` : ' · 无未映射会话')
-        + (dupes ? ` · ${dupes} 个重复角色会话` : '')
         + (live && live.workspace && live.workspace.bound === false ? ' · 工作区未就绪' : '');
     } else if (state.dsh && state.dsh.online) {
       note.textContent = '本地映射已显示；正在向 DSH 核验会话是否存在。';
@@ -2018,7 +2264,7 @@ function renderTeamSessions() {
     return `<div class="team-session ${sessionId ? '' : 'missing'}">
       <div class="team-session-top">
         <span class="session-dot" style="--role-color:${esc(role.color)}" aria-hidden="true"></span>
-        <span class="team-session-main"><b>${esc(role.name)}</b><code title="${esc(sessionId || '')}">${sessionId ? esc(sessionId) : '无会话'}</code><small class="team-session-title${titleWarn ? ' warn' : ''}" title="${esc('DSH 标题：' + shownTitle)}">${esc(shownTitle)}</small></span>
+        <span class="team-session-main"><b>${esc(role.name)}</b><code title="${esc(sessionId || '')}" data-session-id="${esc(sessionId || '')}">${sessionId ? esc(sessionShort(sessionId)) : '无会话'}</code><small class="team-session-title${titleWarn ? ' warn' : ''}" title="${esc('DSH 标题：' + shownTitle)}">${esc(shownTitle)}</small></span>
         <span class="session-state ${st.cls}" title="${esc(st.title)}">${esc(st.text)}</span>
         <span class="team-session-actions">
           <button type="button" data-role-session="${esc(role.id)}" title="会话操作">操作</button>
@@ -2032,19 +2278,360 @@ function renderTeamSessions() {
         <span class="session-fact"><i>最近回执</i><b class="fact-${esc(facts.receipt.key)}" title="${esc(facts.receipt.title)}">${esc(facts.receipt.short)}</b></span>
         <span class="session-fact"><i>最后唤醒</i><b class="fact-${esc(facts.wake.key)}" title="${esc(facts.wake.title)}">${esc(facts.wake.short)}</b></span>
       </div>
+      ${presenceMarkup(role.id)}
     </div>`;
   }).join('');
+  ensurePresence(() => { renderTeamSessions(); renderRoles(); });
 }
 
 /* ── 团队台：消息、回执、派单 ─────────────────────────── */
 
+// R-b5fc F-4b：角色队列面板（只读派生文件 role_queues.json）。
+// 数据源只走 team:role-queues；面板不写任何状态，缺失/损坏/越权都用人话显示。
+const roleQueueUi = { projectId: null, data: null, error: null, errorKind: '', viewer: null, at: 0, loading: false };
+const ROLE_QUEUE_PRIORITY = { P0: 0, P1: 1, P2: 2, P3: 3 };
+const ROLE_QUEUE_ROLE_LABEL = { pm: '项目经理', product: '产品设计师', analyst: '需求分析师', programmer1: '高级程序员 A', programmer2: '高级程序员 B', tester: '测试人员' };
+// F-4b 查看者绑定：不固定 role=pm。当前 DSH 会话 → 项目角色映射 → 只看该角色那一队；
+// 认不出角色会话时（Owner 控制台 / DSH 未连）按 PM 全量，但把来源标出来，不冒充“当前角色会话”。
+const roleQueueViewer = { projectId: '', role: '', source: '', sessionId: '', at: 0 };
+
+function roleQueueRoleForSession(project, sessionId) {
+  const sid = String(sessionId || '').trim();
+  if (!project || !sid) return '';
+  const map = {};
+  const meta = project.sessionMeta && typeof project.sessionMeta === 'object' ? project.sessionMeta : {};
+  for (const role of Object.keys(meta)) if (meta[role] && meta[role].sessionId) map[role] = String(meta[role].sessionId);
+  if (project.sessions && typeof project.sessions === 'object') {
+    for (const role of Object.keys(project.sessions)) if (project.sessions[role]) map[role] = String(project.sessions[role]);
+  }
+  const mapping = project.mapping && Array.isArray(project.mapping.sessions) ? project.mapping.sessions : [];
+  for (const row of mapping) if (row && row.role && row.sessionId) map[row.role] = String(row.sessionId);
+  const hit = Object.keys(map).find((role) => String(map[role] || '') === sid);
+  return hit || '';
+}
+
+function roleQueueSessionFromUrl() {
+  const view = $('#dsh-view');
+  if (!view || typeof view.getURL !== 'function') return '';
+  let url = '';
+  try { url = String(view.getURL() || ''); } catch { return ''; }
+  const found = /session-[0-9a-fA-F]{8}-[0-9a-fA-F-]{8,}/.exec(url) || /session-[0-9a-fA-F]{8,}/.exec(url);
+  return found ? found[0] : '';
+}
+
+async function roleQueueSessionFromDsh() {
+  const view = $('#dsh-view');
+  if (!view || typeof view.executeJavaScript !== 'function' || !dshReady) return '';
+  try {
+    const result = await view.executeJavaScript(`(() => {
+      const attr = (el) => el ? String(el.getAttribute('data-session-id') || el.getAttribute('data-sessionid') || '') : '';
+      const picked = document.querySelector('[role="treeitem"][aria-selected="true"], [role="option"][aria-selected="true"], [data-session-id][aria-current="true"], [data-session-id][aria-selected="true"]');
+      const direct = attr(picked);
+      if (direct) return direct;
+      const hit = /session-[0-9a-fA-F]{8}-[0-9a-fA-F-]{8,}/.exec(String(location.href || ''));
+      return hit ? hit[0] : '';
+    })()`, true);
+    return String(result || '');
+  } catch { return ''; }
+}
+
+async function resolveRoleQueueViewer(project, opts = {}) {
+  if (!project) { roleQueueViewer.role = ''; roleQueueViewer.source = ''; roleQueueViewer.projectId = ''; return roleQueueViewer; }
+  const fresh = roleQueueViewer.at && (Date.now() - roleQueueViewer.at) < 5000;
+  if (!opts.force && fresh && roleQueueViewer.projectId === project.id) return roleQueueViewer;
+  // 仅测试（--queue-check）用：显式指定查看者会话，生产界面不会设置。
+  const forced = window.__awbQueueViewerOverride;
+  if (forced && typeof forced === 'object' && forced.role) {
+    roleQueueViewer.role = String(forced.role || '');
+    roleQueueViewer.sessionId = String(forced.sessionId || '');
+    roleQueueViewer.source = 'session';
+    roleQueueViewer.projectId = project.id;
+    roleQueueViewer.at = Date.now();
+    return roleQueueViewer;
+  }
+  let sessionId = roleQueueSessionFromUrl();
+  if (!sessionId) sessionId = await roleQueueSessionFromDsh();
+  const role = roleQueueRoleForSession(project, sessionId);
+  roleQueueViewer.sessionId = sessionId;
+  roleQueueViewer.projectId = project.id;
+  roleQueueViewer.at = Date.now();
+  if (role) { roleQueueViewer.role = role; roleQueueViewer.source = 'session'; }
+  else if (sessionId) { roleQueueViewer.role = ''; roleQueueViewer.source = 'session-unbound'; }
+  else { roleQueueViewer.role = 'pm'; roleQueueViewer.source = 'owner-console'; }
+  return roleQueueViewer;
+}
+
+function roleQueueViewerLabel(viewer) {
+  const v = viewer || roleQueueViewer;
+  if (v.source === 'session' && v.role) return `当前会话：${ROLE_QUEUE_ROLE_LABEL[v.role] || v.role}（只看本角色）`;
+  if (v.source === 'session-unbound') return '当前会话未绑定角色（看不到队列）';
+  if (v.source === 'owner-console') return 'Owner 控制台（未识别角色会话，按 PM 全量）';
+  return '查看者未识别';
+}
+
+function roleQueueCaps() {
+  return Boolean(window.workbench && typeof window.workbench.teamRoleQueues === 'function');
+}
+
+/** 排序口径（需求写死）：优先级 → 截止日期 → 创建时间；空值排最后，不猜。 */
+function roleQueueRows(list) {
+  const rank = (row) => (Object.prototype.hasOwnProperty.call(ROLE_QUEUE_PRIORITY, String(row && row.priority)) ? ROLE_QUEUE_PRIORITY[row.priority] : 9);
+  const time = (value) => {
+    const ms = Date.parse(String(value || ''));
+    return Number.isFinite(ms) ? ms : Number.MAX_SAFE_INTEGER;
+  };
+  return (Array.isArray(list) ? list.slice() : []).sort((a, b) => {
+    const byPriority = rank(a) - rank(b);
+    if (byPriority) return byPriority;
+    const byDue = time(a && a.due) - time(b && b.due);
+    if (byDue) return byDue;
+    return time(a && a.createdAt) - time(b && b.createdAt);
+  });
+}
+
+function roleQueueRowHtml(row) {
+  const taskId = String((row && row.taskId) || '');
+  const requirementId = String((row && row.requirementId) || '');
+  const action = String((row && row.action) || '—');
+  const status = String((row && row.status) || '—');
+  const priority = String((row && row.priority) || '—');
+  const evidence = String((row && row.evidencePath) || '');
+  return `<tr data-task="${esc(taskId)}" data-requirement="${esc(requirementId)}">
+    <td class="rq-p">${esc(priority)}</td>
+    <td class="rq-task"><code>${esc(taskId || '—')}</code></td>
+    <td class="rq-action">${esc(action)}</td>
+    <td class="rq-status">${esc(status)}</td>
+    <td class="rq-req"><code>${esc(requirementId || '—')}</code></td>
+    <td class="rq-evidence" title="${esc(evidence)}">${evidence ? `<code>${esc(evidence.length > 46 ? evidence.slice(0, 46) + '…' : evidence)}</code>` : '<span class="muted">无</span>'}</td>
+  </tr>`;
+}
+
+function roleQueuePaintViewer(box) {
+  if (!box) return;
+  const viewer = roleQueueUi.viewer || roleQueueViewer;
+  box.dataset.viewerRole = String(viewer.role || '');
+  box.dataset.viewerSource = String(viewer.source || '');
+  box.dataset.viewerSession = String(viewer.sessionId || '');
+  const badge = $('#role-queue-viewer');
+  if (badge) {
+    badge.textContent = '查看者：' + roleQueueViewerLabel(viewer).replace(/（.*$/, '');
+    badge.className = 'badge muted-badge';
+    badge.title = roleQueueViewerLabel(viewer) + (viewer.sessionId ? ` · 会话 ${viewer.sessionId}` : '');
+  }
+}
+
+function renderRoleQueue() {
+  const box = $('#role-queue');
+  const meta = $('#role-queue-meta');
+  if (!box) return;
+  roleQueuePaintViewer(box);
+  const p = activeProject();
+  if (!p) {
+    box.dataset.state = 'empty';
+    box.dataset.count = '0';
+    box.dataset.reason = '';
+    box.innerHTML = '<div class="empty-row">先选择工作区，再看角色队列。</div>';
+    if (meta) { meta.textContent = '未加载'; meta.className = 'badge muted-badge'; }
+    return;
+  }
+  if (!roleQueueCaps()) {
+    box.dataset.state = 'error';
+    box.innerHTML = '<div class="empty-row">当前壳层没有 team:role-queues 接口，队列面板不可用。</div>';
+    if (meta) { meta.textContent = '接口缺失'; meta.className = 'badge badge-rejected'; }
+    return;
+  }
+  if (roleQueueUi.error) {
+    // F-4b：会话没绑角色不是“读取失败”，用灰字说明；越权与真错误才报红。
+    if (roleQueueUi.errorKind === 'unbound') {
+      box.dataset.state = 'unbound';
+      box.dataset.count = '0';
+      box.dataset.reason = 'unbound';
+      box.innerHTML = `<div class="empty-row">${esc(roleQueueUi.error)}</div>`;
+      if (meta) { meta.textContent = '会话未绑定角色'; meta.className = 'badge muted-badge'; meta.title = roleQueueViewerLabel(roleQueueUi.viewer || roleQueueViewer); }
+      return;
+    }
+    box.dataset.state = 'error';
+    box.innerHTML = `<div class="empty-row">${esc(roleQueueUi.error)}</div>`;
+    if (meta) { meta.textContent = '读取失败'; meta.className = 'badge badge-rejected'; }
+    return;
+  }
+  const data = roleQueueUi.data;
+  if (!data) {
+    box.dataset.state = 'loading';
+    box.innerHTML = '<div class="empty-row">读取中…</div>';
+    if (meta) { meta.textContent = '读取中…'; meta.className = 'badge muted-badge'; }
+    return;
+  }
+  if (data.missing) {
+    // 派单 8bfe ①：文件缺失/损坏都按「队列未生成」降级，灰字不报红；解析原文只进 title 与日志。
+    const broken = Boolean(data.degraded) || data.code === 'QUEUE_FILE_BROKEN';
+    box.dataset.state = 'missing';
+    box.dataset.count = '0';
+    box.dataset.reason = broken ? 'broken' : 'missing';
+    box.dataset.degraded = broken ? '1' : '0';
+    box.innerHTML = broken
+      ? `<div class="empty-row">队列未生成（文件损坏已忽略）：点「刷新」重试或等队列生成器重建。</div>`
+      : `<div class="empty-row">队列未生成（${esc(data.project || p.name)} 还没有 role_queues.json）：等队列生成器跑一次后点「刷新」。</div>`;
+    if (meta) {
+      meta.textContent = '队列未生成';
+      meta.className = 'badge muted-badge';
+      meta.title = broken
+        ? `role_queues.json 解析失败，已按未生成降级（派生文件可重建）${data.detail ? '：' + data.detail : ''}`
+        : 'role_queues.json 不存在（派生文件，由团队工具生成）';
+    }
+    return;
+  }
+  const roles = data.roles && typeof data.roles === 'object' ? data.roles : {};
+  const keys = Object.keys(roles);
+  const total = keys.reduce((sum, key) => sum + (Array.isArray(roles[key]) ? roles[key].length : 0), 0);
+  box.dataset.state = 'ready';
+  box.dataset.count = String(total);
+  box.dataset.reason = '';
+  box.dataset.degraded = '0';
+  if (meta) {
+    meta.textContent = `${total} 条 · ${data.generatedAt ? fmtTime(data.generatedAt) || data.generatedAt : '生成时间未记'}`;
+    meta.className = 'badge ' + (total ? 'badge-approved' : 'muted-badge');
+    meta.title = `来源 ${(data.source && data.source.path) || '未记'}${data.source && data.source.sha256 ? ' · sha256 ' + String(data.source.sha256).slice(0, 12) : ''}${data.meta && data.meta.teamMode ? ' · 模式 ' + data.meta.teamMode : ''}`;
+  }
+  if (!keys.length || !total) {
+    box.innerHTML = '<div class="empty-row">队列已生成，但当前没有派给角色的活（0 条）。</div>';
+    return;
+  }
+  box.innerHTML = keys.map((role) => {
+    const rows = roleQueueRows(roles[role]);
+    const label = ROLE_QUEUE_ROLE_LABEL[role] || role;
+    return `<div class="rq-group" data-role="${esc(role)}" data-count="${rows.length}">
+      <div class="rq-group-head"><b>${esc(label)}</b><code>${esc(role)}</code><span class="rq-count">${rows.length} 条</span></div>
+      ${rows.length ? `<table class="rq-table" role="table" aria-label="${esc(label)} 的角色队列">
+        <thead><tr><th>优先</th><th>任务</th><th>动作</th><th>状态</th><th>关联需求</th><th>证据路径</th></tr></thead>
+        <tbody>${rows.map((row) => roleQueueRowHtml(row)).join('')}</tbody>
+      </table>` : '<div class="empty-row">这一队没有活。</div>'}
+    </div>`;
+  }).join('');
+}
+
+async function loadRoleQueue(opts = {}) {
+  const p = activeProject();
+  if (!p || !roleQueueCaps()) return null;
+  if (roleQueueUi.loading) return null;
+  const fresh = roleQueueUi.projectId === p.id && (Date.now() - roleQueueUi.at) < 30000;
+  if (!opts.force && fresh) return roleQueueUi;
+  roleQueueUi.loading = true;
+  roleQueueUi.error = null;
+  roleQueueUi.errorKind = '';
+  try {
+    // F-4b：按当前会话角色绑定（不再固定 role=pm）。识别不到角色会话时才走 Owner 控制台全量，并在面板标来源。
+    const viewer = await resolveRoleQueueViewer(p, { force: Boolean(opts.force) });
+    roleQueueUi.viewer = { role: viewer.role, source: viewer.source, sessionId: viewer.sessionId };
+    roleQueueUi.projectId = p.id;
+    const payload = { projectId: p.id, sessionId: viewer.sessionId || '' };
+    if (viewer.role) payload.role = viewer.role;
+    const result = await window.workbench.teamRoleQueues(payload);
+    roleQueueUi.at = Date.now();
+    if (result && result.ok === false) {
+      roleQueueUi.data = null;
+      if (result.code === 'QUEUE_SESSION_UNBOUND' || result.code === 'QUEUE_VIEWER_REQUIRED') {
+        roleQueueUi.errorKind = 'unbound';
+        roleQueueUi.error = `${result.message || '当前会话不是角色会话'}（按 F-4b 只看当前角色会话）`;
+      } else if (result.code === 'QUEUE_FORBIDDEN') {
+        roleQueueUi.errorKind = 'forbidden';
+        roleQueueUi.error = `越权：${result.message || '只能看自己的队列'}`;
+      } else {
+        roleQueueUi.errorKind = 'read';
+        roleQueueUi.error = `队列读取失败：${humanError(String(result.message || result.code || '未知原因'))}`;
+      }
+    } else {
+      roleQueueUi.data = result || null;
+    }
+  } catch (error) {
+    roleQueueUi.data = null;
+    roleQueueUi.errorKind = 'read';
+    roleQueueUi.error = '队列读取失败：' + humanError(String((error && error.message) || error));
+  } finally {
+    roleQueueUi.loading = false;
+  }
+  renderRoleQueue();
+  return roleQueueUi;
+}
+
+// R-9db6 F-1：Owner 决策箱（只读列表）。放入只有 PM 能做（团队工具 decision add），
+// 回执走团队工具 decision ack；界面这边先把「待决 / 已回执 / 空 / 损坏」四态与未读计数显示清楚。
+async function loadDecisionBox() {
+  const box = $('#decision-box');
+  if (!box) return null;
+  const p = activeProject();
+  if (!p) {
+    box.dataset.state = 'empty';
+    box.innerHTML = '<div class="empty-row">先选择工作区，再看决策箱。</div>';
+    return null;
+  }
+  if (!(window.workbench && typeof window.workbench.teamDecisionBox === 'function')) {
+    box.dataset.state = 'error';
+    box.innerHTML = '<div class="empty-row">当前壳层没有 team:decision-box 接口，决策箱不可用。</div>';
+    return null;
+  }
+  try {
+    const result = await window.workbench.teamDecisionBox({ projectId: p.id });
+    renderDecisionBox(result || {});
+    return result;
+  } catch (error) {
+    box.dataset.state = 'error';
+    box.innerHTML = `<div class="empty-row">决策箱读取失败：${esc(humanError(String((error && error.message) || error)))}</div>`;
+    return null;
+  }
+}
+
+function renderDecisionBox(data) {
+  const box = $('#decision-box');
+  const unread = $('#decision-box-unread');
+  if (!box) return;
+  const items = Array.isArray(data.items) ? data.items : [];
+  const openItems = items.filter((item) => String(item.status || 'open') === 'open');
+  const unreadCount = Number(data.unread || 0);
+  box.dataset.unread = String(unreadCount);
+  box.dataset.open = String(openItems.length);
+  box.dataset.total = String(items.length);
+  if (unread) {
+    unread.textContent = `待决 ${unreadCount}`;
+    unread.setAttribute('data-unread', String(unreadCount));
+    unread.className = 'badge ' + (unreadCount ? 'badge-pending' : 'muted-badge');
+    unread.title = `待决 ${openItems.length} 条，其中未读 ${unreadCount} 条`;
+  }
+  if (data.degraded) {
+    box.dataset.state = 'degraded';
+    box.innerHTML = `<div class="empty-row">${esc(data.message || '决策箱读不出来（已按空箱显示）')}</div>`;
+    return;
+  }
+  if (!items.length) {
+    box.dataset.state = 'empty';
+    box.innerHTML = '<div class="empty-row">暂无待决事项</div>';
+    return;
+  }
+  box.dataset.state = 'ready';
+  box.innerHTML = items.map((item) => {
+    const isOpen = String(item.status || 'open') === 'open';
+    const badge = isOpen ? '<span class="badge badge-pending">待决</span>' : '<span class="badge muted-badge">已回执</span>';
+    const src = item.source && item.source.ref
+      ? `<button type="button" class="ghost small" data-source-open="${esc(item.source.ref)}" data-source-kind="${esc(item.source.kind || 'none')}">看来源</button>`
+      : '<span class="muted">未记来源</span>';
+    return `<div class="decision-row${isOpen ? '' : ' done'}" data-decision-id="${esc(item.id)}" data-status="${esc(String(item.status || 'open'))}">
+      <div class="decision-head"><b>${esc(item.title || item.id)}</b><code>${esc(item.id)}</code>${badge}</div>
+      <div class="decision-line">${esc(clip60(item.summary || '', 60))}</div>
+      <div class="decision-line muted">要决定什么：${esc(item.question || '未写')}</div>
+      <div class="decision-actions">${src}<span class="muted">放入于 ${esc(fmtTime(item.createdAt) || '未记')}</span></div>
+    </div>`;
+  }).join('');
+}
+
 function renderTeam() {
   const summary = $('#team-summary');
   const log = $('#team-log');
-  const msgSummary = $('#team-msg-summary');
-  const p = activeProject();
+  const msgSummary = $('#team-msg-summary');  const p = activeProject();
   renderInbox();
   renderTeamSessions();
+  renderRoleQueue();
+  loadRoleQueue();
+  loadDecisionBox();
   renderTeamWorkspace();
   renderBoardSummary();
   renderReceipts();
@@ -2420,12 +3007,7 @@ function renderTeamWorkspace() {
   }
   if (ws.lastError && ws.lastError.code) row('绑定错误', `${ws.lastError.code}${ws.lastError.message ? ' · ' + ws.lastError.message : ''}`, 'bad');
   row('当前团队角色', verified === null ? `${ready}/${total} 本地映射（待 DSH 核验）` : `${verified}/${total} 已核验`, verified === null ? 'warn' : (verified >= total ? 'ok' : 'bad'));
-  if (live && Array.isArray(live.extras) && live.extras.length) {
-    row('未映射会话', live.extras.map((item) => item.title || item.sessionId).join('、'), 'warn');
-  }
-  if (live && Array.isArray(live.duplicates) && live.duplicates.length) {
-    row('重复会话', live.duplicates.map((item) => `${roleById(item.role).name} ×${(item.sessionIds || []).length + 1}`).join('、'), 'bad');
-  }
+  // e29f F-4：额外会话数字只由侧栏统计那一处显示（同一套口径、同一个数），团队台不再另报一份。
   const cur = wsUi.data && wsUi.data.currentWorkspace;
   if (cur && (cur.name || cur.project)) {
     const curName = String(cur.name || cur.project);
@@ -2728,7 +3310,7 @@ function loadBoardFrame(boardPath) {
     frame.removeAttribute('src');
     return;
   }
-  const url = absFileUrl(boardPath) + '?v=' + Date.now();
+  const url = absFileUrl(boardPath) + '?v=' + Date.now() + '&theme=' + currentTheme();
   boardUi.embedError = null;
   frame.hidden = false;
   frame.dataset.boardUrl = url;
@@ -3776,14 +4358,13 @@ function renderHeader() {
   const tbSessions = $('#tb-sessions');
   const stageProject = $('#stage-project');
   const stagePath = $('#stage-path');
-  const stageOwner = $('#stage-owner');
-  const dots = $('#session-dots');
+  const stageOwner = $('#legacyReviewStage');
 
   if (!p) {
     if (tbName) tbName.textContent = '未选择工作区';
     if (tbPath) tbPath.textContent = '选择或新建一个项目';
     if (tbStage) tbStage.textContent = '—';
-    if (tbTeam) { tbTeam.textContent = '0/6'; tbTeam.classList.remove('warn'); tbTeam.parentElement.title = '还没有工作区'; }
+    if (tbTeam) { tbTeam.textContent = '—'; tbTeam.classList.remove('warn'); tbTeam.parentElement.title = '还没有工作区'; }
     if (tbSessions) tbSessions.textContent = '0';
     if (stageProject) stageProject.textContent = '未选择工作区';
     if (stagePath) stagePath.textContent = '选择项目后进入工作区';
@@ -3793,14 +4374,13 @@ function renderHeader() {
       stageOwner.title = '先选择工作区';
       stageOwner.disabled = true;
     }
-    const headerOwner = $('#btn-owner');
+    const headerOwner = $('#legacy-owner-btn-removed');
     if (headerOwner) {
       headerOwner.disabled = true;
       headerOwner.title = '先选择工作区；需求级 Owner 闸门在项目面板打开';
     }
     const projectOwnerBadge = $('#project-owner-badge');
     if (projectOwnerBadge) projectOwnerBadge.hidden = true;
-    if (dots) dots.innerHTML = '';
   } else {
     const ready = sessionReadyCount(p);
     const verified = verifiedCount(p);
@@ -3815,8 +4395,11 @@ function renderHeader() {
     }
     if (tbStage) tbStage.textContent = stageById(p.stage).label;
     if (tbTeam) {
-      tbTeam.textContent = `${shown}/${total}`;
-      tbTeam.classList.toggle('warn', verified !== null && verified < total);
+      // e29f F-3：N/N 只认 DSH 核验；未核验就写「待核验」，不拿本地映射凑满员。
+      tbTeam.textContent = verified === null ? '待核验' : `${shown}/${total}`;
+      tbTeam.setAttribute('data-local', `${ready}/${total}`);
+      tbTeam.setAttribute('data-verified', verified === null ? '0' : '1');
+      tbTeam.classList.toggle('warn', verified === null || verified < total);
       if (tbTeam.parentElement) {
         tbTeam.parentElement.title = verified === null
           ? `本地会话映射 ${ready}/${total}；DSH 还没核验（点「刷新」或打开团队台）`
@@ -3824,8 +4407,9 @@ function renderHeader() {
       }
     }
     if (tbSessions) {
-      tbSessions.textContent = String(verified === null ? sessions : verified);
-      tbSessions.title = verified === null ? '本地记录的会话数' : 'DSH 工作区里已核验的角色会话数';
+      // 降级口径（需求六节「降级」）：未核验时数字写「—」，不写 0 冒充"一个都没有"。
+      tbSessions.textContent = verified === null ? '—' : String(verified);
+      tbSessions.title = verified === null ? '本地记录的会话数（DSH 未核验，不显示数字）' : 'DSH 工作区里已核验的角色会话数';
     }
     if (stageProject) stageProject.textContent = p.name;
     if (stagePath) {
@@ -3841,7 +4425,7 @@ function renderHeader() {
         + (os.title ? ' · ' + os.title : '');
       stageOwner.setAttribute('aria-label', stageOwner.title);
     }
-    const headerOwner = $('#btn-owner');
+    const headerOwner = $('#legacy-owner-btn-removed');
     if (headerOwner) {
       headerOwner.disabled = !ownerGate.ok;
       // Fast 的 Owner 决定由后端壳层落账：按钮文案明确“一次点击”，不再因缺 owner 旧命令禁用。
@@ -3859,15 +4443,6 @@ function renderHeader() {
       projectOwnerBadge.textContent = '项目级 Owner ' + projectOs.label;
       projectOwnerBadge.className = 'badge owner-badge badge-' + projectOs.key;
       projectOwnerBadge.title = `旧版项目级 ownerReview（${projectOs.label}）；不参与需求派单。需求级 Owner 请从流程/需求卡片进入。`;
-    }
-    if (dots) {
-      dots.innerHTML = sessionEntries(p).map(({ role, sessionId }) => {
-        const st = sessionState(p, role);
-        const cls = st.cls === 'ready' || st.cls === 'running' ? 'on'
-          : (st.cls === 'blank' || st.cls === 'unverified' || st.cls === 'mismatch' ? 'warn'
-            : (st.cls === 'missing' ? 'miss' : ''));
-        return `<i class="${cls}" style="--role-color:${esc(role.color)}" title="${esc(role.name)} · ${esc(st.text)}${sessionId ? ' · ' + esc(sessionShort(sessionId)) : ''}"></i>`;
-      }).join('');
     }
   }
 
@@ -3917,25 +4492,107 @@ function legacyFile(rel) {
 }
 
 function legacyHas(rel) {
+  // B-20261114-003257-0a46（R-d734 F-2/F-3）：项目信息/项目铁律以 docs:presence 的真实文件系统判定为准。
+  // files:list 有 600 项 / 4 层上限，本项目 团队/ 与产出目录会先被扫满，根目录文档被截掉会误报“缺失”。
+  const check = legacyPresenceCheckByRel(rel);
+  if (check) return check.exists === true;
   return Boolean(legacyFile(rel));
 }
 
 function legacySize(rel) {
+  const check = legacyPresenceCheckByRel(rel);
+  if (check) return Number.isFinite(Number(check.size)) ? Number(check.size) : 0;
   const item = legacyFile(rel);
   return item && Number.isFinite(Number(item.size)) ? Number(item.size) : 0;
 }
 
+// 文档 key ↔ 相对路径：与后端 PROJECT_DOC_CHECKS 同口径。
+const LEGACY_PRESENCE_DOCS = [
+  { key: 'projectInfo', rel: '项目信息.md' },
+  { key: 'iron', rel: '项目铁律.md' }
+];
+
+function legacyPresenceCheck(key) {
+  const presence = legacyUi.presence;
+  if (!presence || !Array.isArray(presence.checks)) return null;
+  return presence.checks.find((row) => row && row.key === key) || null;
+}
+
+/**
+ * B-20261114-052109-2ebe：docs:presence 现在覆盖「项目信息/铁律 + 六角色目录/角色卡/文件索引」
+ * 共 20 项，每项都带 rel。这里按 rel 直接对表——不再像旧版那样只认两个文档 key，
+ * 也不再回退 files:list（600 项 / 4 层上限会把后面的角色目录整段截掉，导致角色卡/文件索引永远“缺失”）。
+ */
+function legacyPresenceCheckByRel(rel) {
+  const key = String(rel || '').replace(/\\/g, '/');
+  if (!key) return null;
+  const presence = legacyUi.presence;
+  if (presence && Array.isArray(presence.checks)) {
+    const hit = presence.checks.find((row) => row && String(row.rel || '').replace(/\\/g, '/') === key);
+    if (hit) return hit;
+  }
+  const doc = LEGACY_PRESENCE_DOCS.find((item) => item.rel === key);
+  return doc ? legacyPresenceCheck(doc.key) : null;
+}
+
+// B-e7e6：角色 id → 项目内目录名（与团队工具 ROLE_DIRS 同口径），给“新会话尚未映射 role.dir”兜底。
+const ROLE_DIR_FALLBACK = { pm: '项目经理', product: '产品', analyst: '需求分析师', programmer1: '程序员A', programmer2: '程序员B', tester: '测试人员' };
+/** 角色目录名：优先 role.dir（团队工具给的真实映射），换人后未映射时用 ROLE_DIR_FALLBACK 兜底。 */
+function legacyRoleDirName(role) {
+  return (role && role.dir) || ROLE_DIR_FALLBACK[String(role && (role.id || role))] || '';
+}
 function legacyRoleCardRel(role) {
-  return role && role.dir ? String(role.dir) + '/角色卡.md' : '';
+  // B-e7e6：换人进来的新会话可能还没带上 role.dir；文件其实都在，别把“未映射”显示成“角色卡缺失”。
+  const dir = legacyRoleDirName(role);
+  return dir ? String(dir) + '/角色卡.md' : '';
+}
+// B-e7e6：角色卡三态——存在 / 缺失（路径有但文件没有）/ 未就绪（还没映射到目录，通常是新会话未 boot）。
+function legacyRoleCardState(role) {
+  const rel = legacyRoleCardRel(role);
+  if (!rel) return { key: 'unmapped', label: '未就绪（未读角色卡）', rel: '', title: '换人后还没映射到角色目录：点「boot」读角色卡即就绪' };
+  if (legacyHas(rel)) return { key: 'ok', label: '存在', rel, title: rel };
+  return { key: 'missing', label: '缺失', rel, title: rel };
 }
 
 function legacyRoleIndexRel(role) {
-  return role && role.dir ? String(role.dir) + '/文件索引.md' : '';
+  // B 复核（2026-11-14 05:30）：文件索引列也必须走同一份目录兜底，
+  // 否则换人后 role.dir 还没映射时，角色卡能兜住、文件索引却仍显示「缺失」。
+  const dir = legacyRoleDirName(role);
+  return dir ? String(dir) + '/文件索引.md' : '';
+}
+
+/**
+ * B-20261114-052109-2ebe：角色就绪提示（Owner 2026-11-14 05:24 + 05:26 口径）
+ *   ① 文件缺失：角色卡/文件索引在 docs:presence 里 exists=false（真缺才红）；
+ *   ② 未 boot：保留提示（文件齐但本会话未读必读），不当作门槛/红字；
+ *   ③ boot 过期：**不再提示**（boot 只作记录不作门槛，Owner 05:26 更正：只去掉「过期」，保留「未 boot」）。
+ */
+function legacyRoleBootHint(role) {
+  const cardRel = legacyRoleCardRel(role);
+  const indexRel = legacyRoleIndexRel(role);
+  const card = cardRel ? legacyPresenceCheckByRel(cardRel) : null;
+  const index = indexRel ? legacyPresenceCheckByRel(indexRel) : null;
+  const missing = [];
+  if (!cardRel) missing.push('角色卡（目录未映射）');
+  else if (card && card.exists === false) missing.push(cardRel);
+  if (!indexRel) missing.push('文件索引（目录未映射）');
+  else if (index && index.exists === false) missing.push(indexRel);
+  const boot = legacyBootFor(role.id);
+  if (missing.length) {
+    return { key: 'missing-file', label: '文件缺失', title: `真缺文件：${missing.join('、')}（docs:presence 判存在性，不看截断清单）`, boot };
+  }
+  if (!boot.booted) {
+    return { key: 'not-booted', label: '未 boot', title: '文件齐但本会话还没 boot（只作记录，不拦推进）：点「boot」读项目铁律/项目信息/角色卡/文件索引', boot };
+  }
+  // boot 已过期/文档变更：按 Owner 05:26 口径不再提示红字，也不再要求重新 boot，只注明记录时间。
+  return { key: 'ready', label: '已 boot', title: `${boot.label}${boot.expired ? '（已过期，只作记录，不影响推进）' : ''}`, boot };
 }
 
 function legacyRoleFiles(role) {
-  const dir = role && role.dir ? String(role.dir) + '/' : '';
-  if (!dir) return [];
+  // 同上：目录名走 ROLE_DIR_FALLBACK，换人后未映射也能数到本角色目录里的“其他文档”。
+  const dirName = legacyRoleDirName(role);
+  if (!dirName) return [];
+  const dir = String(dirName) + '/';
   return legacyFiles().filter((item) => item && item.kind === 'file' && String(item.rel || '').startsWith(dir));
 }
 
@@ -3952,7 +4609,7 @@ function legacyDocumentsReady() {
   const index = legacyHas('项目索引.md');
   const overview = legacyHas('需求/00-需求总览.md');
   const guide = legacyHas('协作准则.md');
-  const dirs = roles.filter((role) => legacyHas(role.dir)).length;
+  const dirs = roles.filter((role) => legacyHas(legacyRoleDirName(role))).length;
   const cards = roles.filter((role) => legacyHas(legacyRoleCardRel(role))).length;
   const indexes = roles.filter((role) => legacyHas(legacyRoleIndexRel(role))).length;
   const others = roles.reduce((sum, role) => sum + legacyRoleOtherDocCount(role), 0);
@@ -4098,11 +4755,15 @@ function legacyLedgerMarkup() {
 
 function legacyPlaceholderDocs(keys = null) {
   const wanted = Array.isArray(keys) ? new Set(keys) : null;
+  const PLACEHOLDER_RE = /（待[^）]*）|待填写|待补/;
   return LEGACY_PROJECT_DOCS.filter((doc) => {
     if (wanted && !wanted.has(doc.key)) return false;
     const entry = legacyDocRecord(doc.rel);
-    if (!entry || !entry.ok) return false;
-    return /（待[^）]*）|待填写|待补/.test(String(entry.text || ''));
+    if (entry && entry.ok) return PLACEHOLDER_RE.test(String(entry.text || ''));
+    // 只命中团队共享（项目目录没有）时读不到整篇正文，用后端只读摘录开头 400 字判占位；判不了就当没有。
+    const check = legacyPresenceCheck(doc.key);
+    if (!check || check.exists !== true || !check.excerpt) return false;
+    return PLACEHOLDER_RE.test(String(check.excerpt));
   }).map((doc) => doc.label);
 }
 
@@ -4127,11 +4788,17 @@ function legacyDocReadiness() {
   const overviewPlaceholder = legacyPlaceholderDocs(['overview']).length > 0;
   const rolesOk = ready.total > 0 && ready.dirs === ready.total && ready.cards === ready.total && ready.indexes === ready.total;
   // 文件清单只证明“存在”，模板占位必须等 files:read 正文回来后再判断；否则首帧会误报“已就绪”。
+  // 只命中团队共享的文档由 docs:presence 给摘录，不要求 files:read 正文，否则会永远停在“文档读取中”。
   const docsToRead = LEGACY_PROJECT_DOCS.map((doc) => doc.rel).filter((rel) => legacyHas(rel));
-  const docsRead = docsToRead.length === LEGACY_PROJECT_DOCS.length
-    && docsToRead.every((rel) => { const entry = legacyDocRecord(rel); return Boolean(entry && entry.ok); });
+  const docReadOk = (rel) => {
+    const entry = legacyDocRecord(rel);
+    if (entry) return entry.ok === true;
+    const check = legacyPresenceCheckByRel(rel);
+    return Boolean(check && check.exists === true && check.excerpt);
+  };
+  const docsRead = docsToRead.length === LEGACY_PROJECT_DOCS.length && docsToRead.every(docReadOk);
   const readErrors = docsToRead.filter((rel) => { const entry = legacyDocRecord(rel); return Boolean(entry && entry.ok === false); });
-  const pendingRead = missing.length === 0 && !docsRead && readErrors.length === 0;
+  const pendingRead = missing.length === 0 && !docsRead && readErrors.length === 0 && docsToRead.length === LEGACY_PROJECT_DOCS.length;
   const ok = missing.length === 0 && bootPlaceholders.length === 0 && rolesOk && !pendingRead && readErrors.length === 0;
   return {
     ...ready,
@@ -4162,6 +4829,10 @@ function legacyBootTtlMinutes() {
 function legacyBootFor(roleId) {
   const briefing = legacyUi.briefing;
   const row = briefing && briefing.roles && roleId ? briefing.roles[roleId] : null;
+  // B-20261114-003257-0a46（R-d734 F-4）：角色真实 boot 证据（启动令牌/阅读记录），只用于显示，不改闸门。
+  const evidence = (row && row.evidence)
+    || (briefing && briefing.evidence && briefing.evidence.roles ? briefing.evidence.roles[roleId] : null)
+    || null;
   const wf = legacyWorkflow();
   const currentRound = wf && Number(wf.round) ? Number(wf.round) : null;
   const ttlMinutes = legacyBootTtlMinutes();
@@ -4179,7 +4850,8 @@ function legacyBootFor(roleId) {
       expiresAt: null,
       remainingMs: null,
       ttlMinutes,
-      label: briefing ? '未 boot' : '未核验'
+      label: evidence ? '已 BOOT' : (briefing ? '未 boot' : '未核验'),
+      evidence
     };
   }
   const bootRound = row.round ? Number(row.round) : null;
@@ -4210,7 +4882,8 @@ function legacyBootFor(roleId) {
     expiresAt,
     remainingMs: expiresAt ? Math.max(0, expiresAt - Date.now()) : null,
     ttlMinutes,
-    label
+    label,
+    evidence
   };
 }
 
@@ -4228,6 +4901,35 @@ function legacyBootSummary() {
     allComplete: rows.length > 0 && rows.every((row) => row.boot.ready),
     total: rows.length
   };
+}
+
+/**
+ * B-20261114-003257-0a46（R-d734 F-4）：面板显示的 BOOT 三态以真实证据为准：
+ * 未 BOOT / 已 BOOT（时间）/ BOOT 过期；旧会话的 boot 不算（stale-session）。
+ * 闸门（可推进）仍看工作台自己的 boots，两者分开显示，避免“已 BOOT 却不能推进”被读成矛盾。
+ */
+function legacyBootDisplay(roleId) {
+  const boot = legacyBootFor(roleId);
+  const ev = boot.evidence;
+  if (!ev) {
+    return { key: boot.booted ? 'booted' : 'never', label: boot.label, title: '工作台未记录 boot（workflow:briefing）', at: boot.at, evidence: null };
+  }
+  const time = ev.at ? fmtTime(ev.at) : '';
+  const label = ev.state === 'booted' ? `已 BOOT${time ? '（' + time + '）' : ''}`
+    : ev.state === 'expired' ? `BOOT 过期${time ? '（' + time + '）' : ''}`
+      : ev.state === 'stale-session' ? '未 BOOT（本会话未 boot）'
+        : ev.state === 'unbound' ? '未 BOOT（当前会话未绑定）'
+          : '未 BOOT';
+  const title = [
+    `证据：${ev.evidenceSource || '启动令牌'}${time ? ' · ' + time : ''}`,
+    ev.sessionId ? `boot 会话 ${ev.sessionId}` : '',
+    ev.currentSessionId ? `当前会话 ${ev.currentSessionId}（${ev.currentSessionSource || '团队.json'}）` : '当前会话未绑定（团队.json members[].sessionId 为空）',
+    ev.state === 'stale-session' ? '旧会话的 boot 不算已 BOOT；用当前会话重新 boot' : '',
+    ev.state === 'unbound' ? '团队.json 没有该角色的当前会话：先在团队台把角色绑到会话再 boot' : '',
+    ev.state === 'expired' ? `超过 ${ev.ttlMinutes} 分钟，后端按 BOOT_EXPIRED 拒绝，需重新 boot` : '',
+    boot.booted ? '' : '工作台动作仍要求 workflow:boot（在本角色卡片点一次 boot）'
+  ].filter(Boolean).join('；');
+  return { key: ev.state, label, title, at: ev.at, evidence: ev };
 }
 
 /** boot 会在 TTL（默认 480 分钟）后过期：到点自动重绘，避免页面一直停在绿色“可推进”。 */
@@ -4657,6 +5359,474 @@ function legacyActionCommandGate(action) {
   return { ok: true, missing: [], unknown: [], reason: '' };
 }
 
+/* ── 闸门展示（判定只来自 team.mjs / team-tools，壳层不自己判） ─────── */
+
+const GATE_CODE_INFO = {
+  REQ_NOT_FINAL: { gate: 'G1', title: '需求未定稿', next: '先补需求正文与验收标准，再执行需求评审' },
+  REQ_REVIEW_REQUIRED: { gate: 'G2', title: '缺需求评审通过', next: '先完成需求评审 approve，再开 Owner 门 / 派单' },
+  PRODUCT_REVIEW_REQUIRED: { gate: 'G2', title: '缺需求评审通过（legacy 码）', next: '先完成需求评审 approve，再开 Owner 门 / 派单' },
+  TESTABILITY_REVIEW_REQUIRED: { gate: 'G2.5', title: '缺可测性评审（TR-Q）', next: '先让测试人员出《可测性评审-<需求id>-vN.md》且结论“可测”，再开 Owner 门' },
+  OWNER_REVIEW_REQUIRED: { gate: 'G3', title: '缺 Owner 决定', next: '先让 Owner 在界面/终端落账 approved 或 skipped，再由 PM 派单' },
+  OWNER_GATE_NOT_READY: { gate: 'G3', title: 'Owner 门尚未就绪', next: '先补齐需求评审与 Owner 决定，再尝试 Owner 门动作' },
+  PRODUCT_DESIGN_REQUIRED: { gate: 'G4', title: '缺产品设计评审 / 签字', next: '先完成设计 propose→review→sign→apply，再派开发' },
+  TECH_REVIEW_REQUIRED: { gate: 'G4f', title: '缺技术评审通过', next: '先由程序员A完成技术评审 approve（需求状态 ready），再派单' },
+  ROLE_NOT_IN_STAGE: { gate: 'G0', title: '角色不在当前阶段', next: '按当前阶段允许的动作重新派单；Owner 前只允许 TR-Q / 材料补全' },
+  ROLE_BUSY: { gate: 'G5', title: '角色有未闭环任务', next: '先完成或释放该角色上一任务 / 派单锁，再派下一个' },
+  TASK_OPEN: { gate: 'G5', title: '角色有未闭环任务', next: '先完成或释放该角色上一任务 / 派单锁，再派下一个' },
+  TEST_REPORT_REQUIRED: { gate: 'G7', title: '缺测试报告或结论不明确', next: '补《测试报告-vN.md》并写明 PASS/FAIL，再 task done' },
+  EVIDENCE_REQUIRED: { gate: 'G8', title: '任务缺少证据', next: '补证据（产出路径 / 验证输出）后再 task done' },
+  ITERATION_BLOCKED: { gate: 'G9', title: '迭代 / 终止被拦', next: '先收口全部需求、关闭任务并释放派单锁，再迭代 / 终止' },
+  GATE_BYPASS_DENIED: { gate: 'G7', title: '绕过派单入口被拒', next: '从正常入口派单；闸门未满足时不会被唤醒' }
+};
+const GATE_ACTION_ALIASES = {
+  owner: 'owner-review',
+  'owner-review': 'owner-review',
+  'owner-accept': 'owner-accept',
+  review: 'requirement-review',
+  'requirement-review': 'requirement-review',
+  tech: 'tech-review',
+  'tech-review': 'tech-review',
+  dispatch: 'dispatch',
+  'requirement-dispatch': 'dispatch',
+  'test-dispatch': 'test-dispatch',
+  'task-claim': 'task-claim',
+  'task-done': 'task-done',
+  'dev-submit': 'dev-submit',
+  'dev-review': 'dev-review',
+  'dev-apply': 'dev-apply',
+  iterate: 'iterate',
+  terminate: 'terminate',
+  'workflow-iterate': 'iterate',
+  'workflow-terminate': 'terminate'
+};
+
+function normalizeGateAction(action) {
+  const key = String(action || '').trim();
+  return GATE_ACTION_ALIASES[key] || key;
+}
+
+function gateInfoFor(code) {
+  return GATE_CODE_INFO[String(code || '')] || null;
+}
+
+function gateCodeOfError(error) {
+  const direct = String((error && error.code) || '').trim();
+  if (direct && GATE_CODE_INFO[direct]) return direct;
+  const match = String((error && error.message) || '').match(/\[([A-Z][A-Z0-9_]+)\]/);
+  return match && GATE_CODE_INFO[match[1]] ? match[1] : '';
+}
+
+function normalizeGateEntry(entry, fallbackAction = '') {
+  const row = entry && typeof entry === 'object' ? entry : {};
+  const rawCode = String(row.code || row.errorCode || '');
+  const info = gateInfoFor(rawCode);
+  const allowed = row.ok === true || row.allowed === true || row.result === 'pass' || row.result === 'ok'
+    || (row.ok === undefined && row.allowed === undefined && !rawCode);
+  const missing = Array.isArray(row.missing)
+    ? row.missing.map((item) => (typeof item === 'string' ? item : String((item && (item.label || item.code || item.path)) || ''))).filter(Boolean).slice(0, 12)
+    : [];
+  return {
+    action: normalizeGateAction(row.action || row.gateAction || fallbackAction),
+    gate: String(row.gate || (info && info.gate) || ''),
+    ok: Boolean(allowed),
+    code: rawCode,
+    title: String(row.title || (info && info.title) || ''),
+    message: String(row.message || row.why || ''),
+    missing,
+    next: String(row.next || row.nextStep || row.hint || (info && info.next) || ''),
+    role: String(row.role || row.targetRole || ''),
+    requirementId: String(row.requirementId || '')
+  };
+}
+
+function normalizeGatePayload(raw) {
+  const out = {
+    available: false, unavailable: false, source: '', interface: '', phase: null,
+    allowedActions: null, gates: new Map(), error: '', code: '', at: Date.now()
+  };
+  if (!raw || typeof raw !== 'object') { out.error = 'gate:check 没有返回对象'; return out; }
+  out.source = String(raw.source || raw.driver || '');
+  out.interface = String(raw.interface || '');
+  out.phase = raw.phase ? String(raw.phase) : null;
+  if (raw.code === 'GATE_API_UNAVAILABLE' || raw.missingInterface === true) {
+    out.unavailable = true;
+    out.code = 'GATE_API_UNAVAILABLE';
+    out.error = String(raw.message || 'team.mjs 还没有 gate:check 接口（TODO(接口)）');
+    return out;
+  }
+  const rows = [];
+  if (Array.isArray(raw.gates)) rows.push(...raw.gates);
+  else if (raw.gates && typeof raw.gates === 'object') {
+    for (const [action, entry] of Object.entries(raw.gates)) rows.push({ ...(entry && typeof entry === 'object' ? entry : {}), action: (entry && entry.action) || action });
+  }
+  if (Array.isArray(raw.checks)) rows.push(...raw.checks);
+  if (Array.isArray(raw.results)) rows.push(...raw.results);
+  if (raw.action || raw.code) rows.push(raw);
+  for (const entry of rows) {
+    const norm = normalizeGateEntry(entry);
+    if (norm.action) out.gates.set(norm.action, norm);
+  }
+  if (Array.isArray(raw.allowedActions)) out.allowedActions = raw.allowedActions.map(normalizeGateAction);
+  if (!out.gates.size && !out.allowedActions) {
+    out.error = String(raw.message || 'gate:check 返回了无法识别的形状（需要 gates[] 或 allowedActions[]）');
+    out.code = String(raw.code || 'GATE_API_SHAPE_UNKNOWN');
+    return out;
+  }
+  out.available = true;
+  if (raw.ok === false && !out.gates.size) { out.error = String(raw.message || raw.code || '闸门判定失败'); out.code = String(raw.code || ''); }
+  return out;
+}
+
+const gateUi = { projectId: null, at: 0, loading: false, data: null };
+const gateAuditUi = { projectId: null, at: 0, loading: false, data: null };
+
+function gateDataReady() {
+  const p = activeProject();
+  return Boolean(p && gateUi.projectId === p.id && gateUi.data && gateUi.data.available);
+}
+
+/** 返回该动作的后端判定；null = 判定接口未就绪，界面不自行禁用。 */
+function gateForAction(action) {
+  if (!gateDataReady()) return null;
+  const key = normalizeGateAction(action);
+  const data = gateUi.data;
+  if (data.gates.has(key)) return data.gates.get(key);
+  if (Array.isArray(data.allowedActions)) {
+    const allowed = data.allowedActions.includes(key);
+    return {
+      action: key, gate: '', ok: allowed, code: '',
+      title: allowed ? '' : '当前阶段不在允许动作列表',
+      message: allowed ? '' : 'team.mjs 返回的允许动作不包含该动作',
+      missing: [], next: allowed ? '' : `允许动作：${data.allowedActions.join('、') || '（空）'}`,
+      role: '', requirementId: ''
+    };
+  }
+  return null;
+}
+
+function gateDeniedText(entry) {
+  const bits = [];
+  if (entry.gate) bits.push(`闸门 ${entry.gate}`);
+  if (entry.title) bits.push(entry.title);
+  if (Array.isArray(entry.missing) && entry.missing.length) bits.push('缺：' + entry.missing.join('、'));
+  if (entry.next) bits.push('下一步：' + entry.next);
+  return bits.join(' · ') || entry.message || entry.code || '闸门未满足';
+}
+
+async function loadGateCheck(options = {}) {
+  const p = activeProject();
+  if (!p || !window.workbench || typeof window.workbench.gateCheck !== 'function') return null;
+  if (gateUi.loading) return null;
+  const force = options.force === true;
+  if (!force && gateUi.projectId === p.id && Date.now() - gateUi.at < 8000) return gateUi.data;
+  gateUi.loading = true;
+  try {
+    const req = legacyActiveRequirement();
+    const raw = await window.workbench.gateCheck({ projectId: p.id, requirementId: req ? req.id : '' });
+    if (!activeProject() || activeProject().id !== p.id) return null;
+    gateUi.projectId = p.id;
+    gateUi.at = Date.now();
+    gateUi.data = normalizeGatePayload(raw);
+    renderFlow();
+    return gateUi.data;
+  } catch (e) {
+    gateUi.projectId = p.id;
+    gateUi.at = Date.now();
+    gateUi.data = normalizeGatePayload({ ok: false, code: 'GATE_API_UNAVAILABLE', message: humanError(e.message), missingInterface: true });
+    renderFlow();
+    return null;
+  } finally {
+    gateUi.loading = false;
+  }
+}
+
+async function loadGateAudit(options = {}) {
+  const p = activeProject();
+  if (!p || !window.workbench || typeof window.workbench.gateAudit !== 'function') return null;
+  if (gateAuditUi.loading) return null;
+  const force = options.force === true;
+  if (!force && gateAuditUi.projectId === p.id && Date.now() - gateAuditUi.at < 8000) return gateAuditUi.data;
+  gateAuditUi.loading = true;
+  try {
+    const raw = await window.workbench.gateAudit({ projectId: p.id, limit: 20 });
+    if (!activeProject() || activeProject().id !== p.id) return null;
+    gateAuditUi.projectId = p.id;
+    gateAuditUi.at = Date.now();
+    gateAuditUi.data = raw;
+    renderGateAudit();
+    return raw;
+  } catch (e) {
+    gateAuditUi.data = { ok: false, message: humanError(e.message), items: [] };
+    gateAuditUi.projectId = p.id;
+    gateAuditUi.at = Date.now();
+    renderGateAudit();
+    return null;
+  } finally {
+    gateAuditUi.loading = false;
+  }
+}
+
+function gateRejectionView(entry, extra = {}) {
+  const info = gateInfoFor(entry && entry.code) || {};
+  const missing = Array.isArray(entry && entry.missing) ? entry.missing : [];
+  return {
+    gate: String((entry && entry.gate) || info.gate || ''),
+    code: String((entry && entry.code) || ''),
+    title: String((entry && entry.title) || info.title || '操作被闸门拒绝'),
+    message: String((entry && entry.message) || info.title || ''),
+    missing,
+    next: String((entry && entry.next) || info.next || ''),
+    requirementId: String((entry && entry.requirementId) || ''),
+    source: String(extra.source || 'team.mjs / team-tools 返回'),
+    attempted: String(extra.attempted || '')
+  };
+}
+
+function gateRejectionMarkup(view) {
+  const missing = view.missing.length
+    ? `<ul class="gate-reject-missing">${view.missing.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>`
+    : '<p class="gate-reject-empty">后端没有返回缺项清单；以错误消息为准，界面不补造。</p>';
+  return `<div class="gate-reject" data-gate-code="${esc(view.code)}" data-gate="${esc(view.gate)}">
+    <div class="gate-reject-head">
+      <span class="gate-reject-badge">${esc(view.gate || '闸门')}</span>
+      <b>${esc(view.title)}</b>
+      ${view.code ? `<code>${esc(view.code)}</code>` : ''}
+    </div>
+    ${view.message && view.message !== view.title ? `<p class="gate-reject-message">${esc(view.message)}</p>` : ''}
+    <div class="gate-reject-section"><span>缺什么</span>${missing}</div>
+    <div class="gate-reject-section"><span>下一步</span><p>${esc(view.next || '按错误码补齐前置条件后重试；界面不提供 --force。')}</p></div>
+    <p class="gate-reject-source">判定来源：${esc(view.source)}${view.attempted ? ` ｜ 尝试动作：${esc(view.attempted)}` : ''}${view.requirementId ? ` ｜ 需求：${esc(view.requirementId)}` : ''}</p>
+    <p class="gate-reject-audit">拒绝应由 team.mjs 写入 <code>团队/状态/项目/&lt;项目&gt;/闸门审计.jsonl</code>；下方“闸门审计”面板只读展示，未记录不等于放行。</p>
+  </div>`;
+}
+
+function showGateRejection(entry, extra = {}) {
+  const view = gateRejectionView(entry, extra);
+  const wrap = document.createElement('div');
+  wrap.innerHTML = gateRejectionMarkup(view);
+  openModal({
+    title: `闸门拒绝 · ${view.code || view.title}`,
+    subtitle: '判定由 team.mjs / team-tools 返回；壳层只展示，不提供绕过入口',
+    icon: '⛔',
+    width: 640,
+    body: wrap,
+    actions: [{ label: '知道了', kind: 'primary', onClick: ({ close }) => close() }]
+  });
+  loadGateAudit({ force: true });
+}
+
+/** 在已有弹窗内就地展示闸门拒绝（不叠第二个弹窗）。 */
+function renderGateRejectionInto(container, entry, extra = {}) {
+  if (!container) return;
+  const previous = container.querySelector('.gate-rejection-inline');
+  if (previous) previous.remove();
+  const view = gateRejectionView(entry, extra);
+  const holder = document.createElement('div');
+  holder.className = 'gate-rejection-inline';
+  holder.innerHTML = gateRejectionMarkup(view);
+  container.insertBefore(holder, container.firstChild);
+  loadGateAudit({ force: true });
+}
+
+function gateErrorView(error, extra = {}) {
+  const code = gateCodeOfError(error);
+  if (!code) return null;
+  const info = gateInfoFor(code) || {};
+  const message = humanError(error && error.message).replace(/^\[[A-Z0-9_]+\]\s*/, '');
+  return {
+    gate: info.gate || '', code, title: info.title || '操作被闸门拒绝',
+    message, missing: Array.isArray(error && error.missing) ? error.missing : [],
+    next: info.next || '', requirementId: String((error && error.requirementId) || ''),
+    source: extra.source || '后端动作返回错误码', attempted: String(extra.attempted || '')
+  };
+}
+
+/* ── Owner decisions[] 展示（只读；append-only；legacy-unrecorded 灰） ── */
+
+function ownerDecisionLabel(status) {
+  const key = String(status || '');
+  if (key === 'approved') return '通过';
+  if (key === 'skipped') return '跳过';
+  if (key === 'rejected') return '打回';
+  if (key === 'pending') return '待决定';
+  return key || '未记录';
+}
+
+function ownerBasisBits(basis) {
+  if (!basis || typeof basis !== 'object') return [];
+  const bits = [];
+  const req = basis.requirement && typeof basis.requirement === 'object' ? basis.requirement : null;
+  const design = basis.design && typeof basis.design === 'object' ? basis.design : null;
+  if (req) bits.push(`需求 ${req.path || '未记录'}${req.sha256 ? ' · sha256 ' + String(req.sha256).slice(0, 12) : ''}`);
+  if (design) bits.push(`设计 ${design.path || '未记录'}${design.version ? ' · ' + design.version : ''}${design.sha256 ? ' · sha256 ' + String(design.sha256).slice(0, 12) : ''}`);
+  if (!bits.length && typeof basis === 'string') bits.push(basis);
+  return bits;
+}
+
+/** decisions[] 优先；没有时给单条旧记录，按 AC-O5 只读标注，不补账。 */
+function ownerDecisionRows(req) {
+  const owner = req && req.ownerReview && typeof req.ownerReview === 'object' ? req.ownerReview : null;
+  if (!owner) return { rows: [], source: '', legacy: false, empty: true };
+  const decisions = Array.isArray(owner.decisions)
+    ? owner.decisions.filter((row) => row && typeof row === 'object')
+    : (owner.decisions && typeof owner.decisions === 'object'
+      ? Object.values(owner.decisions).filter((row) => row && typeof row === 'object')
+      : []);
+  if (decisions.length) return { rows: decisions, source: 'ownerReview.decisions[]', legacy: false, empty: false };
+  const status = String(owner.status || '');
+  const hasAt = Boolean(owner.at);
+  const hasConfirm = Boolean(owner.confirmation);
+  // AC-O5：历史（未落账）必须由 team.mjs 显式标记（或决策日志含“Owner 口头”）。
+  // 壳层没有日志就不猜：pending 且无 at/confirmation 只写“待决定”，不冒充历史、也不冒充已决定。
+  const explicitLegacy = owner.legacy === 'unrecorded' || owner.legacyUnrecorded === true
+    || owner.source === 'legacy-unrecorded' || owner.channel === 'legacy-unrecorded';
+  const pending = status === 'pending' && !hasAt && !hasConfirm;
+  const source = explicitLegacy
+    ? '旧单条 ownerReview（历史，未落账）'
+    : (pending ? '旧单条 ownerReview（待决定；无 decisions[]）' : '旧单条 ownerReview（无 decisions[]）');
+  return { rows: [owner], source, legacy: explicitLegacy, empty: false };
+}
+
+function ownerDecisionsMarkup(req, options = {}) {
+  const data = ownerDecisionRows(req);
+  const compact = options.compact === true;
+  if (data.empty) {
+    return `<section class="owner-decisions${compact ? ' compact' : ''}">
+      <div class="owner-decisions-head"><b>Owner 决定记录</b><span>未记录</span></div>
+      <div class="owner-decisions-empty">未记录：这条需求还没有 Owner 决定；界面不补造 decisions[]。</div>
+    </section>`;
+  }
+  const rows = data.rows.map((row) => {
+    const status = String(row.status || row.decision || '');
+    const channel = String(row.channel || '');
+    const channelOk = ['ui', 'tty'].includes(channel);
+    const channelBad = channel && !channelOk;
+    const at = row.at || row.confirmedAt || '';
+    const basis = ownerBasisBits(row.basis);
+    const opinion = String(row.opinion || '');
+    const by = String(row.by || row.actor || '');
+    const nonceHash = String(row.nonceHash || (row.confirmation && row.confirmation.nonceHash) || '');
+    const cls = data.legacy ? ' legacy-unrecorded' : (channelBad ? ' channel-bad' : '');
+    return `<div class="owner-decision${cls}" data-decision-status="${esc(status)}">
+      <div class="od-top">
+        <span class="od-badge status-${esc(status || 'unknown')}">${esc(ownerDecisionLabel(status))}</span>
+        <code class="od-channel ${channelOk ? 'ok' : (channelBad ? 'bad' : '')}" title="channel 只允许 ui / tty">${esc(channel || 'channel 未记录')}</code>
+        ${at ? `<time>${esc(fmtTime(at))}</time>` : '<span class="od-time muted">时间未记录</span>'}
+        ${data.legacy ? '<span class="badge badge-skipped">历史（未落账）· 只读</span>' : ''}
+        ${channelBad ? '<span class="badge badge-rejected">通道不合规 · 不计验收</span>' : ''}
+      </div>
+      ${by || nonceHash ? `<div class="od-fields">${by ? `<span>记录人 <code>${esc(by)}</code></span>` : ''}${nonceHash ? `<span>nonceHash <code>${esc(nonceHash.slice(0, 12))}</code></span>` : ''}</div>` : ''}
+      ${basis.length ? `<div class="od-basis">依据：${basis.map((item) => `<span>${esc(item)}</span>`).join('')}</div>` : (data.legacy ? '<div class="od-basis">依据：历史记录没有 basis（只读，不补账）</div>' : '')}
+      ${opinion ? `<p class="od-opinion">意见：${esc(opinion)}</p>` : ''}
+    </div>`;
+  }).join('');
+  return `<section class="owner-decisions${compact ? ' compact' : ''}">
+    <div class="owner-decisions-head"><b>Owner 决定记录</b><span>${data.rows.length} 条 · ${esc(data.source)}</span></div>
+    <div class="owner-decisions-list">${rows}</div>
+    <p class="owner-decisions-note">只读展示 append-only 记录；channel 只允许 ui / tty，basis 为落账时的需求/设计哈希。旧单条记录不改写、不补账。</p>
+  </section>`;
+}
+
+/* ── TR-Q（可测性评审）展示：字段由 team.mjs 落库；没有就写未记录 ── */
+
+function legacyTrqFile(req) {
+  const files = Array.isArray(legacyUi.files) ? legacyUi.files : [];
+  const id = String((req && req.id) || '');
+  if (!id) return '';
+  const rows = files.filter((file) => file && file.rel && /^测试人员\/产出\/可测性评审-/.test(file.rel));
+  const hit = rows.find((file) => file.rel.includes(id)) || null;
+  return hit ? hit.rel : '';
+}
+
+function legacyTrqView(req) {
+  const trq = req && req.trq && typeof req.trq === 'object' ? req.trq : null;
+  const fileHint = legacyTrqFile(req);
+  if (!trq) {
+    return {
+      state: 'missing', verdict: '', label: '未记录', file: fileHint,
+      detail: fileHint ? '文件存在但需求行没有 trq 记录（待 team.mjs 落库）' : '需求行没有 trq 字段；G2.5 判定由 team.mjs 返回',
+      by: '', at: '', hash: '', version: '', missing: []
+    };
+  }
+  const verdict = String(trq.verdict || '');
+  const missing = Array.isArray(trq.missing) ? trq.missing.map((item) => String((item && (item.label || item.code)) || item)).filter(Boolean) : [];
+  const label = verdict === 'testable' ? '可测'
+    : verdict === 'not_testable' ? '不可测'
+      : verdict === 'optional-missing' ? 'P1 未做'
+        : (verdict || '未记录');
+  return {
+    state: verdict === 'testable' ? 'testable' : (verdict === 'not_testable' ? 'not_testable' : (verdict === 'optional-missing' ? 'optional' : 'unknown')),
+    verdict, label, file: String(trq.file || trq.path || trq.doc || fileHint || ''),
+    detail: trq.note || (missing.length ? `缺 ${missing.length} 项` : ''),
+    by: String(trq.by || trq.reviewer || ''),
+    at: String(trq.at || ''),
+    hash: String(trq.requirementHash || trq.hash || ''),
+    version: trq.version ? String(trq.version) : '',
+    missing
+  };
+}
+
+/* ── 闸门审计（只读） ─────────────────────────────────────── */
+
+function gateAuditRowMarkup(row) {
+  return `<div class="gate-audit-row${row.code ? ' is-deny' : ''}">
+    <div class="ga-top">
+      <time>${esc(row.at ? fmtTime(row.at) : '时间未记录')}</time>
+      <span>${esc(row.role ? roleById(row.role).name : '角色未记录')}</span>
+      <code>${esc(row.source || 'source?')}</code>
+      <span class="ga-action">${esc(row.action || '动作未记录')}</span>
+      ${row.gate ? `<span class="ga-gate">${esc(row.gate)}</span>` : ''}
+      ${row.code ? `<code class="ga-code">${esc(row.code)}</code>` : ''}
+    </div>
+    ${row.missing && row.missing.length ? `<div class="ga-missing">缺：${row.missing.map((item) => esc(item)).join('、')}</div>` : ''}
+    ${row.message ? `<div class="ga-message">${esc(row.message)}</div>` : ''}
+    ${row.requirementId || row.taskId ? `<div class="ga-ref">${row.requirementId ? '需求 ' + esc(row.requirementId) : ''}${row.taskId ? ' · 任务 ' + esc(row.taskId) : ''}</div>` : ''}
+  </div>`;
+}
+
+function renderGateAudit() {
+  // 同一份只读审计同时渲染到“流程页”和“团队台”两处，避免两套口径。
+  const targets = [
+    { box: $('#gate-audit'), badge: $('#gate-audit-badge') },
+    { box: $('#gate-audit-team'), badge: $('#gate-audit-team-badge') }
+  ].filter((item) => item.box);
+  if (!targets.length) return;
+  const data = gateAuditUi.data;
+  let html = '';
+  let badgeText = '读取中';
+  let badgeCls = 'badge muted-badge';
+  let badgeTitle = '';
+  if (!data) {
+    const hasProject = Boolean(activeProject());
+    badgeText = hasProject ? '读取中' : '未选择项目';
+    html = `<div class="empty-row">${hasProject ? '读取中…（只读闸门审计）' : '先选择项目：闸门审计按当前项目的团队状态目录读取。'}</div>`;
+  } else if (data.ok === false) {
+    badgeText = '读取失败';
+    badgeCls = 'badge badge-rejected';
+    html = `<div class="empty-row">闸门审计不可读：${esc(humanError(data.message || data.code || '未知原因'))}</div>`;
+  } else if (!data.exists) {
+    badgeText = '未记录';
+    html = '<div class="empty-row">未记录：还没有 <code>团队/状态/项目/&lt;项目&gt;/闸门审计.jsonl</code>。接口未写入时不补造；无记录不等于放行。</div>';
+  } else {
+    const items = Array.isArray(data.items) ? data.items : [];
+    badgeText = `${data.total || items.length} 条 · 只读`;
+    badgeCls = 'badge badge-skipped';
+    badgeTitle = data.file || '';
+    html = items.length
+      ? `<div class="gate-audit-list">${items.map((row) => gateAuditRowMarkup(row)).join('')}</div>`
+      : '<div class="empty-row">审计文件存在，但没有可解析的记录。</div>';
+  }
+  for (const target of targets) {
+    if (target.badge) {
+      target.badge.textContent = badgeText;
+      target.badge.className = badgeCls;
+      target.badge.title = badgeTitle;
+    }
+    target.box.innerHTML = html;
+  }
+}
+
+
 /** 主流程动作的命令缺口汇总：明确缺失和“未核验”分开，只有前者才能写“缺”。 */
 const LEGACY_FLOW_ACTIONS = [
   'requirement-create', 'requirement-review', 'owner-review', 'dispatch',
@@ -5011,6 +6181,8 @@ function resetLegacyUiFor(projectId) {
   legacyUi.workflow = null;
   legacyUi.briefing = null;
   legacyUi.briefingError = null;
+  legacyUi.presence = null;
+  legacyUi.presenceError = null;
   legacyUi.workflowError = null;
   legacyUi.phaseHint = null;
   legacyUi.error = null;
@@ -5102,6 +6274,7 @@ async function loadLegacyDocs(force = false) {
   const requiredIpc = [
     ['files:list', 'filesList'],
     ['files:read', 'filesRead'],
+    ['docs:presence', 'docsPresence'],
     ['workflow:state', 'workflowState'],
     ['workflow:next', 'workflowNext'],
     ['workflow:briefing', 'workflowBriefing'],
@@ -5133,10 +6306,18 @@ async function loadLegacyDocs(force = false) {
     const briefingPromise = typeof wb.workflowBriefing === 'function'
       ? wb.workflowBriefing({ projectId: p.id }).catch((e) => ({ ok: false, code: 'BRIEFING_FAILED', message: humanError(e.message) }))
       : Promise.resolve(null);
-    const [list, workflow, next, briefing] = await Promise.all([listPromise, workflowPromise, nextPromise, briefingPromise]);
+    // B-20261114-003257-0a46：项目信息/项目铁律的真实存在性（直达文件系统，不信截断清单）。
+    const presencePromise = typeof wb.docsPresence === 'function'
+      ? wb.docsPresence({ projectId: p.id }).catch((e) => ({ ok: false, code: 'PRESENCE_FAILED', message: humanError(e.message) }))
+      : Promise.resolve(null);
+    const [list, workflow, next, briefing, presence] = await Promise.all([listPromise, workflowPromise, nextPromise, briefingPromise, presencePromise]);
     if (!activeProject() || activeProject().id !== wanted) return;
     legacyUi.files = list && Array.isArray(list.files) ? list.files : [];
     legacyUi.truncated = Boolean(list && list.truncated);
+    legacyUi.presence = presence && presence.ok !== false && Array.isArray(presence.checks) ? presence : null;
+    legacyUi.presenceError = presence && presence.ok === false
+      ? { code: presence.code || 'PRESENCE_FAILED', message: presence.message || presence.why || 'docs:presence 读取失败' }
+      : null;
     const nextOk = next && next.ok !== false && Array.isArray(next.requirements);
     const stateOk = workflow && workflow.ok !== false;
     if (nextOk || stateOk) {
@@ -5164,9 +6345,9 @@ async function loadLegacyDocs(force = false) {
       const hint = legacyUi.phaseHint;
       if (hint && Number(hint.round) === Number(merged.round) && hint.statusKey === statusKey) {
         merged.phase = legacyDisplayPhase(hint.phase, merged.requirements);
-      } else if (p.workflowMirror && p.workflowMirror.phase && Number(p.workflowMirror.round) === Number(merged.round)) {
-        merged.phase = legacyDisplayPhase(p.workflowMirror.phase, merged.requirements);
       }
+      // 不再用 p.workflowMirror.phase 覆盖刚读到的 snapshot：那是上次 apply 时的旧镜像，
+      // 角色直接写 工作流.json 后它不会更新，会把流程图永久钉在旧阶段。
       legacyUi.workflow = merged;
     } else {
       legacyUi.workflow = null;
@@ -5485,6 +6666,53 @@ function legacyReadStepsMarkup() {
   </div>`;
 }
 
+/**
+ * B-20261114-003257-0a46（R-d734 F-2/F-3/F-5）：项目信息/项目铁律的真实存在性。
+ * 每项带 data-check-path / data-exists / data-source；缺失时把两处路径都列进 #missing-list（AC3 可直接断言）。
+ */
+function legacyDocPresenceMarkup() {
+  const presence = legacyUi.presence;
+  if (!presence) {
+    if (legacyUi.presenceError) {
+      return `<div class="legacy-presence legacy-presence-error" data-presence-state="error"><b>文档存在性未核验</b><span>docs:presence 读取失败：<code>${esc(legacyUi.presenceError.code)}</code> ${esc(legacyUi.presenceError.message)}</span></div>`;
+    }
+    if (!window.workbench || typeof window.workbench.docsPresence !== 'function') {
+      return '<div class="legacy-presence legacy-presence-error" data-presence-state="no-ipc"><b>文档存在性未核验</b><span>当前 preload 没有 <code>docs:presence</code>：只能看 files:list（600 项截断时可能误报缺失）。</span></div>';
+    }
+    return '<div class="legacy-presence" data-presence-state="loading">文档存在性核验中…</div>';
+  }
+  const at = presence.at ? fmtTime(presence.at) : '';
+  const rows = presence.checks.map((row) => {
+    const state = row.state === 'present' ? '存在' : (row.state === 'unreadable' ? '无法读取' : '缺失');
+    const cls = row.state === 'present' ? 'ok' : (row.state === 'unreadable' ? 'warn' : 'bad');
+    const source = row.state === 'present' ? `存在（来源：${row.sourceLabel || row.source}）` : '来源：—';
+    return `<div class="legacy-presence-row ${cls}" data-doc-key="${esc(row.key)}" data-exists="${row.state === 'present' ? '1' : '0'}" data-source="${esc(row.source || '')}" data-check-path="${esc(row.checkPath || '')}" title="${esc(row.checkPath || '')}">
+      <b>${esc(row.label)}</b>
+      <span class="legacy-presence-state">${esc(state)}</span>
+      <span class="legacy-presence-source">${esc(source)}</span>
+      <code class="legacy-presence-path">${esc(row.checkPath || '')}</code>
+      <span class="legacy-presence-at">${esc(at)}</span>
+    </div>`;
+  }).join('');
+  const bad = presence.checks.filter((row) => row.state !== 'present');
+  const missingMarkup = bad.length
+    ? `<div class="legacy-missing-list" id="missing-list" data-missing-count="${bad.length}">
+      <b>缺失 / 读不到的检查路径（按序查两处：项目目录 → 团队共享）</b>
+      ${bad.map((row) => (row.candidates || []).map((cand) => `<div class="legacy-missing-row" data-doc-key="${esc(row.key)}" data-check-path="${esc(cand.path)}" data-exists="${cand.state === 'present' ? '1' : '0'}" data-source="${esc(cand.source)}">
+        <code>${esc(cand.path)}</code><span>${cand.state === 'present' ? '存在' : (cand.state === 'unreadable' ? '无法读取' + (cand.error ? `（${esc(cand.error)}）` : '') : '不存在')}</span><span>${esc(cand.sourceLabel || cand.source)}</span><span>${esc(at)}</span>
+      </div>`).join('')).join('')}
+    </div>`
+    : '<div class="legacy-missing-list is-empty" id="missing-list" data-missing-count="0"><b>检查路径</b><span>项目信息、项目铁律两处都命中，无缺失。</span></div>';
+  return `<div class="legacy-presence" data-presence-state="${bad.length ? 'missing' : 'ok'}">
+    ${rows}
+    ${missingMarkup}
+    <p class="legacy-presence-note">判定口径：只查项目目录 <code>${esc(presence.projectPath || '')}</code> 与团队共享；任一处存在即算存在并标来源；读不到（权限/占用）不判缺失。每次打开面板重算。</p>
+  </div>`;
+}
+
+// 验收列表（#accept-list）由 R-4f99 的 owner-review.js 独占实现（单一容器，顶部【验】打开）；
+// 0a46（本条）不在这里再渲染第二份，避免同一 id 出现两个容器 —— 见 0a46 实现说明「跨任务边界」。
+
 function renderLegacyGate(project) {
   const box = $('#legacy-gate');
   if (!box) return;
@@ -5580,6 +6808,9 @@ function renderLegacyGate(project) {
         <span><code>workflow:*</code> 动作：产品评审 / Owner 决定 / 派单 / 开发互审 / 测试 / Owner 验收；旧命令明确缺失才写“缺”，矩阵没返回只写“未核验”，两种情况都禁用按钮并说明，界面不回退本机假成功。</span>
       </div>`;
   }
+  // B-20261114-003257-0a46：文档真实存在性（#missing-list 锚点在 legacyDocPresenceMarkup 里）。
+  const presenceBox = $('#doc-presence');
+  if (presenceBox) presenceBox.innerHTML = legacyDocPresenceMarkup();
 }
 
 function legacyRoleTableMarkup(project) {
@@ -5588,12 +6819,14 @@ function legacyRoleTableMarkup(project) {
   return `<table class="legacy-table">
     <thead><tr><th>角色</th><th>目录</th><th>角色卡</th><th>文件索引</th><th>其他文档</th><th>会话</th><th>本轮 boot / 必读</th><th>已读证据来源</th><th>打开</th></tr></thead>
     <tbody>${roles.map((role) => {
-      const dir = legacyHas(role.dir);
+      const dir = legacyHas(legacyRoleDirName(role));
       const card = legacyHas(legacyRoleCardRel(role));
+      const cardState = legacyRoleCardState(role);
       const index = legacyHas(legacyRoleIndexRel(role));
       const others = legacyRoleOtherDocCount(role);
       const session = sessions[role.id];
       const boot = legacyBootFor(role.id);
+      const bootDisplay = legacyBootDisplay(role.id);
       const ev = legacyBootEvidence(role.id);
       const evidenceRecord = ev.memRead || ev.bootRecord;
       const evidence = evidenceRecord
@@ -5601,12 +6834,12 @@ function legacyRoleTableMarkup(project) {
         : (ev.row ? `工作流.json：${ev.briefingHash ? '简报 ' + legacyHashShort(ev.briefingHash) : '有记录无简报哈希'}` : '未记录');
       return `<tr>
         <td><span class="legacy-role-id" style="--role-color:${esc(role.color)}">${esc(String(role.name || '?').slice(0, 1))}</span><b>${esc(role.name)}</b><br><code>${esc(role.id)}</code></td>
-        <td><code>${esc(role.dir)}/</code><br><span class="${dir ? 'legacy-cell-ok' : 'legacy-cell-bad'}">目录${dir ? '存在' : '缺失'}</span></td>
-        <td class="${card ? 'legacy-cell-ok' : 'legacy-cell-bad'}">${card ? '存在' : '缺失'}</td>
+        <td><code>${esc(legacyRoleDirName(role))}/</code><br><span class="${dir ? 'legacy-cell-ok' : 'legacy-cell-bad'}">目录${dir ? '存在' : '缺失'}</span></td>
+        <td class="${cardState.key === 'ok' ? 'legacy-cell-ok' : (cardState.key === 'unmapped' ? 'legacy-cell-warn' : 'legacy-cell-bad')}" title="${esc(cardState.title)}">${esc(cardState.label)}</td>
         <td class="${index ? 'legacy-cell-ok' : 'legacy-cell-bad'}">${index ? '存在' : '缺失'}</td>
         <td class="legacy-cell-dim">${others} 份</td>
         <td>${session ? '<span class="legacy-cell-ok">已映射</span><br><code>' + esc(sessionShort(session)) + '</code>' : '<span class="legacy-cell-warn">未建</span>'}</td>
-        <td><span class="${boot.ready ? 'legacy-cell-ok' : (boot.expired || boot.roundMismatch ? 'legacy-cell-bad' : (boot.booted ? 'legacy-cell-warn' : 'legacy-cell-bad'))}" title="${esc(boot.at || '')}">${esc(boot.label)}</span><br><span class="legacy-cell-dim">${esc(boot.at ? fmtTime(boot.at) : '无 boot 时间')}</span></td>
+        <td><span class="${boot.ready ? 'legacy-cell-ok' : (bootDisplay.key === 'booted' ? 'legacy-cell-warn' : 'legacy-cell-bad')}" title="${esc(bootDisplay.title)}">${esc(bootDisplay.label)}</span><br><span class="legacy-cell-dim">${esc(boot.at ? '工作台 ' + fmtTime(boot.at) : '工作台未记录')}</span></td>
         <td class="legacy-cell-dim">${esc(evidence)}</td>
         <td><div class="legacy-table-actions">
           <button type="button" data-legacy-role-card="${esc(role.id)}" title="只读查看 ${esc(legacyRoleCardRel(role))}">角色卡</button>
@@ -5709,7 +6942,7 @@ function renderOverview() {
   const headline = legacyOwnerHeadline(p);
   const req = legacyActiveRequirement();
   const reqOwner = legacyReqOwnerView(req);
-  const ownerOpen = $('#btn-owner-open');
+  const ownerOpen = $('#legacy-owner-open-removed');
   if (ownerOpen) {
     const ownerGate = legacyActionCommandGate('owner-review');
     ownerOpen.disabled = !ownerGate.ok;
@@ -5766,8 +6999,9 @@ function legacyRoleDirsMarkup(project) {
   return teamRoles(project).map((role) => {
     const cardRel = legacyRoleCardRel(role);
     const indexRel = legacyRoleIndexRel(role);
-    const dir = legacyHas(role.dir);
+    const dir = legacyHas(legacyRoleDirName(role));
     const card = legacyHas(cardRel);
+    const cardState = legacyRoleCardState(role);
     const index = legacyHas(indexRel);
     const others = legacyRoleOtherDocCount(role);
     const any = card || index || others > 0 || dir;
@@ -5785,9 +7019,9 @@ function legacyRoleDirsMarkup(project) {
         <b>${esc(role.name)}</b>
         <small>${esc(role.id)}</small>
       </div>
-      <div class="legacy-role-dir-path" title="${esc(role.scope || role.dir)}">${esc(role.dir)}/ <span class="${dir ? 'ok' : 'bad'}">${dir ? '目录存在' : '目录缺失'}</span></div>
+      <div class="legacy-role-dir-path" title="${esc(role.scope || role.dir)}">${esc(legacyRoleDirName(role))}/ <span class="${dir ? 'ok' : 'bad'}">${dir ? '目录存在' : '目录缺失'}</span></div>
       <div class="legacy-role-dir-files">
-        <span class="${card ? 'ok' : 'bad'}">角色卡 ${card ? '有' : '缺'}</span>
+        <span class="${cardState.key === 'ok' ? 'ok' : (cardState.key === 'unmapped' ? 'warn' : 'bad')}" title="${esc(cardState.title)}">角色卡 ${esc(cardState.label)}</span>
         <span class="${index ? 'ok' : 'bad'}">文件索引 ${index ? '有' : '缺'}</span>
         <span>其他文档 ${others}</span>
         <span class="${boot.ready ? 'ok' : 'bad'}" title="${esc(boot.missing.join('、') || boot.at || '')}">${esc(boot.label)}</span>
@@ -6341,14 +7575,29 @@ function legacyOwnerActionGate(action, decision) {
 function legacyOwnerQuickButton(kind, req, decision, label) {
   const action = kind === 'accept' ? 'owner-accept' : 'owner-review';
   const gate = legacyOwnerActionGate(action, decision);
-  const ready = gate.ok;
+  const processGate = gateForAction(action);
+  const decisionValue = String(decision || '').trim();
+  let gateDenied = Boolean(processGate && processGate.ok === false);
+  // B-3524：G2.5 只拦“通过/开发”；打回/跳过不受可测性评审限制，
+  // 否则 not_testable 的需求连“打回”按钮都会被闸门锁死（Owner 实测）。
+  if (gateDenied && action === 'owner-review' && decisionValue && decisionValue !== 'approved'
+    && String((processGate && processGate.gate) || '') === 'G2.5') {
+    gateDenied = false;
+  }
+  const ready = gate.ok && !gateDenied;
   const shellOwned = gate.shellOwned && (action === 'owner-review' || action === 'owner-accept');
-  const why = !gate.ok
-    ? gate.reason
-    : (shellOwned
-      ? `Owner（我）一次点击：直接调用 ${action === 'owner-accept' ? 'owner:accept' : 'requirement:owner'}；后端壳收口（Full / Fast），不依赖旧 ${action === 'owner-accept' ? 'owner/workflow' : 'owner'} 命令（${label}）`
-      : `${label}：一次点击直接调用后端（${action === 'owner-accept' ? 'owner:accept' : 'requirement:owner'}），无需二次确认`);
-  return `<button type="button" class="ghost small owner-click" data-legacy-owner-click="${esc(kind)}" data-legacy-owner-decision="${esc(decision)}" data-req-id="${esc(req.id)}" ${ready ? '' : 'disabled'} title="${esc(why)}">${esc(label)}</button>`;
+  const why = gateDenied
+    ? gateDeniedText(processGate)
+    : (!gate.ok
+      ? gate.reason
+      : (shellOwned
+        ? `Owner（我）一次点击：直接调用 ${action === 'owner-accept' ? 'owner:accept' : 'requirement:owner'}；后端壳收口（Full / Fast），不依赖旧 ${action === 'owner-accept' ? 'owner/workflow' : 'owner'} 命令（${label}）`
+        : `${label}：一次点击直接调用后端（${action === 'owner-accept' ? 'owner:accept' : 'requirement:owner'}），无需二次确认`));
+  const gateNote = gateDenied
+    ? `<span class="legacy-req-gate" title="${esc(why)}">闸门 ${esc(processGate.gate || processGate.code || '拒绝')}：${esc(processGate.title || processGate.code || '未满足')}</span>`
+    : '';
+  const gateBlocked = gateDenied && gate.ok;
+  return `<button type="button" class="ghost small owner-click${gateBlocked ? ' gate-blocked' : ''}" data-legacy-owner-click="${esc(kind)}" data-legacy-owner-decision="${esc(decision)}" data-req-id="${esc(req.id)}" ${ready || gateBlocked ? '' : 'disabled'}${gateBlocked ? ' data-gate-blocked="1" data-gate-action="' + esc(action) + '" aria-disabled="true"' : ''} title="${esc(why)}">${esc(label)}</button>${gateNote}`;
 }
 
 /**
@@ -6373,6 +7622,11 @@ async function legacyOwnerOneClick(kind, reqId, decision, button) {
   const action = kind === 'accept' ? 'owner-accept' : 'owner-review';
   const gate = legacyOwnerActionGate(action, decision);
   if (!gate.ok) { toast(gate.reason, 'bad'); return; }
+  const processGate = gateForAction(action);
+  if (processGate && processGate.ok === false) {
+    showGateRejection(processGate, { attempted: action, source: 'team.mjs 闸门判定（gate:check）' });
+    return;
+  }
   const label = action === 'owner-accept' ? 'Owner 验收（一次点击）' : 'Owner 决定（一次点击）';
   const originalText = button ? button.textContent : '';
   if (button) {
@@ -6386,7 +7640,7 @@ async function legacyOwnerOneClick(kind, reqId, decision, button) {
     } else {
       await legacyEnsureRoleReadyForAction(['accepted', 'rejected'].includes(decision) ? 'tester' : 'pm', label);
     }
-    const payload = { requirementId: req.id, decision, opinion: '', ownerConfirmed: true };
+    const payload = { requirementId: req.id, decision, opinion: '', ownerConfirmed: true, channel: 'ui' };
     const result = await legacyCallWorkflow(action, payload);
     if (!result || result.ok === false) {
       const failure = new Error(`[${(result && result.code) || 'WORKFLOW_FAILED'}] ${(result && (result.message || result.why)) || '后端拒绝执行'}`);
@@ -6418,11 +7672,15 @@ async function legacyOwnerOneClick(kind, reqId, decision, button) {
       actor
     });
     await loadLegacyDocs(true);
+    loadGateCheck({ force: true });
+    loadGateAudit({ force: true });
     toast(`Owner（我）已提交：${legacyOwnerDecisionLabel(action, decision)}（后端返回 ${result.code || 'OK'}）· actor=${actor}（本机点击）`, 'ok');
   } catch (e) {
     legacyRecordAction(action, label, null, e);
     renderLegacyCapabilities();
-    toast(humanError(e.message), 'bad');
+    const gateView = gateErrorView(e, { attempted: action });
+    if (gateView) showGateRejection(gateView);
+    else toast(humanError(e.message), 'bad');
   } finally {
     if (button) {
       button.disabled = false;
@@ -6456,6 +7714,186 @@ function legacyOwnerSuccessMarkup(action, req, form, result) {
     <p class="hint">Owner（我）一次点击提交；actor 由后端落账返回，不是 DSH 会话签名。</p>
     <div class="modal-error"></div>
   </div>`;
+}
+
+/**
+ * Owner 评审材料：五类（需求正文 / 上游产出 / 提案 / 测试报告 / 最近提交）。
+ * 清单来自主进程 owner:materials（带路径、大小、更新时间、版本），单项读取走 owner:material；
+ * 缺失写“未记录”，不可读写“不可读（原因）”，不补造内容；1 MB 上限由主进程校验。
+ */
+function ownerMaterialVersionLabel(item) {
+  const versions = Array.isArray(item.versions) ? item.versions : [];
+  if (versions.length > 1) return `共 ${versions.length} 版 · 默认 v${item.version === null || item.version === undefined ? '—' : item.version}`;
+  if (item.version) return `v${item.version}`;
+  return '';
+}
+
+function ownerMaterialTime(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return fmtTime(d.toISOString());
+}
+
+async function enhanceOwnerReviewModal(dlg, project, req) {
+  if (!dlg || !dlg.body || !project) return;
+  if (dlg.el) dlg.el.style.width = 'min(960px, calc(100vw - 40px))';
+  const box = document.createElement('section');
+  box.className = 'owner-materials two-pane';
+  box.innerHTML = `
+    <div class="owner-materials-head"><b>本轮评审材料（只读）</b><span id="owner-material-status">读取中…</span></div>
+    <div class="owner-materials-body">
+      <div class="owner-materials-list" id="owner-material-list" role="tree" aria-label="评审材料"></div>
+      <div class="owner-material-preview-wrap">
+        <div class="owner-material-toolbar">
+          <span id="owner-material-path">—</span>
+          <select id="owner-material-version" class="select" hidden aria-label="切换材料版本"></select>
+          <button class="ghost small" id="owner-material-open" type="button" disabled>打开文件</button>
+        </div>
+        <pre class="owner-material-preview" id="owner-material-preview">选择左侧材料后在这里预览；不会修改任何文件。</pre>
+      </div>
+    </div>`;
+  dlg.body.insertBefore(box, dlg.body.firstChild);
+  const list = box.querySelector('#owner-material-list');
+  const preview = box.querySelector('#owner-material-preview');
+  const status = box.querySelector('#owner-material-status');
+  const pathEl = box.querySelector('#owner-material-path');
+  const openBtn = box.querySelector('#owner-material-open');
+  const versionSel = box.querySelector('#owner-material-version');
+  const itemsByKey = new Map();
+  let currentRel = '';
+
+  const setOpen = (rel) => {
+    currentRel = rel || '';
+    openBtn.disabled = !currentRel;
+    openBtn.title = currentRel ? '用系统默认程序打开原文件' : '当前材料没有可打开的文件';
+  };
+  setOpen('');
+  openBtn.addEventListener('click', async () => {
+    if (!currentRel) return;
+    try { await window.workbench.filesOpen({ projectId: project.id, rel: currentRel }); }
+    catch (e) { status.textContent = '打开失败：' + humanError(e.message); }
+  });
+
+  const showProposal = (item) => {
+    setOpen('');
+    versionSel.hidden = true;
+    pathEl.textContent = `提案 ${item.id}（团队状态目录 · 只读摘要）`;
+    const reviews = (item.reviews || []).map((row) => `${roleById(row.role).name}：${row.verdict || '—'}${row.comment ? ' · ' + row.comment : ''}`).join('\n') || '（暂无评审）';
+    const files = (item.files || []).map((file) => file.target || file).filter(Boolean).join('\n') || '（无文件）';
+    preview.textContent = [
+      `${item.id} · ${item.title || ''}`,
+      `作者：${item.author || '—'} ｜ 状态：${item.status || '—'} ｜ 风险：${item.risk || '—'}`,
+      item.at ? `创建：${ownerMaterialTime(item.at)}` : '',
+      '', '涉及文件：', files, '', '理由：', item.rationale || '（未写）', '', '评审：', reviews
+    ].filter((line) => line !== null).join('\n');
+  };
+
+  const showCommit = (item) => {
+    setOpen('');
+    versionSel.hidden = true;
+    pathEl.textContent = `提交 ${item.id}${item.at ? ' · ' + ownerMaterialTime(item.at) : ''}`;
+    const files = (item.files || []).join('\n') || '（未记录文件清单）';
+    preview.textContent = [
+      `${item.id} · ${item.title || '（未写标题）'}`,
+      `作者：${item.author || '—'} ｜ 时间：${ownerMaterialTime(item.at) || '—'}`,
+      item.note ? `备注：${item.note}` : '',
+      '', '提交文件：', files
+    ].filter(Boolean).join('\n');
+  };
+
+  const showFile = async (rel, label) => {
+    setOpen(rel);
+    pathEl.textContent = label || rel;
+    preview.textContent = '读取中…';
+    try {
+      const r = await window.workbench.ownerMaterial({ projectId: project.id, rel });
+      if (!r || r.ok === false) {
+        const code = (r && r.code) || 'MATERIAL_READ_FAILED';
+        preview.textContent = `不可读（${code}${r && r.message ? '：' + r.message : ''}）\n\n可以点右上角「打开文件」用系统程序查看；其余材料照常可读。`;
+        return;
+      }
+      const text = String(r.text || '');
+      preview.textContent = text || '（空文件）';
+    } catch (e) {
+      preview.textContent = '不可读（' + humanError(e.message) + '）\n\n可以点右上角「打开文件」用系统程序查看。';
+    }
+  };
+
+  const selectItem = (button, item) => {
+    list.querySelectorAll('.owner-material').forEach((el) => el.classList.toggle('active', el === button));
+    box._ownerItem = item;
+    if (item.kind === 'proposal') { showProposal(item); return; }
+    if (item.kind === 'commit') { showCommit(item); return; }
+    const versions = Array.isArray(item.versions) ? item.versions : [];
+    if (versions.length > 1) {
+      versionSel.hidden = false;
+      versionSel.innerHTML = versions.map((row) => `<option value="${esc(row.rel)}"${row.rel === item.rel ? ' selected' : ''}>${row.version ? 'v' + row.version : row.rel} · ${fmtSize(row.size || 0)}</option>`).join('');
+    } else {
+      versionSel.hidden = true;
+      versionSel.innerHTML = '';
+    }
+    showFile(item.rel, item.rel);
+  };
+  versionSel.addEventListener('change', () => {
+    const item = box._ownerItem;
+    if (!item || !item.kind || item.kind !== 'file') return;
+    const rel = versionSel.value;
+    const picked = (item.versions || []).find((row) => row.rel === rel);
+    if (picked) showFile(rel, `${rel} · ${picked.version ? 'v' + picked.version : ''}`);
+  });
+
+  const renderGroup = (group) => {
+    const head = `<div class="owner-material-group" data-group="${esc(group.key)}">
+      <div class="owner-material-group-head"><b>${esc(group.label)}</b><span class="${group.missing ? 'is-missing' : ''}">${group.missing ? '未记录' : group.items.length + ' 项'}</span></div>`;
+    if (group.missing) return `${head}<div class="owner-material-missing">${esc(group.reason || '未记录')}</div></div>`;
+    const rows = group.items.map((item, idx) => {
+      itemsByKey.set(`${group.key}:${idx}`, item);
+      const isProposal = item.kind === 'proposal';
+      const isCommit = item.kind === 'commit';
+      const name = isProposal || isCommit ? (item.title || item.id) : item.name;
+      const meta = [
+        item.size ? fmtSize(item.size) : '',
+        ownerMaterialTime(item.mtime || item.at),
+        ownerMaterialVersionLabel(item),
+        isProposal ? item.status : '',
+        isCommit ? item.author : ''
+      ].filter(Boolean).join(' · ');
+      return `<button type="button" class="owner-material" role="treeitem" data-owner-item="${esc(group.key + ':' + idx)}" title="${esc(item.rel || item.id || '')}">
+        <span class="owner-material-name">${esc(name)}</span>
+        <span class="owner-material-meta">${esc(meta || '—')}</span>
+      </button>`;
+    }).join('');
+    return `${head}${rows}</div>`;
+  };
+
+  try {
+    const data = await window.workbench.ownerMaterials({ projectId: project.id, requirementId: req && req.id });
+    if (!data || data.ok === false) throw new Error((data && (data.message || data.code)) || '材料清单读取失败');
+    const groups = Array.isArray(data.groups) ? data.groups : [];
+    list.innerHTML = groups.map(renderGroup).join('') || '<div class="owner-materials-empty">未记录：没有可展示的材料。</div>';
+    const missingCount = groups.filter((group) => group.missing).length;
+    const trq = req && req.trq && typeof req.trq === 'object' ? req.trq : null;
+    const trqText = trq
+      ? ` ｜ TR-Q：${trq.verdict || '未记录'}${trq.by ? ' · ' + trq.by : ''}${trq.at ? ' · ' + fmtTime(trq.at) : ''}`
+      : '';
+    status.textContent = `五类材料 · 缺失 ${missingCount} 类（缺失不补造）${trqText}`;
+    const firstButton = list.querySelector('.owner-material');
+    if (firstButton) {
+      const item = itemsByKey.get(firstButton.dataset.ownerItem);
+      if (item) selectItem(firstButton, item);
+    }
+    list.addEventListener('click', (event) => {
+      const button = event.target instanceof Element ? event.target.closest('[data-owner-item]') : null;
+      if (!button) return;
+      const item = itemsByKey.get(button.dataset.ownerItem);
+      if (!item) return;
+      selectItem(button, item);
+    });
+  } catch (e) {
+    status.textContent = '材料清单读取失败：' + humanError(e.message);
+    list.innerHTML = `<div class="owner-material-missing">不可读（${esc(humanError(e.message))}）：决定区仍可提交；不会补造材料。</div>`;
+  }
 }
 
 async function legacyActionModal(action, reqId) {
@@ -6527,6 +7965,15 @@ async function legacyActionModal(action, reqId) {
     });
     dlg.foot.append(cancel, go);
     setTimeout(() => dlg.foot.querySelector('.primary')?.focus(), 30);
+    if (action === 'owner-review' && current) {
+      const box = document.createElement('div');
+      box.className = 'owner-decisions-holder';
+      box.innerHTML = ownerDecisionsMarkup(current);
+      const errBox = dlg.body.querySelector('.modal-error');
+      if (errBox) dlg.body.insertBefore(box, errBox);
+      else dlg.body.appendChild(box);
+      enhanceOwnerReviewModal(dlg, activeProject(), current);
+    }
   };
 
   const showOwnerSuccess = (reqFor, form, result) => {
@@ -6542,6 +7989,13 @@ async function legacyActionModal(action, reqId) {
     const requirement = reqs.find((row) => row.id === form.req) || selectedReq;
     const liveGate = legacyActionCommandGate(action);
     if (!liveGate.ok) { error(liveGate.reason); return false; }
+    // 闸门判定来自 team.mjs（gate:check）；壳层只负责展示与阻止明显未满足的动作。
+    const processGate = gateForAction(action);
+    if (processGate && processGate.ok === false) {
+      renderGateRejectionInto(dlg.body, processGate, { attempted: action, source: 'team.mjs 闸门判定（gate:check）' });
+      error(gateDeniedText(processGate));
+      return false;
+    }
     if (action === 'iterate') {
       const iterateGuard = legacyIterateGuard();
       if (!iterateGuard.ok) { error(iterateGuard.reason); return false; }
@@ -6709,13 +8163,24 @@ async function legacyActionModal(action, reqId) {
       } else {
         toast(`已执行：${titles[action]}（后端返回 ${result.code || 'OK'}）${actorNote}`, 'ok');
       }
+      // 状态变了：闸门判定与审计立即重读，按钮态随之恢复/更新（不等 5 秒轮询）。
+      loadGateCheck({ force: true });
+      loadGateAudit({ force: true });
       return true;
     } catch (e) {
       legacyRecordAction(action, titles[action], null, e);
       renderLegacyCapabilities();
+      // 动作后无论成败都重新拉一次判定与审计：成功要恢复按钮，失败要留下闸门记录。
+      loadGateCheck({ force: true });
+      loadGateAudit({ force: true });
       let message = humanError(e.message);
       if (reqFor.origin === 'legacy-doc' && String(e.code || '').includes('REQUIREMENT_NOT_FOUND')) {
         message += '；该旧需求只有正文，后端尚未补建工作流行。界面不会把这次失败显示成成功。';
+      }
+      const gateView = gateErrorView(e, { attempted: action });
+      if (gateView) {
+        renderGateRejectionInto(dlg.body, gateView);
+        message = `${gateView.code}：${gateView.title}${gateView.next ? '；下一步：' + gateView.next : ''}`;
       }
       error(message);
       return false;
@@ -6727,24 +8192,31 @@ async function legacyActionModal(action, reqId) {
 }
 
 function legacyReqButton(action, label, req, role, title, gateRole) {
-  // 按钮只按“命令是否存在”禁用；角色未 boot 不再锁按钮，执行前会自动补一次真实 boot，
+  // 按钮只按“命令是否存在 + 后端闸门判定”禁用；角色未 boot 不再锁按钮，执行前会自动补一次真实 boot，
   // 后端仍会校验该角色的阅读证据（gateRole 是后端真正校验的角色）。
   const checkRole = gateRole === undefined ? role : gateRole;
   const bootReady = !checkRole || legacyRoleReady(checkRole);
   const commandGate = legacyActionCommandGate(action);
-  const ready = commandGate.ok;
+  const processGate = gateForAction(action);
+  const gateDenied = Boolean(processGate && processGate.ok === false);
+  const ready = commandGate.ok && !gateDenied;
   const autoBoot = checkRole && !bootReady;
-  const why = !commandGate.ok
-    ? commandGate.reason
-    : (autoBoot
-      ? `${roleById(checkRole).name} 未 boot/未读全；点击不会禁用，执行会先自动 boot，再由后端校验（${title || action}）`
-      : (title || '调用真实 workflow IPC'));
-  const note = !commandGate.ok
-    ? ((commandGate.missing || []).length
-      ? `<span class="legacy-req-noaction" title="${esc(commandGate.reason)}">命令缺失：${esc(commandGate.missing.join('、'))}</span>`
-      : `<span class="legacy-req-noaction" title="${esc(commandGate.reason)}">旧命令未核验：${esc((commandGate.unknown || []).join('、') || '能力待核验')}</span>`)
-    : (autoBoot ? `<span class="legacy-req-autoboot" title="${esc(why)}">未 boot · 点击自动 boot</span>` : '');
-  return `<button type="button" class="ghost small" data-legacy-req-action="${esc(action)}" data-req-id="${esc(req.id)}" ${ready ? '' : 'disabled'} title="${esc(why)}">${esc(label)}</button>${note}`;
+  const why = gateDenied
+    ? gateDeniedText(processGate)
+    : (!commandGate.ok
+      ? commandGate.reason
+      : (autoBoot
+        ? `${roleById(checkRole).name} 未 boot/未读全；点击不会禁用，执行会先自动 boot，再由后端校验（${title || action}）`
+        : (title || '调用真实 workflow IPC')));
+  const note = gateDenied
+    ? `<span class="legacy-req-gate" title="${esc(why)}">闸门 ${esc(processGate.gate || processGate.code || '拒绝')}：${esc(processGate.title || processGate.code || '未满足')}</span>`
+    : (!commandGate.ok
+      ? ((commandGate.missing || []).length
+        ? `<span class="legacy-req-noaction" title="${esc(commandGate.reason)}">命令缺失：${esc(commandGate.missing.join('、'))}</span>`
+        : `<span class="legacy-req-noaction" title="${esc(commandGate.reason)}">旧命令未核验：${esc((commandGate.unknown || []).join('、') || '能力待核验')}</span>`)
+      : (autoBoot ? `<span class="legacy-req-autoboot" title="${esc(why)}">未 boot · 点击自动 boot</span>` : ''));
+  const gateBlocked = gateDenied && commandGate.ok;
+  return `<button type="button" class="ghost small${gateBlocked ? ' gate-blocked' : ''}" data-legacy-req-action="${esc(action)}" data-req-id="${esc(req.id)}" ${ready || gateBlocked ? '' : 'disabled'}${gateBlocked ? ' data-gate-blocked="1" data-gate-action="' + esc(action) + '" aria-disabled="true"' : ''} title="${esc(why)}">${esc(label)}</button>${note}`;
 }
 
 function legacyReqActions(req) {
@@ -6964,14 +8436,16 @@ function renderLegacyTeamGate() {
   const rows = teamRoles(p).map((role) => {
     const card = legacyHas(legacyRoleCardRel(role));
     const index = legacyHas(legacyRoleIndexRel(role));
+    // B-4baa 顺手修复：v42 三态改造在这里漏了 cardState，团队台整块渲染会报 “cardState is not defined”。
+    const cardState = legacyRoleCardState(role);
     const session = sessions[role.id];
     const boot = legacyBootFor(role.id);
     const bootCtl = legacyBootControl(role.id);
     return `<div class="legacy-team-row">
       <span class="legacy-team-dot" style="--role-color:${esc(role.color)}"></span>
       <b>${esc(role.name)}</b>
-      <code>${esc(role.dir)}/</code>
-      <span class="${card ? 'ok' : 'bad'}">角色卡 ${card ? '有' : '缺'}</span>
+      <code>${esc(legacyRoleDirName(role))}/</code>
+      <span class="${cardState.key === 'ok' ? 'ok' : (cardState.key === 'unmapped' ? 'warn' : 'bad')}" title="${esc(cardState.title)}">角色卡 ${esc(cardState.label)}</span>
       <span class="${index ? 'ok' : 'bad'}">索引 ${index ? '有' : '缺'}</span>
       <span class="${session ? 'ok' : 'warn'}">${session ? '会话已映射' : '无会话'}</span>
       <span class="${boot.ready ? 'ok' : (boot.expired || boot.roundMismatch ? 'bad' : (boot.booted ? 'warn' : 'bad'))}" title="${esc(boot.missing.join('、') || boot.at || '')}">${esc(boot.label)}</span>
@@ -7154,24 +8628,8 @@ function wsFactsMarkup(p) {
       title: curName === mine || !curName ? '旧协议「当前工作区」指针' : `DSH 当前指向「${curName}」，不是本项目「${mine}」`
     }
   ];
-  if (live && Array.isArray(live.extras) && live.extras.length) {
-    facts.push({
-      k: '未映射会话',
-      v: `${live.extras.length} 个会话不计入当前团队角色`,
-      cls: 'warn',
-      mono: false,
-      title: live.extras.map((item) => item.title || item.sessionId).join('、')
-    });
-  }
-  if (live && Array.isArray(live.duplicates) && live.duplicates.length) {
-    facts.push({
-      k: '重复角色会话',
-      v: `${live.duplicates.length} 个角色有重复会话`,
-      cls: 'bad',
-      mono: false,
-      title: live.duplicates.map((item) => `${roleById(item.role).name}：${(item.sessionIds || []).join('、')}`).join('\n')
-    });
-  }
+  // e29f F-4：额外会话（含同一角色多会话）只在侧栏统计那处显示一个数字；
+  // 团队台这张事实表不再另列"未映射会话/重复角色会话"，否则同一时刻会出现两个不同的数。
   return facts.map((f) => `<div class="ws-fact"><span class="k">${esc(f.k)}</span><span class="v ${f.cls}${f.mono ? ' mono' : ''}" title="${esc(f.title || '')}">${esc(f.v)}</span></div>`).join('');
 }
 
@@ -7271,26 +8729,35 @@ function renderBoard() {
 
 const LEGACY_FLOW_STEPS = {
   requirement: { label: '需求', owner: '需求分析师', gate: '先读铁律 → 项目信息 → 角色卡 → 其他人文档；未 boot 不写需求' },
-  product: { label: '产品评审', owner: '产品设计师', gate: '需求回执到齐后评审；通过才进入 Owner 闸门' },
-  owner: { label: 'Owner', owner: 'Owner', gate: '产品评审通过后，Owner 明确通过/跳过/打回；跳过也要记录，PM 派单只认需求级 ownerReview' },
-  dispatch: { label: 'PM 派单', owner: '项目经理', gate: 'Owner 明确选择后派单；一次只派一个，等回执' },
+  product: { label: '产品评审', owner: '产品设计师', gate: '需求回执到齐后评审；通过之后才进入可测性评审' },
+  trq: { label: '可测性评审', owner: '测试人员', gate: 'G2.5：需求评审 approve 后、Owner 之前；只评 AC 可判定性，结论“可测”才开 Owner 门；不写测试计划' },
+  owner: { label: 'Owner', owner: 'Owner', gate: '需求评审通过 + TR-Q 可测后，Owner 明确通过/跳过/打回；跳过也要记录，PM 派单只认需求级 ownerReview.decisions' },
+  dispatch: { label: 'PM 派单', owner: '项目经理', gate: 'Owner 落账 approved/skipped 且 designs/TR 通过后派单；一次只派一个，等回执' },
   devreview: { label: '开发互审', owner: '程序员 A/B', gate: 'proposal 互审 + 签字；作者不能审自己' },
   test: { label: '测试', owner: '测试人员', gate: '开发回执 + commit；测试独立验证' },
   accept: { label: 'Owner 验收', owner: 'Owner', gate: '测试报告 + 回执；验收后才收口/下一轮' },
   closure: { label: '迭代 / 终止', owner: 'Owner / PM', gate: '验收后才收口：迭代把下一轮需求转正；终止冻结工作流' }
 };
 const LEGACY_FLOW_ROWS = [
-  ['requirement', 'product', 'owner', 'dispatch'],
-  ['devreview', 'test', 'accept', 'closure']
+  ['requirement', 'product', 'trq'],
+  ['owner', 'dispatch', 'devreview'],
+  ['test', 'accept', 'closure']
 ];
 const LEGACY_FLOW_EDGES = {
   'requirement>product': { pending: '待需求回执', active: '需求评审中' },
-  'product>owner': { pending: '待产品评审', active: '产品已通过 · 待 Owner' },
-  'owner>dispatch': { pending: '待 Owner', active: '等待 Owner 决定' },
+  'product>trq': { pending: '待可测性评审', active: '等待测试人员出 TR-Q' },
+  'trq>owner': { pending: '待 TR-Q 可测', active: '可测 · 待 Owner' },
+  'owner>dispatch': { pending: '待 Owner 落账', active: '等待 Owner 决定' },
   'dispatch>devreview': { pending: '待派发', active: '等待派单回执' },
   'devreview>test': { pending: '待互审', active: '互审中' },
   'test>accept': { pending: '待测试', active: '等待测试报告' },
   'accept>closure': { pending: '待验收', active: '验收后选择迭代/终止' }
+};
+
+// 流程图节点到阶段的位置（TR-Q 与 Owner 同在 owner_review，不新增 phase）。
+const FLOW_STEP_RANK = {
+  requirement: 0, product: 1, trq: 2, owner: 2, dispatch: 3,
+  devreview: 4, test: 5, accept: 6, closure: 7
 };
 
 function legacyFlowEvidence(project) {
@@ -7337,18 +8804,102 @@ const LEGACY_PHASE_INDEX = {
   terminated: 7
 };
 
+// 阶段推导顺序（比展示用的八步更细）：只用于“只前进不回退”的单调判定。
+const FLOW_PHASE_RANK = {
+  idle: 0, requirement: 1, requirement_review: 2, owner_review: 3, tech_review: 4,
+  dispatch: 5, dev: 6, dev_done: 7, dev_review: 8, test: 9, test_done: 10,
+  owner_accept: 11, accepted: 12, iteration: 13, terminated: 14
+};
+const FLOW_PHASE_LABEL = {
+  idle: '未开始', requirement: '需求', requirement_review: '需求评审', product_review: '需求评审',
+  owner_review: 'Owner 闸门', tech_review: '技术评审', dispatch: '待派单', dev: '开发中',
+  dev_done: '开发完成', dev_review: '互审', test: '测试中', test_done: '测试完成',
+  owner_accept: '待 Owner 验收', accepted: '已验收', iteration: '下一轮', terminated: '已终止'
+};
+
+/** 后端 workflow:state 的 derivation 是唯一推导结果；缺失时按需求/任务证据就地只读推导。 */
+function flowDerivationFrom(wf) {
+  const d = (wf && wf.derivation) || null;
+  const reqs = wf && Array.isArray(wf.requirements) ? wf.requirements : [];
+  const tasks = wf && Array.isArray(wf.tasks) ? wf.tasks : [];
+  const sources = d && Array.isArray(d.sources) ? d.sources.slice(0, 6) : [];
+  let phase = String((d && d.phase) || (wf && wf.phase) || legacyPhaseFromRequirements(reqs, wf && wf.round) || 'idle');
+  let rollback = Boolean(d && d.rollback);
+  if (!d) {
+    const statuses = new Set(reqs.map((row) => String((row && row.status) || '')));
+    const done = tasks.filter((task) => String((task && task.status) || '') === 'done');
+    if (reqs.length) sources.push(`需求 ${reqs.length} 条`);
+    if (statuses.has('test_done')) sources.push('需求 status=test_done');
+    if (tasks.length) sources.push(`任务 done ${done.length}/${tasks.length}`);
+    if (statuses.has('rejected')) { rollback = true; sources.push('需求被评审驳回（显式回退）'); }
+    if (!sources.length) sources.push('无可用证据，按工作流快照');
+  }
+  const historyPhase = d && d.historyPhase
+    ? String(d.historyPhase)
+    : (wf && wf.workflow && wf.workflow.phase ? String(wf.workflow.phase) : null);
+  phase = legacyDisplayPhase(phase, reqs);
+  return {
+    phase,
+    rank: FLOW_PHASE_RANK[phase] !== undefined ? FLOW_PHASE_RANK[phase] : 0,
+    sources,
+    historyPhase,
+    historyIgnored: Boolean(historyPhase && historyPhase !== phase),
+    rollback,
+    at: Date.now()
+  };
+}
+
+/** 同项目同轮次内只前进不回退；合法回退只认显式事件（reject / Owner 打回 / iterate / terminate）。 */
+function mergeFlowDerivation(prev, next, projectId, round) {
+  const base = { ...next, projectId, round };
+  if (!prev || prev.projectId !== projectId || prev.round !== round) return base;
+  if (next.rollback) return base;
+  if (next.rank >= prev.rank) return base;
+  return { ...prev, sources: next.sources, historyPhase: next.historyPhase, historyIgnored: next.historyIgnored, at: Date.now(), heldBack: true };
+}
+
+function flowDerivationMarkup() {
+  const p = activeProject();
+  const d = legacyUi.flowDerive;
+  if (!p || !d || d.projectId !== p.id) return '';
+  const label = FLOW_PHASE_LABEL[d.phase] || d.phase;
+  const hist = d.historyPhase
+    ? ` ｜ 历史 phase：<code>${esc(d.historyPhase)}</code>（仅提示，不参与${d.historyIgnored ? '，已按证据忽略' : ''}）`
+    : ' ｜ 工作流.json 无 phase 字段（不是真相来源）';
+  const held = d.heldBack ? ' ｜ 本轮证据暂未前进，保持已推导阶段' : '';
+  return `<span class="flow-derive-dot" aria-hidden="true"></span>推导阶段 <b>${esc(label)}</b>（<code>${esc(d.phase)}</code>） ｜ 推导来源：${esc(d.sources.join('；') || '无可用证据')}${hist}${held}`;
+}
+
+function renderFlowDerivation() {
+  const markup = flowDerivationMarkup();
+  for (const id of ['flow-derive', 'flow-mini-derive']) {
+    const el = $('#' + id);
+    if (!el) continue;
+    el.innerHTML = markup;
+    el.hidden = !markup;
+  }
+}
+
+
 function legacyFlowStatuses(project) {
   const evidence = legacyFlowEvidence(project);
   const phase = evidence.phase;
   const idx = LEGACY_PHASE_INDEX[phase] !== undefined ? LEGACY_PHASE_INDEX[phase] : 0;
-  const total = Object.keys(LEGACY_FLOW_STEPS).length;
-  const statuses = [];
-  for (let i = 0; i < total; i += 1) {
-    statuses.push(i < idx ? 'done' : (i === idx ? 'current' : 'pending'));
+  const trq = legacyTrqView(evidence.requirement);
+  const statuses = {};
+  for (const key of Object.keys(LEGACY_FLOW_STEPS)) {
+    const rank = FLOW_STEP_RANK[key] !== undefined ? FLOW_STEP_RANK[key] : 0;
+    statuses[key] = rank < idx ? 'done' : (rank === idx ? 'current' : 'pending');
   }
-  // 已验收/下一轮/终止：阶段索引 7 = 收口；验收节点由 i<idx 自动算完成。
-  // 后端 phase 是全局阶段；如果阶段停在需求但已有需求被验收，仍按 phase 展示，不擅自改真。
-  return { statuses, idx, evidence };
+  // TR-Q 挂在 owner_review 里：有“可测”记录才算完成；不可测当前卡住；
+  // 已经越过 Owner 却没有记录，标 missing（历史缺口），不把“没记录”显示成“已完成”。
+  if (trq.state === 'testable') statuses.trq = idx >= 2 ? 'done' : 'pending';
+  else if (trq.state === 'not_testable') statuses.trq = 'current';
+  else if (trq.state === 'optional') statuses.trq = idx >= 2 ? 'done' : 'pending';
+  else if (idx >= 3) statuses.trq = 'missing';
+  else if (idx === 2) statuses.trq = 'current';
+  else statuses.trq = 'pending';
+  return { statuses, idx, evidence, trq };
 }
 
 function legacyFlowStepText(project, key, idx, status, evidence) {
@@ -7356,9 +8907,11 @@ function legacyFlowStepText(project, key, idx, status, evidence) {
   const reqOwner = evidence.requirementOwner || {};
   const req = evidence.requirement || null;
   const phase = evidence.phase;
+  const trq = key === 'trq' ? legacyTrqView(req) : null;
   if (phase === 'terminated') return key === 'closure' ? '已终止' : '已停止';
   if (status === 'done') {
     if (key === 'product') return '评审完成';
+    if (key === 'trq') return trq && trq.state === 'testable' ? `可测${trq.version ? ' · v' + trq.version : ''}` : '已过 Owner 门（TR-Q 未记录）';
     if (key === 'owner') return 'Owner 已决定';
     if (key === 'dispatch') return '已派发';
     if (key === 'devreview') return `${terms.devReview}完成`;
@@ -7373,6 +8926,13 @@ function legacyFlowStepText(project, key, idx, status, evidence) {
     if (req && req.voteRejection && String(req.status) === 'rejected') return '投票驳回 · 可迭代';
     if (req && String(req.status) === 'rejected') return `${terms.review}已打回`;
     return `当前 · ${terms.review}`;
+  }
+  if (key === 'trq') {
+    if (trq && trq.state === 'testable') return `可测${trq.version ? ' · v' + trq.version : ''}`;
+    if (trq && trq.state === 'not_testable') return `不可测${trq.missing.length ? ' · 缺 ' + trq.missing.length + ' 项' : ''}`;
+    if (trq && trq.state === 'optional') return 'P1 未做（不阻门）';
+    if (status === 'missing') return '缺 TR-Q（历史未记录）';
+    return trq && trq.file ? '缺记录（文件已存在）' : '缺 TR-Q（未记录）';
   }
   if (key === 'owner') {
     if (reqOwner.status === 'rejected') return 'Owner 已打回需求';
@@ -7401,8 +8961,164 @@ function legacyFlowStepText(project, key, idx, status, evidence) {
   return '当前';
 }
 
+/* ── 并行泳道（R-cbbd）───────────────────────────────────────────────
+ * 纯逻辑（阶段推导/汇总/冲突）在 flow-lanes.js，无 DOM 依赖、可单测；
+ * 这里只负责 DOM 与“只重绘变化泳道”。
+ */
+const FLOW_LANES = window.FlowLanes;
+const FLOW_LANE_BUCKETS = FLOW_LANES.BUCKETS;
+const FLOW_LANE_TRACK = FLOW_LANES.TRACK;
+const FLOW_LANE_STAGE_OF_PHASE = FLOW_LANES.STAGE_OF_PHASE;
+
+function flowLaneInnerMarkup(lane, conflicts) {
+  return FLOW_LANES.innerMarkup(lane, conflicts);
+}
+
+function flowLaneMarkup(lane, conflicts) {
+  return FLOW_LANES.markup(lane, conflicts);
+}
+
+const flowLaneUi = { keys: new Map(), summary: '', source: null, panelKey: '' };
+
+/* R-db98：节点式全量状态图（替代泳道多列，最小可用版）。
+ * 同一批 lanes + 工作流行 → flow-graph.js 纯字符串渲染；两处容器（团队台/右下角浮窗）共用。
+ * 节点图不可用（脚本没加载）时回落到原泳道渲染，保证旧回归不炸。 */
+const flowGraphUi = { key: '', panelKey: '' };
+
+function renderFlowGraphBoxes(project, lanes, summary) {
+  const graph = window.FlowGraph;
+  if (!graph) return false;
+  const wf = legacyWorkflow() || {};
+  const requirements = Array.isArray(wf.requirements) ? wf.requirements : [];
+  flowGraphUi.last = { lanes, summary, wf };
+  const key = `${project.id}|${lanes.map((lane) => `${lane.id}:${lane.phase}:${lane.done}/${lane.total}`).join('|')}|${requirements.length}`;
+  const box = $('#flow-lanes');
+  if (box && flowGraphUi.key !== key) {
+    box.innerHTML = graph.markup(lanes, wf, summary);
+    box.setAttribute('data-node-count', String(graph.NODES.length));
+    box.setAttribute('data-lane-count', String(lanes.length));
+    box.setAttribute('data-lane-summary', summary.text);
+    flowGraphUi.key = key;
+  }
+  const panelBox = $('#flow-lanes-panel');
+  const panelOpen = !($('#flow-panel') && $('#flow-panel').hidden);
+  if (panelBox) {
+    // R-db98 v2：流程面板的节点图统一走 #flow-mini（T-090012 已定），这里清空旧容器避免同屏两份图。
+    if (panelBox.innerHTML || flowGraphUi.panelKey) {
+      panelBox.innerHTML = '';
+      panelBox.setAttribute('data-node-count', '0');
+      panelBox.setAttribute('data-lane-count', '0');
+      flowGraphUi.panelKey = '';
+    }
+  }
+  const mini = $('#flow-lanes-mini');
+  if (mini) mini.textContent = `${summary.text}${lanes.length ? ` ｜ ${lanes.length} 条需求` : ''}`;
+  return true;
+}
+
+/** 右侧【流程】面板内的节点图块：用最近一次 lanes 数据渲染；无数据/无脚本时返回空串。 */
+function flowGraphBoardMarkup() {
+  const graph = window.FlowGraph;
+  const last = flowGraphUi.last;
+  if (!graph || !last) return '';
+  return `<section class="flow-board-graph" data-flow-board-graph="1">${graph.markup(last.lanes, last.wf, last.summary)}</section>`;
+}
+
+/** 渲染泳道：集合变化才重建容器；否则只替换变化泳道的 .flow-lane-inner（未变化泳道零 DOM 操作）。 */
+function renderFlowLanes(project) {
+  const box = $('#flow-lanes');
+  const mini = $('#flow-lanes-mini');
+  if (!box) return;
+  if (!project) {
+    box.innerHTML = '';
+    box.setAttribute('data-lane-count', '0');
+    box.setAttribute('data-lane-summary', '');
+    flowLaneUi.keys = new Map();
+    flowLaneUi.summary = '';
+    flowLaneUi.source = null;
+    if (mini) mini.textContent = '';
+    // B-2634：浮窗泳道清空（无项目时不留旧泳道）。
+    const panelBoxEmpty = $('#flow-lanes-panel');
+    if (panelBoxEmpty) {
+      panelBoxEmpty.innerHTML = '';
+      panelBoxEmpty.setAttribute('data-lane-count', '0');
+      panelBoxEmpty.setAttribute('data-lane-summary', '');
+    }
+    flowLaneUi.panelKey = '';
+    flowGraphUi.key = '';
+    flowGraphUi.panelKey = '';
+    flowGraphUi.last = null;
+    return;
+  }
+  const lanes = FLOW_LANES.rows(legacyWorkflow() || {}, project, (legacyUi.flowDerive && legacyUi.flowDerive.phase) || '');
+  const conflicts = FLOW_LANES.conflicts(lanes);
+  const summary = FLOW_LANES.summary(lanes);
+  // R-db98：节点式全量状态图优先；脚本缺失时 renderFlowGraphBoxes 返回 false，继续走旧泳道。
+  if (renderFlowGraphBoxes(project, lanes, summary)) return;
+  const ids = lanes.map((lane) => lane.id);
+  const existing = Array.from(box.querySelectorAll('.flow-lane')).map((el) => el.getAttribute('data-lane-id'));
+  const sameSet = flowLaneUi.source === project.id
+    && existing.length === ids.length
+    && ids.every((id, i) => id === existing[i]);
+  if (!sameSet) {
+    box.innerHTML = FLOW_LANES.containerMarkup(lanes, summary, conflicts);
+    flowLaneUi.keys = new Map(lanes.map((lane) => [lane.id, lane.key]));
+    flowLaneUi.summary = summary.text;
+    flowLaneUi.source = project.id;
+  } else {
+    for (const lane of lanes) {
+      const el = box.querySelector(`.flow-lane[data-lane-id="${CSS.escape(lane.id)}"]`);
+      if (!el) continue;
+      const conflict = Object.values(conflicts).some((laneIds) => laneIds.includes(lane.id));
+      el.classList.toggle('conflict', conflict);
+      if (flowLaneUi.keys.get(lane.id) === lane.key) continue; // 签名未变 → 不碰 DOM
+      const inner = el.querySelector('.flow-lane-inner');
+      if (inner) inner.innerHTML = flowLaneInnerMarkup(lane, conflicts);
+      el.setAttribute('data-lane-key', lane.key);
+      el.setAttribute('data-lane-phase', lane.phase);
+      el.setAttribute('data-lane-bucket', lane.bucket);
+      const badge = el.querySelector('.flow-lane-badge');
+      if (badge) badge.textContent = (FLOW_LANE_BUCKETS.find((b) => b.key === lane.bucket) || {}).label || '未映射';
+      flowLaneUi.keys.set(lane.id, lane.key);
+    }
+    const sumEl = box.querySelector('[data-flow-lanes-summary]');
+    if (sumEl && flowLaneUi.summary !== summary.text) {
+      sumEl.textContent = summary.text;
+      flowLaneUi.summary = summary.text;
+    }
+    const inactiveEl = box.querySelector('[data-flow-lanes-inactive]');
+    if (inactiveEl) inactiveEl.textContent = summary.inactive;
+  }
+  box.setAttribute('data-lane-count', String(lanes.length));
+  box.setAttribute('data-lane-summary', summary.text);
+  if (mini) {
+    mini.textContent = `${summary.text}${summary.inactive ? ' ｜ ' + summary.inactive : ''}${lanes.length ? ` ｜ ${lanes.length} 条泳道` : ''}`;
+  }
+  // B-2634：右下角浮窗接同一批泳道（flow-lanes 只读展示）。浮窗关着只清缓存不建 DOM，省渲染成本。
+  const panelBox = $('#flow-lanes-panel');
+  if (panelBox) {
+    const panelOpen = !($('#flow-panel') && $('#flow-panel').hidden);
+    if (!panelOpen) {
+      if (flowLaneUi.panelKey) {
+        panelBox.innerHTML = '';
+        panelBox.setAttribute('data-lane-count', '0');
+        panelBox.setAttribute('data-lane-summary', '');
+        flowLaneUi.panelKey = '';
+      }
+    } else {
+      const panelKey = `${project.id}|${lanes.length}|${lanes.map((lane) => lane.id + ':' + lane.key).join('|')}`;
+      if (flowLaneUi.panelKey !== panelKey) {
+        panelBox.innerHTML = FLOW_LANES.containerMarkup(lanes, summary, conflicts);
+        panelBox.setAttribute('data-lane-count', String(lanes.length));
+        panelBox.setAttribute('data-lane-summary', summary.text);
+        flowLaneUi.panelKey = panelKey;
+      }
+    }
+  }
+}
+
 function flowMarkup(p) {
-  const { statuses, evidence } = legacyFlowStatuses(p);
+  const { statuses, evidence, trq } = legacyFlowStatuses(p);
   const quick = isQuickTeam(p);
   const terms = modeTerms(p);
   const copy = (text) => (quick ? localizeFastCopy(text) : String(text ?? ''));
@@ -7413,20 +9129,25 @@ function flowMarkup(p) {
     row.forEach((key, col) => {
       const step = LEGACY_FLOW_STEPS[key];
       const i = Object.keys(LEGACY_FLOW_STEPS).indexOf(key);
-      const status = statuses[i];
+      const status = statuses[key];
       const stepLabel = quick && key === 'product' ? terms.review
         : (quick && key === 'dispatch' && evidence.phase === 'tech_review' ? 'TR'
           : (quick && key === 'devreview' ? terms.devReview : step.label));
       const stepOwner = quick && key === 'product' ? `${terms.reviewer} / PM`
         : (quick && key === 'dispatch' && evidence.phase === 'tech_review' ? '程序员A'
           : (quick && key === 'devreview' ? '测试人员' : step.owner));
-      const stepGate = quick && key === 'product' ? `${terms.review}；通过才进入 Owner 闸门`
+      const trqDetail = key === 'trq'
+        ? `；TR-Q：${trq.label}${trq.by ? ' · ' + trq.by : ''}${trq.at ? ' · ' + fmtTime(trq.at) : ''}${trq.file ? ' · ' + trq.file : ''}${trq.detail ? ' · ' + trq.detail : ''}`
+        : '';
+      const stepGate = quick && key === 'product' ? `${terms.review}；通过才进入可测性评审`
         : (quick && key === 'dispatch' && evidence.phase === 'tech_review' ? `Owner 之后由程序员A做${terms.techReview}；通过才 ready 可派单`
-          : (quick && key === 'devreview' ? '测试人员独立复核；PM 在签字 apply 时复核；不是程序员A自审' : step.gate));
+          : (quick && key === 'devreview' ? '测试人员独立复核；PM 在签字 apply 时复核；不是程序员A自审' : step.gate + trqDetail));
       let cls = 'flow-node';
       if (status === 'done') cls += ' done';
       if (status === 'current') cls += ' current';
+      if (status === 'missing') cls += ' trq-missing';
       if (key === 'product' && (reqOwnerKey === 'rejected' || evidence.phase === 'requirement')) cls += ' rejected';
+      if (key === 'trq' && trq.state === 'not_testable') cls += ' rejected';
       if (key === 'owner' && reqOwnerKey === 'rejected') cls += ' rejected';
       if (key === 'closure') {
         cls += ' closure';
@@ -7440,10 +9161,15 @@ function flowMarkup(p) {
         const edgeDef = LEGACY_FLOW_EDGES[key + '>' + next] || { pending: '待推进', active: '推进中' };
         let edgeCls = 'flow-edge';
         let label = copy(edgeDef.pending);
-        const nextIndex = Object.keys(LEGACY_FLOW_STEPS).indexOf(next);
         if (key === 'product' && reqOwnerKey === 'rejected') {
           edgeCls += ' done';
           label = `${terms.review}已通过`;
+        } else if (key === 'trq' && trq.state === 'testable') {
+          edgeCls += ' done';
+          label = '可测 · 可开 Owner 门';
+        } else if (key === 'trq' && trq.state === 'not_testable') {
+          edgeCls += ' rejected';
+          label = '不可测 · 退回需求';
         } else if (key === 'owner' && reqOwnerKey === 'rejected') {
           edgeCls += ' rejected';
           label = 'Owner 已打回需求';
@@ -7457,10 +9183,10 @@ function flowMarkup(p) {
         } else if (key === 'owner' && evidence.ownerPending) {
           edgeCls += ' active';
           label = 'Owner 决定后派单';
-        } else if (statuses[nextIndex] === 'done') {
+        } else if (statuses[next] === 'done') {
           edgeCls += ' done';
           label = '已通过';
-        } else if (status === 'current' || statuses[nextIndex] === 'current') {
+        } else if (status === 'current' || statuses[next] === 'current') {
           edgeCls += ' active';
           label = copy(edgeDef.active);
         }
@@ -7567,6 +9293,136 @@ function renderQuickTechReview(p) {
   box.innerHTML = quickTechReviewMarkup(p);
 }
 
+
+/* ── 需求/缺陷池（R-3f0d）──────────────────────────────────────────── */
+const poolUi = { open: false, filter: 'all', rows: [], lastFetch: 0, loading: false };
+const POOL_FILTERS = [
+  { key: 'all', label: '全部' },
+  { key: 'approved', label: '已通过' },
+  { key: 'active', label: '进行中' },
+  { key: 'accepted', label: '已验收' }
+];
+/** 类型：默认需求；type/defect 或 D- 前缀为缺陷（复用工作流 requirementId/type）。 */
+function poolTypeOf(row) {
+  const t = String((row && row.type) || '').toLowerCase();
+  if (t === 'defect' || t === 'bug' || t === '缺陷') return 'defect';
+  if (/^D-/i.test(String((row && row.id) || ''))) return 'defect';
+  return 'requirement';
+}
+function poolTypeLabel(row) { return poolTypeOf(row) === 'defect' ? '【缺陷】' : '【需求】'; }
+function poolTypeBadge(row) {
+  const t = poolTypeOf(row);
+  return `<span class="req-type ${t}" title="${t === 'defect' ? '缺陷' : '需求'}">${t === 'defect' ? '缺陷' : '需求'}</span>`;
+}
+/** 评审通过判定：draft/review/rejected 之外，或已有 reviewedAt。 */
+function poolBucket(row) {
+  const s = String((row && row.status) || '');
+  if (['accepted', 'done', 'iteration'].includes(s)) return 'accepted';
+  if (['dispatched', 'dev', 'dev_review', 'test', 'test_done'].includes(s)) return 'active';
+  if (['approved', 'ready'].includes(s)) return 'approved';
+  if (row && row.reviewedAt) return 'approved';
+  return 'other';
+}
+function poolEntered(row) { return poolBucket(row) !== 'other' || !!(row && row.reviewedAt); }
+function poolStatusLabel(row) {
+  const b = poolBucket(row);
+  return b === 'accepted' ? '已验收' : b === 'active' ? '进行中' : b === 'approved' ? '已通过' : '待评审';
+}
+async function poolFetchRows() {
+  const p = activeProject();
+  if (!p || !window.workbench || typeof window.workbench.workflowState !== 'function') return null;
+  try {
+    const wf = await window.workbench.workflowState({ projectId: p.id });
+    if (!wf || wf.ok === false) return null;
+    return Array.isArray(wf.requirements) ? wf.requirements : [];
+  } catch { return null; }
+}
+function poolPanelEnsure() {
+  let mask = $('#pool-mask');
+  if (mask) return mask;
+  mask = document.createElement('div');
+  mask.id = 'pool-mask';
+  mask.className = 'pool-mask';
+  mask.hidden = true;
+  mask.innerHTML = `<section class="pool-panel" role="dialog" aria-modal="true" aria-label="需求/缺陷池">
+    <header class="pool-head"><b>需求 / 缺陷池</b><span class="pool-sub">评审通过自动入池 · 六人/四人同规则</span><button class="pool-close" id="pool-close" type="button" aria-label="关闭">×</button></header>
+    <div class="pool-filters" id="pool-filters"></div>
+    <div class="pool-cols">
+      <section class="pool-col"><h4>需求池 <span class="pool-n" id="pool-req-n">0</span></h4><div class="pool-list" id="pool-req-list"></div></section>
+      <section class="pool-col"><h4>缺陷池 <span class="pool-n" id="pool-def-n">0</span></h4><div class="pool-list" id="pool-def-list"></div></section>
+    </div>
+    <p class="pool-foot" id="pool-foot"></p>
+  </section>`;
+  document.body.appendChild(mask);
+  mask.addEventListener('click', (e) => { if (e.target === mask) closePool(); });
+  $('#pool-close')?.addEventListener('click', closePool);
+  return mask;
+}
+function poolRowMarkup(row) {
+  const id = String((row && row.id) || '');
+  const b = poolBucket(row);
+  const who = String((row && (row.owner || row.ownerRole)) || '');
+  return `<div class="pool-row" data-id="${esc(id)}" data-bucket="${b}">${poolTypeBadge(row)}<span class="pool-id">${esc(id)}</span><span class="pool-state s-${b}">${poolStatusLabel(row)}</span>${who ? `<span class="pool-who">${esc(who)}</span>` : ''}</div>`;
+}
+function renderPool() {
+  poolPanelEnsure();
+  const entered = (poolUi.rows || []).filter(poolEntered);
+  const visible = entered.filter((r) => poolUi.filter === 'all' || poolBucket(r) === poolUi.filter);
+  const req = visible.filter((r) => poolTypeOf(r) === 'requirement');
+  const def = visible.filter((r) => poolTypeOf(r) === 'defect');
+  const filters = $('#pool-filters');
+  if (filters) {
+    filters.innerHTML = POOL_FILTERS.map((f) => {
+      const n = f.key === 'all' ? entered.length : entered.filter((r) => poolBucket(r) === f.key).length;
+      return `<button class="pool-chip${poolUi.filter === f.key ? ' on' : ''}" data-filter="${f.key}" type="button">${f.label}<i>${n}</i></button>`;
+    }).join('');
+    filters.querySelectorAll('.pool-chip').forEach((btn) => btn.addEventListener('click', () => { poolUi.filter = btn.dataset.filter; renderPool(); }));
+  }
+  const reqList = $('#pool-req-list');
+  const defList = $('#pool-def-list');
+  if (reqList) reqList.innerHTML = req.length ? req.map(poolRowMarkup).join('') : '<p class="pool-empty">需求池暂无（评审通过后自动入池）</p>';
+  if (defList) defList.innerHTML = def.length ? def.map(poolRowMarkup).join('') : '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
+  if ($('#pool-req-n')) $('#pool-req-n').textContent = String(req.length);
+  if ($('#pool-def-n')) $('#pool-def-n').textContent = String(def.length);
+  if ($('#pool-foot')) {
+    const allReq = entered.filter((r) => poolTypeOf(r) === 'requirement').length;
+    const allDef = entered.filter((r) => poolTypeOf(r) === 'defect').length;
+    const label = (POOL_FILTERS.find((f) => f.key === poolUi.filter) || {}).label || '全部';
+    $('#pool-foot').textContent = `池内 ${entered.length} 条（需求 ${allReq} · 缺陷 ${allDef}）；筛选：${label}`;
+  }
+}
+async function refreshPool() {
+  if (poolUi.loading) return;
+  poolUi.loading = true;
+  try {
+    const rows = await poolFetchRows();
+    if (rows) { poolUi.rows = rows; poolUi.lastFetch = Date.now(); }
+    if (poolUi.open) renderPool();
+  } finally { poolUi.loading = false; }
+}
+async function togglePool(force) {
+  const mask = poolPanelEnsure();
+  const next = typeof force === 'boolean' ? force : mask.hidden;
+  poolUi.open = next;
+  mask.hidden = !next;
+  if (next) await refreshPool();
+}
+function closePool() {
+  const mask = $('#pool-mask');
+  if (mask) mask.hidden = true;
+  poolUi.open = false;
+}
+async function refreshPoolBadge() {
+  if (Date.now() - poolUi.lastFetch < 5000) return;
+  const rows = await poolFetchRows();
+  if (!rows) return;
+  poolUi.rows = rows;
+  poolUi.lastFetch = Date.now();
+  const n = rows.filter(poolEntered).length;
+  const badge = $('#tb-pool');
+  if (badge) badge.textContent = String(n);
+}
+
 function flowMeta(p) {
   const evidence = legacyFlowEvidence(p);
   const boot = legacyBootSummary();
@@ -7578,7 +9434,7 @@ function flowMeta(p) {
   const closure = evidence.phase === 'terminated' ? '已终止'
     : (['accepted', 'iteration'].includes(evidence.phase) ? '待选择迭代/终止' : '未到');
   const reqText = req
-    ? `${req.id}（${legacyReqStatus(req)}）· Owner ${reqOwner.label}`
+    ? `${poolTypeLabel(req)} ${req.id}（${legacyReqStatus(req)}）· Owner ${reqOwner.label}`
     : '还没有需求';
   const ledgerText = evidence.ledger.length ? `账本分叉 ${evidence.ledger.length} 条` : '账本一致';
   return `第 ${evidence.round} 轮 ｜ 阶段：${evidence.phase} ｜ boot/已读 ${boot.complete}/${boot.total} ｜ 需求 ${evidence.requirementCount}（已验收 ${evidence.accepted}）｜ 当前需求：${reqText} ｜ 任务 ${evidence.tasks.length} ｜ 项目级 Owner：${projectOwner.label}（不参与派单）｜ 收口：${closure} ｜ 待回执：${evidence.pending ? roleById(evidence.pending.to).name : '无'} ｜ 旧命令缺失：${missing === null ? '未知' : missing} ｜ ${ledgerText}`;
@@ -7669,6 +9525,7 @@ function legacyOwnerPanelMarkup(p) {
   return `<div class="legacy-owner-panel">
     <div class="legacy-flow-owner-head"><b>需求级 Owner 闸门：可参与评审 / 也可明确跳过</b><span class="badge badge-${esc(reqOwner.key)}">Owner ${esc(reqOwner.label)}</span></div>
     <div class="legacy-owner-req">${reqLine}</div>
+    ${req ? ownerDecisionsMarkup(req, { compact: true }) : ''}
     <div class="legacy-owner-legacy">
       <b>项目级 Owner（旧版）：</b>只写顶层 <code>ownerReview</code>，不写入任何需求的 <code>ownerReview</code>，<b>不参与 PM 派单</b>。当前：${esc(projectState.label)}${projectOwner.at ? ' · ' + esc(fmtTime(projectOwner.at)) : ''} · roundKey <code title="${esc(String(roundKey))}">${esc(String(roundKey).slice(-28))}</code>
       <button class="ghost small" type="button" data-open-owner-legacy title="打开旧版项目级 Owner 评审，界面会再次标注它不参与需求派单">打开旧版项目级评审</button>
@@ -7714,6 +9571,15 @@ function renderLegacyFlowExtras(p) {
       ? iterateGuard.reason : '';
     const terminateReady = !terminated && terminateGate.ok;
     const ownerDemandReady = !terminated && ownerDemandGate.ok;
+    const gateData = activeProject() && gateUi.projectId === activeProject().id ? gateUi.data : null;
+    // 闸门判定与原因：只展示 team.mjs 返回的结果；接口未就绪就写“待接入”，壳层不自己判。
+    const gateReasonParts = [];
+    if (gateData && gateData.unavailable) {
+      gateReasonParts.push(`<span class="legacy-action-warn">闸门判定待接入：${esc(gateData.error)}（接口约定：<code>gate:check</code> → <code>team-tools.gateCheck</code>，TODO(接口)）</span>`);
+    } else if (gateData && gateData.available) {
+      const denied = [...gateData.gates.values()].filter((entry) => !entry.ok);
+      gateReasonParts.push(`<span class="legacy-action-note">闸门判定：team.mjs 返回 ${gateData.gates.size} 项${denied.length ? ' · 未满足：' + denied.map((entry) => esc(entry.gate || entry.code || entry.action)).join('、') : ' · 全部满足'}</span>`);
+    }
     actions.innerHTML = `
       <button class="primary small" type="button" id="legacy-flow-advance" ${canAdvance ? '' : 'disabled'} data-legacy-scroll="requirements" title="${canAdvance ? '跳到需求队列' : (terminated ? '工作流已终止' : (placeholders.length ? '项目信息/铁律占位：禁止推进，先写清正文' : '六角色未全部 boot/读全（或已过期）'))}">${canAdvance ? '查看本轮动作' : '禁止推进'}</button>
       <button class="ghost small" type="button" id="legacy-flow-iterate" ${iterateReady ? '' : 'disabled'} data-legacy-req-action="iterate" title="${esc(iterateGuard.reason || '启动下一轮（PM）；执行前会自动补 boot')}">迭代（下一轮）</button>
@@ -7725,8 +9591,174 @@ function renderLegacyFlowExtras(p) {
       ${overviewPlaceholder ? '<span class="legacy-action-note">需求总览待首条需求：第一条需求落盘时会被重写，不挡 boot。</span>' : ''}
       ${missingCommands.length ? `<span class="legacy-action-warn">当前缺旧命令：${missingCommands.map((name) => `<code>${esc(name)}</code>`).join('、')}；${blockedByMissing.length ? blockedByMissing.join('、') + ' 按钮已禁用，' : ''}先升级团队工具，界面不会伪造成功。${shellOwnedIterate ? '（迭代在 Fast 由工作台壳层推进，不依赖旧 workflow 命令）' : ''}</span>` : ''}
       ${unknownCommands.length ? `<span class="legacy-action-warn">旧命令未核验：${unknownCommands.map((name) => `<code>${esc(name)}</code>`).join('、')}；能力矩阵没有返回这些命令，对应按钮暂时禁用，不写成缺失。</span>` : ''}
+      ${gateReasonParts.join('')}
       <span class="legacy-action-note">所有动作调用真实 <code>workflow:*</code> IPC；所需角色未 boot/未读全时，执行前会自动补一次真实 boot，后端仍校验阅读证据；旧命令明确缺失才写“缺”，矩阵没返回只写“未核验”，两种情况都不伪造成功。迭代另需全部需求验收（或被投票驳回收口）且无在办需求。</span>`;
   }
+}
+
+/**
+ * 流程图实时刷新：只读 workflow:state / workflow:next，不写文件、不重读全部文档。
+ * 角色用 team.mjs 直接改文件时，界面最多 5 秒跟上；失败按 2s/5s/10s 退避，隐藏时暂停。
+ */
+const flowLiveState = { failures: 0, nextAt: 0 };
+
+async function refreshFlowLive() {
+  const p = activeProject();
+  if (!p || !window.workbench) return false;
+  const flowOpen = !$('#flow-panel')?.hidden;
+  if (!flowOpen && openDrawerName !== 'project') return false;
+  const wb = window.workbench;
+  try {
+    const [wf, nx] = await Promise.all([
+      typeof wb.workflowState === 'function' ? wb.workflowState({ projectId: p.id }).catch(() => null) : null,
+      typeof wb.workflowNext === 'function' ? wb.workflowNext({ projectId: p.id }).catch(() => null) : null
+    ]);
+    if (!wf || wf.ok === false) throw new Error((wf && (wf.message || wf.code)) || 'workflow:state 未返回');
+    if (!activeProject() || activeProject().id !== p.id) return false;
+    const reqs = nx && nx.ok && Array.isArray(nx.requirements)
+      ? nx.requirements
+      : (Array.isArray(wf.requirements) ? wf.requirements : []);
+    const round = Number((nx && nx.round) || wf.round || 1);
+    const derivation = mergeFlowDerivation(
+      legacyUi.flowDerive,
+      flowDerivationFrom({ ...wf, requirements: reqs, round }),
+      p.id,
+      round
+    );
+    legacyUi.flowDerive = derivation;
+    const phase = legacyDisplayPhase(derivation.phase, reqs);
+    legacyUi.workflow = {
+      ...(legacyUi.workflow || {}),
+      ...wf,
+      phase,
+      requirements: reqs,
+      tasks: Array.isArray(wf.tasks) ? wf.tasks : ((legacyUi.workflow && legacyUi.workflow.tasks) || []),
+      round,
+      derivation
+    };
+    legacyUi.workflowError = null;
+    flowLiveState.failures = 0;
+    // R-db98 v2：验收要求「状态变化 5 秒内刷新」；节流 4 秒 + 1 秒心跳，保证最坏 5 秒内命中。
+    flowLiveState.nextAt = Date.now() + 4000;
+    renderFlow();
+    // 闸门判定与审计也只读拉取；接口未就绪时显示“待接入”，不影响流程渲染。
+    loadGateCheck();
+    loadGateAudit();
+    return true;
+  } catch (error) {
+    flowLiveState.failures += 1;
+    const delay = flowLiveState.failures <= 1 ? 2000 : (flowLiveState.failures === 2 ? 5000 : 10000);
+    flowLiveState.nextAt = Date.now() + delay;
+    // 只读刷新失败不打断界面，也不拿旧值冒充；下次按退避重试。
+    return false;
+  }
+}
+
+/** 1 秒心跳 + 5 秒节流：面板不可见时暂停，重新打开立即刷新一次。 */
+function flowRefreshTick() {
+  const p = activeProject();
+  const flowOpen = !$('#flow-panel')?.hidden;
+  if (!p || (!flowOpen && openDrawerName !== 'project')) { flowLiveState.nextAt = 0; return; }
+  if (Date.now() < flowLiveState.nextAt) return;
+  refreshFlowLive();
+}
+
+/** 主流程面板上次渲染签名：数据没变就不重建大 DOM（5 秒轮询只刷新数据，不重复排版）。 */
+const flowRenderUi = { projectId: '', sig: '' };
+
+/** 流程面板内容签名：工作流/需求/任务/boot/闸门审计任一变化才重绘。
+ * B-20261113-005026-c447：补 Owner 决定与落账字段。旧签名只有需求行 id/status/updatedAt，
+ * Owner 只改 ownerReview（点通过/先跳过、写 decisions）而需求行 status/updatedAt 没动时签名不变 →
+ * 右下角流程图不重绘，看起来“点了没反应”。现在把 ownerReview.status、decisions 条数与最近决定时间、
+ * 账本分叉条数一起算进签名：判定后 5 秒轮询拿到新数据就会重绘。 */
+
+/** v4 流程面板数据：从工作流 requirements 构建（优先级排序、卡点/冲突/验收人）。 */
+/** 已收口状态：与 legacyActiveRequirement 同口径（验收/完成/终止/迭代/驳回）；流程图默认只看未收口。 */
+const FLOW_CLOSED_STATUSES = ['accepted', 'done', 'terminated', 'iteration', 'rejected'];
+function flowV4Data() {
+  const wf = legacyWorkflow() || {};
+  const reqs = Array.isArray(wf.requirements) ? wf.requirements : [];
+  const byId = new Map(reqs.map((r) => [String(r.id), r]));
+  const nameOf = (id) => String((byId.get(id) || {}).title || id || '');
+  const PRI = { P0: 0, P1: 1, P2: 2, P3: 3 };
+  const items = reqs.map((r) => {
+    const status = String(r.status || '');
+    const decisions = Array.isArray(r.decisions) ? r.decisions : [];
+    const acceptEv = [...(Array.isArray(r.history) ? r.history : [])].reverse()
+      .find((ev) => ev && (ev.action === 'owner_accept' || ev.action === 'accept'));
+    let acceptor = '';
+    if (acceptEv) {
+      const by = String(acceptEv.by || '');
+      acceptor = /pm/i.test(by) && /owner/i.test(by) ? 'PM（Owner 授权）' : (/owner/i.test(by) ? 'Owner' : (by || 'Owner'));
+    } else {
+      const acc = [...decisions].reverse().find((d) => d && (d.action === 'accept' || d.status === 'accepted'));
+      if (acc) {
+        const actor = String(acc.actor || '');
+        const by = String(acc.decidedBy || acc.by || '');
+        acceptor = actor === 'pm' ? 'PM（Owner 授权）' : (actor === 'owner' || /owner/i.test(by) ? 'Owner' : (by || actor || 'PM'));
+      }
+    }
+    let blocker = null;
+    if (status === 'rejected') blocker = { reason: '需求评审被驳回', who: '产品设计师' };
+    else if (r.trq && r.trq.verdict === 'not_testable') blocker = { reason: 'TR-Q 未通过（不可测）', who: '测试人员' };
+    const text = String(r.detail || '') + ' ' + String(r.story || '');
+    const deps = []; const conflicts = [];
+    const depRe = /依赖[：:]\s*(R-\d{8}-\d{6}-[0-9a-f]{4})/gi;
+    let m;
+    while ((m = depRe.exec(text))) { const id = m[1]; if (id !== r.id && !deps.some((d) => d.id === id)) deps.push({ id, name: nameOf(id) }); }
+    const cflRe = /冲突[：:]\s*(R-\d{8}-\d{6}-[0-9a-f]{4})/gi;
+    while ((m = cflRe.exec(text))) { const id = m[1]; if (id !== r.id && !conflicts.some((c) => c.id === id)) conflicts.push({ id, name: nameOf(id) }); }
+    const created = Date.parse(r.createdAt || '') || 0;
+    const days = created ? Math.max(0, Math.round((Date.now() - created) / 86400000)) : 0;
+    const iterations = Array.isArray(r.history) ? r.history.filter((ev) => ev && ev.action === 'iterate').length : 0;
+    return {
+      id: String(r.id || ''), title: String(r.title || ''), pri: String(r.priority || 'P2').toUpperCase(),
+      owner: String(r.owner || r.createdBy || ''), status, statusText: '', stage: 0,
+      updatedAt: String(r.updatedAt || ''), round: Number(r.round || wf.round || 1),
+      closed: FLOW_CLOSED_STATUSES.includes(status),
+      iterationRound: iterations, acceptor, blocker, deps, conflicts,
+      elapsed: days ? days + ' 天' : ''
+    };
+  });
+  items.sort((x, y) => (PRI[x.pri] ?? 9) - (PRI[y.pri] ?? 9) || String(y.updatedAt).localeCompare(String(x.updatedAt)));
+  const activeStatuses = ['approved', 'ready', 'dispatched', 'dev', 'dev_review', 'test', 'test_done'];
+  const active = items.filter((i) => activeStatuses.includes(i.status)).length;
+  const closedCount = items.filter((i) => i.closed).length;
+  const parallel = [
+    { key: 'review-dev', on: items.some((i) => ['approved', 'ready'].includes(i.status)) && items.some((i) => ['dev', 'dev_review'].includes(i.status)), label: '评审 ∥ 开发' },
+    { key: 'test-collect', on: items.some((i) => ['test', 'test_done'].includes(i.status)) && items.some((i) => i.status === 'review'), label: '测试 ∥ 下一轮收集' }
+  ];
+  return { round: Number(wf.round || 1), total: items.length, open: items.length - closedCount, closed: closedCount, active, items, parallel };
+}
+
+function flowRenderSignature(p) {
+  const wf = legacyWorkflow() || {};
+  const reqs = Array.isArray(wf.requirements) ? wf.requirements : [];
+  const tasks = Array.isArray(wf.tasks) ? wf.tasks : [];
+  const boot = legacyBootSummary();
+  const gate = gateAuditUi.data
+    ? `${gateAuditUi.data.total || 0}:${Array.isArray(gateAuditUi.data.items) ? gateAuditUi.data.items.length : 0}`
+    : 'na';
+  // 账本分叉（工作流.json 与旧 任务/ 不一致）条数：它变了也要重绘，否则分叉增减看不见。
+  let ledgerCount = 0;
+  try { ledgerCount = legacyLedgerDivergences().length; } catch { ledgerCount = 0; }
+  return JSON.stringify([
+    p.id,
+    wf.phase || '',
+    wf.round || 1,
+    legacyUi.workflowError ? legacyUi.workflowError.code : '',
+    reqs.map((r) => {
+      const owner = r && r.ownerReview && typeof r.ownerReview === 'object' ? r.ownerReview : null;
+      const decisions = Array.isArray(owner && owner.decisions) ? owner.decisions : [];
+      const lastDecisionAt = decisions.length
+        ? String((decisions[decisions.length - 1] && (decisions[decisions.length - 1].at || decisions[decisions.length - 1].confirmedAt)) || '')
+        : '';
+      const ownerAt = String((owner && owner.at) || '');
+      return `${r.id}:${r.status}:${r.updatedAt || ''}:${r.priority || ''}:${owner ? (owner.status || '') : ''}:${decisions.length}:${lastDecisionAt || ownerAt}`;
+    }).join('|'),
+    tasks.map((t) => `${t.id}:${t.status}:${t.owner || ''}`).join('|'),
+    boot.complete, boot.total, boot.allComplete, gate, ledgerCount,
+  ]);
 }
 
 function renderFlow() {
@@ -7740,6 +9772,8 @@ function renderFlow() {
   if (!board) return;
 
   if (!p) {
+    flowRenderUi.projectId = '';
+    flowRenderUi.sig = '';
     const empty = `<div class="flow-empty">先新建或选择一个项目，旧流程会随阶段与真实记录变化。</div>`;
     board.innerHTML = `<div class="view-empty compact"><span class="view-empty-mark">⇢</span><h3>还没有项目流程</h3><p>新建项目后，需求 → 产品评审 → Owner → PM 派单 → 开发互审 → 测试 → Owner 验收 → 迭代/终止会在这里展开。</p><div class="view-empty-actions"><button class="primary small" type="button" data-open-new-project>＋ 新建项目</button></div></div>`;
     if (meta) meta.textContent = '还没有项目。';
@@ -7760,11 +9794,33 @@ function renderFlow() {
     const flowActions = $('#legacy-flow-actions');
     if (flowActions) flowActions.innerHTML = '';
     renderQuickTechReview(null);
+    renderFlowDerivation();
+    // 并行泳道：无项目时清空，避免残留上一条项目的泳道。
+    renderFlowLanes(null);
+    gateAuditUi.data = null;
+    gateAuditUi.projectId = null;
+    renderGateAudit();
     return;
   }
-  const markup = flowMarkup(p);
+  // 并行泳道先渲染：每条需求一条泳道 + 项目级汇总；只重绘变化泳道。
+  // 5 秒轮询：数据签名未变时直接返回，避免周期性全量重建大 DOM（渲染进程 CPU/内存峰值的主因）。
+  const flowSig = flowRenderSignature(p);
+  if (flowRenderUi.projectId === p.id && flowRenderUi.sig === flowSig) return;
+  flowRenderUi.projectId = p.id;
+  flowRenderUi.sig = flowSig;
+  renderFlowLanes(p);
+  // R-db98 收尾：右侧【流程】面板顶部接入节点图（与团队台/浮窗共用同一份 flow-graph.js），
+  // 5 秒轮询命中 flowRefreshTick → renderFlow → 这里的签名变化会重绘。旧 flowMarkup 保留在下方。
+  const graphHtml = flowGraphBoardMarkup();
+  const markup = `${graphHtml}${flowMarkup(p)}`;
   board.innerHTML = markup;
-  if (mini) mini.innerHTML = markup;
+  // T-20261113-090012 小修：流程面板只保留节点图（#flow-mini 里这份可见）+ 下方明细；
+  // 旧泳道/串行小图（产品评审/可测性/Owner/PM派单/开发…）不再默认渲染，避免两套图并存。
+  // 节点图脚本缺失时回落到旧小图，保证面板不空。
+  if (mini && !$('#flow-panel')?.hidden) {
+    if (window.FlowV4) window.FlowV4.render(mini, flowV4Data());
+    else mini.innerHTML = graphHtml || flowMarkup(p);
+  }
   renderQuickTechReview(p);
   renderLegacyFlowExtras(p);
   renderLegacyRequirements();
@@ -7776,6 +9832,8 @@ function renderFlow() {
   const activeOwner = legacyReqOwnerView(activeReq);
   if (summary) summary.textContent = `boot/已读 ${boot.complete}/${boot.total} · ${boot.allComplete ? '可按角色推进' : '禁止推进'} ｜ 需求级 Owner：${activeReq ? `${activeOwner.label} · ${activeReq.id}` : '无在办需求'}`;
   if (projectEl) projectEl.textContent = p.name;
+  renderFlowDerivation();
+  renderGateAudit();
 }
 
 
@@ -7785,7 +9843,15 @@ function setFlowPanel(open) {
   if (!panel) return;
   panel.hidden = !open;
   launcher?.setAttribute('aria-expanded', String(open));
-  if (open) renderFlow();
+  if (open) {
+    // 打开浮窗时强制重绘一次（隐藏期间按签名跳过，迷你版需要补渲染）。
+    flowRenderUi.projectId = '';
+    flowRenderUi.sig = '';
+    renderFlow();
+    // 打开即刷新一次，不等 5 秒节拍；失败会按退避重试。
+    flowLiveState.nextAt = 0;
+    refreshFlowLive();
+  }
 }
 
 /* ── 角色与派单 ───────────────────────────────────────── */
@@ -7820,8 +9886,9 @@ function renderRoles() {
   grid.innerHTML = visibleRoles.map((role) => {
     const cardRel = legacyRoleCardRel(role);
     const indexRel = legacyRoleIndexRel(role);
-    const dir = legacyHas(role.dir);
+    const dir = legacyHas(legacyRoleDirName(role));
     const card = legacyHas(cardRel);
+    const cardState = legacyRoleCardState(role);
     const index = legacyHas(indexRel);
     const others = legacyRoleOtherDocCount(role);
     const session = sessions[role.id];
@@ -7829,6 +9896,8 @@ function renderRoles() {
     const boot = legacyBootFor(role.id);
     const bootCtl = legacyBootControl(role.id);
     const ev = legacyBootEvidence(role.id);
+    // B-2ebe：就绪三态（文件缺失/未 boot/已过期）统一走 legacyRoleBootHint，不再只看 boot 标签。
+    const hint = legacyRoleBootHint(role);
     const evidenceRecord = ev.memRead || ev.bootRecord;
     const evidence = evidenceRecord
       ? `${ev.memRead ? '本次 boot' : '工作流.json boots'} ${evidenceRecord.complete ? '必读齐全' : '有缺失'}${evidenceRecord.tokenHash ? ' · 令牌 ' + evidenceRecord.tokenHash : ''}`
@@ -7839,16 +9908,17 @@ function renderRoles() {
         <div><h3>${esc(role.name)}</h3><div class="muted">${taskRoles.has(role.id) ? '本轮有任务' : '待命'} · ${session ? '有会话' : '无会话'} · <code>${esc(role.id)}</code></div></div>
       </div>
       <p>${esc(ROLE_BLURB[role.id] || '实现、互审、提交与回执。')}</p>
-      <div class="role-scope" title="${esc(role.scope)}">${esc(role.dir)}/ · ${esc(role.scope)} · <span class="${dir ? 'fact-ok' : 'fact-bad'}">目录${dir ? '存在' : '缺失'}</span></div>
+      <div class="role-scope" title="${esc(role.scope)}">${esc(legacyRoleDirName(role))}/ · ${esc(role.scope)} · <span class="${dir ? 'fact-ok' : 'fact-bad'}">目录${dir ? '存在' : '缺失'}</span></div>
       <div class="role-session" title="${esc(session || '')}">${session ? '本地映射 · ' + esc(sessionShort(session)) : '本地映射 · 未创建'}</div>
       <div class="role-live ${st.cls}" title="${esc(st.title)}">${esc(st.text)}</div>
       <div class="role-facts">
-        <span><i>角色卡</i><b class="${card ? 'fact-ok' : 'fact-bad'}" title="${esc(cardRel)}">${card ? '存在' : '缺失'}</b></span>
+        <span><i>角色卡</i><b class="${cardState.key === 'ok' ? 'fact-ok' : (cardState.key === 'unmapped' ? 'fact-warn' : 'fact-bad')}" title="${esc(cardState.title)}">${esc(cardState.label)}</b></span>
         <span><i>文件索引</i><b class="${index ? 'fact-ok' : 'fact-bad'}" title="${esc(indexRel)}">${index ? '存在' : '缺失'}</b></span>
         <span><i>其他文档</i><b class="${others ? 'fact-ok' : 'fact-muted'}">${others}</b><small>份</small></span>
-        <span><i>本轮 boot</i><b class="${boot.ready ? 'fact-ok' : (boot.expired || boot.stale || boot.roundMismatch ? 'fact-bad' : 'fact-warn')}" title="${esc(boot.missing.join('、') || boot.at || '')}">${esc(boot.label)}</b></span>
+        <span><i>本轮 boot</i><b class="fact-${hint.key === 'ready' ? 'ok' : (hint.key === 'missing-file' ? 'bad' : 'warn')}" title="${esc(hint.title)}">${esc(hint.label)}</b></span>
       </div>
       <div class="role-evidence" title="${esc(ev.source)}">${esc(evidence)}</div>
+      ${presenceMarkup(role.id, { compact: true })}
       <div class="role-actions">
         <button class="ghost small" type="button" data-legacy-boot="${esc(role.id)}" ${bootCtl.disabled ? 'disabled' : ''} title="${esc(bootCtl.title)}">${esc(bootCtl.text)}</button>
         <button class="ghost small" type="button" data-legacy-role-card="${esc(role.id)}" title="只读查看 ${esc(cardRel)}">角色卡</button>
@@ -7860,6 +9930,7 @@ function renderRoles() {
   }).join('');
 
   grid.querySelectorAll('[data-wake-role]').forEach((button) => button.addEventListener('click', () => openWakeModal(button.dataset.wakeRole)));
+  ensurePresence(() => { renderRoles(); renderTeamSessions(); });
 }
 
 function dispatchTargets(fromId) {
@@ -8576,8 +10647,7 @@ function proposalLocalSteps(proposal) {
   ];
 }
 
-function renderProposalProtocol(proposals) {
-  const box = $('#proposal-protocol');
+function renderProposalProtocol(proposals) {  const box = $('#proposal-protocol');
   if (!box) return;
   const items = Array.isArray(proposals) ? proposals : [];
   const legacy = items.filter(proposalIsLegacy).length;
@@ -8590,6 +10660,69 @@ function renderProposalProtocol(proposals) {
     <p class="protocol-note">${legacy
       ? '「旧协议」卡片的状态来自 team.mjs 提案文件的只读镜像（proposal:legacy），本地 <code>proposal:*</code> 不能改它们；点卡片里的「刷新旧协议状态」才会重新 show。'
       : '旧协议状态没有只读接口，所以五个旧阶段统一标“未观测”，不把本地评审/签字/应用回填成旧协议回执。本地 proposal:* 会在应用前备份原文件。'}</p>`;
+}
+
+function legacyProposalView(item) {
+  const reviews = Object.entries(item.reviews || {}).map(([role, row]) => ({
+    role,
+    verdict: row && row.verdict ? row.verdict : 'unknown',
+    comment: String((row && (row.comments || row.comment)) || '').slice(0, 600)
+  }));
+  const signatures = Object.entries(item.signatures || {});
+  const pmSig = signatures.find(([role]) => role === 'pm');
+  const applied = Boolean(item.commitId);
+  const legacyStatus = String(item.status || '').toLowerCase();
+  const status = applied ? 'applied'
+    : legacyStatus === 'rejected' ? 'rejected'
+      : (signatures.length && signatures.every(([, row]) => row && row.decision === 'approve')) || legacyStatus === 'approved' ? 'approved'
+        : 'review';
+  const stage = applied ? 'applied'
+    : status === 'approved' ? 'signed'
+      : reviews.length ? 'reviewed' : 'proposed';
+  return {
+    id: item.id,
+    legacyId: item.id,
+    protocol: 'legacy',
+    legacyStatus,
+    status,
+    stage,
+    title: item.title || item.id,
+    author: item.author || 'pm',
+    hash: item.proposalHash || '',
+    fileRel: (item.files && item.files[0] && item.files[0].target) || '',
+    fileSize: (item.files && item.files[0] && item.files[0].size) || 0,
+    files: item.files || [],
+    reviews,
+    signature: pmSig ? { decision: pmSig[1].decision === 'approve' ? 'approved' : 'rejected', note: String(pmSig[1].note || '') } : null,
+    applied,
+    commitId: item.commitId || '',
+    createdAt: item.createdAt || '',
+    rationale: item.rationale || '',
+    risk: item.risk || 'normal'
+  };
+}
+
+/** 旧协议提案只读列表：打开提案页/切项目时自动拉一次，失败不影响本地提案。 */
+async function loadLegacyProposals(force = false) {
+  const p = activeProject();
+  if (!p || !window.workbench || typeof window.workbench.proposalList !== 'function') return;
+  if (legacyUi.proposalsLoading) return;
+  if (!force && legacyUi.proposalsProjectId === p.id && Date.now() - legacyUi.proposalsAt < 12000) return;
+  legacyUi.proposalsLoading = true;
+  try {
+    const r = await window.workbench.proposalList({ projectId: p.id });
+    if (!activeProject() || activeProject().id !== p.id) return;
+    legacyUi.proposalsProjectId = p.id;
+    legacyUi.proposalsAt = Date.now();
+    legacyUi.legacyProposals = (r && r.ok && Array.isArray(r.proposals))
+      ? r.proposals.map(legacyProposalView)
+      : [];
+    renderProposals();
+  } catch {
+    legacyUi.legacyProposals = [];
+  } finally {
+    legacyUi.proposalsLoading = false;
+  }
 }
 
 function renderProposals() {
@@ -8608,9 +10741,14 @@ function renderProposals() {
     });
     return;
   }
-  const items = p.proposals || [];
+  const localItems = Array.isArray(p.proposals) ? p.proposals : [];
+  // 旧协议提案自动并入：不需要先点一次 show 才能看到；失败只影响这一块。
+  const legacyItems = (legacyUi.proposalsProjectId === p.id ? legacyUi.legacyProposals : [])
+    .filter((x) => !localItems.some((y) => y.id === x.id));
+  const items = [...legacyItems, ...localItems];
   renderProposalProtocol(items);
   const legacyCount = items.filter(proposalIsLegacy).length;
+  if (legacyUi.proposalsProjectId !== p.id || Date.now() - legacyUi.proposalsAt > 12000) loadLegacyProposals();
   if (summary) {
     summary.textContent = items.length
       ? `${items.length} 个提案 · ${items.filter((x) => x.status === 'review').length} 个待处理`
@@ -9171,7 +11309,9 @@ function renderFileTree() {
   const build = (parent, depth) => (children.get(parent) || []).map((it) => {
     const isDir = it.kind === 'dir';
     const open = isDir && fileUi.expanded.has(it.rel);
-    const meta = isDir ? '文件夹' : `${fmtSize(it.size || 0)} · ${fileKind(it.name)}`;
+    const roleDirNames = ['项目经理', '产品', '需求分析师', '程序员A', '程序员B', '测试人员'];
+    const dirKind = isDir ? (it.rel === '需求' ? '需求池' : (roleDirNames.includes(it.name) ? '角色目录' : '文件夹')) : '';
+    const meta = isDir ? dirKind : `${fmtSize(it.size || 0)} · ${fileKind(it.name)}`;
     let html = `<div class="file-row${isDir ? ' is-dir' : ''}${open ? ' is-open' : ''}" style="--depth:${depth}" data-file-rel="${esc(it.rel)}" data-file-kind="${isDir ? 'dir' : 'file'}" tabindex="0" role="${isDir ? 'button' : 'link'}"${isDir ? ` aria-expanded="${open}"` : ''} title="${esc(it.rel)}">
       <span class="file-caret" aria-hidden="true">${isDir ? (open ? '⌄' : '›') : ''}</span>
       <span class="file-ico${isDir ? ' is-dir' : ''}" aria-hidden="true">${esc(fileIcon(it.name, isDir))}</span>
@@ -9200,6 +11340,7 @@ function projectForm() {
       <span><b>打开已有项目文件夹</b><small>不复制、不移动；目录里需要有 项目信息.md</small></span>
     </button>
     <label class="field"><span><b>项目名称</b></span><input id="np-name" class="input" placeholder="例如：个人作品集" maxlength="60"><div class="hint">一个目录 = 一个项目。</div></label>
+    <label class="field"><span><b>团队模式</b></span><select id="np-mode" class="select"><option value="full" selected>完整六角色（PM / 产品 / 需求 / 程序员A / 程序员B / 测试）</option><option value="fast">快速四角色（PM / 需求分析师 / 程序员A / 测试，无产品、无程序员B）</option></select><div class="hint">建项目时就按模式生成目录与协作准则；之后还能在「建团队」里切换（旧目录保留但不计入当前模式）。</div></label>
     <label class="field"><span><b>项目根目录</b></span><div class="form-row"><input id="np-root" class="input" value="${esc(state.defaultRoot || '')}"><button id="np-choose" type="button" class="ghost">选择</button></div><div class="hint">项目会创建在“根目录/项目名”。</div></label>
     <p id="np-preview" class="path-preview"></p>
     <div class="modal-error"></div>`;
@@ -9217,7 +11358,7 @@ function projectForm() {
     const dir = await window.workbench.chooseDir();
     if (dir) { root.value = dir; update(); }
   });
-  return { wrap, name, root, preview, update };
+  return { wrap, name, root, preview, update, mode: wrap.querySelector('#np-mode') };
 }
 
 function openNewProject() {
@@ -9228,7 +11369,8 @@ function openNewProject() {
       { label: '取消', kind: 'ghost', onClick: ({ close }) => close() },
       { label: '创建项目', kind: 'primary', onClick: async ({ close, error }) => {
         try {
-          const r = await window.workbench.createProject({ name: f.name.value, root: f.root.value, teamMode: 'full' });
+          const wantedMode = normalizeTeamMode(f.mode && f.mode.value);
+          const r = await window.workbench.createProject({ name: f.name.value, root: f.root.value, teamMode: wantedMode });
           close();
           await applyState(r);
           // 创建返回的是目录/状态，不包含文档正文；等文件读完再提示，避免首帧显示“未读取/模板占位”。
@@ -9238,7 +11380,7 @@ function openNewProject() {
           const readiness = legacyDocReadiness();
           const created = activeProject();
           if (created) {
-            if (!created.teamMode) saveProjectTeamMode(created, 'full');
+            if (!created.teamMode) saveProjectTeamMode(created, wantedMode);
             await focusDshWorkspace(created, { notify: true });
           }
           // 放最后：DSH 定位/切换可能自带 toast，创建结果与“文档已就绪”必须是用户看到的最后一条。
@@ -9286,6 +11428,8 @@ async function openRestoreModal(options = {}) {
     <p class="muted" style="margin-bottom:8px">扫描 <code>${esc(r.root || '')}</code>：找到 <b id="restore-count">${items.length}</b> 个未登记目录。</p>
     <label class="field"><span><b>按项目名筛选</b></span><input id="restore-filter" class="input" placeholder="输入项目名过滤"></label>
     <div id="restore-list" class="restore-list"></div>
+    <div class="restore-sep"><span>或恢复已移除的项目记录（_deleted 归档）</span></div>
+    <div id="restore-archived" class="restore-archived"><div class="hint">读取归档记录…</div></div>
     <div class="restore-foot">
       <button class="ghost small" id="restore-other" type="button">选择其他目录…</button>
       <button class="link-btn" id="restore-rescan" type="button">重新扫描</button>
@@ -9359,6 +11503,49 @@ async function openRestoreModal(options = {}) {
   list.addEventListener('click', (e) => {
     const b = e.target.closest('[data-restore]');
     if (b) adopt(b.dataset.restore);
+  });
+  // 已移除的项目记录：从 团队/状态/项目/_deleted 归档恢复；目录还在走登记，目录不在标失效可重新定位。
+  const archivedBox = wrap.querySelector('#restore-archived');
+  const loadArchived = async () => {
+    if (typeof window.workbench.archivedProjects !== 'function') {
+      archivedBox.innerHTML = '<div class="empty-row">当前版本不支持归档恢复</div>';
+      return;
+    }
+    try {
+      const data = await window.workbench.archivedProjects();
+      const rows = data && Array.isArray(data.items) ? data.items : [];
+      archivedBox.innerHTML = rows.map((row) => `<button class="restore-item" type="button" data-restore-archive="${esc(row.archiveName)}">
+        <b>${esc(row.name)}</b>
+        <small>${esc(row.path || '原目录未记录')} · ${row.dirExists ? '目录存在' : '目录不存在'}${row.archivedAt ? ' · ' + esc(ownerMaterialTime(row.archivedAt)) : ''}</small>
+      </button>`).join('') || '<div class="empty-row">还没有归档记录</div>';
+    } catch (e) {
+      archivedBox.innerHTML = `<div class="empty-row">归档读取失败：${esc(humanError(e.message))}</div>`;
+    }
+  };
+  loadArchived();
+  archivedBox.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-restore-archive]');
+    if (!b || b.disabled) return;
+    b.disabled = true;
+    try {
+      const res = await window.workbench.restoreArchivedProject({ archiveName: b.dataset.restoreArchive });
+      if (!res || res.ok === false) throw new Error((res && (res.message || res.code)) || '恢复失败');
+      if (res.needsAdopt) {
+        const adopted = await window.workbench.adoptProject({ path: res.path });
+        await applyState(adopted);
+      } else if (res.state) {
+        state = res.state;
+        await refresh();
+      }
+      dlg.close();
+      render();
+      toast(res.missingDir
+        ? '记录已恢复，但原目录不存在：在左栏点该项目用「重新定位」指回真实目录'
+        : '已从归档恢复项目记录', res.missingDir ? 'warn' : 'ok');
+    } catch (err) {
+      b.disabled = false;
+      dlg.error('恢复失败：' + humanError(err.message));
+    }
   });
   wrap.querySelector('#restore-other').addEventListener('click', async () => {
     const dir = await window.workbench.chooseDir();
@@ -9455,8 +11642,7 @@ function openOwnerGate() {
     width: 640,
     body,
     actions: [
-      { label: '关闭', kind: 'ghost', onClick: ({ close }) => close() },
-      { label: '旧版项目级评审', kind: 'ghost', onClick: ({ close }) => { close(); openOwnerModal(); } }
+      { label: '关闭', kind: 'ghost', onClick: ({ close }) => close() }
     ]
   });
   dlg.body.querySelectorAll('[data-owner-gate-req]').forEach((button) => {
@@ -9682,6 +11868,74 @@ async function retryDsh() {
   }
 }
 
+/* ── 会话映射自动跟随（B-405f 补充）：轮换/换人后不用重启工作台 ─────────
+ * 以前界面只在启动或手动刷新时读一次 workbench.json；team.mjs session rotate 在
+ * 进程外改了映射，左侧就停在 4/6，必须重启。这里每 5 秒只读一次状态：
+ * 映射签名变了才重画会话相关区域（不整页 render，保留抽屉与正在填的派单表单）。
+ */
+const ROSTER_WATCH_MS = 5000;
+const rosterUi = { busy: false, timer: null, lastSig: '', lastAt: 0 };
+
+function rosterSignature(s) {
+  const list = s && Array.isArray(s.projects) ? s.projects : [];
+  return list.map((p) => `${p.id}:${JSON.stringify(p.sessions || {})}:${JSON.stringify((p.workspace && p.workspace.sessionIds) || [])}`).join('|');
+}
+
+async function syncRosterFromDisk(opts = {}) {
+  if (!window.workbench || typeof window.workbench.state !== 'function' || rosterUi.busy) return false;
+  rosterUi.busy = true;
+  try {
+    const next = await window.workbench.state();
+    if (!next) return false;
+    const before = rosterSignature(state);
+    const after = rosterSignature(next);
+    if (!opts.force && after === before) return false;
+    rosterUi.lastSig = after;
+    state = next;
+    hydrateTeamModes();
+    // 只重画与会话映射相关的区域，避免打断抽屉/表单的输入状态。
+    renderSidebar();
+    renderSessions();
+    renderTeamSessions();
+    renderHeader();
+    renderOverview();
+    renderWorkspacePopover();
+    if (openDrawerName === 'project') renderTeamWorkspace();
+    if (openDrawerName === 'team') renderTeam();
+    if (opts.notify) {
+      const p = activeProject();
+      toast(`会话映射已更新：${p ? sessionReadyCount(p) + '/' + teamRoleCount(p) : '—'}`, 'ok');
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rosterUi.busy = false;
+  }
+}
+
+function rosterWatchTick() {
+  // 只读一次 workbench 状态（JSON 文件），开销很小；不做 document.hidden 跳过，
+  // 否则最小化/沙盘窗口里轮换后的映射永远不刷新，Owner 回来还是旧的 4/6。
+  const now = Date.now();
+  if (now - rosterUi.lastAt < ROSTER_WATCH_MS - 250) return;
+  rosterUi.lastAt = now;
+  syncRosterFromDisk().catch(() => {});
+}
+
+function startRosterWatch() {
+  if (rosterUi.timer) return;
+  rosterUi.lastSig = rosterSignature(state);
+  rosterUi.lastAt = Date.now();
+  rosterUi.timer = setInterval(rosterWatchTick, ROSTER_WATCH_MS);
+  // 自测/排查用只读钩子：当前映射签名与侧栏计数。
+  window.__teamRoster = {
+    sync: (opts) => syncRosterFromDisk(opts || {}),
+    sig: () => rosterSignature(state),
+    count: () => (document.querySelector('#team-session-count') || {}).textContent || '',
+  };
+}
+
 function reloadDshView(opts = {}) {
   const view = $('#dsh-view');
   if (!view) return false;
@@ -9689,6 +11943,10 @@ function reloadDshView(opts = {}) {
   dshReady = false;
   try { view.reload(); } catch { applyDshViewSrc(); }
   renderDsh(state?.dsh);
+  // B-405f 补充：重载聊天区的同时重读会话映射，成员列表/计数一起刷新（不用重启工作台）。
+  if (window.__teamRoster && typeof window.__teamRoster.sync === 'function') {
+    window.__teamRoster.sync({}).catch(() => {});
+  }
   if (!opts.quiet) toast('已重载 DSH 主画面', 'ok');
   return true;
 }
@@ -9876,6 +12134,12 @@ async function selectWorkspace(projectId) {
       await loadDshTeamStatus({ force: true });
     }
   } catch (e) {
+    if (/项目目录不存在|PROJECT_DIR_MISSING|PROJECT_FOLDER_NOT_FOUND|目录已不存在/.test(String(e && e.message || ''))) {
+      // 失效项目：点它不是“切换失败”死路，直接给“移除本机记录 / 重新定位”的出口。
+      toast(`「${target.name}」目录不存在，已打开清理入口`, 'bad');
+      removeProjectRecord(projectId);
+      return;
+    }
     toast('切换工作区失败：' + humanError(e.message), 'bad');
   }
 }
@@ -10102,49 +12366,127 @@ async function syncTeamNow() {
   }
 }
 
-/** 只移除本机项目记录：项目目录、团队登记与六角色会话都不动。 */
-async function removeProjectRecord() {
-  const p = activeProject();
+/** 项目记录被移除/重定位后清掉渲染层缓存，避免旧路径继续显示。 */
+function forgetProjectCaches(p) {
+  if (!p) return;
+  delete teamModeStore[String(p.id || '')];
+  delete teamModePathStore[projectPathKey(p)];
+  try { localStorage.setItem(TEAM_MODE_STORE_KEY, JSON.stringify(teamModeStore)); } catch { /* ignore */ }
+  try { localStorage.setItem(TEAM_MODE_PATH_KEY, JSON.stringify(teamModePathStore)); } catch { /* ignore */ }
+  voteUi.projectId = null;
+  voteUi.votes = [];
+  voteUi.data = null;
+  voteUi.error = null;
+  liveUi.projectId = null;
+  liveUi.items = [];
+  liveUi.at = 0;
+  legacyUi.flowDerive = null;
+}
+
+/** 失效项目重新定位：只改本机与团队登记路径，不移动、不删除任何真实文件。 */
+async function relocateProjectRecord(p, onDone) {
+  if (!p) return false;
+  if (typeof window.workbench.relocateProject !== 'function') {
+    toast('当前版本不支持重新定位；请升级工作台', 'bad');
+    return false;
+  }
+  const dir = await window.workbench.chooseDir();
+  if (!dir) return false;
+  try {
+    const r = await window.workbench.relocateProject({ projectId: p.id, newPath: dir });
+    if (!r || r.ok === false) throw new Error((r && (r.message || r.code)) || '重新定位失败');
+    await refresh();
+    if (typeof onDone === 'function') onDone();
+    toast(`已重新定位到：${dir}${r.teamUpdated ? '' : '（团队登记路径未更新）'}`, r.teamUpdated ? 'ok' : 'warn');
+    return true;
+  } catch (e) {
+    toast('重新定位失败：' + humanError(e.message), 'bad');
+    return false;
+  }
+}
+
+/** 只移除本机项目记录：项目目录、团队登记与角色会话按主进程规则处理；失效目录也能移除。 */
+async function removeProjectRecord(projectId) {
+  const p = (projectId && (state?.projects || []).find((x) => x.id === projectId)) || activeProject();
   if (!p) { toast('先选择工作区', 'bad'); return; }
+  const missing = p.exists === false;
   const wrap = document.createElement('div');
   wrap.innerHTML = `
-    <p class="muted">只移除本机状态库里的项目记录：</p>
+    <p class="muted">${missing ? '这个项目的目录已经不存在，请二选一：' : '只移除本机状态库里的项目记录：'}</p>
     <p class="mono hint-path">${esc(p.name)}<br>${esc(p.path)}</p>
+    ${missing ? '<p class="legacy-modal-warn">「重新定位」用于目录被移动/改名后指回真实目录；「移除记录」只清本机登记，团队登记归档到 <code>团队/状态/项目/_deleted/</code>，可恢复。</p>' : ''}
     <ul class="hint-list">
-      <li>项目目录、文件、六角色 DSH 会话都会保留；团队登记会一起清理，同名重建不会再被哈希。</li>
-      <li>想恢复时用「恢复 / 登记已有项目」或「打开已有项目文件夹」重新登记。</li>
+      <li>项目目录、文件、角色 DSH 会话都会保留；团队登记会归档，同名重建不会再被哈希。</li>
+      <li>想恢复时用「恢复项目」：按名字恢复或从 <code>_deleted</code> 归档记录恢复。</li>
     </ul>
     <div class="modal-error"></div>`;
   openModal({
     title: '移除项目记录',
-    subtitle: p.name,
+    subtitle: `${p.name}${missing ? ' · 目录不存在' : ''}`,
     icon: '×',
     body: wrap,
-    width: 540,
+    width: 560,
     actions: [
       { label: '取消', kind: 'ghost', onClick: ({ close }) => close() },
+      { label: '重新定位…', kind: 'ghost', onClick: async ({ close }) => {
+        close();
+        await relocateProjectRecord(p);
+      } },
       { label: '移除记录', kind: 'primary', onClick: async ({ close, error }) => {
         try {
-          const r = await window.workbench.deleteProjectRecord(p.id);
+          // 目录不存在时不尝试 DSH 会话归档：直接摘本机记录，避免卡在“归档失败”。
+          const r = await window.workbench.deleteProjectRecord(
+            missing ? { projectId: p.id, archiveSessions: false } : p.id
+          );
           if (r && r.state) state = r.state;
-          // 只清本机渲染层缓存；项目目录、团队登记与 DSH 会话由主进程/真实返回处理。
-          delete teamModeStore[String(p.id || '')];
-          delete teamModePathStore[projectPathKey(p)];
-          try { localStorage.setItem(TEAM_MODE_STORE_KEY, JSON.stringify(teamModeStore)); } catch { /* ignore */ }
-          try { localStorage.setItem(TEAM_MODE_PATH_KEY, JSON.stringify(teamModePathStore)); } catch { /* ignore */ }
-          voteUi.projectId = null;
-          voteUi.votes = [];
-          voteUi.data = null;
-          voteUi.error = null;
+          forgetProjectCaches(p);
           close();
           await refresh();
-          liveUi.projectId = null;
-          liveUi.items = [];
-          liveUi.at = 0;
           loadWorkspaces(true);
           render();
-          toast('已移除本机记录；项目文件仍在磁盘上', 'ok');
+          toast('已移除本机记录；项目文件仍在磁盘上，团队登记已归档可恢复', 'ok');
         } catch (e) { error(e.message); }
+      } }
+    ]
+  });
+}
+
+/** 批量清理失效项目：列清单 + 二次确认，逐条执行并报告成功/失败数。 */
+async function cleanMissingProjects() {
+  const missing = (state?.projects || []).filter((x) => x.exists === false);
+  if (!missing.length) { toast('没有失效项目', 'ok'); return; }
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <p class="muted">下列 <b>${missing.length}</b> 个项目的目录已不存在；清理只移除本机记录：</p>
+    <ul class="hint-list clean-missing-list">${missing.map((x) => `<li><b>${esc(x.name)}</b><small>${esc(x.path)}</small></li>`).join('')}</ul>
+    <p class="legacy-modal-warn">真实目录与文件不会被删除；团队登记归档到 <code>团队/状态/项目/_deleted/</code>，可在「恢复项目」里找回。</p>
+    <div class="modal-error"></div>`;
+  openModal({
+    title: '清理失效项目',
+    subtitle: `${missing.length} 个项目目录不存在`,
+    icon: '×',
+    body: wrap,
+    width: 640,
+    actions: [
+      { label: '取消', kind: 'ghost', onClick: ({ close }) => close() },
+      { label: `移除 ${missing.length} 个记录`, kind: 'primary', onClick: async ({ close }) => {
+        let ok = 0;
+        const failed = [];
+        for (const p of missing) {
+          try {
+            await window.workbench.deleteProjectRecord({ projectId: p.id, archiveSessions: false });
+            ok += 1;
+            forgetProjectCaches(p);
+          } catch (e) {
+            failed.push(`${p.name}：${humanError(e.message)}`);
+          }
+        }
+        close();
+        await refresh();
+        loadWorkspaces(true);
+        render();
+        if (failed.length) toast(`已移除 ${ok} 个，失败 ${failed.length} 个（${failed[0]}）；失败项仍保留`, 'bad');
+        else toast(`已移除 ${ok} 个失效项目记录；真实目录与文件未动`, 'ok');
       } }
     ]
   });
@@ -10155,27 +12497,45 @@ async function removeProjectRecord() {
 const GUIDE_STEPS = [
   {
     target: '#workspace-switch',
-    kicker: '第 1 步 / 4',
-    title: '项目 = 工作区',
-    html: '<p>顶栏左边是当前工作区。点它切换项目；一个目录 = 一个项目 = 一个 DSH 工作区。</p><ul><li>新建：项目名 + 根目录 → 创建项目。</li><li>已有：顶栏「恢复」或「打开已有项目文件夹」。</li></ul>'
+    kicker: '第 1 步 / 7',
+    title: '新建项目 → 建团队',
+    html: '<p>一个目录 = 一个项目 = 一个 DSH 工作区。顶栏左边是当前工作区，点它可切换。</p><ul><li><b>新建项目</b>：填项目名 + 选根目录，创建后自动登记为工作区。</li><li><b>建团队</b>：一次补齐角色会话。完整六人（PM / 产品 / 需求 / 程序员A / 程序员B / 测试）或快速四人（去掉产品与程序员B）。</li></ul><p>团队没建好之前，后面的派单、评审、验收都无从谈起。</p>'
   },
   {
-    target: '#role-sessions',
-    kicker: '第 2 步 / 4',
-    title: '六角色 = 六会话',
-    html: '<p>左侧「六角色会话」一直可见。每个角色对应一个 DSH 会话；点一行可以查看会话 id、在 DSH 里定位，或单独唤醒。</p><p>点 <b>建团队</b> 一次补齐六个角色会话。</p>'
+    target: '',
+    kicker: '第 2 步 / 7',
+    title: '跟项目经理提需求（需求流程）',
+    html: '<p>直接在主画面对项目经理说你要什么，不用填表。它会按这条链推进：</p><p><b>提需求 → 需求分析 / 产品评审 → 拆任务派开发 → 测试 → 验收 → 收口</b>。</p><p>示例话术（点按钮只复制，不会替你发送）：</p><p><code>我想做一个个人博客，先帮我理一下需求。</code></p><p><button type="button" class="ghost small" data-guide-copy="我想做一个个人博客，先帮我理一下需求。">复制示例话术</button></p>'
   },
   {
     target: '#btn-board',
-    kicker: '第 3 步 / 4',
-    title: '看板与流程是浮层',
-    html: '<p>DSH 始终是主画面。点 <b>项目面板</b> 在右侧浮层里打开总览 / 看板 / 流程 / 提案 / 文件 / 角色；点 <b>团队台</b> 看六角色会话、消息、派单与回执。</p><p>右下角两个入口：<b>团队看板</b> 打开旧版看板浮窗（置顶），<b>流程</b> 浮出流程图，拖动或关闭都行。</p>'
+    kicker: '第 3 步 / 7',
+    title: '流程看板：现在走到哪了',
+    html: '<p>点 <b>项目面板</b> 打开浮层，里面有「流程」页：从工作流实时推导出每个需求走到哪一步（提需求 / 评审 / 开发 / 测试 / 验收 / 收口），不靠人记。</p><p>右下角也有 <b>流程</b> 浮窗入口，可以边看边聊。</p>'
+  },
+  {
+    target: '',
+    kicker: '第 4 步 / 7',
+    title: '在哪审核需求',
+    html: '<p>需要你拍板的需求进「<b>更多 → 我的评审</b>」：点条目看「是什么 / 怎么做 / 建议拍板」，再点 <b>通过</b> 或 <b>打回</b>。</p><p>打回必须写一句意见，通过不用。评审通过后才会进入开发。</p>'
+  },
+  {
+    target: '',
+    kicker: '第 5 步 / 7',
+    title: '在哪验收需求',
+    html: '<p>开发测试都做完的需求进「<b>我的验收</b>」浮层：看测试报告与证据，再决定 <b>通过</b> 或 <b>打回</b>。</p><p>验收和评审不是一回事：评审是「要不要做」，验收是「做成没有」。验收通过需求才收口。</p>'
+  },
+  {
+    target: '#metrics',
+    kicker: '第 6 步 / 7',
+    title: '回收内存解决了什么',
+    html: '<p>左下角这行是 CPU / 内存 / GPU 占用。<b>立即回收</b>只在内存涨太快时重载渲染进程（DSH 主画面 + 壳），把内存降下来。</p><p>它 <b>不动任何数据</b>：不改项目、不改会话、不改团队状态；只是把界面重新加载一遍，正在跑的后台任务照常。</p>'
   },
   {
     target: '#btn-more',
-    kicker: '第 4 步 / 4',
-    title: '更多与外观',
-    html: '<p>点 <b>⋯</b> 可以切换 <b>暗金 / 暖白</b>、刷新、恢复工作区、打开旧版看板，也可以重开这份引导。</p><p>顶栏右侧可重载 DSH 主画面；左上角 ◧ 可以收起工作区侧栏。</p>'
+    kicker: '第 7 步 / 7',
+    title: '调字号 / 调主题',
+    html: '<p>字号：标题栏 <b>A-</b> / <b>A+</b>，全局生效并记住。</p><p>主题：<b>更多（⋯）→ 外观</b>，切 <b>暗金</b> / <b>暖白</b>。</p><p>其他：左上角 ◧ 收起工作区侧栏；顶栏可重载 DSH 主画面；这里也能重开这份引导。</p>'
   }
 ];
 
@@ -10236,6 +12596,17 @@ function renderGuide() {
   if (title) title.textContent = step.title;
   if (progress) progress.innerHTML = GUIDE_STEPS.map((_, i) => `<span class="ob-dot${i <= guideStep ? ' on' : ''}"></span>`).join('');
   if (body) body.innerHTML = step.html;
+  // 引导里的「复制示例话术」：只复制，绝不替用户发送。
+  const copyBtn = body ? body.querySelector('[data-guide-copy]') : null;
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      const text = String(copyBtn.getAttribute('data-guide-copy') || '');
+      try {
+        await navigator.clipboard.writeText(text);
+        copyBtn.textContent = '已复制（不会自动发送）';
+      } catch { copyBtn.textContent = '复制失败，请手动选中这行文字'; }
+    });
+  }
   if (prev) prev.disabled = guideStep === 0;
   if (next) next.textContent = guideStep === GUIDE_STEPS.length - 1 ? '完成' : '下一步';
   applyTeamModeCopy($('#onboard') || document.body);
@@ -10264,19 +12635,62 @@ function closeGuide(markDone = true) {
   }
 }
 
+/* ── T-b417：路由守护状态（运行中 / 已停止 / 心跳超时，超 3 周期标红） ───── */
+let daemonBusy = false;
+function daemonPillPaint(pill, s) {
+  if (!pill) return;
+  const state = String((s && s.state) || 'unknown');
+  const label = String((s && s.label) || '守护 —');
+  pill.dataset.daemonState = state;
+  pill.dataset.daemonBeat = (s && s.beatAgeMs !== null && s.beatAgeMs !== undefined) ? String(Math.round(Number(s.beatAgeMs) / 1000)) : '';
+  pill.dataset.daemonPid = s && s.pid ? String(s.pid) : '';
+  pill.textContent = label;
+  pill.classList.toggle('daemon-stale', state === 'stale');
+  pill.title = [
+    s && s.detail ? s.detail : '',
+    s && s.lastBeatAt ? `最后心跳 ${s.lastBeatAt}` : '',
+    s && s.pid ? `pid ${s.pid}` : '',
+    s && s.managed ? '本工作台正在管这个守护' : '',
+    s && s.error ? s.error : '',
+    '点一下刷新',
+  ].filter(Boolean).join(' · ');
+  pill.setAttribute('aria-label', label + (s && s.detail ? '：' + s.detail : ''));
+}
+async function tickDaemonStatus() {
+  const pill = $('#daemon-pill');
+  if (!pill || daemonBusy) return null;
+  if (!(window.workbench && typeof window.workbench.teamRouteStatus === 'function')) {
+    daemonPillPaint(pill, { state: 'disabled', label: '守护：接口缺失', detail: '当前壳层没有 team:route-status' });
+    return null;
+  }
+  daemonBusy = true;
+  try {
+    const p = activeProject();
+    if (!p) { daemonPillPaint(pill, { state: 'no-project', label: '守护 —', detail: '先选择工作区' }); return null; }
+    const s = await window.workbench.teamRouteStatus({ projectId: p.id });
+    daemonPillPaint(pill, s || {});
+    return s;
+  } catch (error) {
+    daemonPillPaint(pill, { state: 'error', label: '守护：状态读不到', detail: humanError(String((error && error.message) || error)) });
+    return null;
+  } finally { daemonBusy = false; }
+}
+
 /* ── 顶栏指标与看板切换 ───────────────────────────────── */
 
+let metricsBusy = false;
 async function tickMetrics() {
+  if (metricsBusy) return; // B-fa80：2 秒一次，慢返回时跳过本轮，避免 IPC 堆积
+  metricsBusy = true;
   try {
     const m = await window.workbench.metrics();
     const metrics = $('#metrics');
     if (!metrics) return;
-    const gpu = m.gpu && Number.isFinite(m.gpu.util) ? `${m.gpu.util}%` : '—';
-    metrics.textContent = `CPU ${m.cpu}% · GPU ${gpu} · MEM ${m.mem}%`;
-    const gpuMem = m.gpu && Number.isFinite(m.gpu.used) && Number.isFinite(m.gpu.total)
-      ? ` · GPU 显存 ${m.gpu.used}/${m.gpu.total} MB` : '';
-    metrics.title = `本机负载 · 点击刷新\nCPU ${m.cpu}% · GPU ${gpu} · MEM ${m.mem}%${gpuMem}`;
-  } catch { /* ignore */ }
+    const gpuText = m.gpu && Number.isFinite(m.gpu.util) ? `${m.gpu.util}%` : '不可用';
+    const gpuMem = m.gpu && Number.isFinite(m.gpu.used) && Number.isFinite(m.gpu.total) ? ` · 显存 ${m.gpu.used}/${m.gpu.total}MB` : '';
+    metrics.textContent = `CPU ${m.cpu}% · 内存 ${m.mem}% · GPU ${gpuText}`;
+    metrics.title = `本机占用（2 秒刷新，点击立即刷新）\nCPU ${m.cpu}%${m.cpuSource === 'system' ? '（全机）' : '（进程汇总）'} · 内存 ${m.mem}% · GPU ${gpuText}${gpuMem}`;
+  } catch { /* ignore */ } finally { metricsBusy = false; }
 }
 
 /* ── 事件绑定 ─────────────────────────────────────────── */
@@ -10299,7 +12713,7 @@ async function openTeamBoardOld(projectId) {
     return;
   }
   try {
-    const r = await window.workbench.teamBoardOld(p.id);
+    const r = await window.workbench.teamBoardOld({ projectId: p.id, theme: currentTheme() });
     if (r && r.ok) {
       toast(r.reused ? '团队看板浮窗已置顶（复用已有窗口）' : '已打开旧版团队看板浮窗（置顶）', 'ok');
       loadTeamStatus({ force: true });
@@ -10310,6 +12724,18 @@ async function openTeamBoardOld(projectId) {
 }
 
 function bind() {
+  // B-fa80：系统占用点击立即刷新（平时 2 秒自动刷新）。
+  $('#metrics')?.addEventListener('click', () => { tickMetrics(); });
+  // R-9db6：决策箱刷新（只读重拉）
+  $('#btn-decision-refresh')?.addEventListener('click', () => { loadDecisionBox(); });
+  // T-b417：守护状态点击立即刷新（平时 10 秒刷新）；启动先读一次。
+  $('#daemon-pill')?.addEventListener('click', () => { tickDaemonStatus(); });
+  tickDaemonStatus();
+  setInterval(() => { tickDaemonStatus(); }, 10000);
+  // R-2a69：F1 由主进程统一接管（焦点在 DSH webview 里也能开引导）。
+  if (window.workbench && typeof window.workbench.onGuideOpen === 'function') {
+    window.workbench.onGuideOpen(() => { showGuide(true); });
+  }
   // 顶栏：工作区切换 + 团队/会话状态
   $('#workspace-switch')?.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -10332,14 +12758,18 @@ function bind() {
   // 顶栏操作
   $('#btn-board')?.addEventListener('click', () => setDrawer('project'));
   $('#btn-members')?.addEventListener('click', () => setDrawer('team'));
-  $('#btn-owner-quick')?.addEventListener('click', openOwnerGate);
-  $('#stage-owner')?.addEventListener('click', () => {
+  $('#legacy-owner-quick-removed')?.addEventListener('click', openOwnerGate);
+  $('#legacyReviewStage')?.addEventListener('click', () => {
     if (activeProject()) openOwnerGate();
   });
   $('#btn-workspace')?.addEventListener('click', openNewProject);
   $('#btn-side-new')?.addEventListener('click', openNewProject);
   $('#btn-team-start')?.addEventListener('click', () => startTeam($('#btn-team-start')));
+  $('#btn-pool')?.addEventListener('click', () => togglePool());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && poolUi.open) closePool(); });
+  setTimeout(() => { refreshPoolBadge(); }, 1500);
   $('#btn-restore')?.addEventListener('click', () => openRestoreModal());
+  $('#btn-clean-missing')?.addEventListener('click', () => cleanMissingProjects());
   $('#btn-empty-new')?.addEventListener('click', openNewProject);
   $('#btn-side-restore')?.addEventListener('click', () => openRestoreModal());
   $('#btn-refresh')?.addEventListener('click', async (e) => {
@@ -10360,6 +12790,92 @@ function bind() {
   $('#btn-wc-team')?.addEventListener('click', () => setDrawer('team'));
   $('#btn-wc-build')?.addEventListener('click', () => startTeam($('#btn-wc-build')));
   $('#btn-theme')?.addEventListener('click', toggleTheme);
+  // 界面字号：A- / A+ / 100% + Ctrl+= / Ctrl+-（0.9–1.5，步进 0.1；值存 workbench.json.ui.zoom，重启恢复）
+  (function setupZoomControls() {
+    const out = $('#btn-zoom-out');
+    const reset = $('#btn-zoom-reset');
+    const inc = $('#btn-zoom-in');
+    let current = 1;
+    const paint = () => { if (reset) reset.textContent = Math.round(current * 100) + '%'; };
+    const apply = async (next) => {
+      const z = Math.min(1.5, Math.max(0.9, Math.round(Number(next) * 10) / 10));
+      try {
+        const r = (window.workbench && typeof window.workbench.uiZoomSet === 'function')
+          ? await window.workbench.uiZoomSet(z) : null;
+        current = (r && Number.isFinite(r.zoom)) ? r.zoom : z;
+      } catch { current = z; }
+      paint();
+    };
+    out?.addEventListener('click', () => apply(current - 0.1));
+    inc?.addEventListener('click', () => apply(current + 0.1));
+    reset?.addEventListener('click', () => apply(1));
+    window.addEventListener('keydown', (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      if (e.key === '=' || e.key === '+') { e.preventDefault(); apply(current + 0.1); }
+      else if (e.key === '-' || e.key === '_') { e.preventDefault(); apply(current - 0.1); }
+      else if (e.key === '0') { e.preventDefault(); apply(1); }
+    });
+    if (window.workbench && typeof window.workbench.uiZoomGet === 'function') {
+      window.workbench.uiZoomGet().then((r) => { if (r && Number.isFinite(r.zoom)) { current = r.zoom; paint(); } }).catch(() => {});
+    }
+    paint();
+  })();
+  // 内存回收（类 GC，2026-11-13 T-38f0）：徽标每 5 秒刷新；「立即回收」优雅重载；重载后恢复抽屉/滚动
+  (function setupMemoryRecycle() {
+    const badge = $('#mem-badge');
+    const btn = $('#btn-mem-recycle');
+    const fmt = (mb) => (!Number.isFinite(Number(mb)) ? '—' : (Number(mb) >= 1024 ? (Number(mb) / 1024).toFixed(2) + 'GB' : Math.round(Number(mb)) + 'MB'));
+    let lastMb = null;
+    const paint = (data) => {
+      if (!badge) return;
+      const mb = Number(data && data.mb);
+      // 首次采样前/采样失败：有上次值保留并标灰，没有就显示“—”；绝不写 0MB（Owner 实测过 0MB）。
+      if (!Number.isFinite(mb) || mb <= 0) {
+        badge.textContent = lastMb ? '内存 ' + fmt(lastMb) : '内存 —';
+        badge.classList.add('is-unknown');
+        badge.title = lastMb
+          ? `这次没读到内存，先显示上次的 ${fmt(lastMb)}（会继续每 5 秒重试）`
+          : '正在等待第一次内存采样（每 5 秒一次，读到就显示真实 MB）';
+        return;
+      }
+      lastMb = mb;
+      badge.classList.remove('is-unknown');
+      badge.textContent = '内存 ' + fmt(mb);
+      badge.classList.toggle('is-high', Boolean(data && data.thresholdMB && mb >= Number(data.thresholdMB)));
+      badge.title = `渲染进程内存 ${fmt(mb)}；当前阈值 ${fmt((data && data.thresholdMB) || 0)}（自适应：基线×2.5，最低 1.8GB、上限 3GB）${Number.isFinite(Number(data && data.baselineMB)) && Number(data.baselineMB) > 0 ? `；基线 ${fmt(data.baselineMB)}` : '；基线待启动满 10 分钟后确定'}；涨得快才自动回收`;
+    };
+    // 回收前由主进程调用：把当前抽屉/滚动存到 localStorage，重载后恢复（项目选中由 workbench.json 持久化，不丢）。
+    window.__awbMemSnapshot = () => {
+      const snap = { drawer: typeof openDrawerName === 'string' ? openDrawerName : '', theme: document.documentElement.getAttribute('data-theme') || '', scroll: window.scrollY || 0, at: Date.now() };
+      try { localStorage.setItem('awb.memResume', JSON.stringify(snap)); } catch { /* ignore */ }
+      return snap;
+    };
+    try {
+      const resume = JSON.parse(localStorage.getItem('awb.memResume') || 'null');
+      if (resume) {
+        localStorage.removeItem('awb.memResume');
+        if (resume.drawer) { try { setDrawer(resume.drawer); } catch { /* ignore */ } }
+        if (resume.scroll) { try { window.scrollTo(0, resume.scroll); } catch { /* ignore */ } }
+      }
+    } catch { /* ignore */ }
+    btn?.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        const r = await window.workbench.memRecycle();
+        if (r && r.ok) toast(`正在回收内存（回收前 ${fmt(r.beforeMB)}）…`);
+        else toast('回收失败：' + String((r && (r.code || r.message)) || '未知原因'), 'bad');
+      } catch (e) {
+        toast('回收失败：' + humanError((e && e.message) || e), 'bad');
+      } finally {
+        setTimeout(() => { btn.disabled = false; }, 4000);
+      }
+    });
+    if (window.workbench && typeof window.workbench.onMemStats === 'function') window.workbench.onMemStats(paint);
+    if (window.workbench && typeof window.workbench.onMemRecycleDone === 'function') {
+      window.workbench.onMemRecycleDone((d) => { paint({ mb: d && d.after, thresholdMB: (d && d.thresholdMB) || 0, baselineMB: d && d.baselineMB }); toast(`已回收：${fmt(d && d.before)} → ${fmt(d && d.after)}`); });
+    }
+    if (window.workbench && typeof window.workbench.memStats === 'function') window.workbench.memStats().then(paint).catch(() => {});
+  })();
   $('#board-launcher')?.addEventListener('click', toggleBoardPanel);
   $('#btn-project-remove')?.addEventListener('click', removeProjectRecord);
   $('#btn-team-board-2')?.addEventListener('click', openBoardPanel);
@@ -10408,6 +12924,8 @@ function bind() {
     if (p) renderTeamLog(p);
   });
   $('#btn-receipts-refresh')?.addEventListener('click', () => { loadReceipts({ force: true }); });
+  // R-b5fc F-4b：角色队列刷新（只读重拉 role_queues.json）
+  $('#btn-queue-refresh')?.addEventListener('click', () => { loadRoleQueue({ force: true }); });
   $('#team-receipts-note')?.addEventListener('click', (e) => {
     if (e.target.closest('[data-receipts-board]')) openBoardPanel();
   });
@@ -10480,12 +12998,26 @@ function bind() {
   $('#btn-task-board')?.addEventListener('click', () => showTab('board'));
   $('#btn-open')?.addEventListener('click', openProjectFolder);
   $('#btn-project-index')?.addEventListener('click', openProjectIndex);
+  // 项目终验（R-fb48）：前置检查 → 记忆先快照后清理 → 写终验记录；失败按错误码提示，不吞。
+  $('#btn-finalize')?.addEventListener('click', async () => {
+    const id = boardUi.currentProjectId;
+    if (!id) { toast('先选择一个项目'); return; }
+    if (!window.confirm('项目终验：先快照本项目记忆，再清空记忆库中本项目的内容，并写终验记录（不可重复，Owner --force 除外）。继续？')) return;
+    try {
+      const r = await window.workbench.finalizeRun({ projectId: id });
+      const mem = r && r.memory ? r.memory : {};
+      toast(`终验完成：${(r && r.record && r.record.finalizedAt) || ''} ｜ 记忆 ${mem.status || '-'}${mem.cleared ? '（已清理）' : '（未清理）'}`);
+      if (typeof refreshTeam === 'function') refreshTeam();
+    } catch (error) {
+      toast(String((error && error.message) || error));
+    }
+  });
   $('#btn-team-board-old')?.addEventListener('click', openBoardPanel);
   $('#btn-provision')?.addEventListener('click', () => startTeam($('#btn-provision')));
-  $('#btn-owner')?.addEventListener('click', openOwnerGate);
-  $('#btn-owner-open')?.addEventListener('click', openOwnerGate);
-  $('#btn-owner-legacy')?.addEventListener('click', openOwnerModal);
-  $('#btn-flow-owner')?.addEventListener('click', openOwnerGate);
+  $('#legacy-owner-btn-removed')?.addEventListener('click', openOwnerGate);
+  $('#legacy-owner-open-removed')?.addEventListener('click', openOwnerGate);
+  $('#legacy-owner-btn-removed-legacy')?.addEventListener('click', openOwnerModal);
+  $('#legacy-owner-flow-removed')?.addEventListener('click', openOwnerGate);
   $('#project-to-team')?.addEventListener('click', () => setDrawer('team'));
   $('#team-to-project')?.addEventListener('click', () => setDrawer('project'));
 
@@ -10600,8 +13132,21 @@ function bind() {
 
   // 切换工作区 / 六角色会话操作
   $('#project-list')?.addEventListener('click', (e) => {
+    const remove = e.target.closest('[data-project-remove]');
+    if (remove) {
+      e.stopPropagation();
+      removeProjectRecord(remove.dataset.projectRemove);
+      return;
+    }
     const item = e.target.closest('[data-project]');
     if (item) selectWorkspace(item.dataset.project);
+  });
+  $('#project-list')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const item = e.target instanceof Element ? e.target.closest('[data-project]') : null;
+    if (!item || e.target.closest('[data-project-remove]')) return;
+    e.preventDefault();
+    selectWorkspace(item.dataset.project);
   });
   // 旧流程面板：文档 / 角色卡 / 阶段跳转 / 只读刷新（全部只读，不调写接口）
   document.addEventListener('click', (e) => {
@@ -10612,6 +13157,21 @@ function bind() {
       e.preventDefault();
       setDrawer('project');
       showTab(go.dataset.legacyGo);
+      return;
+    }
+    // R-c651 F-c651-4/5：团队行的「一键唤醒」「全部已读」（口径由主进程 → 团队工具 presence/mark-read/wake 执行）
+    const wakeRoleBtn = target.closest('[data-action="wake-role"]');
+    if (wakeRoleBtn) {
+      e.preventDefault();
+      if (wakeRoleBtn.disabled) return;
+      wakeRoleFromRow(wakeRoleBtn.dataset.role || '', wakeRoleBtn);
+      return;
+    }
+    const markReadBtn = target.closest('[data-action="mark-read"]');
+    if (markReadBtn) {
+      e.preventDefault();
+      if (markReadBtn.disabled) return;
+      markRoleReadFromRow(markReadBtn.dataset.role || '', markReadBtn);
       return;
     }
     if (target.closest('#legacy-boot-all, #roles-boot-all, #team-boot-all, #legacy-gate-reboot')) {
@@ -10628,12 +13188,25 @@ function bind() {
     const actionButton = target.closest('[data-legacy-req-action]');
     if (actionButton) {
       e.preventDefault();
+      if (actionButton.dataset.gateBlocked) {
+        const action = actionButton.dataset.legacyReqAction;
+        const entry = gateForAction(action) || { action, gate: '', code: '', title: '闸门未满足', missing: [actionButton.title], next: '' };
+        showGateRejection(entry, { attempted: action, source: 'team.mjs gates.mjs（gate:check）' });
+        return;
+      }
       legacyActionModal(actionButton.dataset.legacyReqAction, actionButton.dataset.reqId || '');
       return;
     }
     const ownerClick = target.closest('[data-legacy-owner-click]');
-    if (ownerClick && !ownerClick.disabled) {
+    if (ownerClick) {
       e.preventDefault();
+      const action = ownerClick.dataset.legacyOwnerClick === 'accept' ? 'owner-accept' : 'owner-review';
+      if (ownerClick.dataset.gateBlocked) {
+        const entry = gateForAction(action) || { action, gate: '', code: '', title: '闸门未满足', missing: [ownerClick.title], next: '' };
+        showGateRejection(entry, { attempted: action, source: 'team.mjs gates.mjs（gate:check）' });
+        return;
+      }
+      if (ownerClick.disabled) return;
       legacyOwnerOneClick(
         ownerClick.dataset.legacyOwnerClick,
         ownerClick.dataset.reqId || '',
@@ -10840,6 +13413,29 @@ function bind() {
     if (e.key === 'F1') {
       e.preventDefault();
       showGuide(true);
+      return;
+    }
+    // R-2a69：引导打开时支持键盘翻页（→/Enter 下一步，← 上一步，Esc 关闭），
+    // 鼠标按钮不变；也给自动化截图一个稳定入口。
+    const guideMask = $('#onboard');
+    if (guideMask && !guideMask.hidden) {
+      if (e.key === 'ArrowRight' || e.key === 'Enter') {
+        e.preventDefault();
+        const next = $('#ob-next');
+        if (next) next.click();
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const prev = $('#ob-prev');
+        if (prev && !prev.disabled) prev.click();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        showGuide(false);
+        return;
+      }
     }
   });
 
@@ -10927,6 +13523,13 @@ async function provisionTeamForMode(mode) {
     throw new Error('preload 没有 dsh:provision：不能建团队，也不会伪造会话');
   }
   const desired = normalizeTeamMode(mode);
+  // 先按模式补齐项目结构/协作准则/项目.json，再建会话；否则会出现“4 个会话 + 6 角色目录 + 六角色准则”的混搭。
+  if (typeof window.workbench.teamEnsureProject === 'function') {
+    const ensured = await window.workbench.teamEnsureProject({ projectId: p.id, teamMode: desired });
+    if (ensured && ensured.ok === false) {
+      throw new Error(ensured.message || ensured.code || '团队项目结构同步失败');
+    }
+  }
   const r = await window.workbench.dshProvision({ projectId: p.id, teamMode: desired });
   const warning = Boolean(r && r.ok === false);
   if (warning && r.code !== 'SESSION_BLANK') {
@@ -11016,7 +13619,11 @@ function clampFlowPanel() {
   }
   await initDsh();
   await tickMetrics();
-  setInterval(tickMetrics, 4000);
+  setInterval(tickMetrics, 2000);
+  // 流程图/项目面板打开时轮询工作流真相（只读，5 秒节流）；隐藏暂停，失败按 2s/5s/10s 退避。
+  setInterval(flowRefreshTick, 1000);
+  // B-405f：会话映射自动跟随（rotate/换人后 5 秒内刷新成员列表与计数，不用重启）。
+  startRosterWatch();
   // 团队台打开时定期复核会话（只读）；平时不轮询，避免打扰 DSH。
   setInterval(() => {
     if (!state || !state.dsh || !state.dsh.online) return;

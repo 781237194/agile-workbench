@@ -1,0 +1,6 @@
+# pm-workbench-dsh —— DSH 启动器插件（host-only bundle）
+# 只插入一个 Host 插件行；不包含、也不修改 Electron 工作台源码。
+- insert:
+    - id: pm-workbench-dsh
+      name: pm-workbench-dsh
+      config: {}

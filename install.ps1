@@ -1255,13 +1255,17 @@ try {
         }
 
         $shortcutFile = Join-Path $desktop 'PM工作台.lnk'
-        $startTarget = Join-Path $repoRoot 'start.cmd'
+        $launchScript = Join-Path $repoRoot 'launch.vbs'
+        $wscriptExe = Join-Path $env:WINDIR 'System32\wscript.exe'
         $iconFile = Join-Path $repoRoot 'assets\pm-workbench.ico'
+        if (-not (Test-Path -LiteralPath $launchScript)) { throw "找不到隐藏启动器：$launchScript" }
+        if (-not (Test-Path -LiteralPath $wscriptExe)) { throw "找不到 wscript.exe：$wscriptExe" }
 
         $shell = New-Object -ComObject WScript.Shell
         try {
             $shortcut = $shell.CreateShortcut($shortcutFile)
-            $shortcut.TargetPath = $startTarget
+            $shortcut.TargetPath = $wscriptExe
+            $shortcut.Arguments = '"' + $launchScript + '"'
             $shortcut.WorkingDirectory = $repoRoot
             $shortcut.Description = 'PM工作台（PM Workbench）'
             if (Test-Path -LiteralPath $iconFile) {
@@ -1279,8 +1283,13 @@ try {
         $verifyShell = New-Object -ComObject WScript.Shell
         try {
             $verified = $verifyShell.CreateShortcut($shortcutFile)
-            if ([System.IO.Path]::GetFullPath($verified.TargetPath) -ne [System.IO.Path]::GetFullPath($startTarget)) {
+            $actualTarget = [System.IO.Path]::GetFullPath($verified.TargetPath)
+            $expectedTarget = [System.IO.Path]::GetFullPath($wscriptExe)
+            if ($actualTarget -ne $expectedTarget) {
                 throw "快捷方式目标不正确：$($verified.TargetPath)"
+            }
+            if ($verified.Arguments -notmatch [regex]::Escape($launchScript)) {
+                throw "快捷方式参数不正确：$($verified.Arguments)"
             }
         } finally {
             if ($verified) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($verified) }
@@ -1293,10 +1302,12 @@ try {
 
     if ($Launch) {
         Write-Step 7 '启动 PM工作台'
-        $startCmd = Join-Path $repoRoot 'start.cmd'
+        $launchScript = Join-Path $repoRoot 'launch.vbs'
+        $wscriptExe = Join-Path $env:WINDIR 'System32\wscript.exe'
         try {
-            Start-Process -FilePath $startCmd -WorkingDirectory $repoRoot -ErrorAction Stop
-            Write-InstallerLog 'OK' '已启动 start.cmd（新窗口）'
+            if (-not (Test-Path -LiteralPath $launchScript)) { throw "找不到隐藏启动器：$launchScript" }
+            Start-Process -FilePath $wscriptExe -ArgumentList ('"' + $launchScript + '"') -WorkingDirectory $repoRoot -WindowStyle Hidden -ErrorAction Stop
+            Write-InstallerLog 'OK' '已通过隐藏启动器启动 PM工作台'
         } catch {
             $script:ExitCode = 1
             Write-InstallerLog 'FAIL' "自动启动失败：$($_.Exception.Message)"

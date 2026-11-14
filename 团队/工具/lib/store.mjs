@@ -36,8 +36,19 @@ export function projectRoleSet(project) {
   return rolesForMode(projectTeamMode(project));
 }
 
-/** 模式角色 id 列表：项目.json / workspace.json 的 roleIds 都以这里为准。 */
+/** 模式角色 id 列表：项目.json / workspace.json 的 roleIds 都以这里为准。
+ *  R-b52b F-7：项目内「有哪些角色」只认 项目.json.roleIds（显式清单优先）；
+ *  只有项目还没写过 roleIds 时才回退团队模式（full=6 / fast=4）。这样测试把 tester 从
+ *  roleIds 里删掉后，互询/派单/评审/验收的判定会立刻跟着变，不会被模式再补回来。 */
 export function projectRoleIds(project) {
+  const explicit = Array.isArray(project && project.roleIds)
+    ? project.roleIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  if (explicit.length) {
+    // ROLES 是角色 id 字符串数组（roles.mjs 单一真相），不是对象数组。
+    const kept = explicit.filter((id) => ROLES.includes(id));
+    if (kept.length) return kept;
+  }
   return projectRoleSet(project);
 }
 
@@ -478,6 +489,56 @@ export function setActiveProject(name) {
 }
 
 /**
+ * 任务相关必读：需求正文 + 按角色的上游产出（只收录当前存在的文件）。
+ * 这是“必读分层”的第二层：核心 4 份固定，任务相关按任务/需求动态带入；找不到就不写，不补造。
+ */
+export function requiredTaskDocs(projectName, role, task) {
+  let project = null;
+  try { project = loadProject(projectName); } catch { return []; }
+  const root = path.resolve(project.path);
+  const out = [];
+  const seen = new Set();
+  const addDoc = (abs, rel) => {
+    if (!rel || seen.has(rel)) return;
+    const record = readDocRecord(abs, rel);
+    if (!record.exists) return;
+    seen.add(rel);
+    out.push({ rel, hash: record.hash, size: record.size });
+  };
+  const latestIn = (dir, pattern) => {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { return ''; }
+    const rows = names.filter((name) => pattern.test(name))
+      .map((name) => ({ name, mtime: fs.statSync(path.join(dir, name)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    return rows.length ? rows[0].name : '';
+  };
+  if (task && task.requirementId) {
+    const id = String(task.requirementId).toLowerCase();
+    let names = [];
+    try { names = fs.readdirSync(path.join(root, '需求')); } catch { names = []; }
+    const reqName = names.filter((name) => /^R-.*\.md$/i.test(name))
+      .find((name) => name.toLowerCase().startsWith(id));
+    if (reqName) addDoc(path.join(root, '需求', reqName), `需求/${reqName}`);
+  }
+  const upstream = role === 'product'
+    ? ['analyst']
+    : (role === 'programmer1' || role === 'programmer2')
+      ? ['analyst', 'product']
+      : role === 'tester'
+        ? ['programmer1', 'programmer2', 'product']
+        : [];
+  for (const roleId of upstream) {
+    const dirName = ROLE_DIRS[roleId];
+    if (!dirName) continue;
+    const dir = path.join(root, dirName, '产出');
+    const file = latestIn(dir, /\.md$/i);
+    if (file && !/^实现说明-v\d+\.md$/i.test(file)) addDoc(path.join(dir, file), `${dirName}/产出/${file}`);
+  }
+  return out;
+}
+
+/**
  * boot 必读：项目铁律 → 项目信息 → 角色卡（项目内）→ 项目索引 → 需求总览 → 相关需求 → 他人文档索引。
  * 团队宪法在项目文档之前读；全局角色卡不再回退，缺项目文档就 MISSING_DOC（不假成功）。
  * 返回每个文件的路径/大小/哈希/摘录，作为本轮 read 证据；hashes 只覆盖进令牌的规则文档。
@@ -498,7 +559,7 @@ export function readDocSet(role, project) {
   const specs = bootDocSpecs(root, ROLE_DIRS[role] || '');
   const records = specs.map((spec) => {
     const record = spec.path ? readDocRecord(spec.path, spec.rel) : readDocRecord('', spec.rel);
-    return { ...record, key: spec.key, label: spec.label, required: spec.required !== false };
+    return { ...record, key: spec.key, label: spec.label, required: spec.required !== false, core: Boolean(spec.core) };
   });
   const missing = records.filter((r) => r.required && !r.exists).map((r) => r.label);
   if (missing.length) {
@@ -538,7 +599,17 @@ export function readDocSet(role, project) {
     peers.push({ role: other.role, label: `${ROLE_NAMES[other.role] || other.role} · 文件索引`, rel, path: record.path, size: record.size, hash: record.hash });
   }
   const readOrder = records.filter((r) => r.exists).map((r) => r.rel || r.path);
-  return { files, hashes, rulesHash, docs: records, requirements, peers, readOrder, team, member, project, teamMode, modeRoles };
+  // 第二层必读：只按“本人未完成任务”带需求正文与上游产出；PM 没有 owner 任务时留空，不硬凑。
+  const taskDocs = [];
+  const seenTaskDoc = new Set();
+  for (const task of listTasks(project.name).filter((t) => t.status !== 'done' && t.type !== 'requirement' && t.owner === role).slice(0, 3)) {
+    for (const doc of requiredTaskDocs(project.name, role, task)) {
+      if (seenTaskDoc.has(doc.rel)) continue;
+      seenTaskDoc.add(doc.rel);
+      taskDocs.push({ ...doc, task: task.id });
+    }
+  }
+  return { files, hashes, rulesHash, docs: records, requirements, peers, readOrder, taskDocs, team, member, project, teamMode, modeRoles };
 }
 
 export function bootTokenPath(token) {
@@ -562,7 +633,13 @@ export function createBootToken({ role, project, sessionId, docs }) {
     // read 证据随令牌落盘：谁在什么时候读了哪些文件、哈希多少，事后可复核。
     readOrder: docs.readOrder || [],
     requirementsHash: docs.requirements ? docs.requirements.hash : '',
+    requirementsContentHash: docs.requirements ? (docs.requirements.contentHash || docs.requirements.hash) : '',
     requirementsCount: docs.requirements ? docs.requirements.count : 0,
+    // 需求正文逐个哈希：评审/派单前用它判断“boot 后需求是否变了”，变了就要求重新 boot 补读。
+    // contentHash 忽略程序自己写的状态行/状态记录，状态流转不算“没读”。
+    requirementDocs: (docs.requirements && Array.isArray(docs.requirements.list) ? docs.requirements.list : [])
+      .map((row) => ({ id: row.id, rel: row.rel, hash: row.hash, contentHash: row.contentHash || row.hash, size: row.size })),
+    taskDocs: Array.isArray(docs.taskDocs) ? docs.taskDocs : [],
     peers: (docs.peers || []).map((p) => ({ role: p.role, rel: p.rel, hash: p.hash })),
     createdAt: nowIso(),
     expiresAt: new Date(now + Number(team.config.bootTtlMinutes || DEFAULT_BOOT_TTL_MINUTES) * 60000).toISOString(),
@@ -578,7 +655,8 @@ export function requireBoot(token, { role, project } = {}) {
   if (!token || token === true) fail('BOOT_REQUIRED', '需要 --boot <启动令牌>；先运行 boot');
   const data = readJson(bootTokenPath(String(token)), null);
   if (!data) fail('BOOT_INVALID', `启动令牌不存在：${token}`);
-  if (Date.parse(data.expiresAt) < Date.now()) fail('BOOT_EXPIRED', `启动令牌已过期，重新 boot`, { token: data.token, expiredAt: data.expiresAt });
+  // B-b8d0（Owner 05:26 更正）：启动令牌不再按时间过期——BOOT_EXPIRED 不再出现。
+  // expiresAt 仍写入作审计/prompt 展示，但**不再作为拒绝依据**；缺令牌仍 BOOT_REQUIRED，规则变更仍 RULES_CHANGED。
   if (role && data.role !== role) fail('BOOT_ROLE_MISMATCH', `令牌角色 ${data.role} ≠ 请求角色 ${role}`);
   if (project && data.project !== project) fail('BOOT_PROJECT_MISMATCH', `令牌项目 ${data.project} ≠ 请求项目 ${project}`);
   const proj = loadProject(data.project);
@@ -605,6 +683,10 @@ export function mailBoxDir(role, box) {
 }
 
 export function sendMessage(msg) {
+  // R-9db6 F-9db6-10②：断消息通道注入（只在测试里设），用于造 RECEIPT_FAILED；生产默认不设。
+  if (process.env.TEAM_MESSAGE_SEND_FAIL === '1') {
+    fail('MESSAGE_SEND_FAIL', '消息通道被测试注入为失败（TEAM_MESSAGE_SEND_FAIL=1）', { to: msg && msg.to, type: msg && msg.type });
+  }
   const team = loadTeam();
   if (msg.from !== 'system' && !getMember(team, msg.from)) fail('NO_SENDER', `发件人不在团队：${msg.from}`);
   const to = getMember(team, msg.to);
@@ -625,7 +707,11 @@ export function sendMessage(msg) {
     ackRequired: Boolean(msg.ackRequired),
     type: msg.type || 'note',
     replyTo: msg.replyTo || '',
+    // 收件会话：轮换后新派单必须指向新会话，旧会话不再收到该角色派单（AC17.6/17.7）。
+    recipientSessionId: String((to && to.sessionId) || ''),
     ts: nowIso(),
+    // R-c651 F-c651-4：投递成功立即写 deliveredAt（未读/未回执都从这一处算，不另建未读表）。
+    deliveredAt: nowIso(),
   };
   const box = mailBoxDir(msg.to, 'new');
   ensureDir(box);
@@ -671,6 +757,7 @@ export function findMessage(role, id) {
 export function readMessage(role, id) {
   const found = findMessage(role, id);
   if (!found) fail('MESSAGE_NOT_FOUND', `消息不存在：${id}`);
+  let targetFile = found.file;
   if (found.box === 'new') {
     const dst = path.join(mailBoxDir(role, 'cur'), path.basename(found.file));
     ensureDir(path.dirname(dst));
@@ -678,8 +765,17 @@ export function readMessage(role, id) {
       if (e.code === 'EEXIST') fs.rmSync(found.file, { force: true });
       else throw e;
     }
+    targetFile = dst;
   }
-  return { msg: found.msg, alreadyRead: found.box === 'cur' };
+  // R-c651 F-c651-4：读取即写 readAt；旧消息没有 readAt 的按 deliveredAt||ts 派生并标 legacyRead（只读兼容，不另建未读表）。
+  let msg = found.msg;
+  if (!msg.readAt) {
+    msg = found.box === 'cur'
+      ? { ...msg, readAt: String(msg.deliveredAt || msg.ts || nowIso()), legacyRead: true }
+      : { ...msg, readAt: nowIso() };
+    try { writeJson(targetFile, msg); } catch { /* 读动作不因写回失败中断 */ }
+  }
+  return { msg, alreadyRead: found.box === 'cur' };
 }
 
 export function loadReceipts() {
@@ -693,9 +789,28 @@ export function ackMessage(role, id, note) {
   if (rawNote.length > maxNote) fail('RECEIPT_TOO_LONG', `回执超过 ${maxNote} 字（对账回执大小限制）`, { length: rawNote.length, max: maxNote });
   const found = findMessage(role, id);
   if (!found) fail('MESSAGE_NOT_FOUND', `消息不存在：${id}`);
+  // 旧会话消息只读不可执行：轮换后归档消息不许再 ack/执行，必须走新会话（AC17.6）。
+  if (found.msg.archivedSession) {
+    fail('MESSAGE_ARCHIVED', `消息 ${id} 属于已归档旧会话 ${found.msg.archivedSession}，只能读、不能执行；请用新会话 ${found.msg.replacedBySessionId || '(session rotate 后的新会话)'} 重新派单/处理`, {
+      messageId: id, archivedSession: found.msg.archivedSession, replacedBySessionId: found.msg.replacedBySessionId || '',
+    });
+  }
   const existing = loadReceipts().find((r) => r.msgId === id && r.from === role);
   if (existing) return { ack: existing, already: true, msg: found.msg, receiptMessage: null };
   readMessage(role, id);
+  // R-c651 F-c651-4：回执补 ackAt（readAt 已由 readMessage 写入；缺 deliveredAt 的旧消息在这里补齐）。
+  try {
+    const afterRead = findMessage(role, id);
+    if (afterRead && afterRead.msg) {
+      const stampNow = nowIso();
+      writeJson(afterRead.file, {
+        ...afterRead.msg,
+        deliveredAt: String(afterRead.msg.deliveredAt || afterRead.msg.ts || stampNow),
+        readAt: String(afterRead.msg.readAt || stampNow),
+        ackAt: stampNow,
+      });
+    }
+  } catch { /* 留痕失败不影响回执生成 */ }
   const ack = {
     id: `A-${stamp()}-${randomHex(3)}`,
     msgId: id,
@@ -806,7 +921,7 @@ export function claimTask(project, id, role, sessionId) {
   });
 }
 
-export function finishTask(project, id, role, evidence, note = '') {
+export function finishTask(project, id, role, evidence, note = '', extra = {}) {
   return withLock(`task:${project}:${id}`, { role, ttlMs: 15000, waitMs: 5000, reason: 'finish task' }, () => {
     const task = loadTask(project, id);
     if (task.status === 'done') fail('TASK_DONE', `任务已完成：${id}`);
@@ -815,6 +930,11 @@ export function finishTask(project, id, role, evidence, note = '') {
     task.status = 'done';
     task.doneAt = nowIso();
     task.evidence = truncate(evidence, 500);
+    // G9 证据门（T-20261113-063141-70a9）：把核过的证据文件（路径/大小/mtime/sha256）写进任务，供复核。
+    if (extra && Array.isArray(extra.evidenceFiles) && !extra.skipped) {
+      task.evidenceFiles = extra.evidenceFiles;
+      task.evidenceCheckedAt = String(extra.checkedAt || nowIso());
+    }
     if (note) task.detail = truncate(task.detail + '\n\n完成说明：' + note, 3000);
     task._by = role; task._action = 'done'; task._note = truncate(evidence, 100);
     return saveTask(project, task);
@@ -846,7 +966,7 @@ export function proposalPaths(project, id) {
   };
 }
 
-export function newProposal({ project, author, authorSession, task, title, rationale, risk, files }) {
+export function newProposal({ project, author, authorSession, task, title, rationale, risk, scope = 'project', files }) {
   const root = projectStatePaths(project).proposals;
   ensureDir(root);
   let id;
@@ -868,6 +988,10 @@ export function newProposal({ project, author, authorSession, task, title, ratio
     title: truncate(title, 160),
     rationale: truncate(rationale, 3000),
     risk,
+    // R-3911：提案范围；历史提案没有该字段，读取时按 project 兼容。
+    scope: scope === 'shared' ? 'shared' : 'project',
+    // R-3911 P1-1：v2 哈希覆盖 scope；历史提案无该字段，按旧算法校验，不强制迁移。
+    hashVersion: 2,
     status: 'proposed',
     createdAt: nowIso(),
     files,
@@ -884,7 +1008,7 @@ function canonicalFiles(files) {
 }
 
 export function computeProposalHash(p) {
-  return sha256(JSON.stringify({
+  const payload = {
     id: p.id,
     project: p.project,
     task: p.task,
@@ -894,7 +1018,15 @@ export function computeProposalHash(p) {
     risk: p.risk,
     files: canonicalFiles(p.files || []),
     createdAt: p.createdAt,
-  }));
+  };
+  // R-3911 P1-1：v2 哈希纳入 scope，防止“同一份签字复用到换根提案”（project ↔ shared）。
+  // 历史提案没有 hashVersion 字段：保持旧算法（不含 scope/hashVersion），不破坏既有 proposalHash/签字链；
+  // 新提案由 newProposal 写 hashVersion=2，哈希必然覆盖 hashVersion 与 scope。
+  if (p.hashVersion === 2) {
+    payload.hashVersion = 2;
+    payload.scope = p.scope === 'shared' ? 'shared' : 'project';
+  }
+  return sha256(JSON.stringify(payload));
 }
 
 export function loadProposal(project, id) {
@@ -919,6 +1051,122 @@ export function listProposals(project) {
     try { out.push(readJson(f)); } catch { /* skip */ }
   }
   return out.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+}
+
+const PROPOSAL_STATUS_TEXT = {
+  proposed: '已提案', shown: '已展示', reviewed: '已评审', signed: '已签字',
+  applied: '已应用', rejected: '已拒绝', review: '评审中', approved: '已批准',
+};
+
+/**
+ * 项目内的人读提案镜像：<项目>/提案/index.md + <项目>/提案/<P-...>/提案.md。
+ * 团队状态里的 提案/ 仍是唯一真相；这里只做只读镜像，让 Owner 不靠 Agent 记忆也能追踪每轮提案。
+ */
+/**
+ * 开发角色的“产出/代码快照-vN/”：apply 后把本次提交的代码复制一份到本角色目录，
+ * 并生成 实现说明-vN.md（含任务、提案、提交、哈希）。代码本体仍以 site/** 为准。
+ * 这是派生镜像，不参与 CAS；失败不回滚提交，只返回错误给调用方记日志。
+ */
+export function syncDevOutput(projectName, proposal, commit) {
+  const author = String((proposal && proposal.author) || '');
+  if (!['programmer1', 'programmer2'].includes(author)) return null;
+  const project = loadProject(projectName);
+  const roleDir = ROLE_DIRS[author];
+  const outRoot = path.join(project.path, roleDir, '产出');
+  let version = 1;
+  try {
+    const used = fs.readdirSync(outRoot)
+      .map((name) => /^代码快照-v(\d+)$/.exec(name))
+      .filter(Boolean)
+      .map((m) => Number(m[1]));
+    version = (used.length ? Math.max(...used) : 0) + 1;
+  } catch { /* 首次 */ }
+  const snapDir = path.join(outRoot, `代码快照-v${version}`);
+  ensureDir(snapDir);
+  const copied = [];
+  for (const row of (commit && Array.isArray(commit.after) ? commit.after : [])) {
+    const rel = String(row.target || '').replace(/\\/g, '/');
+    if (!/^(site|src|app|public)\//i.test(rel)) continue;
+    const from = path.join(project.path, rel);
+    if (!exists(from)) continue;
+    const to = path.join(snapDir, rel);
+    ensureDir(path.dirname(to));
+    fs.copyFileSync(from, to);
+    copied.push({ target: rel, hash: row.hash || hashFile(from), size: fs.statSync(from).size });
+  }
+  const note = `# 实现说明 · v${version}\n\n`
+    + `- 项目：${projectName}\n- 角色：${author}\n- 任务：${proposal.task || '—'}\n`
+    + `- 提案：${proposal.id}（${String(proposal.proposalHash || '').slice(0, 16)}）\n`
+    + `- 提交：${commit ? commit.id : '—'}\n- 时间：${nowIso()}\n\n`
+    + `## 本次代码快照\n\n| 文件 | 大小 | 哈希 |\n|---|---|---|\n`
+    + (copied.map((row) => `| ${row.target} | ${row.size} B | ${String(row.hash).slice(0, 16)} |`).join('\n') || '| （无 site/src 文件） | | |')
+    + `\n\n> 代码本体在项目 \`site/**\`（或其他代码目录）；本快照是 apply 后的只读副本，版本递增、不覆盖历史。\n`;
+  writeText(path.join(outRoot, `实现说明-v${version}.md`), note);
+  return { ok: true, role: author, version, dir: snapDir, files: copied.length };
+}
+
+export function syncProposalMirror(projectName) {  let project = null;
+  try { project = loadProject(projectName); } catch { return null; }
+  if (!project || !project.path) return null;
+  const root = path.join(path.resolve(project.path), '提案');
+  const proposals = listProposals(projectName);
+  const commits = (() => { try { return listCommits(projectName); } catch { return []; } })();
+  const rows = [];
+  for (const proposal of proposals) {
+    const reviews = (() => { try { return loadReviews(projectName, proposal.id); } catch { return {}; } })();
+    const signatures = (() => { try { return loadSignatures(projectName, proposal.id); } catch { return {}; } })();
+    const commit = commits.find((row) => String(row.proposalId) === String(proposal.id)) || null;
+    const status = commit ? 'applied' : String(proposal.status || '');
+    const statusText = PROPOSAL_STATUS_TEXT[status] || status || '未记录';
+    const fileRows = (Array.isArray(proposal.files) ? proposal.files : [])
+      .map((file) => `| ${String(file.target || '').replace(/\|/g, '/')} | ${Number(file.size || 0)} B | ${String(file.newHash || file.contentHash || '').slice(0, 16)} | ${file.baseHash === 'absent' ? '新建' : String(file.baseHash || '').slice(0, 12) || '—'} |`)
+      .join('\n');
+    const reviewRows = Object.entries(reviews)
+      .map(([role, row]) => `- ${role}：${row && row.verdict ? row.verdict : '未记录'}${row && row.comments ? ' · ' + String(row.comments).replace(/\s+/g, ' ').slice(0, 300) : ''}`)
+      .join('\n') || '- （暂无评审）';
+    const signRows = Object.entries(signatures)
+      .map(([role, row]) => `- ${role}：${row && row.decision ? row.decision : '未记录'}${row && row.note ? ' · ' + String(row.note).replace(/\s+/g, ' ').slice(0, 200) : ''}`)
+      .join('\n') || '- （暂无签字）';
+    const md = `# ${proposal.id} · ${proposal.title || '未命名提案'}\n\n`
+      + `- 项目：${projectName}\n`
+      + `- 作者：${proposal.author || '—'}｜任务：${proposal.task || '—'}｜风险：${proposal.risk || '—'}\n`
+      + `- 状态：${statusText}${commit ? `（提交 ${commit.id}）` : ''}\n`
+      + `- 创建：${proposal.createdAt || '—'}｜提案哈希：${String(proposal.proposalHash || '').slice(0, 16)}\n`
+      + `- 真相：团队\\状态\\项目\\${projectName}\\提案\\${proposal.id}\\（本文件是只读镜像）\n\n`
+      + `## 一、改了什么\n\n${String(proposal.rationale || '（未写理由）').trim()}\n\n`
+      + `## 二、文件\n\n| 目标 | 大小 | 新哈希 | 基线 |\n|---|---|---|---|\n${fileRows || '| （无） | | | |'}\n\n`
+      + `## 三、评审\n\n${reviewRows}\n\n`
+      + `## 四、签字\n\n${signRows}\n\n`
+      + `## 五、提交\n\n${commit ? `- ${commit.id} · ${commit.createdAt || ''}${commit.note ? ' · ' + commit.note : ''}` : '- （尚未提交）'}\n`;
+    ensureDir(path.join(root, proposal.id));
+    writeText(path.join(root, proposal.id, '提案.md'), md);
+    const reviewText = Object.entries(reviews).map(([role, row]) => `${role}:${row && row.verdict ? row.verdict : '—'}`).join('；') || '—';
+    const signText = Object.entries(signatures).map(([role, row]) => `${role}:${row && row.decision ? row.decision : '—'}`).join('；') || '—';
+    rows.push(`| [${proposal.id}](${proposal.id}/提案.md) | ${String(proposal.title || '').replace(/\|/g, '/').slice(0, 40)} | ${proposal.author || '—'} | ${proposal.risk || '—'} | ${statusText} | ${(proposal.files || []).map((f) => f.target).join('<br>') || '—'} | ${reviewText} | ${signText} | ${commit ? commit.id : '—'} | ${proposal.createdAt || '—'} |`);
+  }
+  // ceba AC6：镜像是团队状态的人读派生。团队状态里已不存在的 P-* 目录必须清掉，
+  // 否则会出现「团队状态 0 条提案、项目内却有 提案/index.md + P-* 目录」的不一致（测试就是这么抓到的）。
+  const prunedStale = [];
+  try {
+    const alive = new Set(proposals.map((p) => String(p.id)));
+    for (const entry of fs.readdirSync(root)) {
+      if (!/^P-/.test(entry) || alive.has(entry)) continue;
+      fs.rmSync(path.join(root, entry), { recursive: true, force: true });
+      prunedStale.push(entry);
+    }
+  } catch { /* 目录不存在/权限问题不阻断同步 */ }
+  const index = `# 提案记录 · ${projectName}\n\n`
+    + `> 由 team.mjs 在 propose/review/sign/apply 后自动生成；**团队状态目录里的 提案/ 是唯一真相**，本目录是给 Owner 看的人读镜像。\n`
+    + `> 每轮一个 \`P-...\`；不要手改本目录，改了也不会回写团队状态。\n\n`
+    + `共 ${proposals.length} 个提案。\n\n`
+    + `| 提案 | 标题 | 作者 | 风险 | 状态 | 目标文件 | 评审 | 签字 | 提交 | 创建 |\n`
+    + `|---|---|---|---|---|---|---|---|---|---|\n`
+    + (rows.join('\n') || '| （暂无提案） | | | | | | | | | |')
+    + '\n';
+  ensureDir(root);
+  writeText(path.join(root, 'index.md'), index);
+  // ceba AC6：把这次清掉的过时镜像目录也带出去，回执/测试可直接核对。
+  return { ok: true, dir: root, count: proposals.length, pruned: prunedStale };
 }
 
 export function saveReview(project, proposalId, role, review) {
@@ -1030,6 +1278,31 @@ export function activeGrants(role, project = null) {
   });
 }
 
+/**
+ * 授权 scope 的 glob → 正则：单遍扫描，避免 `**` 先变 `.*` 再被 `*` 规则二次替换成 `.[^/]*`。
+ * 规则：`**` 跨目录、`*` 不跨 `/`、`?` 匹配非 `/` 单字符；其余字符按正则转义。
+ */
+export function scopeGlobToRegExp(scope) {
+  const src = String(scope == null ? '**' : scope).replace(/\\/g, '/');
+  let pattern = '';
+  for (let index = 0; index < src.length; index += 1) {
+    const ch = src[index];
+    if (ch === '*') {
+      if (src[index + 1] === '*') {
+        pattern += '.*';
+        index += 1;
+      } else {
+        pattern += '[^/]*';
+      }
+    } else if (ch === '?') {
+      pattern += '[^/]';
+    } else {
+      pattern += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  return new RegExp('^' + pattern + '$', 'i');
+}
+
 export function hasGrant(role, action, project, targetRel) {
   if (role === 'pm' || role === 'owner') return true;
   const grants = activeGrants(role, project);
@@ -1039,8 +1312,7 @@ export function hasGrant(role, action, project, targetRel) {
     const scopes = Array.isArray(g.scope) ? g.scope : [g.scope || '**'];
     return scopes.some((s) => {
       if (s === '**' || s === '*') return true;
-      const re = new RegExp('^' + String(s).replace(/\\/g, '/').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$', 'i');
-      return re.test(String(targetRel).replace(/\\/g, '/'));
+      return scopeGlobToRegExp(s).test(String(targetRel).replace(/\\/g, '/'));
     });
   });
 }

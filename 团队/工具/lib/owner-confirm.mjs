@@ -151,7 +151,8 @@ export function consumeOwnerConfirmation({
           hint: '重新运行 owner confirm 生成新的确认码',
         });
       }
-      return markUsed(record, channel || 'nonce');
+      // 通道以签发时记录的为准（ui/tty/test）；调用方没有显式通道时不要覆盖成 'nonce'。
+      return markUsed(record, channel);
     });
   }
   return withLock(`owner-confirm:match:${String(project || '')}`, {

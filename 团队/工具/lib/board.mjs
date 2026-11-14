@@ -22,6 +22,8 @@ function clip(v, n) { return truncate(String(v || ''), n); }
 function titleAttr(v) { return esc(String(v || '')); }
 function owner(v) { return v ? role(v) : '—'; }
 function sid(v) { return v ? '当前工作区' : '—'; }
+// PM 代管标识（T-a01d / R-1cee）：需求行状态列后面追加【PM通过】/【PM打回】/【待 PM 评审】。
+function proxyTag(row) { return row && row.ownerProxyLabel ? ' ' + row.ownerProxyLabel : ''; }
 
 function rowsHtml(headers, rows, empty = '暂无') {
   return `<table><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}" class="muted">${esc(empty)}</td></tr>`}</tbody></table>`;
@@ -33,6 +35,9 @@ export function renderBoardMd(d) {
   lines.push(`# 团队看板 · ${d.project?.name || '未选项目'}`);
   lines.push('');
   lines.push(`> 生成 ${d.generatedAt} ｜ 阶段 ${phase(d.team.phase)} ｜ 负责人 ${d.team.owner} ｜ 成员 ${d.members.length}`);
+  if (d.questions && d.questions.total) {
+    lines.push(`> 问询：未答 ${d.questions.open} ｜ 超时待升级 ${d.questions.overdue} ｜ 已升级 ${d.questions.escalated} ｜ 已回答 ${d.questions.answered}`);
+  }
   lines.push('');
   lines.push('## 一、需求');
   lines.push('');
@@ -40,7 +45,7 @@ export function renderBoardMd(d) {
   else {
     lines.push('| 优先级 | 需求 | 状态 | 负责人 | 子任务 | 验收标准 |');
     lines.push('|---|---|---|---|---|---|');
-    for (const r of d.requirements) lines.push(`| ${r.priority} | ${r.id} ${r.title} | ${status(r.derivedStatus || r.status)} | ${owner(r.owner)} | ${r.kidsDone ?? 0}/${r.kidsTotal ?? 0} | ${clip(r.acceptance, 100)} |`);
+    for (const r of d.requirements) lines.push(`| ${r.priority} | ${r.id} ${r.title} | ${status(r.derivedStatus || r.status)}${proxyTag(r)} | ${owner(r.owner)} | ${r.kidsDone ?? 0}/${r.kidsTotal ?? 0} | ${clip(r.acceptance, 100)} |`);
   }
   lines.push('');
   lines.push('## 二、进行中任务');
@@ -72,7 +77,10 @@ export function renderBoardMd(d) {
   lines.push('');
   lines.push('## 六、成员');
   lines.push('');
-  for (const m of d.members) lines.push(`- ${role(m.role)}（${m.name}）｜ 会话 ${sid(m.session)} ｜ 发消息 ${m.sent} ｜ 评审 ${m.reviews} ｜ 签字 ${m.signs} ｜ 提交 ${m.commits} ｜ 回执 ${m.acks}`);
+  for (const m of d.members) {
+    const wf = d.wakeFailed && d.wakeFailed[m.role];
+    lines.push(`- ${role(m.role)}（${m.name}）｜ 会话 ${sid(m.session)} ｜ 发消息 ${m.sent} ｜ 评审 ${m.reviews} ｜ 签字 ${m.signs} ｜ 提交 ${m.commits} ｜ 回执 ${m.acks}${wf ? ` ｜ 🔴 唤醒失败（${wf.attempt || '?'} 次，消息 ${wf.messageId || '无'}，原因 ${wf.why || '未知'}）` : ''}`);
+  }
   lines.push('');
   lines.push('## 七、质量汇总');
   lines.push('');
@@ -90,7 +98,7 @@ export function renderBoardMd(d) {
 }
 
 export function renderBoardHtml(d) {
-  const reqRows = d.requirements.map((r) => `<tr><td><span class="pill p-${esc(r.priority)}">${esc(r.priority)}</span></td><td><b>${esc(r.id)}</b><br><span class="sub" title="${titleAttr(r.title)}">${esc(clip(r.title, 60))}</span></td><td>${esc(status(r.derivedStatus || r.status))}</td><td>${esc(owner(r.owner))}</td><td>${r.kidsDone ?? 0}/${r.kidsTotal ?? 0}</td><td class="muted" title="${titleAttr(r.acceptance)}">${esc(clip(r.acceptance, 90))}</td></tr>`).join('');
+  const reqRows = d.requirements.map((r) => `<tr><td><span class="pill p-${esc(r.priority)}">${esc(r.priority)}</span></td><td><b>${esc(r.id)}</b><br><span class="sub" title="${titleAttr(r.title)}">${esc(clip(r.title, 60))}</span></td><td>${esc(status(r.derivedStatus || r.status))}${esc(proxyTag(r))}</td><td>${esc(owner(r.owner))}</td><td>${r.kidsDone ?? 0}/${r.kidsTotal ?? 0}</td><td class="muted" title="${titleAttr(r.acceptance)}">${esc(clip(r.acceptance, 90))}</td></tr>`).join('');
   const taskRows = d.childTasks.filter((t) => t.status !== 'done').map((t) => `<tr><td><span class="pill p-${esc(t.priority)}">${esc(t.priority)}</span></td><td><b>${esc(t.id)}</b> <span class="sub" title="${titleAttr(t.title)}">${esc(clip(t.title, 70))}</span></td><td>${esc(status(t.status))}</td><td>${esc(owner(t.owner))}</td><td>${esc(t.requirementId || '—')}</td></tr>`).join('');
   const propRows = d.proposals.slice().reverse().map((p) => {
     const rv = Object.entries(d.reviews[p.id] || {}).map(([r, v]) => `<span class="tag ${v.verdict === 'approve' ? 'ok' : 'bad'}">${esc(role(r))}：${esc(verdict(v.verdict))}</span>`).join(' ') || '<span class="muted">—</span>';
@@ -99,7 +107,14 @@ export function renderBoardHtml(d) {
   }).join('');
   const ackRows = d.receipts.slice(-50).reverse().map((r) => `<tr><td class="muted">${esc(time(r.ts))}</td><td>${esc(role(r.from))}</td><td>${esc(r.project || '—')}</td><td>${esc(r.msgId)}</td><td title="${titleAttr(r.log || r.note)}">${esc(clip(r.log || r.note, 100))}</td></tr>`).join('');
   const fileRows = d.files.slice(0, 400).map((f) => `<tr><td><button class="file-link" data-file="${esc(f.abs)}" title="${titleAttr(f.abs)}">${esc(f.target)}</button></td><td>${f.size} B</td><td class="mono">${esc(shortHash(f.hash || '', 12))}</td><td>${esc(owner(f.owner))}</td></tr>`).join('');
-  const memRows = d.members.map((m) => `<tr><td><b>${esc(role(m.role))}</b><br><span class="sub" title="${titleAttr(m.name)}">${esc(m.name)}</span></td><td class="mono">${esc(sid(m.session))}</td><td>${m.sent}</td><td>${m.reviews}</td><td>${m.signs}</td><td>${m.commits}</td><td>${m.acks}</td></tr>`).join('');
+  const memRows = d.members.map((m) => {
+    // R-c651 F-c651-3：3 次重试仍唤醒失败 → 该角色红点（tooltip 带消息 id 与原因）；下次唤醒成功由工具清掉。
+    const wf = d.wakeFailed && d.wakeFailed[m.role];
+    const dot = wf
+      ? `<span class="wake-failed-dot" data-wake-failed="${esc(m.role)}" title="${titleAttr(`唤醒失败 ${wf.attempt || ''} 次 ｜ 消息 ${wf.messageId || '无'} ｜ 原因 ${wf.why || '未知'} ｜ ${wf.at || ''}`)}">●</span> `
+      : '';
+    return `<tr${wf ? ' class="wake-failed"' : ''} data-role="${esc(m.role)}" data-wake-failed="${wf ? '1' : '0'}"><td>${dot}<b>${esc(role(m.role))}</b><br><span class="sub" title="${titleAttr(m.name)}">${esc(m.name)}</span></td><td class="mono">${esc(sid(m.session))}</td><td>${m.sent}</td><td>${m.reviews}</td><td>${m.signs}</td><td>${m.commits}</td><td>${m.acks}</td></tr>`;
+  }).join('');
   const logRows = d.logs.slice(0, 60).map((l) => `<tr><td class="muted">${esc(time(l.ts))}</td><td>${esc(role(l.actor))}</td><td>${esc(l.kind)}</td><td title="${titleAttr(l.text)}">${esc(clip(l.text, 120))}</td></tr>`).join('');
   const checks = [
     ['提交闭环', `${d.commits.length} 次提交`, d.commits.length > 0],
@@ -108,6 +123,9 @@ export function renderBoardHtml(d) {
     ['文件索引', `${d.files.length} 个项目文件`, d.files.length > 0],
     ['成员', `${d.members.length} 名成员`, d.members.length > 0],
     ['成员日志', `${d.logs.length} 条一句话日志`, d.logs.length > 0],
+    ...(d.questions && d.questions.total
+      ? [['问询', `未答 ${d.questions.open} 条（超时已升级 ${d.questions.escalated} 条）`, d.questions.open === 0]]
+      : []),
   ].map(([label, detail, ok]) => `<li class="${ok ? 'ok' : 'bad'}">${ok ? '✅' : '❌'} ${esc(label)}：${esc(detail)}</li>`).join('');
   const projectOpts = (d.projects || []).map((p) => `<option value="${esc(p.name)}" ${p.selected ? 'selected' : ''}>${esc(p.name)}${p.current ? '（当前）' : ''}</option>`).join('');
   const summary = [
@@ -145,6 +163,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
 .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:700}.p-P0{background:#4a1717;color:#ffb4b4}.p-P1{background:#4a3a12;color:#ffd48a}.p-P2{background:#12332f;color:#9fe4d1}.p-P3{background:#24252d;color:#b8c6dc}
 .tag{display:inline-block;padding:1px 7px;border-radius:6px;font-size:10.5px;margin:1px;white-space:nowrap}.tag.ok{background:rgba(112,215,181,.13);color:#8be5c7;border:1px solid rgba(112,215,181,.25)}.tag.bad{background:rgba(238,141,127,.12);color:#ffa89d;border:1px solid rgba(238,141,127,.25)}
 .file-link{border:0;background:transparent;color:var(--gold2);font:inherit;text-align:left;padding:0;cursor:pointer;border-bottom:1px dotted rgba(220,181,111,.4)}.file-link:hover{color:#fff;border-bottom-color:var(--gold)}
+.wake-failed-dot{color:var(--bad);font-size:12px;margin-right:4px;text-shadow:0 0 6px rgba(238,141,127,.5)}tr.wake-failed td{background:rgba(238,141,127,.07)}
 .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px}.summary-btn{text-align:left;border:1px solid var(--line);border-radius:10px;background:rgba(255,248,235,.025);color:var(--text);padding:10px 12px;cursor:pointer}.summary-btn:hover{background:rgba(220,181,111,.10);border-color:var(--line2)}.summary-btn b{display:block;color:var(--gold2);font-size:20px}.summary-btn span{font-size:10.5px;color:var(--muted)}
 #pilot-list{list-style:none;margin:10px 0 0;padding:0}#pilot-list li{padding:4px 0;color:var(--muted)}#pilot-list li.ok{color:#a9e8d4}#pilot-list li.bad{color:#ffb1a8}
 footer{padding:0 28px 24px;color:var(--muted2);font-size:10.5px}
@@ -154,7 +173,34 @@ footer{padding:0 28px 24px;color:var(--muted2);font-size:10.5px}
 .drawer-body{flex:1;overflow:auto;padding:16px 20px 30px}.drawer-body pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.75 Consolas,"Microsoft YaHei",monospace;color:var(--text);background:rgba(0,0,0,.18);border:1px solid var(--line);border-radius:9px;padding:14px}
 .empty{padding:12px;color:var(--muted2)}.close-note{font-size:10.5px;color:var(--muted2);margin-top:8px}
 @media(max-width:720px){header{padding:16px}.cards,section{margin-left:12px;margin-right:12px;padding-left:12px;padding-right:12px}.cards{padding:0 12px 14px}header{padding:18px 12px}.header-side{align-items:flex-start}td{max-width:220px}}
+/* 暖白：与工作台 html[data-theme="light"] 同步；看板在 iframe/独立窗口里也要变白。 */
+html[data-theme="light"]{--bg:#f6f1e7;--panel:#fffaf1;--panel2:#f3ece0;--line:rgba(90,72,48,.16);--line2:rgba(90,72,48,.30);--text:#2c261e;--strong:#1d1812;--muted:#6b5f50;--muted2:#8a7c69;--gold:#8e6328;--gold2:#7a4f16;--ok:#1f7a5c;--bad:#b3402f;--warn:#8a5a13}
+html[data-theme="light"] body{background:radial-gradient(900px 500px at 8% -10%,rgba(142,99,40,.08),transparent 65%),radial-gradient(700px 420px at 100% 0%,rgba(31,122,92,.04),transparent 62%),#f6f1e7}
+html[data-theme="light"] .board-chrome{background:rgba(255,250,241,.94)}
+html[data-theme="light"] .board-actions button,html[data-theme="light"] select{background:#fffaf1}
+html[data-theme="light"] section{background:linear-gradient(180deg,#fffaf1,#fbf4e8);box-shadow:0 8px 24px rgba(90,72,48,.10)}
+html[data-theme="light"] th{background:#f3ece0}
+html[data-theme="light"] .drawer{background:linear-gradient(180deg,#fffaf1,#f6efe3);box-shadow:-24px 0 70px rgba(60,45,28,.25)}
+html[data-theme="light"] .drawer-body pre{background:rgba(90,72,48,.06)}
+html[data-theme="light"] .p-P0{background:#f7d9d4;color:#8f2318}
+html[data-theme="light"] .p-P1{background:#f7e8c6;color:#7a4f16}
+html[data-theme="light"] .p-P2{background:#d8efe6;color:#145c46}
+html[data-theme="light"] .p-P3{background:#e6e9f0;color:#3d4a63}
+html[data-theme="light"] .tag.ok{background:rgba(31,122,92,.10);color:#16624a;border-color:rgba(31,122,92,.28)}
+html[data-theme="light"] .tag.bad{background:rgba(179,64,47,.10);color:#8f2318;border-color:rgba(179,64,47,.28)}
+html[data-theme="light"] .file-link:hover{color:#1d1812}
+html[data-theme="light"] .drawer-mask{background:rgba(40,32,22,.40)}
 </style></head><body>
+<script>
+(() => {
+  try {
+    const q = new URLSearchParams(location.search);
+    const wanted = q.get('theme') || localStorage.getItem('awb.boardTheme') || 'dark';
+    if (wanted === 'light') document.documentElement.dataset.theme = 'light';
+    if (q.get('theme')) localStorage.setItem('awb.boardTheme', q.get('theme'));
+  } catch { /* ignore */ }
+})();
+</script>
 <div class="board-chrome"><div class="board-drag"><b>团队看板</b><span>可拖动 / 缩放 / 半透明悬浮</span></div><div class="board-actions"><button data-win="collapse" title="收纳成标题条">—</button><button data-win="zoom-out" title="缩小">－</button><button data-win="zoom-in" title="放大">＋</button><button data-win="maximize" title="最大化/还原">⛶</button><button data-win="close" title="关闭">×</button></div></div>
 <div class="board-content">
 <header><div><div class="eyebrow">团队运营 / 团队总览</div><h1>团队看板 · ${esc(d.project?.name || '未选项目')}</h1><div class="meta">阶段 ${esc(phase(d.team.phase))} ｜ 负责人 ${esc(d.team.owner)} ｜ 生成 ${esc(time(d.generatedAt))}</div></div><div class="header-side"><select id="project-select" title="切换项目">${projectOpts}</select><div class="header-hint">切换项目不会改变工作台当前项目</div></div></header>
@@ -166,7 +212,7 @@ footer{padding:0 28px 24px;color:var(--muted2);font-size:10.5px}
     ['files', '项目文件', d.files.length],
     ['members', '成员', d.members.length],
   ].map(([view, label, n]) => `<button class="card" data-view="${view}"><span>${label}</span><b>${n}</b></button>`).join('')}</div>
-<section><div class="section-head"><h2>一、需求看板</h2><span>点击卡片查看完整明细</span></div>${rowsHtml(['优先级', '需求', '状态', '负责人', '子任务', '验收标准'], (d.requirements || []).map((r) => `<tr><td><span class="pill p-${esc(r.priority)}">${esc(r.priority)}</span></td><td><b>${esc(r.id)}</b><br><span class="sub" title="${titleAttr(r.title)}">${esc(clip(r.title, 60))}</span></td><td>${esc(status(r.derivedStatus || r.status))}</td><td>${esc(owner(r.owner))}</td><td>${r.kidsDone ?? 0}/${r.kidsTotal ?? 0}</td><td title="${titleAttr(r.acceptance)}">${esc(clip(r.acceptance, 90))}</td></tr>`), '暂无需求')}</section>
+<section><div class="section-head"><h2>一、需求看板</h2><span>点击卡片查看完整明细</span></div>${rowsHtml(['优先级', '需求', '状态', '负责人', '子任务', '验收标准'], (d.requirements || []).map((r) => `<tr><td><span class="pill p-${esc(r.priority)}">${esc(r.priority)}</span></td><td><b>${esc(r.id)}</b><br><span class="sub" title="${titleAttr(r.title)}">${esc(clip(r.title, 60))}</span></td><td>${esc(status(r.derivedStatus || r.status))}${esc(proxyTag(r))}</td><td>${esc(owner(r.owner))}</td><td>${r.kidsDone ?? 0}/${r.kidsTotal ?? 0}</td><td title="${titleAttr(r.acceptance)}">${esc(clip(r.acceptance, 90))}</td></tr>`), '暂无需求')}</section>
 <section><div class="section-head"><h2>二、进行中任务</h2><span>状态/负责人/需求均可在这里核对</span></div>${rowsHtml(['优先级', '任务', '状态', '负责人', '需求'], (d.childTasks || []).filter((t) => t.status !== 'done').map((t) => `<tr><td><span class="pill p-${esc(t.priority)}">${esc(t.priority)}</span></td><td><b>${esc(t.id)}</b> <span class="sub" title="${titleAttr(t.title)}">${esc(clip(t.title, 70))}</span></td><td>${esc(status(t.status))}</td><td>${esc(owner(t.owner))}</td><td>${esc(t.requirementId || '—')}</td></tr>`), '无进行中任务')}</section>
 <section><div class="section-head"><h2>三、提案 · 评审 · 签字</h2><span>评审/签字统一显示中文</span></div>${rowsHtml(['提案', '风险', '状态', '作者', '评审', '签字', '提交'], (d.proposals || []).map((p) => {
     const rv = Object.entries(d.reviews[p.id] || {}).map(([r, v]) => `<span class="tag ${v.verdict === 'approve' ? 'ok' : 'bad'}">${esc(role(r))}：${esc(verdict(v.verdict))}</span>`).join(' ') || '<span class="muted">—</span>';
@@ -175,7 +221,14 @@ footer{padding:0 28px 24px;color:var(--muted2);font-size:10.5px}
   }), '暂无提案')}</section>
 <section><div class="section-head"><h2>四、回执（最近 50 条）</h2><span>鼠标悬停查看完整备注</span></div>${rowsHtml(['时间', '回执人', '项目', '消息', '备注'], (d.receipts || []).slice(-50).reverse().map((r) => `<tr><td class="muted">${esc(time(r.ts))}</td><td>${esc(role(r.from))}</td><td>${esc(r.project || '—')}</td><td>${esc(r.msgId)}</td><td title="${titleAttr(r.log || r.note)}">${esc(clip(r.log || r.note, 100))}</td></tr>`), '暂无回执')}</section>
 <section><div class="section-head"><h2>五、项目文件</h2><span>点击文件名在弹窗预览，可关闭返回</span></div>${rowsHtml(['文件', '大小', '哈希', '归属'], (d.files || []).map((f) => `<tr><td><button class="file-link" data-file="${esc(f.abs)}" title="${titleAttr(f.abs)}">${esc(f.target)}</button></td><td>${f.size} B</td><td class="mono">${esc(shortHash(f.hash || '', 12))}</td><td>${esc(owner(f.owner))}</td></tr>`), '暂无索引')}</section>
-<section><div class="section-head"><h2>六、成员</h2><span>角色 / 会话 / 贡献计数</span></div>${rowsHtml(['角色', '会话', '发消息', '评审', '签字', '提交', '回执'], (d.members || []).map((m) => `<tr><td><b>${esc(role(m.role))}</b><br><span class="sub" title="${titleAttr(m.name)}">${esc(m.name)}</span></td><td class="mono">${esc(sid(m.session))}</td><td>${m.sent}</td><td>${m.reviews}</td><td>${m.signs}</td><td>${m.commits}</td><td>${m.acks}</td></tr>`), '暂无成员')}</section>
+<section><div class="section-head"><h2>六、成员</h2><span>角色 / 会话 / 贡献计数</span></div>${rowsHtml(['角色', '会话', '发消息', '评审', '签字', '提交', '回执'], (d.members || []).map((m) => {
+    // R-c651 F-c651-3：3 次重试仍唤醒失败 → 该角色红点（tooltip 带消息 id 与原因）；唤醒成功后由工具清掉。
+    const wf = d.wakeFailed && d.wakeFailed[m.role];
+    const dot = wf
+      ? `<span class="wake-failed-dot" data-wake-failed="${esc(m.role)}" title="${titleAttr(`唤醒失败 ${wf.attempt || '?'} 次 ｜ 消息 ${wf.messageId || '无'} ｜ 原因 ${wf.why || '未知'} ｜ ${wf.at || ''}`)}">●</span> `
+      : '';
+    return `<tr${wf ? ' class="wake-failed"' : ''} data-role="${esc(m.role)}" data-wake-failed="${wf ? '1' : '0'}"><td>${dot}<b>${esc(role(m.role))}</b><br><span class="sub" title="${titleAttr(m.name)}">${esc(m.name)}</span></td><td class="mono">${esc(sid(m.session))}</td><td>${m.sent}</td><td>${m.reviews}</td><td>${m.signs}</td><td>${m.commits}</td><td>${m.acks}</td></tr>`;
+  }), '暂无成员')}</section>
 <section><div class="section-head"><h2>七、质量汇总</h2><span>点击“次提交闭环”查看是哪几次</span></div><div class="summary-grid">${summary}</div><ul id="pilot-list">${checks}</ul></section>
 <section><div class="section-head"><h2>八、成员日志（一句话）</h2><span>每次提交/回执由成员写一句；点击查看全部</span></div>${rowsHtml(['时间', '成员', '动作', '日志'], (d.logs || []).slice(0, 60).map((l) => `<tr><td class="muted">${esc(time(l.ts))}</td><td>${esc(role(l.actor))}</td><td>${esc(l.kind)}</td><td title="${titleAttr(l.text)}">${esc(clip(l.text, 120))}</td></tr>`), '暂无日志')}</section>
 <footer>数据源：团队\\状态\\看板.json ｜ 重新生成：node 团队\\工具\\team.mjs board ｜ 看板 v2</footer>
@@ -202,7 +255,7 @@ footer{padding:0 28px 24px;color:var(--muted2);font-size:10.5px}
     return '<table><thead><tr>' + headers.map((h) => '<th>' + E(h) + '</th>').join('') + '</tr></thead><tbody>' + (rows.length ? rows.join('') : '<tr><td colspan="' + headers.length + '" class="muted">' + E(empty || '暂无') + '</td></tr>') + '</tbody></table>';
   }
   function view(kind) {
-    if (kind === 'requirements') return open('需求明细', table(['优先级','需求','状态','负责人','子任务','验收标准'], (D.requirements || []).map((r) => '<tr><td>' + E(r.priority) + '</td><td><b>' + E(r.id) + '</b><br>' + E(r.title) + '</td><td>' + E(st(r.derivedStatus || r.status)) + '</td><td>' + E(rl(r.owner)) + '</td><td>' + (r.kidsDone ?? 0) + '/' + (r.kidsTotal ?? 0) + '</td><td>' + E(r.acceptance || '—') + '</td></tr>'), '暂无需求'));
+    if (kind === 'requirements') return open('需求明细', table(['优先级','需求','状态','负责人','子任务','验收标准'], (D.requirements || []).map((r) => '<tr><td>' + E(r.priority) + '</td><td><b>' + E(r.id) + '</b><br>' + E(r.title) + '</td><td>' + E(st(r.derivedStatus || r.status)) + E(proxyTag(r)) + '</td><td>' + E(rl(r.owner)) + '</td><td>' + (r.kidsDone ?? 0) + '/' + (r.kidsTotal ?? 0) + '</td><td>' + E(r.acceptance || '—') + '</td></tr>'), '暂无需求'));
     if (kind === 'tasks') return open('任务明细', table(['优先级','任务','状态','负责人','需求'], (D.childTasks || []).map((x) => '<tr><td>' + E(x.priority) + '</td><td><b>' + E(x.id) + '</b> ' + E(x.title) + '</td><td>' + E(st(x.status)) + '</td><td>' + E(rl(x.owner)) + '</td><td>' + E(x.requirementId || '—') + '</td></tr>'), '暂无任务'));
     if (kind === 'proposals') return open('提案明细', table(['提案','风险','状态','作者','评审','签字','提交'], (D.proposals || []).map((p) => {
       const rv = Object.entries(D.reviews[p.id] || {}).map(([r,v]) => rl(r) + '：' + vd(v.verdict)).join('；') || '—';

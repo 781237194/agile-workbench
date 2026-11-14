@@ -4,6 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PM工作台 · DSH 壳</title>
+  <script>
+    // 首帧前恢复上次主题，避免重开时“先暗后亮”闪一下；主题只挂 html[data-theme]。
+    try {
+      var savedTheme = localStorage.getItem('awb.theme');
+      if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.setAttribute('data-theme', savedTheme);
+    } catch (e) { /* 隐私模式忽略 */ }
+  </script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -26,13 +33,17 @@
       </button>
       <div class="tb-status">
         <button id="team-pill" class="tb-chip" type="button" title="打开团队台：六角色、消息与回执">
-          <span class="chip-k">团队</span><b id="tb-team">0/6</b>
+          <span class="chip-k">团队</span><b id="tb-team">—</b>
         </button>
         <button id="session-pill" class="tb-chip" type="button" title="打开团队台：六角色 DSH 会话">
           <span class="chip-k">会话</span><b id="tb-sessions">0</b>
         </button>
       </div>
-      <nav class="top-tools" aria-label="工作区操作">
+      <span id="tb-owner-entries" class="tb-owner-entries" role="group" aria-label="我的评审与验收"></span>
+      <button id="btn-pool" class="tb-chip" type="button" title="需求/缺陷池：评审通过的需求/缺陷自动入池，可按状态筛选（六人四人同规则）">
+        <span class="chip-k">需求/缺陷池</span><b id="tb-pool">0</b>
+      </button>
+    <nav class="top-tools" aria-label="工作区操作">
         <button id="btn-workspace" class="ghost tb-btn" title="新建项目（一个项目 = 一个工作区，并自动生成六角色目录）" type="button">
           <span class="tb-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 2.8v10.4M2.8 8h10.4"/></svg></span>
           <span class="tb-text">新建项目</span>
@@ -56,8 +67,14 @@
       </nav>
     </div>
     <div class="titlebar-right">
-      <button id="btn-theme" class="ghost tb-icon" type="button" title="切换主题（暗金 / 暖白）" aria-label="切换主题" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.6"/><path d="M8 1.5v1.8M8 12.7v1.8M1.5 8h1.8M12.7 8h1.8M3.4 3.4l1.3 1.3M11.3 11.3l1.3 1.3M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3"/></svg></button>
       <button id="btn-more" class="ghost tb-icon" type="button" title="更多" aria-label="更多" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.2" cy="8" r="1.15"/><circle cx="8" cy="8" r="1.15"/><circle cx="12.8" cy="8" r="1.15"/></svg></button>
+      <button id="btn-mem-recycle" class="ghost small mem-recycle" type="button" title="立即回收内存：优雅重载渲染进程（项目选中不丢）">立即回收</button>
+      <span id="mem-badge" class="mem-badge" title="渲染进程内存（每 5 秒采样；阈值按启动 10 分钟后的基线自适应：基线×2.5，最低 1.8GB、上限 3GB；涨得快才自动回收）">内存 —</span>
+      <span class="zoom-controls" role="group" aria-label="字号">
+        <button id="btn-zoom-out" class="zoom-btn" type="button" title="缩小字号（Ctrl+-）" aria-label="缩小字号">A-</button>
+        <button id="btn-zoom-reset" class="zoom-btn zoom-value" type="button" title="恢复 100% 字号" aria-label="恢复字号">100%</button>
+        <button id="btn-zoom-in" class="zoom-btn" type="button" title="放大字号（Ctrl+=）" aria-label="放大字号">A+</button>
+      </span>
       <span class="win-sep"></span>
       <button class="win-btn" type="button" data-win="min" title="最小化" aria-label="最小化">─</button>
       <button class="win-btn" type="button" data-win="max" title="最大化" aria-label="最大化">□</button>
@@ -111,6 +128,7 @@
             <h2>工作区</h2>
             <span id="project-count" class="counter">0</span>
           </div>
+          <button id="btn-clean-missing" class="ghost small clean-missing" type="button" hidden>清理失效项目</button>
           <p id="sidebar-stats" class="sidebar-sub">项目 = 工作区 · 会话 = 角色</p>
         </div>
 
@@ -133,7 +151,8 @@
         </div>
 
         <section class="side-section sessions-section">
-          <div class="side-section-head"><span>六角色会话</span><span id="session-count" class="side-count">0/6</span></div>
+          <div class="side-section-head"><span>六角色会话</span><span id="session-count" class="side-count">—</span></div>
+      <div id="session-usage" class="session-usage" data-session-usage="1" hidden></div>
           <div id="role-sessions" class="role-sessions"></div>
         </section>
 
@@ -143,7 +162,8 @@
         </section>
 
         <div class="sidebar-foot">
-          <button id="metrics" class="metrics-mini" type="button" title="本机负载（点击刷新）">CPU — · GPU — · MEM —</button>
+          <button id="metrics" class="metrics-mini" type="button" title="本机占用（2 秒刷新，点击立即刷新）">CPU — · 内存 — · GPU —</button>
+          <button id="daemon-pill" class="metrics-mini daemon-pill" type="button" data-daemon-state="unknown" title="路由守护状态：只看 守护状态.json 的心跳与进程，点一下刷新">守护 —</button>
           <div class="dsh-box">
             <div class="dsh-row"><span class="dot" id="dsh-dot"></span><b id="dsh-label">DSH 未检测</b></div>
             <p id="dsh-detail">外部会话引擎</p>
@@ -164,11 +184,8 @@
             <span class="stage-sep">/</span>
             <b id="stage-project">未选择工作区</b>
             <span id="stage-path" class="stage-path">选择项目后进入工作区</span>
-            <button id="stage-owner" class="stage-owner" type="button" title="Owner 状态：待决定 / 已通过 / 已打回；点击打开评审">Owner —</button>
           </div>
           <div class="stage-actions">
-            <span id="session-dots" class="session-dots" title="六角色会话"></span>
-            <button id="btn-owner-quick" class="stage-btn stage-owner-quick" type="button" title="本轮 Owner 还没决定，点这里继续" hidden>Owner 待决定</button>
             <button id="btn-board" class="stage-btn" type="button" title="打开项目面板（浮层）">项目面板</button>
             <button id="btn-members" class="stage-btn" type="button" title="打开团队台：六角色、消息、回执">团队台</button>
             <button id="btn-dsh-mode" class="stage-btn" type="button" title="重载 DSH 主画面" aria-pressed="false">重载 DSH</button>
@@ -211,11 +228,11 @@
               </div>
               <div class="drawer-head-right">
                 <div class="project-actions" id="project-actions" hidden>
+                  <button id="btn-finalize" class="ghost small" type="button" title="项目终验：前置检查 → 记忆先快照后清理 → 写终验记录（PM/Owner）">终验</button>
                   <button id="btn-project-index" class="ghost small" type="button" title="打开项目根目录的 项目索引.md">项目索引</button>
                   <button id="btn-open" class="ghost small" type="button">打开目录</button>
                   <button id="btn-team-board-old" class="ghost small" type="button" title="打开内嵌团队看板浮窗：可折叠、刷新、切看板项目">团队看板</button>
                   <button id="btn-provision" class="ghost small" type="button">启动团队</button>
-                  <button id="btn-owner" class="owner-btn" type="button" title="打开需求级 Owner 闸门；Fast 后端壳收口后一次点击直接调用 requirement:owner">Owner（我）一次点击</button>
                   <button id="btn-project-remove" class="ghost small danger" type="button" title="只移除本机项目记录，不删除项目文件">移除记录</button>
                 </div>
                 <button id="project-to-team" class="ghost small drawer-switch" type="button" title="切到团队台（同一个浮层，不会离开 DSH 主画面）">团队台 →</button>
@@ -259,6 +276,7 @@
                       </div>
                     </div>
                     <div id="legacy-gate" class="legacy-gate"></div>
+                    <div id="doc-presence" class="legacy-doc-presence" aria-live="polite"></div>
                   </section>
 
                   <section class="panel">
@@ -282,11 +300,7 @@
                       <div class="panel-head"><h3>Owner 状态</h3><span id="owner-badge" class="badge muted-badge">可选</span></div>
                       <p id="owner-summary" class="muted">本轮还没有 Owner 决定。</p>
                       <div id="owner-result" class="owner-result" hidden></div>
-                      <div class="quick-actions">
-                        <button id="btn-owner-open" class="ghost small" type="button" title="打开需求级 Owner 闸门（PM 派单的前置）">打开需求 Owner 决定</button>
-                        <button id="btn-owner-legacy" class="ghost small" type="button" title="旧版项目级 Owner 评审：只写项目 ownerReview，不参与需求派单">旧版项目级评审</button>
-                      </div>
-                      <p class="legacy-note">需求级 Owner 决定走 <code>requirement:owner</code>，写入该需求的 <code>ownerReview</code>，是 PM 派单的前置闸门；Owner 是外部角色，不跑 boot。项目级旧闸门（<code>owner:decide</code>）只写顶层 <code>ownerReview</code>，不参与任何需求派单，已在下面单独标出，不混用。</p>
+                      <p class="legacy-note">Owner 只保留需求级评审：决定写入该需求的 <code>ownerReview</code>，是 PM 派单的前置闸门；旧版项目级评审入口已移除，历史记录仍可在事件日志里查。</p>
                     </section>
                   </div>
 
@@ -329,14 +343,24 @@
                   <div><div class="eyebrow">PROJECT / TEAM FLOW</div><h2>需求 → 产品评审 → Owner → PM 派单 → 开发互审 → 测试 → Owner 验收 → 迭代/终止</h2></div>
                   <div class="board-head-actions">
                     <span id="flow-summary" class="board-summary"></span>
-                    <button id="btn-flow-owner" class="owner-btn" type="button" title="打开当前需求的 Owner 闸门；项目级旧闸门不参与派单">Owner（我）决定</button>
                   </div>
                 </div>
                 <div class="flow-wrap">
                   <div id="legacy-flow-ledger" class="legacy-flow-ledger"></div>
+                  <div id="flow-lanes" class="flow-lanes" data-lane-count="0" aria-label="需求并行泳道"></div>
                   <div id="flow-board" class="flow-board"></div>
                   <div id="quick-tech-review" class="quick-tech-review" hidden></div>
                   <div id="legacy-flow-gate" class="legacy-flow-gate"></div>
+                  <section class="panel gate-audit-panel" id="gate-audit-panel">
+                    <div class="panel-head">
+                      <h3>闸门审计 / 违规留痕</h3>
+                      <div class="panel-actions">
+                        <span id="gate-audit-badge" class="badge muted-badge">读取中</span>
+                      </div>
+                    </div>
+                    <div id="gate-audit" class="gate-audit"><div class="empty-row">读取中…（只读闸门审计，不改文件）</div></div>
+                    <p class="legacy-note">只读展示 <code>团队/状态/项目/&lt;项目&gt;/闸门审计.jsonl</code>：谁、何时、哪道门、缺什么、尝试动作。审计由 team.mjs 写入；没有记录时写“未记录”，界面不补造，也不把“无记录”当成放行。</p>
+                  </section>
                   <section class="panel legacy-req-panel">
                     <div class="panel-head">
                       <h3>需求队列 / 本轮动作</h3>
@@ -362,13 +386,15 @@
                     <p class="legacy-note">能力矩阵来自 <code>workflow:state</code> 的 <code>legacy.capabilities</code>，渲染层 IPC 来自 <code>window.workbench</code> 实际函数探测。只有矩阵明确缺失（<code>caps.missing</code> 或 <code>false</code>）才写“缺”；矩阵没有返回的命令写“未核验”，对应动作按钮暂时禁用，不写成缺失。后端也会在写状态前返回 <code>LEGACY_PROTOCOL_REQUIRED</code>，不按文件契约伪造成功。</p>
                   </section>
                   <div id="flow-meta" class="flow-meta">读取中…</div>
+                  <div id="flow-derive" class="flow-derive" hidden></div>
                   <div class="flow-legend">
                     <span><i class="legend-dot current"></i>当前</span>
                     <span><i class="legend-dot done"></i>已完成</span>
                     <span><i class="legend-dot pending"></i>未到</span>
                     <span><i class="legend-dot optional"></i>Owner 可跳过（记录在需求级闸门）</span>
+                    <span><i class="legend-dot optional"></i>TR-Q 可测性评审（Owner 门前，不新增 phase）</span>
                   </div>
-                  <p class="flow-note">阶段状态来自后端 <code>workflow:next</code> 与 <code>workflow:briefing</code>；流程只保留八步：需求 → 产品评审 → Owner → PM 派单 → 开发互审 → 测试 → Owner 验收 → 迭代/终止。快速 4 人模式把产品评审显示为分析师评审、开发互审显示为复核，并在 Owner 之后增加 <b>TR（技术评审）</b>：TR 通过后需求状态为 <code>ready</code> 才可派单；投票驳回的需求标为“可迭代”，仍可重新评审，不是死锁。Owner 的“通过 / 跳过 / 打回”是<b>需求级</b>闸门（<code>requirement:owner</code> → 需求 <code>ownerReview</code>），PM 派单只认它；顶栏与项目头的“项目级 Owner”是旧版顶层字段，只做历史展示，不参与需求派单。动作按钮在动作 IPC 缺失或旧命令缺失/未核验时禁用（<code>caps.missing</code> / 明确 <code>false</code> 才写“缺”，矩阵没返回写“未核验”；Owner 决定/验收在 Full / Fast 都由后端壳收口，不受旧 <code>owner</code> 命令影响）；所需角色未 boot/未读全时，执行前自动补一次真实 boot，再由后端校验阅读证据与 boot 有效期。不把壳代跑当成角色已开工，也不替后端把旧任务改成已关闭。</p>
+                  <p class="flow-note">阶段由后端 <code>workflow:state</code> 的推导结果渲染（需求状态 → 任务 done → 提交 → Owner 决定）；<code>工作流.json.phase</code> 只作历史提示、不参与；流程保留九个节点（阶段仍为八步）：需求 → 产品评审 → 可测性评审（TR-Q）→ Owner → PM 派单 → 开发互审 → 测试 → Owner 验收 → 迭代/终止。TR-Q 不新增 phase，挂在 <code>owner_review</code> 阶段：P0 未“可测”时 Owner 门不开（<code>TESTABILITY_REVIEW_REQUIRED</code>），P1 可标 optional-missing 不阻门。快速 4 人模式把产品评审显示为分析师评审、开发互审显示为复核，并在 Owner 之后增加 <b>TR（技术评审）</b>：TR 通过后需求状态为 <code>ready</code> 才可派单；投票驳回的需求标为“可迭代”，仍可重新评审，不是死锁。Owner 的“通过 / 跳过 / 打回”是<b>需求级</b>闸门（<code>requirement:owner</code> → 需求 <code>ownerReview</code>），PM 派单只认它；顶栏与项目头的“项目级 Owner”是旧版顶层字段，只做历史展示，不参与需求派单。动作按钮在动作 IPC 缺失或旧命令缺失/未核验时禁用（<code>caps.missing</code> / 明确 <code>false</code> 才写“缺”，矩阵没返回写“未核验”；Owner 决定/验收在 Full / Fast 都由后端壳收口，不受旧 <code>owner</code> 命令影响）；所需角色未 boot/未读全时，执行前自动补一次真实 boot，再由后端校验阅读证据与 boot 有效期。不把壳代跑当成角色已开工，也不替后端把旧任务改成已关闭。</p>
                 </div>
               </section>
 
@@ -448,10 +474,41 @@
               </section>
 
               <section class="team-block">
-                <div class="team-block-head"><h3>六角色会话</h3><span id="team-session-count" class="side-count">0/6</span></div>
+                <div class="team-block-head"><h3>六角色会话</h3><span id="team-session-count" class="side-count">—</span></div>
                 <div id="team-live-note" class="team-live-note">会话状态以 DSH 核验为准；DSH 未连接时只显示本地映射。</div>
                 <p class="team-status-source">每行五个字段：本地映射（workbench.json 的 sessions）、DSH 存在（dsh:team-status 核验，10 分钟有效）、收件箱未读（旧协议邮箱 new；未展开调试收件箱时按通信链 comm 统计并标“通信链未读”）、最近回执（本机 messages / 通信链 comm.ack / 回执.jsonl）、最后唤醒（通信链 comm.wake，其次已核验 dsh:prompt 事件，最后本次界面返回）。没有记录就写“未记录”，不补造。</p>
                 <div id="team-session-list" class="team-session-list"></div>
+              </section>
+
+              <!-- R-b5fc F-4b：角色队列（只读 role_queues.json 派生文件；按当前会话角色绑定：角色只看自己，识别不到会话时才按 PM 全量并标来源） -->
+              <section id="role-queue-block" class="team-block role-queue-block">
+                <div class="team-block-head">
+                  <h3>角色队列 <span class="muted">/ role_queues.json</span></h3>
+                  <div class="team-head-tools">
+                    <span id="role-queue-viewer" class="badge muted-badge" title="查看者按当前会话角色绑定（F-4b）">查看者：—</span>
+                    <span id="role-queue-meta" class="badge muted-badge" title="队列生成时间与来源">未加载</span>
+                    <button id="btn-queue-refresh" class="ghost small" type="button" title="重新读取角色队列（只读）">刷新</button>
+                  </div>
+                </div>
+                <p class="team-status-source">查看者按当前 DSH 会话的角色绑定：本角色只看自己那一队，PM 看全量；未识别到角色会话时按 Owner 控制台（PM 全量）并在徽标标出来源。排序：优先级 → 截止日期 → 创建时间。列含义：动作（action）/ 状态 / 关联需求 / 证据路径。越权请求后端返回 QUEUE_FORBIDDEN。队列文件缺失或损坏都显示「队列未生成」灰字，不报红（损坏原文只进 title 与日志）。</p>
+                <div id="role-queue" class="role-queue" data-state="empty" data-count="0" data-viewer-role="" data-viewer-source="" data-reason="">
+                  <div class="empty-row">还没读取队列。</div>
+                </div>
+              </section>
+
+              <!-- R-9db6 F-1：Owner 决策箱（只读展示；放入仅 PM，回执走团队工具 decision ack） -->
+              <section id="decision-box-block" class="team-block decision-box-block">
+                <div class="team-block-head">
+                  <h3>Owner 决策箱 <span class="muted">/ 决策箱.json</span></h3>
+                  <div class="team-head-tools">
+                    <span id="decision-box-unread" class="badge muted-badge" data-unread="0" title="待决且未读条数">待决 0</span>
+                    <button id="btn-decision-refresh" class="ghost small" type="button" title="重新读取决策箱（只读）">刷新</button>
+                  </div>
+                </div>
+                <p class="team-status-source">PM 放进来「需要你拍板」的事；你逐条看，点【回执 PM】给出选择（只能从 PM 给的选项里选）。回执不等于评审通过/验收，门禁仍走原入口。</p>
+                <div id="decision-box" class="decision-box" data-state="empty" data-unread="0" data-open="0" data-total="0">
+                  <div class="empty-row">还没读取决策箱。</div>
+                </div>
               </section>
 
               <section id="team-receipts" class="team-block team-receipts">
@@ -467,6 +524,17 @@
                 <div id="team-receipts-list" class="team-receipts-list" role="list" aria-label="最近回执列表"></div>
                 <div id="team-manual-acks" class="team-manual-acks" hidden></div>
                 <p class="team-receipts-rule">旧看板口径：只显示 <code>!update</code> 行，按 <code>msgId|from</code> 去重，项目过滤含空 <code>project</code>，最新 50 条倒序；字段：时间 / 回执人 / 项目 / 消息 / 备注。每条另标 <code>actor</code> / <code>executor</code> / 身份来源：<b>actor=workbench-shell</b> 是壳执行旧协议 ack，<b>actor=workbench-shell/manual</b> 是人工确认（只写本机，不写 回执.jsonl，不是角色回执）；没有 actor 的旧回执行只写“执行者未记录”，不猜是角色本人。接口缺失时只明确提示，不用本机消息或看板计数冒充回执。</p>
+              </section>
+
+              <section id="team-gate-audit" class="team-block team-gate-audit">
+                <div class="team-block-head">
+                  <h3>闸门审计 <span class="muted">/ 闸门审计.jsonl · 最近 20 条</span></h3>
+                  <div class="team-head-tools">
+                    <span id="gate-audit-team-badge" class="badge muted-badge" title="闸门审计来源：团队/状态/项目/<项目>/闸门审计.jsonl">读取中</span>
+                  </div>
+                </div>
+                <div id="gate-audit-team" class="gate-audit"><div class="empty-row">读取中…（只读；由 team.mjs 写入）</div></div>
+                <p class="team-receipts-rule">只读展示最近 20 条闸门拒绝：谁 / 何时 / 来源（ui|cli）/ 动作 / 闸门 / 错误码 / 缺项 / 关联需求任务。没有记录写“未记录”，不补造；无记录不等于放行。</p>
               </section>
 
               <section class="team-block">
@@ -572,8 +640,12 @@
       </div>
     </header>
     <div class="flow-panel-body">
+      <div id="flow-lanes-mini" class="flow-lanes-mini" aria-label="并行汇总"></div>
+      <!-- B-2634：浮窗接 flow-lanes 只读泳道（最小可用版本），按需求分泳道、多阶段并排 -->
+      <div id="flow-lanes-panel" class="flow-lanes flow-lanes-panel" data-lane-count="0" aria-label="并行泳道（只读）"></div>
       <div id="flow-mini" class="flow-board compact"></div>
       <div id="flow-mini-meta" class="flow-meta">读取中…</div>
+      <div id="flow-mini-derive" class="flow-derive" hidden></div>
     </div>
   </section>
 
@@ -628,6 +700,12 @@
 
   <div id="modal-root"></div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="flow-lanes.js"></script>
+  <script src="flow-graph.js"></script>
+  <script src="flow-v4.js"></script>
   <script src="app.js"></script>
+  <script src="owner-review.js"></script>
+<!-- R-20261114-001014-e29f：工作区残留（额外会话）单一展示 + 清理 + 清理历史 -->
+<script src="workspace-clean.js"></script>
 </body>
 </html>

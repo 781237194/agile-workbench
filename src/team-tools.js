@@ -193,6 +193,107 @@ function isInside(parent, child) {
   return c === p || c.startsWith(p + path.sep);
 }
 
+// ==========================================================================
+// R-ea86 F-E3：PM 代验收「证据两件套」校验（纯函数，只读文件、不写盘）
+//
+// 判据（需求 v3 + PM 2026-11-14 02:31 补充：证据可在项目内，也可在工作台共享层）：
+//   统一前置：路径必须存在；fs.realpathSync 后必须在「项目目录」或「共享层（src/**、团队/工具/**）」内
+//            （拒 .. / 软链逃逸到别处）；>0 字节。
+//   截图：≥1 张，扩展名 png|jpg|jpeg|webp 且文件头魔数匹配（PNG 89 50 4E 47 / JPEG FF D8 FF / WebP RIFF....WEBP）。
+//   测试报告：正文 \bPASS\b 命中 且 \bFAIL\b 不命中（大小写不敏感）；报告日期 ≥ 时效基线（见 acceptEvidenceStaleness）。
+//   失败明细统一走 reason（六值）：evidence_missing / evidence_outside_project / evidence_empty /
+//   evidence_not_image / evidence_failed / evidence_stale；时效无法判定时记 warning evidence_time_unknown（不阻断）。
+// ==========================================================================
+/** 工作台共享层根（证据允许放在这里）：<仓库>/src 与 <仓库>/团队/工具。项目根由调用方传入。 */
+function sharedEvidenceRoots() {
+  const repo = path.resolve(__dirname, '..');
+  return [path.join(repo, 'src'), path.join(repo, '团队', '工具')];
+}
+function evidenceMagic(buf) {
+  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf.length >= 12 && buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'webp';
+  return '';
+}
+/** 从报告正文里取最近一个日期（支持 2026-11-12 / 2026/11/12 / 2026.11.12）；取不到返回 ''。 */
+function latestDateInText(text) {
+  const found = [];
+  const re = /(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})/g;
+  let m = re.exec(String(text || ''));
+  while (m) {
+    const iso = `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}T00:00:00.000Z`;
+    if (Number.isFinite(Date.parse(iso))) found.push(iso);
+    m = re.exec(String(text || ''));
+  }
+  if (!found.length) return '';
+  return found.sort().slice(-1)[0];
+}
+function acceptEvidenceCheck(projectPath, evidence) {
+  const projectRoot = (() => {
+    try { return fs.realpathSync(path.resolve(String(projectPath || ''))); } catch { return path.resolve(String(projectPath || '')); }
+  })();
+  const raw = Array.isArray(evidence) ? evidence.slice(0, 12) : [];
+  const missing = [];
+  const warnings = [];
+  const accepted = [];
+  for (const item of raw) {
+    const rel = String((item && (item.path || item.rel)) || '').trim();
+    const kind = String((item && item.kind) || '').toLowerCase() || 'file';
+    if (!rel) { missing.push({ path: '', kind, reason: 'evidence_missing', note: '没写证据路径' }); continue; }
+    const absRaw = path.isAbsolute(rel) ? rel : path.resolve(projectRoot, rel);
+    if (!fs.existsSync(absRaw)) { missing.push({ path: rel, kind, reason: 'evidence_missing', note: '文件不存在' }); continue; }
+    let abs = absRaw;
+    try { abs = fs.realpathSync(absRaw); } catch { /* 解析失败按原路径判越界 */ }
+    const sharedRoots = sharedEvidenceRoots().map((root) => {
+      try { return fs.realpathSync(root); } catch { return path.resolve(root); }
+    });
+    const inProject = isInside(projectRoot, abs);
+    const inShared = sharedRoots.some((root) => isInside(root, abs));
+    if (!inProject && !inShared) {
+      missing.push({ path: rel, kind, reason: 'evidence_outside_project', note: 'realpath 后既不在项目目录、也不在共享层（src、团队/工具）内（.. 或软链逃逸）' });
+      continue;
+    }
+    let st = null;
+    try { st = fs.statSync(abs); } catch { st = null; }
+    if (!st || !st.isFile()) { missing.push({ path: rel, kind, reason: 'evidence_missing', note: '不是普通文件' }); continue; }
+    if (st.size <= 0) { missing.push({ path: rel, kind, reason: 'evidence_empty', note: '0 字节' }); continue; }
+    const buf = fs.readFileSync(abs);
+    const sha = crypto.createHash('sha256').update(buf).digest('hex');
+    const claimed = String((item && item.sha256) || '').toLowerCase();
+    if (claimed && claimed !== sha) { missing.push({ path: rel, kind, reason: 'evidence_failed', note: 'HASH_MISMATCH' }); continue; }
+    let reportAt = '';
+    if (kind === 'screenshot') {
+      const magic = evidenceMagic(buf);
+      if (!magic) { missing.push({ path: rel, kind, reason: 'evidence_not_image', note: '文件头不是 PNG/JPEG/WebP' }); continue; }
+    } else if (kind === 'report') {
+      const text = buf.toString('utf8');
+      if (!/\bPASS\b/i.test(text)) { missing.push({ path: rel, kind, reason: 'evidence_failed', note: '报告正文没有 PASS' }); continue; }
+      if (/\bFAIL\b/i.test(text)) { missing.push({ path: rel, kind, reason: 'evidence_failed', note: '报告正文出现 FAIL' }); continue; }
+      reportAt = latestDateInText(text);
+      if (!reportAt) warnings.push({ path: rel, kind, reason: 'evidence_time_unknown', note: '报告里找不到日期' });
+    }
+    accepted.push({ path: rel, sha256: sha, kind, size: st.size, ...(reportAt ? { at: reportAt } : {}) });
+  }
+  if (!accepted.some((row) => row.kind === 'report')) missing.push({ path: '', kind: 'report', reason: 'evidence_missing', note: '缺测试报告' });
+  if (!accepted.some((row) => row.kind === 'screenshot')) missing.push({ path: '', kind: 'screenshot', reason: 'evidence_missing', note: '缺截图' });
+  return { ok: missing.length === 0, evidence: accepted, missing, warnings };
+}
+/** 证据时效：报告日期 ≥ 基线（reviewedAt 优先，回退 updatedAt）；两边都缺 → warning evidence_time_unknown。
+ *  日期按「天」比较（报告正文只写 YYYY-MM-DD）：同一天不算过期，只有报告日 < 基线日 才 stale。 */
+function acceptEvidenceStaleness(evidence, baselineAt) {
+  const baseMs = Date.parse(String(baselineAt || ''));
+  if (!Number.isFinite(baseMs)) return { ok: true, warning: 'evidence_time_unknown', baselineAt: '' };
+  const report = (evidence || []).find((row) => row.kind === 'report') || null;
+  const reportMs = Date.parse(String((report && report.at) || ''));
+  if (!Number.isFinite(reportMs)) return { ok: true, warning: 'evidence_time_unknown', baselineAt: String(baselineAt || '') };
+  const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+  if (day(reportMs) < day(baseMs)) {
+    return { ok: false, warning: '', reason: 'evidence_stale', baselineAt: String(baselineAt || ''), reportAt: String(report.at || '') };
+  }
+  return { ok: true, warning: '', baselineAt: String(baselineAt || ''), reportAt: String(report.at || '') };
+}
+
+
 /**
  * 从工具输出里取 JSON。优先整段解析；工具偶尔在 JSON 前后打印日志，
  * 就按括号配对扫出最后一个完整对象。
@@ -618,8 +719,16 @@ function createTeamTools(options = {}) {
     };
   }
 
-  function writeJsonAtomic(file, data) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+  /** R-b52b F-7：项目角色集只认 项目.json.roleIds（缺省才回退团队模式）；壳层与团队工具同一口径。 */
+  function projectRoleIdsOf(projectName) {
+    let cfg = null;
+    try { cfg = readJsonSafe(path.join(projectStateDir(projectName), '项目.json')); } catch { cfg = null; }
+    const explicit = cfg && Array.isArray(cfg.roleIds) ? cfg.roleIds.map((id) => String(id || '').trim()).filter(Boolean) : [];
+    if (explicit.length) return explicit;
+    return roleIdsForTeamMode(normalizeTeamMode(cfg && cfg.teamMode));
+  }
+
+  function writeJsonAtomic(file, data) {    fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = file + '.awb-tmp-' + process.pid + '-' + crypto.randomUUID().slice(0, 8);
     fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
     try {
@@ -1003,6 +1112,36 @@ function createTeamTools(options = {}) {
    * Owner 决定写回旧版 工作流.json（<团队>/状态/项目/<slug>/工作流.json）。
    * 旧版消费者只认 ownerReview.required/status/by/at；这里保留其它字段并补 roundKey/opinion。
    */
+  function ownerDecisionBasis(project, requirementId) {
+    const root = path.resolve(String((project && project.path) || ''));
+    let requirement = { path: '', sha256: '', contentHash: '' };
+    try {
+      const docs = readRequirementDocs(root);
+      const doc = docs.list.find((row) => String(row.id) === String(requirementId));
+      if (doc) requirement = { path: doc.rel, sha256: doc.hash, contentHash: doc.contentHash || '' };
+    } catch { /* 保持空 */ }
+    let design = { path: '', sha256: '', version: '' };
+    try {
+      const dirs = ['产品/产出', '需求分析师/产出'];
+      const candidates = [];
+      for (const dir of dirs) {
+        let names = [];
+        try { names = fs.readdirSync(path.join(root, dir)); } catch { names = []; }
+        for (const name of names) {
+          const match = /(?:产品设计|需求分析)-v(\d+)\.md$/i.exec(name);
+          if (!match) continue;
+          const file = path.join(root, dir, name);
+          const version = Number(match[1]) || 0;
+          const stat = fs.statSync(file);
+          candidates.push({ rel: `${dir}/${name}`, version, mtime: stat.mtimeMs, sha256: crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') });
+        }
+      }
+      candidates.sort((a, b) => (b.version - a.version) || (b.mtime - a.mtime));
+      if (candidates[0]) design = { path: candidates[0].rel, sha256: candidates[0].sha256, version: `v${candidates[0].version}` };
+    } catch { /* 保持空 */ }
+    return { requirement, design, at: new Date().toISOString() };
+  }
+
   function writeOwnerWorkflow(project, input = {}) {
     const name = String((project && (project.teamName || project.name)) || '').trim();
     if (!name) return failure('NO_PROJECT', '缺少团队项目名');
@@ -1021,17 +1160,62 @@ function createTeamTools(options = {}) {
     const previous = readJsonSafe(file) || {};
     const at = new Date().toISOString();
     const status = String(input.status || input.decision || '');
+    const channel = String(input.channel || '');
+    // 通道白名单：ui/tty = Owner 本人；proxy = 代管（PM 代落账 Owner 已给的决定，R-6f60 AC24.4）；
+    // skip_committee = 三方共决跳过（开发+产品+分析师书面意见，多数通过，Owner 2026-11-13 规则）。
+    if (!['ui', 'tty', 'proxy', 'skip_committee'].includes(channel)) {
+      return failure('OWNER_CHANNEL_REQUIRED', 'Owner 决定必须显式带 channel=ui/tty（代管落账用 proxy、三方共决跳过用 skip_committee）；不再回退旧通道名');
+    }
+    if (channel === 'skip_committee') {
+      if (status !== 'skipped') return failure('SKIP_COMMITTEE_INVALID', 'channel=skip_committee 只能用于“跳过”决定');
+      const committeeIn = input.committee || {};
+      const votes = [committeeIn.analyst, committeeIn.product, committeeIn.dev].map((t) => String(t || '').trim());
+      if (votes.some((t) => !t)) return failure('SKIP_COMMITTEE_INCOMPLETE', '三方未齐：跳过必须开发、产品、分析师各写一句书面意见，缺一不得跳过');
+      const approveCount = votes.filter((t) => /^(?!.*(?:不同意|不通过|不赞成|不可跳过|反对)).*(?:同意|通过|赞成|可跳过)/.test(t)).length;
+      if (approveCount < 2) return failure('SKIP_COMMITTEE_REJECTED', `三方共决未通过：${approveCount}/3 写“同意”，至少 2 方同意才能跳过`);
+    }
+    if (channel === 'proxy') {
+      // 异常条款：未取得 Owner 授权即写 proxy → PROXY_UNAUTHORIZED，不落半条。
+      const proxyRecordedBy = String(input.recordedBy || '');
+      const proxyAuthorization = String(input.authorization || '').trim();
+      const proxyScope = String(input.proxy || '');
+      if (proxyRecordedBy !== 'pm') return failure('PROXY_UNAUTHORIZED', '代管落账必须 recordedBy=pm（PM 只代记 Owner 决定，不自己决定）');
+      if (!proxyAuthorization) return failure('PROXY_UNAUTHORIZED', '代管落账缺少 Owner 授权来源（authorization）：先取得 Owner 书面授权再落账');
+      if (!['once', 'always'].includes(proxyScope)) return failure('PROXY_UNAUTHORIZED', '代管范围必须是 once 或 always');
+    }
+    const basis = input.basis || ownerDecisionBasis(project, String(input.requirementId || input.id || project.id || ''));
+    const decisionRecord = {
+      status,
+      decision: status,
+      channel,
+      decidedBy: String(input.decidedBy || 'owner'),
+      basis,
+      at,
+      actor: String(input.actor || 'owner'),
+      by: String(input.by || 'Owner'),
+      opinion: String(input.opinion || '').slice(0, 1000),
+      roundKey: String(input.roundKey || ''),
+      ...(input.recordedBy ? { recordedBy: String(input.recordedBy) } : {}),
+      ...(input.proxy ? { proxy: String(input.proxy) } : {}),
+      ...(input.authorization ? { authorization: String(input.authorization) } : {}),
+      ...(input.committee ? { committee: input.committee } : {}),
+    };
+    const previousDecisions = (previous.ownerReview && Array.isArray(previous.ownerReview.decisions))
+      ? previous.ownerReview.decisions.slice(-49) : [];
     const ownerReview = {
       ...((previous.ownerReview && typeof previous.ownerReview === 'object') ? previous.ownerReview : {}),
       required: true,
       status,
       by: String(input.by || 'Owner'),
-      // Owner 确认码已废弃：决定/验收直接以 role=owner 接受，审计记 workbench 通道。
       actor: 'owner',
-      channel: 'workbench',
+      channel,
+      decidedBy: String(input.decidedBy || 'owner'),
+      basis,
       at,
       roundKey: String(input.roundKey || ''),
-      opinion: String(input.opinion || '').slice(0, 1000)
+      opinion: String(input.opinion || '').slice(0, 1000),
+      ...(input.committee ? { committee: input.committee } : {}),
+      decisions: [...previousDecisions, decisionRecord],
     };
     const next = { ...previous, ownerReview, updatedAt: at };
     writeJsonAtomic(file, next);
@@ -1078,6 +1262,8 @@ function createTeamTools(options = {}) {
     }
     const notifiedTool = path.join(layout.toolRoot, 'owner-note.mjs');
     let notified = null;
+    // B-719f：通知写进 PM 邮箱后必须把 PM 叫醒；唤醒失败只记 warning，不影响 decisions 落账与前端提示。
+    let notifyWake = null;
     let warning = null;
     if (!fs.existsSync(notifiedTool)) {
       warning = { code: 'OWNER_NOTE_MISSING', message: '旧版 owner-note.mjs 不存在，PM 收件箱没有写入系统消息' };
@@ -1091,6 +1277,10 @@ function createTeamTools(options = {}) {
       const value = run.value || {};
       if (run.ok && value && value.ok && value.message) {
         notified = value.message;
+        notifyWake = value.wake || null;
+        if (value.warning) {
+          warning = { code: String(value.warning.code || 'OWNER_NOTE_WAKE_FAILED'), message: String(value.warning.message || 'PM 通知已写入，但唤醒失败').slice(0, 300) };
+        }
       } else {
         warning = {
           code: String((value && value.error) || run.errorCode || 'OWNER_NOTE_FAILED'),
@@ -1108,6 +1298,7 @@ function createTeamTools(options = {}) {
       // 写旧 工作流.json 的结果单独给一份：调用方不必从 file/workflow 是否为 null 反推。
       workflowWrite: { ok: true, attempted: true, code: 'OK', message: '' },
       notified,
+      notifyWake,
       warnings: warning ? [warning] : [],
       warning
     };
@@ -1285,7 +1476,7 @@ function createTeamTools(options = {}) {
             ts: proposal.signature.at || nowIso,
             note: String(proposal.signature.note || ''),
             sessionId: String((project.sessions && project.sessions[role]) || ''),
-            channel: 'workbench',
+            channel: 'local',
             source: 'workbench',
           });
           counts.signatures += 1;
@@ -1577,6 +1768,36 @@ function createTeamTools(options = {}) {
     for (const key of [...bootCache.keys()]) {
       if (key.startsWith(prefix)) bootCache.delete(key);
     }
+  }
+
+  /**
+   * bootRole 刚重签了令牌，内存缓存必须同步成这张新令牌。
+   * 否则“重新 boot 过了”的角色下一步仍拿旧令牌执行旧命令：新需求/新正文不在旧阅读证据里，
+   * 闸门会判成“boot 时还没有这份”，表现为 RULES_CHANGED / TASK_DOCS_UNREAD 的假回归。
+   */
+  function refreshBootCache(projectName, role, sessionId, value = {}) {
+    const name = String(projectName || '').trim();
+    const roleId = String(role || '').trim();
+    const sid = String(sessionId || '').trim();
+    if (!name || !roleId || !value.token) return null;
+    dropBootToken(name, roleId);
+    const ttlMs = Math.max(60000, Number(teamConfig().bootTtlMinutes || DEFAULT_BOOT_TTL_MINUTES) * 60000);
+    const briefing = String(value.briefing || '').slice(0, Math.max(400, Number(teamConfig().bootBriefMaxChars || 2000)));
+    const record = {
+      token: String(value.token),
+      role: roleId,
+      project: name,
+      sessionId: String(value.sessionId || sid),
+      rulesHash: String(value.rulesHash || ''),
+      briefing,
+      briefingExcerpt: briefing.slice(0, 400),
+      unread: Number(value.unread || 0),
+      tasks: Number(value.tasks || 0),
+      proposals: Number(value.proposals || 0),
+      expiresAt: Date.now() + Math.max(30000, ttlMs - BOOT_EXPIRY_MARGIN_MS)
+    };
+    bootCache.set(name + '|' + roleId + '|' + sid, record);
+    return record;
   }
 
   /** 拿令牌跑一次旧协议命令；令牌失效（过期/规则变化）时重新 boot 再试一次。 */
@@ -1894,6 +2115,34 @@ function createTeamTools(options = {}) {
   }
 
   /** 派单：走 team.mjs send（PM 一次只能派一个由旧协议自己兜）。 */
+  /**
+   * B-20261113-005705-a577：派单队列兜底泵（工作台主进程每 60 秒调用）。
+   * 走 team.mjs queue pump：无论成功失败都返回结构化结果，失败由调用方留痕；
+   * 队列项只在真正派发成功后才移除（工具侧保证），失败/角色忙都原样保留。
+   */
+  async function pumpDispatchQueue(name) {
+    const projectName = String(name || '').trim();
+    if (!projectName) return { ok: false, code: 'BAD_PROJECT', message: '缺少项目名' };
+    if (!fs.existsSync(layout.teamTool)) {
+      return { ok: false, code: 'TOOL_MISSING', message: `团队工具不存在：${layout.teamTool}` };
+    }
+    const run = await runNode(layout.teamTool, ['queue', 'pump', '--project', projectName, '--json'], { timeoutMs: TIMEOUTS.status });
+    if (!run.ok) {
+      return { ok: false, code: run.errorCode || 'QUEUE_PUMP_FAILED', message: run.message || '队列泵执行失败', run: publicRun(run) };
+    }
+    const value = run.value || {};
+    return {
+      ok: value.ok !== false,
+      code: value.code || (value.pumped ? 'PUMPED' : 'IDLE'),
+      project: projectName,
+      pumped: Boolean(value.pumped),
+      item: value.item || null,
+      message: value.message || null,
+      remaining: Number.isFinite(value.remaining) ? value.remaining : null,
+      reason: String(value.reason || ''),
+    };
+  }
+
   async function sendDispatch(input = {}) {
     const projectName = String(input.projectName || '').trim();
     const to = String(input.to || '').trim();
@@ -1926,16 +2175,29 @@ function createTeamTools(options = {}) {
     const rawBody = String(input.body == null ? '' : input.body).trim();
     if (!rawBody) return failure('EMPTY_MESSAGE', '派单内容不能为空');
     const maxChars = Number(teamConfig().messageMaxChars || 600);
-    const body = rawBody.length > maxChars ? rawBody.slice(0, maxChars) : rawBody;
+    // D3：超过 600 字不再静默截断（旧 slice(0,600) 会投出半条派单）。
+    // 直接拒绝并给出可执行路径：先写 项目经理/派单/M-*.md，消息只发标题+路径+要点+完成标准。
+    if (rawBody.length > maxChars) {
+      return failure('MESSAGE_TOO_LONG', `派单正文 ${rawBody.length} 字，超过 ${maxChars} 字上限；先把任务说明写成 项目经理/派单/M-YYYYMMDD-HHmm-<slug>.md，再只发「标题 + 路径 + 3 条要点 + 完成标准」`, {
+        length: rawBody.length,
+        max: maxChars,
+        wrote: false,
+        file: '项目经理/派单/M-YYYYMMDD-HHmm-<slug>.md'
+      });
+    }
+    const body = rawBody;
     const subject = String(input.subject || '任务派单').slice(0, 80);
     const task = String(input.task || '').trim();
+    const declaredType = String(input.type || '').trim().toLowerCase();
+    // 'note' 是旧壳的默认占位，不是真实类型：不传给 team.mjs，让它按“PM→角色+要回执+任务未完成”判派单。
+    const passType = ['dispatch', 'receipt', 'notice'].includes(declaredType) ? declaredType : '';
     return withBootToken(projectName, from, async (token) => {
       const args = ['send', '--boot', token, '--to', to, '--subject', subject, '--body', body, '--json'];
       if (input.ackRequired !== false) args.push('--ack');
       // 唤醒由主进程用 DSH 适配层做（保留 DSH 离线/超时错误码），工具只记账。
       args.push('--no-wake');
       if (task) args.push('--task', task);
-      if (input.type) args.push('--type', String(input.type));
+      if (passType) args.push('--type', passType);
       const run = await runNode(layout.teamTool, args, { timeoutMs: TIMEOUTS.send });
       if (!run.ok) {
         return {
@@ -1949,6 +2211,7 @@ function createTeamTools(options = {}) {
       if (value.ok === false || !value.message || !value.message.id) {
         return failure(value.code || 'TEAM_SEND_FAILED', value.message || '团队工具没有返回消息 id', {});
       }
+      const isDispatch = value.dispatch === true;
       const wake = wakeMessageFor({
         projectName,
         role: to,
@@ -1956,18 +2219,22 @@ function createTeamTools(options = {}) {
         messageId: value.message.id,
         subject: value.message.subject || subject,
         task: value.message.task || task,
-        ackRequired: value.message.ackRequired !== false
+        ackRequired: value.message.ackRequired !== false,
+        type: value.type || '',
+        dispatch: isDispatch
       });
       return {
         ok: true,
         code: 'OK',
         message: value.message,
         wake: value.wake || null,
-        // 旧版四步唤醒文案：主进程用 DSH 适配层把它发给角色会话。
+        dispatch: isDispatch,
+        type: value.type || '',
+        demoted: value.demoted === true,
+        // 文案按真实分型生成：派单给四步执行文案，回执/通知只给“去 inbox 读”的提示。
         wakeText: wake.text,
         wakeSteps: wake.steps,
         ackRequired: Boolean(value.message.ackRequired),
-        truncated: rawBody.length > maxChars,
         project: projectName,
         stdout: tail(run.stdout),
         stderr: tail(run.stderr),
@@ -2171,6 +2438,95 @@ function createTeamTools(options = {}) {
         ms: run.ms
       };
     }, session);
+  }
+
+  // ==========================================================================
+  // R-c651 F-c651-4/5：团队在场（未读/未回执/停滞/wakeFailed）、全部已读、一键唤醒
+  //
+  // 口径只认旧工具的 `presence / mark-read / wake` 三个命令（团队/工具/lib/ops.mjs），
+  // 壳层不重算、不猜：字段名与计数口径见产品《字段对齐与迁移清单-v2》。
+  // ==========================================================================
+  async function presenceFor(input = {}) {
+    const projectName = String(input.projectName || input.project || '').trim();
+    if (!projectName) return failure('PROJECT_REQUIRED', '缺少团队项目名');
+    if (!fs.existsSync(layout.teamTool)) return failure('TOOL_MISSING', '团队工具不存在：' + layout.teamTool);
+    const args = ['presence', '--project', projectName, '--json'];
+    const roles = Array.isArray(input.roles) ? input.roles.filter(Boolean) : String(input.roles || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (roles.length) args.push('--role', roles.join(','));
+    const run = await runNode(layout.teamTool, args, { timeoutMs: TIMEOUTS.inbox });
+    if (!run.ok) return { ...publicRun(run), ok: false, code: run.errorCode || 'TEAM_PRESENCE_FAILED', rows: [] };
+    const value = run.value || {};
+    if (value.ok === false) return failure(value.code || 'TEAM_PRESENCE_FAILED', value.message || '在场数据读取失败', {});
+    return {
+      ok: true,
+      code: 'OK',
+      project: projectName,
+      rows: Array.isArray(value.rows) ? value.rows : [],
+      stalledWarnMin: Number(value.stalledWarnMin || 15),
+      stalledBadMin: Number(value.stalledBadMin || 30),
+      at: new Date().toISOString(),
+      ms: run.ms
+    };
+  }
+
+  async function markReadFor(input = {}) {
+    const projectName = String(input.projectName || input.project || '').trim();
+    const role = String(input.role || '').trim();
+    if (!projectName) return failure('PROJECT_REQUIRED', '缺少团队项目名');
+    if (!ROLE_IDS.includes(role)) return failure('BAD_ROLE', `角色无效：${role}`);
+    if (!fs.existsSync(layout.teamTool)) return failure('TOOL_MISSING', '团队工具不存在：' + layout.teamTool);
+    const args = ['mark-read', '--project', projectName, '--role', role, '--json'];
+    // 工作台壳 = Owner 控制台：以 actor=owner 执行批量已读（阅读.jsonl 里留 actor/source）。
+    args.push('--actor', String(input.actor || 'owner'));
+    if (input.source) args.push('--source', String(input.source));
+    const run = await runNode(layout.teamTool, args, { timeoutMs: TIMEOUTS.inbox });
+    if (!run.ok) return { ...publicRun(run), ok: false, code: run.errorCode || 'TEAM_MARK_READ_FAILED' };
+    const value = run.value || {};
+    if (value.ok === false) return failure(value.code || 'TEAM_MARK_READ_FAILED', value.message || '批量已读失败', {});
+    return {
+      ok: true,
+      code: 'OK',
+      project: projectName,
+      role,
+      count: Number(value.count || 0),
+      messageIds: Array.isArray(value.messageIds) ? value.messageIds : [],
+      actor: String(value.actor || input.actor || 'owner'),
+      at: String(value.at || ''),
+      stdout: tail(run.stdout),
+      stderr: tail(run.stderr),
+      ms: run.ms
+    };
+  }
+
+  async function wakeRole(input = {}) {
+    const projectName = String(input.projectName || input.project || '').trim();
+    const role = String(input.role || '').trim();
+    if (!projectName) return failure('PROJECT_REQUIRED', '缺少团队项目名');
+    if (!ROLE_IDS.includes(role)) return failure('BAD_ROLE', `角色无效：${role}`);
+    if (!fs.existsSync(layout.teamTool)) return failure('TOOL_MISSING', '团队工具不存在：' + layout.teamTool);
+    const args = ['wake', '--project', projectName, '--role', role, '--json', '--reason', String(input.reason || 'ui')];
+    const engineUrl = String(input.engineUrl || '').trim();
+    if (engineUrl) args.push('--engine-url', engineUrl);
+    const run = await runNode(layout.teamTool, args, { timeoutMs: TIMEOUTS.wake || TIMEOUTS.send || 30000 });
+    if (!run.ok) return { ...publicRun(run), ok: false, code: run.errorCode || 'TEAM_WAKE_FAILED' };
+    const value = run.value || {};
+    if (value.ok === false) {
+      return failure(value.code || 'TEAM_WAKE_FAILED', value.message || '唤醒失败', {
+        role, wake: value.wake || null, retry: value.retry || null
+      });
+    }
+    return {
+      ok: value.ok === true,
+      code: value.ok === true ? 'OK' : (value.code || 'WAKE_FAILED'),
+      project: projectName,
+      role,
+      wake: value.wake || null,
+      retry: value.retry || null,
+      at: String(value.at || ''),
+      stdout: tail(run.stdout),
+      stderr: tail(run.stderr),
+      ms: run.ms
+    };
   }
 
   // ==========================================================================
@@ -2596,7 +2952,11 @@ function createTeamTools(options = {}) {
     const hasCase = (name) => new RegExp(`case\\s+['"]${name}['"]`).test(text);
     const implText = opsText || text;
     const reqSection = sectionOf(implText, 'export function cmdReq', 'export function cmdFind');
-    const taskSection = sectionOf(implText, 'export function cmdTask', 'export function cmdReq');
+    // 基线修复（B-25c7）：cmdTask 现为 `export async function cmdTask`（ops.mjs），
+    // 只认 'export function cmdTask' 会匹配不到 → task claim/done 被误判缺失 → LEGACY_PROTOCOL_REQUIRED。
+    // 两种锚点都试，保持对旧版非 async 实现的兼容。
+    const taskSection = sectionOf(implText, 'export async function cmdTask', 'export function cmdReq')
+      || sectionOf(implText, 'export function cmdTask', 'export function cmdReq');
     const commands = {
       init: hasCase('init'),
       boot: hasCase('boot'),
@@ -2805,7 +3165,7 @@ function createTeamTools(options = {}) {
    * 确认码；但旧 team.mjs 的 owner 命令仍要求一次性 nonce，这里用
    * `owner confirm --test-owner`（TEAM_SELFTEST=1）静默换一张绑定「项目+需求+决定+动作」
    * 的 nonce，只在本进程内存里传给下一条 owner 命令，不返回给渲染层、不要求用户输入。
-   * 审计通道由壳层归一为 channel='workbench'。
+   * 审计通道由壳层显式标为 ui/tty，不再做旧通道名归一。
    */
   async function issueLegacyOwnerConfirmation(input = {}) {
     const projectName = String(input.projectName || '').trim();
@@ -2836,12 +3196,12 @@ function createTeamTools(options = {}) {
       '--requirement', requirementId,
       '--decision', decision,
       ...(action ? ['--action', action] : []),
-      '--test-owner',
+      // 界面通道：Owner 在弹窗里点确认，壳层只负责转交，不注入 TEAM_SELFTEST、不用 --test-owner。
+      '--channel', 'ui',
       '--json'
     ];
     const run = await runNode(layout.teamTool, args, {
-      timeoutMs: TIMEOUTS.send,
-      env: { TEAM_SELFTEST: '1' }
+      timeoutMs: TIMEOUTS.send
     });
     if (!run.ok) return { ...classifyLegacyRun(run, 'owner confirm'), argv: publicLegacyArgs(args) };
     const value = run.value || {};
@@ -2980,13 +3340,34 @@ function createTeamTools(options = {}) {
     return state;
   }
 
-  function readWorkflowState(projectName) {
+  // B-fa80：workflow:state/next 被渲染层每 5 秒轮询；按 mtime+size 缓存解析结果，
+  // 文件未变直接返回，避免同步重读+重新解析 190KB 工作流 JSON 阻塞主进程事件循环（输入卡顿）。
+  // B-b55c：Owner 验收这类"写前必须知道磁盘现在是什么"的动作传 { fresh: true }，绕过缓存重新读盘，
+  // 返回值带 readAt/mtime 作为"这份状态是谁、什么时候读的"来源证据。
+  let workflowStateCache = { file: '', key: '', value: null };
+
+  function readWorkflowState(projectName, options = {}) {
     const name = String(projectName || '').trim();
     if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
+    const wantFresh = options && options.fresh === true;
     const file = workflowFile(name);
     if (!fs.existsSync(file)) {
-      return { ok: true, code: 'OK', exists: false, file, raw: null, managed: false, state: emptyWorkflowState(name) };
+      return {
+        ok: true, code: 'OK', exists: false, file, raw: null, managed: false,
+        state: emptyWorkflowState(name), readAt: new Date().toISOString(), mtime: ''
+      };
     }
+    // mtime+size 未变 → 直接返回缓存对象（写路径会清缓存，见 writeWorkflowState）。
+    let cacheKey = '';
+    let mtime = '';
+    try {
+      const st = fs.statSync(file);
+      cacheKey = `${st.mtimeMs}:${st.size}`;
+      mtime = st.mtime.toISOString();
+      if (!wantFresh && workflowStateCache.file === file && workflowStateCache.key === cacheKey) {
+        return { ...workflowStateCache.value, cached: true };
+      }
+    } catch { /* stat 失败按未缓存处理 */ }
     const raw = readJsonSafe(file);
     if (!raw || typeof raw !== 'object') {
       return failure('WORKFLOW_CORRUPT', `旧 工作流.json 无法解析：${file}`, { file });
@@ -2997,16 +3378,46 @@ function createTeamTools(options = {}) {
       ? (Array.isArray(raw.requirements) ? raw.requirements.length : Object.keys(raw.requirements).length)
       : 0;
     const managed = Number(raw.schema || 0) >= WORKFLOW_SCHEMA || requirementCount > 0;
-    return { ok: true, code: 'OK', exists: true, file, raw, managed, state: normalizeWorkflowState(raw, name) };
+    const result = {
+      ok: true, code: 'OK', exists: true, file, raw, managed,
+      state: normalizeWorkflowState(raw, name),
+      readAt: new Date().toISOString(),
+      mtime
+    };
+    if (cacheKey) workflowStateCache = { file, key: cacheKey, value: result };
+    return result;
+  }
+
+  /**
+   * 状态的"来源证据"：同一份 工作流.json、同一时刻读到的状态是谁写的、什么时候。
+   * 列表与确认都带这个对象，界面才能在人话里写清"界面看到 X（读于 T1），磁盘是 Y（更新于 T2）"。
+   */
+  function workflowStateSource(read) {
+    const file = String((read && read.file) || '');
+    let mtime = String((read && read.mtime) || '');
+    if (!mtime && file) {
+      try { mtime = fs.statSync(file).mtime.toISOString(); } catch { mtime = ''; }
+    }
+    return {
+      file,
+      updatedAt: String((read && read.state && read.state.updatedAt) || ''),
+      mtime,
+      readAt: String((read && read.readAt) || new Date().toISOString()),
+      cached: Boolean(read && read.cached)
+    };
   }
 
   function writeWorkflowState(projectName, state) {
+    // 写前先失效缓存：调用方可能改过 read.state；即使写盘失败也不能让下次读到脏缓存。
+    workflowStateCache = { file: '', key: '', value: null };
     const name = String(projectName || '').trim();
     if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
     const next = normalizeWorkflowState(state, name);
     next.updatedAt = new Date().toISOString();
     try {
       writeJsonAtomic(workflowFile(name), next);
+      // 写成功立即失效缓存：同一毫秒内 mtime 可能不变，不能靠 mtime 自动识别。
+      workflowStateCache = { file: '', key: '', value: null };
       return { ok: true, code: 'OK', file: workflowFile(name), state: next };
     } catch (error) {
       return failure('WORKFLOW_WRITE_FAILED', `写旧 工作流.json 失败：${String(error && error.message || error).slice(0, 300)}`, {
@@ -3082,7 +3493,8 @@ function createTeamTools(options = {}) {
   function mutateWorkflowState(projectName, mutator) {
     const read = readWorkflowState(projectName);
     if (!read.ok) return read;
-    const state = read.state;
+    // 命中缓存时必须先克隆再交给 mutator：mutator 会原地改 state，不能污染缓存对象。
+    const state = read.cached ? structuredClone(read.state) : read.state;
     try {
       if (typeof mutator === 'function') mutator(state);
     } catch (error) {
@@ -3459,12 +3871,21 @@ function createTeamTools(options = {}) {
     };
   }
 
-  /** 名册只补当前团队模式的角色，不动现有 sessionId；否则新项目 boot 会撞 NO_MEMBER。 */
+  /** 名册只补当前团队模式的角色，不动现有 sessionId；否则新项目 boot 会撞 NO_MEMBER。
+   *  R-b52b F-8：项目.json 里已有显式 roleIds 时**只补这些角色**，不按模式回填——
+   *  测试把 tester 从 roleIds 删掉后，壳层启动/ensure 不得把它加回来（否则“无 tester”夹具不成立）。 */
   function ensureRosterRoles(projectName, teamMode = DEFAULT_TEAM_MODE) {
     const name = String(projectName || '').trim();
     if (!name) return { ok: false, code: 'PROJECT_REQUIRED' };
     const mode = normalizeTeamMode(teamMode);
-    const roleIds = roleIdsForTeamMode(mode);
+    const explicit = (() => {
+      try {
+        const cfg = readJsonSafe(path.join(projectStateDir(name), '项目.json'));
+        return cfg && Array.isArray(cfg.roleIds) ? cfg.roleIds.map((id) => String(id || '').trim()).filter(Boolean) : [];
+      } catch { return []; }
+    })();
+    const roleIds = explicit.length ? explicit : roleIdsForTeamMode(mode);
+    const backfillSkipped = Boolean(explicit.length) && explicit.length !== roleIdsForTeamMode(mode).length;
     const team = readJsonSafe(layout.teamFile);
     if (!team || !Array.isArray(team.members)) return { ok: false, code: 'NO_TEAM' };
     let added = 0;
@@ -3484,7 +3905,7 @@ function createTeamTools(options = {}) {
         return { ok: false, code: 'ROSTER_WRITE_FAILED', message: String(error && error.message || error).slice(0, 200) };
       }
     }
-    return { ok: true, code: added ? 'ROSTER_ADDED' : 'ROSTER_READY', added, teamMode: mode, roleIds };
+    return { ok: true, code: added ? 'ROSTER_ADDED' : 'ROSTER_READY', added, teamMode: mode, roleIds, backfillSkipped, explicitRoleIds: explicit.length > 0 };
   }
 
   /** 项目创建/恢复的统一入口：旧 workspace ensure + 当前模式角色目录 + 文档 + 索引。 */
@@ -3682,11 +4103,17 @@ function createTeamTools(options = {}) {
       const record = readDocRecord(file);
       if (!record.exists) continue;
       const meta = readRequirementDocMeta(file, match[0], overview);
+      let contentHash = '';
+      try {
+        contentHash = crypto.createHash('sha256').update(requirementContentText(fs.readFileSync(file, 'utf8'))).digest('hex');
+      } catch { contentHash = ''; }
       list.push({
         id: match[0],
         file,
         rel: '需求/' + name,
         hash: record.hash,
+        // 内容哈希：忽略「- 状态：」与「## 状态记录」这类程序自己维护的元数据。
+        contentHash,
         size: record.size,
         mtime: record.mtime || null,
         title: meta.title,
@@ -3698,7 +4125,28 @@ function createTeamTools(options = {}) {
     const hash = crypto.createHash('sha256')
       .update(JSON.stringify(list.map((row) => [row.rel, row.hash])))
       .digest('hex');
-    return { list, hash, count: list.length };
+    const contentHash = crypto.createHash('sha256')
+      .update(JSON.stringify(list.map((row) => [row.rel, row.contentHash])))
+      .digest('hex');
+    return { list, hash, contentHash, count: list.length };
+  }
+
+  /**
+   * 需求正文“内容文本”：去掉机器维护的 `- 状态：` 行与 `## 状态记录` 区。
+   * 与 团队/工具/lib/scaffold.mjs 的 requirementContentText 保持同一口径。
+   */
+  function requirementContentText(text) {
+    const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/);
+    const out = [];
+    let inStatusSection = false;
+    for (const line of lines) {
+      if (/^##\s+状态记录/.test(line)) { inStatusSection = true; continue; }
+      if (inStatusSection && /^##\s+/.test(line)) inStatusSection = false;
+      if (inStatusSection) continue;
+      if (/^- 状态：/.test(line)) continue;
+      out.push(line.replace(/\s+$/, ''));
+    }
+    return out.join('\n').trim();
   }
 
   function readBootDocs(projectPath, role) {
@@ -3764,6 +4212,8 @@ function createTeamTools(options = {}) {
       }
       return boot;
     }
+    // 本次 boot 的令牌就是角色下一步要用的令牌：同步内存缓存，避免“刚重读还判没读”。
+    refreshBootCache(name, roleId, sessionId, boot);
     const tokenFile = path.join(layout.state, '启动', boot.token + '.json');
     const tokenData = readJsonSafe(tokenFile) || {};
     const legacyHashes = tokenData.docHashes && typeof tokenData.docHashes === 'object' ? tokenData.docHashes : {};
@@ -3803,6 +4253,7 @@ function createTeamTools(options = {}) {
       missing: docs.missing,
       requirements: docs.requirements,
       requirementsHash: docs.requirements.hash,
+      requirementsContentHash: docs.requirements.contentHash || docs.requirements.hash,
       hashChecks,
       legacyTokenFile: tokenFile,
       legacyTokenFound: Boolean(tokenData.token),
@@ -3857,6 +4308,30 @@ function createTeamTools(options = {}) {
    * 旧 CLI 命令（task/propose/...）自己会 boot；req review / owner / workflow
    * 必须走旧命令，缺命令时由 requireLegacyCommand 明确拒绝，不能写本地假状态。
    */
+  /**
+   * B-0b28：轮换后的新会话可能用 team.mjs boot（CLI）补读过文档，而 工作流.json.boots 仍停在旧会话，
+   * 验收门不能因此判“没读到需求”。这里只在「读没读过这份需求正文」这一项上兜底，
+   * 规则文档哈希/轮次/必读完整性仍按壳层记录的 boot 校验，不放宽。
+   */
+  function latestLegacyBootToken(projectName, roleId) {
+    try {
+      const dir = path.join(layout.state, '启动');
+      if (!fs.existsSync(dir)) return null;
+      const hits = [];
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.endsWith('.json')) continue;
+        const data = readJsonSafe(path.join(dir, name));
+        if (!data || String(data.role || '') !== roleId) continue;
+        if (String(data.project || '') !== projectName) continue;
+        hits.push({ ...data, tokenFile: path.join(dir, name), at: String(data.createdAt || '') });
+      }
+      hits.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+      return hits[0] || null;
+    } catch {
+      return null;
+    }
+  }
+
   function requireWorkflowBoot(projectName, projectPath, role, options = {}) {
     const name = String(projectName || '').trim();
     const roleId = String(role || '').trim();
@@ -3905,44 +4380,74 @@ function createTeamTools(options = {}) {
     const requirementId = String(options.requirementId || '').trim();
     const live = readBootDocs(projectPath, roleId);
     const stale = [];
+    // 生成型索引（项目索引/需求总览）由工具在每次需求变化后重写，属于导航物，不是规则。
+    // 拿它们的哈希作废 boot 会把“刚评审完就要派单”的整队卡死（ROUND11 的 RULES_CHANGED 根因）。
+    // 规则文档（宪法/铁律/项目信息/角色卡）仍然逐字节比对，改了就必须重新 boot。
+    const GENERATED_DOCS = new Set(['projectIndex', 'requirementOverview']);
     for (const spec of bootDocSpecs(projectPath, roleId)) {
       if (spec.required === false) continue;
-      // 针对具体需求的闸门只认“这份需求正文”的阅读证据。索引/总览会因为
-      // 别的需求新增而重写，拿它们作废在途需求的 boot 会把整队卡死。
-      if (requirementId && ['projectIndex', 'requirementOverview'].includes(spec.key)) continue;
       const before = boot.docs && boot.docs[spec.key] ? boot.docs[spec.key] : null;
       const now = live.docs[spec.key];
       if (!now || !now.exists) stale.push(spec.label + '（缺失）');
+      else if (GENERATED_DOCS.has(spec.key)) continue;
       else if (!before || before.hash !== now.hash || before.exists !== now.exists) stale.push(spec.label);
     }
-    // 没有具体需求时才要求“本轮相关需求”整体哈希仍然一致（迭代/终止用）。
-    if (!requirementId && String(boot.requirementsHash || '') !== live.requirements.hash) stale.push('本轮相关需求');
+    // 没有具体需求时才要求“本轮相关需求”整体仍然一致（迭代/终止用）。
+    // 比对内容哈希：需求正文里的「- 状态：」和「## 状态记录」是程序自己写的，
+    // 只改这些不该让角色的阅读证据作废；新增需求或改正文内容仍然作废。
+    if (!requirementId) {
+      const beforePool = String(boot.requirementsContentHash || boot.requirementsHash || '');
+      const nowPool = String(live.requirements.contentHash || live.requirements.hash || '');
+      if (beforePool !== nowPool) stale.push('本轮相关需求');
+    }
     if (stale.length) {
       return failure('RULES_CHANGED', `角色「${ROLE_NAMES[roleId] || roleId}」boot 后必读文件已变化（${stale.join('、')}），旧阅读证据作废；请重新 boot`, {
         role: roleId, project: name, stale, bootRead: boot, protocol: 'legacy'
       });
     }
+    // B-0b28：记录“这份需求的阅读证据来自哪里”（壳层 boot 记录 / 最新 CLI boot 令牌），供调用方审计。
+    let requirementReadSource = '';
     if (requirementId) {
-      const doc = live.requirements.list.find((row) => requirementIdKey(row.id) === requirementIdKey(requirementId));
-      if (!doc) {
+      const doc = live.requirements.list.find((row) => requirementIdKey(row.id) === requirementIdKey(requirementId));      if (!doc) {
         return failure('MISSING_DOC', `需求 ${requirementId} 没有可读正文（需求/R-*.md），禁止评审/派单/开发/测试/验收`, {
           role: roleId, project: name, requirementId, requirementDocs: live.requirements.list, protocol: 'legacy'
         });
       }
-      const readBefore = boot.requirements && Array.isArray(boot.requirements.list)
+      let readBefore = boot.requirements && Array.isArray(boot.requirements.list)
         ? boot.requirements.list.find((row) => requirementIdKey(row.id) === requirementIdKey(requirementId))
         : null;
+      let readSource = readBefore ? 'workflow-boot' : '';
+      requirementReadSource = readSource;
+      if (!readBefore) {
+        // B-0b28：壳层记录没这条需求 → 回退到该角色最新一次 CLI boot 令牌（轮换后新会话补读的证据）。
+        const latest = latestLegacyBootToken(name, roleId);
+        const tokenRow = latest && Array.isArray(latest.requirementDocs)
+          ? latest.requirementDocs.find((row) => requirementIdKey(row.id) === requirementIdKey(requirementId))
+          : null;
+        if (tokenRow) {
+          readBefore = {
+            id: tokenRow.id,
+            rel: tokenRow.rel || '',
+            hash: tokenRow.hash || '',
+            contentHash: tokenRow.contentHash || tokenRow.hash || '',
+            source: 'legacy-boot-token',
+            at: latest.at,
+          };
+          readSource = 'legacy-boot-token';
+          requirementReadSource = readSource;
+        }
+      }
       // allowRequirementChanged：Owner 决定以“产品评审已通过”为证据；产品评审命令
       // 本身会写需求状态行，不能因此要求产品对同一份需求再 boot 一次。
-      // 仍然要求产品确实读过这份需求（readBefore 存在），只是允许哈希随评审更新。
-      const sameHash = Boolean(readBefore) && String(readBefore.hash || '') === String(doc.hash || '');
+      // 仍然要求产品确实读过这份需求（readBefore 存在），只是允许状态行/状态记录随流程更新。
+      const sameHash = Boolean(readBefore) && String(readBefore.contentHash || readBefore.hash || '') === String(doc.contentHash || doc.hash || '');
       if (!readBefore || (!sameHash && options.allowRequirementChanged !== true)) {
         return failure('BOOT_REQUIRED', `角色「${ROLE_NAMES[roleId] || roleId}」boot 时没有读到需求 ${requirementId}，禁止推进；请重新 boot`, {
-          role: roleId, project: name, requirementId, protocol: 'legacy'
+          role: roleId, project: name, requirementId, readSource, protocol: 'legacy'
         });
       }
     }
-    return { ok: true, code: 'OK', role: roleId, project: name, round: state.round || 1, boot, live };
+    return { ok: true, code: 'OK', role: roleId, project: name, round: state.round || 1, boot, live, requirementReadSource };
   }
 
   /**
@@ -4036,6 +4541,13 @@ function createTeamTools(options = {}) {
         docs: live.docs
       };
     }
+    // B-20261114-003257-0a46（R-d734 F-4）：面板要显示“角色真的 boot 过”。
+    // 工作台自己的 boots 只记壳层发起的 boot；角色用 team.mjs boot 的证据在
+    // 团队/状态/启动/<token>.json（+ 阅读.jsonl kind=boot），单独算一份，不改闸门语义。
+    const evidence = bootEvidence(name, projectPath);
+    for (const role of ROLE_IDS) {
+      if (roles[role]) roles[role].evidence = evidence.roles[role] || null;
+    }
     return {
       ok: true,
       code: 'OK',
@@ -4045,7 +4557,277 @@ function createTeamTools(options = {}) {
       round: currentRound,
       allBooted: Object.values(roles).every((row) => row.booted),
       allComplete: Object.values(roles).every((row) => row.complete),
-      roles
+      roles,
+      evidence
+    };
+  }
+
+  /* ── B-20261114-003257-0a46（R-d734）：文档真实存在性 + 角色 BOOT 真实证据 ──── */
+
+  const PROJECT_DOC_CHECKS = [
+    { key: 'projectInfo', label: '项目信息', file: '项目信息.md' },
+    { key: 'iron', label: '项目铁律', file: '项目铁律.md' }
+  ];
+
+  /**
+   * 单文件探测：只 stat + access，不整篇读（面板每次打开都重算，不缓存结论）。
+   * 读失败（EACCES/EPERM/占用）与“不存在”分开：读不到 ≠ 缺失（R-d734 F-5）。
+   */
+  function probeProjectDoc(file) {
+    const out = { path: file, state: 'missing', exists: false, readable: false, size: 0, mtime: null, error: '', excerpt: '' };
+    let stat;
+    try {
+      stat = fs.statSync(file);
+    } catch (error) {
+      const code = String((error && error.code) || '');
+      if (code && code !== 'ENOENT' && code !== 'ENOTDIR') {
+        out.state = 'unreadable';
+        out.error = code;
+      }
+      return out;
+    }
+    if (!stat.isFile()) {
+      out.state = 'unreadable';
+      out.error = 'NOT_A_FILE';
+      return out;
+    }
+    out.exists = true;
+    out.size = stat.size;
+    out.mtime = stat.mtime.toISOString();
+    try {
+      fs.accessSync(file, fs.constants.R_OK);
+      out.readable = true;
+      out.state = 'present';
+      try {
+        const buffer = fs.readFileSync(file);
+        // 只留开头 400 字给“模板占位”判据；不是正文服务，也不落缓存。
+        out.excerpt = buffer.toString('utf8', 0, Math.min(400, buffer.length)).replace(/\s+/g, ' ').trim();
+      } catch { out.excerpt = ''; }
+    } catch (error) {
+      out.state = 'unreadable';
+      out.error = String((error && error.code) || 'EACCES');
+    }
+    return out;
+  }
+
+  /**
+   * 项目信息/项目铁律 + 六角色（目录/角色卡/文件索引）到底在不在：
+   * 只查两处——项目目录 → 团队共享；**不读 files:list**（600 项 / 4 层上限会把根目录文档和
+   * 排在后面的角色目录截掉，旧版因此误报“角色卡/文件索引永远缺失”，B-20261114-052109-2ebe）。
+   * 返回 checks[]（每项带 rel，前端按 rel 直接对表）与 dirs[]（六角色目录三项）。
+   */
+  function projectDocPresence(projectPath) {
+    const root = path.resolve(String(projectPath || ''));
+    const at = new Date().toISOString();
+    if (!root || !isDirectory(root)) {
+      return failure('PROJECT_DIR_MISSING', `项目目录不存在：${root || '未提供'}`, { projectPath: root, at });
+    }
+    const docCheck = (docFile, key, label, kind, rel) => {
+      const candidates = [
+        { source: 'project', sourceLabel: '项目目录', ...probeProjectDoc(path.join(root, docFile)) },
+        { source: 'team', sourceLabel: '团队共享', ...probeProjectDoc(path.join(layout.root, docFile)) }
+      ];
+      if (kind === 'dir') {
+        // 目录不用 probeProjectDoc（它判 isFile 会把目录当 unreadable），单独 stat。
+        for (const row of candidates) {
+          try {
+            const stat = fs.statSync(row.path);
+            if (stat.isDirectory()) { row.state = 'present'; row.exists = true; row.readable = true; row.size = 0; row.mtime = stat.mtime.toISOString(); }
+            else { row.state = 'unreadable'; row.error = 'NOT_A_DIRECTORY'; }
+          } catch (error) {
+            const code = String((error && error.code) || '');
+            row.state = code && code !== 'ENOENT' && code !== 'ENOTDIR' ? 'unreadable' : 'missing';
+            if (row.state === 'unreadable') row.error = code;
+          }
+        }
+      }
+      const present = candidates.find((row) => row.state === 'present') || null;
+      const unreadable = candidates.find((row) => row.state === 'unreadable') || null;
+      const hit = present || unreadable || null;
+      return {
+        key,
+        label,
+        kind,
+        rel,
+        file: hit ? hit.path : candidates[0].path,
+        state: hit ? hit.state : 'missing',
+        exists: Boolean(present),
+        readable: Boolean(present),
+        source: hit ? hit.source : '',
+        sourceLabel: hit ? hit.sourceLabel : '',
+        checkPath: hit ? hit.path : candidates[0].path,
+        size: present ? present.size : 0,
+        mtime: present ? present.mtime : null,
+        error: hit && hit.state === 'unreadable' ? hit.error : '',
+        excerpt: present ? present.excerpt || '' : '',
+        candidates,
+        at
+      };
+    };
+    const checks = PROJECT_DOC_CHECKS.map((doc) => docCheck(doc.file, doc.key, doc.label, 'file', doc.file));
+    // 六角色 18 项：目录 / 角色卡 / 文件索引（路径与团队工具 ROLE_DIRS 同口径，前端不再自己拼）
+    const dirs = [];
+    for (const roleId of ROLE_IDS) {
+      const dirName = ROLE_DIRS[roleId] || roleId;
+      const dirRel = `${dirName}`;
+      const cardRel = `${dirName}/角色卡.md`;
+      const indexRel = `${dirName}/文件索引.md`;
+      const dirCheck = docCheck(dirName, `role:${roleId}:dir`, `${dirName} 目录`, 'dir', dirRel);
+      const cardCheck = docCheck(cardRel, `role:${roleId}:card`, `${dirName} 角色卡`, 'file', cardRel);
+      const indexCheck = docCheck(indexRel, `role:${roleId}:index`, `${dirName} 文件索引`, 'file', indexRel);
+      checks.push(dirCheck, cardCheck, indexCheck);
+      dirs.push({
+        role: roleId,
+        dir: dirName,
+        rel: dirRel,
+        state: dirCheck.state,
+        exists: dirCheck.exists,
+        cardRel,
+        cardState: cardCheck.state,
+        indexRel,
+        indexState: indexCheck.state,
+      });
+    }
+    return {
+      ok: true,
+      code: 'OK',
+      projectPath: root,
+      at,
+      checks,
+      dirs,
+      missing: checks.filter((row) => row.state === 'missing').map((row) => ({ key: row.key, label: row.label, path: row.checkPath, source: row.source, rel: row.rel })),
+      unreadable: checks.filter((row) => row.state === 'unreadable').map((row) => ({ key: row.key, label: row.label, path: row.checkPath, error: row.error, rel: row.rel })),
+      allPresent: checks.every((row) => row.state === 'present')
+    };
+  }
+
+  /** 角色当前绑定的会话：轮换记录优先（703f），其次 团队.json members[]；禁止按活跃度推断。 */
+  function currentRoleSessions(projectName) {
+    const out = {};
+    for (const role of ROLE_IDS) out[role] = { role, sessionId: '', source: '未绑定', rotationId: '' };
+    for (const member of teamMembers()) {
+      if (!member || !ROLE_IDS.includes(member.role) || member.status === 'removed') continue;
+      out[member.role] = { role: member.role, sessionId: String(member.sessionId || ''), source: '团队.json', rotationId: '' };
+    }
+    const dir = path.join(layout.projectsDir, teamSlug(String(projectName || '')), '会话轮换');
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { names = []; }
+    for (const name of names) {
+      // 角色文件（<role>.json）是每次轮换后的当前记录；S-* 是历史事件，不参与。
+      if (!/\.json$/i.test(name) || /^S-/i.test(name)) continue;
+      const row = readJsonSafe(path.join(dir, name));
+      if (!row || !ROLE_IDS.includes(String(row.role || ''))) continue;
+      if (row.project && String(row.project) !== String(projectName || '')) continue;
+      if (String(row.status || '') === 'retired') continue;
+      const to = String(row.to || '');
+      if (!to) continue;
+      out[row.role] = { role: row.role, sessionId: to, source: '会话轮换', rotationId: String(row.id || '') };
+    }
+    return out;
+  }
+
+  // 阅读.jsonl 只读尾部；面板 5 秒轮询时不重复解析整份文件。
+  let receiptBootCache = { at: 0, rows: [] };
+  function readReceiptBootRows() {
+    if (Date.now() - receiptBootCache.at < 10000) return receiptBootCache.rows;
+    const rows = [];
+    try {
+      const lines = fs.readFileSync(path.join(layout.state, '阅读.jsonl'), 'utf8').split(/\r?\n/);
+      for (const line of lines.slice(-800)) {
+        if (!line.trim()) continue;
+        let row = null;
+        try { row = JSON.parse(line); } catch { continue; }
+        if (!row || row.kind !== 'boot' || !ROLE_IDS.includes(String(row.role || ''))) continue;
+        const atMs = Date.parse(String(row.ts || ''));
+        if (!Number.isFinite(atMs)) continue;
+        rows.push({ role: String(row.role), sessionId: String(row.sessionId || ''), atMs, ts: String(row.ts), project: String(row.project || '') });
+      }
+    } catch { /* 没有阅读记录就是没有 */ }
+    receiptBootCache = { at: Date.now(), rows };
+    return rows;
+  }
+
+  /**
+   * 角色 BOOT 的三态（未 BOOT / 已 BOOT / BOOT 过期），以真实启动令牌为准。
+   * 当前会话口径（703f 落地前）：轮换记录 status=active 的 to 优先，否则 团队.json.members[].sessionId；
+   * 旧会话的 boot 不算“已 BOOT”。
+   */
+  function bootEvidence(projectName, projectPath) {
+    const name = String(projectName || '').trim();
+    const at = new Date().toISOString();
+    const ttlMinutes = Math.max(1, Number(teamConfig().bootTtlMinutes || DEFAULT_BOOT_TTL_MINUTES));
+    const sessions = currentRoleSessions(name);
+    const dir = path.join(layout.state, '启动');
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { names = []; }
+    const tokens = {};
+    for (const fileName of names) {
+      if (!/\.json$/i.test(fileName)) continue;
+      const tokenFile = path.join(dir, fileName);
+      const row = readJsonSafe(tokenFile);
+      if (!row || !ROLE_IDS.includes(String(row.role || ''))) continue;
+      if (row.project && name && String(row.project) !== name) continue;
+      const atMs = Date.parse(String(row.createdAt || ''));
+      if (!Number.isFinite(atMs)) continue;
+      const prev = tokens[row.role];
+      if (!prev || atMs > prev.atMs) {
+        tokens[row.role] = {
+          atMs, at: String(row.createdAt), sessionId: String(row.sessionId || ''),
+          token: String(row.token || ''), expiresAt: String(row.expiresAt || ''), file: tokenFile
+        };
+      }
+    }
+    const receipts = readReceiptBootRows();
+    const roles = {};
+    for (const role of ROLE_IDS) {
+      const current = sessions[role] || { sessionId: '', source: '未绑定' };
+      let record = tokens[role] || null;
+      let evidenceSource = record ? '启动令牌' : '';
+      if (!record) {
+        const latest = receipts
+          .filter((row) => row.role === role && (!name || !row.project || row.project === name))
+          .sort((a, b) => b.atMs - a.atMs)[0] || null;
+        if (latest) {
+          record = { atMs: latest.atMs, at: latest.ts, sessionId: latest.sessionId, token: '', expiresAt: '', file: path.join(layout.state, '阅读.jsonl') };
+          evidenceSource = '阅读.jsonl';
+        }
+      }
+      const expiresMs = record && record.expiresAt ? Date.parse(record.expiresAt) : NaN;
+      const expireAtMs = Number.isFinite(expiresMs) ? expiresMs : (record ? record.atMs + ttlMinutes * 60000 : NaN);
+      const expired = Boolean(record) && Number.isFinite(expireAtMs) && Date.now() > expireAtMs;
+      const matchesCurrent = Boolean(record && current.sessionId && record.sessionId === current.sessionId);
+      let state = 'never';
+      if (record) {
+        if (!current.sessionId) state = 'unbound';
+        else if (record.sessionId !== current.sessionId) state = 'stale-session';
+        else if (expired) state = 'expired';
+        else state = 'booted';
+      }
+      roles[role] = {
+        role,
+        state,
+        label: state === 'booted' ? '已 BOOT'
+          : state === 'expired' ? `BOOT 过期（超过 ${ttlMinutes} 分钟）`
+            : state === 'stale-session' ? '未 BOOT（本会话未 boot）'
+              : state === 'unbound' ? '未 BOOT（当前会话未绑定）' : '未 BOOT',
+        at: record ? record.at : null,
+        atMs: record ? record.atMs : null,
+        expiresAt: record && Number.isFinite(expireAtMs) ? new Date(expireAtMs).toISOString() : null,
+        ttlMinutes,
+        sessionId: record ? record.sessionId : '',
+        currentSessionId: current.sessionId || '',
+        currentSessionSource: current.source || '',
+        matchesCurrent,
+        expired,
+        evidenceSource,
+        token: record ? record.token : '',
+        file: record ? record.file : '',
+        checkedAt: at
+      };
+    }
+    return {
+      ok: true, code: 'OK', project: name, at, ttlMinutes, roles,
+      note: '口径：只认角色当前绑定会话的最新 boot，旧会话 boot 不算；703f 落地前当前会话取轮换记录 to（无记录回退 团队.json members[].sessionId）。'
     };
   }
 
@@ -4257,14 +5039,97 @@ function createTeamTools(options = {}) {
   }
 
   /** 工作流里按 4/6 位兼容号找需求行；再也不会因为编号宽度不同而看成两条。 */
-  function findStateRequirementRow(state, requirementId) {
-    const wanted = requirementIdKey(requirementId);
-    if (!wanted || !state || !state.requirements || typeof state.requirements !== 'object') return null;
-    for (const key of Object.keys(state.requirements)) {
-      const row = state.requirements[key];
-      if (requirementIdKey(key) === wanted || requirementIdKey(row && row.id) === wanted) return { key, row };
+  /**
+   * 需求 id 的匹配计划（B-b55c）。
+   * 旧实现只用 requirementIdKey 归一化（R-20261113-035931-54da → R-20261113-35931），
+   * 同一天同一秒创建的多条需求会撞成同一个 key；真实项目里 R-20261113-035931 下就有 5 条
+   * （52f3/98ee/1cee/54da/8b9d）。只看归一化 key 会把 54da 认成同秒第一条 52f3，
+   * 于是"列表 test_done、点确认却报 accepted"。
+   * 这里把"精确 id"与"兼容短号"分开：精确形态优先，模糊形态必须唯一，多条就判歧义。
+   */
+  function requirementIdMatchPlan(value) {
+    const text = String(value == null ? '' : value).trim();
+    const upper = text.toUpperCase();
+    const plan = { text, exact: upper, isFullId: false, isSuffixOnly: false, isSecondsOnly: false, secondsKey: requirementIdKey(text), suffix: '' };
+    const full = upper.match(/^R-(\d{8})-(\d{4,8})-([0-9A-Z]{2,8})$/);
+    if (full) {
+      plan.isFullId = true;
+      plan.suffix = full[3];
+      plan.secondsKey = `R-${full[1]}-${Number(full[2])}`;
+      return plan;
     }
-    return null;
+    // R-20261113-035931：只写秒号（旧入口/人话常用）→ 归一化后可能命中同秒多条。
+    const secondsOnly = upper.match(/^R-(\d{8})-(\d{4,8})$/);
+    if (secondsOnly) {
+      plan.isSecondsOnly = true;
+      plan.secondsKey = `R-${secondsOnly[1]}-${Number(secondsOnly[2])}`;
+      return plan;
+    }
+    // R-54da / 54da：只写后缀（消息里人话常用「需求 R-54da」）。
+    const suffixOnly = upper.match(/^(?:R-)?([0-9A-Z]{4})$/);
+    if (suffixOnly && !/^\d{4}$/.test(suffixOnly[1])) {
+      plan.isSuffixOnly = true;
+      plan.suffix = suffixOnly[1];
+      plan.secondsKey = '';
+    }
+    return plan;
+  }
+
+  function requirementRowId(key, row) {
+    return String((row && row.id) || key || '').trim();
+  }
+
+  /**
+   * 带歧义信息的需求行查找（B-b55c）。返回：
+   *   { key, row, matched: 'exact'|'secondsKey'|'suffix', candidates: [] }  命中唯一
+   *   { ambiguous: true, row: null, candidates: [{id,status}, ...] }        短号命中多条，不猜
+   *   null                                                                  没有命中
+   * 顺序：① 精确（key 或 row.id 全等）→ ② 唯一兼容匹配（同秒 key / 后缀）→ ③ 多条判歧义。
+   */
+  function findStateRequirementRowDetailed(state, requirementId) {
+    const plan = requirementIdMatchPlan(requirementId);
+    if (!plan.exact || !state || !state.requirements || typeof state.requirements !== 'object') return null;
+    const keys = Object.keys(state.requirements);
+    // ① 精确命中：只要能精确命中，就绝不退回模糊匹配（同秒需求会撞 key）。
+    for (const key of keys) {
+      const row = state.requirements[key];
+      if (String(key).trim().toUpperCase() === plan.exact || requirementRowId(key, row).toUpperCase() === plan.exact) {
+        return { key, row, matched: 'exact', candidates: [] };
+      }
+    }
+    if (!plan.isFullId && !plan.isSuffixOnly && !plan.isSecondsOnly) return null;
+    // ② 兼容匹配：同秒 key（旧入口只传 R-YYYYMMDD-HHMMSS）或 4 位后缀（R-54da）。
+    const hits = [];
+    for (const key of keys) {
+      const row = state.requirements[key];
+      const id = requirementRowId(key, row);
+      const upperId = id.toUpperCase();
+      const secondsHit = Boolean(plan.secondsKey)
+        && (requirementIdKey(key) === plan.secondsKey || requirementIdKey(id) === plan.secondsKey);
+      const suffixHit = Boolean(plan.suffix) && upperId.endsWith('-' + plan.suffix);
+      if (secondsHit || suffixHit) hits.push({ key, row, matched: secondsHit ? 'secondsKey' : 'suffix', candidates: [] });
+    }
+    if (!hits.length) return null;
+    if (hits.length === 1) return hits[0];
+    return {
+      ambiguous: true,
+      row: null,
+      key: '',
+      matched: '',
+      wanted: plan.text,
+      candidates: hits.map((hit) => ({
+        id: requirementRowId(hit.key, hit.row),
+        status: String((hit.row && hit.row.status) || ''),
+        key: hit.key
+      }))
+    };
+  }
+
+  function findStateRequirementRow(state, requirementId) {
+    const found = findStateRequirementRowDetailed(state, requirementId);
+    // 歧义不能当成"命中某一条"：旧调用点一律按 not found 处理（安全失败，不改错需求）。
+    if (!found || found.ambiguous) return null;
+    return found;
   }
 
   /** 旧 任务/ 目录里按 4/6 位兼容号找任务文件。 */
@@ -4292,7 +5157,17 @@ function createTeamTools(options = {}) {
     if (!root) return failure('PROJECT_PATH_REQUIRED', '缺少项目目录，无法导入旧需求');
     const read = readWorkflowState(name);
     if (!read.ok) return read;
-    const found = findStateRequirementRow(read.state, wanted);
+    // B-b55c：短号（只写秒号/只写后缀）命中多条时不许"补建/落到第一条"——那会把动作记到另一条
+    // 同秒需求上。歧义就在入口拒收，并列出候选让人用完整 id 再来。
+    const detailed = findStateRequirementRowDetailed(read.state, wanted);
+    if (detailed && detailed.ambiguous) {
+      return failure(
+        'REQUIREMENT_AMBIGUOUS',
+        `需求号 ${wanted} 同时命中 ${detailed.candidates.length} 条（${detailed.candidates.map((row) => `${row.id}=${row.status}`).join(' / ')}），请用完整需求 id 再操作`,
+        { requirementId: wanted, candidates: detailed.candidates }
+      );
+    }
+    const found = detailed;
     const docs = readRequirementDocs(root).list;
     const doc = docs.find((row) => requirementIdKey(row.id) === requirementIdKey(wanted)) || null;
     const existingTask = findLegacyRequirementTask(name, wanted);
@@ -4464,6 +5339,8 @@ function createTeamTools(options = {}) {
       priority: String(row.priority || source.priority || 'P2'),
       status: String(row.status || (source.status === 'done' ? 'accepted' : 'review')),
       origin: String(row.origin || 'role'),
+      type: String(row.type || source.type || ''),
+      owner: String(row.owner || source.owner || ''),
       queued: Boolean(row.queued),
       round: Number(row.round || 1),
       createdBy: String(row.createdBy || source.createdBy || ''),
@@ -4481,6 +5358,7 @@ function createTeamTools(options = {}) {
       techReview: row.techReview || null,
       voteRejection: row.voteRejection || null,
       ownerReview: row.ownerReview || null,
+      decisions: Array.isArray(row.decisions) ? row.decisions : [],
       dispatch: row.dispatch || null,
       dev: row.dev || null,
       test: row.test || null,
@@ -4490,21 +5368,113 @@ function createTeamTools(options = {}) {
     };
   }
 
-  function phaseFromRequirements(state, requirements) {
+  // 阶段只由证据推导，不再让 工作流.json 里陈旧的 phase 永久胜出。
+  // 顺序即“只前进不回退”：需求 → 需求评审 → Owner → 技术评审 → 派单 → 开发 → 互审 → 测试 → 待验收 → 验收/迭代。
+  const PHASE_RANK = {
+    idle: 0, requirement: 1, requirement_review: 2, product_review: 2, owner_review: 3,
+    tech_review: 4, dispatch: 5, ready: 5, dev: 6, dev_review: 7, dev_done: 7,
+    test: 8, test_done: 9, owner_accept: 10, accepted: 11, iteration: 11, terminated: 12,
+  };
+  const rankPhase = (phase) => PHASE_RANK[String(phase || '')] || 0;
+  const maxPhase = (a, b) => (rankPhase(b) > rankPhase(a) ? b : a);
+
+  function phaseFromRequirements(state, requirements, tasks = []) {
     const rows = Array.isArray(requirements) ? requirements : [];
+    if (!rows.length) return (state && state.phase) || 'idle';
+    // 显式回退/收口事件优先：评审 reject、Owner 打回、终止是设计里的合法回退（产品设计 §二），
+    // 不能被同项目其它需求“更靠后”的状态掩盖，否则驳回后界面停在 dispatch，掩盖返工。
     const statuses = new Set(rows.map((row) => String(row.status || '')));
-    if (state && state.phase && state.phase !== 'idle') return state.phase;
-    if (statuses.has('terminated')) return 'terminated';
-    if (statuses.has('test_done')) return 'owner_accept';
-    if (statuses.has('test')) return 'test';
-    if (statuses.has('dev_review')) return 'dev_review';
-    if (statuses.has('dev') || statuses.has('dispatched') || statuses.has('dev_done')) return 'dev';
-    if (statuses.has('tech_review')) return 'tech_review';
-    if (statuses.has('ready')) return 'dispatch';
-    if (statuses.has('approved')) return 'owner_review';
-    if (statuses.has('review') || statuses.has('rejected')) return 'requirement_review';
-    if (rows.length && rows.every((row) => ['accepted', 'iteration'].includes(String(row.status)))) return 'accepted';
-    return 'idle';
+    if ((state && state.phase === 'terminated') || statuses.has('terminated')) return 'terminated';
+    if (statuses.has('rejected')) return 'requirement_review';
+    let phase = 'idle';
+    if (statuses.has('test_done')) phase = 'owner_accept';
+    else if (statuses.has('test')) phase = 'test';
+    else if (statuses.has('dev_review')) phase = 'dev_review';
+    else if (statuses.has('dev') || statuses.has('dispatched') || statuses.has('dev_done')) phase = 'dev_done';
+    else if (statuses.has('tech_review')) phase = 'tech_review';
+    else if (statuses.has('ready')) phase = 'dispatch';
+    else if (statuses.has('approved')) phase = 'owner_review';
+    else if (statuses.has('review') || statuses.has('rejected')) phase = 'requirement_review';
+    else if (rows.every((row) => ['accepted', 'iteration'].includes(String(row.status)))) phase = 'accepted';
+    // 任务证据：需求行状态可能没被角色回写，但任务已全部 done。只升不降。
+    const taskRows = Array.isArray(tasks) ? tasks : [];
+    for (const row of rows) {
+      const status = String(row.status || '');
+      if (['accepted', 'terminated', 'iteration', 'rejected'].includes(status)) continue;
+      const kids = taskRows.filter((task) => task && String(task.requirementId || '') === String(row.id || '') && task.type !== 'requirement');
+      if (!kids.length || kids.some((task) => String(task.status || '') !== 'done')) continue;
+      const testerDone = kids.some((task) => String(task.owner || '') === 'tester');
+      const devDone = kids.some((task) => ['programmer1', 'programmer2'].includes(String(task.owner || '')));
+      if (testerDone) phase = maxPhase(phase, 'owner_accept');
+      else if (devDone) phase = maxPhase(phase, 'dev_done');
+      else phase = maxPhase(phase, 'dispatch');
+    }
+    // 迭代：全部需求已收口且轮次被推进时保留 iteration。
+    if (state && state.phase === 'iteration' && phase === 'accepted') return 'iteration';
+    return phase;
+  }
+
+  /**
+   * 只读列出旧协议提案（P-*），供 Owner 评审与提案页直接展示。
+   * 只读 提案/评审/签字/提交 四类文件，不写状态、不伪造评审。
+   */
+  function listLegacyProposals(projectName) {
+    const name = String(projectName || '').trim();
+    if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
+    const paths = projectStatePaths(name);
+    let ids = [];
+    try { ids = fs.readdirSync(paths.proposals).filter((id) => /^P-/.test(id)); } catch { ids = []; }
+    const commits = [];
+    try {
+      for (const file of fs.readdirSync(paths.commits).filter((f) => f.endsWith('.json'))) {
+        const record = readJsonSafe(path.join(paths.commits, file));
+        if (record && record.proposalId) commits.push(record);
+      }
+    } catch { /* none */ }
+    const proposals = [];
+    for (const id of ids) {
+      const dir = path.join(paths.proposals, id);
+      const proposal = readJsonSafe(path.join(dir, '提案.json'));
+      if (!proposal) continue;
+      const reviews = {};
+      try {
+        for (const file of fs.readdirSync(path.join(dir, '评审')).filter((f) => f.endsWith('.json'))) {
+          const row = readJsonSafe(path.join(dir, '评审', file));
+          if (row) reviews[String(row.role || file.replace(/\.json$/, ''))] = row;
+        }
+      } catch { /* none */ }
+      const signatures = {};
+      try {
+        for (const file of fs.readdirSync(path.join(dir, '签字')).filter((f) => f.endsWith('.json'))) {
+          const row = readJsonSafe(path.join(dir, '签字', file));
+          if (row) signatures[String(row.role || file.replace(/\.json$/, ''))] = row;
+        }
+      } catch { /* none */ }
+      const commit = commits.find((row) => String(row.proposalId) === String(id)) || null;
+      proposals.push({
+        id,
+        title: String(proposal.title || ''),
+        author: String(proposal.author || ''),
+        status: String(proposal.status || ''),
+        risk: String(proposal.risk || ''),
+        task: String(proposal.task || ''),
+        rationale: String(proposal.rationale || ''),
+        createdAt: proposal.createdAt || null,
+        proposalHash: proposal.proposalHash || '',
+        files: (Array.isArray(proposal.files) ? proposal.files : []).map((file) => ({
+          target: String(file.target || '').replace(/\\/g, '/'),
+          size: Number(file.size || 0),
+          baseHash: file.baseHash === undefined ? null : file.baseHash,
+          newHash: file.newHash || null
+        })),
+        reviews,
+        signatures,
+        commitId: commit ? commit.id : '',
+        appliedAt: commit ? commit.createdAt : null
+      });
+    }
+    proposals.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    return { ok: true, code: 'OK', project: name, count: proposals.length, proposals };
   }
 
   /**
@@ -4536,11 +5506,20 @@ function createTeamTools(options = {}) {
     }
     // 旧项目可能只有 需求/R-*.md 正文，没有 工作流.json 行/任务。
     // 这些需求也必须进入工作流扫描，否则界面显示“没有需求”、迭代守卫也会放行。
+    // 注意：同一份需求正文不能因为文件 id 与真实需求 id 写法不同（4 位/6 位/截断）
+    // 被重复登记成第二条“幽灵需求”，否则界面会一直显示 requirements 里还有 review。
     const resolvedProjectPath = projectPath ? path.resolve(projectPath) : ((registrationFor(name) || {}).path || '');
     if (resolvedProjectPath) {
+      const knownDocs = requirements.map((row) => String(row.doc || '').replace(/\\/g, '/')).filter(Boolean);
+      const knownIds = requirements.map((row) => String(row.id || '')).filter(Boolean);
       for (const doc of readRequirementDocs(resolvedProjectPath).list) {
-        if (seen.has(String(doc.id))) continue;
-        seen.add(String(doc.id));
+        const rel = String(doc.rel || '').replace(/\\/g, '/');
+        if (knownDocs.includes(rel)) continue;
+        const docId = String(doc.id || '');
+        const sameId = knownIds.some((id) => id === docId || id.startsWith(docId) || docId.startsWith(id));
+        if (sameId) continue;
+        knownIds.push(docId);
+        knownDocs.push(rel);
         requirements.push(requirementView(null, {
           id: doc.id,
           title: doc.title || doc.id,
@@ -4570,7 +5549,7 @@ function createTeamTools(options = {}) {
       view.votes = votes.filter((vote) => String(vote.requirementId) === String(view.id));
       view.vote = view.votes.length ? view.votes[view.votes.length - 1] : null;
     }
-    let phase = phaseFromRequirements(state, requirements);
+    let phase = phaseFromRequirements(state, requirements, tasks);
     // 旧项目可能只有 team.mjs 建的任务/需求、没有本闭环的 requirements 元数据；
     // 此时按旧任务的 owner/status 反推阶段，避免把真实旧项目显示成 intake。
     if (!requirements.length && tasks.length && phase === 'idle') {
@@ -4594,6 +5573,9 @@ function createTeamTools(options = {}) {
       teamMode: projectMode,
       file: read.file,
       exists: read.exists,
+      // B-b55c：列表与确认同源——快照带上"这份状态哪个文件、什么时候读的"，
+      // 界面才能显示来源，并把界面看到的状态回传给确认接口做一致性判断。
+      source: workflowStateSource(read),
       workflow: state,
       phase,
       stage: WORKFLOW_STAGE_BY_PHASE[phase] || 'intake',
@@ -5698,6 +6680,18 @@ function createTeamTools(options = {}) {
       legacyRequirement && legacyRequirement.workflow && legacyRequirement.workflow.ownerReview
     );
     const legacyTopOwnerReview = runValue && runValue.ownerReview;
+    // Owner 通道只允许 ui/tty：来源依次取调用方、旧命令返回、已有记录；都没有就拒绝，
+    // 不再静默回退旧通道名，避免决定的审计通道失真。
+    const ownerChannelCandidates = [
+      String(input.channel || ''),
+      String((runValue && (runValue.channel || (runValue.ownerReview && runValue.ownerReview.channel))) || ''),
+      String((legacyOwnerReview && legacyOwnerReview.channel) || (legacyTopOwnerReview && legacyTopOwnerReview.channel) || ''),
+      String((meta.ownerReview && meta.ownerReview.channel) || (read.state.ownerReview && read.state.ownerReview.channel) || '')
+    ];
+    const ownerChannel = ownerChannelCandidates.find((candidate) => ['ui', 'tty'].includes(candidate));
+    if (!ownerChannel) {
+      return failure('OWNER_CHANNEL_REQUIRED', 'Owner 决定必须显式携带 channel=ui 或 tty，不再回退旧通道', { requirementId });
+    }
     const written = mutateWorkflowState(ctx.name, (state) => {
       const target = findStateRequirementRow(state, requirementId);
       if (!target) throw new Error(`工作流里没有需求 ${requirementId}`);
@@ -5718,8 +6712,8 @@ function createTeamTools(options = {}) {
         runValue
       );
       // Owner 确认码已废弃：UI 不再要求 challenge/nonce，决定直接以 role=owner 接受。
-      // Fast 缺旧 owner 命令时由壳层落账，通道同样归一为 workbench。
-      auth.channel = 'workbench';
+      // 通道已在 mutate 之前校验为 ui/tty（ownerChannel）；这里只落库，不再做任何回退。
+      auth.channel = ownerChannel;
       auth.actor = auth.actor || 'owner';
       auth.at = auth.at || at;
       row.ownerReview = {
@@ -5820,6 +6814,152 @@ function createTeamTools(options = {}) {
         mocked: Boolean(run && run.mocked),
         missingCommands: (ctx.capabilities.missing || []).filter((name) => !(shellOwnedOwner && name === 'owner'))
       }
+    };
+  }
+
+  /**
+   * B-fe22：评审弹窗「通过/打回」必须落到需求行，不能只改项目级 ownerReview。
+   * owner:decide 负责项目级落账与 PM 通知；这里补需求级：row.ownerReview/status/phase/history，
+   * 并支持 ui / proxy / skip_committee 三种通道（弹窗、代管、三方共决共用同一入口）。
+   * 不做产品评审/boot 闸门：弹窗只展示已过产品评审的待决需求，Owner 是最终决策人；
+   * 打回理由必填在 owner:decide 入口校验，避免静默丢理由。
+   */
+  async function applyOwnerDecisionToRequirement(input = {}) {
+    const name = String((input.project && (input.project.teamName || input.project.name)) || input.projectName || '').trim();
+    if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
+    const requirementId = String(input.requirementId || '').trim();
+    if (!requirementId) return failure('REQUIREMENT_REQUIRED', '缺少需求 id（弹窗决定必须指向具体需求）');
+    const status = String(input.status || input.decision || '');
+    if (!['approved', 'rejected', 'skipped'].includes(status)) {
+      return failure('OWNER_DECISION_INVALID', 'Owner 决定必须是 approved / rejected / skipped', { status });
+    }
+    const channel = String(input.channel || '');
+    if (!['ui', 'tty', 'proxy', 'skip_committee'].includes(channel)) {
+      return failure('OWNER_CHANNEL_REQUIRED', 'Owner 决定必须显式带 channel=ui/tty（代管用 proxy、三方共决跳过用 skip_committee）');
+    }
+    if (status === 'rejected' && !String(input.opinion || '').trim()) {
+      return failure('OWNER_OPINION_REQUIRED', '打回必须写理由：说明哪不行、要怎么改');
+    }
+    const read = readWorkflowState(name);
+    if (!read.ok) return read;
+    const mode = normalizeTeamMode(input.teamMode || (readJsonSafe(path.join(projectStateDir(name), '项目.json')) || {}).teamMode);
+    const at = new Date().toISOString();
+    const opinion = String(input.opinion || '').slice(0, 1000);
+    const roundKey = String(input.roundKey || `${name}|${read.state.round}|${Object.keys(read.state.requirements || {}).length}`);
+    // B-2ed9：服务端按「需求 + 本轮 + 同状态」去重——重复点同一条只落 1 条决定；
+    // 不同状态（如通过后打回）仍然允许，append-only。
+    const existingTarget = findStateRequirementRow(read.state, requirementId);
+    const existingDecisions = existingTarget && Array.isArray(existingTarget.row.decisions) ? existingTarget.row.decisions : [];
+    const rowRound = Number((existingTarget && existingTarget.row.round) || 1);
+    if (existingDecisions.some((d) => d
+      && String(d.status || d.decision || '') === status
+      && Number(d.round || rowRound) === rowRound)) {
+      return failure('DUPLICATE_DECISION', `需求 ${requirementId} 本轮已有相同决定（${status}），不重复落账`, {
+        requirementId, status, round: rowRound,
+      });
+    }
+    const auth = {
+      channel,
+      actor: 'owner',
+      decidedBy: 'owner',
+      by: 'Owner',
+      at,
+      roundKey,
+      opinion,
+      ...(input.recordedBy ? { recordedBy: String(input.recordedBy) } : {}),
+      ...(input.proxy ? { proxy: String(input.proxy) } : {}),
+      ...(input.authorization ? { authorization: String(input.authorization) } : {}),
+      ...(input.committee ? { committee: input.committee } : {}),
+    };
+    const written = mutateWorkflowState(name, (state) => {
+      const target = findStateRequirementRow(state, requirementId);
+      if (!target) throw new Error(`工作流里没有需求 ${requirementId}`);
+      const row = target.row;
+      const previousRowReview = isPlainObject(row.ownerReview) ? row.ownerReview : {};
+      const previousStateReview = isPlainObject(state.ownerReview) ? state.ownerReview : {};
+      // B-a08e：决定写到「需求行顶层 decisions[]」（闸门/弹窗读这里）；
+      // ownerReview 只保留最新摘要，不再塞 decisions 数组（旧 nested 数据顺手并到顶层，幂等）。
+      const decisionKey = (d) => `${String(d && d.at || '')}|${String(d && (d.status || d.decision) || '')}|${String(d && d.channel || '')}`;
+      const nestedLegacy = Array.isArray(previousRowReview.decisions) ? previousRowReview.decisions.filter(Boolean) : [];
+      const topLevel = Array.isArray(row.decisions) ? row.decisions.filter(Boolean) : [];
+      const mergedDecisions = [];
+      const seenDecision = new Set();
+      for (const row0 of [...topLevel, ...nestedLegacy]) {
+        const key = decisionKey(row0);
+        if (seenDecision.has(key)) continue;
+        seenDecision.add(key);
+        mergedDecisions.push(row0);
+      }
+      const previousRowDecisions = mergedDecisions.slice(-99);
+      const decisionRecord = {
+        status,
+        decision: status,
+        channel,
+        decidedBy: 'owner',
+        actor: 'owner',
+        by: 'Owner',
+        at,
+        round: Number(row.round || 1),
+        roundKey,
+        opinion,
+        ...(input.recordedBy ? { recordedBy: String(input.recordedBy) } : {}),
+        ...(input.proxy ? { proxy: String(input.proxy) } : {}),
+        ...(input.authorization ? { authorization: String(input.authorization) } : {}),
+        ...(input.committee ? { committee: input.committee } : {}),
+      };
+      row.decisions = [...previousRowDecisions, decisionRecord];
+      row.ownerReview = { ...previousRowReview, ...auth, status, source: 'workbench-dialog', command: 'owner' };
+      delete row.ownerReview.decisions;
+      row.updatedAt = at;
+      pushHistoryOnce(row, {
+        at,
+        action: 'owner_review',
+        by: 'Owner',
+        note: `${status}${opinion ? '：' + opinion.slice(0, 80) : ''}`,
+      }, { requirementId });
+      row.teamMode = mode;
+      if (status === 'rejected') {
+        row.status = 'rejected';
+        state.phase = REJECTED_REQUIREMENT_PHASE;
+      } else if (mode === 'fast') {
+        row.status = 'tech_review';
+        state.phase = 'tech_review';
+      } else {
+        row.status = 'ready';
+        state.phase = 'dispatch';
+      }
+      state.ownerReview = {
+        ...previousStateReview,
+        ...auth,
+        required: true,
+        status,
+        kind: 'requirement',
+        requirementId,
+      };
+      pushWorkflowEventOnce(state, {
+        at,
+        action: 'owner_requirement',
+        role: 'owner',
+        project: name,
+        requirementId,
+        note: `${status}${opinion ? '：' + opinion.slice(0, 80) : ''}`,
+      });
+    });
+    if (!written.ok) return written;
+    const projectPath = String((input.project && input.project.path) || (registrationFor(name) || {}).path || '');
+    const projectIndex = await refreshProjectIndex(name, projectPath);
+    const indexWarning = projectIndexWarning(projectIndex);
+    return {
+      ok: true,
+      code: 'OK',
+      name,
+      requirementId,
+      status,
+      channel,
+      file: written.file,
+      workflow: written.state || null,
+      projectIndex,
+      warnings: indexWarning ? [indexWarning] : [],
     };
   }
 
@@ -6832,6 +7972,25 @@ function createTeamTools(options = {}) {
   }
 
   /** 派单前置校验（并行派单的预检也复用）：返回 {ok, meta} 或结构化失败。 */
+  /**
+   * 壳层 TR-Q（G2.5）：P0 需求在 Owner 门前必须有测试人员的可测性评审；P1 允许 optional-missing。
+   * 只读：先看工作流行 trq 记录，再看 测试人员/产出/可测性评审-<需求id>-vN.md 的结论行。
+   */
+  function testabilityEvidence(ctx, requirementId, meta) {
+    const recorded = (meta && meta.trq && typeof meta.trq === 'object') ? meta.trq : null;
+    if (recorded && recorded.verdict) return { verdict: String(recorded.verdict), file: String(recorded.file || ''), source: 'workflow' };
+    const dir = path.join(path.resolve(ctx.projectPath), '测试人员', '产出');
+    let names = [];
+    try { names = fs.readdirSync(dir).filter((name) => /^可测性评审-.*-v\d+\.md$/i.test(name) && name.includes(String(requirementId))); } catch { names = []; }
+    if (!names.length) return null;
+    const latest = names.map((name) => ({ name, mtime: fs.statSync(path.join(dir, name)).mtimeMs })).sort((a, b) => b.mtime - a.mtime)[0];
+    let text = '';
+    try { text = fs.readFileSync(path.join(dir, latest.name), 'utf8'); } catch { text = ''; }
+    const line = (text.split(/\r?\n/).find((item) => /结论\s*[:：]/.test(item)) || '');
+    const verdict = /不可测|not[_\s-]?testable/i.test(line) ? 'not_testable' : (/可测|testable/i.test(line) ? 'testable' : 'unknown');
+    return { verdict, file: `测试人员/产出/${latest.name}`, source: 'file' };
+  }
+
   function validateDispatchTarget(ctx, requirementId) {
     const mode = normalizeTeamMode(ctx.teamMode);
     // 旧需求只有正文时先补任务/工作流行，否则“评审/Owner 已过、派单找不到行”会断链。
@@ -6864,8 +8023,21 @@ function createTeamTools(options = {}) {
     if (!meta.productReview || meta.productReview.verdict !== 'approve') {
       return failure('PRODUCT_REVIEW_REQUIRED', `需求 ${requirementId} 没有需求评审通过，不能派单`, { requirementId });
     }
-    if (!meta.ownerReview || !['approved', 'skipped'].includes(String(meta.ownerReview.status))) {
-      return failure('OWNER_REVIEW_REQUIRED', `需求 ${requirementId} 的 Owner 闸门未通过/未跳过`, { requirementId });
+    const latestDecision = Array.isArray(meta.decisions) && meta.decisions.length ? meta.decisions[meta.decisions.length - 1] : null;
+    const ownerStatus = String((latestDecision && latestDecision.status) || (meta.ownerReview && meta.ownerReview.status) || '');
+    if (!['approved', 'skipped', 'accepted'].includes(ownerStatus)) {
+      return failure('OWNER_REVIEW_REQUIRED', `需求 ${requirementId} 的 Owner 闸门未通过/未跳过（最新：${ownerStatus || '无记录'}）`, {
+        requirementId, gate: 'G3', decision: latestDecision || meta.ownerReview || null,
+        next: '让 Owner 在界面/终端确认（owner confirm → owner）',
+      });
+    }
+    // G2.5：P0 需求在 Owner 门前必须有测试人员的可测性评审（TR-Q）；P1 允许 optional-missing。
+    const trq = testabilityEvidence(ctx, requirementId, meta);
+    if (String(meta.priority || '').toUpperCase() === 'P0' && (!trq || trq.verdict !== 'testable')) {
+      return failure('TESTABILITY_REVIEW_REQUIRED', `P0 需求 ${requirementId} 还没有可测性评审（TR-Q）通过；先让测试人员做 TR-Q`, {
+        requirementId, gate: 'G2.5', trq: trq || null,
+        next: `测试人员/产出/可测性评审-${requirementId}-vN.md（结论：testable）`,
+      });
     }
     // Fast 模式：Owner 之后必须有高级程序员 A 的开发技术评审通过，否则不得派单。
     if (mode === 'fast' && (!meta.techReview || meta.techReview.verdict !== 'approve')) {
@@ -6877,7 +8049,35 @@ function createTeamTools(options = {}) {
   }
 
   /** 单个开发任务的实际派发（校验已由调用方完成）。 */
+  /**
+   * G5（AC14.6）壳层同步：目标开发角色已有未闭环任务 → TASK_OPEN，先 done/释放再派。
+   * 与 team.mjs 的 gateRoleBusy 同一错误码与提示，UI 与 CLI 不各写一套。
+   */
+  function devOwnerBusy(ctx, devOwner) {
+    const name = String((ctx && ctx.name) || '').trim();
+    const owner = String(devOwner || '').trim();
+    if (!name || !owner) return null;
+    const tasksDir = path.join(projectStatePaths(name).dir, '任务');
+    const open = [];
+    try {
+      for (const file of fs.readdirSync(tasksDir).filter((entry) => entry.endsWith('.json'))) {
+        const task = readJsonSafe(path.join(tasksDir, file));
+        if (!task || task.type === 'requirement') continue;
+        if (String(task.owner || '') !== owner) continue;
+        if (String(task.status || '') === 'done') continue;
+        open.push({ id: String(task.id || file.replace(/\.json$/, '')), title: String(task.title || ''), status: String(task.status || '') });
+      }
+    } catch { /* 没有任务目录：视为空闲 */ }
+    if (!open.length) return null;
+    return failure('TASK_OPEN', `角色 ${owner} 还有未闭环任务：${open.map((task) => task.id).join(', ')}；先 done 或改派再派单`, {
+      role: owner, gate: 'G5', taskIds: open.map((task) => task.id),
+      next: `先让 ${owner} 完成 ${open[0].id}（task done --evidence），或 PM 释放/改派`,
+    });
+  }
+
   async function dispatchOneRequirement(ctx, requirementId, devOwner, extra = {}, sessionId = '') {
+    const busy = devOwnerBusy(ctx, devOwner);
+    if (busy) return busy;
     const read = readWorkflowState(ctx.name);
     if (!read.ok) return read;
     const found = findStateRequirementRow(read.state, requirementId);
@@ -7596,16 +8796,41 @@ function createTeamTools(options = {}) {
     const ctx = await ensureWorkflowProject(input);
     if (!ctx.ok) return ctx;
     const role = String(input.role || 'owner').trim();
-    if (!['owner', 'pm'].includes(role)) return failure('ROLE_NOT_ALLOWED', '只有 Owner 能验收（PM 可代办启动下一轮/终止）', { role });
+    if (!['owner', 'pm'].includes(role)) return failure('ROLE_NOT_ALLOWED', '只有 Owner 能验收（PM 可在有效代管下凭证据代验收）', { role });
     const requirementId = String(input.requirementId || '').trim();
     if (!requirementId) return failure('REQUIREMENT_REQUIRED', '缺少需求 id');
     const decision = String(input.decision || input.status || '').trim();
     if (!['accepted', 'rejected', 'iterate', 'terminated'].includes(decision)) {
       return failure('OWNER_DECISION_INVALID', 'Owner 验收决定必须是 accepted / rejected / iterate / terminated', { decision });
     }
-    // 验收/打回只能由 Owner 做；PM 只能代办迭代/终止，不能替 Owner 验收。
-    if (['accepted', 'rejected'].includes(decision) && role !== 'owner') {
-      return failure('ROLE_NOT_ALLOWED', 'Owner 验收/打回只能由 Owner 执行，PM 不能代验收', { role, decision });
+    // R-4f99 F-3：验收两种身份——Owner 本人（ui/tty）；有效代管下的 PM 代验收（proxy，必须带证据）。
+    // PM 仍然不能代打回/迭代/终止：那三种只能 Owner 做。
+    const wantProxyAccept = String(input.channel || '') === 'proxy' || String(input.recordedBy || '') === 'pm';
+    const proxyAccept = role === 'pm' && decision === 'accepted' && wantProxyAccept;
+    if (['accepted', 'rejected'].includes(decision) && role !== 'owner' && !proxyAccept) {
+      return failure('ROLE_NOT_ALLOWED', 'Owner 验收/打回只能由 Owner 执行；PM 只能在有效代管下凭证据代验收（accepted）', { role, decision });
+    }
+    if (proxyAccept) {
+      const recordedBy = String(input.recordedBy || '');
+      const authorization = String(input.authorization || '').trim();
+      const scope = String(input.proxy || '');
+      if (recordedBy !== 'pm') return failure('PROXY_UNAUTHORIZED', 'PM 代验收必须 recordedBy=pm（PM 只代记，不自己决定）');
+      if (!authorization) return failure('PROXY_UNAUTHORIZED', 'PM 代验收缺少 Owner 授权来源（authorization）：先开代管再验收');
+      if (!['once', 'always'].includes(scope)) return failure('PROXY_UNAUTHORIZED', '代管范围必须是 once 或 always');
+    }
+    // R-ea86 F-E3：PM 代验收证据两件套——存在/项目内/非 0 字节/截图魔数/报告 PASS 无 FAIL，失败明细走 reason。
+    let acceptEvidence = [];
+    let acceptWarnings = [];
+    if (proxyAccept) {
+      const check = acceptEvidenceCheck(ctx.projectPath, input.evidence);
+      if (!check.ok) {
+        const first = check.missing[0] || { reason: 'evidence_missing' };
+        return failure('PM_ACCEPT_EVIDENCE_REQUIRED',
+          `PM 代验收证据不合格（${first.reason}）：${first.note || first.path || '缺证据'}；两件套＝测试报告（含 PASS 不含 FAIL）+ 截图（png/jpg/webp）`,
+          { requirementId, reason: first.reason, missing: check.missing });
+      }
+      acceptEvidence = check.evidence;
+      acceptWarnings = check.warnings;
     }
     const mode = normalizeTeamMode(input.teamMode || ctx.teamMode);
     const caps = legacyCapabilities();
@@ -7623,18 +8848,80 @@ function createTeamTools(options = {}) {
     const imported = ensureLegacyRequirementRecord(ctx.name, ctx.projectPath, requirementId);
     if (!imported.ok) return imported;
     const requirementKey = String(imported.id || requirementId);
-    const gateRole = ['accepted', 'rejected'].includes(decision) ? 'tester' : 'pm';
-    const read = readWorkflowState(ctx.name);
+    // R-b52b F-8：项目角色集只认 项目.json.roleIds；不含 tester 时验收 boot 门改由 PM 把。
+    // 必须在使用前算好（gateRole / 状态门 / 落账三处都用），否则会命中 TDZ（noTester 未初始化）。
+    const acceptRoleIds = projectRoleIdsOf(ctx.name);
+    const noTester = !acceptRoleIds.includes('tester');
+    const gateRole = ['accepted', 'rejected'].includes(decision) ? (noTester ? 'pm' : 'tester') : 'pm';
+    // B-b55c：验收前必须重新读盘（绕过 mtime+size 缓存），列表与确认用同一份 工作流.json、同一时刻的真相。
+    // 旧实现读的可能是缓存里的旧快照，也可能按归一化 key 命中同秒的另一条需求，于是"列表 test_done、
+    // 点确认却报 accepted"。这里带上来源（文件 + 落盘 updatedAt + mtime + 本次读盘时间）。
+    const read = readWorkflowState(ctx.name, { fresh: true });
     if (!read.ok) return read;
-    const found = findStateRequirementRow(read.state, requirementId);
-    if (!found) return failure('REQUIREMENT_NOT_FOUND', `工作流里没有需求 ${requirementId}`, { requirementId });
+    const source = workflowStateSource(read);
+    const found = findStateRequirementRowDetailed(read.state, requirementId);
+    if (found && found.ambiguous) {
+      return failure(
+        'REQUIREMENT_AMBIGUOUS',
+        `需求号 ${requirementId} 同时命中 ${found.candidates.length} 条（${found.candidates.map((row) => `${row.id}=${row.status}`).join(' / ')}），请用完整需求 id 再验收；不替你猜是哪一条`,
+        { requirementId, candidates: found.candidates, source }
+      );
+    }
+    if (!found || !found.row) {
+      return failure('REQUIREMENT_NOT_FOUND', `工作流里没有需求 ${requirementId}`, { requirementId, source });
+    }
     const meta = found.row;
-    if (String(meta.status) !== 'test_done') {
-      return failure('TEST_NOT_DONE', `需求 ${requirementId} 当前状态是 ${meta.status}，测试 done 后才能 Owner 验收`, { requirementId, status: meta.status });
+    const resolvedRequirementId = String(meta.id || found.key || requirementId);
+    const diskStatus = String(meta.status || '');
+    // R-ea86 F-E4：重复验收同一需求 → 幂等返回 ALREADY_ACCEPTED，不追加第二条 decided 记录。
+    if (decision === 'accepted' && diskStatus === 'accepted') {
+      return failure('ALREADY_ACCEPTED', `需求 ${resolvedRequirementId} 已经是 accepted，不重复落账（没有新增第二条决定）`, {
+        requirementId, resolvedRequirementId, status: diskStatus, source
+      });
+    }
+    // R-ea86 F-E3 时效：报告日期 ≥ reviewedAt（回退 updatedAt）；两边都缺只记 warning，不阻断。
+    if (proxyAccept) {
+      const baseline = String(meta.reviewedAt || meta.updatedAt || '');
+      const stale = acceptEvidenceStaleness(acceptEvidence, baseline);
+      if (!stale.ok) {
+        return failure('PM_ACCEPT_EVIDENCE_REQUIRED',
+          `PM 代验收证据过期（evidence_stale）：报告日期 ${stale.reportAt} 早于时效基线 ${stale.baselineAt}`,
+          { requirementId, reason: stale.reason || 'evidence_stale', missing: [{ path: '', kind: 'report', reason: 'evidence_stale', note: `报告 ${stale.reportAt} < 基线 ${stale.baselineAt}` }] });
+      }
+      if (stale.warning) acceptWarnings = [...acceptWarnings, { kind: 'report', reason: stale.warning, note: '时效基线缺失或报告无日期，只记 warning' }];
+    }
+    // 界面带上它当时看到的状态时，先判"界面那份是不是过期了"：两侧状态 + 来源时间一起说清，
+    // 不把磁盘的真实状态说成界面看到的相反状态，也不让 Owner 拿一个过期列表反复点。
+    const expectedStatus = String(input.expectedStatus || '').trim();
+    const expectedAt = String(input.expectedUpdatedAt || '').trim();
+    if (expectedStatus && expectedStatus !== diskStatus) {
+      return failure(
+        'WORKFLOW_STATE_CHANGED',
+        `界面看到的是 ${expectedStatus}${expectedAt ? `（列表读于 ${expectedAt}）` : ''}，磁盘上 ${resolvedRequirementId} 现在是 ${diskStatus}`
+        + `（来源 ${source.file}，落盘 updatedAt ${source.updatedAt || '未记'}，mtime ${source.mtime || '未记'}，本次读盘 ${source.readAt}）。已按磁盘为准，请刷新列表后再操作`,
+        { requirementId, resolvedRequirementId, expectedStatus, status: diskStatus, source }
+      );
+    }
+    // R-b52b F-8：roleIds 不含 tester 时，验收前置从「test_done」改为「dev_done/test 也可」，但证据两件套不省；
+    // 落账追加 signedBy=pm / testGate=pm_signed（只写 decisions，不新增任务字段）。
+    // acceptRoleIds / noTester 已在上方（gateRole 之前）算好，这里只做状态门。
+    if (diskStatus !== 'test_done' && !noTester) {
+      return failure(
+        'TEST_NOT_DONE',
+        `需求 ${resolvedRequirementId} 当前状态是 ${diskStatus}，测试 done 后才能 Owner 验收（来源 ${source.file}，落盘 updatedAt ${source.updatedAt || '未记'}，本次读盘 ${source.readAt}）`,
+        { requirementId, resolvedRequirementId, status: diskStatus, source }
+      );
+    }
+    if (noTester && !['dev_done', 'test', 'test_done'].includes(diskStatus)) {
+      return failure(
+        'TEST_NOT_DONE',
+        `需求 ${resolvedRequirementId} 当前状态是 ${diskStatus}；无 tester 时也只允许在 dev_done / test / test_done 验收（证据两件套仍必须齐）`,
+        { requirementId, resolvedRequirementId, status: diskStatus, roleIds: acceptRoleIds, source }
+      );
     }
     // Owner 验收弹窗里的“迭代”也是同一道迭代闸门：其他在办需求没验收时不能启动下一轮。
     if (decision === 'iterate') {
-      const businessGate = iterateGuard(ctx.name, read.state, { exceptRequirementId: requirementId, projectPath: ctx.projectPath });
+      const businessGate = iterateGuard(ctx.name, read.state, { exceptRequirementId: resolvedRequirementId, projectPath: ctx.projectPath });
       if (!businessGate.ok) return { ...businessGate, projectPath: ctx.projectPath, workflowFile: read.file };
     }
     const gate = await ensureWorkflowBoot(ctx.name, ctx.projectPath, gateRole, { requirementId });
@@ -7697,9 +8984,19 @@ function createTeamTools(options = {}) {
       if (requirementTask.status === 'done') {
         requirementTaskDone = { ok: true, code: 'ALREADY_DONE' };
       } else {
+        // 证据门（T-70a9）：task done 的证据必须是项目内真实文件路径；验收这里补一份
+        // 需求/验收/<需求>-验收记录.md（mtime=本次验收），否则会 EVIDENCE_FILE_MISSING。
+        let acceptRecordRel = '';
+        try {
+          const rel = path.join('需求', '验收', `${requirementKey}-验收记录.md`);
+          const abs = path.join(ctx.projectPath, rel);
+          fs.mkdirSync(path.dirname(abs), { recursive: true });
+          fs.writeFileSync(abs, `# ${requirementKey} 验收记录\n\n- 决定：${decision}\n- 执行人：${role}\n- 时间：${at}\n- 意见：${opinion || '（无）'}\n`, 'utf8');
+          acceptRecordRel = rel.split(path.sep).join('/');
+        } catch { acceptRecordRel = ''; }
         requirementTaskDone = await runLegacyCommand(ctx.name, 'pm', 'task done', (token) => [
           'task', 'done', '--boot', token, '--id', requirementKey,
-          '--evidence', `Owner 验收通过${opinion ? '：' + opinion.slice(0, 120) : ''}`
+          '--evidence', `${acceptRecordRel ? acceptRecordRel + '（' : ''}Owner 验收通过${opinion ? '：' + opinion.slice(0, 120) : ''}${acceptRecordRel ? '）' : ''}`
         ], { sessionId: String(input.sessionId || '').trim() });
         if (!requirementTaskDone.ok) {
           return {
@@ -7739,9 +9036,23 @@ function createTeamTools(options = {}) {
       ]
       : [];
     const legacyAcceptanceReview = protocolRun.value && protocolRun.value.ownerReview;
+    // Owner 验收通道只允许 ui/tty：来源依次取调用方、旧命令返回、已有验收记录；都没有就拒绝，
+    // 不再静默回退旧通道名，避免验收审计通道失真。
+    const acceptChannelCandidates = [
+      String(input.channel || ''),
+      String((protocolRun.value && (protocolRun.value.channel || (protocolRun.value.ownerReview && protocolRun.value.ownerReview.channel))) || ''),
+      String((legacyAcceptanceReview && legacyAcceptanceReview.channel) || ''),
+      String((meta.acceptance && meta.acceptance.channel) || (read.state.ownerReview && read.state.ownerReview.channel) || '')
+    ];
+    // PM 代验收固定 channel=proxy（已在上方校验 recordedBy/authorization/scope/证据）；Owner 本人仍只认 ui/tty。
+    const acceptChannel = proxyAccept ? 'proxy' : acceptChannelCandidates.find((candidate) => ['ui', 'tty'].includes(candidate));
+    if (!acceptChannel) {
+      return failure('OWNER_CHANNEL_REQUIRED', 'Owner 验收必须显式携带 channel=ui 或 tty，不再回退旧通道', { requirementId });
+    }
     const written = mutateWorkflowState(ctx.name, (state) => {
-      const target = findStateRequirementRow(state, requirementId);
-      if (!target) throw new Error(`工作流里没有需求 ${requirementId}`);
+      // 写路径也按已解析出的完整需求 id 命中：短号歧义在上面已经拒收，这里不允许再退回归一化猜。
+      const target = findStateRequirementRow(state, resolvedRequirementId);
+      if (!target) throw new Error(`工作流里没有需求 ${resolvedRequirementId}`);
       const row = target.row;
       const previousStateOwnerReview = isPlainObject(state.ownerReview) ? state.ownerReview : null;
       const previousAcceptance = acceptanceFields(row.acceptance);
@@ -7761,11 +9072,17 @@ function createTeamTools(options = {}) {
         )
         : {};
       if (protocolCommand === 'owner') {
-        // Owner 确认码已废弃：验收直接以 role=owner 接受；
-        // 审计统一记 actor:'owner'、channel:'workbench'、at。
-        auth.channel = 'workbench';
-        auth.actor = auth.actor || (role === 'owner' ? 'owner' : role);
+        // Owner 确认码已废弃：验收直接以 role=owner 接受。
+        // 通道已在 mutate 之前校验为 ui/tty；PM 代验收为 proxy（带证据与授权来源）。
+        auth.channel = acceptChannel;
+        auth.actor = proxyAccept ? 'pm' : (auth.actor || (role === 'owner' ? 'owner' : role));
         auth.at = auth.at || at;
+        if (proxyAccept) {
+          auth.recordedBy = 'pm';
+          auth.proxy = String(input.proxy || '');
+          auth.authorization = String(input.authorization || '');
+          auth.evidence = acceptEvidence;
+        }
       }
       row.acceptance = {
         ...mergedAcceptance,
@@ -7777,6 +9094,36 @@ function createTeamTools(options = {}) {
         opinion
       };
       row.updatedAt = at;
+      // R-4f99 AC4 / 字段清单：验收必须写行级 decisions（唯一真相），并补 closedAt/closedBy。
+      // Owner 验收计 channel=ui；PM 代验收计 channel=proxy + recordedBy=pm + evidence[{path,sha256,kind}]。
+      const acceptRecord = {
+        status: decision,
+        decision,
+        channel: acceptChannel,
+        // R-ea86 F-E4：decidedBy=授权人（owner），actor/recordedBy=执行人（pm）——审计必须分得清“谁授权、谁执行”。
+        decidedBy: proxyAccept ? 'owner' : 'Owner',
+        actor: proxyAccept ? 'pm' : 'owner',
+        by: proxyAccept ? 'Owner（授权 PM 代验收）' : 'Owner',
+        at,
+        opinion,
+        ...(proxyAccept
+          ? {
+            recordedBy: 'pm',
+            proxy: String(input.proxy || ''),
+            authorization: String(input.authorization || ''),
+            evidence: acceptEvidence,
+            ...(acceptWarnings.length ? { warnings: acceptWarnings } : {})
+          }
+          : {}),
+        // R-b52b F-8：无 tester 的验收由 PM 代签测试结论；signedBy/testGate 只进 decisions，不加任务字段。
+        ...(noTester && decision === 'accepted' ? { signedBy: 'pm', testGate: 'pm_signed' } : {})
+      };
+      row.decisions = Array.isArray(row.decisions) ? row.decisions : [];
+      row.decisions.push(acceptRecord);
+      if (decision === 'accepted' || decision === 'terminated') {
+        row.closedAt = at;
+        row.closedBy = proxyAccept ? 'pm' : 'owner';
+      }
       pushHistoryOnce(row, { at, action: 'owner_accept', by: role, note: decision }, {
         actions: acceptHistoryActions,
         requirementId,
@@ -7836,9 +9183,9 @@ function createTeamTools(options = {}) {
           opinion
         };
       }
-      pushWorkflowEventOnce(state, { at, action: 'owner_accept', role, project: ctx.name, requirementId, note: decision }, {
+      pushWorkflowEventOnce(state, { at, action: 'owner_accept', role, project: ctx.name, requirementId: resolvedRequirementId, note: decision }, {
         actions: acceptEventActions,
-        requirementId,
+        requirementId: resolvedRequirementId,
         matchNote: false
       });
     });
@@ -7848,7 +9195,7 @@ function createTeamTools(options = {}) {
       ? protocolRun.value.closedTasks.map(String)
       : [];
     const shellClosed = decision === 'terminated'
-      ? closeLegacyTasksForTermination(ctx.name, [requirementId], `Owner 终止${opinion ? '：' + opinion.slice(0, 120) : ''}`)
+      ? closeLegacyTasksForTermination(ctx.name, [resolvedRequirementId], `Owner 终止${opinion ? '：' + opinion.slice(0, 120) : ''}`)
       : [];
     const closedTasks = [...new Set([...toolClosed, ...shellClosed])];
     // 验收的四种决定都同步正文/总览与需求任务；accepted/terminated 旧命令已写过，
@@ -7865,7 +9212,9 @@ function createTeamTools(options = {}) {
         status: decision === 'accepted' || decision === 'iterate' ? 'approved' : 'rejected',
         opinion: `[验收${decision}] ${opinion}`.slice(0, 1000),
         roundKey: `${ctx.name}|${read.state.round}|${Object.keys(read.state.requirements).length}`,
-        by: 'Owner'
+        by: 'Owner',
+        channel: acceptChannel,
+        requirementId: resolvedRequirementId
       });
     } catch (error) {
       warning = { code: 'OWNER_NOTE_FAILED', message: String(error && error.message || error).slice(0, 300) };
@@ -7893,8 +9242,15 @@ function createTeamTools(options = {}) {
         : (protocolCommand === 'owner' ? 'team.mjs owner + owner-note.mjs' : 'team.mjs workflow + owner-note.mjs'),
       legacyCommandStatus: shellOwnedCloseout ? 'SHELL_OWNED' : 'AVAILABLE',
       shellOwned: shellOwnedCloseout,
-      requirementId, decision,
-      requirement: snapshot.ok ? snapshot.requirements.find((row) => row.id === requirementId) : null,
+      requirementId,
+      resolvedRequirementId,
+      // 验收前后都带着同一份来源证据：界面能写清"这条状态哪来的、什么时候读的"。
+      source: { ...source, writtenAt: written.ok ? new Date().toISOString() : '' },
+      decision,
+      channel: acceptChannel,
+      proxyAccept,
+      evidence: proxyAccept ? acceptEvidence : [],
+      requirement: snapshot.ok ? snapshot.requirements.find((row) => row.id === resolvedRequirementId) : null,
       ownerReview: snapshot.ok ? snapshot.ownerReview : null,
       ownerNote: ownerNote ? { ok: Boolean(ownerNote.ok), workflowFile: ownerNote.workflowFile || null, notified: ownerNote.notified || null } : null,
       requirementTaskDone: requirementTaskDone ? { ok: Boolean(requirementTaskDone.ok), code: requirementTaskDone.code || 'OK', alreadyDone: requirementTaskDone.code === 'ALREADY_DONE' } : null,
@@ -7943,8 +9299,47 @@ function createTeamTools(options = {}) {
     const subject = String(input.subject || '任务派单').slice(0, 80);
     const task = String(input.task || '').trim();
     const ackRequired = input.ackRequired !== false;
+    // 三型只判一次：派单 = PM → 非 PM 且要回执；回执/通知/角色互发只发“去 inbox 读”的提示。
+    // 旧调用方（不传 from）保持派单语义，兼容 main.js 既有自测；PM 自己永远不是派单执行者。
+    const explicitDispatch = typeof input.dispatch === 'boolean' ? input.dispatch : null;
+    const declaredType = String(input.type || '').trim().toLowerCase();
+    const dispatchByRule = role !== 'pm' && (from === 'pm' ? ackRequired !== false : !from);
+    const isDispatch = explicitDispatch !== null
+      ? explicitDispatch
+      : (declaredType === 'receipt' || declaredType === 'notice' ? false : dispatchByRule);
     const quote = (value) => '"' + String(value == null ? '' : value).replace(/"/g, '\\"') + '"';
     const tool = layout.teamTool;
+    if (!isDispatch) {
+      const noticeHeader = `【团队消息 ${messageId || '(缺 id)'}】${subject}`;
+      const noticeText = [
+        noticeHeader,
+        `${from ? from + ' → ' : ''}${role} · 项目：${projectName}`,
+        '这条是回复/通知，不是新派单；按需读取并按正常流程回执即可，不必为它新建任务。',
+        `请按需读取：node ${quote(tool)} inbox --boot <令牌> --all，再 read --boot <令牌> --id ${messageId}；需要回执时只 ack。`,
+        `只回一行：已读/已回执 + ${messageId}。`
+      ].join('\n');
+      return {
+        ok: Boolean(projectName && ROLE_IDS.includes(role) && messageId),
+        text: noticeText,
+        steps: {
+          inbox: `node ${quote(tool)} inbox --boot <令牌> --all`,
+          read: `node ${quote(tool)} read --boot <令牌> --id ${messageId}`
+        },
+        ackRequired,
+        role,
+        from,
+        project: projectName,
+        messageId,
+        executionRequired: false,
+        dispatch: false,
+        type: declaredType || 'notice',
+        brief: null,
+        briefChars: 0,
+        limit: 0,
+        budget: 0,
+        totalChars: noticeText.length
+      };
+    }
     // 回执写“执行结果”，不能只写“已收到”；产出物可以是需求号，也可以是文件路径。
     const ackNote = '已执行 ' + (task || messageId) + '：产出 <文件/需求号>；边界';
     const steps = {
@@ -7994,6 +9389,8 @@ function createTeamTools(options = {}) {
       project: projectName,
       messageId,
       executionRequired: true,
+      dispatch: true,
+      type: 'dispatch',
       analystReqCreate: analystFromPm,
       brief: brief.ok ? brief : null,
       briefChars: briefText.length,
@@ -8245,6 +9642,7 @@ function createTeamTools(options = {}) {
     syncRoster,
     writeOwnerWorkflow,
     recordOwnerDecision,
+    applyOwnerDecisionToRequirement,
     launchSessions,
     resolveProjectName: (project) => resolveProjectName(project, readRegistrations()),
     normalizeRoles,
@@ -8266,6 +9664,9 @@ function createTeamTools(options = {}) {
     bootToken,
     dropBootToken,
     sendDispatch,
+    sendWorkflowNotice,
+    // B-20261113-005705-a577：派单队列兜底泵（全队空闲时由工作台定时器触发）
+    pumpDispatchQueue,
     ackDispatch,
     inboxFor,
     readFor,
@@ -8290,12 +9691,17 @@ function createTeamTools(options = {}) {
     requireWorkflowBoot,
     ensureWorkflowBoot,
     briefingStatus,
+    // B-20261114-003257-0a46（R-d734）：面板状态检查的真相——文档真实存在性 / 角色 BOOT 真实证据。
+    projectDocPresence,
+    bootEvidence,
+    currentRoleSessions,
     buildRoleBrief,
     readBootDocs,
     readRequirementDocs,
     readWorkflowState,
     writeWorkflowState,
     readWorkflowSnapshot,
+    listLegacyProposals,
     workflowFile,
     legacyCapabilities,
     // 能力矩阵：旧命令存在与否 / 哪些动作由壳层收口（Fast / Full 通用，供界面与自测核对）。
@@ -8325,6 +9731,12 @@ function createTeamTools(options = {}) {
     devApply,
     dispatchTest,
     ownerAccept,
+    // B-b55c：需求 id 精确匹配与状态来源（tester 复跑"同秒需求不串号"用同一份实现，不另写一套）
+    requirementIdKey,
+    requirementIdMatchPlan,
+    findStateRequirementRow,
+    findStateRequirementRowDetailed,
+    workflowStateSource,
     rosterStatus,
     readDispatchLockState,
     releaseDispatchLock,
@@ -8336,6 +9748,10 @@ function createTeamTools(options = {}) {
     recordWorkspaceBinding,
     teamConfig,
     teamMembers,
+    // R-c651：团队在场三列 / 全部已读 / 一键唤醒（口径只在旧工具 团队/工具/lib/ops.mjs）
+    presenceFor,
+    markReadFor,
+    wakeRole,
     // 供测试/诊断使用
     _paths: () => ({ ...layout }),
     _runNode: runNode,
@@ -8548,7 +9964,7 @@ async function runOwnerAuthProbe(options = {}) {
       '',
       '## 一、目标',
       '',
-      '验证 Owner 决定与验收后 actor、confirmation、nonceHash 不被壳层覆盖，channel 归一为 workbench（确认码已废弃）。',
+      '验证 Owner 决定与验收后 actor、confirmation、nonceHash 不被壳层覆盖，channel 只允许 ui/tty（确认码已废弃）。',
       '',
       '## 二、边界',
       '',
@@ -8674,6 +10090,20 @@ async function runOwnerAuthProbe(options = {}) {
       updatedAt: at
     });
     check('探针工作流初始状态可写', seeded.ok === true, seeded);
+    // 探针 toolsDir 是空的；补一个最小 owner-note.mjs，验证 PM 系统消息链路真实可写。
+    probeWriteText(path.join(toolsDir, 'owner-note.mjs'), [
+      "import fs from 'node:fs';",
+      "import path from 'node:path';",
+      "import { fileURLToPath } from 'node:url';",
+      "const [project = '', decision = '', opinion = '', roundKey = ''] = process.argv.slice(2);",
+      "const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '团队', '状态', '邮箱', 'pm', 'new');",
+      "const label = { approved: '通过', skipped: '跳过评审', rejected: '打回' }[decision] || decision;",
+      "const id = 'M-PROBE-' + Date.now();",
+      "fs.mkdirSync(root, { recursive: true });",
+      "fs.writeFileSync(path.join(root, id + '.json'), JSON.stringify({ id, from: 'system', to: 'pm', subject: 'Owner评审：' + label, project, type: 'owner-review', at: new Date().toISOString() }));",
+      "console.log(JSON.stringify({ ok: true, message: { id } }));",
+      ''
+    ].join('\n'));
 
     const decision = await tools.ownerRequirementDecision({
       projectName: OWNER_AUTH_PROBE_PROJECT,
@@ -8681,6 +10111,7 @@ async function runOwnerAuthProbe(options = {}) {
       role: 'owner',
       requirementId: requirementKey,
       decision: 'approved',
+      channel: 'ui',
       opinion: '探针 Owner 决定：认证字段必须保留'
     });
     check('Owner 决定执行成功', decision.ok === true, decision);
@@ -8698,7 +10129,7 @@ async function runOwnerAuthProbe(options = {}) {
       decisionState.ownerReview && decisionState.ownerReview.confirmation
       && decisionState.ownerReview.confirmation.nonceHash === OWNER_AUTH_PROBE_NONCE_HASH,
       decisionState.ownerReview && decisionState.ownerReview.confirmation);
-    check('决定后顶层 ownerReview channel 归一为 workbench（确认码已废弃）', decisionState.ownerReview && decisionState.ownerReview.channel === 'workbench',
+    check('决定后顶层 ownerReview channel=ui（确认码已废弃）', decisionState.ownerReview && decisionState.ownerReview.channel === 'ui',
       decisionState.ownerReview && decisionState.ownerReview.channel);
     const decisionSnapshot = tools.readWorkflowSnapshot(OWNER_AUTH_PROBE_PROJECT, projectPath);
     const decisionSnapshotRow = decisionSnapshot.ok
@@ -8730,6 +10161,7 @@ async function runOwnerAuthProbe(options = {}) {
       role: 'owner',
       requirementId: requirementKey,
       decision: 'accepted',
+      channel: 'ui',
       opinion: '探针 Owner 验收：认证字段必须保留'
     });
     check('Owner 验收执行成功', accept.ok === true, accept);
@@ -8741,7 +10173,7 @@ async function runOwnerAuthProbe(options = {}) {
       acceptance && typeof acceptance === 'object'
       && Object.keys(acceptance).every((key) => !/^\d+$/.test(key)), acceptance && Object.keys(acceptance));
     check('验收后 acceptance 保留 actor', acceptance && acceptance.actor === 'owner', acceptance && acceptance.actor);
-    check('验收后 acceptance channel 归一为 workbench（确认码已废弃）', acceptance && acceptance.channel === 'workbench', acceptance && acceptance.channel);
+    check('验收后 acceptance channel=ui（确认码已废弃）', acceptance && acceptance.channel === 'ui', acceptance && acceptance.channel);
     check('验收后 acceptance 保留 confirmation.nonceHash',
       acceptance && acceptance.confirmation && acceptance.confirmation.nonceHash === OWNER_AUTH_PROBE_NONCE_HASH,
       acceptance && acceptance.confirmation);
@@ -8763,6 +10195,66 @@ async function runOwnerAuthProbe(options = {}) {
       && acceptSnapshotRow.ownerAcceptance.confirmation
       && acceptSnapshotRow.ownerAcceptance.confirmation.nonceHash === OWNER_AUTH_PROBE_NONCE_HASH,
       acceptSnapshotRow && acceptSnapshotRow.ownerAcceptance);
+    // 验收后顶层 ownerReview 必须有 append-only decisions 记录，且 PM 必须收到 owner-note 通知。
+    const acceptDecisions = acceptStateAfter.ownerReview && acceptStateAfter.ownerReview.decisions;
+    check('验收后顶层 ownerReview.decisions 有记录',
+      Array.isArray(acceptDecisions) && acceptDecisions.length >= 1
+      && acceptDecisions[acceptDecisions.length - 1].channel === 'ui',
+      Array.isArray(acceptDecisions) ? acceptDecisions.map((row) => row.channel) : acceptDecisions);
+    const pmMailDir = path.join(tools.layout.mailDir, 'pm', 'new');
+    const ownerNoteMails = (() => {
+      try {
+        return fs.readdirSync(pmMailDir).filter((name) => name.endsWith('.json'))
+          .map((name) => probeReadJson(path.join(pmMailDir, name)))
+          .filter((mail) => mail && String(mail.type || '') === 'owner-review');
+      } catch {
+        return [];
+      }
+    })();
+    check('验收后 PM 邮箱收到 owner-note 通知', ownerNoteMails.length >= 1,
+      ownerNoteMails.map((mail) => mail.subject));
+
+    // B-0b28：轮换后新会话用 team.mjs boot 补读，壳层 工作流.json.boots 还停在旧会话 →
+    // 验收门不能判“没读到需求”。只补“读过这份需求”这一项，规则文档/轮次/必读完整性照旧校验。
+    {
+      const gateState = probeReadJson(workflowFile);
+      gateState.requirements[requirementKey].status = 'test_done';
+      gateState.boots = gateState.boots && typeof gateState.boots === 'object' ? gateState.boots : {};
+      gateState.boots.tester = {
+        ...(gateState.boots.tester || {}),
+        role: 'tester', project: OWNER_AUTH_PROBE_PROJECT, round: gateState.round || 1,
+        at: new Date().toISOString(), complete: true, missing: [],
+        docs: (gateState.boots.tester && gateState.boots.tester.docs) || {},
+        requirements: { list: [], hash: 'stale', contentHash: 'stale' },
+        requirementsHash: 'stale', requirementsContentHash: 'stale'
+      };
+      probeWriteJson(workflowFile, gateState);
+      const denied = tools.requireWorkflowBoot(OWNER_AUTH_PROBE_PROJECT, projectPath, 'tester', { requirementId: requirementKey });
+      check('B-0b28：壳层记录缺该需求且无 CLI boot 令牌 → 验收门拒绝（BOOT_REQUIRED）',
+        denied.ok === false && denied.code === 'BOOT_REQUIRED', { code: denied.code, readSource: denied.readSource });
+
+      // 补一份该角色最新 CLI boot 令牌（轮换后新会话补读的证据）
+      const liveDocs = tools.readRequirementDocs(projectPath);
+      const liveRow = liveDocs && Array.isArray(liveDocs.list)
+        ? liveDocs.list.find((row) => String(row.id) === String(requirementKey))
+        : null;
+      const bootDir = path.join(tools.layout.state, '启动');
+      fs.mkdirSync(bootDir, { recursive: true });
+      probeWriteText(path.join(bootDir, 'probe-b0b28-token.json'), JSON.stringify({
+        token: 'probe-b0b28-token',
+        role: 'tester',
+        project: OWNER_AUTH_PROBE_PROJECT,
+        createdAt: new Date().toISOString(),
+        rulesHash: gateState.boots.tester.rulesHash || '',
+        requirementDocs: liveRow
+          ? [{ id: liveRow.id, rel: liveRow.rel, hash: liveRow.hash, contentHash: liveRow.contentHash || liveRow.hash, size: liveRow.size }]
+          : []
+      }, null, 2) + '\n');
+      const allowed = tools.requireWorkflowBoot(OWNER_AUTH_PROBE_PROJECT, projectPath, 'tester', { requirementId: requirementKey });
+      check('B-0b28：有最新 CLI boot 令牌（补读过该需求）→ 验收门放行，来源=legacy-boot-token',
+        allowed.ok === true && allowed.requirementReadSource === 'legacy-boot-token',
+        { ok: allowed.ok, code: allowed.code, readSource: allowed.requirementReadSource });
+    }
   } catch (error) {
     fatal = String((error && error.stack) || error);
     check('探针没有抛异常', false, fatal);
@@ -8813,7 +10305,10 @@ module.exports = {
   TIMEOUTS,
   LEGACY_REVIEW_ACTIONS,
   LEGACY_STATUS_MAP,
-  isInside
+  isInside,
+  // R-ea86：PM 代验收证据校验（纯函数，供 ownerAccept 与可复跑测试共用同一份判据）
+  acceptEvidenceCheck,
+  acceptEvidenceStaleness
 };
 
 if (require.main === module) {
@@ -8833,3 +10328,4 @@ if (require.main === module) {
       });
   }
 }
+

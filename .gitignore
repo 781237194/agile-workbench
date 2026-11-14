@@ -25,17 +25,21 @@ projects/
 
 # ── 临时、备份、归档 ──────────────────────────────
 _tmp/
+_tmp-*/
 _backup/
 _archive/
 .tmp/
 *.tmp
+*.corrupt-*
+*.bak-*
 .runtime/
 
 # ── 本地运行数据与自测产物 ────────────────────────
 data/
 userdata*/
 .selftest-data/
-.selftest-data-*/
+.selftest-data*/
+.*-check-data/
 probe-receipts/
 selftest*.png
 

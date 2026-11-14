@@ -90,6 +90,9 @@ export function votersForMode(mode) {
 }
 
 // 展示名与项目目录名是两件事：展示名用于卡片标题，目录名用于落盘。
+import fs from 'node:fs';
+import { PATHS } from './core.mjs';
+
 export const ROLE_NAMES = {
   pm: '项目经理',
   product: '产品设计师',
@@ -107,6 +110,24 @@ export const ROLE_DIRS = {
   programmer2: '程序员B',
   tester: '测试人员',
 };
+
+/**
+ * 角色展示名（B-…e5d6）：以 团队/状态/团队.json 的 members[].name 为唯一来源，
+ * 缺名册/缺该角色时才退回 ROLE_NAMES。唤醒头、回执头、卡片标题都走它，禁止各自硬编码。
+ */
+export function roleDisplayName(role, { members } = {}) {
+  let list = members;
+  if (!Array.isArray(list)) {
+    try {
+      const team = JSON.parse(fs.readFileSync(PATHS.team, 'utf8'));
+      list = Array.isArray(team.members) ? team.members : [];
+    } catch { list = []; }
+  }
+  const hit = list.find((m) => String((m && (m.role || m.id)) || '') === String(role || ''));
+  const name = hit && String(hit.name || '').trim();
+  if (name) return name;
+  return ROLE_NAMES[role] || String(role || '系统');
+}
 
 export const LIMITS = {
   messageMaxChars: 600,
@@ -127,25 +148,27 @@ export const OUTPUT_DOCS = {
   analyst: {
     code: '01', file: '01-需求分析-vN.md', title: '01-需求分析', label: '需求分析师',
     dir: ROLE_DIRS.analyst,
-    fileRe: /^01-需求分析-v\d+\.md$/i,
+    // 兼容两式：模板命名 01-需求分析-vN.md 与项目实际使用的 需求分析-vN.md。
+    fileRe: /^(01-)?需求分析-v\d+\.md$/i,
     sections: ['一、场景与用户', '二、目标与价值', '三、边界与不做', '四、功能点清单', '五、验收标准', '六、异常与约束', '七、依赖与风险', '八、追踪矩阵', '九、变更记录'],
   },
   product: {
     code: '02', file: '02-产品设计-vN.md', title: '02-产品设计', label: '产品设计师',
     dir: ROLE_DIRS.product,
-    fileRe: /^02-产品设计-v\d+\.md$/i,
+    // 产品产出实际落 产品设计-vN.md；模板用 02- 前缀。两式都要能 brief。
+    fileRe: /^(02-)?产品设计-v\d+\.md$/i,
     sections: ['一、上游引用', '二、用户故事', '三、页面与流程', '四、数据与状态', '五、架构要点', '六、优先级与竞品', '七、验收口径', '八、风险与回滚', '九、变更记录'],
   },
   programmer1: {
     code: '03', file: '03-架构设计-vN.md', title: '03-架构设计', label: '主开发（程序员A）',
     dir: ROLE_DIRS.programmer1,
-    fileRe: /^03-架构设计-v\d+\.md$/i,
+    fileRe: /^(03-)?架构设计-v\d+\.md$/i,
     sections: ['一、上游引用', '二、技术选型', '三、模块划分', '四、目录与文件结构', '五、接口与数据契约', '六、关键流程', '七、失败与回滚', '八、风险与依赖', '九、变更记录'],
   },
   tester: {
     code: '04', file: '04-测试报告-vN.md', title: '04-测试报告', label: '测试人员',
     dir: ROLE_DIRS.tester,
-    fileRe: /^04-测试报告-v\d+\.md$/i,
+    fileRe: /^(04-)?测试报告-v\d+\.md$/i,
     sections: ['一、测试范围', '二、环境与命令', '三、用例与结果', '四、缺陷', '五、验证与证据', '六、结论', '七、对账复核', '八、变更记录'],
   },
 };

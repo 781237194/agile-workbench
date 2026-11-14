@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { PATHS, exists, ensureDir, fail, nowIso, readText, writeText } from './core.mjs';
+import { PATHS, exists, ensureDir, fail, nowIso, readText, writeText, sha256 } from './core.mjs';
 import {
   LIMITS, MODEL_BY_ROLE, ROLE_DIRS, ROLE_NAMES, OUTPUT_DOCS, OUTPUT_DISCIPLINE,
   TEAM_MODE_LABELS, normalizeTeamMode, rolesForMode, teamModeDescription,
@@ -22,6 +22,8 @@ export const DEFAULT_IRON = `# 项目铁律（默认版）
 6. 不写密钥、账号、私密内容，只记路径。
 7. 每个结论给证据：哈希 / 路径 / 命令输出。
 8. 派单必须带任务正文、产出目录、完成标准；ack=已回执（收到/认领），完成回执 + task done 证据=已完成。
+9. **面向 Owner/PM 汇报用「人话 + 需求名」**：先说这是什么（需求名/功能名），再说现在到哪了，最后说要不要对方拍板；F-2、B-149a、G2.5 这类内部代号只能放括号里，不许单独出现。Owner 需要回头问“这是什么意思”即视为汇报不合格。
+10. **不打断正在跑的任务**：角色会话 running 时不插新单、不改优先级；要插的单先记下，等这一轮收工再发。只有线上故障/数据损坏、或 Owner 明确说「立刻停」才打断；打断后必须由 PM 主动补发「继续原任务」，不靠对方记得。
 `;
 
 // ---------- 角色职责（按团队模式区分） ----------
@@ -33,7 +35,7 @@ export function roleDuty(role, mode = 'full') {
       pm: '纯协调/传话：建需求条目与任务、派单、催回执、跟进完成、组织投票（vote start/status）、组织 Owner 决定（owner confirm/owner）与工作流轮次（workflow iterate/terminate）、填写项目信息、更新项目准则和索引；不做产品/架构/需求正文/开发/测试，不替别人写业务文件，不投票。',
       analyst: '需求分析与需求评审：需求拆解、场景拆解、可行性评估、验收标准、需求追踪矩阵，并在 fast 模式执行需求评审（req review）；需要驳回 Owner 需求时可按实际分析师身份发起投票（vote start，createdBy=analyst）；不写业务代码、不替 PM 派单、不替测试下结论。',
       programmer1: '开发（唯一）：只做本职——实现、单测、技术评审记录（req review --kind tech）、写 staged、propose、自测；不写需求、不定优先级、不下测试结论。',
-      tester: '独立测试 + 投票：只做本职——测试计划/用例、回归、verify、缺陷闭环、对账复核，并按证据参与团队投票（vote cast）；不改业务代码、不定需求、不无证据签字。',
+      tester: '独立测试 + 投票：只做本职——测试计划/用例、回归、verify、缺陷闭环、对账复核，并按证据参与团队投票（vote cast）；另有**需求可测性评审（TR-Q）**：需求定稿+需求评审 approve 后、Owner 门之前，逐条判断 AC 可判定/证据形式/边界异常可复现，产出 `测试人员/产出/可测性评审-<需求id>-vN.md`（≤1 页，结论只有 可测/不可测（缺什么））；TR-Q 只评审不执行，不写测试计划/用例、不跑测试、不改需求 AC；不改业务代码、不定需求、不无证据签字。',
     };
     return duties[role] || '';
   }
@@ -43,7 +45,7 @@ export function roleDuty(role, mode = 'full') {
     analyst: '需求分析：需求拆解与评审、场景拆解、可行性评估、场景缺陷闭环、验收标准、需求追踪矩阵；不写业务代码。',
     programmer1: '开发 A：只做本职——实现、单测、写 staged、propose、互审；不写需求、不定优先级、不下测试结论；不与 B 抢文件。',
     programmer2: '开发 B：只做本职——实现、单测、写 staged、propose、互审；不写需求、不定优先级、不下测试结论；不抢同一文件。',
-    tester: '独立测试：只做本职——测试计划/用例、回归、verify、缺陷闭环、对账复核；不改业务代码、不定需求、不无证据签字。',
+    tester: '独立测试：只做本职——测试计划/用例、回归、verify、缺陷闭环、对账复核；另有**需求可测性评审（TR-Q）**：需求定稿+需求评审 approve 后、Owner 门之前，逐条判断 AC 可判定/证据形式/边界异常可复现，产出 `测试人员/产出/可测性评审-<需求id>-vN.md`（≤1 页，结论只有 可测/不可测（缺什么））；TR-Q 只评审不执行，不写测试计划/用例、不跑测试、不改需求 AC；不改业务代码、不定需求、不无证据签字。',
   }[role] || '';
 }
 
@@ -80,12 +82,59 @@ function modeDutyLines(role, mode) {
     );
   } else if (role === 'tester') {
     lines.push(
+      '- **可测性评审（TR-Q，Owner 门之前）**：需求定稿 + 需求评审 approve → 读需求与 AC → 逐条判断可判定性/证据形式/边界异常可复现 → 产出 `测试人员/产出/可测性评审-<需求id>-vN.md`（≤1 页；结论只有 `testable` / `not_testable` + 缺项清单）；命令 `req trq --boot <T> --id R-... --verdict testable|not_testable [--missing "..."]`。',
+      '- **只评审不执行**：TR-Q 不写测试计划/用例、不跑测试、不改需求与 AC；结论不可测只退回需求分析师修订。',
+      '- **两职能分开**：TR-Q 在 Owner 门之前；交付验收报告（`测试报告-vN.md` + `证据/`）在测试之后，两份记录的文件、状态、时间都不同。fast 不因没有产品而跳过 TR-Q。',
+      '- **闸门**：P0 未 `testable` 时 Owner 门被拒（`TESTABILITY_REVIEW_REQUIRED`）；P1 未做标 optional-missing，不阻门但要在需求行标注。',
       '- **投票**：`vote cast --boot <T> --id V-... --vote approve|reject [--comment "..."]`；只按测试证据投票，没看报告不投赞成。',
       `- **投票规则**：${VOTE_RULE_TEXT}。`,
     );
   }
   lines.push('');
   return lines;
+}
+
+/** 子代理边界：只写“可开/不可外包”，避免角色拿子代理绕过回执、评审与签字。 */
+export function subagentAllow(role) {
+  return ({
+    pm: '只读巡检、对账取数、索引/看板摘要、多项目状态汇总',
+    product: '竞品/资料检索、用户故事与流程图草案、验收标准草案',
+    analyst: '场景枚举、边界/异常清单、需求正文初稿',
+    programmer1: '只读代码检索、单测用例草案、构建/静态检查、截图对比',
+    programmer2: '只读代码检索、单测用例草案、构建/静态检查、截图对比',
+    tester: '独立复现、截图/录屏、对账数据整理',
+  })[role] || '只读资料整理';
+}
+
+export function subagentDeny(role) {
+  return ({
+    pm: '派单、签字、验收、Owner 决定',
+    product: '最终评审结论、架构取舍、签字',
+    analyst: '需求正文定稿、req review、签字',
+    programmer1: '写代码、提案、互审结论、apply',
+    programmer2: '写代码、提案、互审结论、apply',
+    tester: '测试结论、缺陷定级、签字',
+  })[role] || '签字、验收、评审结论';
+}
+
+/**
+ * 测试人员角色卡固定一节：可测性评审（TR-Q）与交付验收两职能分开（R-453c AC16.6）。
+ * 六人/四人都生成这一节，fast 不因没有产品而跳过 TR-Q。
+ */
+function testerTrqSection() {
+  return [
+    '## 可测性评审（TR-Q）与交付验收（两件事）',
+    '',
+    '| 职能 | 时机 | 产出 | 闸门 | 不做 |',
+    '|---|---|---|---|---|',
+    '| 可测性评审 TR-Q | 需求定稿 + 需求评审 approve 之后、Owner 门之前 | `测试人员/产出/可测性评审-<需求id>-vN.md`（≤1 页，结论 `testable` / `not_testable` + 缺项清单） | G2.5：P0 未 `testable` → Owner 门不开（`TESTABILITY_REVIEW_REQUIRED`）；P1 未做标 optional-missing，不阻门 | 不写测试计划/用例、不执行测试、不改需求与 AC |',
+    '| 交付验收 | 开发/测试完成之后、Owner 验收之前 | `测试人员/产出/测试报告-vN.md` + `证据/` | G7：报告要覆盖需求，PASS/FAIL 明确 | 不改代码、不代签 |',
+    '',
+    '- 命令：`req trq --boot <T> --id R-... --verdict testable|not_testable [--missing "缺项"]`；只有测试人员本人能记录，PM 不能代写、子代理不能代评。',
+    '- 记录字段：需求 id、依据需求哈希、版本、评审人、时间、结论、缺项、文件路径；同时写工作流行 `trq`。',
+    '- 需求修订后旧 TR-Q 失效（需求哈希不一致），必须重做；不追认旧结论。',
+    '',
+  ].join('\n');
 }
 
 export function roleCard(projectName, role, mode = 'full') {
@@ -106,6 +155,7 @@ export function roleCard(projectName, role, mode = 'full') {
     + `- 文件上限：Markdown/TXT ≤ ${LIMITS.docMaxBytes} 字节；代码 ≤ ${LIMITS.codeMaxBytes} 字节。\n\n`
     + `## 职责\n\n${roleDuty(role, m)}\n\n`
     + modeDutyLines(role, m).join('\n')
+    + (role === 'tester' ? testerTrqSection() : '')
     + `## 结构化输出（豆包协议）\n\n`
     + `- ${OUTPUT_DISCIPLINE}。\n`
     + `- 输出即结果：本角色交付物就是一份结构化 MD，不写开场白、不总结感想；上游内容只写路径 + 版本号，不重复贴入。\n`
@@ -116,10 +166,14 @@ export function roleCard(projectName, role, mode = 'full') {
     + `1. 只有被${role === 'pm' ? 'Owner' : 'PM 按任务'}叫到才启动；先读根《项目信息.md》《项目索引.md》，再读本目录《文件索引.md》《角色卡.md》和《协作准则.md》。\n`
     + `2. 被叫到后先 boot，再回一条确认：角色 id、任务 id、交付物、边界/依赖；随后 **ack 回执（只算已回执，不算完成）**，不能只回确认。\n`
     + `3. **执行消息正文中的任务**；产出写到本角色目录（开发代码写代码目录），不写别人目录；完成后发完成回执（结果+路径+证据）并 \`task done --evidence\`，这才算已完成。\n`
+    + `3.5 **每轮在 \`产出/\` 留版本**：${role === 'programmer1' || role === 'programmer2' ? '开发写 `实现说明-vN.md` + `代码快照-vN/`（与 site 同哈希）' : role === 'tester' ? '测试写 `测试报告-vN.md` + `证据/`' : role === 'analyst' ? '需求写 `需求分析-vN.md`（需求正文仍写 需求/R-*.md）' : '产品写 `产品设计-vN.md`'}；版本递增，不覆盖历史。\n`
+    + `3.6 **每轮写记忆（R-8514）**：收尾写 1 条 project 记忆（任务 id + 产出路径 + 1–2 行进展）；P0 任务必写，缺失时 task done 会被拒（MEMORY_MISSING）。\n`
+    + `3.7 **长期事实只走 key 建议**：约定/决策/踩坑提交 key 建议，待 Owner 在记忆面板确认后生效；密钥/隐私只记路径，不写值。\n`
     + `4. 分析或实现后，先互评与回执；负责人确认后才更新本目录文件与索引。\n`
     + `5. 回执 ≤ ${LIMITS.ackNoteMaxChars} 字，评审意见 ≤ ${LIMITS.reviewCommentMaxChars} 字，不写长文汇报。\n`
     + `6. 所有回执、评审、签字和提交都要能被团队看板查到。\n`
     + `7. 提交/回执只写一句 ≤160 字日志（对象+动作+单号/时间）。\n`
+    + `8. **子代理**：可开——${subagentAllow(role)}；不可外包——${subagentDeny(role)}。子代理只回结论 ≤300 字 + 产出路径，过程写文件；主角色复核后才算产出。\n`
     + (role === 'pm'
       ? `\n## 叫醒角色模板\n\n**先完成《项目信息.md》和任务分配，再叫角色；没写清不要叫。**\n\nPM 叫角色时只发这一段（替换占位）：\n\n> 任务 <任务id>；先读 项目信息.md、项目索引.md、你的 文件索引.md 和 角色卡.md；回“角色 id + 任务 id + 交付物 + 边界”确认，并 **ack 回执（只算已回执）**。随后执行本条正文任务，产出写 <本角色目录>；完成后发完成回执 + task done --evidence（才算已完成）。目标文件：<路径>。\n\n发送时带 --ack；**一次只发一个人，发完停，等回执再发下一个。**\n`
       : '');
@@ -156,8 +210,8 @@ export function collaborationRules(projectName, mode = 'full') {
     + `- **路径纪律**：交付文档写当前项目内对应角色目录；程序员代码写项目根 \`site/**\`。临时文件放项目 \`_tmp/\`，交付前清理。\n\n`
     + `## 〇·二、阶段闸门与回执链\n\n`
     + (fast
-      ? `- 快速模式流程（见 \`团队\\流程.md\`）：PM接单 → 需求 → 需求评审（需求分析师 \`req review\`） → 技术评审记录（程序员A \`req review --kind tech\`） → Owner评审（可选） → PM 派开发 → 测试 → 投票（vote） → PM 收口 → 迭代。\n`
-      : `- 完整流程见 \`团队\\流程.md\`：PM接单 → 需求 → 产品/架构评审 → Owner评审（可选） → PM 派开发 → A/B 互审/对账 → 测试 → PM 收口 → 迭代。\n`)
+      ? `- 快速模式流程（见 \`团队\\流程.md\`）：PM接单 → 需求 → 需求评审（需求分析师 \`req review\`） → **需求可测性评审 TR-Q（测试人员 \`req trq\`）** → 技术评审记录（程序员A \`req review --kind tech\`） → Owner评审（可选） → PM 派开发 → 测试 → 投票（vote） → PM 收口 → 迭代。\n`
+      : `- 完整流程见 \`团队\\流程.md\`：PM接单 → 需求 → 产品/架构评审 → **需求可测性评审 TR-Q（测试人员 \`req trq\`）** → Owner评审（可选） → PM 派开发 → A/B 互审/对账 → 测试 → PM 收口 → 迭代。\n`)
     + `- Owner 的任何新需求都直接向 PM 提；PM 必须让 Owner 选择“跳过评审/开始评审”，并记录后才派程序员。\n`
     + `- **PM 一次只发一个 --ack 派单**；派单锁未清不得派下一个；角色必须执行正文任务并把产出写进本角色目录，完成回执 + task done 证据才等于完成；只 ack 算未完成。\n\n`
     + `## 一、${fast ? '四个' : '六个'}角色\n\n`
@@ -187,6 +241,15 @@ export function collaborationRules(projectName, mode = 'full') {
     + `- Owner 是外部角色、没有 boot：先在真实终端 \`owner confirm --project <P> --requirement R-... --decision ...\` 签发一次性确认码，再 \`owner --project <P> --requirement R-... --decision ... --opinion "..." --owner-confirm <确认码>\` 落账。\n`
     + `- Owner 验收：\`owner --action accept --decision accepted|rejected\`；该需求名下测试任务必须全部 done，accepted 才收口需求。\n`
     + `- PM 推进轮次：\`workflow iterate --boot <T> --project <P> --opinion "..."\`；终止：\`workflow terminate --boot <T> --project <P> --opinion "..."\`。两者都写共享 \`工作流.json\`，不另造状态。\n\n`
+    + `## 四·三、需求可测性评审（TR-Q）\n\n`
+    + `- **时机**：需求定稿 + 需求评审 approve 之后、Owner 门之前；顺序不可跳过。\n`
+    + `- **执行人**：测试人员本人；PM 只能派单，不能代评；子代理不能代评。六人、四人都一样，fast 不因没有产品跳过。\n`
+    + `- **评什么**：逐条 AC 是否可判定、证据形式是否够、边界/异常是否可复现；不评方案/架构/实现路线。\n`
+    + `- **产出**：\`测试人员/产出/可测性评审-<需求id>-vN.md\`（≤1 页）；结论只有“可测（testable）/ 不可测（not_testable，列缺项）”。\n`
+    + `- **命令**：\`req trq --boot <T> --id R-... --verdict testable|not_testable [--missing "缺项"]\`，同时写工作流行 \`trq\`。\n`
+    + `- **闸门 G2.5**：P0 未 \`testable\` → Owner 门不开（\`TESTABILITY_REVIEW_REQUIRED\`）；P1 未做标 optional-missing，不阻门。\n`
+    + `- **只评审不执行**：不写测试计划/用例、不跑测试、不改需求与 AC；不可测只退回需求分析师，修订后旧 TR-Q 失效、必须重做。\n`
+    + `- **两职能分开**：TR-Q（Owner 前）与交付验收报告（测试后，\`测试报告-vN.md\` + \`证据/\`）是两份记录，文件/状态/时间不同。\n\n`
     + `## 五、投票（vote）\n\n`
     + `- PM 或需求分析师发起：\`vote start --boot <T> --subject "..." [--kind requirement|change|other] [--requirement R-...] [--proposal P-...]\`；V 文件 \`createdBy\` 记实际发起角色；PM 不投票。\n`
     + `- 参与人：${votersForMode(m).map((r) => ROLE_NAMES[r]).join('、')}（除 PM 外全体）。投票：\`vote cast --boot <T> --id V-... --vote approve|reject [--comment "..."]\`。\n`
@@ -305,7 +368,25 @@ export function readDocRecord(file, rel = '') {
 // 需求文件名：R-YYYYMMDD-序号-标题.md；序号 4~6 位都收（模板用 4 位，旧工具曾按 6 位）。
 const REQ_FILE_RE = /^R-\d{8}-\d{4,6}(?:-[0-9a-f]{2,8})?/i;
 
-/** 项目 需求/ 下的全部 R-*.md：boot 一次读齐并记哈希；新增/改动后本轮视为过期。 */
+/**
+ * 需求正文“内容文本”：去掉机器维护的元数据（`- 状态：` 行与 `## 状态记录` 区），
+ * 只留标题/场景/验收标准等正文。状态是程序自己改的，不该定期把角色的阅读证据作废。
+ */
+export function requirementContentText(text) {
+  const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/);
+  const out = [];
+  let inStatusSection = false;
+  for (const line of lines) {
+    if (/^##\s+状态记录/.test(line)) { inStatusSection = true; continue; }
+    if (inStatusSection && /^##\s+/.test(line)) inStatusSection = false;
+    if (inStatusSection) continue;
+    if (/^- 状态：/.test(line)) continue;
+    out.push(line.replace(/\s+$/, ''));
+  }
+  return out.join('\n').trim();
+}
+
+/** 项目 需求/ 下的全部 R-*.md：boot 一次读齐并记哈希；新增/改内容后本轮视为过期。 */
 export function readRequirementDocs(root) {
   const dir = path.join(root, '需求');
   const list = [];
@@ -315,27 +396,33 @@ export function readRequirementDocs(root) {
     if (!/\.md$/i.test(name)) continue;
     const match = name.match(REQ_FILE_RE);
     if (!match) continue;
-    const record = readDocRecord(path.join(dir, name), '需求/' + name);
+    const file = path.join(dir, name);
+    const record = readDocRecord(file, '需求/' + name);
     if (!record.exists) continue;
-    list.push({ id: match[0], file: record.path, rel: record.rel, hash: record.hash, size: record.size });
+    let contentHash = '';
+    try { contentHash = sha256(requirementContentText(fs.readFileSync(file, 'utf8'))); } catch { contentHash = ''; }
+    list.push({ id: match[0], file: record.path, rel: record.rel, hash: record.hash, contentHash, size: record.size });
   }
   list.sort((a, b) => a.rel.localeCompare(b.rel, 'zh-Hans-CN'));
   const hash = crypto.createHash('sha256').update(JSON.stringify(list.map((row) => [row.rel, row.hash]))).digest('hex');
-  return { list, hash, count: list.length };
+  const contentHash = crypto.createHash('sha256').update(JSON.stringify(list.map((row) => [row.rel, row.contentHash]))).digest('hex');
+  return { list, hash, contentHash, count: list.length };
 }
 
 /**
  * boot 必读清单，顺序即协议：团队宪法 → 项目铁律 → 项目信息 → 角色卡 → 项目索引 → 需求总览 → 协作准则。
- * 项目铁律/项目信息/角色卡/索引/需求总览为硬前提；缺了 boot 直接 MISSING_DOC，不拿全局文档冒充。
+ * 必读分两层：core=true 的 4 份是核心必读（缺一份 boot 直接 MISSING_DOC）；
+ * 其余为按需文档（读得到就带进 read 证据，读不到在简报里列“未读”，不冒充已读）。
+ * 第二层“任务相关”由 store.readDocSet 按本人未完成任务动态带入（需求正文 + 上游产出）。
  */
 export function bootDocSpecs(root, roleDirName) {
   const base = path.resolve(root);
   const role = roleDirName || '';
   return [
-    { key: 'constitution', label: '团队宪法', path: path.join(PATHS.teamRoot, '团队宪法.md'), rel: '团队宪法.md', required: true },
-    { key: 'iron', label: '项目铁律', path: path.join(base, '项目铁律.md'), rel: '项目铁律.md', required: true },
-    { key: 'projectInfo', label: '项目信息', path: path.join(base, '项目信息.md'), rel: '项目信息.md', required: true },
-    { key: 'roleCard', label: '角色卡', path: role ? path.join(base, role, '角色卡.md') : '', rel: role ? `${role}/角色卡.md` : '', required: true },
+    { key: 'constitution', label: '团队宪法', path: path.join(PATHS.teamRoot, '团队宪法.md'), rel: '团队宪法.md', required: true, core: true },
+    { key: 'iron', label: '项目铁律', path: path.join(base, '项目铁律.md'), rel: '项目铁律.md', required: true, core: true },
+    { key: 'projectInfo', label: '项目信息', path: path.join(base, '项目信息.md'), rel: '项目信息.md', required: true, core: true },
+    { key: 'roleCard', label: '角色卡', path: role ? path.join(base, role, '角色卡.md') : '', rel: role ? `${role}/角色卡.md` : '', required: true, core: true },
     { key: 'roleIndex', label: '角色文件索引', path: role ? path.join(base, role, '文件索引.md') : '', rel: role ? `${role}/文件索引.md` : '', required: false },
     { key: 'projectIndex', label: '项目索引', path: path.join(base, '项目索引.md'), rel: '项目索引.md', required: true },
     { key: 'requirementOverview', label: '需求总览', path: path.join(base, '需求', '00-需求总览.md'), rel: '需求/00-需求总览.md', required: true },
@@ -410,6 +497,19 @@ export function ensureProjectStructure({ name, root, desc = '', overwrite = fals
 
   for (const [file, template] of ROOT_FILES) put(path.join(base, file), template(projectName, desc, m));
 
+  // 切模式时只改 project.teamMode 不够：协作准则还写着旧模式，角色会按错的口径执行。
+  // 这是生成文档，不是 PM/角色正文；模式不一致时留一份 .bak 再按当前模式重写。
+  const collab = path.join(base, '协作准则.md');
+  if (exists(collab)) {
+    const current = readText(collab, '');
+    const modeLine = `团队模式：${TEAM_MODE_LABELS[m]}`;
+    if (current && !current.includes(modeLine)) {
+      try { writeText(`${collab}.bak-${Date.now()}`, current); } catch { /* 备份失败也继续，正文仍可重写 */ }
+      writeText(collab, collaborationRules(projectName, m));
+      if (!created.includes('协作准则.md（按模式重写）')) created.push('协作准则.md（按模式重写）');
+    }
+  }
+
   const teamIron = path.join(PATHS.teamRoot, '项目铁律.md');
   put(path.join(base, '项目铁律.md'), exists(teamIron) ? readText(teamIron, DEFAULT_IRON) : DEFAULT_IRON);
 
@@ -425,6 +525,30 @@ export function ensureProjectStructure({ name, root, desc = '', overwrite = fals
     mkdir(path.join(dir, '产出'));
     put(path.join(dir, '角色卡.md'), roleCard(projectName, role, m));
     put(path.join(dir, '文件索引.md'), roleIndex(role));
+  }
+
+  // 模式与目录一致：当前模式内角色目录齐全；模式外的旧角色目录不删，只标“非当前模式”。
+  // 这样 fast 项目不会出现无标注的 产品/程序员B，切回 full 时把标记撤掉即可，不丢任何产出。
+  const activeRoleDirs = new Set(rolesForMode(m).map((role) => ROLE_DIRS[role]));
+  for (const roleId of Object.keys(ROLE_DIRS)) {
+    const dirName = ROLE_DIRS[roleId];
+    if (!dirName) continue;
+    const dir = path.join(base, dirName);
+    if (!exists(dir)) continue;
+    const marker = path.join(dir, '非当前模式.md');
+    if (activeRoleDirs.has(dirName)) {
+      if (exists(marker)) {
+        try { fs.rmSync(marker, { force: true }); } catch { /* ignore */ }
+      }
+      continue;
+    }
+    const text = `# 非当前模式目录\n\n`
+      + `> 本目录对应的角色不在当前团队模式「${TEAM_MODE_LABELS[m]}」内（${teamModeDescription(m)}）。\n`
+      + `> 目录、角色卡、产出与文件索引全部保留（不删数据、不换会话），但该角色不再参与当前模式的评审、签字与派单。\n`
+      + `> 需要启用时把项目团队模式切回对应模式，再跑一次 project ensure；本文件会自动撤掉。\n`;
+    const current = exists(marker) ? readText(marker, '') : '';
+    if (current !== text) writeText(marker, text);
+    if (!created.includes(`${dirName}/非当前模式.md`)) created.push(`${dirName}/非当前模式.md`);
   }
 
   const report = structureReport(base, { teamMode: m });
