@@ -1390,11 +1390,13 @@ export function revokeGrant(role, id, by, reason = '') {
 
 export function addReadReceipt(receipt) {
   const owner = acquireLock('_reads', { role: 'system', sessionId: 'system', ttlMs: 10000, waitMs: 5000, reason: 'read receipt' });
+  const row = { ...receipt, ts: receipt.ts || nowIso() };
   try {
-    appendLine(PATHS.reads, JSON.stringify({ ...receipt, ts: receipt.ts || nowIso() }));
+    appendLine(PATHS.reads, JSON.stringify(row));
   } finally {
     releaseLock('_reads', { role: 'system' });
   }
+  return row;
 }
 
 export function latestRead({ role, sessionId, proposalId, proposalHash, maxAgeMs }) {

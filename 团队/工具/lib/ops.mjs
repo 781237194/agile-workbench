@@ -2377,19 +2377,29 @@ export function cmdRead(args) {
   const b = bootFor(args, 'read');
   if (!args.id) fail('BAD_ID', '需要 --id');
   const { msg, alreadyRead } = readMessage(b.role, String(args.id));
-  // R-c651 F-c651-1①：读消息必须留「kind=read + messageId」证据——这是“角色真的起来了”的主判据，
-  // 也是在场数据里“最后活动（阅读）”的来源；旧协议邮箱 new→cur 仍是已读水位本体。
+  // R-c651 F-c651-1① + B-20261114-152128-44f5：读消息必须留「kind=read + messageId」证据。
+  // 唤醒投递会先把消息移进 cur 并写 readAt（alreadyRead=true），以前这里跳过 → 唤醒过的消息永远没有阅读行。
+  // 现在：首次读 mode=first（counted=true）；已读/重复读也写 mode=reread（counted=false，不重复计数）。
+  let readReceipt = null;
   try {
-    if (!alreadyRead) {
-      addReadReceipt({
-        role: b.role, sessionId: b.sessionId, kind: 'read', project: String(msg.project || b.project || ''),
-        messageId: msg.id, messageIds: [msg.id], source: 'inbox', at: nowIso(),
-        proposalId: '', proposalHash: '', baseHash: '',
-      });
-    }
+    const prior = readJsonl(PATHS.reads).filter((row) => row
+      && String(row.kind || '') === 'read'
+      && String(row.role || '') === b.role
+      && String(row.messageId || '') === String(msg.id));
+    readReceipt = addReadReceipt({
+      role: b.role, sessionId: b.sessionId, kind: 'read', project: String(msg.project || b.project || ''),
+      messageId: msg.id, messageIds: [msg.id], source: 'inbox', at: nowIso(),
+      proposalId: '', proposalHash: '', baseHash: '',
+      mode: prior.length ? 'reread' : 'first',
+      counted: prior.length === 0,
+      rereadCount: prior.length,
+    });
   } catch { /* 阅读证据写失败不阻断读动作本身 */ }
   appendEvent({ role: b.role, sessionId: b.sessionId, action: 'mail_read', project: msg.project, target: msg.id, note: msg.subject });
-  out(args, `已读 ${msg.id}：${msg.subject}\n${msg.body}`, { ok: true, message: msg, alreadyRead });
+  out(args, `已读 ${msg.id}：${msg.subject}\n${msg.body}`, {
+    ok: true, message: msg, alreadyRead, readReceipt,
+    readCounted: Boolean(readReceipt && readReceipt.counted),
+  });
 }
 
 export async function cmdAck(args) {
