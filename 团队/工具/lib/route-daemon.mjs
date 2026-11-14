@@ -287,15 +287,25 @@ export function diffSnapshot(prev, curr) {
 // ---------- 规则表（F-3 写死）+ 只读前置判定（F-2） ----------
 
 /** 承载该需求的最新开发任务 owner（程序员A/B）；没有就空字符串（不猜）。 */
-export function carrierOf(requirementId, tasks) {
+export function carrierOf(requirementId, tasks, row = null) {
   const hit = tasks
     .filter((t) => String(t.requirementId || '') === String(requirementId || '')
+      && isCurrentRound(row, t)
       && ['programmer1', 'programmer2'].includes(String(t.owner || ''))
       // B-3db4（2026-11-14）：只看在办任务。以前不排除 done，会拿已完成的缺陷任务当载体，
       // 把新派的 develop 丢给那个早就收工的人（45c7 就被派给了已 done 的 a1cf 的 owner）。
       && !['done', 'rejected', 'terminated', 'cancelled'].includes(String(t.status || '')))
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0];
   return hit ? String(hit.owner) : '';
+}
+
+/** R-5fbd 裁决 1：候选/载体只认当前轮（round === deliveryRound；缺字段按当前轮，前向兼容 d225）。 */
+export function isCurrentRound(row, task) {
+  const cur = Number((row && (row.deliveryRound ?? row.round)) ?? 0) || 0;
+  const raw = task && (task.round ?? (task.workflow && task.workflow.round));
+  const r = Number(raw);
+  if (!Number.isFinite(r) || raw === '' || raw === null || raw === undefined) return true;
+  return r === cur;
 }
 
 function taskForRequirement(requirementId, tasks) {
@@ -332,15 +342,21 @@ export function planForRow(row, ctx) {
     }
     const decided = String(latest.status || latest.decision || '');
     if (decided === 'rejected') {
-      return { role: carrierOf(id, tasks) || 'analyst', action: 'rework', gate: null };
+      return { role: carrierOf(id, tasks, row) || 'analyst', action: 'rework', gate: null };
     }
-    // 已落过 Owner 决定却还停在 ready：历史漂移，不重复叫（PM 兜底推进状态，守护不改真相）。
-    return { skip: 'already_decided' };
+    // R-5fbd F-5fbd-1：只有 approve/skip 才叫开发；未知决定只告警不猜。
+    if (!['approved', 'accept', 'accepted', 'skip', 'skipped'].includes(decided)) {
+      return { skip: 'unknown_decision', alertPm: true };
+    }
+    const carrier = carrierOf(id, tasks, row);
+    if (!carrier) return { skip: 'no_carrier_task', alertPm: true };
+    // ready + 决定（approve/skip）+ 当前轮载体 → 叫开发（不写状态，守护只读）。
+    return { role: carrier, action: 'develop', gate: 'G3' };
   }
   if (status === 'approved') {
     const gate = gateOwnerDecision(row);
     if (gate) return { gateBlocked: gate };
-    const role = carrierOf(id, tasks);
+    const role = carrierOf(id, tasks, row);
     if (!role) return { skip: 'no_carrier_task', alertPm: true };
     return { role, action: 'develop', gate: 'G3' };
   }
@@ -362,7 +378,7 @@ export function planForRow(row, ctx) {
     }
     return { role: 'pm', action: 'accept' };
   }
-  if (status === 'rejected') return { role: carrierOf(id, tasks) || 'analyst', action: 'rework', gate: null };
+  if (status === 'rejected') return { role: carrierOf(id, tasks, row) || 'analyst', action: 'rework', gate: null };
   if (status === 'iteration') return { skip: 'iteration_parked' };
   if (['accepted', 'done', 'terminated'].includes(status)) return { skip: 'closed' };
   return { skip: 'unmapped_status' };
