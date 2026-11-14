@@ -3724,6 +3724,25 @@ function cmdReqLifecycle(args, action) {
   const result = transitionRequirement({
     project: b.project, task, action, role: b.role, sessionId: b.sessionId, reason, force: Boolean(args.force),
   });
+  // B-37ea：iterate 与 reopen 同口径——写门禁失效标记并推进 deliveryRound，
+  // 否则返工后旧 rejected 仍挡验收、同状态决定被判 DUPLICATE_DECISION（2a69 实测）。
+  if (action === 'iterate') {
+    try {
+      const stateNow = readWorkflowState(b.project, { fresh: true }).state || {};
+      const reqs = stateNow.requirements || {};
+      const row = reqs[task.id] || Object.values(reqs).find((r) => r && String(r.id || '') === task.id) || null;
+      if (row) {
+        const at = nowIso();
+        const iterationRound = Number((result.requirement && result.requirement.workflow && result.requirement.workflow.iterationRound) || row.iterationRound || 0) || 0;
+        row.gateInvalidatedAt = at;
+        row.gateInvalidatedBy = 'iterate';
+        row.iterationRound = iterationRound || row.iterationRound;
+        row.deliveryRound = Math.max(Number(row.deliveryRound || 0), Number(row.iterationRound || 0), iterationRound, 1);
+        if (row.trq && typeof row.trq === 'object') row.trq = { ...row.trq, verdictStale: true };
+        writeWorkflowState(b.project, stateNow);
+      }
+    } catch { /* 标记失败不阻断 iterate 本身 */ }
+  }
   // 终止后未消费的派单必须清掉，避免角色之后再被旧派单唤醒去做已终止需求。
   const queue = action === 'terminate'
     ? clearDispatchQueue(b.project, { reason: 'req_terminate', requirementId: task.id })

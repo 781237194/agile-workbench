@@ -184,12 +184,14 @@ export function latestValidOwnerDecision(row) {
   return null;
 }
 
-/** B-96e9：当前轮次（d225 deliveryRound 优先，缺失回退 round，再缺失按 1）。 */
+/** B-37ea：当前轮次（d225 deliveryRound / iterationRound 取大者，再回退 round，最后 1）。 */
 export function currentDeliveryRound(row) {
-  const d = Number(row && row.deliveryRound);
-  if (Number.isFinite(d) && d > 0) return d;
-  const r = Number(row && row.round);
-  return Number.isFinite(r) && r > 0 ? r : 1;
+  const vals = [
+    Number(row && row.deliveryRound),
+    Number(row && row.iterationRound),
+    Number(row && row.round),
+  ].filter((n) => Number.isFinite(n) && n > 0);
+  return vals.length ? Math.max(...vals) : 1;
 }
 export function deriveProjectPhase(state) {
   const rows = Object.values((state && state.requirements) || {});
