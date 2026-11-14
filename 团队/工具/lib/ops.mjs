@@ -854,6 +854,10 @@ function wakeHeaderFor(msg, target, { merged = 0 } = {}) {
 }
 /** 单次真唤醒（含 mock/测试注入）；返回 null 表示沙盘跳过。 */
 async function tryWake({ project, target, batch, isDispatch = false, engineUrl = '', taskRow = null }) {
+  // 测试注入优先级最高：显式要求“唤醒失败”时必须返回失败，不能被后面的沙盘跳过吞掉。
+  if (String(process.env.TEAM_WAKE_TEST_FAIL || '') === '1') {
+    return { ok: false, why: 'TEAM_WAKE_TEST_FAIL（测试注入）', code: 'WAKE_TEST_FAIL' };
+  }
   const list = Array.isArray(batch) ? batch : [];
   const head = list[0] || {};
   const pseudoMsg = list.length > 1
@@ -889,6 +893,24 @@ async function tryWake({ project, target, batch, isDispatch = false, engineUrl =
     return { ok: false, why: 'TEAM_WAKE_TEST_FAIL（测试注入）', code: 'WAKE_TEST_FAIL' };
   }
   try {
+    // B-3c03：沙盘（TEAM_ROOT 非安装默认根）默认不唤起真实会话，避免沙盘事件串到真实角色；
+    // 需要沙盘真唤醒时显式 TEAM_ALLOW_SANDBOX_WAKE=1（自测/演示）。
+    // 放在这里（伪消息已构造、测试注入已判过）以保持唤醒文案与留痕口径不变，只掐掉真实 DSH 调用。
+    {
+      const { isSandboxTeamRoot } = await import('./core.mjs');
+      if (isSandboxTeamRoot() && String(process.env.TEAM_ALLOW_SANDBOX_WAKE || '') !== '1') {
+        // 不真唤醒，但正文与入口语义照旧（自测/排查要能看见唤醒文案）。
+        let text = '';
+        try {
+          const last = batch[batch.length - 1] || {};
+          text = buildNoticePrompt({
+            to: target, project, messageId: last.messageId || '', subject: last.subject || '',
+            from: last.from || '', teamTool: path.join(PATHS.teamRoot, '工具', 'team.mjs'), body: String(last.body || ''),
+          });
+        } catch { text = ''; }
+        return { ok: true, skipped: 'sandbox_wake_skipped', delivered: false, to: target, merged: batch.length, text, reason: '沙盘根不唤醒真实会话' };
+      }
+    }
     return await wakeSessionForMessage({ project, to: target, msg: pseudoMsg, isDispatch, engineUrl, taskRow });
   } catch (e) {
     return { ok: false, why: String((e && e.message) || e), code: e && e.code };
