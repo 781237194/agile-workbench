@@ -1086,9 +1086,32 @@
     const ok = el('button', 'accept-btn', rejecting ? '确认打回' : '确认验收');
     ok.type = 'button';
     ok.setAttribute('data-action', rejecting ? 'owner-reject-confirm' : 'owner-accept-confirm');
+    // B-53ff：以前点「确认验收」到 IPC 返回之间界面完全没变化（一次 1.5–3 秒），Owner 体感是"点了没反应"。
+    // 现在：立刻进入忙碌态（按钮文案 + 进度行 + 计时）、成功后立刻把该行从列表移除，失败才恢复。
+    const busy = el('p', 'accept-busy');
+    busy.setAttribute('data-accept-busy', '1');
+    busy.hidden = true;
+    form.appendChild(busy);
+    let busyTimer = null;
+    const startBusy = () => {
+      const startedAt = Date.now();
+      busy.hidden = false;
+      busy.textContent = (rejecting ? '正在提交打回…' : '正在验收…') + ' 0 秒';
+      if (busyTimer) clearInterval(busyTimer);
+      busyTimer = setInterval(() => {
+        busy.textContent = (rejecting ? '正在提交打回…' : '正在验收…') + ' ' + Math.round((Date.now() - startedAt) / 1000) + ' 秒';
+      }, 400);
+    };
+    const stopBusy = () => {
+      if (busyTimer) { clearInterval(busyTimer); busyTimer = null; }
+      busy.hidden = true;
+    };
     ok.addEventListener('click', async () => {
       ok.disabled = true;
+      ok.textContent = rejecting ? '正在打回…' : '正在验收…';
       err.hidden = true;
+      startBusy();
+      showNotice(rejecting ? `正在打回 ${row.id}…` : `正在验收 ${row.id}…`);
       const opinion = String(op.value || '').trim();
       // R-c431：打回必须填原因——前端先拦一次，后端 OWNER_OPINION_REQUIRED 再兜一次。
       if (rejecting && !opinion) {
@@ -1096,6 +1119,8 @@
         err.setAttribute('data-error-code', 'OWNER_OPINION_REQUIRED');
         err.textContent = '打回必须写原因（至少 1 个字），否则不知道要改什么。';
         ok.disabled = false;
+        ok.textContent = '确认打回';
+        stopBusy();
         return;
       }
       try {
@@ -1117,6 +1142,11 @@
           throw error;
         }
         form.hidden = true;
+        stopBusy();
+        // B-53ff：成功后立刻把该行从列表移除（不等下一次 5 秒轮询），
+        // 否则 Owner 看到"行还在"，会以为没生效并反复点。
+        const goneRow = document.querySelector(`#accept-list .accept-row[data-req-id="${String(row.id).replace(/["\\]/g, '\\$&')}"]`);
+        if (goneRow) goneRow.remove();
         renderMissing([]);
         await loadData();
         renderAcceptList();
@@ -1124,11 +1154,34 @@
           ? `已打回：${row.id}；需求回到可整改，PM 会收到打回原因`
           : `已验收：${row.id}；流程图 ≤6 秒内更新`);
       } catch (e) {
+        stopBusy();
+        ok.disabled = false;
+        ok.textContent = rejecting ? '确认打回' : '确认验收';
         err.hidden = false;
         const code = String((e && e.code) || '');
         // 错误码落在 DOM 上：自检/复跑可以直接断言是"列表过期"还是"真没到 test_done"。
         err.setAttribute('data-error-code', code);
-        if (code === 'WORKFLOW_STATE_CHANGED') {
+        // B-53ff：被「上次评审打回」的旧状态挡住时，不只给一句报错——说清怎么办并给直达入口。
+        const staleRejected = code === 'REQUIREMENT_STATE_INVALID' && /Owner 决定是 rejected/.test(String((e && e.message) || ''));
+        if (staleRejected) {
+          err.textContent = `这条上次被评审打回（${row.id}），旧打回状态还没被复审清掉，所以不能验收。`
+            + '先点右边「去复审」重新评估通过（或在评审弹窗通过一次），再回来验收即可。';
+          err.setAttribute('data-accept-blocked-by', 'stale-owner-reject');
+          if (!err.querySelector('[data-action="accept-goto-review"]')) {
+            const goto = el('button', 'accept-btn link', '去复审');
+            goto.type = 'button';
+            goto.setAttribute('data-action', 'accept-goto-review');
+            goto.addEventListener('click', () => {
+              closeAcceptList();
+              const dialog = dialogEl();
+              if (dialog && dialog.hidden) openDialog(false);
+              state.selected = String(row.id);
+              renderDialog();
+            });
+            err.appendChild(document.createTextNode(' '));
+            err.appendChild(goto);
+          }
+        } else if (code === 'WORKFLOW_STATE_CHANGED') {
           // 后端已经写好"界面 X（读于 T1）/ 磁盘 Y（更新于 T2）+ 来源文件"这句人话。
           err.textContent = String((e && e.message) || '列表与磁盘状态不一致，已按磁盘为准');
           try {
