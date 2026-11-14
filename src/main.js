@@ -6220,6 +6220,8 @@ function registerIpc() {
       // 后端口径是"同一文件、同一时刻"，不一致就明确说列表过期，而不是报一个相反状态。
       source: snapshot.source || null,
       requirements: Array.isArray(snapshot.requirements) ? snapshot.requirements : [],
+      // B-1358：验收前置状态要看「测试任务」——把同一份快照里的任务数组一起带上（不额外读盘）。
+      tasks: Array.isArray(snapshot.tasks) ? snapshot.tasks : [],
       materials: p.requirementId ? ownerMaterials(project, String(p.requirementId)) : null,
     };
   });

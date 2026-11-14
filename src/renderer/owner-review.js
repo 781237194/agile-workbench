@@ -8,6 +8,8 @@
   const KEY_NO_AUTO = 'awb.ownerReview.noAuto';
   // B-d100：打回后复审的判定收在 owner-review-state.js（Node 可单测）；脚本缺失时退回本文件旧逻辑。
   const OR_STATE = (typeof window !== 'undefined' && window.OwnerReviewState) ? window.OwnerReviewState : null;
+  // B-1358：验收前置状态（测试任务/测试报告/截图/Owner 决定）判定收在 accept-prereq.js。
+  const AP = (typeof window !== 'undefined' && window.AcceptPrereq) ? window.AcceptPrereq : null;
 
   function el(tag, cls, text) {
     const node = document.createElement(tag);
@@ -959,6 +961,57 @@
       try { history.replaceState(null, '', location.pathname + location.search); } catch { /* ignore */ }
     }
   }
+  /** B-1358：四项前置判定（数据来自 owner:review-data 一次快照：requirements + tasks）。 */
+  function prereqOfRow(row) {
+    if (!AP) return null;
+    const tasks = (state.data && Array.isArray(state.data.tasks)) ? state.data.tasks : [];
+    return AP.acceptPrereq(row, tasks);
+  }
+  /** B-1358：缺失项的去处按钮（测试报告/截图 → 打开材料；测试任务 → 流程图；Owner 决定 → 评审弹窗）。 */
+  function acceptGoto(item, row) {
+    const key = String((item && item.go) || '');
+    if (key === 'test_report' || key === 'shot') {
+      if (item && item.path && typeof openMaterial === 'function') { openMaterial(String(item.path)); return; }
+      showNotice(`该需求还没挂${key === 'shot' ? '截图' : '测试报告'}：请让测试人员在测试任务证据里补上，再点「刷新列表」`);
+      return;
+    }
+    if (key === 'test_task') {
+      closeAcceptList();
+      if (typeof setFlowPanel === 'function') setFlowPanel(true);
+      return;
+    }
+    // Owner 决定：直接进评审弹窗并选中该需求（B-d100 的复审标记同一条链路）。
+    closeAcceptList();
+    const dialog = dialogEl();
+    if (dialog && dialog.hidden) openDialog(false);
+    state.selected = String(row.id || '');
+    renderDialog();
+  }
+  /** 把「缺项 + 去处」挂到错误行下面；同一去处已存在就不重复加。 */
+  function appendMissingLinks(errEl, row) {
+    const prereq = prereqOfRow(row);
+    if (!errEl || !prereq || prereq.canAccept) return;
+    const box = el('span', 'accept-missing-list');
+    box.setAttribute('data-accept-missing-list', '1');
+    const added = new Set();
+    for (const item of prereq.missing) {
+      const go = String(item.go || '');
+      if (!go || added.has(go)) continue;
+      if (errEl.querySelector(`[data-accept-goto="${go}"]`)) { added.add(go); continue; }
+      added.add(go);
+      const btn = el('button', 'accept-btn link', '去' + item.label);
+      btn.type = 'button';
+      btn.setAttribute('data-accept-goto', go);
+      btn.title = item.reason;
+      btn.addEventListener('click', () => acceptGoto(item, row));
+      box.appendChild(btn);
+    }
+    if (added.size) {
+      errEl.appendChild(document.createTextNode(' '));
+      errEl.appendChild(box);
+    }
+  }
+
   function renderAcceptList() {
     const box = ensureAcceptList();
     const body = box.querySelector('[data-accept-body]');
@@ -991,6 +1044,26 @@
       info.appendChild(el('b', 'accept-title', clip60(humanizeTitle(row.title || id), 64)));
       info.appendChild(el('span', 'accept-line', `${id} ｜ 状态：待验收 ｜ 测试结论：测试已完成（test_done）`));
       info.appendChild(el('span', 'accept-line', `证据：${evidenceTextOf(row)}`));
+      // B-1358：四项前置状态（测试任务 / 测试报告 / 截图 / Owner 决定）——缺项行不能点【通过】，并给出原因。
+      const prereq = prereqOfRow(row);
+      if (prereq) {
+        const pre = el('span', 'accept-line accept-prereq');
+        pre.setAttribute('data-accept-prereq', '1');
+        pre.setAttribute('data-accept-can', prereq.canAccept ? '1' : '0');
+        for (const check of prereq.checks) {
+          const chip = el('span', `accept-pre ${check.ok ? 'ok' : 'bad'}`, `${check.label}${check.ok ? '✓' : '✗'}`);
+          chip.setAttribute('data-accept-pre', check.key);
+          chip.setAttribute('data-accept-pre-ok', check.ok ? '1' : '0');
+          chip.title = check.reason;
+          pre.appendChild(chip);
+        }
+        info.appendChild(pre);
+        if (!prereq.canAccept) {
+          const why = el('span', 'accept-line accept-pre-why', '不可验：' + prereq.missing.map((item) => item.label).join('、') + ' 还缺（鼠标停在 ✗ 上看原因）');
+          why.setAttribute('data-accept-pre-why', '1');
+          info.appendChild(why);
+        }
+      }
       // 每一行也标一次来源时刻：行级状态来自哪次读盘，确认时回传同一时刻。
       info.appendChild(el('span', 'accept-line accept-line-source', `来源：${acceptSource().readAt ? `读盘 ${clockOf(acceptSource().readAt)}` : '未记读盘时间'}`));
       const badge = el('span', 'accept-badge', '待验收');
@@ -1002,6 +1075,12 @@
       ownerBtn.type = 'button';
       ownerBtn.setAttribute('data-action', 'owner-accept');
       ownerBtn.title = '验收通过：需求出池归档';
+      if (prereq && !prereq.canAccept) {
+        // 前置不齐：直接置灰并写明缺什么，避免 "点了才弹错"。
+        ownerBtn.disabled = true;
+        ownerBtn.setAttribute('data-accept-blocked', prereq.missing.map((item) => item.key).join(','));
+        ownerBtn.title = '前置不齐，暂不能验收：' + prereq.missing.map((item) => `${item.label}（${item.reason}）`).join('；');
+      }
       ownerBtn.addEventListener('click', () => ownerAcceptFlow(row, 'accepted'));
       // R-c431：验收行上直接给【打回】，打回必须填原因；打回后需求回到可整改，不再出池。
       const rejectBtn = el('button', 'accept-btn reject', '打回');
@@ -1193,6 +1272,8 @@
           // 人话标题 + 后端原始原因（含磁盘状态与来源）：只给标题会丢掉到底哪条状态不对。
           const info = humanizeError(e);
           err.textContent = info.detail && info.detail !== info.title ? info.title + '（' + info.detail + '）' : info.title;
+          // B-1358：错误横幅把「还缺哪几项」和「去哪里补」一起给出来，不只说失败。
+          appendMissingLinks(err, row);
         }
         ok.disabled = false;
       }
