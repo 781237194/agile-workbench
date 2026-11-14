@@ -10525,6 +10525,41 @@ async function runReviewCheck() {
   check('AC1 结束后按钮变回「全部交 PM 代管」', /全部交 PM 代管/.test(proxyUiOff.buttonText) && proxyUiOff.buttonState === 'idle', proxyUiOff);
   check('AC7 结束代管不回溯：acceptanceRecord+decisions 的 canonical sha 前后一致', ac7After === ac7Before, { before: ac7Before.slice(0, 12), after: ac7After.slice(0, 12) });
 
+  // ── B-11ce 更正：弹窗快照过期 → 点代管前必须强制刷新，条数用即时值（造 1 条验收后应少 1）──
+  const wfStale = readJsonFile(workflowFile) || {};
+  const staleId = 'R-20261114-100003-a003'; // 夹具里 test_done（非终态）
+  const beforeCount = (() => {
+    const reqs = wfStale.requirements || {};
+    return Object.values(reqs).filter((row) => row && String(row.status || '') && !['accepted', 'terminated', 'rejected'].includes(String(row.status))).length;
+  })();
+  if (wfStale.requirements && wfStale.requirements[staleId]) {
+    wfStale.requirements[staleId].status = 'accepted';
+    wfStale.requirements[staleId].updatedAt = now();
+    wfStale.requirements[staleId].closedAt = now();
+    writeJsonFile(workflowFile, wfStale);
+  }
+  // 立刻点一键代管（不给 5 秒轮询留时间），修复后 startProxyAll 会先 loadData 再计数。
+  await js(`(function(){ const b = document.querySelector('[data-or-proxy-all]'); if (b && /全部交 PM 代管/.test(b.textContent)) b.click(); return true; })()`);
+  await sleep(4200);
+  const staleCount = JSON.parse(await js(`(()=>{
+    const notice = document.querySelector('[data-or-notice]') || document.querySelector('.or-notice');
+    const chip = document.querySelector('[data-owner-review-proxy]');
+    return JSON.stringify({
+      notice: notice ? notice.textContent : '',
+      chip: chip ? chip.textContent : '',
+      count: chip && chip.getAttribute ? chip.getAttribute('data-proxy-count') : ''
+    });
+  })()`));
+  report.b11ce = { beforeCount, staleCount };
+  check('B-11ce 更正：点代管前强制刷新——造 1 条验收后提示/徽标即时少 1',
+    Number(beforeCount) >= 2 && (/覆盖\s*(\d+)\s*条/.test(staleCount.notice || '')
+      ? Number((staleCount.notice.match(/覆盖\s*(\d+)\s*条/) || [])[1]) === Number(beforeCount) - 1
+      : Number(staleCount.count) === Number(beforeCount) - 1),
+    { beforeCount, staleCount });
+  // 收尾：结束代管，避免影响后续断言/截图
+  await js(`(function(){ const b = document.querySelector('[data-or-proxy-all]'); if (b && /结束代管/.test(b.textContent)) b.click(); return true; })()`);
+  await sleep(1500);
+
   report.ok = report.failures.length === 0;
   const reportPath = path.join(outDir, 'review-report.json');
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');

@@ -907,8 +907,11 @@
   async function startProxyAll() {
     // 7849 AC1：一键入口写 scope=all（一条全项目记录，带 expiresAt，覆盖全部非终态需求）。
     // 已生效时再点：幂等——不新建、只更新 updatedAt，后端返回 idempotent=true。
+    // B-11ce 更正（PM 2026-11-15 02:35）：根因不是无状态行，而是**弹窗打开时的旧快照**——
+    // Owner 连续验收 10+ 条后，state.data 仍是几秒前的，按旧快照算就虚高（25 vs 13）。
+    // 所以点代管前**强制重读**一次（loadData），条数与 authorization 都用**即时值**。
+    await loadData();
     const rows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
-    // B-11ce：覆盖条数只算「有真实非终态 status」的行（无 status 的幽灵行不计入，避免 25 vs 13 虚高）。
     const covered = OR_STATE ? OR_STATE.proxyCoveredRows(rows)
       : rows.filter((row) => row && ![ 'accepted', 'terminated', 'rejected' ].includes(String(row.status || '')) && String(row.status || ''));
     if (!covered.length) {
@@ -922,7 +925,7 @@
         scope: 'all',
         expiresAt,
         actor: 'owner',
-        authorization: `Owner 在评审弹窗点击全部交 PM 代管（scope=all，覆盖 ${covered.length} 条非终态需求，到期 ${expiresAt}；含评审 + 决策箱 + 验收）`,
+        authorization: `Owner 在评审弹窗点击全部交 PM 代管（scope=all，覆盖 ${covered.length} 条非终态需求[${new Date().toLocaleTimeString('zh-CN', { hour12: false })} 即时快照]，到期 ${expiresAt}；含评审 + 决策箱 + 验收）`,
       });
       if (!r || r.ok === false) throw new Error((r && (r.message || r.code)) || '批量开代管失败');
       hideBanner();
