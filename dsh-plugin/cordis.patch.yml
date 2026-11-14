@@ -1,6 +1,46 @@
-# pm-workbench-dsh —— DSH 启动器插件（host-only bundle）
-# 只插入一个 Host 插件行；不包含、也不修改 Electron 工作台源码。
+# dsh-pm-workbench —— PM工作台套装 bundle（patch-only）
+#
+# 一次 insert 装齐六类行；套装包本身不注册插件、也不 insert 自己（会循环）：
+#   1. pm-workbench-dsh    工作台启动器（工具 pm_workbench_open），随包放在 ./pm-workbench-dsh/
+#   2. dsh-memory-evolve   记忆插件
+#   3. dsh-ego-browser     浏览器插件
+#   4. @liustack/modsearch 搜索插件
+#   5. @liustack/modlens   视觉插件
+#   6. mcp-web-search-safe 安全搜索 MCP（@deepseek-ai/dsh-mcp-client + 随包脚本）
+# node 运行时由 dsh-base 内置的 ptc-runtime-node 提供，这里不单列。
+#
+# 先照搬 @liustack/modsearch 自带 bundle 的这条路由：它除了 insert 自己，还会把 web 行的
+# 搜索能力指向 modsearch；只 insert 不改 web，会出现"装了搜索插件、搜索却仍走别的 provider"。
+# 注意 patch 行是整段替换 config，这里必须重述 searchProvider/fetchProvider 两个键。
+- id: web
+  config:
+    searchProvider: modsearch
+    fetchProvider: http
+
 - insert:
     - id: pm-workbench-dsh
-      name: pm-workbench-dsh
+      name: ./pm-workbench-dsh/index.js
       config: {}
+    - id: dsh-memory-evolve
+      name: dsh-memory-evolve
+      config: {}
+    - id: ego-browser
+      name: dsh-ego-browser
+      config: {}
+    - id: modsearch
+      name: '@liustack/modsearch'
+      config: {}
+    - id: modlens
+      name: '@liustack/modlens'
+      config: {}
+    - id: mcp-web-search-safe
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: web-search-safe
+        transport: stdio
+        # 可配置，不写死本机路径：
+        #   DSH_WEB_SEARCH_SAFE_NODE   node 可执行文件（默认 PATH 里的 node）
+        #   DSH_WEB_SEARCH_SAFE_SCRIPT 安全搜索脚本（默认本包 mcp/web-search-safe.js）
+        command: !!js process.env.DSH_WEB_SEARCH_SAFE_NODE || 'node'
+        args:
+          - !!js process.env.DSH_WEB_SEARCH_SAFE_SCRIPT || (process.env.DSH_PROFILE_DIR + '/node_modules/dsh-pm-workbench/mcp/web-search-safe.js')

@@ -1,0 +1,42 @@
+{
+  "name": "pm-workbench-dsh",
+  "version": "0.1.0",
+  "description": "DSH launcher plugin for PM Workbench: opens the local Electron workbench from a tool call.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "author": "徐野风",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/781237194/agile-workbench.git"
+  },
+  "homepage": "https://github.com/781237194/agile-workbench/tree/dsh-plugin",
+  "bugs": {
+    "url": "https://github.com/781237194/agile-workbench/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "pm-workbench",
+    "launcher"
+  ],
+  "engines": {
+    "dsh": ">=0.2.2-rc.1 <0.3.0",
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

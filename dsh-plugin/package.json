@@ -1,17 +1,14 @@
 {
-  "name": "pm-workbench-dsh",
-  "version": "0.1.0",
-  "description": "DSH launcher plugin for PM Workbench: opens the local Electron workbench from a tool call.",
+  "name": "dsh-pm-workbench",
+  "version": "1.0.0",
+  "description": "PM 工作台套装 bundle：一次安装装齐工作台启动器、记忆插件、浏览器插件、搜索插件与安全搜索 MCP。",
   "type": "module",
-  "main": "index.js",
-  "exports": {
-    ".": "./index.js"
-  },
   "files": [
-    "index.js",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "mcp/",
+    "pm-workbench-dsh/"
   ],
   "license": "MIT",
   "author": "徐野风",
@@ -28,7 +25,10 @@
     "dsh-plugin",
     "dsh-bundle",
     "pm-workbench",
-    "launcher"
+    "memory",
+    "browser",
+    "search",
+    "mcp"
   ],
   "engines": {
     "dsh": ">=0.2.2-rc.1 <0.3.0",
@@ -38,5 +38,12 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "dependencies": {
+    "pm-workbench-dsh": "file:./pm-workbench-dsh",
+    "dsh-memory-evolve": "^0.1.0",
+    "dsh-ego-browser": "^0.9.7",
+    "@liustack/modsearch": "^5.10.12",
+    "@liustack/modlens": "^3.27.3"
   }
 }
