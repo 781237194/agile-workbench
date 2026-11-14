@@ -1054,14 +1054,14 @@ export async function cmdSession(args) {
   if (!projectName) fail('NO_PROJECT', '没有当前项目；先 project use / --project');
   if (action === 'rounds') {
     const r = roundsQuery(projectName, String(args.role || ''));
-    const human = `轮次 · ${r.role}：${r.roundsSinceArchive}/${r.max}${r.lastArchiveAt ? ' ｜ 上次归档 ' + r.lastArchiveAt : ''}`;
+    const human = `阶段 · ${r.role}：${r.roundsSinceArchive}/${r.max}${r.lastArchiveAt ? ' ｜ 上次归档 ' + r.lastArchiveAt : ''}`;
     out(args, human, r);
     return;
   }
   if (action === 'transcript') {
     const r = exportTranscriptToProject({ projectName, sessionId: String(args.session || ''), role: String(args.role || '') });
     const human = r.transcript === 'ok'
-      ? `转录 ${r.session}：${r.turns.length} 轮${r.file ? '（已落 ' + r.file + '）' : ''}`
+      ? `转录 ${r.session}：${r.turns.length} 段${r.file ? '（已落 ' + r.file + '）' : ''}`
       : `转录 ${r.session}：${r.transcript}（不伪造、不报错）`;
     out(args, human, { ok: r.transcript === 'ok', ...r });
     return;
@@ -1107,7 +1107,7 @@ export async function cmdSession(args) {
     }
     if (args.session || args['first-turn']) {
       const r = firstTurnUsage({ projectName, sessionId: String(args.session || ''), role: String(args.role || '') });
-      out(args, `首轮 token 采样 · ${r.role || '-'} ｜ session ${r.session}：${r.firstTurnInputTokens === null ? '未知' : r.firstTurnInputTokens}（${r.transcript}，sampledAt ${r.sampledAt}）`, { ok: true, ...r });
+      out(args, `首次 token 采样 · ${r.role || '-'} ｜ session ${r.session}：${r.firstTurnInputTokens === null ? '未知' : r.firstTurnInputTokens}（${r.transcript}，sampledAt ${r.sampledAt}）`, { ok: true, ...r });
       return;
     }
     // 兼容：--threshold 旧语义=预警阈值；--warn 同义；--force 设强制阈值（默认 50 万）。

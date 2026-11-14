@@ -199,7 +199,7 @@
     entry.id = 'owner-review-entry';
     entry.type = 'button';
     entry.setAttribute('data-owner-review-entry', '1');
-    entry.title = '我的评审：Owner 待决定的需求与本轮看板';
+    entry.title = '我的评审：Owner 待决定的需求与当前看板';
     entry.innerHTML = '<span class="tb-entry-ico" aria-hidden="true">审</span><span class="tb-entry-text">我的评审</span>';
     const badge = el('span', 'owner-review-badge', '0');
     badge.setAttribute('data-owner-review-badge', '1');
@@ -248,7 +248,7 @@
       '        <button type="button" class="or-ok" data-or-approve>通过</button>',
       '        <button type="button" class="or-reject" data-or-reject>打回</button>',
       '        <button type="button" class="or-skip-btn" data-or-skip>先跳过</button>',
-      '        <button type="button" class="or-proxy-all" data-or-proxy-all title="一次给当前等你决定和等你验收的需求开代管；后面每轮保持，随时可结束">全部交 PM 代管</button>',
+      '        <button type="button" class="or-proxy-all" data-or-proxy-all title="一次给当前等你决定和等你验收的需求开代管；后面每次保持，随时可结束">全部交 PM 代管</button>',
       '      </div>',
       '    </section>',
       '  </div>',
@@ -428,7 +428,7 @@
       acceptBadge.classList.toggle('is-zero', acceptRows.length === 0);
       acceptBadge.title = acceptRows.length
         ? `待你验收 ${acceptRows.length} 条：${acceptRows.slice(0, 3).map((row) => String(row.id || '')).join('、')}${acceptRows.length > 3 ? ' 等' : ''}`
-        : '本轮没有待验收需求';
+        : '当前没有待验收需求';
       acceptBadge.setAttribute('data-count', String(acceptRows.length));
     }
     if (count) maybeAutoOpen(count);
@@ -543,7 +543,7 @@
       const when = shortWhen((row && row.closedAt) || (row && row.updatedAt));
       return clip60(`${tag}${when ? when + ' ' : ''}已终止，不用再拍`);
     }
-    if (status === 'iteration') return clip60(`${tag}已转下一轮，本轮不用拍`);
+    if (status === 'iteration') return clip60(`${tag}已转下一次，当前不用拍`);
     if (status === 'rejected') return clip60(`${tag}被打回过、还没返工，建议先让分析师改`);
 
     // 1）被打回过：把上次理由摆出来
@@ -581,7 +581,7 @@
     const productComment = one((row && row.productReview && (row.productReview.comment || row.productReview.reason)) || '', 14);
     if (productComment) return clip60(`${tag}产品评审提了：${productComment}，建议先确认这点`);
     const rounds = Number((row && row.round) || 1);
-    if (rounds > 1) return clip60(`${tag}已经到第 ${rounds} 轮，建议先看这轮改了什么再拍`);
+    if (rounds > 1) return clip60(`${tag}已经到当前，建议先看这次改了什么再拍`);
     if (pending) return clip60(`${tag}验收标准已写清，建议通过、进开发`);
     if (/待确认/.test(detail)) return clip60(`${tag}正文还有待确认项，建议让分析师先收口`);
     return clip60(`${tag}正文没写方案要点，建议让分析师先补正文`);
@@ -857,7 +857,7 @@
     ROLE_NOT_IN_STAGE: '当前阶段还不该派这个角色：先推进到对应阶段。',
     TASK_OPEN: '对方手上还有没交的活：先让他交差，或者换个人。',
     PM_DISPATCH_PENDING: '上一条派单还没回执：等回执或先排队。',
-    MEMORY_MISSING: '缺这轮的项目记忆：先写 1 条再完成。',
+    MEMORY_MISSING: '缺这次的项目记忆：先写 1 条再完成。',
     NOT_PM: '这一步只有 PM 能做。',
     SELF_SEND: '不能发给自己。',
     // B-b55c：验收状态矛盾与同秒需求歧义，都用能读懂的人话说，不甩错误码。
@@ -1241,7 +1241,7 @@
     form.appendChild(el('p', 'accept-p', `证据：${evidenceTextOf(row)}`));
     form.appendChild(el('p', 'accept-warn', rejecting
       ? '打回后该需求回到可整改（不再出池），PM 会收到打回原因。'
-      : '验收后该需求出池并归档（已闭环），不会再有“迭代/下一轮”。'));
+      : '验收后该需求出池并归档（已闭环），不会再有“迭代/下一次”。'));
     const op = el('input', 'accept-input');
     op.setAttribute('data-accept-opinion', '1');
     op.maxLength = 200;
@@ -1565,7 +1565,7 @@
       hint.setAttribute('data-ac-structure-hint', '1');
       list.appendChild(hint);
     }
-    if (!rows.length) list.appendChild(el('p', 'or-empty', '本轮暂时没有等你决定的事'));
+    if (!rows.length) list.appendChild(el('p', 'or-empty', '当前暂时没有等你决定的事'));
     // B-504a：先给「全部需求」清单（默认全量、按状态分组、可筛选、点行展开详情）；
     // 只做展示，不改变任何提交/落账口径。
     renderAllRequirements(list, allRows);
@@ -1577,7 +1577,7 @@
     const board = el('div', 'or-board');
     board.setAttribute('data-owner-board', '1');
     board.setAttribute('data-owner-board-round', String(round));
-    board.appendChild(el('h4', 'or-board-title', `本轮需求（第 ${round} 轮）· 是什么 / 怎么做 / 建议拍板点 / 卡在哪 / 影响谁`));
+    board.appendChild(el('h4', 'or-board-title', `当前需求 · 是什么 / 怎么做 / 建议拍板点 / 卡在哪 / 影响谁`));
     const boardInner = el('div', 'or-board-items');
     rows.forEach((req, index) => {
       const pending = isPending(req);

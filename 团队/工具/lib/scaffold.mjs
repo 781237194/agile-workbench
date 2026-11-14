@@ -23,7 +23,7 @@ export const DEFAULT_IRON = `# 项目铁律（默认版）
 7. 每个结论给证据：哈希 / 路径 / 命令输出。
 8. 派单必须带任务正文、产出目录、完成标准；ack=已回执（收到/认领），完成回执 + task done 证据=已完成。
 9. **面向 Owner/PM 汇报用「人话 + 需求名」**：先说这是什么（需求名/功能名），再说现在到哪了，最后说要不要对方拍板；F-2、B-149a、G2.5 这类内部代号只能放括号里，不许单独出现。Owner 需要回头问“这是什么意思”即视为汇报不合格。
-10. **不打断正在跑的任务**：角色会话 running 时不插新单、不改优先级；要插的单先记下，等这一轮收工再发。只有线上故障/数据损坏、或 Owner 明确说「立刻停」才打断；打断后必须由 PM 主动补发「继续原任务」，不靠对方记得。
+10. **不打断正在跑的任务**：角色会话 running 时不插新单、不改优先级；要插的单先记下，等这次收工再发。只有线上故障/数据损坏、或 Owner 明确说「立刻停」才打断；打断后必须由 PM 主动补发「继续原任务」，不靠对方记得。
 `;
 
 // ---------- 角色职责（按团队模式区分） ----------
@@ -32,7 +32,7 @@ export function roleDuty(role, mode = 'full') {
   const m = normalizeTeamMode(mode);
   if (m === 'fast') {
     const duties = {
-      pm: '纯协调/传话：建需求条目与任务、派单、催回执、跟进完成、组织投票（vote start/status）、组织 Owner 决定（owner confirm/owner）与工作流轮次（workflow iterate/terminate）、填写项目信息、更新项目准则和索引；不做产品/架构/需求正文/开发/测试，不替别人写业务文件，不投票。',
+      pm: '纯协调/传话：建需求条目与任务、派单、催回执、跟进完成、组织投票（vote start/status）、组织 Owner 决定（owner confirm/owner）与工作流阶段（workflow iterate/terminate）、填写项目信息、更新项目准则和索引；不做产品/架构/需求正文/开发/测试，不替别人写业务文件，不投票。',
       analyst: '需求分析与需求评审：需求拆解、场景拆解、可行性评估、验收标准、需求追踪矩阵，并在 fast 模式执行需求评审（req review）；需要驳回 Owner 需求时可按实际分析师身份发起投票（vote start，createdBy=analyst）；不写业务代码、不替 PM 派单、不替测试下结论。',
       programmer1: '开发（唯一）：只做本职——实现、单测、技术评审记录（req review --kind tech）、写 staged、propose、自测；不写需求、不定优先级、不下测试结论。',
       tester: '独立测试 + 投票：只做本职——测试计划/用例、回归、verify、缺陷闭环、对账复核，并按证据参与团队投票（vote cast）；另有**需求可测性评审（TR-Q）**：需求定稿+需求评审 approve 后、Owner 门之前，逐条判断 AC 可判定/证据形式/边界异常可复现，产出 `测试人员/产出/可测性评审-<需求id>-vN.md`（≤1 页，结论只有 可测/不可测（缺什么））；TR-Q 只评审不执行，不写测试计划/用例、不跑测试、不改需求 AC；不改业务代码、不定需求、不无证据签字。',
@@ -40,7 +40,7 @@ export function roleDuty(role, mode = 'full') {
     return duties[role] || '';
   }
   return {
-    pm: '纯协调/传话：建需求条目与任务、派单、催回执、跟进完成、批复文件、组织 Owner 决定（owner confirm/owner）与工作流轮次（workflow iterate/terminate）、填写项目信息、更新项目准则和索引；不做产品/架构/需求正文/开发/测试，不替别人写业务文件。',
+    pm: '纯协调/传话：建需求条目与任务、派单、催回执、跟进完成、批复文件、组织 Owner 决定（owner confirm/owner）与工作流阶段（workflow iterate/terminate）、填写项目信息、更新项目准则和索引；不做产品/架构/需求正文/开发/测试，不替别人写业务文件。',
     product: '产品与架构：需求拆解评审、用户故事、流程图/类图、架构方案、竞品优劣势、优先级建议与验收；架构方案由产品主审，PM 复核双签；不写业务代码。',
     analyst: '需求分析：需求拆解与评审、场景拆解、可行性评估、场景缺陷闭环、验收标准、需求追踪矩阵；不写业务代码。',
     programmer1: '开发 A：只做本职——实现、单测、写 staged、propose、互审；不写需求、不定优先级、不下测试结论；不与 B 抢文件。',
@@ -186,13 +186,13 @@ export function roleCard(projectName, role, mode = 'full') {  const m = normaliz
     + `- 输出即结果：本角色交付物就是一份结构化 MD，不写开场白、不总结感想；上游内容只写路径 + 版本号，不重复贴入。\n`
     + outHint
     + `- 他人产出一律用 \`team.mjs brief --role <角色> --project <项目> --section <区块>\` 提取指定区块，禁止全文通读。\n\n`
-    + `## 每轮动作\n\n`
-    + `0. **每轮第一件事：读根目录《项目铁律.md》（每轮都读，不靠记忆）**；再判断是否有自己的任务。\n`
+    + `## 每次动作\n\n`
+    + `0. **每次第一件事：读根目录《项目铁律.md》（每次都读，不靠记忆）**；再判断是否有自己的任务。\n`
     + `1. 只有被${role === 'pm' ? 'Owner' : 'PM 按任务'}叫到才启动；先读根《项目信息.md》《项目索引.md》，再读本目录《文件索引.md》《角色卡.md》和《协作准则.md》。\n`
     + `2. 被叫到后先 boot，再回一条确认：角色 id、任务 id、交付物、边界/依赖；随后 **ack 回执（只算已回执，不算完成）**，不能只回确认。\n`
     + `3. **执行消息正文中的任务**；产出写到本角色目录（开发代码写代码目录），不写别人目录；完成后发完成回执（结果+路径+证据）并 \`task done --evidence\`，这才算已完成。\n`
-    + `3.5 **每轮在 \`产出/\` 留版本**：${role === 'programmer1' || role === 'programmer2' ? '开发写 `实现说明-vN.md` + `代码快照-vN/`（与 site 同哈希）' : role === 'tester' ? '测试写 `测试报告-vN.md` + `证据/`' : role === 'analyst' ? '需求写 `需求分析-vN.md`（需求正文仍写 需求/R-*.md）' : '产品写 `产品设计-vN.md`'}；版本递增，不覆盖历史。\n`
-    + `3.6 **每轮写记忆（R-8514）**：收尾写 1 条 project 记忆（任务 id + 产出路径 + 1–2 行进展）；P0 任务必写，缺失时 task done 会被拒（MEMORY_MISSING）。\n`
+    + `3.5 **每次在 \`产出/\` 留版本**：${role === 'programmer1' || role === 'programmer2' ? '开发写 `实现说明-vN.md` + `代码快照-vN/`（与 site 同哈希）' : role === 'tester' ? '测试写 `测试报告-vN.md` + `证据/`' : role === 'analyst' ? '需求写 `需求分析-vN.md`（需求正文仍写 需求/R-*.md）' : '产品写 `产品设计-vN.md`'}；版本递增，不覆盖历史。\n`
+    + `3.6 **每次写记忆（R-8514）**：收尾写 1 条 project 记忆（任务 id + 产出路径 + 1–2 行进展）；P0 任务必写，缺失时 task done 会被拒（MEMORY_MISSING）。\n`
     + `3.7 **长期事实只走 key 建议**：约定/决策/踩坑提交 key 建议，待 Owner 在记忆面板确认后生效；密钥/隐私只记路径，不写值。\n`
     + `4. 分析或实现后，先互评与回执；负责人确认后才更新本目录文件与索引。\n`
     + `5. 回执 ≤ ${LIMITS.ackNoteMaxChars} 字，评审意见 ≤ ${LIMITS.reviewCommentMaxChars} 字，不写长文汇报。\n`
@@ -200,7 +200,7 @@ export function roleCard(projectName, role, mode = 'full') {  const m = normaliz
     + `7. 提交/回执只写一句 ≤160 字日志（对象+动作+单号/时间）。\n`
     + `8. **子代理**：可开——${subagentAllow(role)}；不可外包——${subagentDeny(role)}。子代理只回结论 ≤300 字 + 产出路径，过程写文件；主角色复核后才算产出。\n`
     + (role === 'pm'
-      ? `9. **决策箱（Owner ↔ PM 专用）**：**只放非评审类的拍板（取舍、优先级、口径、阻塞）；需求评审、缺陷评审、验收一律走评审列表/验收列表，禁止放进决策箱。** 需要 Owner 拍板的事一律用 \`decision add --project <P> --boot <T> --title "≤40字" --summary "≤120字" --question "≤200字" --options "A,B,C" --source-kind requirement|message|file --source-ref <R-…|M-…|路径>\` 放进决策箱，**不发消息催**；消息只发进展与已办结论。**每轮收尾前自查：本轮有没有该放决策箱而没放的事。** 其他角色不得往决策箱放任何东西（程序拒 \`DECISION_BOX_FORBIDDEN\`）。\n`
+      ? `9. **决策箱（Owner ↔ PM 专用）**：**只放非评审类的拍板（取舍、优先级、口径、阻塞）；需求评审、缺陷评审、验收一律走评审列表/验收列表，禁止放进决策箱。** 需要 Owner 拍板的事一律用 \`decision add --project <P> --boot <T> --title "≤40字" --summary "≤120字" --question "≤200字" --options "A,B,C" --source-kind requirement|message|file --source-ref <R-…|M-…|路径>\` 放进决策箱，**不发消息催**；消息只发进展与已办结论。**每次收尾前自查：当前有没有该放决策箱而没放的事。** 其他角色不得往决策箱放任何东西（程序拒 \`DECISION_BOX_FORBIDDEN\`）。\n`
         + `   **放不进去的两类（程序拒收，按码处理，不要绕过）**：\n`
         + `   - \`DECISION_SCOPE_FORBIDDEN\`：需求不在 accepted/terminated/rejected，或标题不以「复盘」开头 → 这是评审/验收类，**去评审列表，或验收列表 \`#accept-list\`（\`?accept=1\`）**；\n`
         + `   - \`DECISION_REVIEW_ACTION_FORBIDDEN\`：意图词（通过/打回/驳回/验收/批准/approve/reject/accept）或选项全是通过/打回 → **去评审弹窗直接点，不要用决策箱代替拍板**；\n`
@@ -240,7 +240,7 @@ export function collaborationRules(projectName, mode = 'full') {
     + `- **PM 先写《项目信息.md》**（目标/场景/交付/边界/任务分配），再建需求与任务；项目信息没写清前不叫其他角色。\n`
     + `- **PM 一次只能发一个角色**：send --ack 后停手，等对方 ack；未回执不得派下一个。\n`
     + `- 唤醒消息必须带任务 id、任务正文、项目信息/角色卡路径、产出目录、目标文件、完成标准，不重复贴全量职责。\n`
-    + `- 角色每轮第一件事先读《项目铁律.md》（每轮都读，不靠上下文记忆），再读《项目信息.md》《项目索引.md》、本目录《文件索引.md》《角色卡.md》。\n`
+    + `- 角色每次第一件事先读《项目铁律.md》（每次都读，不靠上下文记忆），再读《项目信息.md》《项目索引.md》、本目录《文件索引.md》《角色卡.md》。\n`
     + `- 角色被 PM 叫到后先 boot（boot 会读齐铁律/信息/角色卡/索引/需求并返回 read 证据），再回“角色 id + 任务 id + 交付物 + 边界”确认身份，并 ack 回执（只算已回执）。\n`
     + `- **路径纪律**：交付文档写当前项目内对应角色目录；程序员代码写项目根 \`site/**\`。临时文件放项目 \`_tmp/\`，交付前清理。\n\n`
     + `## 〇·二、阶段闸门与回执链\n\n`
@@ -253,8 +253,8 @@ export function collaborationRules(projectName, mode = 'full') {
     + `| 角色 | 目录 | 主要职责 | 模型 |\n|---|---|---|---|\n`
     + roleTable
     + `\n\n`
-    + `## 二、主流程（每轮照做）\n\n`
-    + `1. **先索引**：每轮先读《项目铁律.md》，再读《项目信息.md》《项目索引.md》、角色目录《文件索引.md》和《角色卡.md》，然后才读任务指定文件。\n`
+    + `## 二、主流程（每次照做）\n\n`
+    + `1. **先索引**：每次先读《项目铁律.md》，再读《项目信息.md》《项目索引.md》、角色目录《文件索引.md》和《角色卡.md》，然后才读任务指定文件。\n`
     + `2. **派单**：PM 先把 Owner 需求写成《项目信息.md》，再建需求/任务；${fast ? '需求分析师给优先级建议，PM 终审' : '产品给优先级建议，PM 终审'}。重要消息要求回执。\n`
     + `3. **认领**：负责人只认领自己的任务，先 read，后 ack（已回执）；执行正文任务、产出落盘、完成回执 + task done 才算完成。\n`
     + (fast
@@ -272,10 +272,10 @@ export function collaborationRules(projectName, mode = 'full') {
     + `- 需求评审：\`req review --boot <T> --id R-... --verdict approve|reject --comments "..."\`；${fast ? 'fast 由需求分析师执行' : 'full 由产品设计师执行'}，PM 不评审，其他角色不能代评。\n`
     + `- 技术评审记录：\`req review --boot <T> --kind tech --id R-... [--proposal P-...] --verdict approve|reject --comments "..."\`；执行人：${techReviewers(m).map((r) => ROLE_NAMES[r]).join(' / ')}。\n`
     + `- 评审记录落盘：\`团队\\状态\\项目\\<项目>\\需求评审\\\` 与 \`技术评审\\\`（JSON），同时写任务评审字段与事件链；评审结论只对同一需求版本负责。\n\n`
-    + `## 四·二、Owner 决定 / 验收 / 工作流轮次\n\n`
+    + `## 四·二、Owner 决定 / 验收 / 工作流阶段\n\n`
     + `- Owner 是外部角色、没有 boot：先在真实终端 \`owner confirm --project <P> --requirement R-... --decision ...\` 签发一次性确认码，再 \`owner --project <P> --requirement R-... --decision ... --opinion "..." --owner-confirm <确认码>\` 落账。\n`
     + `- Owner 验收：\`owner --action accept --decision accepted|rejected\`；该需求名下测试任务必须全部 done，accepted 才收口需求。\n`
-    + `- PM 推进轮次：\`workflow iterate --boot <T> --project <P> --opinion "..."\`；终止：\`workflow terminate --boot <T> --project <P> --opinion "..."\`。两者都写共享 \`工作流.json\`，不另造状态。\n\n`
+    + `- PM 推进阶段：\`workflow iterate --boot <T> --project <P> --opinion "..."\`；终止：\`workflow terminate --boot <T> --project <P> --opinion "..."\`。两者都写共享 \`工作流.json\`，不另造状态。\n\n`
     + `## 四·三、需求可测性评审（TR-Q）\n\n`
     + `- **时机**：需求定稿 + 需求评审 approve 之后、Owner 门之前；顺序不可跳过。\n`
     + `- **执行人**：测试人员本人；PM 只能派单，不能代评；子代理不能代评。六人、四人都一样，fast 不因没有产品跳过。\n`
@@ -314,7 +314,7 @@ export function projectInfo(projectName, desc = '', mode = 'full') {
   const roleDirs = roles.map((r) => `\`${ROLE_DIRS[r]}/\``).join('、');
   return `# ${projectName} · 项目信息\n\n`
     + `> **由项目经理根据 Owner 需求填写，角色只读。** 没写清前，PM 不叫其他角色。\n`
-    + `> 每轮先读《项目铁律.md》，再读本文件，然后读角色卡与项目索引。\n`
+    + `> 每次先读《项目铁律.md》，再读本文件，然后读角色卡与项目索引。\n`
     + `> 团队模式：${TEAM_MODE_LABELS[m]}（${teamModeDescription(m)}）。\n\n`
     + `## 一、项目目标\n\n${desc ? desc + '\n' : '（待 PM 填写：这个项目到底要做什么、为什么做）'}\n\n`
     + `## 二、使用场景与用户\n\n（待 PM 填写：谁用、在什么场景用、现有替代方案）\n\n`
@@ -326,13 +326,13 @@ export function projectInfo(projectName, desc = '', mode = 'full') {
     + `## 六、期限与约束\n\n（待 PM 填写：截止时间、技术/成本/合规约束）\n\n`
     + `## 七、角色确认记录\n\n| 角色 | 已读项目信息 | 已确认角色卡 | 确认时间 |\n|---|---|---|---|\n`
     + roles.map((r) => `| ${ROLE_NAMES[r]} | | | |`).join('\n') + '\n'
-    + `\n## 八、交互方式总表（每轮必读）\n\n`
+    + `\n## 八、交互方式总表（每次必读）\n\n`
     + `> **一条原则：不存在“不唤醒”。** 任何消息——派单、回执、通知、问询、\`ack\` 确认、升级告警——落盘后都必须唤醒接收方。接收方可以只回一句“已读/收到”，但绝不能靠静默省事：不唤醒就等于对方没看到消息。\n\n`
     + `| 动作 | 命令 | 语义 | 唤醒行为 |\n|---|---|---|---|\n`
     + `| 派单 | \`send --ack\` | 要回执；PM 一次只发一个角色，锁未清不得派下一个；\`--queue\` 排队 | 必唤醒 |\n`
     + `| 普通通知 | \`send\` | 告知、同步、催办 | 必唤醒 |\n`
     + `| 回执确认 | \`ack --id\` | 只代表“已收到/已认领”，不算完成；系统会自动给原发送者补一条静默 notice | 收到者被通知 |\n`
-    + `| 只回已读 | 收到后回一句“已读/收到” | 低成本确认，不触发新一轮 | 不要求再回执 |\n`
+    + `| 只回已读 | 收到后回一句“已读/收到” | 低成本确认，不触发新流程 | 不要求再回执 |\n`
     + `| 完成回执 | \`send --type receipt\` + \`task done --evidence\` | 两者都齐才算完成 | 必唤醒 |\n`
     + `| 问询 | \`ask --to --question\` / \`answer --id\` | 不占派单锁；问题 ≤600 字 | 必唤醒 |\n`
     + `| 决策箱（仅 PM ↔ Owner） | \`decision add ...\` | **只放非评审类拍板（取舍/优先级/口径/阻塞）；需求评审、缺陷评审、验收一律走评审列表/验收列表，禁止放进决策箱。** 其他角色不得放（\`DECISION_BOX_FORBIDDEN\`） | 默认静默，未读 ≥5 或超 2 小时升级唤醒一次 |\n`
@@ -391,7 +391,7 @@ export function rootIndex(projectName, mode = 'full') {
     + `> 先读顺序：项目铁律 → 项目信息 → 项目索引 → 角色卡/文件索引 → 任务指定文件。\n\n`
     + `<!-- 人工说明:BEGIN -->\n`
     + `- 项目信息：[项目信息.md](项目信息.md)（PM 先填，角色后读）\n`
-    + `- 项目铁律：[项目铁律.md](项目铁律.md)（每轮必读）\n`
+    + `- 项目铁律：[项目铁律.md](项目铁律.md)（每次必读）\n`
     + `- 协作准则：[协作准则.md](协作准则.md)\n`
     + `- 需求目录：[需求/00-需求总览.md](需求/00-需求总览.md)\n`
     + `- 角色目录：${dirs.map((d) => `${d}/`).join('、')}、需求/\n`

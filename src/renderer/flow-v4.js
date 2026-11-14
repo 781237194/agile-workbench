@@ -111,7 +111,7 @@
     items.forEach(function (it) { (isClosed(it.status) ? shut : open).push(it); });
     var openN = data.open != null ? data.open : open.length;
     var shutN = data.closed != null ? data.closed : shut.length;
-    var head = '<div class="fv4-head"><b>当前：第 ' + esc(data.round || 1) + ' 轮</b>'
+    var head = '<div class="fv4-head"><b>当前需求</b>'
       + '<span class="fv4-sub">共 ' + (data.total || items.length) + ' 条 · 未收口 ' + openN + ' · 已收口 ' + shutN + '</span>'
       + '<span class="fv4-agent">点需求看详情</span></div>';
     var parallel = (data.parallel || []).filter(function (p) { return p.on; });
@@ -120,7 +120,7 @@
       : '';
     var rows = open.map(rowHtml).join('');
     var openHtml = rows || (items.length
-      ? '<p class="fv4-empty">本轮没有未收口需求，' + shutN + ' 条都已收口</p>'
+      ? '<p class="fv4-empty">当前没有未收口需求，' + shutN + ' 条都已收口</p>'
       : '<p class="fv4-empty">还没有需求</p>');
     var fold = '';
     if (shutN) {
@@ -131,8 +131,8 @@
       if (on) {
         var curRound = Number(data.round || 1);
         var groupHtml = closedGroups(shut, curRound).map(function (g) {
-          var label = g.current ? ('第 ' + g.round + ' 轮 · ' + g.items.length + ' 条')
-            : ('往轮（第 ' + g.round + ' 轮）· ' + g.items.length + ' 条');
+          var label = g.current ? ('当前需求 · ' + g.items.length + ' 条')
+            : ('历史收口 · ' + g.items.length + ' 条');
           return '<div class="fv4-round-head">' + esc(label) + '</div>' + g.items.map(rowHtml).join('');
         }).join('');
         fold += '<div class="fv4-list fv4-list-closed">' + groupHtml + '</div>';
@@ -163,7 +163,7 @@
       + '<button class="fv4-back" type="button" data-back="1">← 返回</button></div>'
       + '<div class="fv4-fields">'
       + field('编号', it.id) + field('优先级', it.pri || 'P2') + field('负责人', it.owner || '—')
-      + field('状态', it.statusText || statusText(it.status)) + field('当前阶段', st) + field('轮次', '第 ' + (it.round || data.round || 1) + ' 轮')
+      + field('状态', it.statusText || statusText(it.status)) + field('当前阶段', st) + field('批次', '第 ' + (it.round || data.round || 1) + ' 批')
       + field('是否返工', it.iterationRound ? '是（第 ' + it.iterationRound + ' 次返工）' : '否')
       + field('验收人', it.acceptor || '—') + field('已耗时', it.elapsed || '—')
       + '</div>' + blocker + relHtml

@@ -31,8 +31,8 @@ push('返回按钮不清选中', /data-owner-back[\s\S]{0,160}scrollTop = 0/.tes
 push('怎么做文案函数', /function howTextOf\(/.test(src) && /功能点|方案要点|实现要点/.test(src));
 push('建议拍板函数', /function adviceTextOf\(/.test(src) && /建议你定：/.test(src));
 push('本轮过滤（round）', /function currentRoundOf\(/.test(src) && /row\.round\) \|\| 1\) === round/.test(src));
-push('看板标题写明本轮', /本轮需求（第 \$\{round\} 轮）/.test(src));
-push('怎么做/建议截断 ≤60', /clip60\(howTextOf\(req\)\)/.test(src) && /const advice = clip60\(adviceTextOf\(req, pending\)\)/.test(src));
+push('看板标题写明当前需求', /当前需求 · 是什么 \/ 怎么做/.test(src));
+push('怎么做/建议截断 ≤60', /clip60\(howTextOf\(req\)\)/.test(src) && /clip60\(adviceTextOf\(req, pending\)\)/.test(src) && /clip60\(acBoard\.advice\)/.test(src));
 push('本轮序号落 DOM', /setAttribute\('data-owner-board-round', String\(round\)\)/.test(src));
 push('看板三问行含怎么做', /怎么做：\$\{esc\(how\)\}/.test(src));
 

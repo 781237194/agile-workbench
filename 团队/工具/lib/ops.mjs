@@ -261,7 +261,7 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
           const wf = rowTask.workflow || {};
           if (wf.round !== undefined && wf.round !== null && wf.round !== '') return Number(wf.round);
           if (wf.iterationRound !== undefined && wf.iterationRound !== null && wf.iterationRound !== '') return Number(wf.iterationRound);
-          return null; // 老任务没轮次标记：按 legacy 参与收口
+          return null; // 老任务没阶段标记：按 legacy 参与收口
         };
         const same = allDevTasks.filter((rowTask) => {
           const r = markedRound(rowTask);
@@ -1972,14 +1972,14 @@ export async function cmdBoot(args) {
   const optionalRead = optionalDocs.filter((d) => d.exists);
   const optionalMissing = optionalDocs.filter((d) => !d.exists);
   lines.push(`=== 启动简报 · ${ROLE_NAMES[role] || role} · ${projectName} ===`);
-  lines.push(`令牌: ${token.token}（${bootTtlMinutes} 分钟 = ${bootTtlMinutes / 60} 小时；本轮所有写操作都要带 --boot）｜ 哈希 rules ${shortHash(docs.rulesHash)} / index ${shortHash(docs.hashes.projectIndex)}`);
+  lines.push(`令牌: ${token.token}（${bootTtlMinutes} 分钟 = ${bootTtlMinutes / 60} 小时；当前所有写操作都要带 --boot）｜ 哈希 rules ${shortHash(docs.rulesHash)} / index ${shortHash(docs.hashes.projectIndex)}`);
   lines.push(`身份: ${member.name}（${role}）｜ 会话: ${sessionId}`);
   lines.push(`团队模式: ${TEAM_MODE_LABELS[teamMode]}（${teamModeDescription(teamMode)}）｜ 角色集: ${rolesForMode(teamMode).join(' / ')}`);
   lines.push(teamMode === 'fast'
     ? '快速模式: 需求评审=需求分析师 ｜ 技术评审记录=程序员A ｜ 投票=vote start/cast/status'
     : '完整模式: 需求评审=产品设计师 ｜ 技术评审记录=产品/程序员A ｜ 投票=vote start/cast/status');
   lines.push(`阶段: ${team.phase} ｜ 活跃成员: ${activeRoles(team).filter((r) => rolesForMode(teamMode).includes(r)).join(', ')} ｜ 当前锁: ${locks.length ? locks.map((l) => l.key + '@' + l.role).slice(0, 6).join(', ') : '无'}`);
-  lines.push(`纪律: 中文思考、中文回复、中文写文档 ｜ 每轮先读项目铁律 ｜ 消息≤${team.config.messageMaxChars}字 ｜ 回执≤${team.config.ackNoteMaxChars}字 ｜ 先读索引再找文件`);
+  lines.push(`纪律: 中文思考、中文回复、中文写文档 ｜ 每次先读项目铁律 ｜ 消息≤${team.config.messageMaxChars}字 ｜ 回执≤${team.config.ackNoteMaxChars}字 ｜ 先读索引再找文件`);
   lines.push('派单闭环: ack=已回执（收到/认领）≠ 已完成；执行正文任务 → 产出写本角色目录（开发代码写 site/**）→ 完成回执 + task done --evidence');
   lines.push(`结构化输出: ${OUTPUT_DISCIPLINE}`);
   const outSpec = OUTPUT_DOCS[role];
@@ -1995,7 +1995,7 @@ export async function cmdBoot(args) {
   if (taskDocs.length) {
     lines.push(`必读-任务相关（${taskDocs.length}）: ${taskDocs.map((d) => d.rel).join(' ')}`);
   } else {
-    lines.push('必读-任务相关: （无未完成任务；收到派单后按派单里的「本轮必读」补读）');
+    lines.push('必读-任务相关: （无未完成任务；收到派单后按派单里的「当前必读」补读）');
   }
   lines.push(`read 回执: ${PATHS.reads}（kind=boot；需求/任务文档哈希随令牌落盘，评审与派单前复核）`);
   if (bootQueue && bootQueue.consumed) {
@@ -2803,7 +2803,7 @@ export async function cmdTask(args) {
       const created = loadTask(b.project, task.id);
       created.workflow = { ...(created.workflow || {}), round: inheritedRound };
       saveTask(b.project, created);
-    } catch { /* 轮次标记失败不阻断建单 */ }
+    } catch { /* 阶段标记失败不阻断建单 */ }
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'task_create', project: b.project, target: task.id, note: `${task.priority} ${task.title}`, data: { task } });
     if (task.owner) {
       notify({ from: b.role, to: task.owner, subject: `新任务 ${task.id}`, body: clipMessage(`${task.priority} ${task.title}\n${task.detail}`), project: b.project, task: task.id, ackRequired: true, sessionId: b.sessionId });
@@ -3060,15 +3060,15 @@ export async function cmdTask(args) {
     try {
       roundInfo = bumpRound(b.project, String(task.owner || b.role), task.id);
       if (roundInfo && roundInfo.archived === 'triggered') {
-        const arch = archiveSession({ projectName: b.project, role: String(task.owner || b.role), reason: `轮次达 ${ROUNDS_MAX} 自动归档`, auto: true, operator: 'system' });
+        const arch = archiveSession({ projectName: b.project, role: String(task.owner || b.role), reason: `阶段达 ${ROUNDS_MAX} 自动归档`, auto: true, operator: 'system' });
         roundInfo.archive = arch.record.id;
       }
     } catch (e) { roundInfo = { error: String((e && e.message) || e) }; }
     const roundHint = roundInfo && !roundInfo.error
-      ? `\n轮次：${roundInfo.rounds}/${ROUNDS_MAX}${roundInfo.archived === 'triggered' ? `（已自动归档 ${roundInfo.archive || ''}）` : ''}`
+      ? `\n阶段：${roundInfo.rounds}/${ROUNDS_MAX}${roundInfo.archived === 'triggered' ? `（已自动归档 ${roundInfo.archive || ''}）` : ''}`
       : '';
     const memoryHint = memoryGate && memoryGate.code === 'MEMORY_ABSENT_WARN'
-      ? `\n提醒：项目记忆里没有 ${task.id} 的条目（非 P0 不阻断，下一轮补写）`
+      ? `\n提醒：项目记忆里没有 ${task.id} 的条目（非 P0 不阻断，下一次补写）`
       : (memoryGate && memoryGate.code === 'MEMORY_UNKNOWN' ? '\n记忆核查不可用（unknown，按告警处理）'
         : (memoryGate && memoryGate.code === 'MEMORY_SKIPPED' ? `\n记忆降级：${memoryGate.why}` : ''));
     const wakeHint = doneWake && doneWake.ok === false
@@ -3223,7 +3223,7 @@ function cmdReqReopen(args) {
   // F-reopen-6：3 秒内重复命令视为同一次（幂等，不重复计数）。
   const lastReopenMs = Date.parse(String(row.lastReopenAt || ''));
   if (Number.isFinite(lastReopenMs) && Date.now() - lastReopenMs < 3000) {
-    out(args, `返工幂等（3 秒内重复）：${requirementId} 已在第 ${Number(row.deliveryRound || 1)} 轮`, {
+    out(args, `返工幂等（3 秒内重复）：${requirementId} 已在当前`, {
       ok: true, idempotent: true, requirementId, deliveryRound: Number(row.deliveryRound || 1), fromStatus,
     });
     return;
@@ -3288,7 +3288,7 @@ function cmdReqReopen(args) {
     data: { requirementId, role: b.role, reason, count: row.reopenCount, at, fromStatus, toStatus: 'dev', deliveryRound: nextRound, reopenedTasks },
   });
   out(args, [
-    `已返工 ${requirementId}：${fromStatus} → dev（第 ${nextRound} 轮，第 ${row.reopenCount} 次返工）`,
+    `已返工 ${requirementId}：${fromStatus} → dev（当前，第 ${row.reopenCount} 次返工）`,
     `原因：${reason}`,
     `门禁失效标记：gateInvalidatedAt=${at}；TR-Q 旧结论标 stale`,
     ...(reopenedTasks.length ? [`测试任务回 open：${reopenedTasks.join(', ')}`] : []),
@@ -3738,7 +3738,7 @@ function cmdReqTrq(args) {
  */
 function cmdReqLifecycle(args, action) {
   const b = bootFor(args, `req ${action}`);
-  if (b.role !== 'pm') fail('NOT_PM', `只有 PM 能决定需求 ${action === 'iterate' ? '进入下一轮' : '终止'}`);
+  if (b.role !== 'pm') fail('NOT_PM', `只有 PM 能决定需求 ${action === 'iterate' ? '进入下一次' : '终止'}`);
   if (!args.id) fail('BAD_ID', '需要 --id R-...');
   const task = loadTask(b.project, String(args.id));
   if (task.type !== 'requirement') {
@@ -3772,7 +3772,7 @@ function cmdReqLifecycle(args, action) {
     ? clearDispatchQueue(b.project, { reason: 'req_terminate', requirementId: task.id })
     : null;
   const human = action === 'iterate'
-    ? `需求已进入下一轮：${task.id}（第 ${result.requirement.workflow.iterationRound} 轮）\n工作流：${result.workflowFile}`
+    ? `需求已进入下一次：${task.id}（当前）\n工作流：${result.workflowFile}`
     : `需求已终止：${task.id}\n关闭子任务 ${result.closedTasks.length} 个\n工作流：${result.workflowFile}${queue && queue.count ? `\n清理未消费派单：${queue.count} 条` : ''}`;
   out(args, human, {
     ok: true,
@@ -4708,7 +4708,7 @@ export function cmdWorkflow(args) {
     fail('BAD_ACTION', 'workflow 只支持 iterate / terminate', { action, allowed: ['iterate', 'terminate'] });
   }
   const b = bootFor(args, `workflow ${action}`);
-  if (b.role !== 'pm') fail('NOT_PM', '只有 PM 能推进工作流轮次或终止工作流');
+  if (b.role !== 'pm') fail('NOT_PM', '只有 PM 能推进工作流阶段或终止工作流');
   // G9：还有在办开发/测试任务或在办需求时不能推进下一轮（--force 可留痕绕过）。
   if (action === 'iterate') {
     const stateRead = readWorkflowState(b.project);
@@ -4733,7 +4733,7 @@ export function cmdWorkflow(args) {
     ? clearDispatchQueue(b.project, { reason: 'workflow_terminate' })
     : null;
   const human = action === 'iterate'
-    ? `工作流已进入下一轮：第 ${result.fromRound} 轮 → 第 ${result.round} 轮；转入迭代 ${result.transitioned.length} 条\n工作流：${result.workflowFile}`
+    ? `工作流已进入下一次：当前 → 当前；转入迭代 ${result.transitioned.length} 条\n工作流：${result.workflowFile}`
     : `工作流已终止：停止 ${result.stopped.length} 条需求；关闭子任务 ${result.closedTasks.length} 个\n工作流：${result.workflowFile}${queue && queue.count ? `\n清理未消费派单：${queue.count} 条` : ''}`;
   out(args, human, { ...result, ok: true, project: b.project, ...(queue ? { dispatchQueue: queue } : {}) });
 }
@@ -5435,10 +5435,10 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
   const modeRoles = rolesForMode(teamMode);
   const modeLabel = teamMode === 'fast' ? '四角色' : '六角色';
   const required = [
-    ['项目铁律.md', '每轮必读：底线、红线、失败即停', 'PM', '每轮'],
+    ['项目铁律.md', '每次必读：底线、红线、失败即停', 'PM', '每次'],
     ['项目信息.md', '项目目标、场景、交付、边界、任务分配', 'PM', '接需求/开工前'],
     ['协作准则.md', `${modeLabel}协同、启动顺序、需求与文件规则`, 'PM', '首次/规则变更'],
-    ['项目索引.md', '本目录：必读顺序与文件导航', 'PM', '每轮'],
+    ['项目索引.md', '本目录：必读顺序与文件导航', 'PM', '每次'],
     ['团队会话.md', `${modeLabel}会话 id / 模型（程序生成，不手改）`, '程序', '建团队/换会话后'],
     ['需求/00-需求总览.md', '需求目录：需求 id → 文件 → 状态', '需求分析师', '接需求前'],
   ];
@@ -5509,10 +5509,10 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
   if (!commits.length) lines.push('（暂无）');
   for (const c of commits) lines.push(`- ${c.id} ｜ ${String(c.createdAt).slice(0, 19).replace('T', ' ')} ｜ ${c.proposalId} ｜ ${c.after.map((a) => a.target).join(', ')}`);
   lines.push('');
-  lines.push('## 六、避雷铁律（每轮必读）');
+  lines.push('## 六、避雷铁律（每次必读）');
   lines.push('');
-  lines.push('- 每轮先读《项目铁律.md》，再读项目信息/本索引/角色卡；不要凭上一轮记忆开工。');
-  lines.push('- 只读任务需要的文件；不要每轮把 `需求/`、角色目录全量读一遍。');
+  lines.push('- 每次先读《项目铁律.md》，再读项目信息/本索引/角色卡；不要凭上一次记忆开工。');
+  lines.push('- 只读任务需要的文件；不要每次把 `需求/`、角色目录全量读一遍。');
   lines.push('- 一个需求一个 `R-...md`；新需求新建，澄清更新原文件；单文件 ≤ 16KB，超了拆分。');
   lines.push('- 写文件只走 `propose → review → sign → apply`；不直接改目标文件。');
   lines.push('- 没有回执 = 没发生；没有签字 = 没批准；没有 CAS = 不算提交。');
@@ -6641,7 +6641,7 @@ export function cmdRoster(args) {
     const m = { role, name: args.name || ROLE_NAMES[role] || role, status: 'active', joinedAt: nowIso(), sessionId: args.session || '' };
     mutateTeam((t) => { t.members.push(m); return t; });
     const card = path.join(PATHS.roles, `${role}.md`);
-    if (!exists(card)) writeText(card, `# ${m.name}\n\n- 职责：${args.duty || '（待补）'}\n- 每轮先 boot。\n`);
+    if (!exists(card)) writeText(card, `# ${m.name}\n\n- 职责：${args.duty || '（待补）'}\n- 每次先 boot。\n`);
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'roster_add', project: b.project, target: role, note: `${m.name} ${args.reason || ''}`, data: { member: m, teamMode: addMode } });
     notify({ from: b.role, to: role, subject: '团队欢迎 / 必读', body: `你是 ${m.name}（团队模式 ${addMode}）。先读 团队宪法、项目铁律、角色卡、项目索引，然后 boot。没有令牌不执行。`, project: b.project, ackRequired: true, type: 'welcome', sessionId: b.sessionId });
     out(args, `已加入 ${m.name}（${role}，项目模式 ${addMode}）。提醒：先读四样，再 boot。`, { ok: true, member: m, teamMode: addMode });

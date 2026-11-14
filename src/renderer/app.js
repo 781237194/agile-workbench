@@ -709,16 +709,16 @@ async function castVote(voteId, roleId, verdict, reason) {
  *      不用界面状态补造角色已读/已验收。
  */
 const LEGACY_READ_ORDER = [
-  { key: 'rules', no: '1', label: '项目铁律', note: '每轮第一件：底线、红线、失败即停' },
+  { key: 'rules', no: '1', label: '项目铁律', note: '每次第一件：底线、红线、失败即停' },
   { key: 'info', no: '2', label: '项目信息', note: '目标 / 场景 / 交付 / 边界' },
   { key: 'card', no: '3', label: '角色卡', note: '六角色各自的角色卡.md' },
   { key: 'others', no: '4', label: '其他人文档', note: '其他角色目录 / 文件索引' }
 ];
 const LEGACY_PROJECT_DOCS = [
-  { key: 'rules', rel: '项目铁律.md', label: '项目铁律', mark: '律', note: '每轮必读；项目目录缺失时旧工具会回退团队根' },
+  { key: 'rules', rel: '项目铁律.md', label: '项目铁律', mark: '律', note: '每次必读；项目目录缺失时旧工具会回退团队根' },
   { key: 'info', rel: '项目信息.md', label: '项目信息', mark: '息', note: 'PM 先填写；未写清楚前 PM 不叫其他角色' },
   { key: 'index', rel: '项目索引.md', label: '项目索引', mark: '引', note: '先读索引再找文件；不跳过索引直接 glob/grep' },
-  { key: 'overview', rel: '需求/00-需求总览.md', label: '需求总览', mark: '求', note: '本轮需求总览；缺它旧 boot 会判必读不完整' },
+  { key: 'overview', rel: '需求/00-需求总览.md', label: '需求总览', mark: '求', note: '当前需求总览；缺它旧 boot 会判必读不完整' },
   { key: 'guide', rel: '协作准则.md', label: '协作准则', mark: '则', note: '六角色协作、启动顺序与文件规则' }
 ];
 
@@ -893,7 +893,7 @@ function sessionState(project, role) {
   if (!live.exists) return { cls: 'missing', text: 'DSH 中找不到', title: '本地记录了会话，但 DSH 里已不存在；点「建团队」补建' };
   if (live.archived) return { cls: 'missing', text: '已归档', title: 'DSH 里这个会话已归档；点「建团队」会补建一个新的角色会话' };
   if (!live.inWorkspace) return { cls: 'mismatch', text: '不在本工作区', title: '会话不在当前项目绑定的 DSH 工作区里' };
-  if (live.blank) return { cls: 'blank', text: '待启动', title: '会话还没有第一轮对话（DSH 左侧可能不显示）；点「建团队」补发就位' };
+  if (live.blank) return { cls: 'blank', text: '待启动', title: '会话还没有首条对话（DSH 左侧可能不显示）；点「建团队」补发就位' };
   if (live.running) return { cls: 'running', text: '运行中', title: 'DSH 会话正在运行' };
   return { cls: 'ready', text: '已就绪', title: '会话已在 DSH 当前工作区里' };
 }
@@ -941,7 +941,7 @@ function dshExistence(project, roleId) {
   if (!live.exists) return { key: 'missing', label: '不存在', title: '本地有映射，但 DSH 会话列表里已经找不到这个 sessionId' };
   if (live.archived) return { key: 'missing', label: '已归档', title: 'DSH 里这个会话已归档，不能作为当前团队会话' };
   if (!live.inWorkspace) return { key: 'mismatch', label: '不在工作区', title: '会话存在，但不属于当前项目绑定的 DSH 工作区' };
-  if (live.blank) return { key: 'blank', label: '存在·空会话', title: '会话存在，但还没有第一轮对话；DSH 左侧可能不显示' };
+  if (live.blank) return { key: 'blank', label: '存在·空会话', title: '会话存在，但还没有首条对话；DSH 左侧可能不显示' };
   return { key: 'ok', label: '存在', title: 'dsh:team-status 已核验：会话存在且属于当前工作区' };
 }
 
@@ -3504,7 +3504,7 @@ function boardOwnerNotice(project) {
   let cls = 'warn';
   if (os.pending) {
     cls = 'bad';
-    parts.push('<b>Owner 待决定</b>：本轮流程停在 Owner，还没有通过 / 打回 / 跳过，Owner 评审不会自动弹窗。');
+    parts.push('<b>Owner 待决定</b>：当前流程停在 Owner，还没有通过 / 打回 / 跳过，Owner 评审不会自动弹窗。');
   } else if (os.status === 'rejected') {
     cls = 'bad';
     parts.push(`<b>Owner 已打回</b>：${esc(os.opinion || '没有写意见')}${os.at ? ` · ${esc(fmtTime(os.at))}` : ''}`);
@@ -5203,7 +5203,7 @@ function legacyBootFor(roleId) {
   // 后端对“没有有效 boot 时间”同样按 BOOT_EXPIRED 拒绝，界面不能把它当可复用。
   const expired = Boolean(row.booted) && (!Number.isFinite(bootAtMs) || Date.now() > expiresAt);
   const reasons = [];
-  if (roundMismatch) reasons.push(`boot 属于第 ${bootRound} 轮（当前第 ${currentRound} 轮）`);
+  if (roundMismatch) reasons.push(`boot 属于当前（当前当前）`);
   if (expired) reasons.push(Number.isFinite(bootAtMs) ? `boot 记录超 TTL（超过 ${ttlMinutes} 分钟，仅提示，不拦推进）` : 'boot 时间未记录');
   if (row.stale) reasons.push('boot 后文档已变更');
   if (!row.complete) reasons.push('必读未读全');
@@ -5310,7 +5310,7 @@ function legacyRoleBootReason(roleId) {
   }
   if (!legacyUi.briefing) return `boot 尚未读取：不能确认 ${role.name} 已读，动作禁用；先刷新必读/流程`;
   if (boot.expired) return `${role.name} 的 ${boot.label}；后端会拒绝该动作，先点该角色的「重新 boot」或「全队 boot」`;
-  if (boot.roundMismatch) return `${role.name} 的 ${boot.label}；后端会拒绝跨轮动作，先重新 boot`;
+  if (boot.roundMismatch) return `${role.name} 的 ${boot.label}；后端会拒绝跨版本动作，先重新 boot`;
   if (boot.stale) return `${role.name} 的 ${boot.label}；旧阅读证据已作废，先重新 boot`;
   if (!boot.booted) return `${role.name} 未 boot/未读全（workflow:briefing），后端会拒绝该动作，界面先禁用`;
   return `${role.name} 必读未读全（workflow:briefing），后端会拒绝该动作，界面先禁用`;
@@ -5341,8 +5341,8 @@ const LEGACY_IPC = [
   { ipc: 'files:list', fn: 'filesList', label: '六角色目录 / 文件清单' },
   { ipc: 'files:read', fn: 'filesRead', label: '只读文档内容' },
   { ipc: 'workflow:state', fn: 'workflowState', label: '旧工具能力 / 工作流文件' },
-  { ipc: 'workflow:next', fn: 'workflowNext', label: '阶段 / 需求 / 轮次' },
-  { ipc: 'workflow:briefing', fn: 'workflowBriefing', label: '每轮 boot 已读核验' },
+  { ipc: 'workflow:next', fn: 'workflowNext', label: '阶段 / 需求 / 阶段' },
+  { ipc: 'workflow:briefing', fn: 'workflowBriefing', label: '每次 boot 已读核验' },
   { ipc: 'workflow:boot', fn: 'workflowBoot', label: '角色 boot' },
   { ipc: 'requirement:create', fn: 'requirementCreate', label: '需求创建' },
   { ipc: 'requirement:review', fn: 'requirementReview', label: '产品评审' },
@@ -5355,7 +5355,7 @@ const LEGACY_IPC = [
   { ipc: 'dev:apply', fn: 'devApply', label: 'PM 签字 apply' },
   { ipc: 'test:dispatch', fn: 'testDispatch', label: '派测试' },
   { ipc: 'owner:accept', fn: 'ownerAccept', label: 'Owner 验收' },
-  { ipc: 'workflow:iterate', fn: 'workflowIterate', label: '迭代下一轮' },
+  { ipc: 'workflow:iterate', fn: 'workflowIterate', label: '迭代下一次' },
   { ipc: 'workflow:terminate', fn: 'workflowTerminate', label: '终止工作流' }
 ];
 
@@ -5503,7 +5503,7 @@ function legacyBootEvidenceMarkup() {
         + (legacyTerminateReasonText() ? `<span class="bad" data-legacy-terminated="1">${esc(legacyTerminateReasonText())}</span>` : '');
     const displayRound = ev.boot.round || (ev.bootRecord && Number(ev.bootRecord.round)) || null;
     const roundText = displayRound
-      ? `<span class="${oldRed && ev.boot.roundMismatch ? 'bad' : 'muted'}">boot 轮次 ${displayRound}${ev.boot.roundMismatch ? '（本轮记录轮次不同，仅提示）' : ''}</span>`
+      ? `<span class="${oldRed && ev.boot.roundMismatch ? 'bad' : 'muted'}">boot 阶段 ${displayRound}${ev.boot.roundMismatch ? '（当前记录阶段不同，仅提示）' : ''}</span>`
       : '';
     return `<article class="legacy-evidence-card ${cls}">
       <header>
@@ -5516,7 +5516,7 @@ function legacyBootEvidenceMarkup() {
         ${roundText}
         ${tokenLine}
       </p>
-      <div class="legacy-evidence-docs">${ev.docs.map(legacyEvidenceDocChip).join('')}${ev.requirementsStale ? '<span class="legacy-evidence-doc changed" title="boot 后需求目录/需求正文发生变化">本轮相关需求 变更</span>' : ''}</div>
+      <div class="legacy-evidence-docs">${ev.docs.map(legacyEvidenceDocChip).join('')}${ev.requirementsStale ? '<span class="legacy-evidence-doc changed" title="boot 后需求目录/需求正文发生变化">当前相关需求 变更</span>' : ''}</div>
       <div class="legacy-evidence-checks">${checkChips}</div>
       <div class="legacy-evidence-source">来源：${esc(ev.source)}${ev.boot.missing && ev.boot.missing.length ? ` · 缺失：${esc(ev.boot.missing.join('、'))}` : ''}</div>
       ${ev.excerpt ? `<details class="legacy-evidence-excerpt"><summary>启动简报原文（后端返回，截断显示）</summary><pre>${esc(String(ev.excerpt).slice(0, 1600))}</pre></details>` : ''}
@@ -6267,7 +6267,7 @@ function legacyIterateGuard() {
     return {
       ok: false,
       code: 'open-requirements',
-      reason: `还有 ${open.length} 条需求在办：${names}${open.length > 3 ? ' 等' : ''}；迭代会让本轮 boot 全部作废、在办需求留在旧轮。先完成 Owner 验收，或改用「终止」。`
+      reason: `还有 ${open.length} 条需求在办：${names}${open.length > 3 ? ' 等' : ''}；迭代会让当前 boot 全部作废、在办需求留在旧状态。先完成 Owner 验收，或改用「终止」。`
     };
   }
   if (!reqs.length) {
@@ -6280,7 +6280,7 @@ function legacyIterateGuard() {
   const closedByRejection = !accepted && rejected > 0
     && current.every((req) => String(req.status || '') === 'rejected');
   if (!accepted && !closedByRejection) {
-    return { ok: false, code: 'not-accepted', reason: '还没有已验收需求：迭代只在 Owner 验收通过后可用（本轮全部需求被投票驳回时例外）' };
+    return { ok: false, code: 'not-accepted', reason: '还没有已验收需求：迭代只在 Owner 验收通过后可用（当前全部需求被投票驳回时例外）' };
   }
   const placeholders = legacyBootPlaceholderDocs();
   if (placeholders.length) {
@@ -6448,7 +6448,7 @@ const LEGACY_REQ_STATUS = {
   test: '测试中',
   test_done: '待 Owner 验收',
   accepted: '已验收',
-  iteration: '已转下一轮',
+  iteration: '已转下一次',
   terminated: '已终止',
   rejected: '已打回'
 };
@@ -6463,7 +6463,7 @@ function legacyReqStatus(req) {
   else if (status === 'dev_review') label = `待${terms.devReview}`;
   // 投票驳回不是死锁：该需求仍可重新走分析师评审，状态直接写“可迭代”。
   if (req && req.voteRejection && status === 'rejected') label = '可迭代 · 待重新评审';
-  if (req && req.queued) label += ' · 下一轮排队';
+  if (req && req.queued) label += ' · 下一次排队';
   return label;
 }
 
@@ -6487,7 +6487,7 @@ function legacyOwnerStatusText(status) {
   if (key === 'skipped') return '已跳过';
   if (key === 'rejected') return '已打回';
   if (key === 'accepted') return '已验收';
-  if (key === 'iteration') return '转下一轮';
+  if (key === 'iteration') return '转下一次';
   if (key === 'terminated') return '已终止';
   if (key === 'pending' || key === 'optional') return '待决定';
   return key || '未写结论';
@@ -6761,7 +6761,7 @@ async function loadLegacyDocs(force = false) {
       : null;
     legacyUi.briefing = briefing && briefing.ok !== false ? briefing : null;
     if (typeof wb.workflowBriefing !== 'function') {
-      legacyUi.briefingError = { code: 'IPC_MISSING', message: '当前 preload 没有 workflow:briefing，无法核验每轮 boot / 必读状态' };
+      legacyUi.briefingError = { code: 'IPC_MISSING', message: '当前 preload 没有 workflow:briefing，无法核验每次 boot / 必读状态' };
     } else if (!briefing) {
       legacyUi.briefingError = { code: 'BRIEFING_MISSING', message: 'workflow:briefing 没有返回结果，boot 证据不可核验' };
     } else if (briefing.ok === false) {
@@ -6812,9 +6812,9 @@ function legacyTruthMarkup() {
   else if (legacyUi.workflow) rows.push(chip('ok', 'workflow 已读', `工作流阶段 ${legacyUi.workflow.phase || '未写'}；来源 工作流.json`));
   else if (legacyUi.workflowError) rows.push(chip('bad', 'workflow 读取失败', `${legacyUi.workflowError.code}：${legacyUi.workflowError.message}`));
   else rows.push(chip('muted', 'workflow 未读取', '等待 workflow:state'));
-  if (!wb || typeof wb.workflowBriefing !== 'function') rows.push(chip('bad', 'briefing 缺', '没有 workflow:briefing，每轮 boot 证据不可核验'));
+  if (!wb || typeof wb.workflowBriefing !== 'function') rows.push(chip('bad', 'briefing 缺', '没有 workflow:briefing，每次 boot 证据不可核验'));
   else if (legacyUi.briefingError) rows.push(chip('bad', 'briefing 失败', `${legacyUi.briefingError.code}：${legacyUi.briefingError.message}`));
-  else if (legacyUi.briefing) rows.push(chip('ok', 'briefing 已读', '每轮 boot / 必读核验来自后端'));
+  else if (legacyUi.briefing) rows.push(chip('ok', 'briefing 已读', '每次 boot / 必读核验来自后端'));
   else rows.push(chip('muted', 'briefing 未读取', '等待 workflow:briefing'));
   if (!caps) rows.push(chip('muted', '旧命令 待核验', '正在从 workflow:state / team:status 读取旧命令能力；矩阵返回前不显示成“齐全”，也不伪造可用'));
   else if (!caps.available) rows.push(chip('bad', 'team.mjs 缺', caps.file || '旧团队工具不存在：旧命令会明确失败'));
@@ -6977,16 +6977,16 @@ function legacyGateResultMarkup() {
     ? '工作流已终止：不再接受推进'
     : (open
       ? (commandGaps.length
-        ? `本轮必读已核验，但缺 ${commandGaps.length} 条旧命令：可推进的部分仍可用，相关动作已禁用`
+        ? `当前必读已核验，但缺 ${commandGaps.length} 条旧命令：可推进的部分仍可用，相关动作已禁用`
         : (commandUnknowns.length
-          ? `本轮必读已核验，但旧命令 ${commandUnknowns.length} 条未核验：相关动作暂时禁用，不写成缺失`
-          : '本轮必读已核验：六角色 boot 完成，可按角色推进'))
-      : `${blockReasons.join('；')} → 禁止推进本轮`);
+          ? `当前必读已核验，但旧命令 ${commandUnknowns.length} 条未核验：相关动作暂时禁用，不写成缺失`
+          : '当前必读已核验：六角色 boot 完成，可按角色推进'))
+      : `${blockReasons.join('；')} → 禁止推进当前`);
   const detail = terminated
     ? '工作流阶段：<code>terminated</code>。迭代/终止/新需求按钮已禁用；历史需求、评审与回执只读保留。'
     : (open
       ? `后端 <code>workflow:briefing</code> 记录六角色 boot 完成且必读文件齐全；执行动作前若所需角色未 boot，界面会先补一次真实 boot，后端仍校验该角色的阅读证据；Owner 是外部角色、不跑 boot。当前工作流阶段：<code>${esc(phase)}</code>。${overviewPlaceholder ? ' 需求总览仍是模板表头：第一条需求落盘时会被重写，不挡 boot。' : ''}${commandUnknown ? ' 旧命令矩阵尚未由 workflow:state 返回；当前按 team:status 的 team.mjs 存在放行基础动作，真实执行以后端返回为准。' : ''}${commandGaps.length ? ` 当前 team.mjs 缺旧命令：${commandGaps.map((name) => `<code>${esc(name)}</code>`).join('、')}；对应动作按钮已禁用，不能把“有缺口”显示成全绿。` : ''}${commandUnknowns.length ? ` 旧命令未核验：${commandUnknowns.map((name) => `<code>${esc(name)}</code>`).join('、')}；能力矩阵没有返回这些命令，对应按钮暂时禁用，不写成缺失。` : ''}`
-      : `${expired ? `有 ${expired} 个角色的 boot 记录超过 ${legacyBootTtlMinutes()} 分钟（仅提示，不再拒绝推进）；要刷新记录可点「重新 boot」。` : ''}${placeholderBlocked ? ` ${placeholders.map((name) => `<code>${esc(name)}</code>`).join('、')} 仍是模板占位；boot 与推进都会被后端拒绝（<code>PLACEHOLDER_DOC</code>），先把项目目标/边界/铁律正文写清。` : ''}${bootBlocked && !expired ? ` 六角色 boot ${boot.booted}/${boot.total}，可用 ${boot.complete}/${boot.total}；缺哪个角色先点该角色的 boot。` : ''}${boot.stale ? ` 有 ${boot.stale} 个角色在 boot 后文档变更，需重新 boot。` : ''}${boot.roundMismatch ? ` 有 ${boot.roundMismatch} 个角色的 boot 属于上一轮，需重新 boot。` : ''}${legacyUi.briefingError ? ` boot 核验不可用：${legacyUi.briefingError.code}。` : (legacyUi.briefing ? '' : ' 后端 briefing 尚未读取。')}`);
+      : `${expired ? `有 ${expired} 个角色的 boot 记录超过 ${legacyBootTtlMinutes()} 分钟（仅提示，不再拒绝推进）；要刷新记录可点「重新 boot」。` : ''}${placeholderBlocked ? ` ${placeholders.map((name) => `<code>${esc(name)}</code>`).join('、')} 仍是模板占位；boot 与推进都会被后端拒绝（<code>PLACEHOLDER_DOC</code>），先把项目目标/边界/铁律正文写清。` : ''}${bootBlocked && !expired ? ` 六角色 boot ${boot.booted}/${boot.total}，可用 ${boot.complete}/${boot.total}；缺哪个角色先点该角色的 boot。` : ''}${boot.stale ? ` 有 ${boot.stale} 个角色在 boot 后文档变更，需重新 boot。` : ''}${boot.roundMismatch ? ` 有 ${boot.roundMismatch} 个角色的 boot 属于上一次，需重新 boot。` : ''}${legacyUi.briefingError ? ` boot 核验不可用：${legacyUi.briefingError.code}。` : (legacyUi.briefing ? '' : ' 后端 briefing 尚未读取。')}`);
   return `<div class="legacy-gate-result ${open ? (warn ? 'warn' : 'ok') : ''}">
     <span class="legacy-gate-mark" aria-hidden="true">${open ? (warn ? '▲' : '●') : '■'}</span>
     <div>
@@ -7190,24 +7190,24 @@ function renderLegacyGate(project) {
       : `${placeholderBlocked ? `项目信息/项目铁律仍有模板占位：${placeholders.join('、')}；先写清正文。` : ''}${expired ? `有 ${expired} 个角色 boot 已过期；后端会拒绝推进，先点「重新 boot」。` : ''}${!boot.allComplete && !expired ? '未 boot / 未读的角色不能推进；先在六角色卡或团队台点 boot。' : ''}`;
     advance.innerHTML = `
       <div class="legacy-advance-row">
-        <div><b>推进本轮</b><p>${advanceWhy}</p></div>
-        <button class="primary small" type="button" id="legacy-advance" ${open ? '' : 'disabled'} data-legacy-go="flow" title="${open ? '打开旧流程与需求队列' : (placeholderBlocked ? '项目信息/铁律占位：禁止推进，先写清正文' : (expired ? 'boot 已过期：先重新 boot' : '六角色未全部 boot/读全'))}">${open ? '查看本轮动作' : '禁止推进'}</button>
+        <div><b>推进当前</b><p>${advanceWhy}</p></div>
+        <button class="primary small" type="button" id="legacy-advance" ${open ? '' : 'disabled'} data-legacy-go="flow" title="${open ? '打开旧流程与需求队列' : (placeholderBlocked ? '项目信息/铁律占位：禁止推进，先写清正文' : (expired ? 'boot 已过期：先重新 boot' : '六角色未全部 boot/读全'))}">${open ? '查看当前动作' : '禁止推进'}</button>
       </div>
       <div class="legacy-advance-row">
         <div><b>向 PM 提交需求（Owner）</b><p>调用 <code>owner:demand</code>：只提需求描述、优先级、验收标准（每条一行，可多条）；PM 会自动 boot 代办建档，项目开始 / 评审 / 迭代时提交。</p></div>
         <button class="ghost small" type="button" id="legacy-owner-new" ${ownerDemandVisible ? '' : 'hidden'} ${ownerCreateReady ? '' : 'disabled'} data-legacy-req-action="owner-demand" title="${esc(ownerCreateWhy)}">向 PM 提交需求（Owner）</button>
       </div>
       <div class="legacy-advance-row">
-        <div><b>迭代 / 终止</b><p>迭代在全部需求验收后可用；本轮需求被投票驳回、已无在办需求时也允许收口（否则驳回一次就会锁死本轮）。有在办需求时禁用，执行会让本轮 boot 全部作废。PM 未 boot 时执行前会自动补 boot。</p></div>
+        <div><b>迭代 / 终止</b><p>迭代在全部需求验收后可用；当前需求被投票驳回、已无在办需求时也允许收口（否则驳回一次就会锁死当前）。有在办需求时禁用，执行会让当前 boot 全部作废。PM 未 boot 时执行前会自动补 boot。</p></div>
         <span class="legacy-advance-buttons">
-          <button class="ghost small" type="button" id="legacy-iterate" ${iterateReady ? '' : 'disabled'} data-legacy-req-action="iterate" title="${esc(iterateGuard.reason || '启动下一轮（PM）；执行前会自动补 boot')}">迭代（下一轮）</button>
+          <button class="ghost small" type="button" id="legacy-iterate" ${iterateReady ? '' : 'disabled'} data-legacy-req-action="iterate" title="${esc(iterateGuard.reason || '启动下一次（PM）；执行前会自动补 boot')}">迭代（下一次）</button>
           <button class="ghost small danger" type="button" id="legacy-terminate" ${terminateReady ? '' : 'disabled'} data-legacy-req-action="terminate" title="${esc(terminateWhy)}">终止</button>
         </span>
       </div>
       ${iterateVisibleWhy ? `<p class="legacy-iterate-why">迭代不可用：${esc(iterateVisibleWhy)}</p>` : ''}
       <div class="legacy-missing-list">
         <b>动作来源与边界</b>
-        <span><code>workflow:briefing</code>：每轮必读/boot 的真实状态；过期、缺文件或文档变更会标出。</span>
+        <span><code>workflow:briefing</code>：每次必读/boot 的真实状态；过期、缺文件或文档变更会标出。</span>
         <span><code>workflow:boot</code>：角色 boot；由界面发起时，后端记录 role/session，但“角色本人执行”仍以旧账证据为准，不冒充。</span>
         <span><code>workflow:*</code> 动作：产品评审 / Owner 决定 / 派单 / 开发互审 / 测试 / Owner 验收；旧命令明确缺失才写“缺”，矩阵没返回只写“未核验”，两种情况都禁用按钮并说明，界面不回退本机假成功。</span>
       </div>`;
@@ -7221,7 +7221,7 @@ function legacyRoleTableMarkup(project) {
   const roles = teamRoles(project);
   const sessions = (project && project.sessions) || {};
   return `<table class="legacy-table">
-    <thead><tr><th>角色</th><th>目录</th><th>角色卡</th><th>文件索引</th><th>其他文档</th><th>会话</th><th>本轮 boot / 必读</th><th>已读证据来源</th><th>打开</th></tr></thead>
+    <thead><tr><th>角色</th><th>目录</th><th>角色卡</th><th>文件索引</th><th>其他文档</th><th>会话</th><th>当前 boot / 必读</th><th>已读证据来源</th><th>打开</th></tr></thead>
     <tbody>${roles.map((role) => {
       const dir = legacyHas(legacyRoleDirName(role));
       const card = legacyHas(legacyRoleCardRel(role));
@@ -7324,7 +7324,7 @@ function renderOverview() {
   const roundKey = wf.roundKey || '—';
   round.innerHTML = `
     <div class="legacy-round-top">
-      <h3>${esc(p.name)} · 当前轮</h3>
+      <h3>${esc(p.name)} · 当前需求</h3>
       <span class="badge ${os.pending ? 'badge-pending' : 'badge-' + os.key}">${esc(phaseText)}</span>
     </div>
     <div class="legacy-round-grid">
@@ -7656,9 +7656,9 @@ function legacyRoleOptions(ids, selected) {
 // 「按推荐默认」；三轮后生成不超过 15 行的摘要让用户确认；确认后才解锁建单字段并允许提交。
 // ==========================================================================
 const NEW_REQ_GRILL = {
-  title: '先问三轮，再交给 PM',
-  intro: '答完三轮会生成一份摘要，你确认后才真正提交；中途跳过的一律按推荐项写进正文，并标注「按推荐默认」。后续仍按需求正文 + 产品评审推进。',
-  stepTemplate: '第 {n} 轮 / 共 {total} 轮',
+  title: '先问三步，再交给 PM',
+  intro: '答完三步会生成一份摘要，你确认后才真正提交；中途跳过的一律按推荐项写进正文，并标注「按推荐默认」。后续仍按需求正文 + 产品评审推进。',
+  stepTemplate: '第 {n} 步 / 共 {total} 步',
   // 作用范围：只有 Owner → PM 提需求的两条入口；产品/分析师建需求不经过这里。
   actions: ['owner-demand', 'owner-create'],
   fieldId: 'legacy-a-grill',
@@ -7668,7 +7668,7 @@ const NEW_REQ_GRILL = {
     {
       id: 'scope',
       short: '范围',
-      title: '第 1 轮 · 范围',
+      title: '当前 · 范围',
       hint: '这次到底做多大？',
       options: [
         { value: 'min', label: '只做这一件事（最小范围）', recommended: true },
@@ -7681,7 +7681,7 @@ const NEW_REQ_GRILL = {
     {
       id: 'accept',
       short: '验收',
-      title: '第 2 轮 · 验收（谁验 / 算过 / 要什么证据）',
+      title: '当前 · 验收（谁验 / 算过 / 要什么证据）',
       hint: '谁点头才算过？要留什么证据？',
       options: [
         { value: 'tester', label: '测试人员独立验 + 测试报告与截图', recommended: true },
@@ -7694,7 +7694,7 @@ const NEW_REQ_GRILL = {
     {
       id: 'boundary',
       short: '边界',
-      title: '第 3 轮 · 边界（空值 / 并发 / 权限 / 失败降级）',
+      title: '当前 · 边界（空值 / 并发 / 权限 / 失败降级）',
       hint: '哪些坑必须先写清，不写就不准开工？',
       options: [
         { value: 'all', label: '空值、并发、权限、失败降级都要有结论', recommended: true },
@@ -7706,10 +7706,10 @@ const NEW_REQ_GRILL = {
     },
   ],
   buttons: {
-    next: '下一轮',
+    next: '下一次',
     toSummary: '看摘要',
-    prev: '上一轮',
-    skipRound: '这轮跳过（按推荐）',
+    prev: '上一次',
+    skipRound: '这次跳过（按推荐）',
     skipAll: '跳过拷问直接建',
     confirm: '确认摘要',
     edit: '返回修改',
@@ -7721,13 +7721,13 @@ const NEW_REQ_GRILL = {
     chosen: '你选的',
     defaulted: '按推荐默认（跳过）',
     summaryTitle: 'Owner 需求拷问摘要',
-    summaryStep: '三轮已答完 · 摘要确认',
+    summaryStep: '三步已答完 · 摘要确认',
     summaryHint: '这段话会写进需求正文；确认后才真正提交给 PM。',
-    lockedHint: '先把三轮答完（或点「跳过拷问直接建」），下面的需求字段才会解锁。',
+    lockedHint: '先把三步答完（或点「跳过拷问直接建」），下面的需求字段才会解锁。',
     confirmedHint: '摘要已确认：填好需求描述与验收标准，再点【执行】提交给 PM。',
     skippedHint: '已跳过拷问：按推荐项写入正文并标注「按推荐默认」，现在可以提交。',
     needForm: '先把需求描述和验收标准填上，再点【执行】提交。',
-    notAnswered: '还没回答三轮拷问，也没有跳过拷问',
+    notAnswered: '还没回答三步拷问，也没有跳过拷问',
   },
   maxSummaryLines: 15,
 };
@@ -8007,7 +8007,7 @@ function legacyActionBody(action, req) {
         + '</div>';
     }
     case 'owner-demand': {
-      return `<p class="legacy-form-note">向 PM 提交需求（Owner）：调用 <code>owner:demand</code>，只提需求描述、优先级、验收标准（每条一行，可多条）；PM 会自动 boot 代办建档，本轮无在办需求时直接进入${esc(terms.review)}，在办/迭代期间排到下一轮。</p>`
+      return `<p class="legacy-form-note">向 PM 提交需求（Owner）：调用 <code>owner:demand</code>，只提需求描述、优先级、验收标准（每条一行，可多条）；PM 会自动 boot 代办建档，当前无在办需求时直接进入${esc(terms.review)}，在办/迭代期间排到下一次。</p>`
         + legacyGrillPanelWrap(legacyGrillState || { step: 1, answers: {} })
         + `<p class="legacy-form-note" id="legacy-grill-locknote">${esc(NEW_REQ_GRILL.labels.lockedHint)}</p>`
         + `<input type="hidden" id="${esc(NEW_REQ_GRILL.fieldId)}" value="">`
@@ -8090,17 +8090,17 @@ function legacyActionBody(action, req) {
     case 'owner-accept': {
       const tester = legacyBootFor('tester');
       const pm = legacyBootFor('pm');
-      return `<p class="legacy-form-note">后端 <code>owner:accept</code> 按决定校验不同角色的阅读证据：<b>通过 / 打回</b>需 tester（当前 <b class="${tester.ready ? 'ok' : 'bad'}">${esc(tester.label)}</b>）；<b>转下一轮 / 终止</b>需 PM（当前 <b class="${pm.ready ? 'ok' : 'bad'}">${esc(pm.label)}</b>）。未就绪时执行前会自动补一次真实 boot，再由后端校验。</p>`
+      return `<p class="legacy-form-note">后端 <code>owner:accept</code> 按决定校验不同角色的阅读证据：<b>通过 / 打回</b>需 tester（当前 <b class="${tester.ready ? 'ok' : 'bad'}">${esc(tester.label)}</b>）；<b>转下一次 / 终止</b>需 PM（当前 <b class="${pm.ready ? 'ok' : 'bad'}">${esc(pm.label)}</b>）。未就绪时执行前会自动补一次真实 boot，再由后端校验。</p>`
         + legacyField('需求', legacyReqSelect('legacy-a-req', ['test_done'], selected))
-        + legacyField('验收决定', '<select id="legacy-a-decision" class="select"><option value="accepted">通过验收</option><option value="rejected">打回需求</option><option value="iterate">转下一轮</option><option value="terminated">终止</option></select>')
-        + legacyField('Owner 意见', '<textarea id="legacy-a-opinion" class="textarea" placeholder="验收结论 / 下一轮要求"></textarea>');
+        + legacyField('验收决定', '<select id="legacy-a-decision" class="select"><option value="accepted">通过验收</option><option value="rejected">打回需求</option><option value="iterate">转下一次</option><option value="terminated">终止</option></select>')
+        + legacyField('Owner 意见', '<textarea id="legacy-a-opinion" class="textarea" placeholder="验收结论 / 下一次要求"></textarea>');
     }
     case 'iterate': {
       const guard = legacyIterateGuard();
-      return `<p class="legacy-form-note">调用 <code>workflow:iterate</code>：轮次 +1，把 queued 的 Owner 新需求释放到当前轮。只有 Owner / PM 能启动下一轮。</p>
-        <p class="legacy-modal-warn">只在全部需求验收后（accepted）且没有在办需求时可用；本轮需求被投票驳回后已无在办需求时也允许收口。执行会让本轮角色 boot 全部作废，下一轮需要重新 boot。</p>
+      return `<p class="legacy-form-note">调用 <code>workflow:iterate</code>：阶段 +1，把 queued 的 Owner 新需求释放为当前需求。只有 Owner / PM 能启动下一次。</p>
+        <p class="legacy-modal-warn">只在全部需求验收后（accepted）且没有在办需求时可用；当前需求被投票驳回后已无在办需求时也允许收口。执行会让当前角色 boot 全部作废，下一次需要重新 boot。</p>
         ${guard.ok ? '' : `<p class="legacy-modal-warn">当前不可迭代：${esc(guard.reason)}</p>`}`
-        + legacyField('说明', '<textarea id="legacy-a-opinion" class="textarea" placeholder="本轮收口结论 / 下一轮目标"></textarea>');
+        + legacyField('说明', '<textarea id="legacy-a-opinion" class="textarea" placeholder="当前收口结论 / 下一次目标"></textarea>');
     }
     case 'terminate': {
       return `<p class="legacy-form-note">调用 <code>workflow:terminate</code>：把工作流标为 terminated，不删除项目目录或本机记录；必须写原因。</p>`
@@ -8299,7 +8299,7 @@ function legacyResultRequirement(result, requirementId) {
 
 function legacyOwnerDecisionLabel(action, decision) {
   return action === 'owner-accept'
-    ? ({ accepted: '通过验收', rejected: '打回需求', iterate: '转下一轮', terminated: '终止' }[decision] || decision)
+    ? ({ accepted: '通过验收', rejected: '打回需求', iterate: '转下一次', terminated: '终止' }[decision] || decision)
     : ({ approved: '通过', skipped: '跳过', rejected: '打回需求' }[decision] || decision);
 }
 
@@ -8489,7 +8489,7 @@ async function enhanceOwnerReviewModal(dlg, project, req) {
   const box = document.createElement('section');
   box.className = 'owner-materials two-pane';
   box.innerHTML = `
-    <div class="owner-materials-head"><b>本轮评审材料（只读）</b><span id="owner-material-status">读取中…</span></div>
+    <div class="owner-materials-head"><b>当前评审材料（只读）</b><span id="owner-material-status">读取中…</span></div>
     <div class="owner-materials-body">
       <div class="owner-materials-list" id="owner-material-list" role="tree" aria-label="评审材料"></div>
       <div class="owner-material-preview-wrap">
@@ -8649,7 +8649,7 @@ async function legacyActionModal(action, reqId) {
   const reqs = legacyRequirements();
   const selectedReq = reqs.find((row) => row.id === reqId) || null;
   const titles = {
-    boot: '角色 boot / 每轮必读',
+    boot: '角色 boot / 每次必读',
     'requirement-create': isQuickTeam() ? `新建需求（${terms.reviewer}）` : '新建需求（产品 / 需求分析师）',
     'owner-create': '向 PM 提交需求（Owner）',
     'owner-demand': '向 PM 提交需求（Owner）',
@@ -8663,8 +8663,8 @@ async function legacyActionModal(action, reqId) {
     'dev-review': `${terms.devReview}（旧协议 show + review）`,
     'dev-apply': 'PM 签字并 apply',
     'test-dispatch': 'PM 派测试',
-    'owner-accept': 'Owner 验收 / 下一轮 / 终止',
-    iterate: '启动下一轮（迭代）',
+    'owner-accept': 'Owner 验收 / 下一次 / 终止',
+    iterate: '启动下一次（迭代）',
     terminate: '终止工作流'
   };
   if (isQuickTeam() && action === 'requirement-review') titles[action] = `${terms.review}（快速团队）`;
@@ -8990,7 +8990,7 @@ function legacyReqActions(req) {
   }
   const reviewRole = isQuickTeam() ? 'analyst' : 'product';
   if (['review', 'rejected'].includes(status)) {
-    if (req.voteRejection) buttons.push(`<span class="legacy-req-chip warn" title="投票驳回：需求仍可重新评审/迭代，不会锁死本轮">可迭代</span>`);
+    if (req.voteRejection) buttons.push(`<span class="legacy-req-chip warn" title="投票驳回：需求仍可重新评审/迭代，不会锁死当前">可迭代</span>`);
     buttons.push(legacyReqButton('requirement-review', req.voteRejection ? '重新评审' : terms.review, req, reviewRole,
       `requirement:review（${isQuickTeam() ? `快速团队由${terms.reviewer}评审；通过后进入 Owner` : terms.reviewer}）`));
   } else if (status === 'approved') {
@@ -9056,8 +9056,8 @@ function legacyReqActions(req) {
     buttons.push(`<span class="legacy-req-chip ok" title="${isQuickTeam() ? 'Fast 后端壳收口：验收通过/打回一次点击直接调用 owner:accept，不依赖旧 owner 命令' : 'Owner（我）一次点击：直接调用 owner:accept，无需二次确认'}">Owner（我）一次点击</span>`);
     buttons.push(legacyOwnerQuickButton('accept', req, 'accepted', 'Owner（我）验收通过'));
     buttons.push(legacyOwnerQuickButton('accept', req, 'rejected', 'Owner（我）打回'));
-    buttons.push(legacyReqButton('owner-accept', '转下一轮 / 终止…', req, '',
-      `owner:accept（通过/打回需 tester 已 boot/读全；转下一轮/终止需 PM 已 boot/读全。当前 tester ${testerReady ? '就绪' : '未就绪'} · PM ${pmReady ? '就绪' : '未就绪'}；未就绪时执行前自动 boot 对应角色）`,
+    buttons.push(legacyReqButton('owner-accept', '转下一次 / 终止…', req, '',
+      `owner:accept（通过/打回需 tester 已 boot/读全；转下一次/终止需 PM 已 boot/读全。当前 tester ${testerReady ? '就绪' : '未就绪'} · PM ${pmReady ? '就绪' : '未就绪'}；未就绪时执行前自动 boot 对应角色）`,
       ''));
     if (!testerReady || !pmReady) buttons.push('<span class="legacy-req-autoboot">按验收决定自动 boot tester / PM；按钮只在旧命令缺失或未核验时禁用</span>');
   }
@@ -9212,7 +9212,7 @@ function renderLegacyTeamGate() {
       <button type="button" class="legacy-boot-mini" data-legacy-boot="${esc(role.id)}" ${bootCtl.disabled ? 'disabled' : ''} title="${esc(bootCtl.title)}">${esc(bootCtl.text)}</button>
     </div>`;
   }).join('');
-  box.innerHTML = `<div class="legacy-read-order">每轮必读：<b>铁律 → 项目信息 → 角色卡 → 其他人文档</b>（角色目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 文件索引 ${ready.indexes}/${ready.total} · 其他文档 ${ready.others} 份 · 项目索引 ${ready.index ? '有' : '缺'}）</div>
+  box.innerHTML = `<div class="legacy-read-order">每次必读：<b>铁律 → 项目信息 → 角色卡 → 其他人文档</b>（角色目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 文件索引 ${ready.indexes}/${ready.total} · 其他文档 ${ready.others} 份 · 项目索引 ${ready.index ? '有' : '缺'}）</div>
     <div class="legacy-team-docs">${LEGACY_PROJECT_DOCS.map((doc) => `<button type="button" class="${legacyHas(doc.rel) ? 'ok' : 'bad'}" data-legacy-doc="${esc(doc.key)}" title="${esc(doc.rel)} · ${legacyHas(doc.rel) ? '存在' : '缺失'}">${esc(doc.label)} ${legacyHas(doc.rel) ? '有' : '缺'}</button>`).join('')}</div>
     <div class="legacy-team-list">${rows}</div>
     <div class="legacy-team-result">${(() => {
@@ -9495,8 +9495,8 @@ const LEGACY_FLOW_STEPS = {
   dispatch: { label: 'PM 派单', owner: '项目经理', gate: 'Owner 落账 approved/skipped 且 designs/TR 通过后派单；一次只派一个，等回执' },
   devreview: { label: '开发互审', owner: '程序员 A/B', gate: 'proposal 互审 + 签字；作者不能审自己' },
   test: { label: '测试', owner: '测试人员', gate: '开发回执 + commit；测试独立验证' },
-  accept: { label: 'Owner 验收', owner: 'Owner', gate: '测试报告 + 回执；验收后才收口/下一轮' },
-  closure: { label: '迭代 / 终止', owner: 'Owner / PM', gate: '验收后才收口：迭代把下一轮需求转正；终止冻结工作流' }
+  accept: { label: 'Owner 验收', owner: 'Owner', gate: '测试报告 + 回执；验收后才收口/下一次' },
+  closure: { label: '迭代 / 终止', owner: 'Owner / PM', gate: '验收后才收口：迭代把下一次需求转正；终止冻结工作流' }
 };
 const LEGACY_FLOW_ROWS = [
   ['requirement', 'product', 'trq'],
@@ -9574,7 +9574,7 @@ const FLOW_PHASE_LABEL = {
   idle: '未开始', requirement: '需求', requirement_review: '需求评审', product_review: '需求评审',
   owner_review: 'Owner 闸门', tech_review: '技术评审', dispatch: '待派单', dev: '开发中',
   dev_done: '开发完成', dev_review: '互审', test: '测试中', test_done: '测试完成',
-  owner_accept: '待 Owner 验收', accepted: '已验收', iteration: '下一轮', terminated: '已终止'
+  owner_accept: '待 Owner 验收', accepted: '已验收', iteration: '下一次', terminated: '已终止'
 };
 
 /** 后端 workflow:state 的 derivation 是唯一推导结果；缺失时按需求/任务证据就地只读推导。 */
@@ -9626,7 +9626,7 @@ function flowDerivationMarkup() {
   const hist = d.historyPhase
     ? ` ｜ 历史 phase：<code>${esc(d.historyPhase)}</code>（仅提示，不参与${d.historyIgnored ? '，已按证据忽略' : ''}）`
     : ' ｜ 工作流.json 无 phase 字段（不是真相来源）';
-  const held = d.heldBack ? ' ｜ 本轮证据暂未前进，保持已推导阶段' : '';
+  const held = d.heldBack ? ' ｜ 当前证据暂未前进，保持已推导阶段' : '';
   return `<span class="flow-derive-dot" aria-hidden="true"></span>推导阶段 <b>${esc(label)}</b>（<code>${esc(d.phase)}</code>） ｜ 推导来源：${esc(d.sources.join('；') || '无可用证据')}${hist}${held}`;
 }
 
@@ -9681,7 +9681,7 @@ function legacyFlowStepText(project, key, idx, status, evidence) {
     return '已完成';
   }
   if (status === 'pending') return '未到';
-  if (key === 'requirement') return phase === 'iteration' ? '当前 · 第 ' + evidence.round + ' 轮' : '当前 · 需求';
+  if (key === 'requirement') return phase === 'iteration' ? '当前 · 需求' : '当前 · 需求';
   if (key === 'product') {
     if (req && req.voteRejection && String(req.status) === 'rejected') return '投票驳回 · 可迭代';
     if (req && String(req.status) === 'rejected') return `${terms.review}已打回`;
@@ -9717,7 +9717,7 @@ function legacyFlowStepText(project, key, idx, status, evidence) {
   }
   if (key === 'test') return '当前 · 测试';
   if (key === 'accept') return '待 Owner 验收';
-  if (key === 'closure') return phase === 'iteration' ? '已迭代 · 第 ' + evidence.round + ' 轮' : '待选择：迭代 / 终止';
+  if (key === 'closure') return phase === 'iteration' ? '已迭代收口' : '待选择：迭代 / 终止';
   return '当前';
 }
 
@@ -9979,7 +9979,7 @@ function quickTechReviewMarkup(p) {
     stateKey = 'waiting-requirement';
     if (all.length) {
       stateLabel = '无在办需求';
-      desc = `当前没有在办需求（已有 ${all.length} 条需求，均不在本轮在办）。需要时由 Owner 向 PM 提新需求；新一轮从「迭代（下一轮）」开始。`;
+      desc = `当前没有在办需求（已有 ${all.length} 条需求，均不在当前在办）。需要时由 Owner 向 PM 提新需求；新需求从「迭代（收口后）」开始。`;
     } else {
       stateLabel = '等需求';
       desc = `还没有需求。先由 Owner 向 PM 提需求；Owner 评审通过后，这里进入${terms.techReview}。`;
@@ -10430,7 +10430,7 @@ function flowMeta(p) {
     ? `${poolTypeLabel(req)} ${req.id}（${legacyReqStatus(req)}）· Owner ${reqOwner.label}`
     : '还没有需求';
   const ledgerText = evidence.ledger.length ? `账本分叉 ${evidence.ledger.length} 条` : '账本一致';
-  return `第 ${evidence.round} 轮 ｜ 阶段：${evidence.phase} ｜ boot/已读 ${boot.complete}/${boot.total} ｜ 需求 ${evidence.requirementCount}（已验收 ${evidence.accepted}）｜ 当前需求：${reqText} ｜ 任务 ${evidence.tasks.length} ｜ 项目级 Owner：${projectOwner.label}（不参与派单）｜ 收口：${closure} ｜ 待回执：${evidence.pending ? roleById(evidence.pending.to).name : '无'} ｜ 旧命令缺失：${missing === null ? '未知' : missing} ｜ ${ledgerText}`;
+  return `当前 ｜ 阶段：${evidence.phase} ｜ boot/已读 ${boot.complete}/${boot.total} ｜ 需求 ${evidence.requirementCount}（已验收 ${evidence.accepted}）｜ 当前需求：${reqText} ｜ 任务 ${evidence.tasks.length} ｜ 项目级 Owner：${projectOwner.label}（不参与派单）｜ 收口：${closure} ｜ 待回执：${evidence.pending ? roleById(evidence.pending.to).name : '无'} ｜ 旧命令缺失：${missing === null ? '未知' : missing} ｜ ${ledgerText}`;
 }
 
 function renderLegacyCapabilities() {
@@ -10513,7 +10513,7 @@ function legacyOwnerPanelMarkup(p) {
         </div>`
         : (req ? `<p class="hint">只有${esc(reviewLabel)}通过（approved）的需求才进入 Owner 闸门。</p>` : '')}`
     : (legacyRequirements().length
-      ? `<p>当前没有在办需求（已有 ${legacyRequirements().length} 条需求，均不在本轮在办）。Owner 的“参与 / 跳过”发生在${esc(reviewLabel)}通过之后；新一轮从「迭代（下一轮）」开始。</p>`
+      ? `<p>当前没有在办需求（已有 ${legacyRequirements().length} 条需求，均不在当前在办）。Owner 的“参与 / 跳过”发生在${esc(reviewLabel)}通过之后；新需求从「迭代（收口后）」开始。</p>`
       : `<p>还没有需求。Owner 的“参与 / 跳过”发生在${esc(reviewLabel)}通过之后；先建需求并完成${esc(reviewLabel)}。</p>`);
   return `<div class="legacy-owner-panel">
     <div class="legacy-flow-owner-head"><b>需求级 Owner 闸门：可参与评审 / 也可明确跳过</b><span class="badge badge-${esc(reqOwner.key)}">Owner ${esc(reqOwner.label)}</span></div>
@@ -10574,8 +10574,8 @@ function renderLegacyFlowExtras(p) {
       gateReasonParts.push(`<span class="legacy-action-note">闸门判定：team.mjs 返回 ${gateData.gates.size} 项${denied.length ? ' · 未满足：' + denied.map((entry) => esc(entry.gate || entry.code || entry.action)).join('、') : ' · 全部满足'}</span>`);
     }
     actions.innerHTML = `
-      <button class="primary small" type="button" id="legacy-flow-advance" ${canAdvance ? '' : 'disabled'} data-legacy-scroll="requirements" title="${canAdvance ? '跳到需求队列' : (terminated ? (legacyTerminateReasonText() || '工作流已终止') : (placeholders.length ? '项目信息/铁律占位：禁止推进，先写清正文' : '六角色未全部 boot/读全（或已过期）'))}">${canAdvance ? '查看本轮动作' : '禁止推进'}</button>
-      <button class="ghost small" type="button" id="legacy-flow-iterate" ${iterateReady ? '' : 'disabled'} data-legacy-req-action="iterate" title="${esc(iterateGuard.reason || '启动下一轮（PM）；执行前会自动补 boot')}">迭代（下一轮）</button>
+      <button class="primary small" type="button" id="legacy-flow-advance" ${canAdvance ? '' : 'disabled'} data-legacy-scroll="requirements" title="${canAdvance ? '跳到需求队列' : (terminated ? (legacyTerminateReasonText() || '工作流已终止') : (placeholders.length ? '项目信息/铁律占位：禁止推进，先写清正文' : '六角色未全部 boot/读全（或已过期）'))}">${canAdvance ? '查看当前动作' : '禁止推进'}</button>
+      <button class="ghost small" type="button" id="legacy-flow-iterate" ${iterateReady ? '' : 'disabled'} data-legacy-req-action="iterate" title="${esc(iterateGuard.reason || '启动下一次（PM）；执行前会自动补 boot')}">迭代（下一次）</button>
       <button class="ghost small danger" type="button" id="legacy-flow-terminate" ${terminateReady ? '' : 'disabled'} data-legacy-req-action="terminate" title="${esc(!terminateGate.ok ? terminateGate.reason : (terminated ? (legacyTerminateReasonText() || '工作流已终止') : (pmReady ? 'workflow:terminate（PM）' : 'PM 未 boot/未读全；点击执行会先自动 boot，再调用 workflow:terminate')))}">终止</button>
       <button class="ghost small" type="button" data-legacy-req-action="owner-demand" ${ownerDemandVisible ? '' : 'hidden'} ${ownerDemandReady ? '' : 'disabled'} title="${esc(!ownerDemandGate.ok ? ownerDemandGate.reason : (terminated ? (legacyTerminateReasonText() || '工作流已终止') : '向 PM 提交需求（Owner）：owner:demand，描述 / 优先级 / 验收标准（可多条），PM 自动 boot 代办建档'))}">向 PM 提交需求（Owner）</button>
       <button class="ghost small" type="button" data-legacy-go="docs">必读与目录</button>
@@ -10719,7 +10719,7 @@ function flowV4Data() {
   const closedCount = items.filter((i) => i.closed).length;
   const parallel = [
     { key: 'review-dev', on: items.some((i) => ['approved', 'ready'].includes(i.status)) && items.some((i) => ['dev', 'dev_review'].includes(i.status)), label: '评审 ∥ 开发' },
-    { key: 'test-collect', on: items.some((i) => ['test', 'test_done'].includes(i.status)) && items.some((i) => i.status === 'review'), label: '测试 ∥ 下一轮收集' }
+    { key: 'test-collect', on: items.some((i) => ['test', 'test_done'].includes(i.status)) && items.some((i) => i.status === 'review'), label: '测试 ∥ 下一次收集' }
   ];
   return { round: Number(wf.round || 1), total: items.length, open: items.length - closedCount, closed: closedCount, active, items, parallel };
 }
@@ -10898,7 +10898,7 @@ function renderRoles() {
     return `<article class="role-card" style="--role-color:${esc(role.color)}">
       <div class="role-card-head">
         <div class="role-chip" style="background:${esc(role.color)}">${esc(String(role.name || '?').slice(0, 1))}</div>
-        <div><h3>${esc(role.name)}</h3><div class="muted">${taskRoles.has(role.id) ? '本轮有任务' : '待命'} · ${session ? '有会话' : '无会话'} · <code>${esc(role.id)}</code></div></div>
+        <div><h3>${esc(role.name)}</h3><div class="muted">${taskRoles.has(role.id) ? '当前有任务' : '待命'} · ${session ? '有会话' : '无会话'} · <code>${esc(role.id)}</code></div></div>
       </div>
       <p>${esc(ROLE_BLURB[role.id] || '实现、互审、提交与回执。')}</p>
       <div class="role-scope" title="${esc(role.scope)}">${esc(legacyRoleDirName(role))}/ · ${esc(role.scope)} · <span class="${dir ? 'fact-ok' : 'fact-bad'}">目录${dir ? '存在' : '缺失'}</span></div>
@@ -10908,7 +10908,7 @@ function renderRoles() {
         <span><i>角色卡</i><b class="${cardState.key === 'ok' ? 'fact-ok' : (cardState.key === 'unmapped' ? 'fact-warn' : 'fact-bad')}" title="${esc(cardState.title)}">${esc(cardState.label)}</b></span>
         <span><i>文件索引</i><b class="${index ? 'fact-ok' : 'fact-bad'}" title="${esc(indexRel)}">${index ? '存在' : '缺失'}</b></span>
         <span><i>其他文档</i><b class="${others ? 'fact-ok' : 'fact-muted'}">${others}</b><small>份</small></span>
-        <span><i>本轮 boot</i><b class="fact-${hint.key === 'ready' ? 'ok' : (hint.key === 'missing-file' ? 'bad' : 'warn')}" title="${esc(hint.title)}">${esc(hint.label)}</b></span>
+        <span><i>当前 boot</i><b class="fact-${hint.key === 'ready' ? 'ok' : (hint.key === 'missing-file' ? 'bad' : 'warn')}" title="${esc(hint.title)}">${esc(hint.label)}</b></span>
       </div>
       <div class="role-evidence" title="${esc(ev.source)}">${esc(evidence)}</div>
       ${presenceMarkup(role.id, { compact: true })}
@@ -11159,7 +11159,7 @@ function updateDispatchHint(p) {
       notes.push('角色互发 / 发给 PM：不占 PM 单派锁。');
     }
     if (ready.warnings.length) notes.push(...ready.warnings);
-    notes.push('本轮 boot/已读没有后端核验 IPC：派单仍走真实 team:send，但界面不能把“壳代跑 boot”当成角色自己已开工。');
+    notes.push('当前 boot/已读没有后端核验 IPC：派单仍走真实 team:send，但界面不能把“壳代跑 boot”当成角色自己已开工。');
     if (roleId && fromId !== roleId && (p.sessions || {})[roleId]) {
       notes.push(`发送后会尝试唤醒「${toRole.name}」的会话（${roleSessionTitle(p, roleId)}）；唤醒结果以 team:send 返回为准。`);
     }
@@ -11567,7 +11567,7 @@ async function openMembersModal() {
     </div>`;
   }).join('');
   const body = `
-    <p class="member-hint">这里是当前工作区的${esc(teamModeLabel(p))}成员清单。快速团队只显示 4 个角色；被隐藏角色的会话不会出现在清单里。DSH 左侧默认不显示“没有第一轮对话”的空白会话，需要显示时可在角色页逐个唤醒。</p>
+    <p class="member-hint">这里是当前工作区的${esc(teamModeLabel(p))}成员清单。快速团队只显示 4 个角色；被隐藏角色的会话不会出现在清单里。DSH 左侧默认不显示“没有首条对话”的空白会话，需要显示时可在角色页逐个唤醒。</p>
     ${roles.length ? `<div class="member-list">${rows}</div>` : '<div class="empty-row">还没有成员清单；先点顶栏「建团队」创建角色会话。</div>'}
     <div class="modal-error"></div>`;
   openModal({
@@ -12682,7 +12682,7 @@ function openOwnerModal() {
       const entry = rememberOwnerResult(p.id, result, status, OWNER_CONFIRM_ACTOR);
       await applyState(result);
       showResult(result, status);
-      const label = status === 'skipped' ? '已跳过本轮 Owner 评审'
+      const label = status === 'skipped' ? '已跳过当前 Owner 评审'
         : status === 'rejected' ? '已打回，流程回到需求阶段'
           : '已通过 Owner 评审';
       const issues = [];
@@ -12709,7 +12709,7 @@ function openOwnerModal() {
     dlg.body.innerHTML = `
       <p class="muted" style="margin-bottom:10px">看完需求 / 产品更新文档后，写一句判断；可以先把项目文件夹打开对照。Owner（我）按钮一次点击直接提交，无需二次确认。</p>
       <div class="quick-actions" style="margin-top:0;margin-bottom:10px"><button class="ghost small" type="button" id="owner-open-folder">打开项目文件夹</button></div>
-      <label class="field"><span><b>Owner 意见</b><span class="field-note">会作为本轮决定保存在本地</span></span><textarea id="ow-opinion" class="textarea" maxlength="1000" placeholder="例如：需求边界清楚，通过；或：登录流程缺少异常状态，打回需求。">${esc(initialOpinion)}</textarea></label>
+      <label class="field"><span><b>Owner 意见</b><span class="field-note">会作为当前决定保存在本地</span></span><textarea id="ow-opinion" class="textarea" maxlength="1000" placeholder="例如：需求边界清楚，通过；或：登录流程缺少异常状态，打回需求。">${esc(initialOpinion)}</textarea></label>
       <p class="hint">“通过”建议写一句意见；“打回”会回到需求阶段。</p>
       <div class="modal-error"></div>`;
     dlg.body.querySelector('#owner-open-folder').addEventListener('click', openProjectFolder);
@@ -12727,15 +12727,15 @@ function openOwnerModal() {
   const showChoice = () => {
     dlg.body.innerHTML = `
       <p class="legacy-modal-warn">这是<b>旧版项目级 Owner 闸门</b>：只写顶层 <code>ownerReview</code>，<b>不会写入任何需求的 <code>ownerReview</code></b>，也不会让 PM 派单通过。需求级 Owner 决定请从「流程 / 需求卡片」进入。</p>
-      <p class="owner-intro">本轮不是必审，但需要你明确选择：跳过评审，或看完项目文件后留下意见。意见会作为本轮项目级 Owner 决定保存在本地。关闭不会自动弹窗，也不会丢失入口。</p>
+      <p class="owner-intro">当前不是必审，但需要你明确选择：跳过评审，或看完项目文件后留下意见。意见会作为当前项目级 Owner 决定保存在本地。关闭不会自动弹窗，也不会丢失入口。</p>
       <div class="owner-summary">
         <div><span>当前阶段</span><b>${esc(stageById(p.stage).label)}</b></div>
         <div><span>任务</span><b>${tasks.length} 个（完成 ${tasks.filter((t) => t.status === 'done').length}）</b></div>
         <div><span>Owner 状态</span><b class="${os.pending ? 'bad' : ''}">${esc(os.label)}</b></div>
       </div>
-      ${os.opinion ? `<p class="hint">上一轮意见：${esc(os.opinion)}${os.at ? ' · ' + esc(fmtTime(os.at)) : ''}</p>` : ''}
+      ${os.opinion ? `<p class="hint">上一次意见：${esc(os.opinion)}${os.at ? ' · ' + esc(fmtTime(os.at)) : ''}</p>` : ''}
       <div class="quick-actions"><button class="ghost small" type="button" id="owner-open-folder">打开项目文件夹</button></div>
-      <p class="hint">“通过”需要写一句意见；“打回”会回到需求阶段；再次打开会覆盖本轮决定。</p>
+      <p class="hint">“通过”需要写一句意见；“打回”会回到需求阶段；再次打开会覆盖当前决定。</p>
       <div class="modal-error"></div>`;
     dlg.body.querySelector('#owner-open-folder').addEventListener('click', openProjectFolder);
     dlg.foot.innerHTML = '';
@@ -13673,7 +13673,7 @@ async function tickDaemonStatus() {
 
 let metricsBusy = false;
 async function tickMetrics() {
-  if (metricsBusy) return; // B-fa80：2 秒一次，慢返回时跳过本轮，避免 IPC 堆积
+  if (metricsBusy) return; // B-fa80：2 秒一次，慢返回时跳过当前，避免 IPC 堆积
   metricsBusy = true;
   try {
     const m = await window.workbench.metrics();
@@ -14546,7 +14546,7 @@ async function provisionTeamForMode(mode) {
   const warnings = Array.isArray(r?.warnings) ? r.warnings : [];
   const parts = [];
   if (created > 0) parts.push(`新建 ${created} 个角色会话`);
-  if (seeds > 0) parts.push(`补发 ${seeds} 条首轮就位`);
+  if (seeds > 0) parts.push(`补发 ${seeds} 条首次就位`);
   if (!parts.length) parts.push(r?.reused ? '角色会话已存在（已核验）' : '角色会话已存在');
   // “已记录”只在 provision 成功且模式确实写回项目后出现；选择卡片本身只算未保存的选择。
   parts.push(savedLabel ? `团队模式已记录：${savedLabel}` : `模式未写回：${teamModeLabel({ teamMode: desired })}`);
