@@ -37,7 +37,8 @@ const HELP = `团队工作台 v2 · 多会话敏捷团队
 消息
   send --boot T --to <角色> --subject S --body B [--ack] [--queue] [--wake] [--no-wake] [--task T-...]
        --ack=派单；PM 上一条派单未回执时加 --queue 入队，角色 task done 后自动续跑
-       带 --ack 会自动唤醒目标角色：执行消息正文任务 → 产出写本角色目录 → 完成回执；
+       所有 send 默认唤醒接收方（B-01d6/R-45c7）；要静默必须显式 --no-wake
+       带 --ack 额外要求回执并唤醒目标角色：执行消息正文任务 → 产出写本角色目录 → 完成回执；
        ack 只代表已回执（收到/认领），task done --evidence 才代表已完成
   inbox --boot T [--all]
   read --boot T --id M-...

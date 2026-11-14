@@ -52,6 +52,7 @@ import {
   issueOwnerConfirmation, consumeOwnerConfirmation, ownerConfirmHint,
 } from './owner-confirm.mjs';
 import { activeProxyFor } from './owner-proxy.mjs';
+import { readDecisionBox as readDecisionBoxFile } from './decision-box.mjs';
 
 const RISK_RANK = { normal: 1, sensitive: 2, critical: 3 };
 const PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -2285,17 +2286,18 @@ export async function cmdSend(args) {
   });
   if (pmDispatch) writeDispatchLock(b.project, msg, { targetSessionId: targetAlive && targetAlive.probe ? targetAlive.probe.sessionId : '' });
   let wake = null;
-  // B-6818（T0）：派单默认唤醒；发往 PM 的消息默认唤醒（完成/回执不再等 PM 轮询）；
-  // 其它角色仍要显式 --wake；--no-wake 一律关闭。都走 wakeWithGuard 做 30 秒去抖与失败留痕。
-  // Owner 09:10：纯回执（type=receipt）不唤醒；完成回执与 task done 通知按 taskId 只叫一次（见 cmdTask done 的 dedupeKey）。
-  const wantWake = !args['no-wake'] && msgType !== 'receipt' && (isDispatch || to === 'pm' || Boolean(args.wake));
+  // B-01d6（R-45c7）：send 默认唤醒——除「纯回执」与显式 --no-wake 外，一律唤醒接收方，
+  // 不再区分是否派单、是否发往 PM（直连队友也走唤醒，不靠对端轮询）。
+  // 仍然：Owner 09:10 纯回执（type=receipt）不唤醒；完成回执与 task done 通知按 taskId 只叫一次（见 cmdTask done 的 dedupeKey）。
+  // 唤醒失败/去抖/重试都走 wakeWithGuard。
+  const wantWake = !args['no-wake'] && msgType !== 'receipt';
   // B-743e：把首行归属随发送结果一起返回，便于自测与排障核对格式。
   const wakeHeader = wantWake && msg ? wakeHeaderFor(msg, to) : '';
   if (wantWake) {
     wake = await wakeWithGuard({
       project: b.project, to, msg, isDispatch,
       engineUrl: String(args['engine-url'] || ''), taskRow,
-      reason: isDispatch ? 'dispatch' : (to === 'pm' ? 'to_pm' : 'wake_flag'),
+      reason: isDispatch ? 'dispatch' : (to === 'pm' ? 'to_pm' : (args.wake ? 'wake_flag' : 'default')),
     });
   }
   // Owner 2026-11-14 08:44：投递成功即自动标已读（沙盘 SELFTEST 也算送达）；投递失败保持未读，重试由 c651 负责。
@@ -5282,6 +5284,65 @@ function boardData(team, selectedName = '') {
       text: r.log || r.note || r.msgId || '回执', target: r.msgId,
     })),
   ].sort((a, b) => String(b.ts).localeCompare(String(a.ts))).slice(0, 120);
+  // R-9db6 F-9db6-1 / F-9db6-5：Owner 决策箱的看板侧只读视图。
+  // 真相仍是 团队/状态/项目/<项目>/决策箱.json；看板只读、不写回执、不改门禁（F-9db6-8）。
+  const decisionBox = (() => {
+    const empty = { project: projectName, file: '', unread: 0, open: 0, answered: 0, archived: 0, total: 0, corrupt: false, error: '', items: [] };
+    if (!projectName) return empty;
+    let read;
+    try {
+      read = readDecisionBoxFile(projectName);
+    } catch (e) {
+      return { ...empty, corrupt: true, error: String((e && e.message) || e).slice(0, 200) };
+    }
+    const rows = (read.box && Array.isArray(read.box.items) ? read.box.items : []).filter((x) => x && x.id);
+    const openRows = rows.filter((x) => String(x.status || 'open') === 'open');
+    // 需求/文件来源在看板窗口里能直接预览：先把绝对路径算好；消息来源在看板窗里没有读取通道。
+    const resolveAbs = (src) => {
+      const ref = String((src && src.ref) || '').trim();
+      const kind = String((src && src.kind) || 'none');
+      if (!ref || !project || !project.path) return '';
+      try {
+        if (kind === 'file') {
+          const abs = path.join(project.path, ref);
+          return exists(abs) ? abs : '';
+        }
+        if (kind === 'requirement') {
+          const reqDir = path.join(project.path, '需求');
+          if (!exists(reqDir)) return '';
+          const hit = fs.readdirSync(reqDir).find((n) => n === ref || n.startsWith(`${ref}-`) || n.startsWith(`${ref}.`));
+          return hit ? path.join(reqDir, hit) : '';
+        }
+      } catch { return ''; }
+      return '';
+    };
+    return {
+      project: projectName,
+      file: String(read.file || ''),
+      corrupt: !!read.corrupt,
+      error: read.corrupt ? String(read.error || '决策箱读不出来').slice(0, 200) : '',
+      unread: openRows.filter((x) => !x.readAt).length,
+      open: openRows.length,
+      answered: rows.filter((x) => String(x.status) === 'answered').length,
+      archived: rows.filter((x) => String(x.status) === 'archived').length,
+      total: rows.length,
+      items: rows.slice(-50).map((x) => {
+        const src = x.source && typeof x.source === 'object' ? x.source : { kind: 'none', ref: '' };
+        return {
+          id: String(x.id || ''),
+          title: String(x.title || ''),
+          summary: String(x.summary || ''),
+          question: String(x.question || ''),
+          status: String(x.status || 'open'),
+          createdAt: String(x.createdAt || ''),
+          readAt: x.readAt || null,
+          answeredAt: x.answeredAt || null,
+          options: Array.isArray(x.options) ? x.options.map(String) : [],
+          source: { kind: String(src.kind || 'none'), ref: String(src.ref || ''), abs: resolveAbs(src) },
+        };
+      }),
+    };
+  })();
   return {
     generatedAt: nowIso(),
     team: { phase: team.phase, owner: team.owner, activeProject: team.activeProject },
@@ -5294,6 +5355,7 @@ function boardData(team, selectedName = '') {
     childTasks: tasks.filter((t) => t.type !== 'requirement'),
     questions: projectName ? askSummary(projectName) : null,
     wakeFailed,
+    decisionBox,
     logs,
   };
 }

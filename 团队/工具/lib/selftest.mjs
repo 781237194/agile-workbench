@@ -1823,6 +1823,26 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     // ③ --no-wake 显式关闭
     const wakeOff = json(['send', '--boot', anaBoot99.token, '--to', 'pm', '--subject', '不唤醒', '--body', 'x', '--no-wake', '--json']);
     if (wakeOff.wake !== null) failStep('--no-wake 未关闭唤醒', JSON.stringify(wakeOff.wake).slice(0, 200));
+    // ③.1 B-01d6（R-45c7）：普通 send 默认唤醒——非 PM 收件人、不带 --wake 也要唤醒；--no-wake 仍静默
+    const wakeAnalyst = json(['send', '--boot', gateDev.token, '--to', 'analyst', '--subject', '默认唤醒-非PM', '--body', '发往队友也应唤醒', '--json']);
+    if (!(wakeAnalyst.wake && wakeAnalyst.wake.to === 'analyst')) failStep('普通 send 未默认唤醒非 PM 收件人', JSON.stringify(wakeAnalyst).slice(0, 300));
+    if (wakeAnalyst.wake.ok !== true || wakeAnalyst.wake.skipped === 'MERGED_PENDING') failStep('普通 send 唤醒未立即生效', JSON.stringify(wakeAnalyst.wake).slice(0, 200));
+    {
+      // 同一发送者连发 3 条：各唤醒各的（45c7 v6 不合并）
+      const threeDirect = [];
+      for (let i = 1; i <= 3; i += 1) {
+        threeDirect.push(json(['send', '--boot', gateDev.token, '--to', 'analyst', '--subject', `直连连发 ${i}`, '--body', 'x', '--type', 'escalation', '--json']));
+      }
+      if (!threeDirect.every((row) => row.wake && row.wake.ok === true && row.wake.skipped !== 'MERGED_PENDING')) {
+        failStep('直连连发 3 条未各自唤醒', JSON.stringify(threeDirect.map((row) => row.wake && row.wake.skipped)).slice(0, 200));
+      }
+      const directLog = read(path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl')).split(/\r?\n/).filter(Boolean)
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean)
+        .filter((row) => row.to === 'analyst' && Array.isArray(row.messageIds) && row.messageIds.some((id) => threeDirect.some((t) => t.message && t.message.id === id)));
+      if (directLog.length < 3) failStep('直连连发 3 条未产生 3 次唤醒留痕', JSON.stringify(directLog.length));
+    }
+    const wakeOffDirect = json(['send', '--boot', gateDev.token, '--to', 'analyst', '--subject', '直连静默', '--body', 'x', '--no-wake', '--json']);
+    if (wakeOffDirect.wake !== null) failStep('--no-wake 未关闭直连唤醒', JSON.stringify(wakeOffDirect.wake).slice(0, 200));
     // ④ task done 自动发完成事件并尝试唤醒 PM
     const wakeTask = json(['task', 'create', '--boot', gatePm2.token, '--title', '唤醒用例任务', '--priority', 'P2', '--owner', 'programmer2', '--json']);
     json(['task', 'claim', '--boot', qDev.token, '--id', wakeTask.task.id, '--json']);
@@ -1834,7 +1854,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     const wakeLogFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl');
     const wakeLog = fs.existsSync(wakeLogFile) ? read(wakeLogFile) : '';
     if (!wakeLog.includes('TEAM_WAKE_TEST_FAIL')) failStep('唤醒失败未写 唤醒.jsonl', wakeLog.slice(0, 300));
-    pass('B-6818（T0）：send→pm 默认唤醒、取消合并（连续 3 条 3 次唤醒）、--no-wake 关闭、task done 完成事件唤醒、失败写 唤醒.jsonl');
+    pass('B-6818（T0）+ B-01d6（R-45c7）：send 默认唤醒（含非 PM 收件人）、取消合并（连续 3 条 3 次唤醒）、--no-wake 关闭、task done 完成事件唤醒、失败写 唤醒.jsonl');
 
     // ===== B-d111（已按 Owner 08:08 改口径）：不再有窗口合并；保留 delivered 去重、失败重试、兜底补发 =====
     const wakeQueueFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒队列.json');
