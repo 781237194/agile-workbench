@@ -276,6 +276,41 @@
     return '';
   }
 
+  /* ── 验收人（R-62b9 F-accby-1/2/3）──────────────────────────────────── */
+
+  /**
+   * 验收人五值枚举（判据=「谁点 + 什么渠道」，只用池加载快照，不读文件）：
+   *   owner        → Owner 本人（by/decidedBy=owner，channel=ui/tty）
+   *   pm_proxy     → PM 代管验收（channel=proxy + recordedBy=pm + basis.proxy 齐）
+   *   pm           → PM 非代管防御态（by=pm 但 channel 不是 proxy）
+   *   pm_incomplete→ 代管验收但缺 basis.proxy（记录不完整，不冒充）
+   *   none         → 未验收（没有验收结论）
+   * pm_signed 只作副标（data-accept-test-gate），**不参与**验收人取值（产品复审 v3 明确语义错位）。
+   */
+  function acceptByOf(row) {
+    const source = row && typeof row === 'object' ? row : {};
+    const record = source.acceptanceRecord && typeof source.acceptanceRecord === 'object' ? source.acceptanceRecord : null;
+    const decisions = Array.isArray(source.decisions) ? source.decisions.filter(Boolean) : [];
+    const last = decisions.length ? decisions[decisions.length - 1] : null;
+    const decided = String((last && (last.status || last.decision)) || '').toLowerCase();
+    const recordStatus = String((record && record.status) || '').toLowerCase();
+    const accepted = recordStatus === 'accepted' || decided === 'accepted';
+    const at = textOf((record && record.at) || (last && last.at) || '');
+    const testGate = textOf((record && record.testGate) || (last && last.testGate) || '');
+    if (!accepted) return { code: 'none', label: '（未验收）', at: '', testGate };
+    const channel = textOf((record && record.channel) || (last && last.channel) || '').toLowerCase();
+    const by = textOf((record && record.by) || (last && (last.decidedBy || last.actor || last.by)) || '').toLowerCase();
+    const recordedBy = textOf((record && record.recordedBy) || (last && last.recordedBy) || '').toLowerCase();
+    const basisProxy = Boolean(((record && record.basis) || (last && last.basis) || {}).proxy);
+    if (channel === 'proxy') {
+      if (recordedBy === 'pm' && basisProxy) return { code: 'pm_proxy', label: 'PM（代管）', at, testGate };
+      return { code: 'pm_incomplete', label: 'PM（代管记录缺依据）', at, testGate };
+    }
+    if (by === 'owner') return { code: 'owner', label: 'Owner（本人）', at, testGate };
+    if (by === 'pm') return { code: 'pm', label: 'PM', at, testGate };
+    return { code: 'none', label: '（未验收）', at, testGate };
+  }
+
   /** 最近决策时间：decisions[]/ownerReview/acceptanceRecord/各时间戳里最大的 ISO 串。 */
   function lastDecisionAt(row) {
     const times = [];
@@ -331,6 +366,7 @@
     row.evidenceItems = parseEvidence(source.evidence, source.acceptanceRecord);
     row.testReport = pickTestReport(source, row.evidenceItems);
     row.lastDecisionAt = lastDecisionAt(source);
+    row.accept = acceptByOf(source);
     row.searchText = [row.id, row.title, row.owner, row.statusLabel]
       .map((item) => String(item || '').toLowerCase())
       .join(' ');
@@ -498,6 +534,8 @@
     const evidenceItems = Array.isArray(source.evidenceItems) ? source.evidenceItems : parseEvidence(source.evidence, source.acceptanceRecord);
     const report = textOf(source.testReport) || pickTestReport(source, evidenceItems);
     const decisionRaw = textOf(source.lastDecisionAt) || lastDecisionAt(source);
+    // R-62b9：三类（需求/缺陷/场景缺陷）共用这一行「验收人」，只读快照、不读文件。
+    const accept = acceptByOf(source);
 
     const detailBody = detail
       ? `<p class="pool-detail-brief">${esc(clipText(detail, 160))}</p>`
@@ -546,6 +584,7 @@
         <div><dt>状态</dt><dd>${esc(statusLabel)}</dd></div>
         <div><dt>负责人</dt><dd>${esc(owner)}</dd></div>
         <div><dt>最近决策</dt><dd data-pool-at="${esc(decisionRaw)}">${esc(formatPoolTime(decisionRaw) || EMPTY_FIELD)}</dd></div>
+        <div><dt>验收人</dt><dd data-accept-by="${esc(accept.code)}" data-accept-at="${esc(accept.at)}"${accept.testGate ? ` data-accept-test-gate="${esc(accept.testGate)}"` : ''}>${esc(accept.label)}${accept.testGate === 'pm_signed' ? ' · 测试结论 PM 代签' : ''}${accept.at ? ' · ' + esc(formatPoolTime(accept.at)) : ''}</dd></div>
       </dl>
       <section class="pool-detail-sec pool-detail-body"><h5>正文 / 摘要</h5>${detailBody}</section>
       ${requirementSection}
@@ -581,6 +620,7 @@
     evidenceKindOf,
     pickTestReport,
     lastDecisionAt,
+    acceptByOf,
     titleOf,
     normalizePoolRow,
     preparePoolRows,
