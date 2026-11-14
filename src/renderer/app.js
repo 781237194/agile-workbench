@@ -10644,7 +10644,7 @@ function flowV4Data() {
     return {
       id: String(r.id || ''), title: String(r.title || ''), pri: String(r.priority || 'P2').toUpperCase(),
       owner: String(r.owner || r.createdBy || ''), status, statusText: '', stage: 0,
-      updatedAt: String(r.updatedAt || ''), round: Number(r.round || wf.round || 1),
+      updatedAt: String(r.updatedAt || ''), closedAt: String(r.closedAt || ''), round: Number(r.round || wf.round || 1),
       closed: FLOW_CLOSED_STATUSES.includes(status),
       iterationRound: iterations, acceptor, blocker, deps, conflicts,
       elapsed: days ? days + ' 天' : ''

@@ -64,8 +64,28 @@
       + '</span></button>';
   }
 
+  /**
+   * T-f9a7（B-1448 实机复验 FAIL ①）：收口时间 = closedAt → updatedAt → 解析不出算 0（排最后）。
+   * 只用于「已收口」区排序；未收口区仍按 app.js 给的 P0→P3 顺序，两区规则不同、写死在这里。
+   */
+  function closedTimeOf(it) {
+    var raw = (it && (it.closedAt || it.updatedAt)) || '';
+    var ms = Date.parse(String(raw));
+    return Number.isFinite(ms) ? ms : 0;
+  }
+
+  /** 已收口区组内排序：收口时间倒序；同一时刻按编号倒序，保证每次渲染稳定（不抖动）。 */
+  function sortClosedItems(list) {
+    return (Array.isArray(list) ? list.slice() : []).sort(function (a, b) {
+      var ta = closedTimeOf(a);
+      var tb = closedTimeOf(b);
+      if (tb !== ta) return tb - ta;
+      return String((b && b.id) || '').localeCompare(String((a && a.id) || ''));
+    });
+  }
+
   /** 已收口区按轮次分组（PM 口径 A）：当前轮在前、往轮在后（轮次从新到旧）；
-   * 组内仍按 app.js 排好的 P0→P3、同级更新时间顺序展示。 */
+   * T-f9a7 起组内改为「收口时间倒序」，不再按 P0→P3。 */
   function closedGroups(shut, curRound) {
     var groups = {};
     var order = [];
@@ -80,7 +100,7 @@
       return b - a;
     });
     return order.map(function (r) {
-      return { round: r, items: groups[r], current: r === Number(curRound || 1) };
+      return { round: r, items: sortClosedItems(groups[r]), current: r === Number(curRound || 1) };
     });
   }
 
@@ -215,5 +235,19 @@
     }
   }
 
-  window.FlowV4 = { render: render, STAGES: STAGES, stageOf: stageOf, statusText: statusText, isClosed: isClosed, CLOSED: CLOSED };
+  var api = {
+    render: render,
+    STAGES: STAGES,
+    stageOf: stageOf,
+    statusText: statusText,
+    isClosed: isClosed,
+    CLOSED: CLOSED,
+    closedTimeOf: closedTimeOf,
+    sortClosedItems: sortClosedItems,
+    closedGroups: closedGroups,
+    renderListHtml: listHtml
+  };
+  if (typeof window !== 'undefined') window.FlowV4 = api;
+  // 纯渲染函数可在 Node 里 require 做断言（scripts/test-flow-closed-sort.cjs）；浏览器不受影响。
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
