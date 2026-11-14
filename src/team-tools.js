@@ -5421,10 +5421,28 @@ function createTeamTools(options = {}) {
   function phaseFromRequirements(state, requirements, tasks = []) {
     const rows = Array.isArray(requirements) ? requirements : [];
     if (!rows.length) return (state && state.phase) || 'idle';
+    // B-2e5 AC3（2026-11-15，PM 授权，只改本函数口径）：阶段只由**本闭环管理的工作流行**决定。
+    // 从项目目录导入的旧需求文档（origin/createdBy=legacy-doc）只作列表展示，不参与阶段推导；
+    // 这也是快照 80 条 vs 磁盘 68 条差额的来源（12 条旧文档被合并成 review 行），必须在注释里说清。
+    const liveRows = rows.filter((row) => {
+      const origin = String((row && row.origin) || '');
+      const createdBy = String((row && row.createdBy) || '');
+      return origin !== 'legacy-doc' && createdBy !== 'legacy-doc';
+    });
+    const basis = liveRows.length ? liveRows : rows;
+    const statusOf = (row) => String((row && row.status) || '');
     // 显式回退/收口事件优先：评审 reject、Owner 打回、终止是设计里的合法回退（产品设计 §二），
     // 不能被同项目其它需求“更靠后”的状态掩盖，否则驳回后界面停在 dispatch，掩盖返工。
-    const statuses = new Set(rows.map((row) => String(row.status || '')));
-    if ((state && state.phase === 'terminated') || statuses.has('terminated')) return 'terminated';
+    const statuses = new Set(basis.map(statusOf));
+    const closedStatuses = ['accepted', 'terminated', 'iteration', 'rejected'];
+    const activeRows = basis.filter((row) => !closedStatuses.includes(statusOf(row)));
+    // 「工作流已终止」只认两件事：①磁盘 工作流.json 的 phase=terminated 且没有活跃需求；
+    // ②全部需求已收口且其中确有 terminated。历史需求里有一条 terminated 不能把整条工作流判成终止
+    // （旧代码 `statuses.has('terminated') → terminated` 就是这样把活跃项目显示成已终止的）。
+    if (state && state.phase === 'terminated' && !activeRows.length) return 'terminated';
+    if (!activeRows.length && basis.length && statuses.has('terminated') && basis.every((row) => ['accepted', 'terminated', 'iteration'].includes(statusOf(row)))) {
+      return 'terminated';
+    }
     if (statuses.has('rejected')) return 'requirement_review';
     let phase = 'idle';
     if (statuses.has('test_done')) phase = 'owner_accept';
@@ -5435,11 +5453,11 @@ function createTeamTools(options = {}) {
     else if (statuses.has('ready')) phase = 'dispatch';
     else if (statuses.has('approved')) phase = 'owner_review';
     else if (statuses.has('review') || statuses.has('rejected')) phase = 'requirement_review';
-    else if (rows.every((row) => ['accepted', 'iteration'].includes(String(row.status)))) phase = 'accepted';
+    else if (basis.every((row) => ['accepted', 'iteration'].includes(statusOf(row)))) phase = 'accepted';
     // 任务证据：需求行状态可能没被角色回写，但任务已全部 done。只升不降。
     const taskRows = Array.isArray(tasks) ? tasks : [];
-    for (const row of rows) {
-      const status = String(row.status || '');
+    for (const row of basis) {
+      const status = statusOf(row);
       if (['accepted', 'terminated', 'iteration', 'rejected'].includes(status)) continue;
       const kids = taskRows.filter((task) => task && String(task.requirementId || '') === String(row.id || '') && task.type !== 'requirement');
       if (!kids.length || kids.some((task) => String(task.status || '') !== 'done')) continue;

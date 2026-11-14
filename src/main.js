@@ -15452,8 +15452,8 @@ async function selftestPanelTruth(win, testRoot) {
     await js(`(async()=>{ await loadLegacyDocs(true); })()`);
     await sleep(700);
     const roleTable = await js(`(()=>{ const box = document.getElementById('legacy-role-table'); return box ? box.textContent : ''; })()`);
-    expect('面板六角色表显示“未 BOOT（本会话未 boot）”，不把旧会话当已 BOOT',
-      /未 BOOT（本会话未 boot）/.test(String(roleTable || '')), String(roleTable || '').slice(0, 300));
+    expect('面板六角色表显示“未 BOOT（本会话未 boot，只作记录）”，不把旧会话当已 BOOT（B-2e5：boot 只作记录）',
+      /未 BOOT（本会话未 boot，只作记录）/.test(String(roleTable || '')), String(roleTable || '').slice(0, 300));
 
     report.presence = { listCount: list.count, truncated: list.truncated, info: infoCheck && infoCheck.state, ironSource: ironCheck && ironCheck.source };
     report.boot = { booted: pmEvidence && pmEvidence.state, expired: expiredEvidence && expiredEvidence.state, stale: staleEvidence && staleEvidence.state };
