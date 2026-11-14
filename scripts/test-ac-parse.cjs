@@ -97,7 +97,17 @@ check('没有 docText 时退回 detail 文本', fromDetail.structured === true &
 const dup = A.parseAcBlocks(['### AC1（第一次）', '- 功能是什么：a', '### AC1（重复）', '- 功能是什么：b'].join('\n'));
 check('AC 编号重复：只取首个并记录 duplicates', dup.acs.length === 1 && dup.acs[0].title === '第一次' && dup.duplicates.includes('AC1'), { acs: dup.acs.length, dup: dup.duplicates });
 
-/* ── 七、弹窗维度统计（F-5550-7）─────────────────────────────────── */
+/* ── 七、看板五要素映射（AC5 / F-5550-4：与弹窗同一解析结果）──────────────── */
+const boardRow = { id: 'R-A', __ac: A.analyzeRequirement({ id: 'R-A', docText: STRUCTURED }) };
+const board = A.boardFieldsOf(boardRow);
+check('看板映射：是什么=功能是什么', board && board.what === '评审弹窗默认列出全部需求', board && board.what);
+check('看板映射：怎么做=功能+目的', board && /^功能：评审弹窗默认列出全部需求；目的：Owner 不用逐条找/.test(board.how), board && board.how);
+check('看板映射：卡在哪=风险（不是状态文案）', board && /首屏加载变慢/.test(board.blocked), board && board.blocked);
+check('看板映射：影响谁=目的', board && board.impact === 'Owner 不用逐条找', board && board.impact);
+check('看板映射：建议拍板=逐项选项+后果', board && /A\. 现在做：本轮就能看到全部需求/.test(board.advice) && /B\. 下轮做：/.test(board.advice), board && board.advice);
+check('看板映射：旧正文返回 null（保持五要素降级）', A.boardFieldsOf({ id: 'R-old' }) === null && A.boardFieldsOf({ id: 'R-old', __ac: { structured: false, acs: [] } }) === null);
+
+/* ── 八、弹窗维度统计（F-5550-7）─────────────────────────────────── */
 const r1 = { id: 'R-A', __ac: A.analyzeRequirement({ id: 'R-A', docText: STRUCTURED }) };
 const r2 = { id: 'R-B', __ac: A.analyzeRequirement({ id: 'R-B', docText: oldDoc }) };
 const stats = A.missingStats([r1, r2]);

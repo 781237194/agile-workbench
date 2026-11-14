@@ -324,6 +324,10 @@
     try {
       const data = await api.ownerReviewData({ projectId: project.id });
       if (data && data.ok) state.data = data;
+      // R-5550 AC5：解析结果在**加载时**统一算好（看板与弹窗共用同一份），渲染处不再各自取数。
+      if (ACP && state.data && Array.isArray(state.data.requirements)) {
+        for (const row of state.data.requirements) row.__ac = ACP.analyzeRequirement(row);
+      }
     } catch { state.data = null; }
     // R-f8e1 B 清单：读 团队/状态/项目/<项目>/需求建议点.json；文件缺失/坏 JSON 只当作“无建议点”，不阻断评审。
     try {
@@ -743,11 +747,13 @@
   function renderAllRow(req) {    const id = String(req.id || '');
     const pending = isPending(req);
     const proxyActive = isProxied(req);
-    const what = clip60(humanizeTitle(req.title), 80);
-    const blocked = clip60(blockedTextOf(req, pending, proxyActive));
+    // R-5550 AC5 / F-5550-4：看板五要素与弹窗同源——同一条需求同一次解析（row.__ac），不再有第二套取数。
+    const acBoard = (ACP && !(typeof window !== 'undefined' && window.__AWB_AC_BOARD_OFF)) ? ACP.boardFieldsOf(req) : null;
+    const what = acBoard ? clip60(acBoard.what, 80) : clip60(humanizeTitle(req.title), 80);
+    const blocked = acBoard ? clip60(acBoard.blocked, 120) : clip60(blockedTextOf(req, pending, proxyActive));
     // B-d1e5：这里以前是三段硬编码（通过/打回、验收通过/打回、先不动），Owner 看到的「清一色」就是它。
     // 现在统一走 adviceTextOf：按这条需求的状态、证据、验收标准、正文取舍点给一句具体动作。
-    const advise = clip60(adviceTextOf(req, pending));
+    const advise = acBoard ? clip60(acBoard.advice, 220) : clip60(adviceTextOf(req, pending));
     const open = state.listOpen.has(id);
     const item = el('div', 'or-all-row');
     item.setAttribute('data-owner-all-item', '1');
@@ -762,6 +768,11 @@
     item.setAttribute('data-what', what);
     item.setAttribute('data-blocked', blocked);
     item.setAttribute('data-advice', advise);
+    if (acBoard) {
+      item.setAttribute('data-ac-id', acBoard.acId);
+      item.setAttribute('data-how', clip60(acBoard.how, 200));
+      item.setAttribute('data-impact', clip60(acBoard.impact, 120));
+    }
     if (String(id) === state.selected) item.classList.add('selected');
     if (proxyActive) item.setAttribute('data-proxied', '1');
     const headRow = el('button', 'or-all-head');
@@ -770,6 +781,11 @@
     headRow.setAttribute('data-what', what);
     headRow.setAttribute('data-blocked', blocked);
     headRow.setAttribute('data-advice', advise);
+    if (acBoard) {
+      headRow.setAttribute('data-ac-id', acBoard.acId);
+      headRow.setAttribute('data-how', clip60(acBoard.how, 200));
+      headRow.setAttribute('data-impact', clip60(acBoard.impact, 120));
+    }
     headRow.innerHTML = `<b>${esc(what)}</b>` + reworkChipHtml(req)
       + `<span class="or-all-k">这是什么</span><span class="or-all-v">${esc(what)}</span>`
       + `<span class="or-all-k">卡在哪</span><span class="or-all-v">${esc(blocked)}</span>`
@@ -1566,11 +1582,13 @@
     rows.forEach((req, index) => {
       const pending = isPending(req);
       const proxyActive = isProxied(req);
-      const what = clip60(humanizeTitle(req.title));
-      const how = clip60(howTextOf(req));
-      const advice = clip60(adviceTextOf(req, pending));
-      const blocked = clip60(blockedTextOf(req, pending, proxyActive));
-      const impact = clip60(impactTextOf(req));
+      // R-5550 AC5：看板与弹窗同一解析结果（row.__ac 在 loadData/renderDialog 里统一算），不再另取一套。
+      const acBoard = (ACP && !(typeof window !== 'undefined' && window.__AWB_AC_BOARD_OFF)) ? ACP.boardFieldsOf(req) : null;
+      const what = acBoard ? clip60(acBoard.what) : clip60(humanizeTitle(req.title));
+      const how = acBoard ? clip60(acBoard.how) : clip60(howTextOf(req));
+      const advice = acBoard ? clip60(acBoard.advice) : clip60(adviceTextOf(req, pending));
+      const blocked = acBoard ? clip60(acBoard.blocked) : clip60(blockedTextOf(req, pending, proxyActive));
+      const impact = acBoard ? clip60(acBoard.impact) : clip60(impactTextOf(req));
       const owner = (req && req.ownerReview) || {};
       const fullText = String((req && (req.detail || req.story || req.acceptance || req.acceptanceCriteria)) || '').trim();
       const item = el('button', 'or-item or-board-item');

@@ -157,7 +157,28 @@
     return { total: items.length, items };
   }
 
-  const api = { parseAcBlocks, validateAcs, analyzeRequirement, missingStats, FIELD_KEYS };
+  /**
+   * R-5550 AC5 / F-5550-4：看板五要素与弹窗**同一解析结果**（禁止两套取数）。
+   * 是什么=功能是什么；怎么做=功能+目的；卡在哪=风险；影响谁=目的；建议拍板=逐项选项+后果。
+   * 旧正文（无结构）返回 null，调用方退回原五要素降级。
+   */
+  function boardFieldsOf(row) {
+    const info = row && row.__ac;
+    if (!info || !info.structured || !Array.isArray(info.acs) || !info.acs.length) return null;
+    const ac = info.acs[0];
+    const options = Array.isArray(ac.options) ? ac.options : [];
+    const advice = options.map((option) => `${option.key}. ${option.label}：${option.consequence || '（正文缺：后果）'}`).join('；');
+    return {
+      acId: ac.id,
+      what: ac.what || '（正文缺：功能是什么）',
+      how: `功能：${ac.what || '（正文缺）'}；目的：${ac.purpose || '（正文缺）'}`,
+      blocked: ac.risk || '（正文缺：风险）',
+      impact: ac.purpose || '（正文缺：目的）',
+      advice: advice || '（正文缺：拍板选项）',
+    };
+  }
+
+  const api = { parseAcBlocks, validateAcs, analyzeRequirement, missingStats, boardFieldsOf, FIELD_KEYS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (globalScope) globalScope.AcParse = api;
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : null));

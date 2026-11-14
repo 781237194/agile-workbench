@@ -10339,6 +10339,53 @@ async function runReviewCheck() {
   report.shots['ac-structure'] = await shot('ac-structure.png');
   check('AC 结构化截图落盘', Boolean(report.shots['ac-structure']), report.shots['ac-structure']);
 
+  // ── R-5550 AC5：看板五要素必须与弹窗同一解析结果（a002 前后对照）──
+  const readBoardA002 = `JSON.stringify((() => {
+    const item = document.querySelector('[data-owner-board-item][data-or-req="R-20261114-100002-a002"]');
+    if (!item) return null;
+    return {
+      what: item.getAttribute('data-what'), how: item.getAttribute('data-how'),
+      blocked: item.getAttribute('data-blocked'), advice: item.getAttribute('data-advice'),
+      impact: item.getAttribute('data-impact')
+    };
+  })())`;
+  // 前：关掉 AC 取数（模拟旧口径）→ 看板应还是旧文案（a002 状态 dev → 「在开发」）
+  await js(`(function(){ window.__AWB_AC_BOARD_OFF = 1; const c = document.querySelector('[data-or-close]'); if (c) c.click(); const e = document.querySelector('[data-owner-review-entry]'); if (e) e.click(); return true; })()`);
+  await sleep(900);
+  const boardBefore = JSON.parse(await js(readBoardA002));
+  report.shots['ac5-before'] = await shot('ac5-board-before.png');
+  // 后：恢复 AC 取数 → 同一行应变成 AC 字段
+  await js(`(function(){
+    window.__AWB_AC_BOARD_OFF = 0;
+    const c = document.querySelector('[data-or-close]'); if (c) c.click();
+    const e = document.querySelector('[data-owner-review-entry]'); if (e) e.click();
+    return true;
+  })()`);
+  await sleep(900);
+  const boardAfter = JSON.parse(await js(readBoardA002));
+  // 截图前把看板那一行滚进可视区（否则只能拍到弹窗顶部/正文，看不到五要素对照）。
+  await js(`(function(){
+    const item = document.querySelector('[data-owner-board-item][data-or-req="R-20261114-100002-a002"]');
+    if (item && item.scrollIntoView) item.scrollIntoView({ block: 'center' });
+    return true;
+  })()`);
+  await sleep(500);
+  report.shots['ac5-after'] = await shot('ac5-board-after.png');
+  report.ac5 = { before: boardBefore, after: boardAfter };
+  check('R-5550-AC5 前对照：旧口径下 a002 卡在哪=「在开发」（不是 AC 风险）',
+    Boolean(boardBefore) && boardBefore.blocked === '在开发', boardBefore);
+  check('R-5550-AC5 后：看板卡在哪改为 AC「风险」原文',
+    Boolean(boardAfter) && /首屏渲染变慢/.test(String(boardAfter.blocked)) && boardAfter.blocked !== '在开发', boardAfter);
+  check('R-5550-AC5 后：是什么/怎么做/影响谁/建议拍板全部映射 AC 字段',
+    Boolean(boardAfter)
+    && /评审弹窗默认列出全部需求/.test(String(boardAfter.what))
+    && /功能：评审弹窗默认列出全部需求.*；目的：Owner 不用逐条翻找/.test(String(boardAfter.how))
+    && /Owner 不用逐条翻找，一屏知道哪些在等他/.test(String(boardAfter.impact))
+    && /A\. 现在就做：本轮 Owner 立刻能看到全部需求/.test(String(boardAfter.advice)),
+    boardAfter);
+  check('R-5550-AC5 前后对照截图各一张落盘',
+    Boolean(report.shots['ac5-before']) && Boolean(report.shots['ac5-after']), { before: Boolean(report.shots['ac5-before']), after: Boolean(report.shots['ac5-after']) });
+
   // 703f AC1：侧栏会话用量展示（数据源 会话用量.json；没有数据时也必须显示「会话用量未知 / 阈值 30 万」）。
   const usageDom = JSON.parse(await js(`(()=>{
     const node = document.querySelector('[data-session-usage]');
