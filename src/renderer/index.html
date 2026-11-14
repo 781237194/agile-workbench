@@ -113,6 +113,8 @@
     <button type="button" role="menuitem" data-more="restore"><span class="mm-ico" aria-hidden="true">♻</span><span class="mm-text">恢复 / 登记已有项目</span></button>
     <div class="more-sep"></div>
     <button type="button" role="menuitem" data-more="guide"><span class="mm-ico" aria-hidden="true">？</span><span class="mm-text">新手引导</span></button>
+    <!-- 2a69 发版：菜单里给一行版本号（state.version 拼；有 commit 短号就带上，不硬编码） -->
+    <div id="more-version-line" class="more-version" data-version="" data-commit="" role="note" title="当前版本">版本 —</div>
     <button type="button" role="menuitem" data-more="version"><span class="mm-ico mm-ico-pm" aria-hidden="true">PM</span><span class="mm-text">关于 PM工作台</span></button>
     <div class="more-sep"></div>
     <button type="button" role="menuitem" data-more="inbox"><span class="mm-ico" aria-hidden="true">✉</span><span class="mm-text">调试：角色收件箱（旧协议，非主界面）</span></button>
@@ -496,17 +498,17 @@
                 </div>
               </section>
 
-              <!-- R-9db6 F-1：Owner 决策箱（只读展示；放入仅 PM，回执走团队工具 decision ack） -->
+              <!-- R-9db6 F-1：Owner 决策箱（团队台抽屉版，保留；主入口见右下角 #decision-box 浮层） -->
               <section id="decision-box-block" class="team-block decision-box-block">
                 <div class="team-block-head">
                   <h3>Owner 决策箱 <span class="muted">/ 决策箱.json</span></h3>
                   <div class="team-head-tools">
-                    <span id="decision-box-unread" class="badge muted-badge" data-unread="0" title="待决且未读条数">待决 0</span>
+                    <span id="decision-box-drawer-unread" class="badge muted-badge" data-unread="0" title="待决且未读条数">待决 0</span>
                     <button id="btn-decision-refresh" class="ghost small" type="button" title="重新读取决策箱（只读）">刷新</button>
                   </div>
                 </div>
                 <p class="team-status-source">PM 放进来「需要你拍板」的事；你逐条看，点【回执 PM】给出选择（只能从 PM 给的选项里选）。回执不等于评审通过/验收，门禁仍走原入口。</p>
-                <div id="decision-box" class="decision-box" data-state="empty" data-unread="0" data-open="0" data-total="0">
+                <div id="decision-box-drawer" class="decision-box" data-state="empty" data-unread="0" data-open="0" data-total="0">
                   <div class="empty-row">还没读取决策箱。</div>
                 </div>
               </section>
@@ -622,6 +624,27 @@
       </main>
     </div>
   </div>
+
+  <!-- Owner 2026-11-14 13:15 定：决策箱主入口 = 主界面右下角【团队看板】按钮正上方的 fixed 浮层；
+       默认收起成小胶囊「决策箱 N」，点开展开列表；团队台抽屉保留作次入口。 -->
+  <section id="decision-box" class="decision-float" data-unread="0" data-open="0" data-total="0" data-state="collapsed" aria-label="Owner 决策箱">
+    <button id="decision-box-pill" class="decision-pill" type="button" aria-expanded="false" title="需要你拍板的事（点开逐条回执）">
+      <span class="decision-pill-ico" aria-hidden="true">◆</span>
+      <span class="decision-pill-text">决策箱</span>
+      <b id="decision-box-count" class="decision-pill-count" data-unread="0">0</b>
+    </button>
+    <div id="decision-box-panel" class="decision-panel" hidden>
+      <header class="decision-panel-head">
+        <b>Owner 决策箱</b>
+        <span id="decision-box-unread" class="badge muted-badge" data-unread="0">待决 0</span>
+        <button id="decision-box-close" class="decision-close" type="button" title="收起">×</button>
+      </header>
+      <div id="decision-box-list" class="decision-panel-body">
+        <div class="empty-row">还没读取决策箱。</div>
+      </div>
+      <!-- Owner 2026-11-14 13:55：不要批量勾选（一条一条点），底部批量条已移除；每条自己的红字提示在条目内。 -->
+    </div>
+  </section>
 
   <button id="board-launcher" class="flow-launcher board-launcher" type="button" title="团队看板浮窗（可打开/刷新/折叠/切看板项目）" aria-expanded="false">
     <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.6" width="11.6" height="10.8" rx="1.4"/><path d="M6.2 2.6v10.8M2.2 6.4h11.6"/></svg>

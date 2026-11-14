@@ -422,6 +422,9 @@ button:focus-visible, [tabindex]:focus-visible {
 .mm-text { flex: 1; min-width: 0; }
 .more-label { padding: 5px 9px 3px; color: var(--dim); font-size: 8px; font-weight: 700; letter-spacing: 1.4px; }
 .more-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+/* 2a69 发版：菜单里的版本行（只读，不抢菜单项焦点） */
+.more-version { padding: 3px 9px 4px; color: var(--muted); font-size: 8.5px; line-height: 1.5; user-select: none; }
+.more-version[data-commit=""] { opacity: .8; }
 
 /* ── 主壳：左侧工作区 + 右侧 DSH 主画面 ─────── */
 #app { height: calc(100vh - var(--titlebar-h)); display: flex; flex-direction: column; min-height: 0; }
@@ -1836,6 +1839,32 @@ html[data-theme="light"] .modal-mask { background: rgba(40, 32, 22, .46); }
 .flow-tool:hover { color: var(--gold); border-color: var(--gold-line); background: var(--gold-soft); }
 .board-launcher { bottom: 56px; }
 .board-launcher svg { stroke-width: 1.25; }
+/* T-d2ee / Owner 2026-11-14 13:15 定：决策箱主入口是主界面右下角【团队看板】按钮正上方的 fixed 浮层。
+   右侧与 #board-launcher 对齐（right:16px）；「底部在其上方 60–70px」按同一基准（视口底）算：
+   按钮 bottom:56 → 浮层 bottom:120（= 56 + 64），即浮层底边在按钮底边上方 64px、在按钮上沿上方 32px。
+   默认收起，只显示胶囊「决策箱 N」；点开展开列表（面板向上长，不挡按钮）。 */
+.decision-float { position: fixed; right: 16px; bottom: 120px; z-index: 9400; display: flex; flex-direction: column-reverse; align-items: flex-end; gap: 6px; }
+.decision-pill { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid var(--gold-line); border-radius: 999px; background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 96%, white 4%), var(--panel)); color: var(--gold-2); font: inherit; font-size: 10.5px; cursor: pointer; box-shadow: 0 8px 22px rgba(0, 0, 0, .34); }
+.decision-pill:hover { border-color: var(--gold); background: var(--gold-soft); }
+.decision-pill-ico { font-size: 9px; color: var(--gold); }
+.decision-pill-count { display: inline-block; min-width: 16px; padding: 0 5px; border-radius: 999px; background: var(--red); color: #241311; font-size: 9.5px; line-height: 15px; text-align: center; }
+.decision-pill-count.zero { background: var(--line-strong); color: var(--muted); }
+.decision-panel { width: min(360px, 42vw); max-height: min(56vh, 460px); display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); box-shadow: 0 14px 40px rgba(0, 0, 0, .42); overflow: hidden; }
+.decision-panel[hidden] { display: none; }
+.decision-panel-head { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+.decision-panel-head b { flex: 1; font-size: 10.5px; }
+.decision-close { border: 0; background: transparent; color: var(--muted); font-size: 14px; line-height: 1; cursor: pointer; padding: 0 2px; }
+.decision-panel-body { flex: 1; min-height: 0; overflow: auto; padding: 2px 0; }
+.decision-choices { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.decision-opt { border: 1px solid var(--line-strong); background: transparent; color: var(--text); border-radius: 5px; padding: 1px 8px; font: inherit; font-size: 9.5px; cursor: pointer; }
+.decision-opt:hover { background: var(--gold-soft); }
+.decision-opt.selected { background: var(--gold-soft); border-color: var(--gold); color: var(--gold-2); font-weight: 700; }
+.decision-opt.selected::before { content: "✓ "; }
+.decision-reply { display: flex; gap: 5px; margin-top: 5px; align-items: center; }
+.decision-opinion { flex: 1; min-width: 0; height: 22px; border: 1px solid var(--line-strong); border-radius: 5px; background: transparent; color: var(--text); font: inherit; font-size: 10px; padding: 0 6px; }
+.decision-decided { color: var(--gold-2); }
+.decision-error { margin-top: 3px; color: var(--red); font-size: 9.5px; line-height: 1.5; }
+.decision-error[hidden] { display: none; }
 
 .ghost.danger { border-color: rgba(225, 139, 123, .35); color: var(--red); }
 .ghost.danger:hover { border-color: var(--red); background: rgba(225, 139, 123, .08); }
@@ -2609,6 +2638,26 @@ html[data-theme="light"] .modal-mask { background: rgba(40, 32, 22, .46); }
 .legacy-req-noaction { color: var(--dim); font-size: 8px; line-height: 1.5; }
 .legacy-req-autoboot { padding: 0 4px; border: 1px dashed var(--gold-line); border-radius: 4px; color: var(--gold); font-size: 7.5px; line-height: 15px; white-space: nowrap; }
 .legacy-form-note { margin: 0 0 8px; padding: 6px 7px; border: 1px dashed var(--line-strong); border-radius: 5px; color: var(--muted); font-size: 8.5px; line-height: 1.6; }
+/* c72e：新建需求前的三轮「拷问」面板（弹窗内分步，不新开页面） */
+.legacy-grill { margin: 0 0 10px; padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: rgba(0, 0, 0, .16); }
+.legacy-grill-intro { margin: 0 0 8px; color: var(--muted); font-size: 8.5px; line-height: 1.6; }
+.legacy-grill-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.legacy-grill-head b { font-size: 10px; }
+.legacy-grill-step { color: var(--muted); font-size: 8.5px; }
+.legacy-grill-opt { display: flex; align-items: flex-start; gap: 6px; padding: 5px 6px; border: 1px solid var(--line); border-radius: 5px; margin-bottom: 4px; cursor: pointer; font-size: 9px; line-height: 1.5; }
+.legacy-grill-opt:hover { border-color: var(--line-strong); background: rgba(255, 255, 255, .03); }
+.legacy-grill-opt.recommended { border-color: var(--line-strong); }
+.legacy-grill-opt input { margin-top: 2px; }
+.legacy-grill-tag { margin-left: 6px; padding: 0 5px; border-radius: 999px; font-size: 8px; background: var(--gold-line); color: var(--gold); }
+.legacy-grill-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.legacy-grill-bar .primary { margin-left: auto; }
+.legacy-grill-summary { border: 1px dashed var(--line-strong); border-radius: 6px; padding: 7px 9px; background: rgba(255, 255, 255, .02); }
+.legacy-grill-summary-title { margin: 0 0 5px; font-weight: 700; font-size: 9px; }
+.legacy-grill-summary ol { margin: 0; padding-left: 16px; font-size: 9px; line-height: 1.7; }
+.legacy-grill-summary-hint { margin: 6px 0 0; color: var(--muted); font-size: 8.5px; }
+.legacy-grill-done { margin: 0; font-size: 9px; color: var(--green); line-height: 1.6; }
+/* 未答完时只降低需求字段区不透明度，不往字段标签里塞字（塞字会把长提示挤到标签上） */
+#legacy-owner-fields[data-locked="1"] { opacity: .55; }
 .legacy-advance-buttons { display: inline-flex; gap: 4px; }
 
 

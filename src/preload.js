@@ -58,6 +58,21 @@ if (IS_BOARD_WINDOW) {
     teamRouteStatus: (payload) => ipcRenderer.invoke('team:route-status', payload),
     // R-9db6 F-1：Owner 决策箱（只读：未读计数 + 逐条列表）。
     teamDecisionBox: (payload) => ipcRenderer.invoke('team:decision-box', payload),
+    // B-a1cf：评审代管.json 变化推送（标题栏「PM 代管中 N 条」实时刷新）。
+    onProxyChanged: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      const handler = (_event, payload) => { try { cb(payload || {}); } catch { /* 回调自身异常忽略 */ } };
+      ipcRenderer.on('owner:proxy-changed', handler);
+      return () => { try { ipcRenderer.off('owner:proxy-changed', handler); } catch { /* ignore */ } };
+    },
+    // B-e731：决策箱文件变化推送（主进程 fs.watch 决策箱.json，tmp+rename 也认）。
+    // 返回取消订阅函数；回调失败不影响主进程。
+    onDecisionBoxChanged: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      const handler = (_event, payload) => { try { cb(payload || {}); } catch { /* 回调自身异常忽略 */ } };
+      ipcRenderer.on('team:decision-box-changed', handler);
+      return () => { try { ipcRenderer.off('team:decision-box-changed', handler); } catch { /* ignore */ } };
+    },
     // R-9db6 AC4（T-20261114-130838-5dfc）：决策箱「回执 PM」——单条或批量，落账 + 发 PM 并唤醒 PM。
     ownerDecisionAck: (payload) => ipcRenderer.invoke('owner:decision-ack', payload),
     teamMarkRead: (payload) => ipcRenderer.invoke('team:mark-read', payload),

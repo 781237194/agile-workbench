@@ -22,6 +22,10 @@ function clip(v, n) { return truncate(String(v || ''), n); }
 function titleAttr(v) { return esc(String(v || '')); }
 function owner(v) { return v ? role(v) : '—'; }
 function sid(v) { return v ? '当前工作区' : '—'; }
+// T-d2ee / R-9db6 F-9db6-3：条目没给 options 时的回执候选（与需求默认枚举一致）。
+function dboxDefaultChoices() { return ['通过', '打回', '其他']; }
+// 看板窗回执通道名（与程序员B 的后端 IPC 约定；只改这一处即可切换）。
+const DECISION_RECEIPT_BRIDGE = 'decisionReceipt';
 // PM 代管标识（T-a01d / R-1cee）：需求行状态列后面追加【PM通过】/【PM打回】/【待 PM 评审】。
 function proxyTag(row) { return row && row.ownerProxyLabel ? ' ' + row.ownerProxyLabel : ''; }
 
@@ -136,6 +140,54 @@ export function renderBoardHtml(d) {
     ['members', d.members.length, '名成员'],
     ['logs', d.logs.length, '条成员日志'],
   ].map(([view, n, label]) => `<button class="summary-btn" data-view="${view}"><b>${esc(n)}</b><span>${esc(label)}</span></button>`).join('');
+  // R-9db6 F-9db6-1 / F-9db6-5：右下角 Owner 决策箱（只读）。未读 = status=open 且没有 readAt 的条数。
+  const db = (d.decisionBox && typeof d.decisionBox === 'object') ? d.decisionBox : {};
+  const dbItems = Array.isArray(db.items) ? db.items.filter((x) => x && x.id) : [];
+  const dbOpenRows = dbItems.filter((x) => String(x.status || 'open') === 'open');
+  const dbOtherRows = dbItems.filter((x) => String(x.status || 'open') !== 'open');
+  const dbUnread = Number(db.unread || 0) || 0;
+  const dbState = db.corrupt ? 'degraded' : (dbOpenRows.length ? 'ready' : 'empty');
+  const dbRowHtml = (x, done) => {
+    const st = String(x.status || 'open');
+    const srcRef = String((x.source && x.source.ref) || '');
+    const srcKind = String((x.source && x.source.kind) || 'none');
+    const srcAbs = String((x.source && x.source.abs) || '');
+    const src = srcRef
+      ? `<button type="button" class="dbox-src" data-source-open="${esc(srcRef)}" data-source-kind="${esc(srcKind)}" data-source-abs="${esc(srcAbs)}">看来源</button>`
+      : '<span class="muted">未记来源</span>';
+    const badge = done
+      ? `<span class="dbox-badge" data-unread="0">${esc(st === 'archived' ? '已归档' : '已回执')}</span>`
+      : `<span class="dbox-badge" data-unread="${x.readAt ? '0' : '1'}">${x.readAt ? '已读' : '未读'}</span>`;
+    // AC4（T-d2ee）：待决条目给候选按钮 + 意见框 + 单条【回执 PM】；已回执条目只展示结果，不再可点。
+    const choices = (Array.isArray(x.options) && x.options.length ? x.options : dboxDefaultChoices())
+      .map((o) => `<button type="button" class="dbox-opt" data-decision-opt="${esc(o)}">${esc(o)}</button>`).join('');
+    const decided = x.decision && x.decision.choice
+      ? `<div class="dbox-line dbox-decided">已回执：${esc(x.decision.choice)}${x.decision.opinion ? ' ｜ 意见：' + esc(x.decision.opinion) : ''}${x.decision.at ? ' ｜ ' + esc(time(x.decision.at)) : ''}</div>`
+      : '';
+    const answerBlock = done ? decided : `<div class="dbox-choices" data-decision-choices>${choices}</div>
+      <div class="dbox-reply">
+        <input class="dbox-opinion" data-decision-opinion maxlength="200" placeholder="意见（≤200 字；选“打回”必填）">
+        <button type="button" class="dbox-submit" data-decision-submit disabled>回执 PM</button>
+      </div>`;
+    const pick = done ? '' : `<label class="dbox-pick" title="勾选后可批量回执"><input type="checkbox" data-decision-pick>批量</label>`;
+    return `<div class="dbox-item" data-decision-id="${esc(x.id)}" data-status="${esc(st)}">
+      <div class="dbox-item-head">${pick}<b>${esc(x.title || x.id)}</b><code>${esc(x.id)}</code>${badge}</div>
+      <div class="dbox-line">${esc(x.summary || '（没写摘要）')}</div>
+      <div class="dbox-line q">要决定什么：${esc(x.question || '（没写待决事项）')}</div>
+      ${answerBlock}
+      <div class="dbox-actions">${src}<span class="muted">放入于 ${esc(time(x.createdAt) || '未记')}</span></div>
+      <div class="dbox-error" data-decision-error hidden></div>
+    </div>`;
+  };
+  const dbBody = db.corrupt
+    ? `<div class="dbox-empty" data-open-error="DECISION_BOX_CORRUPT">决策箱文件读不出来：${esc(db.error || '格式损坏')}（原文件保留，见团队台告警）</div>`
+    : (dbOpenRows.length
+      ? dbOpenRows.map((x) => dbRowHtml(x, false)).join('')
+        + (dbOtherRows.length ? `<div class="dbox-empty">— 已回执 ${dbOtherRows.length} 条（灰显，不再出现在待决列表） —</div>` + dbOtherRows.map((x) => dbRowHtml(x, true)).join('') : '')
+      : '<div class="dbox-empty">暂无待决事项</div>');
+  // Owner 2026-11-14 13:15 定：决策箱**不做在团队看板页**，主入口改到主界面右下角【团队看板】按钮正上方的浮层。
+  // 这里不再渲染（数据仍随 看板.json 带出，供壳层浮层与测试复用）；board 侧取数/渲染代码暂留，清理另立单。
+  const dbHtml = '';
   const json = JSON.stringify(d).replace(/</g, '\\u003c');
 
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>团队看板 · ${esc(d.project?.name || '')}</title>
@@ -190,6 +242,57 @@ html[data-theme="light"] .tag.ok{background:rgba(31,122,92,.10);color:#16624a;bo
 html[data-theme="light"] .tag.bad{background:rgba(179,64,47,.10);color:#8f2318;border-color:rgba(179,64,47,.28)}
 html[data-theme="light"] .file-link:hover{color:#1d1812}
 html[data-theme="light"] .drawer-mask{background:rgba(40,32,22,.40)}
+/* R-9db6 F-9db6-1：Owner 决策箱固定在看板右下角，不挤占正文版面；未读数与空态见 #decision-box[data-unread]。 */
+#decision-box{position:fixed;right:14px;bottom:14px;z-index:900;width:min(360px,44vw);max-height:min(52vh,420px);display:flex;flex-direction:column;background:linear-gradient(180deg,rgba(30,31,39,.98),rgba(16,17,22,.99));border:1px solid var(--line2);border-radius:13px;box-shadow:0 14px 40px rgba(0,0,0,.5);overflow:hidden;font-size:12px}
+.decision-box-head{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line);background:rgba(220,181,111,.07)}
+.decision-box-head h2{margin:0;font-size:13px;color:var(--strong);flex:1}
+.dbox-badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:10.5px;font-weight:700;background:rgba(220,181,111,.16);color:var(--gold2);border:1px solid rgba(220,181,111,.3);white-space:nowrap}
+.dbox-badge[data-unread="0"]{background:rgba(255,248,235,.06);color:var(--muted);border-color:var(--line)}
+.decision-box-body{flex:1 1 auto;min-height:0;overflow:auto}
+.dbox-empty{padding:16px 14px;color:var(--muted2);text-align:center}
+.dbox-item{padding:9px 12px;border-bottom:1px solid rgba(232,211,177,.08)}
+.dbox-item:last-child{border-bottom:0}
+.dbox-item[data-status="answered"],.dbox-item[data-status="archived"]{opacity:.55}
+.dbox-item-head{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.dbox-item-head b{color:var(--strong);font-size:12.5px}
+.dbox-item-head code{color:var(--gold);font-size:10.5px}
+.dbox-line{color:var(--muted);margin-top:3px;line-height:1.55}
+.dbox-line.q{color:var(--text)}
+.dbox-actions{display:flex;align-items:center;gap:8px;margin-top:5px;flex-wrap:wrap}
+.dbox-src{border:1px solid var(--line2);background:transparent;color:var(--gold2);border-radius:6px;padding:1px 7px;font-size:10.5px;cursor:pointer}
+.dbox-src:hover{background:rgba(220,181,111,.14)}
+#source-viewer{margin:6px 12px 10px;border:1px solid var(--line);border-radius:8px;padding:8px;max-height:200px;overflow:auto}
+#source-viewer[hidden]{display:none}
+#source-viewer pre{margin:6px 0 0;max-height:150px;overflow:auto;white-space:pre-wrap;word-break:break-word;font:11px/1.6 Consolas,"Microsoft YaHei",monospace;background:rgba(0,0,0,.2);border-radius:6px;padding:8px}
+.dbox-open-error{color:var(--bad);margin-top:4px;font-size:11px}
+/* T-d2ee / R-9db6 AC4：回执 PM 的候选按钮、意见框、批量条 */
+.dbox-choices{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.dbox-opt{border:1px solid var(--line2);background:transparent;color:var(--text);border-radius:6px;padding:2px 9px;font-size:10.5px;cursor:pointer}
+.dbox-opt:hover{background:rgba(220,181,111,.12)}
+.dbox-opt.selected{background:rgba(220,181,111,.26);border-color:var(--gold);color:var(--strong);font-weight:700}
+.dbox-opt.selected::before{content:"✓ ";color:var(--gold2)}
+.dbox-reply{display:flex;gap:6px;margin-top:6px;align-items:center}
+.dbox-opinion{flex:1;min-width:0;height:24px;border:1px solid var(--line2);border-radius:6px;background:transparent;color:var(--text);font:11px/1.4 inherit;padding:0 7px}
+.dbox-submit{border:1px solid var(--line2);background:rgba(220,181,111,.16);color:var(--gold2);border-radius:6px;padding:2px 10px;font-size:10.5px;cursor:pointer;white-space:nowrap}
+.dbox-submit:disabled{opacity:.45;cursor:not-allowed}
+.dbox-pick{display:inline-flex;align-items:center;gap:3px;color:var(--muted);font-size:10px;margin-right:4px;cursor:pointer}
+.dbox-decided{color:var(--gold2)}
+.dbox-error{margin-top:4px;color:var(--bad);font-size:10.5px;line-height:1.5}
+.dbox-error[hidden]{display:none}
+.dbox-item[data-status="answered"] .dbox-choices,.dbox-item[data-status="archived"] .dbox-choices{display:none}
+.decision-batch{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:7px 12px;border-top:1px solid var(--line);background:rgba(220,181,111,.08);font-size:10.5px;color:var(--text)}
+.decision-batch[hidden]{display:none}
+.decision-error{padding:7px 12px;border-top:1px solid var(--line);color:var(--bad);font-size:10.5px;line-height:1.55}
+.decision-error[hidden]{display:none}
+html[data-theme="light"] .dbox-opt.selected{background:rgba(142,99,40,.20);border-color:#8e6328;color:#4a3208}
+html[data-theme="light"] .dbox-opt.selected::before{color:#7a4f16}
+html[data-theme="light"] .decision-batch{background:rgba(142,99,40,.10)}
+html[data-theme="light"] #decision-box{background:linear-gradient(180deg,#fffaf1,#fbf4e8);box-shadow:0 14px 40px rgba(90,72,48,.22)}
+html[data-theme="light"] .decision-box-head{background:rgba(142,99,40,.08)}
+html[data-theme="light"] .dbox-src{color:#7a4f16}
+html[data-theme="light"] .dbox-badge{color:#7a4f16;border-color:rgba(142,99,40,.35);background:rgba(142,99,40,.10)}
+html[data-theme="light"] #source-viewer pre{background:rgba(90,72,48,.06)}
+@media(max-width:720px){#decision-box{width:calc(100vw - 24px);max-height:46vh}}
 </style></head><body>
 <script>
 (() => {
@@ -233,6 +336,7 @@ html[data-theme="light"] .drawer-mask{background:rgba(40,32,22,.40)}
 <section><div class="section-head"><h2>八、成员日志（一句话）</h2><span>每次提交/回执由成员写一句；点击查看全部</span></div>${rowsHtml(['时间', '成员', '动作', '日志'], (d.logs || []).slice(0, 60).map((l) => `<tr><td class="muted">${esc(time(l.ts))}</td><td>${esc(role(l.actor))}</td><td>${esc(l.kind)}</td><td title="${titleAttr(l.text)}">${esc(clip(l.text, 120))}</td></tr>`), '暂无日志')}</section>
 <footer>数据源：团队\\状态\\看板.json ｜ 重新生成：node 团队\\工具\\team.mjs board ｜ 看板 v2</footer>
 </div>
+${dbHtml}
 <div id="drawer-mask" class="drawer-mask"><div class="drawer" role="dialog" aria-modal="true"><div class="drawer-head"><h3 id="drawer-title">明细</h3><button class="drawer-close" id="drawer-close" title="关闭">×</button></div><div class="drawer-body" id="drawer-body"></div></div></div>
 <script id="team-data" type="application/json">${json}</script>
 <script>
@@ -298,6 +402,193 @@ html[data-theme="light"] .drawer-mask{background:rgba(40,32,22,.40)}
   });
   for (const b of document.querySelectorAll('[data-win]:not([data-win="collapse"])')) b.addEventListener('click', () => {
     const a = b.dataset.win; if (window.boardWin) window.boardWin.control(a); else if (a === 'close') window.close();
+  });
+  // R-9db6 F-9db6-5：决策箱「看来源」——打开到 #source-viewer，打不开时必须留 data-open-error，不许静默。
+  function openSourceError(viewer, ref, code, why) {
+    viewer.dataset.openError = code;
+    viewer.innerHTML = '<div class="dbox-line">来源：' + E(ref) + '</div>'
+      + '<div class="dbox-open-error" data-open-error="' + E(code) + '">' + E(why || '打不开') + '</div>';
+  }
+  document.addEventListener('click', async (e) => {
+    const b = e.target && e.target.closest ? e.target.closest('[data-source-open]') : null;
+    const viewer = document.getElementById('source-viewer');
+    if (!b || !viewer) return;
+    e.preventDefault(); e.stopPropagation();
+    const ref = b.getAttribute('data-source-open') || '';
+    const kind = b.getAttribute('data-source-kind') || 'none';
+    const abs = b.getAttribute('data-source-abs') || '';
+    viewer.hidden = false;
+    viewer.dataset.viewerKind = kind;
+    viewer.dataset.viewerRef = ref;
+    delete viewer.dataset.openError;
+    viewer.innerHTML = '<div class="dbox-line">来源（' + E(kind) + '）：' + E(ref || '未记录') + '</div><div class="dbox-line">读取中…</div>';
+    if (!ref) return openSourceError(viewer, ref, 'SOURCE_EMPTY', '这条没有记来源');
+    if (kind === 'message') return openSourceError(viewer, ref, 'BOARD_NO_MESSAGE_CHANNEL', '看板窗口读不到消息正文；请回工作台团队台按这条消息 id 查看：' + ref);
+    if (!abs) return openSourceError(viewer, ref, 'SOURCE_NOT_FOUND', '来源文件不存在，或不在本项目目录内：' + ref);
+    if (!window.boardWin || !window.boardWin.openFile) return openSourceError(viewer, ref, 'BOARD_BRIDGE_MISSING', '当前窗口不支持预览：' + abs);
+    const r = await window.boardWin.openFile(abs);
+    if (!r || !r.ok) return openSourceError(viewer, ref, String((r && r.code) || 'OPEN_FAILED'), String((r && r.why) || '读不了') + '：' + abs);
+    if (r.kind === 'image') { viewer.innerHTML = '<div class="dbox-line">来源（' + E(kind) + '）：' + E(ref) + '</div><img style="max-width:100%;border-radius:8px" src="' + r.dataUrl + '">'; return; }
+    viewer.innerHTML = '<div class="dbox-line">来源（' + E(kind) + '）：' + E(ref) + '</div><pre>' + E(r.text || '') + '</pre>';
+  });
+  // ===== T-d2ee / R-9db6 AC4：决策箱「回执 PM」（单条 + 勾选批量）=====
+  // 后端通道名由生成时注入；与后端 IPC 约定 receipt{messageId,at,choice,opinion}。
+  const DB = { bridge: '${esc(DECISION_RECEIPT_BRIDGE)}' };
+  const dboxBox = () => document.getElementById('decision-box');
+  const dboxItemOf = (el) => (el && el.closest ? el.closest('.dbox-item') : null);
+  const dboxOpenItems = () => Array.from(document.querySelectorAll('#decision-box .dbox-item[data-status="open"]'));
+  function dboxSetError(el, text) {
+    if (!el) return;
+    el.textContent = text || '';
+    if (text) el.removeAttribute('hidden'); else el.setAttribute('hidden', '');
+  }
+  function dboxGlobalError(text) {
+    const box = document.getElementById('decision-error');
+    if (!box) return;
+    box.textContent = text || '';
+    if (text) box.removeAttribute('hidden'); else box.setAttribute('hidden', '');
+  }
+  function dboxPayload(item) {
+    const id = item.getAttribute('data-decision-id') || '';
+    const chip = item.querySelector('.dbox-opt.selected');
+    const opinionEl = item.querySelector('[data-decision-opinion]');
+    return { id, choice: chip ? chip.getAttribute('data-decision-opt') : '', opinion: opinionEl ? String(opinionEl.value || '').trim() : '' };
+  }
+  function dboxWhy(p) {
+    if (!p.choice) return '先点一个候选（通过 / 打回 / 其他）';
+    if (p.choice.indexOf('打回') >= 0 && !p.opinion) return '选「打回」必须写一句意见';
+    if (p.opinion.length > 200) return '意见最多 200 字';
+    return '';
+  }
+  async function dboxSend(p) {
+    const bridge = window.boardWin || {};
+    const fn = bridge[DB.bridge];
+    if (typeof fn !== 'function') {
+      return { ok: false, code: 'BOARD_RECEIPT_BRIDGE_MISSING', message: '看板窗口还没接上后端回执通道（等后端 IPC 上线），这条没有提交，仍是待决' };
+    }
+    try {
+      const out = await fn({ id: p.id, receipt: { messageId: null, at: new Date().toISOString(), choice: p.choice, opinion: p.opinion } });
+      if (!out || out.ok === false) {
+        return { ok: false, code: (out && out.code) || 'RECEIPT_FAILED', message: (out && (out.message || out.why)) || '后端没有确认这次回执' };
+      }
+      return { ok: true, messageId: (out && out.messageId) || '' };
+    } catch (e) {
+      return { ok: false, code: 'BOARD_RECEIPT_FAILED', message: String((e && e.message) || e) };
+    }
+  }
+  function dboxDecUnread() {
+    const box = dboxBox();
+    if (!box) return;
+    const n = Math.max(0, Number(box.getAttribute('data-unread') || 0) - 1);
+    box.setAttribute('data-unread', String(n));
+    box.setAttribute('data-open', String(dboxOpenItems().length));
+    const badge = document.getElementById('decision-box-unread');
+    if (badge) { badge.setAttribute('data-unread', String(n)); badge.textContent = '待决 ' + n; }
+  }
+  function dboxMarkAnswered(item, p, out) {
+    item.setAttribute('data-status', 'answered');
+    const badge = item.querySelector('.dbox-badge');
+    if (badge) { badge.setAttribute('data-unread', '0'); badge.textContent = '已回执'; }
+    const choices = item.querySelector('[data-decision-choices]');
+    const reply = item.querySelector('.dbox-reply');
+    const pick = item.querySelector('.dbox-pick');
+    const cb = item.querySelector('[data-decision-pick]');
+    if (cb) cb.checked = false;
+    if (choices) choices.remove();
+    if (reply) reply.remove();
+    if (pick) pick.remove();
+    const line = document.createElement('div');
+    line.className = 'dbox-line dbox-decided';
+    line.setAttribute('data-decision-result', p.id);
+    line.textContent = '已回执：' + p.choice + (p.opinion ? ' ｜ 意见：' + p.opinion : '') + (out && out.messageId ? ' ｜ 回执消息 ' + out.messageId : '');
+    item.appendChild(line);
+    dboxSetError(item.querySelector('[data-decision-error]'), '');
+    dboxDecUnread();
+  }
+  function dboxUpdateBatch() {
+    const bar = document.getElementById('decision-batch');
+    const cnt = document.getElementById('decision-batch-count');
+    const btn = document.getElementById('decision-batch-submit');
+    if (!bar || !cnt || !btn) return;
+    const picks = Array.from(document.querySelectorAll('#decision-box [data-decision-pick]:checked'));
+    bar.setAttribute('data-count', String(picks.length));
+    cnt.textContent = String(picks.length);
+    cnt.setAttribute('data-batch-count', String(picks.length));
+    btn.textContent = '回执 PM（' + picks.length + ' 条）';
+    btn.disabled = picks.length === 0;
+    if (picks.length) bar.removeAttribute('hidden'); else bar.setAttribute('hidden', '');
+  }
+  async function dboxSubmitOne(item) {
+    const errEl = item.querySelector('[data-decision-error]');
+    const p = dboxPayload(item);
+    const why = dboxWhy(p);
+    if (why) { dboxSetError(errEl, why); return false; }
+    const btn = item.querySelector('[data-decision-submit]');
+    if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+    const out = await dboxSend(p);
+    if (!out.ok) {
+      if (btn) { btn.disabled = false; btn.textContent = '回执 PM'; }
+      dboxSetError(errEl, '没提交成功：' + (out.message || out.code) + '（' + out.code + '）');
+      return false;
+    }
+    dboxMarkAnswered(item, p, out);
+    dboxUpdateBatch();
+    return true;
+  }
+  async function dboxSubmitBatch() {
+    const picks = Array.from(document.querySelectorAll('#decision-box [data-decision-pick]:checked'));
+    if (!picks.length) { dboxGlobalError('先在条目上勾选要一起回执的条数'); return; }
+    let okCount = 0;
+    const failed = [];
+    for (const cb of picks) {
+      const item = dboxItemOf(cb);
+      if (!item) continue;
+      const p = dboxPayload(item);
+      const why = dboxWhy(p);
+      if (why) { dboxSetError(item.querySelector('[data-decision-error]'), why); failed.push(p.id + '：' + why); continue; }
+      const out = await dboxSend(p);
+      if (!out.ok) {
+        dboxSetError(item.querySelector('[data-decision-error]'), '没提交成功：' + (out.message || out.code));
+        failed.push(p.id + '：' + (out.message || out.code));
+        continue;
+      }
+      dboxMarkAnswered(item, p, out);
+      okCount += 1;
+    }
+    dboxUpdateBatch();
+    dboxGlobalError(failed.length
+      ? ('批量回执：成功 ' + okCount + ' 条，失败 ' + failed.length + ' 条 —— ' + failed.join('；'))
+      : '');
+  }
+  document.addEventListener('click', async (e) => {
+    const target = e.target;
+    if (!target || !target.closest) return;
+    const opt = target.closest('.dbox-opt');
+    if (opt) {
+      const item = dboxItemOf(opt);
+      const group = item ? item.querySelector('[data-decision-choices]') : null;
+      if (group) group.querySelectorAll('.dbox-opt').forEach((b) => b.classList.remove('selected'));
+      opt.classList.add('selected');
+      const submit = item ? item.querySelector('[data-decision-submit]') : null;
+      if (submit) submit.disabled = false;
+      dboxSetError(item ? item.querySelector('[data-decision-error]') : null, '');
+      return;
+    }
+    const one = target.closest('[data-decision-submit]');
+    if (one) {
+      e.preventDefault(); e.stopPropagation();
+      const item = dboxItemOf(one);
+      if (item) await dboxSubmitOne(item);
+      return;
+    }
+    const batch = target.closest('[data-decision-batch]');
+    if (batch) {
+      e.preventDefault(); e.stopPropagation();
+      await dboxSubmitBatch();
+    }
+  });
+  document.addEventListener('change', (e) => {
+    if (e.target && e.target.matches && e.target.matches('[data-decision-pick]')) dboxUpdateBatch();
   });
 })();
 </script>

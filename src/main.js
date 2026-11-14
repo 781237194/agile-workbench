@@ -4718,13 +4718,58 @@ function registerIpc() {
       return { ok: false, code: 'ROUTE_STATUS_FAILED', message: String((e && e.message) || e).slice(0, 300) };
     }
   });
+  // B-e731（P0）：决策箱自动刷新——主进程 fs.watch 决策箱.json（团队工具用 tmp+rename 落盘，
+  // 所以要 watch 目录而不是文件），防抖 250ms 后向所有窗口广播 team:decision-box-changed。
+  // 当前项目变了就换 watch 目录；每 5 秒自检一次（项目切换/目录后建都能跟上）。
+  let decisionWatchDir = '';
+  let decisionWatch = null;
+  let decisionWatchTimer = null;
+  const decisionBoxFileOf = (name) => path.join(teamTools._paths().projectsDir, teamTools.teamSlug(name), '决策箱.json');
+  const decisionBoxFileActive = () => {
+    try {
+      const store = readStore();
+      const active = store.projects.find((p) => p.id === store.activeProjectId) || null;
+      const name = String((active && (active.teamName || active.name)) || '');
+      return name ? decisionBoxFileOf(name) : '';
+    } catch { return ''; }
+  };
+  const notifyDecisionBoxChanged = (reason) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      try { win.webContents.send('team:decision-box-changed', { reason: String(reason || 'watch'), at: new Date().toISOString() }); } catch { /* 窗口在销毁中 */ }
+    }
+  };
+  const ensureDecisionBoxWatch = () => {
+    const file = decisionBoxFileActive();
+    if (!file) return;
+    const dir = path.dirname(file);
+    if (decisionWatch && decisionWatchDir === dir) return;
+    if (decisionWatch) { try { decisionWatch.close(); } catch { /* ignore */ } decisionWatch = null; }
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      decisionWatch = fs.watch(dir, (_event, filename) => {
+        const changed = String(filename || '');
+        if (changed && !changed.startsWith('决策箱.json')) return;
+        clearTimeout(decisionWatchTimer);
+        decisionWatchTimer = setTimeout(() => notifyDecisionBoxChanged('watch'), 250);
+      });
+      decisionWatch.on('error', () => { try { decisionWatch.close(); } catch { /* ignore */ } decisionWatch = null; decisionWatchDir = ''; });
+      decisionWatchDir = dir;
+    } catch (error) {
+      console.warn('DECISION_WATCH_FAIL ' + JSON.stringify({ dir, detail: String((error && error.message) || error).slice(0, 200) }));
+    }
+  };
+  try {
+    ensureDecisionBoxWatch();
+    const watchTimer = setInterval(ensureDecisionBoxWatch, 5000);
+    if (watchTimer && typeof watchTimer.unref === 'function') watchTimer.unref();
+  } catch { /* ignore */ }
   // R-9db6 F-1：Owner 决策箱（只读）。数据真相是 团队/状态/项目/<项目>/决策箱.json，
   // 壳层只读不写；放入由 PM 走团队工具，回执等团队工具侧命令就绪后再接 IPC。
   ipcMain.handle('team:decision-box', async (_e, payload) => {
     try {
       const { name } = teamProjectNameOf(payload || {});
       if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
-      const file = path.join(teamTools._paths().projectsDir, teamTools.teamSlug(name), '决策箱.json');
+      const file = decisionBoxFileOf(name);
       const base = { ok: true, project: name, file, unread: 0, total: 0, open: 0, answered: 0, archived: 0, items: [], degraded: false, message: '' };
       if (!fs.existsSync(file)) {
         return { ...base, code: 'DECISION_BOX_EMPTY', message: '暂无待决事项' };
@@ -4737,7 +4782,10 @@ function registerIpc() {
         console.warn('DECISION_BOX_BROKEN ' + JSON.stringify({ project: name, file, detail }));
         return { ...base, code: 'DECISION_BOX_BROKEN', degraded: true, detail, message: '决策箱读不出来（已按空箱显示，原文见日志）' };
       }
-      const items = Array.isArray(raw && raw.items) ? raw.items.filter((item) => item && item.id) : [];
+      // 口径：只过滤展示，不删数据、不改存储（PM 2026-11-14 14:51 小修）。
+      // items 里 status=archived 的不再回给界面；archived 计数仍按原始条目算，便于对账。
+      const allItems = Array.isArray(raw && raw.items) ? raw.items.filter((item) => item && item.id) : [];
+      const items = allItems.filter((item) => String(item.status || 'open') !== 'archived');
       const openItems = items.filter((item) => String(item.status || 'open') === 'open');
       const unread = openItems.filter((item) => !item.readAt).length;
       const rows = items.map((item) => ({
@@ -4765,7 +4813,7 @@ function registerIpc() {
         open: openItems.length,
         unread,
         answered: rows.filter((row) => row.status === 'answered').length,
-        archived: rows.filter((row) => row.status === 'archived').length,
+        archived: allItems.filter((item) => String(item.status || '') === 'archived').length,
         items: rows,
         message: openItems.length ? '' : '暂无待决事项',
       };
@@ -6030,6 +6078,42 @@ function registerIpc() {
     const dir = teamProjectStateDir(project);
     return dir ? path.join(dir, '评审代管.json') : '';
   };
+  // B-a1cf（P0）：标题栏「PM 代管中 N 条」要跟着 评审代管.json 变——文件一改就推事件，
+  // 界面收到立刻重算，不再等 5 秒轮询（窗口隐藏时浏览器会把定时器降到 1 分钟，看着就像“不更新”）。
+  let proxyWatch = null;
+  let proxyWatchDir = '';
+  let proxyWatchTimer = null;
+  const notifyProxyChanged = () => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      try { win.webContents.send('owner:proxy-changed', { at: new Date().toISOString() }); } catch { /* 窗口销毁中 */ }
+    }
+  };
+  const ensureProxyWatch = () => {
+    const active = readStore().projects.find((p) => p.id === readStore().activeProjectId) || null;
+    const file = active ? ownerProxyFile(active) : '';
+    const dir = file ? path.dirname(file) : '';
+    if (!dir) return;
+    if (proxyWatch && proxyWatchDir === dir) return;
+    if (proxyWatch) { try { proxyWatch.close(); } catch { /* ignore */ } proxyWatch = null; }
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      proxyWatch = fs.watch(dir, (_event, filename) => {
+        const changed = String(filename || '');
+        if (changed && !changed.startsWith('评审代管.json')) return;
+        clearTimeout(proxyWatchTimer);
+        proxyWatchTimer = setTimeout(notifyProxyChanged, 300);
+      });
+      proxyWatch.on('error', () => { try { proxyWatch.close(); } catch { /* ignore */ } proxyWatch = null; proxyWatchDir = ''; });
+      proxyWatchDir = dir;
+    } catch (error) {
+      console.warn('PROXY_WATCH_FAIL ' + JSON.stringify({ dir, detail: String((error && error.message) || error).slice(0, 160) }));
+    }
+  };
+  try {
+    ensureProxyWatch();
+    const t = setInterval(ensureProxyWatch, 5000);
+    if (t && typeof t.unref === 'function') t.unref();
+  } catch { /* ignore */ }
   const readOwnerProxy = (project) => {
     const file = ownerProxyFile(project);
     if (!file || !fs.existsSync(file)) return { records: [] };

@@ -1839,7 +1839,22 @@ function render() {
     liveUi.notInWorkspace = [];
   }
   const versionEl = $('#version');
-  if (versionEl) versionEl.textContent = 'v' + state.version;
+  if (versionEl) {
+    // 顶栏口径（Owner 2026-11-14 定）：只显示主.次 = v1.0；完整版本留在 data-full-version 与 tooltip，
+    // 菜单里那行仍显示完整 1.0.0 · <commit 短号>。
+    versionEl.textContent = 'v' + shortAppVersion(state.version);
+    versionEl.dataset.fullVersion = String(state.version || '');
+    versionEl.title = `应用版本 v${state.version || '—'}（顶栏按主.次显示）`;
+  }
+  // 2a69 发版：菜单里那行版本号（state.version + state.commit 短号；没有 commit 就只显示版本）。
+  const versionLine = $('#more-version-line');
+  if (versionLine) {
+    const commit = String(state.commit || '').trim();
+    versionLine.textContent = `版本 ${state.version || '—'}${commit ? ' · ' + commit : ''}`;
+    versionLine.dataset.version = String(state.version || '');
+    versionLine.dataset.commit = commit;
+    versionLine.title = commit ? `当前版本 ${state.version}（commit ${commit}）` : `当前版本 ${state.version}`;
+  }
   renderSidebar();
   renderSessions();
   renderHeader();
@@ -2554,36 +2569,149 @@ async function loadRoleQueue(opts = {}) {
   return roleQueueUi;
 }
 
-// R-9db6 F-1：Owner 决策箱（只读列表）。放入只有 PM 能做（团队工具 decision add），
-// 回执走团队工具 decision ack；界面这边先把「待决 / 已回执 / 空 / 损坏」四态与未读计数显示清楚。
+// R-9db6 F-1 / T-d2ee：Owner 决策箱。主入口是主界面右下角 #decision-box 浮层（Owner 2026-11-14 13:15 定），
+// 团队台抽屉（#decision-box-drawer）保留作次入口。放入只有 PM 能做（团队工具 decision add），
+// Owner 在这里逐条/批量回执（走壳层 team:decision-receipt；通道没接上时只提示、不提交）。
+const DECISION_FLOAT_STATE = { data: null, expanded: false };
+
+// 摘要裁剪：app.js 里原先没有 clip60（8a9a 抽屉版引用它 → 读箱一直报 "clip60 is not defined"），这里补上。
+function clip60(text, n = 60) {
+  const s = String(text || '');
+  return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
 async function loadDecisionBox() {
-  const box = $('#decision-box');
-  if (!box) return null;
+  const drawer = $('#decision-box-drawer');
+  const float = $('#decision-box');
+  if (!drawer && !float) return null;
   const p = activeProject();
   if (!p) {
-    box.dataset.state = 'empty';
-    box.innerHTML = '<div class="empty-row">先选择工作区，再看决策箱。</div>';
+    DECISION_FLOAT_STATE.data = null;
+    if (float) renderDecisionPill({ unread: 0, open: 0, total: 0, degraded: false });
+    if (drawer) {
+      drawer.dataset.state = 'empty';
+      drawer.innerHTML = '<div class="empty-row">先选择工作区，再看决策箱。</div>';
+    }
     return null;
   }
   if (!(window.workbench && typeof window.workbench.teamDecisionBox === 'function')) {
-    box.dataset.state = 'error';
-    box.innerHTML = '<div class="empty-row">当前壳层没有 team:decision-box 接口，决策箱不可用。</div>';
+    if (drawer) {
+      drawer.dataset.state = 'error';
+      drawer.innerHTML = '<div class="empty-row">当前壳层没有 team:decision-box 接口，决策箱不可用。</div>';
+    }
+    if (float) renderDecisionPill({ degraded: true, message: '当前壳层没有 team:decision-box 接口' });
     return null;
   }
   try {
     const result = await window.workbench.teamDecisionBox({ projectId: p.id });
     renderDecisionBox(result || {});
+    renderDecisionFloat(result || {});
     return result;
   } catch (error) {
-    box.dataset.state = 'error';
-    box.innerHTML = `<div class="empty-row">决策箱读取失败：${esc(humanError(String((error && error.message) || error)))}</div>`;
+    const why = humanError(String((error && error.message) || error));
+    if (drawer) {
+      drawer.dataset.state = 'error';
+      drawer.innerHTML = `<div class="empty-row">决策箱读取失败：${esc(why)}</div>`;
+    }
+    if (float) renderDecisionPill({ degraded: true, message: '决策箱读取失败：' + why });
     return null;
   }
 }
 
-function renderDecisionBox(data) {
+/** 收起态胶囊：只显示「决策箱 N」。 */
+function renderDecisionPill(data) {
   const box = $('#decision-box');
-  const unread = $('#decision-box-unread');
+  const count = $('#decision-box-count');
+  if (!box) return;
+  const unread = Math.max(0, Number(data.unread || 0));
+  box.dataset.unread = String(unread);
+  box.dataset.open = String(data.open || 0);
+  box.dataset.total = String(data.total || 0);
+  box.dataset.degraded = data.degraded ? '1' : '0';
+  if (count) {
+    count.textContent = String(unread);
+    count.setAttribute('data-unread', String(unread));
+    count.className = 'decision-pill-count' + (unread ? '' : ' zero');
+  }
+  const pill = $('#decision-box-pill');
+  if (pill) {
+    pill.title = data.degraded
+      ? (data.message || '决策箱读不出来')
+      : `需要你拍板 ${data.open || 0} 条（未读 ${unread} 条），点开逐条回执`;
+  }
+}
+
+function decisionChoicesOf(item) {
+  const opts = Array.isArray(item.options) ? item.options.filter(Boolean) : [];
+  return opts.length ? opts : ['通过', '打回', '其他'];
+}
+
+function decisionRowMarkup(item) {
+  const st = String(item.status || 'open');
+  const isOpen = st === 'open';
+  const badge = isOpen
+    ? `<span class="badge ${item.readAt ? 'muted-badge' : 'badge-pending'}">${item.readAt ? '已读' : '未读'}</span>`
+    : '<span class="badge muted-badge">已回执</span>';
+  // B-5d4f：原来这里是个死了的「看来源」按钮（只渲染 data-source-open，没有 click 绑定）——
+  // Owner 说没必要用，直接把按钮删掉；source 数据字段保留，改成一行只读文字。
+  const src = item.source && item.source.ref
+    ? `<span class="muted" data-decision-source="${esc(item.source.ref)}" data-decision-source-kind="${esc(item.source.kind || 'none')}">来源：${esc(item.source.ref)}</span>`
+    : '<span class="muted">未记来源</span>';
+  const reply = isOpen
+    ? `<div class="decision-choices" data-decision-choices>${decisionChoicesOf(item).map((o) => `<button type="button" class="decision-opt" data-decision-opt="${esc(o)}">${esc(o)}</button>`).join('')}</div>
+       <div class="decision-reply">
+         <input class="decision-opinion" data-decision-opinion maxlength="500" placeholder="意见（≤500 字；选“打回”必填）">
+         <button type="button" class="ghost small" data-decision-submit disabled>回执 PM</button>
+       </div>`
+    : (item.decision && item.decision.choice
+      ? `<div class="decision-line decision-decided">已回执：${esc(item.decision.choice)}${item.decision.opinion ? ' ｜ 意见：' + esc(item.decision.opinion) : ''}</div>`
+      : '');
+  // Owner 2026-11-14 13:55：不要批量勾选，一条一条点（勾选框与底部【回执 PM（N 条）】已整体移除）。
+  return `<div class="decision-row${isOpen ? '' : ' done'}" data-decision-id="${esc(item.id)}" data-status="${esc(st)}">
+    <div class="decision-head"><b>${esc(item.title || item.id)}</b><code>${esc(item.id)}</code>${badge}</div>
+    <div class="decision-line">${esc(clip60(item.summary || '', 60))}</div>
+    <div class="decision-line muted">要决定什么：${esc(item.question || '未写')}</div>
+    ${reply}
+    <div class="decision-actions">${src}<span class="muted">放入于 ${esc(fmtTime(item.createdAt) || '未记')}</span></div>
+    <div class="decision-error" data-decision-error hidden></div>
+  </div>`;
+}
+
+/** 展开态列表（浮层）：与团队台抽屉共用同一份数据，回执控件只在这里给。 */
+function renderDecisionFloat(data) {
+  DECISION_FLOAT_STATE.data = data || null;
+  renderDecisionPill(data || {});
+  const list = $('#decision-box-list');
+  const unreadEl = $('#decision-box-unread');
+  const box = $('#decision-box');
+  if (!list) return;
+  const items = Array.isArray(data.items) ? data.items : [];
+  const openCount = items.filter((item) => String(item.status || 'open') === 'open').length;
+  const unreadCount = Math.max(0, Number(data.unread || 0));
+  if (unreadEl) {
+    unreadEl.textContent = `待决 ${unreadCount}`;
+    unreadEl.setAttribute('data-unread', String(unreadCount));
+    unreadEl.className = 'badge ' + (unreadCount ? 'badge-pending' : 'muted-badge');
+  }
+  if (box) {
+    box.dataset.unread = String(unreadCount);
+    box.dataset.open = String(openCount);
+    box.dataset.total = String(items.length);
+  }
+  if (data.degraded) {
+    list.innerHTML = `<div class="empty-row">${esc(data.message || '决策箱读不出来（已按空箱显示）')}</div>`;
+    return;
+  }
+  if (!items.length) {
+    list.innerHTML = '<div class="empty-row">暂无待决事项</div>';
+    return;
+  }
+  list.innerHTML = items.map((item) => decisionRowMarkup(item)).join('');
+}
+
+function renderDecisionBox(data) {
+  const box = $('#decision-box-drawer');
+  const unread = $('#decision-box-drawer-unread');
   if (!box) return;
   const items = Array.isArray(data.items) ? data.items : [];
   const openItems = items.filter((item) => String(item.status || 'open') === 'open');
@@ -2612,7 +2740,7 @@ function renderDecisionBox(data) {
     const isOpen = String(item.status || 'open') === 'open';
     const badge = isOpen ? '<span class="badge badge-pending">待决</span>' : '<span class="badge muted-badge">已回执</span>';
     const src = item.source && item.source.ref
-      ? `<button type="button" class="ghost small" data-source-open="${esc(item.source.ref)}" data-source-kind="${esc(item.source.kind || 'none')}">看来源</button>`
+      ? `<span class="muted" data-decision-source="${esc(item.source.ref)}" data-decision-source-kind="${esc(item.source.kind || 'none')}">来源：${esc(item.source.ref)}</span>`
       : '<span class="muted">未记来源</span>';
     return `<div class="decision-row${isOpen ? '' : ' done'}" data-decision-id="${esc(item.id)}" data-status="${esc(String(item.status || 'open'))}">
       <div class="decision-head"><b>${esc(item.title || item.id)}</b><code>${esc(item.id)}</code>${badge}</div>
@@ -2621,6 +2749,219 @@ function renderDecisionBox(data) {
       <div class="decision-actions">${src}<span class="muted">放入于 ${esc(fmtTime(item.createdAt) || '未记')}</span></div>
     </div>`;
   }).join('');
+}
+
+/** 收起/展开浮层（默认收起，只显示胶囊）。 */
+function setDecisionExpanded(on) {
+  const box = $('#decision-box');
+  const panel = $('#decision-box-panel');
+  const pill = $('#decision-box-pill');
+  if (!box || !panel) return;
+  DECISION_FLOAT_STATE.expanded = Boolean(on);
+  panel.hidden = !on;
+  box.dataset.state = on ? 'expanded' : 'collapsed';
+  if (pill) pill.setAttribute('aria-expanded', on ? 'true' : 'false');
+}
+
+function decisionSetError(row, text) {
+  const el = row ? row.querySelector('[data-decision-error]') : null;
+  if (!el) return;
+  el.textContent = text || '';
+  el.hidden = !text;
+}
+
+function decisionPayloadOf(row) {
+  const chip = row.querySelector('.decision-opt.selected');
+  const opinionEl = row.querySelector('[data-decision-opinion]');
+  return {
+    id: row.getAttribute('data-decision-id') || '',
+    choice: chip ? chip.getAttribute('data-decision-opt') : '',
+    opinion: opinionEl ? String(opinionEl.value || '').trim() : ''
+  };
+}
+
+function decisionWhyOf(p) {
+  if (!p.choice) return '先点一个候选（通过 / 打回 / 其他）';
+  if (p.choice.includes('打回') && !p.opinion) return '选「打回」必须写一句意见';
+  if (p.opinion.length > 500) return '意见最多 500 字';
+  return '';
+}
+
+/**
+ * 回执出口：后端 IPC `owner:decision-ack`（程序员B 契约 v2）。
+ * preload 实际暴露在 window.workbench.ownerDecisionAck（B 文档写 window.team，这里两个位置都兼容）。
+ * 入参 {items:[{id,choice,opinion}]}；单条也走 items 一条，批量一次请求只发一次。
+ */
+async function decisionAckSend(items) {
+  const wb = window.workbench || {};
+  const teamNs = window.team || {};
+  const fn = (typeof wb.ownerDecisionAck === 'function')
+    ? wb.ownerDecisionAck
+    : (typeof teamNs.ownerDecisionAck === 'function' ? teamNs.ownerDecisionAck : null);
+  if (!fn) {
+    return { ok: false, code: 'RECEIPT_BRIDGE_MISSING', message: '壳层还没接上回执通道（owner:decision-ack），这条没有提交，仍是待决' };
+  }
+  // P0（M-20261114-135253）：主进程用 teamProjectNameOf(payload) 解析项目，必须带 projectId/project，
+  // 否则一律 NO_PROJECT（列表能读是因为 loadDecisionBox 传了 projectId）。
+  const project = activeProject();
+  if (!project || !project.id) {
+    return { ok: false, code: 'NO_PROJECT', message: '还没有选择工作区，回执没有提交（仍是待决）' };
+  }
+  try {
+    const out = await fn({ projectId: project.id, project: project.name, items });
+    if (!out || out.ok === false) {
+      return { ok: false, code: (out && out.code) || 'DECISION_ACK_FAILED', message: (out && out.message) || '后端没有确认这次回执' };
+    }
+    return out;
+  } catch (error) {
+    return { ok: false, code: 'DECISION_ACK_FAILED', message: String((error && error.message) || error) };
+  }
+}
+
+/** 用后端返回的 counts 刷新未读/待决（权威值，不在前端自己猜）。 */
+function decisionApplyCounts(counts) {
+  if (!counts || typeof counts !== 'object') return;
+  const box = $('#decision-box');
+  const unread = Math.max(0, Number(counts.unread || 0));
+  const open = Math.max(0, Number(counts.open || 0));
+  if (box) {
+    box.dataset.unread = String(unread);
+    box.dataset.open = String(open);
+  }
+  const pillCount = $('#decision-box-count');
+  if (pillCount) {
+    pillCount.textContent = String(unread);
+    pillCount.setAttribute('data-unread', String(unread));
+    pillCount.className = 'decision-pill-count' + (unread ? '' : ' zero');
+  }
+  const unreadEl = $('#decision-box-unread');
+  if (unreadEl) {
+    unreadEl.textContent = `待决 ${unread}`;
+    unreadEl.setAttribute('data-unread', String(unread));
+    unreadEl.className = 'badge ' + (unread ? 'badge-pending' : 'muted-badge');
+  }
+  const drawerCount = $('#decision-box-drawer-unread');
+  if (drawerCount) { drawerCount.textContent = `待决 ${unread}`; drawerCount.setAttribute('data-unread', String(unread)); }
+  const drawer = $('#decision-box-drawer');
+  if (drawer) { drawer.dataset.unread = String(unread); drawer.dataset.open = String(open); }
+}
+
+/** 一条回执落账后的行内更新（状态与消息 id 都取后端 results[]）。 */
+function decisionApplyResult(row, p, result) {
+  row.dataset.status = String((result && result.status) || 'answered');
+  const badge = row.querySelector('.badge');
+  if (badge) { badge.textContent = '已回执'; badge.className = 'badge muted-badge'; }
+  row.querySelector('[data-decision-choices]')?.remove();
+  row.querySelector('.decision-reply')?.remove();
+  const line = document.createElement('div');
+  line.className = 'decision-line decision-decided';
+  line.setAttribute('data-decision-result', p.id);
+  const msgId = result && result.messageId;
+  line.textContent = '已回执：' + p.choice + (p.opinion ? ' ｜ 意见：' + p.opinion : '') + (msgId ? ' ｜ 回执消息 ' + msgId : '');
+  row.appendChild(line);
+  decisionSetError(row, '');
+}
+
+function decisionRowById(id) {
+  return document.querySelector(`#decision-box-list .decision-row[data-decision-id="${String(id).replace(/"/g, '\\"')}"]`);
+}
+
+async function decisionSubmitOne(row) {
+  const p = decisionPayloadOf(row);
+  const why = decisionWhyOf(p);
+  if (why) { decisionSetError(row, why); return false; }
+  const btn = row.querySelector('[data-decision-submit]');
+  if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+  const out = await decisionAckSend([{ id: p.id, choice: p.choice, opinion: p.opinion }]);
+  if (!out.ok) {
+    if (btn) { btn.disabled = false; btn.textContent = '回执 PM'; }
+    decisionSetError(row, `没提交成功：${out.message || out.code}（${out.code}）`);
+    return false;
+  }
+  const result = (Array.isArray(out.results) ? out.results : []).find((r) => r && r.id === p.id) || null;
+  decisionApplyResult(row, p, result);
+  decisionApplyCounts(out.counts);
+  return true;
+}
+
+/** 浮层交互（只绑一次）：胶囊开关、候选选择、单条回执。
+ *  Owner 2026-11-14 13:55：去掉批量勾选，一条一条点。 */
+function bindDecisionFloat() {
+  const box = $('#decision-box');
+  if (!box || box.dataset.bound === '1') return;
+  box.dataset.bound = '1';
+  $('#decision-box-pill')?.addEventListener('click', () => setDecisionExpanded(!DECISION_FLOAT_STATE.expanded));
+  $('#decision-box-close')?.addEventListener('click', () => setDecisionExpanded(false));
+  box.addEventListener('click', async (event) => {
+    const target = event.target;
+    if (!target || !target.closest) return;
+    const opt = target.closest('.decision-opt');
+    if (opt) {
+      const row = opt.closest('.decision-row');
+      const group = row ? row.querySelector('[data-decision-choices]') : null;
+      if (group) group.querySelectorAll('.decision-opt').forEach((b) => b.classList.remove('selected'));
+      opt.classList.add('selected');
+      const submit = row ? row.querySelector('[data-decision-submit]') : null;
+      if (submit) submit.disabled = false;
+      decisionSetError(row, '');
+      return;
+    }
+    const one = target.closest('[data-decision-submit]');
+    if (one) {
+      event.preventDefault(); event.stopPropagation();
+      const row = one.closest('.decision-row');
+      if (row) await decisionSubmitOne(row);
+    }
+  });
+  setDecisionExpanded(false);
+}
+
+// B-e731（P0）：决策箱自动刷新。主进程 fs.watch 决策箱.json → 推送 team:decision-box-changed；
+// 界面收到就重取；另加 15 秒可见时低频轮询兜底（窗口隐藏降到 60 秒），手动【刷新】保留。
+const DECISION_REFRESH = { bound: false, timer: null, polls: 0, refreshes: 0, source: '', lastAt: 0 };
+
+function decisionRefresh(reason) {
+  DECISION_REFRESH.refreshes += 1;
+  DECISION_REFRESH.source = String(reason || '');
+  DECISION_REFRESH.lastAt = Date.now();
+  const box = $('#decision-box');
+  if (box) {
+    box.dataset.refreshCount = String(DECISION_REFRESH.refreshes);
+    box.dataset.refreshSource = DECISION_REFRESH.source;
+    box.dataset.refreshAt = new Date().toISOString();
+  }
+  return loadDecisionBox();
+}
+
+function bindDecisionAutoRefresh() {
+  if (DECISION_REFRESH.bound) return;
+  DECISION_REFRESH.bound = true;
+  const boxEl = $('#decision-box');
+  if (boxEl) boxEl.dataset.autoRefreshBound = '1';
+  DECISION_REFRESH.watch = typeof ((window.workbench || {}).onDecisionBoxChanged) === 'function';
+  if (boxEl) boxEl.dataset.autoRefreshWatch = DECISION_REFRESH.watch ? '1' : '0';
+  const wb = window.workbench || {};
+  if (typeof wb.onDecisionBoxChanged === 'function') {
+    wb.onDecisionBoxChanged((payload) => {
+      decisionRefresh('watch:' + String((payload && payload.reason) || ''));
+    });
+  }
+  const schedule = () => {
+    const hidden = document.visibilityState === 'hidden';
+    const every = hidden ? 60000 : 15000;
+    const boxEl2 = $('#decision-box');
+    if (boxEl2) boxEl2.dataset.pollInterval = String(every);
+    if (DECISION_REFRESH.timer) clearTimeout(DECISION_REFRESH.timer);
+    DECISION_REFRESH.timer = setTimeout(() => {
+      DECISION_REFRESH.polls += 1;
+      const box = $('#decision-box');
+      if (box) box.dataset.pollCount = String(DECISION_REFRESH.polls);
+      decisionRefresh('poll');
+      schedule();
+    }, every);
+  };
+  document.addEventListener('visibilitychange', schedule);
+  schedule();
 }
 
 function renderTeam() {
@@ -7230,11 +7571,344 @@ function legacyField(label, control, hint = '') {
   return `<label class="field"><span><b>${esc(label)}</b>${hint ? `<span class="field-note">${esc(hint)}</span>` : ''}</span>${control}</label>`;
 }
 
+// 顶栏版本口径（Owner 2026-11-14 定）：只显示主.次 = v1.0；取不到两段就原样返回，保证不显示空。
+function shortAppVersion(version) {
+  const m = String(version || '').match(/^(\d+)\.(\d+)/);
+  return m ? `${m[1]}.${m[2]}` : String(version || '').trim();
+}
+
 function legacyRoleOptions(ids, selected) {
   return ids.map((id) => {
     const boot = legacyBootFor(id);
     return `<option value="${esc(id)}" ${id === selected ? 'selected' : ''}>${esc(roleById(id).name)}（${esc(boot.label)}）</option>`;
   }).join('');
+}
+
+// ==========================================================================
+// T-20261114-093822-c72e：Owner 向 PM 提交需求前的三轮「拷问」（Owner 2026-11-14 09:38、13:1x 校正）。
+// 适用范围只到「Owner 给 PM 确认需求」这一步（owner:demand / requirement:owner-create）；
+// 后续仍以需求正文 + 产品评审为主，产品/分析师自己建需求（requirement-create）不走拷问。
+// 文案与选项全部集中在 NEW_REQ_GRILL 这一个常量里（i18n 口径）：改字只改这里。
+// 规则：三轮可在弹窗内分步完成；每轮可选项 / 自填 / 跳过；跳过一律按推荐并在正文标注
+// 「按推荐默认」；三轮后生成不超过 15 行的摘要让用户确认；确认后才解锁建单字段并允许提交。
+// ==========================================================================
+const NEW_REQ_GRILL = {
+  title: '先问三轮，再交给 PM',
+  intro: '答完三轮会生成一份摘要，你确认后才真正提交；中途跳过的一律按推荐项写进正文，并标注「按推荐默认」。后续仍按需求正文 + 产品评审推进。',
+  stepTemplate: '第 {n} 轮 / 共 {total} 轮',
+  // 作用范围：只有 Owner → PM 提需求的两条入口；产品/分析师建需求不经过这里。
+  actions: ['owner-demand', 'owner-create'],
+  fieldId: 'legacy-a-grill',
+  fieldsWrapId: 'legacy-owner-fields',
+  bodyFieldId: 'legacy-a-description',
+  rounds: [
+    {
+      id: 'scope',
+      short: '范围',
+      title: '第 1 轮 · 范围',
+      hint: '这次到底做多大？',
+      options: [
+        { value: 'min', label: '只做这一件事（最小范围）', recommended: true },
+        { value: 'plus', label: '顺带把相关的小改动一起做' },
+        { value: 'preview', label: '先出一版能看的，细节后面迭代' },
+        { value: 'research', label: '先补调研/方案对比，再决定做不做' },
+        { value: 'reuse', label: '能复用现成的就不重写' },
+      ],
+    },
+    {
+      id: 'accept',
+      short: '验收',
+      title: '第 2 轮 · 验收（谁验 / 算过 / 要什么证据）',
+      hint: '谁点头才算过？要留什么证据？',
+      options: [
+        { value: 'tester', label: '测试人员独立验 + 测试报告与截图', recommended: true },
+        { value: 'owner', label: '我自己看一遍就算过（人工验收）' },
+        { value: 'product', label: '产品 / 分析师按验收标准抽查' },
+        { value: 'auto', label: '自动化断言（脚本自检）通过才算' },
+        { value: 'later', label: '先跑通就行，证据后面补' },
+      ],
+    },
+    {
+      id: 'boundary',
+      short: '边界',
+      title: '第 3 轮 · 边界（空值 / 并发 / 权限 / 失败降级）',
+      hint: '哪些坑必须先写清，不写就不准开工？',
+      options: [
+        { value: 'all', label: '空值、并发、权限、失败降级都要有结论', recommended: true },
+        { value: 'basic', label: '只保空值和失败提示' },
+        { value: 'perm', label: '只保权限：不该看的看不到、不该点的点不动' },
+        { value: 'race', label: '只保并发：两个人同时点不互相踩' },
+        { value: 'none', label: '先不写边界，边做边定' },
+      ],
+    },
+  ],
+  buttons: {
+    next: '下一轮',
+    toSummary: '看摘要',
+    prev: '上一轮',
+    skipRound: '这轮跳过（按推荐）',
+    skipAll: '跳过拷问直接建',
+    confirm: '确认摘要',
+    edit: '返回修改',
+  },
+  labels: {
+    customLabel: '自填',
+    customPlaceholder: '也可以自己写一句（留空就用上面的选项）',
+    recommended: '推荐',
+    chosen: '你选的',
+    defaulted: '按推荐默认（跳过）',
+    summaryTitle: 'Owner 需求拷问摘要',
+    summaryStep: '三轮已答完 · 摘要确认',
+    summaryHint: '这段话会写进需求正文；确认后才真正提交给 PM。',
+    lockedHint: '先把三轮答完（或点「跳过拷问直接建」），下面的需求字段才会解锁。',
+    confirmedHint: '摘要已确认：填好需求描述与验收标准，再点【执行】提交给 PM。',
+    skippedHint: '已跳过拷问：按推荐项写入正文并标注「按推荐默认」，现在可以提交。',
+    needForm: '先把需求描述和验收标准填上，再点【执行】提交。',
+    notAnswered: '还没回答三轮拷问，也没有跳过拷问',
+  },
+  maxSummaryLines: 15,
+};
+
+let legacyGrillState = null;
+
+function legacyGrillRecommended(round) {
+  return round.options.find((o) => o.recommended) || round.options[0] || { value: '', label: '' };
+}
+
+function legacyGrillAnswerText(round, ans) {
+  if (!ans) return { text: legacyGrillRecommended(round).label, source: NEW_REQ_GRILL.labels.defaulted };
+  const custom = String(ans.custom || '').trim();
+  const text = custom || String(ans.label || '').trim() || legacyGrillRecommended(round).label;
+  const source = ans.skipped ? NEW_REQ_GRILL.labels.defaulted : NEW_REQ_GRILL.labels.chosen;
+  return { text, source };
+}
+
+/** 摘要正文：逐轮一行（编号交给 <ol>/写进正文时的行号，正文里不重复编号），总行数不超过 maxSummaryLines。 */
+function legacyGrillSummaryLines(st) {
+  const g = NEW_REQ_GRILL;
+  const state = st || legacyGrillState || { answers: {} };
+  return g.rounds.map((round) => {
+    const picked = legacyGrillAnswerText(round, state.answers ? state.answers[round.id] : null);
+    return `${round.short}：${picked.text}（${picked.source}）`;
+  });
+}
+
+function legacyGrillPanelHtml(st) {
+  const g = NEW_REQ_GRILL;
+  const total = g.rounds.length;
+  const isSummary = st.step > total;
+  const stepNo = String(Math.min(st.step, total));
+  const stepText = isSummary
+    ? g.labels.summaryStep
+    : g.stepTemplate.replace('{n}', stepNo).replace('{total}', String(total));
+  const head = `<div class="legacy-grill-head"><b>${esc(g.title)}</b>`
+    + `<span class="legacy-grill-step" id="legacy-grill-stepno" data-step="${isSummary ? String(total + 1) : stepNo}" data-total="${total}">`
+    + `${esc(stepText)}</span></div>`;
+  if (st.step <= total) {
+    const round = g.rounds[st.step - 1];
+    const ans = (st.answers && st.answers[round.id]) || {};
+    const opts = round.options.map((o) => `<label class="legacy-grill-opt${o.recommended ? ' recommended' : ''}">`
+      + `<input type="radio" name="legacy-grill-opt" value="${esc(o.value)}" data-grill-label="${esc(o.label)}" data-grill-recommended="${o.recommended ? '1' : '0'}"${ans.value === o.value ? ' checked' : ''}>`
+      + `<span>${esc(o.label)}${o.recommended ? `<b class="legacy-grill-tag">${esc(g.labels.recommended)}</b>` : ''}</span></label>`).join('');
+    return `${head}`
+      + `<p class="legacy-form-note" data-grill-q="${esc(round.id)}"><b>${esc(round.title)}</b>　${esc(round.hint)}</p>`
+      + opts
+      + `<label class="field"><span><b>${esc(g.labels.customLabel)}</b><span class="field-note">${esc(g.labels.customPlaceholder)}</span></span>`
+      + `<input id="legacy-grill-custom" class="input" value="${esc(ans.custom || '')}"></label>`
+      + '<div class="legacy-grill-bar">'
+      + (st.step > 1 ? `<button type="button" class="ghost small" data-grill="prev">${esc(g.buttons.prev)}</button>` : '')
+      + `<button type="button" class="ghost small" data-grill="skip-round">${esc(g.buttons.skipRound)}</button>`
+      + `<button type="button" class="primary small" data-grill="next">${esc(st.step === total ? g.buttons.toSummary : g.buttons.next)}</button>`
+      + `<button type="button" class="ghost small" data-grill="skip-all">${esc(g.buttons.skipAll)}</button>`
+      + '</div>';
+  }
+  const lines = legacyGrillSummaryLines(st);
+  return `${head}`
+    + `<div class="legacy-grill-summary" id="legacy-grill-summary" data-lines="${lines.length}">`
+    + `<p class="legacy-grill-summary-title">${esc(g.labels.summaryTitle)}</p>`
+    + `<ol>${lines.map((line) => `<li>${esc(line)}</li>`).join('')}</ol>`
+    + `<p class="legacy-grill-summary-hint">${esc(g.labels.summaryHint)}</p></div>`
+    + '<div class="legacy-grill-bar">'
+    + `<button type="button" class="ghost small" data-grill="edit">${esc(g.buttons.edit)}</button>`
+    + `<button type="button" class="primary small" data-grill="confirm">${esc(g.buttons.confirm)}</button>`
+    + `<button type="button" class="ghost small" data-grill="skip-all">${esc(g.buttons.skipAll)}</button>`
+    + '</div>';
+}
+
+/** 面板外壳：靠 <div id="legacy-grill-body"> 就地重绘，避免整块 body 重排导致焦点丢失。 */
+function legacyGrillPanelWrap(st) {
+  const g = NEW_REQ_GRILL;
+  return `<section id="legacy-grill" class="legacy-grill" data-confirmed="${(st && st.confirmed) ? '1' : '0'}" data-mode="${(st && st.mode) || 'ask'}">`
+    + `<p class="legacy-grill-intro">${esc(g.intro)}</p>`
+    + `<div id="legacy-grill-body">${legacyGrillPanelHtml(st || { step: 1, answers: {} })}</div>`
+    + '</section>';
+}
+
+function legacyGrillWriteBody(html) {
+  const host = document.getElementById('legacy-grill-body');
+  if (host) host.innerHTML = html;
+}
+
+function legacyGrillReadStep(st) {
+  const g = NEW_REQ_GRILL;
+  const round = g.rounds[st.step - 1];
+  if (!round) return;
+  const picked = document.querySelector('#legacy-grill input[name="legacy-grill-opt"]:checked');
+  const customEl = document.getElementById('legacy-grill-custom');
+  const custom = customEl ? String(customEl.value || '').trim() : '';
+  if (picked || custom) {
+    st.answers[round.id] = {
+      value: picked ? picked.value : 'custom',
+      label: picked ? String(picked.dataset.grillLabel || '') : '',
+      custom,
+      skipped: false,
+    };
+  } else if (!st.answers[round.id]) {
+    st.answers[round.id] = null;
+  }
+}
+
+function legacyGrillMarkSkipped(st, roundId) {
+  const g = NEW_REQ_GRILL;
+  const round = g.rounds.find((r) => r.id === roundId);
+  if (!round) return;
+  const rec = legacyGrillRecommended(round);
+  st.answers[round.id] = { value: rec.value, label: rec.label, custom: '', skipped: true };
+}
+
+/** 摘要文本块：确认页与正文里用的是同一份（编号按 1. 2. 3.）。 */
+function legacyGrillComposeBlock(st) {
+  const g = NEW_REQ_GRILL;
+  const lines = legacyGrillSummaryLines(st);
+  return ['【' + g.labels.summaryTitle + '】', ...lines.map((line, i) => `${i + 1}. ${line}`)].join('\n');
+}
+
+/** 打确认标记；摘要先存在状态里，提交那一刻再接到需求正文末尾（不动用户写的首行标题）。 */
+function legacyGrillCommitBody(st, mode) {
+  const g = NEW_REQ_GRILL;
+  if (st) st.block = legacyGrillComposeBlock(st);
+  const hidden = document.getElementById(g.fieldId);
+  if (hidden) hidden.value = mode === 'skipped' ? 'skipped' : 'confirmed';
+  const panel = document.getElementById('legacy-grill');
+  if (panel) {
+    panel.dataset.confirmed = '1';
+    panel.dataset.mode = mode;
+  }
+}
+
+/** 提交时把已确认的摘要接到正文末尾；没确认就不加任何东西。 */
+function legacyGrillAppendSummary(text) {
+  const st = legacyGrillState;
+  if (!st || !st.confirmed || !st.block) return text;
+  const body = String(text || '').trim();
+  return body ? `${body}\n\n${st.block}` : st.block;
+}
+
+function legacyGrillUnlockFields() {
+  const g = NEW_REQ_GRILL;
+  const wrap = document.getElementById(g.fieldsWrapId);
+  if (wrap) {
+    wrap.dataset.locked = '0';
+    wrap.querySelectorAll('input,textarea,select,button').forEach((el) => { el.disabled = false; });
+  }
+  const lockNote = document.getElementById('legacy-grill-locknote');
+  if (lockNote) lockNote.hidden = true;
+}
+
+/**
+ * 挂载三轮拷问：锁住需求字段 → 逐轮问答 → 摘要确认 → 解锁。
+ * 只对 NEW_REQ_GRILL.actions（Owner → PM 提需求）挂载；产品/分析师建需求不受影响。
+ * ctx = { go: 底部【执行】按钮, runGo: 执行函数, close: 关闭弹窗, error: 红字提示 }
+ */
+function legacyGrillMount(action, ctx) {
+  const panel = document.getElementById('legacy-grill');
+  if (!NEW_REQ_GRILL.actions.includes(action) || !panel) return;
+  const g = NEW_REQ_GRILL;
+  const wrap = document.getElementById(g.fieldsWrapId);
+  const setLocked = (locked) => {
+    if (!wrap) return;
+    wrap.dataset.locked = locked ? '1' : '0';
+    wrap.querySelectorAll('input,textarea,select,button').forEach((el) => { el.disabled = locked; });
+  };
+  // 之前已经确认过（例如表单重绘）就不再问第二遍。
+  const hidden = document.getElementById(g.fieldId);
+  const already = hidden ? String(hidden.value || '') : '';
+  if (already === 'confirmed' || already === 'skipped') {
+    panel.dataset.confirmed = '1';
+    panel.dataset.mode = already === 'skipped' ? 'skipped' : 'confirm';
+    legacyGrillWriteBody(`<p class="legacy-grill-done" data-grill-done="${esc(already)}">${esc(already === 'skipped' ? g.labels.skippedHint : g.labels.confirmedHint)}</p>`);
+    setLocked(false);
+    if (ctx && ctx.go) ctx.go.disabled = false;
+    return;
+  }
+  legacyGrillState = { step: 1, answers: {}, confirmed: false, mode: 'ask' };
+  setLocked(true);
+  if (ctx && ctx.go) {
+    ctx.go.disabled = true;
+    ctx.go.title = g.labels.lockedHint;
+  }
+  setTimeout(() => {
+    const next = document.querySelector('#legacy-grill [data-grill="next"]');
+    if (next) next.focus();
+  }, 40);
+  const rerender = () => legacyGrillWriteBody(legacyGrillPanelHtml(legacyGrillState));
+  const finish = (mode) => {
+    legacyGrillState.confirmed = true;
+    legacyGrillState.mode = mode;
+    legacyGrillCommitBody(legacyGrillState, mode);
+    legacyGrillUnlockFields();
+    if (ctx && ctx.go) {
+      ctx.go.disabled = false;
+      ctx.go.title = '';
+    }
+    legacyGrillWriteBody(`<p class="legacy-grill-done" data-grill-done="${esc(mode)}">${esc(mode === 'skipped' ? g.labels.skippedHint : g.labels.confirmedHint)}</p>`);
+  };
+  panel.addEventListener('click', (event) => {
+    const button = event.target && event.target.closest ? event.target.closest('[data-grill]') : null;
+    if (!button) return;
+    event.preventDefault();
+    const kind = button.getAttribute('data-grill');
+    const st = legacyGrillState;
+    if (!st) return;
+    if (kind === 'next') {
+      legacyGrillReadStep(st);
+      if (!st.answers[g.rounds[st.step - 1].id]) legacyGrillMarkSkipped(st, g.rounds[st.step - 1].id);
+      st.step += 1;
+      rerender();
+      return;
+    }
+    if (kind === 'skip-round') {
+      legacyGrillMarkSkipped(st, g.rounds[st.step - 1].id);
+      st.step += 1;
+      rerender();
+      return;
+    }
+    if (kind === 'prev') {
+      legacyGrillReadStep(st);
+      st.step = Math.max(1, st.step - 1);
+      rerender();
+      return;
+    }
+    if (kind === 'edit') {
+      st.step = 1;
+      rerender();
+      return;
+    }
+    if (kind === 'skip-all') {
+      g.rounds.forEach((round) => legacyGrillMarkSkipped(st, round.id));
+      finish('skipped');
+      return;
+    }
+    if (kind === 'confirm') {
+      finish('confirm');
+      const form = legacyReadForm();
+      if (form.title && form.acceptance) {
+        if (ctx && typeof ctx.runGo === 'function') ctx.runGo();
+      } else if (ctx && ctx.error) {
+        ctx.error(g.labels.needForm);
+      }
+    }
+  });
 }
 
 function legacyActionBody(action, req) {
@@ -7260,15 +7934,25 @@ function legacyActionBody(action, req) {
     }
     case 'owner-create': {
       return `<p class="legacy-form-note">向 PM 提交需求（Owner）：调用 <code>requirement:owner-create</code>，由 PM 代办建档；项目开始 / 评审 / 迭代时提交。PM 未 boot/未读全时，执行前会先自动补 boot。</p>`
+        + legacyGrillPanelWrap(legacyGrillState || { step: 1, answers: {} })
+        + `<p class="legacy-form-note" id="legacy-grill-locknote">${esc(NEW_REQ_GRILL.labels.lockedHint)}</p>`
+        + `<input type="hidden" id="${esc(NEW_REQ_GRILL.fieldId)}" value="">`
+        + '<div id="legacy-owner-fields" data-locked="1">'
         + legacyField('需求描述（必填）', '<textarea id="legacy-a-description" class="textarea" placeholder="要做什么、为什么做；第一行会作为需求标题"></textarea>')
         + legacyField('验收标准（必填 · 每条一行，可多条）', '<textarea id="legacy-a-acceptance" class="textarea" placeholder="1. 可验收的行为或结果&#10;2. 另一条标准"></textarea>')
-        + legacyField('优先级', '<select id="legacy-a-priority" class="select"><option>P0</option><option selected>P1</option><option>P2</option><option>P3</option></select>');
+        + legacyField('优先级', '<select id="legacy-a-priority" class="select"><option>P0</option><option selected>P1</option><option>P2</option><option>P3</option></select>')
+        + '</div>';
     }
     case 'owner-demand': {
       return `<p class="legacy-form-note">向 PM 提交需求（Owner）：调用 <code>owner:demand</code>，只提需求描述、优先级、验收标准（每条一行，可多条）；PM 会自动 boot 代办建档，本轮无在办需求时直接进入${esc(terms.review)}，在办/迭代期间排到下一轮。</p>`
+        + legacyGrillPanelWrap(legacyGrillState || { step: 1, answers: {} })
+        + `<p class="legacy-form-note" id="legacy-grill-locknote">${esc(NEW_REQ_GRILL.labels.lockedHint)}</p>`
+        + `<input type="hidden" id="${esc(NEW_REQ_GRILL.fieldId)}" value="">`
+        + '<div id="legacy-owner-fields" data-locked="1">'
         + legacyField('需求描述（必填）', '<textarea id="legacy-a-description" class="textarea" placeholder="要做什么、为什么做"></textarea>')
         + legacyField('验收标准（必填 · 每条一行，可多条）', '<textarea id="legacy-a-acceptance" class="textarea" placeholder="1. 可验收的行为或结果&#10;2. 另一条标准"></textarea>')
-        + legacyField('优先级', '<select id="legacy-a-priority" class="select"><option>P0</option><option selected>P1</option><option>P2</option><option>P3</option></select>');
+        + legacyField('优先级', '<select id="legacy-a-priority" class="select"><option>P0</option><option selected>P1</option><option>P2</option><option>P3</option></select>')
+        + '</div>';
     }
     case 'requirement-review': {
       const reviewRole = isQuickTeam() ? 'analyst' : 'product';
@@ -7388,6 +8072,7 @@ function legacyReadForm() {
     rationale: val('legacy-a-rationale'),
     risk: val('legacy-a-risk'),
     note: val('legacy-a-note'),
+    grill: val(NEW_REQ_GRILL.fieldId),
     description: val('legacy-a-description')
   };
 }
@@ -7528,7 +8213,7 @@ async function legacyEnsureRoleReadyForAction(roleId, actionLabel = '') {
 function legacyRestoreActionForm(form) {
   if (!form) return;
   const fields = ['role', 'req', 'title', 'acceptance', 'priority', 'story', 'detail', 'verdict',
-    'comment', 'decision', 'opinion', 'owner', 'evidence', 'target', 'content', 'rationale', 'risk', 'note', 'description'];
+    'comment', 'decision', 'opinion', 'owner', 'evidence', 'target', 'content', 'rationale', 'risk', 'note', 'description', 'grill'];
   for (const key of fields) {
     const el = document.getElementById('legacy-a-' + key);
     if (el && form[key] !== undefined && form[key] !== null) el.value = form[key];
@@ -7952,8 +8637,7 @@ async function legacyActionModal(action, reqId) {
     dlg.foot.innerHTML = '';
     const cancel = makeButton('ghost', '取消');
     const go = makeButton('primary', OWNER_CONFIRM_ACTIONS.has(action) ? 'Owner（我）执行' : '执行');
-    cancel.addEventListener('click', () => dlg.close());
-    go.addEventListener('click', async () => {
+    const runGo = async () => {
       const form = legacyReadForm();
       const requirement = reqs.find((row) => row.id === form.req) || selectedReq;
       const reqFor = requirement || {};
@@ -7962,8 +8646,12 @@ async function legacyActionModal(action, reqId) {
       setButtonsBusy([cancel, go], true);
       const ok = await execute(form, { close: dlg.close, error: dlg.error });
       if (!ok) setButtonsBusy([cancel, go], false);
-    });
+    };
+    cancel.addEventListener('click', () => dlg.close());
+    go.addEventListener('click', runGo);
     dlg.foot.append(cancel, go);
+    // c72e：新建需求先过三轮拷问；确认摘要（或显式跳过）后才解锁建单字段。
+    legacyGrillMount(action, { go, runGo, close: dlg.close, error: dlg.error });
     setTimeout(() => dlg.foot.querySelector('.primary')?.focus(), 30);
     if (action === 'owner-review' && current) {
       const box = document.createElement('div');
@@ -8012,8 +8700,13 @@ async function legacyActionModal(action, reqId) {
       payload = { role: form.role, title: form.title, acceptance: form.acceptance, priority: form.priority, story: form.story, detail: form.detail };
     } else if (action === 'owner-create') {
       // 向 PM 提交需求（Owner）：需求描述（首行作标题，全文作详情）+ 优先级 + 验收标准（每条一行，可多条）。
-      const description = String(form.description || '').trim();
-      if (!description) { error('先写需求描述'); return false; }
+      // c72e：先过三轮拷问（或显式跳过），没有确认标记不提交；摘要接到正文末尾。
+      if (form.grill !== 'confirmed' && form.grill !== 'skipped') {
+        error(NEW_REQ_GRILL.labels.notAnswered);
+        return false;
+      }
+      const description = legacyGrillAppendSummary(form.description);
+      if (!description.trim()) { error('先写需求描述'); return false; }
       const lines = description.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       const acceptanceLines = String(form.acceptance || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       if (!acceptanceLines.length) { error('验收标准不能为空（每条一行）'); return false; }
@@ -8025,10 +8718,14 @@ async function legacyActionModal(action, reqId) {
       };
     } else if (action === 'owner-demand') {
       // 向 PM 提交需求（Owner）：owner:demand 只收描述 / 优先级 / 验收标准[]；
-      // PM 自动 boot 与建档都在后端完成，界面只做字段校验。
-      const description = String(form.description || '').trim();
+      // PM 自动 boot 与建档都在后端完成，界面只做字段校验。c72e：同样先过三轮拷问。
+      if (form.grill !== 'confirmed' && form.grill !== 'skipped') {
+        error(NEW_REQ_GRILL.labels.notAnswered);
+        return false;
+      }
+      const description = legacyGrillAppendSummary(form.description);
       const criteria = String(form.acceptance || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-      if (!description) { error('先写需求描述'); return false; }
+      if (!description.trim()) { error('先写需求描述'); return false; }
       if (!criteria.length) { error('验收标准不能为空（每条一行）'); return false; }
       payload = { description, priority: form.priority || 'P2', acceptanceCriteria: criteria };
     } else if (action === 'requirement-review') {
@@ -13643,3 +14340,12 @@ function clampFlowPanel() {
   loadTeamStatus();
   // Owner 不自动弹窗：首屏只显示状态与入口，避免打断 DSH 主画面。
 })();
+
+// Owner 决策箱浮层（右下角【团队看板】按钮正上方）：交互只绑一次，默认收起。
+// 放在初始化 IIFE 之外，避免 DSH 侧 await 失败时把浮层交互一起跳过。
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => { bindDecisionFloat(); bindDecisionAutoRefresh(); }, { once: true });
+} else {
+  bindDecisionFloat();
+  bindDecisionAutoRefresh();
+}
