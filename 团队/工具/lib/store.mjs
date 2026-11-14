@@ -757,17 +757,29 @@ export function findMessage(role, id) {
 }
 
 export function readMessage(role, id) {
-  const found = findMessage(role, id);
+  let found = findMessage(role, id);
   if (!found) fail('MESSAGE_NOT_FOUND', `消息不存在：${id}`);
   let targetFile = found.file;
   if (found.box === 'new') {
     const dst = path.join(mailBoxDir(role, 'cur'), path.basename(found.file));
     ensureDir(path.dirname(dst));
-    try { fs.renameSync(found.file, dst); } catch (e) {
-      if (e.code === 'EEXIST') fs.rmSync(found.file, { force: true });
-      else throw e;
+    try {
+      fs.renameSync(found.file, dst);
+      targetFile = dst;
+    } catch (e) {
+      if (e.code === 'EEXIST') {
+        fs.rmSync(found.file, { force: true });
+        targetFile = dst;
+      } else if (e.code === 'ENOENT') {
+        // B-c42e：并发（自动已读 / 别人 ack / pump 三路）会把文件从 new 移走，rename 会 ENOENT。
+        // 这时按 id 重新全局定位（new 与 cur 都查），落在哪就按哪处理——不搬回来、不报 INTERNAL。
+        found = findMessage(role, id);
+        if (!found) fail('MESSAGE_NOT_FOUND', `消息不存在（可能已被并发移走或删除）：${id}`, { messageId: id });
+        targetFile = found.file;
+      } else {
+        throw e;
+      }
     }
-    targetFile = dst;
   }
   // R-c651 F-c651-4：读取即写 readAt；旧消息没有 readAt 的按 deliveredAt||ts 派生并标 legacyRead（只读兼容，不另建未读表）。
   let msg = found.msg;
@@ -797,8 +809,12 @@ export function ackMessage(role, id, note) {
       messageId: id, archivedSession: found.msg.archivedSession, replacedBySessionId: found.msg.replacedBySessionId || '',
     });
   }
+  // B-c42e：并发 ack 同一消息（投递/自动已读/两路 ack）会各写一条回执 —— 用 per-message 锁
+  // 把「查重 → 读档 → 落回执 → 发通知」串起来；抢不到锁就等，等不到按 ACK_BUSY 明确失败（不半写）。
+  return withLock(`ack:${role}:${id}`, { role, sessionId: 'ack', ttlMs: 20000, waitMs: 5000, reason: 'ack message' }, () => {
+  const current = findMessage(role, id) || found;
   const existing = loadReceipts().find((r) => r.msgId === id && r.from === role);
-  if (existing) return { ack: existing, already: true, msg: found.msg, receiptMessage: null };
+  if (existing) return { ack: existing, already: true, msg: current.msg, receiptMessage: null };
   readMessage(role, id);
   // R-c651 F-c651-4：回执补 ackAt（readAt 已由 readMessage 写入；缺 deliveredAt 的旧消息在这里补齐）。
   try {
@@ -863,6 +879,7 @@ export function ackMessage(role, id, note) {
     appendLine(PATHS.receipts, JSON.stringify({ ...ack, update: true, receiptMessageId: receiptMessage.id }));
   }
   return { ack, already: false, msg: found.msg, receiptMessage };
+  });
 }
 
 // ---------- 任务 ----------

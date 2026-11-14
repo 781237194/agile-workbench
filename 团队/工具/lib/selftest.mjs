@@ -1895,26 +1895,28 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       const recW = json(['send', '--boot', qDev.token, '--to', 'pm', '--subject', 'receipt也要唤醒', '--body', 'x', '--type', 'receipt', '--json']);
       if (!(recW.wake && recW.wake.to === 'pm')) failStep('B-1e4a ①：receipt 类型 send 未唤醒', JSON.stringify(recW.wake).slice(0, 240));
       const after1 = wakeAllRows().length;
-      if (after1 !== before1 + 1) failStep('B-1e4a ①：receipt 未新增唤醒留痕', JSON.stringify({ before1, after1 }));
+      const recRows = wakeAllRows().filter((row) => (row.messageIds || []).map(String).includes(String(recW.message.id)));
+      if (recRows.length !== 1) failStep('B-1e4a ①：receipt 未按该消息新增唤醒留痕', JSON.stringify({ before1, after1, hits: recRows.length }));
       // ② 收到 notice 后 ack：不再产生新消息、也不再新增唤醒（只回"已读"）
       const ackReceipt = json(['ack', '--boot', gatePm2.token, '--id', recW.message.id, '--note', '收到完成回执', '--json']);
       if (!(ackReceipt.receiptMessage && ackReceipt.receiptMessage.type === 'notice')) failStep('B-1e4a ②：ack 完成回执未投 notice', JSON.stringify(ackReceipt.receiptMessage).slice(0, 200));
       const noticeMsg = json(['inbox', '--boot', qDev.token, '--all', '--json']).messages.find((m) => m.id === ackReceipt.receiptMessage.id);
       if (!noticeMsg) failStep('B-1e4a ②：原发送者没收到 notice', '');
-      const beforeAckNotice = wakeAllRows().length;
       const ackNotice2 = json(['ack', '--boot', qDev.token, '--id', noticeMsg.id, '--note', '已读', '--json']);
       if (ackNotice2.receiptMessage) failStep('B-1e4a ②：ack notice 又产生了消息', JSON.stringify(ackNotice2.receiptMessage).slice(0, 200));
-      const afterAckNotice = wakeAllRows().length;
-      if (afterAckNotice !== beforeAckNotice) failStep('B-1e4a ②：ack notice 产生了新唤醒', JSON.stringify({ beforeAckNotice, afterAckNotice }));
+      const ackNoticeWakes = wakeAllRows().filter((row) => (row.messageIds || []).map(String).includes(String(noticeMsg.id)));
+      if (ackNoticeWakes.length) failStep('B-1e4a ②：ack notice 产生了新唤醒', JSON.stringify(ackNoticeWakes.length));
       // ③ 连发 3 条各唤醒（不合并）
       const three2 = [];
       for (let i = 1; i <= 3; i += 1) three2.push(json(['send', '--boot', qDev.token, '--to', 'pm', '--subject', `全唤醒连发 ${i}`, '--body', 'x', '--type', 'escalation', '--json']));
       if (!three2.every((row) => row.wake && row.wake.ok === true && row.wake.skipped !== 'MERGED_PENDING')) failStep('B-1e4a ③：连发 3 条未各自唤醒', JSON.stringify(three2.map((r) => r.wake && r.wake.skipped)).slice(0, 200));
+      const threeWakes = wakeAllRows().filter((row) => (row.messageIds || []).map(String).some((id) => three2.some((t) => t.message && t.message.id === id)));
+      if (threeWakes.length < 3) failStep('B-1e4a ③：连发 3 条未各自产生唤醒留痕', JSON.stringify(threeWakes.length));
       // ④ --no-wake 是唯一退出阀
-      const beforeSilent2 = wakeAllRows().length;
       const silent2 = json(['send', '--boot', qDev.token, '--to', 'pm', '--subject', '静默', '--body', 'x', '--no-wake', '--json']);
       if (silent2.wake !== null) failStep('B-1e4a ④：--no-wake 未关闭唤醒', JSON.stringify(silent2.wake).slice(0, 200));
-      if (wakeAllRows().length !== beforeSilent2) failStep('B-1e4a ④：--no-wake 仍新增唤醒留痕', '');
+      const silentRows = wakeAllRows().filter((row) => (row.messageIds || []).map(String).includes(String(silent2.message.id)));
+      if (silentRows.length) failStep('B-1e4a ④：--no-wake 仍为该消息新增唤醒留痕', JSON.stringify(silentRows.length));
     }
     pass('B-1e4a（R-45c7）：receipt 也唤醒、notice 被 ack 不再唤醒、连发 3 条各唤醒、--no-wake 唯一退出阀');
 
