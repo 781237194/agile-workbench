@@ -116,6 +116,15 @@ export function buildRoleQueues(projectName) {
       });
     }
   }
+  // B-6f89 AC1：需求已收口的任务不得再进队列（否则面板/角色读到陈旧 fix，wake 脚本照发）。
+  const closedReqIds = new Set();
+  for (const [requirementId, row] of Object.entries(rows)) {
+    if (!row || typeof row !== 'object') continue;
+    if (['accepted', 'done', 'terminated', 'rejected', 'iteration'].includes(String(row.status || ''))) {
+      closedReqIds.add(String(requirementId));
+      if (row.id) closedReqIds.add(String(row.id));
+    }
+  }
   // 任务级队列：bug 旁路（B-*）与已认领但未完成的任务
   for (const task of tasks) {
     const id = String(task.id || '');
@@ -123,6 +132,7 @@ export function buildRoleQueues(projectName) {
     const owner = String(task.owner || '');
     const status = String(task.status || '');
     if (status === 'done') continue;
+    if (closedReqIds.has(String(task.requirementId || ''))) continue;
     if (!roles[owner]) continue;
     if (id.startsWith('B-')) {
       const reopen = Number(task.reopenCount || 0);

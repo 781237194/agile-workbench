@@ -501,6 +501,66 @@ export function planForBugTask(task) {
   return { skip: 'bug_status_unmapped' };
 }
 
+// ---------- B-20261115-055749-6f89：陈旧唤醒守卫（已收口别再叫） ----------
+
+/** 需求收口状态：这些状态下不再对任何任务发唤醒（含任务 done 之前就排队的陈旧项）。 */
+export const ROUTE_CLOSED_REQUIREMENT_STATUSES = Object.freeze(['accepted', 'done', 'terminated', 'rejected', 'iteration']);
+/** 任务 done 后 30 秒内不再发同一任务的 fix 唤醒（AC2）。 */
+export const ROUTE_STALE_DONE_MS = 30 * 1000;
+
+/** 按 id 新鲜读一条任务文件（绕过 tick 开头的任务列表快照，避免 done 与读之间赛跑）。 */
+export function readTaskFresh(projectName, taskId) {
+  const id = String(taskId || '').trim();
+  if (!id || !projectName) return null;
+  try { return readJson(path.join(routePaths(projectName).tasks, `${id}.json`), null); } catch { return null; }
+}
+
+/** 新鲜读一条需求行（工作流.json 的 requirements）；缺行/文件坏返回 null。 */
+export function readRequirementRowFresh(projectName, requirementId) {
+  const id = String(requirementId || '').trim();
+  if (!id || !projectName) return null;
+  try {
+    const wfRaw = readWorkflowRaw(projectName);
+    if (wfRaw.corrupt) return null;
+    const rows = requirementRowsOf(wfRaw);
+    return rows[id] || Object.values(rows).find((r) => r && String(r.id || '') === id) || null;
+  } catch { return null; }
+}
+
+/**
+ * 陈旧唤醒守卫：命中即返回 {skip, why, detail}，放行返回 null。
+ *   ① 需求已收口（accepted/done/terminated/rejected/iteration）→ req_closed
+ *   ② 计划是 fix，但任务已 done / dev_done，或 doneAt 在 30 秒内 → stale_task_done
+ * 传入 task/row 用调用方手里的对象；不传则按 id 新鲜读（队列/补催/重试路径必须新鲜读）。
+ */
+export function staleWakeGuard({ projectName = '', action = '', task = null, row = null, taskId = '', requirementId = '', now = Date.now() } = {}) {
+  const reqId = String(requirementId || '').trim();
+  const tId = String(taskId || (task && task.id) || '').trim();
+  const guideRow = row === null || row === undefined
+    ? (projectName && reqId ? readRequirementRowFresh(projectName, reqId) : null)
+    : row;
+  const rowStatus = String((guideRow && guideRow.status) || '');
+  if (rowStatus && ROUTE_CLOSED_REQUIREMENT_STATUSES.includes(rowStatus)) {
+    return { skip: 'req_closed', why: `requirement ${reqId || String((guideRow && guideRow.id) || '-')}=${rowStatus}` };
+  }
+  if (String(action) !== 'fix') return null;
+  const guideTask = task === null || task === undefined
+    ? (projectName && tId ? readTaskFresh(projectName, tId) : null)
+    : task;
+  if (!guideTask) return null;
+  const taskStatus = String(guideTask.status || '');
+  const doneAt = Date.parse(String(guideTask.doneAt || ''));
+  const doneRecent = !Number.isNaN(doneAt) && Math.abs(now - doneAt) < ROUTE_STALE_DONE_MS;
+  if (taskStatus === 'done' || taskStatus === 'dev_done' || doneRecent) {
+    return {
+      skip: 'stale_task_done',
+      why: `task=${taskStatus || '-'}${Number.isNaN(doneAt) ? '' : ` doneAt=${new Date(doneAt).toISOString()}`}`,
+      detail: { taskId: tId, taskStatus, doneAtMs: Number.isNaN(doneAt) ? null : doneAt },
+    };
+  }
+  return null;
+}
+
 // ---------- 幂等键 ----------
 
 export function routeKey({ requirementId = '', toStatus = '', action = '', taskId = '' } = {}) {
@@ -843,9 +903,16 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
       const task = tasks.find((t) => String(t.id) === String(event.taskId));
       if (!task) { appendRouteLog(name, { ...base, event: 'skip', why: 'task_missing', ok: false }); out.skips.push({ ...base, why: 'task_missing' }); continue; }
       const bugPlan = planForBugTask(task);
+      // B-6f89 AC1/AC2：计划成立也要过陈旧守卫——done 任务与已收口需求都不得再叫。
+      const bugStale = bugPlan.skip ? null : staleWakeGuard({
+        projectName: name, action: bugPlan.action, task, row, taskId: event.taskId, requirementId: event.requirementId || '', now,
+      });
       if (bugPlan.skip) {
         appendRouteLog(name, { ...base, event: 'skip', why: bugPlan.skip, ok: false });
         out.skips.push({ ...base, why: bugPlan.skip });
+      } else if (bugStale) {
+        appendRouteLog(name, { ...base, event: 'skip', why: bugStale.skip, action: bugPlan.action, role: bugPlan.role, ok: true });
+        out.skips.push({ ...base, why: bugStale.skip, action: bugPlan.action, role: bugPlan.role, detail: bugStale.why });
       } else {
         // 缺陷旁路的键要带“第几轮重开”，否则同一 bug 第 2 次打回会被 24 小时幂等窗口吞掉（AC4）。
         const bugKeyStatus = `task:${task.status || ''}#r${Number(task.reopenCount || 0)}`;
@@ -1116,6 +1183,18 @@ async function runFollowUps(projectName, { status, tasks, now, engineUrl }) {
     if (!item || Number(item.dueAt || 0) > now) continue;
     const role = String(item.role || '');
     const requirementId = String(item.requirementId || '');
+    // B-6f89 AC1/AC2：补催前再过陈旧守卫（任务已 done / 需求已收口 → 直接丢弃并记 skip）。
+    const staleFollow = staleWakeGuard({ projectName, action: item.action, taskId: item.taskId, requirementId, now });
+    if (staleFollow) {
+      delete status.followUps[key];
+      appendRouteLog(projectName, {
+        event: 'skip', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId || ''),
+        fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
+        why: staleFollow.skip, ok: true, key,
+      });
+      done.push({ key, role, action: item.action, why: staleFollow.skip });
+      continue;
+    }
     // 2026-11-14 修正③：补催前先校验任务状态——done/cancelled 立即停，别再催。
     if (item.taskId) {
       const hitTask = tasks.find((t) => String(t.id) === String(item.taskId));
@@ -1235,6 +1314,20 @@ async function runWakeRetries(projectName, { status, now, engineUrl }) {
     if (!item || Number(item.dueAt || 0) > now) continue;
     const role = String(item.role || '');
     const attempt = Number(item.attempt || 1);
+    // B-6f89 AC1：重试队列也可能压着陈旧项（任务已 done / 需求已收口）——重发前再守一次。
+    const staleRetry = staleWakeGuard({
+      projectName, action: item.action, taskId: item.taskId, requirementId: item.requirementId, now,
+    });
+    if (staleRetry) {
+      delete status.retries[key];
+      appendRouteLog(projectName, {
+        event: 'skip', source: String(item.source || 'status'), requirementId: String(item.requirementId || ''), role,
+        action: String(item.action || ''), taskId: String(item.taskId || ''), fromStatus: String(item.fromStatus || ''),
+        toStatus: String(item.toStatus || ''), ok: true, why: staleRetry.skip, key,
+      });
+      out.push({ key, role, attempt, why: staleRetry.skip });
+      continue;
+    }
     const text = buildRouteWakeText({
       role, action: item.action, requirementId: String(item.requirementId || ''), taskId: String(item.taskId || ''),
       project: projectName, fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
@@ -1320,6 +1413,10 @@ export function planRoutes(projectName, { now = Date.now() } = {}) {
       if (!task) { planned.push({ ...base, decision: 'skip', why: 'task_missing' }); continue; }
       const p = planForBugTask(task);
       if (p.skip) { planned.push({ ...base, decision: 'skip', why: p.skip }); continue; }
+      const stale = staleWakeGuard({
+        projectName: name, action: p.action, task, row, taskId: event.taskId, requirementId: event.requirementId || '', now,
+      });
+      if (stale) { planned.push({ ...base, decision: 'skip', why: stale.skip, role: p.role, action: p.action, detail: stale.why }); continue; }
       const key = routeKey({ requirementId: event.requirementId || '', toStatus: base.toStatus, action: p.action, taskId: event.taskId });
       const dup = status.wakes[key] && withinWindow(status.wakes[key].lastWakeAt, windowMs, now);
       planned.push({
