@@ -56,6 +56,7 @@ import { readDecisionBox as readDecisionBoxFile } from './decision-box.mjs';
 import {
   voidRegistryFile, legacyVoidRegistryFile, readVoidRegistry, appendVoidEntry,
 } from './req-void-registry.mjs';
+import { detectLedgerForks, requirementLedger, reopenedAtOf } from './ledger.mjs';
 
 const RISK_RANK = { normal: 1, sensitive: 2, critical: 3 };
 const PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -3259,6 +3260,23 @@ function cmdReqReopen(args) {
   }
   let reqTask = null;
   try { reqTask = loadTask(projectName, requirementId); } catch { reqTask = null; }
+  // R-9fbe：历史数据/夹具里可能只有工作流行、没有 任务/R-*.json；旧实现拿 null 直接进
+  // syncWorkflowRow → INTERNAL(Cannot read properties of null)，把「正式返工」这条处置入口堵死。
+  // 这里按最小字段补一条需求任务文件（不写假结论，只承载 workflow 元数据），再走原逻辑。
+  if (!reqTask) {
+    reqTask = {
+      id: requirementId, project: projectName, type: 'requirement', requirementId: '',
+      title: truncate(String(row.title || requirementId), 120),
+      detail: '需求行存在但缺需求任务文件：req reopen 时补齐（R-9fbe）',
+      acceptance: '', story: '', priority: String(row.priority || 'P2'), priorityBy: b.role, priorityReason: '',
+      owner: null, status: 'open', createdBy: b.role, createdAt: at, claimedAt: null, due: '',
+      doneAt: null, evidence: '', rev: 0, history: [], workflow: {},
+    };
+    reqTask._by = b.role;
+    reqTask._action = 'req_reopen_stub';
+    reqTask._note = truncate(reason, 200);
+    saveTask(projectName, reqTask);
+  }
   if (reqTask) {
     reqTask.workflow = { ...(reqTask.workflow || {}), requirementStatus: 'dev', deliveryRound: nextRound, gateInvalidatedAt: at };
     reqTask.updatedAt = at;
@@ -3605,6 +3623,31 @@ function cmdReqSync(args) {
   if (registry.errors && registry.errors.length) {
     violations.push({ rule: 'R5_REGISTRY_BAD_LINES', count: registry.errors.length, sample: registry.errors.slice(0, 3), message: '作废登记有坏行' });
   }
+  // R6（R-9fbe AC3）：账本分叉——作废登记三向没违规 ≠ 账本一致。
+  // 判据在 lib/ledger.mjs（带「重开时间」维度：taskDoneAt < reopenedAt 视为返工在途，不是分叉）。
+  const tasksAll = listTasks(b.project);
+  const ledger = detectLedgerForks({ requirements: rows, tasks: tasksAll });
+  for (const fork of ledger.forks) {
+    violations.push({
+      rule: 'R6_LEDGER_FORK',
+      id: fork.requirementId,
+      requirementId: fork.requirementId,
+      kind: fork.kind,
+      status: fork.status,
+      taskId: fork.taskId,
+      taskDoneAt: fork.taskDoneAt,
+      reopenedAt: fork.reopenedAt,
+      message: `需求 ${fork.requirementId}（${fork.status}）的任务账本已完工，工作流没往前走（${fork.kind}）`,
+    });
+  }
+  if (ledger.inFlight.length) {
+    warnings.push({
+      rule: 'W2_REWORK_IN_FLIGHT',
+      count: ledger.inFlight.length,
+      items: ledger.inFlight.slice(0, 20),
+      message: '有需求在返工在途/任务在办（不是分叉）；面板显示「返工在途」即可，别当分叉处置',
+    });
+  }
   const payload = {
     ok: violations.length === 0,
     project: b.project,
@@ -3617,6 +3660,8 @@ function cmdReqSync(args) {
     violations,
     warnings,
     ghosts,
+    // R-9fbe：账本分叉只在这里算一次（工具侧唯一口径），壳层/面板按同口径取。
+    ledger: { forks: ledger.forks, inFlight: ledger.inFlight, summary: ledger.summary },
   };
   if (violations.length) process.exitCode = 1;
   out(args, [

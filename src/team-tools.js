@@ -5604,6 +5604,72 @@ function createTeamTools(options = {}) {
     return out;
   }
 
+  // ── R-9fbe（T-20261115-063059-09e9）：账本分叉判定（带「重开时间」维度）────────
+  // 口径与 团队/工具/lib/ledger.mjs 完全一致；两边 id 集合由断言脚本对比。
+  const LEDGER_CLOSED_STATUSES = ['accepted', 'done', 'terminated', 'iteration', 'rejected'];
+  const LEDGER_OPEN_STAGES = ['review', 'approved', 'tech_review', 'ready', 'dispatched', 'dev', 'dev_review', 'dev_done', 'test', 'test_done', 'owner_accept'];
+  const LEDGER_TASK_CLOSED = ['done', 'terminated', 'cancelled'];
+  const DEV_STAGE_BEFORE_DONE = ['review', 'approved', 'tech_review', 'ready', 'dispatched', 'dev'];
+
+  /** 重开时间：lastReopenAt/reopenedAt → history 最后一条 req_reopen → gateInvalidatedAt。 */
+  function reopenedAtOf(row) {
+    const source = row && typeof row === 'object' ? row : {};
+    const direct = String(source.lastReopenAt || source.reopenedAt || '').trim();
+    if (direct) return direct;
+    const history = Array.isArray(source.history) ? source.history : [];
+    let latest = '';
+    for (const item of history) {
+      if (!item || typeof item !== 'object') continue;
+      const action = String(item.action || '');
+      if (action !== 'req_reopen' && action !== 'reopen') continue;
+      const at = String(item.at || '');
+      if (at && (!latest || Date.parse(at) >= Date.parse(latest))) latest = at;
+    }
+    if (latest) return latest;
+    return String(source.gateInvalidatedAt || '').trim();
+  }
+
+  /** 单需求账本视图：{requirementId,status,reopenedAt,taskDoneAt,inFlight,fork}（规则见 lib/ledger.mjs 注释）。 */
+  function requirementLedgerView(row, tasks) {
+    const source = row && typeof row === 'object' ? row : {};
+    const id = String(source.id || '').trim();
+    const status = String(source.status || '');
+    const reopenedAt = reopenedAtOf(source);
+    const list = (Array.isArray(tasks) ? tasks : []).filter((task) => task
+      && String(task.type || '') !== 'requirement'
+      && String(task.requirementId || '') === id);
+    const liveTasks = list.filter((task) => !LEDGER_TASK_CLOSED.includes(String(task.status || '')));
+    const closedTasks = list.filter((task) => LEDGER_TASK_CLOSED.includes(String(task.status || '')));
+    let taskDoneAt = '';
+    for (const task of closedTasks) {
+      const at = String(task.doneAt || task.updatedAt || '');
+      if (at && (!taskDoneAt || Date.parse(at) >= Date.parse(taskDoneAt))) taskDoneAt = at;
+    }
+    const view = { requirementId: id, status, reopenedAt, taskDoneAt, liveTasks: liveTasks.length, closedTasks: closedTasks.length, inFlight: '', fork: null };
+    if (!list.length) return view;
+    if (LEDGER_CLOSED_STATUSES.includes(status)) return view;
+    if (!LEDGER_OPEN_STAGES.includes(status)) return view;
+    if (['test_done', 'owner_accept'].includes(status)) return view;
+    if (liveTasks.length) { view.inFlight = 'task_in_progress'; return view; }
+    if (reopenedAt && taskDoneAt && Date.parse(taskDoneAt) < Date.parse(reopenedAt)) {
+      view.inFlight = 'rework_in_flight';
+      return view;
+    }
+    const allClosed = (rows) => rows.length > 0 && rows.every((task) => LEDGER_TASK_CLOSED.includes(String(task.status || '')));
+    const latest = (rows) => rows.slice().sort((a, b) => Date.parse(String(b.doneAt || b.updatedAt || '0')) - Date.parse(String(a.doneAt || a.updatedAt || '0')))[0] || null;
+    const devTasks = list.filter((task) => ['programmer1', 'programmer2'].includes(String(task.owner || '')));
+    const testTasks = list.filter((task) => String(task.owner || '') === 'tester');
+    if (allClosed(devTasks) && DEV_STAGE_BEFORE_DONE.includes(status)) {
+      view.fork = { kind: 'dev_ledger_ahead', taskId: String((latest(devTasks) || {}).id || ''), taskDoneAt, reopenedAt };
+      return view;
+    }
+    if (allClosed(testTasks) && ['dev_done', 'test'].includes(status)) {
+      view.fork = { kind: 'test_ledger_ahead', taskId: String((latest(testTasks) || {}).id || ''), taskDoneAt, reopenedAt };
+      return view;
+    }
+    return view;
+  }
+
   /**
    * 只读快照：需求/任务从旧 任务/ 目录读，阶段从旧 工作流.json 读。
    * 读不到旧状态时返回空快照，不拿本地 workbench.json 冒充真相。
@@ -5698,6 +5764,18 @@ function createTeamTools(options = {}) {
         requirements.push(docView);
       }
     }
+    // R-9fbe：账本分叉判定（带「重开时间」维度）。面板据此显示红项，不再自己比 status×taskStatus。
+    const ledgerForks = [];
+    const ledgerInFlight = [];
+    for (const view of requirements) {
+      const meta = (state.requirements || {})[view.id] || null;
+      const ledger = requirementLedgerView({ ...(meta || {}), id: view.id, status: String(view.status || '') }, tasks);
+      view.reopenedAt = ledger.reopenedAt || '';
+      view.ledgerFork = ledger.fork || null;
+      view.ledgerInFlight = ledger.inFlight || '';
+      if (ledger.fork) ledgerForks.push({ requirementId: view.id, status: view.status, ...ledger.fork });
+      else if (ledger.inFlight) ledgerInFlight.push({ requirementId: view.id, kind: ledger.inFlight, status: view.status, reopenedAt: ledger.reopenedAt, taskDoneAt: ledger.taskDoneAt });
+    }
     requirements.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
     // 投票唯一真相：团队工具 投票/V-*.json。工作流.json.votes 只作为旧项目只读兼容，
     // 不再写入、也不参与判定；这里优先读 V 文件，避免第二份真相。
@@ -5766,6 +5844,12 @@ function createTeamTools(options = {}) {
         owner: row.owner || '',
         createdAt: row.createdAt || null
       })),
+      // R-9fbe：账本分叉（带重开时间维度）。forks 才显示红项；inFlight 是「返工在途/任务在办」，只提提示。
+      ledger: {
+        forks: ledgerForks,
+        inFlight: ledgerInFlight,
+        summary: { forks: ledgerForks.length, inFlight: ledgerInFlight.length, requirements: requirements.length }
+      },
       counts: {
         requirements: requirements.length,
         tasks: tasks.length,
@@ -5775,7 +5859,9 @@ function createTeamTools(options = {}) {
         votes: votes.length,
         accepted: requirements.filter((row) => row.status === 'accepted').length,
         voided: voidRegistry.count,
-        unregistered: requirements.filter((row) => row.unregistered).length
+        unregistered: requirements.filter((row) => row.unregistered).length,
+        ledgerForks: ledgerForks.length,
+        ledgerInFlight: ledgerInFlight.length
       },
       roundKey: `${name}|${state.round || 1}|${requirements.length}|${open.length}`,
       updatedAt: state.updatedAt || null,
