@@ -908,7 +908,8 @@ export function createTask({ project, title, detail = '', priority, priorityBy, 
   // R-43ad F-43ad-1/F-43ad-6：唯一枚举写死；新单缺 type / 未知 type 一律拒建（存量历史行不回填、读取按 requirement 展示）。
   const taskType = String(type || '').trim();
   if (!taskType) fail('TASK_TYPE_REQUIRED', '新任务必须显式给 --type（requirement/task/bug/chore/scenario-bug）', { title });
-  if (!TASK_TYPES.has(taskType)) fail('BAD_TYPE', '类型必须是 requirement/task/bug/chore/scenario-bug', { type: taskType });
+  // R-43ad AC3/AC5②：类型未登记（含 scenario_bug 下划线写法）统一 TASK_TYPE_INVALID（AC 码）。
+  if (!TASK_TYPES.has(taskType)) fail('TASK_TYPE_INVALID', '类型必须是 requirement/task/bug/chore/scenario-bug', { type: taskType, allowed: [...TASK_TYPES] });
   const isDefect = taskType === 'bug' || taskType === 'scenario-bug';
   // F-43ad-3 / AC2：缺陷单必须带验收标准；F-43ad-4：场景缺陷必须有场景名。
   if (isDefect && !String(acceptance || '').trim()) fail('ACCEPTANCE_REQUIRED', '缺陷单（bug/scenario-bug）建单必须带验收标准 --acceptance', { type: taskType, title });

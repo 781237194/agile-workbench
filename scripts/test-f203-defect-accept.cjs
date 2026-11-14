@@ -178,6 +178,21 @@ check('③ 场景缺陷同时算在缺陷组里（defect ⊇ scenario-bug，与 
   counts.kind.defect >= counts.kind['scenario-bug']
   && counts.kind.all === counts.kind.requirement + counts.kind.defect, counts.kind);
 
+// ── ④ 类型枚举与失败码（AC3/AC5②，测试 v165 D1）──────────────────────────
+const badType1 = run(['task', 'create', '--boot', pm, '--project', PROJECT, '--type', 'scenario_bug', '--title', '下划线夹具', '--priority', 'P2', '--detail', 'x', '--json'], true);
+check('④ --type scenario_bug（下划线）→ TASK_TYPE_INVALID（AC 码，不是 BAD_TYPE）',
+  badType1.json && badType1.json.ok === false && badType1.json.code === 'TASK_TYPE_INVALID', badType1.json && badType1.json.code);
+const badType2 = run(['task', 'create', '--boot', pm, '--project', PROJECT, '--type', 'bugx', '--title', '未登记类型夹具', '--priority', 'P2', '--detail', 'x', '--json'], true);
+check('④ --type bugx（未登记）→ TASK_TYPE_INVALID',
+  badType2.json && badType2.json.ok === false && badType2.json.code === 'TASK_TYPE_INVALID', badType2.json && badType2.json.code);
+// 缺 --type：CLI 保持历史默认（task），store 层空 type 才 TASK_TYPE_REQUIRED（见实现说明-v137 §六）
+const noType = run(['task', 'create', '--boot', pm, '--project', PROJECT, '--title', '缺类型夹具', '--priority', 'P2', '--detail', 'x', '--json'], true);
+check('④ 缺 --type 走 CLI 历史默认 task（不破坏既有派单脚本），错误码另见 store 层',
+  noType.json && noType.json.ok === true && String((noType.json.task || {}).type) === 'task', noType.json && (noType.json.code || (noType.json.task || {}).type));
+check('④ 错误详情带 allowed 枚举（可自查）',
+  badType1.json && badType1.json.details && Array.isArray(badType1.json.details.allowed)
+  && badType1.json.details.allowed.includes('scenario-bug'), badType1.json && badType1.json.details);
+
 const passed = results.filter((r) => r.ok).length;
 const failed = results.length - passed;
 console.log(`\nT-f203 断言：${passed}/${results.length} PASS${failed ? `，${failed} FAIL` : ''}`);
