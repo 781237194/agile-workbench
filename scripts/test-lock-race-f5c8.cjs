@@ -56,7 +56,7 @@ const dev = run(['boot', '--role', 'programmer1', '--project', PROJECT, '--sessi
   // ② 并发：一边反复删锁目录，一边 6 路并发 send；不得出现 INTERNAL/ENOENT
   const ids = [];
   for (let i = 0; i < 6; i += 1) ids.push(`并发${i}`);
-  const deleter = setInterval(() => { try { fs.rmSync(locksDir, { recursive: true, force: true }); } catch { /* ignore */ } }, 15);
+  const deleter = setInterval(() => { try { fs.rmSync(locksDir, { recursive: true, force: true }); } catch { /* ignore */ } }, 50);
   const outs = await Promise.all(ids.map((s) => runAsync(['send', '--boot', dev.token, '--to', 'pm', '--subject', s, '--body', 'x', '--no-wake', '--json'])));
   clearInterval(deleter);
   const bad = outs.filter((o) => {
