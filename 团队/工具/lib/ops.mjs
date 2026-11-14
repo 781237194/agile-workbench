@@ -239,8 +239,17 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
     // 受控校准（2026-11-14 ff86 诊断）：历史遗留的「无 owner 的 open 任务」不是真实派工，
     // 只有显式 --allow-unowned-open 时才把它们排除出阻塞清单，并在事件里记下忽略了哪些任务。
     const ignoreUnowned = Boolean(opts.ignoreUnowned);
+    // R-d225 F-reopen-2b：开发任务只认当前轮（旧轮 done 不得把返工后的需求推回 dev_done）。
+    const curRoundAdv = Number((row && row.deliveryRound) || 0) || 0;
+    const roundOkAdv = (rowTask) => {
+      const raw = rowTask && (rowTask.round ?? (rowTask.workflow && rowTask.workflow.round));
+      const rr = Number(raw);
+      if (!Number.isFinite(rr) || raw === '' || raw === null || raw === undefined) return true;
+      return curRoundAdv === 0 || rr === curRoundAdv;
+    };
     const allDevTasks = listTasks(projectName).filter((rowTask) => rowTask && ['task', 'bug'].includes(String(rowTask.type || ''))
       && String(rowTask.requirementId || '') === requirementId)
+      .filter(roundOkAdv)
       .filter((rowTask) => !(String((rowTask.workflow && rowTask.workflow.stage) || '') === 'test'))
       .filter((rowTask) => !(ignoreUnowned && !String(rowTask.owner || '').trim()))
       .filter((rowTask) => String(rowTask.owner || '') !== 'tester');
@@ -2730,6 +2739,25 @@ export async function cmdTask(args) {
       actualFlow: String(args['actual-flow'] || '').split(/[|,，]/).map((x) => x.trim()).filter(Boolean),
       blockedRoles: String(args['blocked-roles'] || '').split(/[|,，]/).map((x) => x.trim()).filter(Boolean),
     });
+    // R-d225 F-reopen-2c：任务轮次自动继承需求当前 deliveryRound（手填 --round 忽略并告警；需求无字段按 1）。
+    try {
+      let inheritedRound = 1;
+      if (requirementId) {
+        const wfNow = readWorkflowState(b.project, { fresh: true }).state || {};
+        const reqs = wfNow.requirements || {};
+        const reqRow = reqs[requirementId] || Object.values(reqs).find((r) => r && String(r.id || '') === requirementId) || null;
+        inheritedRound = Number((reqRow && reqRow.deliveryRound) || 0) || 1;
+      }
+      if (String(args.round || '').trim()) {
+        appendEvent({
+          role: b.role, sessionId: b.sessionId, action: 'task_round_ignored', project: b.project, target: task.id,
+          note: `手填 round=${args.round} 已忽略，按需求 deliveryRound=${inheritedRound}`,
+        });
+      }
+      const created = loadTask(b.project, task.id);
+      created.workflow = { ...(created.workflow || {}), round: inheritedRound };
+      saveTask(b.project, created);
+    } catch { /* 轮次标记失败不阻断建单 */ }
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'task_create', project: b.project, target: task.id, note: `${task.priority} ${task.title}`, data: { task } });
     if (task.owner) {
       notify({ from: b.role, to: task.owner, subject: `新任务 ${task.id}`, body: clipMessage(`${task.priority} ${task.title}\n${task.detail}`), project: b.project, task: task.id, ackRequired: true, sessionId: b.sessionId });
@@ -3110,6 +3138,121 @@ export function cmdMemory(args) {
 
 // ========== 需求看板 / 先索引后找文件 ==========
 
+/**
+ * R-d225 正式返工入口：`req reopen --project P --requirement R --reason "…"`。
+ * dev_done/test_done → dev；deliveryRound+1；写 gateInvalidatedAt/By 与 trq.verdictStale；
+ * test_done 时把 done 的 tester 任务回 open 并置新轮；只追加不抹除历史；3 秒内重复点击幂等。
+ */
+function cmdReqReopen(args) {
+  const b = bootFor(args, 'req');
+  const projectName = String(args.project || b.project);
+  if (!['pm', 'analyst', 'owner'].includes(String(b.role))) {
+    fail('PERMISSION_DENIED', '只有 PM / 需求分析（或 Owner）能发起需求返工', { role: b.role });
+  }
+  const requirementId = String(args.requirement || '').trim();
+  const reason = String(args.reason || '').trim();
+  if (!requirementId) fail('BAD_ARGS', '需要 --requirement R-...');
+  if (!reason) fail('REASON_REQUIRED', '返工必须带 --reason（为什么返工），空原因零副作用拒收', { requirementId });
+  const stateRead = readWorkflowState(projectName, { fresh: true });
+  const wf = stateRead.state || {};
+  const requirements = wf.requirements || {};
+  const row = requirements[requirementId]
+    || Object.values(requirements).find((r) => r && String(r.id || '') === requirementId)
+    || null;
+  if (!row) {
+    let reqTask = null;
+    try { reqTask = loadTask(projectName, requirementId); } catch { reqTask = null; }
+    if (!reqTask) fail('REQUIREMENT_NOT_FOUND', `需求不存在：${requirementId}`, { requirementId });
+    const fromStatus0 = String((reqTask.workflow && reqTask.workflow.requirementStatus) || '');
+    if (!['dev_done', 'test_done'].includes(fromStatus0)) {
+      fail('REOPEN_NOT_APPLICABLE', `需求 ${requirementId} 当前状态 ${fromStatus0 || '(空)'} 不适用返工（只支持 dev_done/test_done）`, { requirementId, status: fromStatus0 });
+    }
+  }
+  const fromStatus = String((row && row.status) || '');
+  if (!['dev_done', 'test_done'].includes(fromStatus)) {
+    fail('REOPEN_NOT_APPLICABLE', `需求 ${requirementId} 当前状态 ${fromStatus || '(空)'} 不适用返工（只支持 dev_done/test_done）`, {
+      requirementId, status: fromStatus, allowed: ['dev_done', 'test_done'],
+    });
+  }
+  // F-reopen-6：3 秒内重复命令视为同一次（幂等，不重复计数）。
+  const lastReopenMs = Date.parse(String(row.lastReopenAt || ''));
+  if (Number.isFinite(lastReopenMs) && Date.now() - lastReopenMs < 3000) {
+    out(args, `返工幂等（3 秒内重复）：${requirementId} 已在第 ${Number(row.deliveryRound || 1)} 轮`, {
+      ok: true, idempotent: true, requirementId, deliveryRound: Number(row.deliveryRound || 1), fromStatus,
+    });
+    return;
+  }
+  const at = nowIso();
+  const prevRound = Number(row.deliveryRound ?? 1) || 1;
+  const nextRound = prevRound + 1;
+  row.deliveryRound = nextRound;
+  row.gateInvalidatedAt = at;
+  row.gateInvalidatedBy = 'reopen';
+  row.status = 'dev';
+  if (row.phase) row.phase = 'dev';
+  row.reopenCount = Number(row.reopenCount || 0) + 1;
+  row.lastReopenAt = at;
+  if (row.trq && typeof row.trq === 'object') row.trq = { ...row.trq, verdictStale: true };
+  // test_done 返工：done 的 tester 任务回 open 并置新轮（旧报告不算本轮）。
+  const reopenedTasks = [];
+  if (fromStatus === 'test_done') {
+    for (const t of listTasks(projectName)) {
+      if (String(t.requirementId || '') !== requirementId) continue;
+      if (String(t.owner || '') !== 'tester' || String(t.status || '') !== 'done') continue;
+      t.status = 'open';
+      t.doneAt = null;
+      t.workflow = { ...(t.workflow || {}), round: nextRound };
+      t.reopenedBy = b.role;
+      t.reopenedAt = at;
+      saveTask(projectName, t);
+      reopenedTasks.push(t.id);
+    }
+  }
+  let reqTask = null;
+  try { reqTask = loadTask(projectName, requirementId); } catch { reqTask = null; }
+  if (reqTask) {
+    reqTask.workflow = { ...(reqTask.workflow || {}), requirementStatus: 'dev', deliveryRound: nextRound, gateInvalidatedAt: at };
+    reqTask.updatedAt = at;
+    reqTask._by = b.role;
+    reqTask._action = 'req_reopen';
+    reqTask._note = reason;
+    saveTask(projectName, reqTask);
+  }
+  const sync = syncWorkflowRow(projectName, reqTask, 'dev', {
+    reviewedAt: reqTask && reqTask.workflow && reqTask.workflow.reviewedAt,
+    reviewedBy: reqTask && reqTask.workflow && reqTask.workflow.reviewedBy,
+    reviewRole: reqTask && reqTask.workflow && reqTask.workflow.reviewRole,
+    teamMode: reqTask && reqTask.workflow && reqTask.workflow.teamMode,
+  }, { create: true, action: 'req_reopen', by: b.role, note: reason, phase: 'dev' });
+  if (sync && sync.state && sync.state.requirements) {
+    const r2 = sync.state.requirements[requirementId] || Object.values(sync.state.requirements).find((r) => r && String(r.id || '') === requirementId);
+    if (r2) {
+      r2.deliveryRound = nextRound;
+      r2.gateInvalidatedAt = at;
+      r2.gateInvalidatedBy = 'reopen';
+      r2.reopenCount = row.reopenCount;
+      r2.lastReopenAt = at;
+      if (r2.trq && typeof r2.trq === 'object') r2.trq = { ...r2.trq, verdictStale: true };
+      writeWorkflowState(projectName, sync.state);
+    }
+  }
+  appendEvent({
+    role: b.role, sessionId: b.sessionId, action: 'requirement_reopened', project: projectName,
+    target: requirementId, note: truncate(reason, 160),
+    data: { requirementId, role: b.role, reason, count: row.reopenCount, at, fromStatus, toStatus: 'dev', deliveryRound: nextRound, reopenedTasks },
+  });
+  out(args, [
+    `已返工 ${requirementId}：${fromStatus} → dev（第 ${nextRound} 轮，第 ${row.reopenCount} 次返工）`,
+    `原因：${reason}`,
+    `门禁失效标记：gateInvalidatedAt=${at}；TR-Q 旧结论标 stale`,
+    ...(reopenedTasks.length ? [`测试任务回 open：${reopenedTasks.join(', ')}`] : []),
+    `工作流：${sync && sync.file ? sync.file : ''}`,
+  ].join('\n'), {
+    ok: true, requirementId, fromStatus, toStatus: 'dev', deliveryRound: nextRound,
+    reopenCount: row.reopenCount, gateInvalidatedAt: at, reopenedTasks, workflowFile: sync && sync.file,
+  });
+}
+
 export function cmdReq(args) {
   const sub = args._[1] || 'list';
   // 需求评审 / 技术评审记录：fast 由需求分析师评审，full 由产品设计师评审；
@@ -3119,6 +3262,8 @@ export function cmdReq(args) {
   if (sub === 'trq') return cmdReqTrq(args);
   // 被驳回需求的出口：PM 决定进入下一轮或终止；两者都会同步 工作流.json。
   if (sub === 'iterate' || sub === 'terminate') return cmdReqLifecycle(args, sub);
+  // R-d225：正式返工入口（dev_done/test_done → dev，deliveryRound+1，门禁失效标记）。
+  if (sub === 'reopen') return cmdReqReopen(args);
   const b = bootFor(args, 'req');
   if (sub === 'create') {
     if (!['pm', 'product', 'analyst'].includes(b.role)) fail('NOT_PM', '只有 PM / 产品 / 需求分析能建需求');
