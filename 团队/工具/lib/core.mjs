@@ -92,7 +92,16 @@ export function readJson(p, fallback = null) {
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'));
   } catch (e) {
-    if (e.code === 'ENOENT' && fallback !== null) return fallback;
+    // B-f5c8：文件可能正被并发 rename（tmp+rename 写盘/锁目录被清），ENOENT 先短重试一次，仍不在则返回 fallback。
+    if (e.code === 'ENOENT') {
+      const until = Date.now() + 20;
+      while (Date.now() < until) { /* busy wait */ }
+      try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e2) {
+        if (e2.code === 'ENOENT') return fallback;
+        if (e2 instanceof SyntaxError) fail('BAD_JSON', `JSON 解析失败：${p}`, { path: p, cause: e2.message });
+        throw e2;
+      }
+    }
     if (e instanceof SyntaxError) fail('BAD_JSON', `JSON 解析失败：${p}`, { path: p, cause: e.message });
     throw e;
   }
@@ -117,7 +126,14 @@ export function writeJson(p, obj) {
 
 export function appendLine(p, line) {
   ensureDir(path.dirname(p));
-  fs.appendFileSync(p, line.endsWith('\n') ? line : line + '\n', 'utf8');
+  try {
+    fs.appendFileSync(p, line.endsWith('\n') ? line : line + '\n', 'utf8');
+  } catch (e) {
+    // B-f5c8：父目录可能刚被并发清理（工作区清理/测试沙盘回收），重建后再写一次。
+    if (e.code !== 'ENOENT') throw e;
+    ensureDir(path.dirname(p));
+    fs.appendFileSync(p, line.endsWith('\n') ? line : line + '\n', 'utf8');
+  }
 }
 
 export function readJsonl(p) {
@@ -313,12 +329,36 @@ export function acquireLock(key, opts = {}) {
     reason: truncate(opts.reason || '', 120),
   };
   const deadline = Date.now() + waitMs;
+  let enoentRetries = 20;
   for (;;) {
     try {
       fs.mkdirSync(dir);
       fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify(owner, null, 2), 'utf8');
       return owner;
     } catch (e) {
+      // B-f5c8：锁目录可能被并发清理（工作区清理/沙盘回收）导致 mkdir 或写 owner.json 报 ENOENT；
+      // 重建目录后重试（最多 2 次），不引入全局大锁、不牺牲并发。
+      if (e.code === 'ENOENT' && enoentRetries > 0) {
+        // 并发删除者可能在 mkdir 与写 owner.json 之间把目录删掉：小步快重试（最多 10 次，总等待 <100ms）。
+        for (let i = 0; i < 10; i += 1) {
+          try { ensureDir(PATHS.locks); } catch { /* ignore */ }
+          try {
+            fs.mkdirSync(dir);
+          } catch (e2) {
+            if (e2.code === 'ENOENT') { const until = Date.now() + 5; while (Date.now() < until) { /* wait */ } continue; }
+            if (e2.code !== 'EEXIST') { enoentRetries -= 1; break; }
+          }
+          try {
+            fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify(owner, null, 2), 'utf8');
+            return owner;
+          } catch (e3) {
+            if (e3.code !== 'ENOENT') { enoentRetries -= 1; break; }
+          }
+          const until = Date.now() + 5;
+          while (Date.now() < until) { /* wait */ }
+        }
+        if (enoentRetries > 0) continue;
+      }
       if (e.code !== 'EEXIST') throw e;
       const cur = readJson(path.join(dir, 'owner.json'), null);
       if (lockIsStale(cur)) {
