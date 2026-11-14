@@ -385,14 +385,29 @@ export function planForRow(row, ctx) {
     if (decided === 'rejected') {
       return { role: carrierOf(id, tasks, row) || 'analyst', action: 'rework', gate: null };
     }
-    // R-5fbd F-5fbd-1：只有 approve/skip 才叫开发；未知决定只告警不猜。
-    if (!['approved', 'accept', 'accepted', 'skip', 'skipped'].includes(decided)) {
-      return { skip: 'unknown_decision', alertPm: true };
+    // R-5fbd F-5fbd-1（补单 T-f947 ③）：accepted/terminated 是需求终态，不是“known 决定”，不得据此叫开发。
+    if (['accepted', 'terminated'].includes(decided)) {
+      return { skip: 'unknown_decision', alertPm: true, decided };
+    }
+    // 只有 approve/skip 才叫开发；其它未知决定只告警不猜。
+    if (!['approved', 'accept', 'skip', 'skipped'].includes(decided)) {
+      return { skip: 'unknown_decision', alertPm: true, decided };
     }
     const carrier = carrierOf(id, tasks, row);
-    if (!carrier) return { skip: 'no_carrier_task', alertPm: true };
+    if (!carrier) {
+      // 补单 T-f947 ②：有当前轮候选任务但 owner 空 → already_decided(carrier_owner_missing)；
+      // 完全没有候选任务才是 no_carrier_task（产品未投载体）。
+      const candidates = tasksOf(id, tasks, (t) => ['task', 'bug'].includes(String(t.type || ''))
+        && isCurrentRound(row, t)
+        && !['done', 'rejected', 'terminated', 'cancelled'].includes(String(t.status || '')));
+      if (candidates.length) {
+        return { skip: 'already_decided', reason: 'carrier_owner_missing', alertPm: true, taskIds: candidates.map((t) => t.id).slice(0, 3) };
+      }
+      return { skip: 'no_carrier_task', alertPm: true };
+    }
     // ready + 决定（approve/skip）+ 当前轮载体 → 叫开发（不写状态，守护只读）。
-    return { role: carrier, action: 'develop', gate: 'G3' };
+    // 补单 T-f947 ①：plan 必须带 reason，便于日志/测试对账。
+    return { role: carrier, action: 'develop', gate: 'G3', reason: 'ready_decision_carrier' };
   }
   if (status === 'approved') {
     const gate = gateOwnerDecision(row);
@@ -876,8 +891,10 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
     }
     const plan = planForRow({ ...row, id: event.requirementId }, ctx);
     if (plan.skip) {
-      appendRouteLog(name, { ...base, event: 'skip', why: plan.skip, ok: plan.skip !== 'closed' });
-      out.skips.push({ ...base, why: plan.skip });
+      // 补单 T-f947：skip 带 reason（如 already_decided(carrier_owner_missing)）时，日志与事件都要带上。
+      const skipWhy = plan.reason ? `${plan.skip}(${plan.reason})` : plan.skip;
+      appendRouteLog(name, { ...base, event: 'skip', why: skipWhy, ok: plan.skip !== 'closed', ...(plan.reason ? { reason: plan.reason } : {}) });
+      out.skips.push({ ...base, why: skipWhy, ...(plan.reason ? { reason: plan.reason } : {}) });
       if (plan.alertPm) {
         // 2026-11-14 修正：告警带原因码 + requirementId + stage；同需求同原因 10 分钟内不重复报。
         const codeMap = {
@@ -885,6 +902,7 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
           no_dev_task: 'NO_DEV_TASK',
           no_test_task: 'NO_TEST_TASK',
           no_task_owner: 'NO_TASK_OWNER',
+          already_decided: 'CARRIER_OWNER_MISSING',
         };
         const code = codeMap[plan.skip] || 'NO_DISPATCHABLE_TASK';
         const stage = currentStatus || 'unknown';

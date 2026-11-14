@@ -36,7 +36,7 @@ const appr = [{ status: 'approved', channel: 'ui', at: '2026-11-15T00:00:00Z' }]
 
   // ⑤ 决定 approved + 当前轮载体 → 叫开发（不再 already_decided）
   const p5 = planForRow(baseRow({ decisions: appr }), { tasks: [carrier()], projectPath: ROOT, mode: 'full' });
-  check('⑤ ready + approved + 载体 → develop（G3）', p5.action === 'develop' && p5.role === 'programmer1' && p5.gate === 'G3', p5);
+  check('⑤ ready + approved + 载体 → develop（G3 + reason）', p5.action === 'develop' && p5.role === 'programmer1' && p5.gate === 'G3' && p5.reason === 'ready_decision_carrier', p5);
 
   // ⑥ 决定 approved + 无载体 → skip:no_carrier_task + alertPm
   const p6 = planForRow(baseRow({ decisions: appr }), { tasks: [], projectPath: ROOT, mode: 'full' });
@@ -57,6 +57,17 @@ const appr = [{ status: 'approved', channel: 'ui', at: '2026-11-15T00:00:00Z' }]
   const p9 = planForRow(baseRow({ decisions: appr }), { tasks: [carrier()], projectPath: ROOT, mode: 'fast' });
   check('⑨ fast 模式 ready+approved+载体 → develop', p9.action === 'develop', p9);
 
+
+  // ⑩ 补单 T-f947：accepted/terminated 不算 known 决定
+  const p10 = planForRow(baseRow({ decisions: [{ status: 'accepted', at: '2026-11-15T00:00:00Z' }] }), { tasks: [carrier()], projectPath: ROOT, mode: 'full' });
+  check('⑩ accepted 决定 → unknown_decision（不叫开发）', p10.skip === 'unknown_decision' && p10.alertPm === true, p10);
+  const p10b = planForRow(baseRow({ decisions: [{ status: 'terminated', at: '2026-11-15T00:00:00Z' }] }), { tasks: [carrier()], projectPath: ROOT, mode: 'full' });
+  check('⑩ terminated 决定 → unknown_decision', p10b.skip === 'unknown_decision', p10b);
+
+  // ⑪ 有当前轮候选但 owner 空 → already_decided(carrier_owner_missing)
+  const ownerless = carrier({ owner: '' });
+  const p11 = planForRow(baseRow({ decisions: appr }), { tasks: [ownerless], projectPath: ROOT, mode: 'full' });
+  check('⑪ 候选 owner 空 → already_decided(carrier_owner_missing)', p11.skip === 'already_decided' && p11.reason === 'carrier_owner_missing', p11);
   const passed = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => !r.ok).length;
   console.log(`\nR-5fbd 断言：${passed}/${results.length} PASS${failed ? `，${failed} FAIL` : ''}`);
