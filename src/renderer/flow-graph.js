@@ -17,7 +17,7 @@
     { key: 'dev', label: '开发', hint: '实现/互审', short: '开发完成' },
     { key: 'test', label: '测试', hint: '报告 PASS/FAIL', short: '报告 PASS' },
     { key: 'accept', label: '验收', hint: 'Owner/PM', short: '验收通过' },
-    { key: 'closure', label: '迭代/终止', hint: '轮次收口', short: '整轮通过 +1 轮' },
+    { key: 'closure', label: '迭代/终止', hint: '需求收口', short: '通过或终止' },
   ];
   // v2 星形布局：中心 (380,260)，9 节点沿椭圆放射（每 40°）。
   const VIEW = { w: 760, h: 520, cx: 380, cy: 260, rx: 262, ry: 182 };
@@ -134,14 +134,14 @@
         from: ANGLES[1], to: ANGLES[5],
         title: '并行①',
         detail: '',
-        fork: '分叉：上一轮开发未收口时，下一轮评审并行',
+        fork: '分叉：需求开发未收口时，评审与开发并行',
       },
       testCollect: {
         key: 'test-collect', live: liveB,
         from: ANGLES[6], to: ANGLES[0] + 360,
         title: '并行②',
         detail: '',
-        fork: '分叉：测试跑的同时收下一轮需求',
+        fork: '分叉：测试与遗留项收集并行',
       },
     };
   }
@@ -194,8 +194,8 @@
     }).join('');
 
     const legend = `<div class="fs-legend">
-      <span class="fs-legend-item" data-fg-legend="parallel-review-dev"><b>并行① 评审 ∥ 开发</b>：分叉条件=上一轮开发未收口时下一轮评审并行；汇合①=开发完成+评审通过 → 测试</span>
-      <span class="fs-legend-item" data-fg-legend="parallel-test-collect"><b>并行② 测试 ∥ 下一轮收集</b>：分叉条件=测试跑的同时收下一轮需求；汇合②=测试结果+收集齐 → 轮次门（迭代/终止）</span>
+      <span class="fs-legend-item" data-fg-legend="parallel-review-dev"><b>并行① 评审 ∥ 开发</b>：分叉条件=当前需求开发未收口时评审并行；汇合①=开发完成+评审通过 → 测试</span>
+      <span class="fs-legend-item" data-fg-legend="parallel-test-collect"><b>并行② 测试 ∥ 遗留项收集</b>：分叉条件=测试与遗留项收集并行；汇合②=测试结果+收集齐 → 需求收口（迭代/终止）</span>
     </div>`;
     const nodeHtml = nodes.map((node, i) => {
       const p = pts[i];
@@ -223,7 +223,7 @@
           <g class="fs-merges">${merges}</g>
         </svg>
         <div class="fs-center" data-fg-center data-fg-current="${esc(nodes.filter((n) => n.current > 0).map((n) => n.key).join(','))}" data-fg-concurrency="${concurrentStages}">
-          <span class="fs-center-eyebrow">本轮 · 第 ${round} 轮</span>
+          <span class="fs-center-eyebrow">当前需求</span>
           <b class="fs-center-title">当前阶段</b>
           <span class="fs-center-detail">${esc(centerText)}</span>
           <span class="fs-center-concurrency" data-fg-concurrency-text>并发 ${concurrentStages} 阶段有在办</span>
