@@ -13,15 +13,19 @@ const booted = lib.boot('programmer2');
 checks.add('沙盘内 boot programmer2 成功', booted.ok);
 
 if (booted.ok) {
+  // 每轮正文带唯一串：同一个 root 连跑两次时，计数按「本轮」算（v159 AC2：原来写死 hits===1，第二次必红）
+  const runTag = `${lib.MESSAGE_MARKER}-${Date.now().toString(36)}-${process.pid}`;
   const subject = '沙盘消息（R-7841 ③消息链路）';
-  const sent = lib.teamJson(['send', '--project', lib.PROJECT, '--boot', booted.token, '--to', 'pm', '--subject', subject, '--body', `探针正文 ${lib.MESSAGE_MARKER}`, '--type', 'notice', '--no-wake']);
+  const sent = lib.teamJson(['send', '--project', lib.PROJECT, '--boot', booted.token, '--to', 'pm', '--subject', subject, '--body', `探针正文 ${runTag}`, '--type', 'notice', '--no-wake']);
   checks.add('沙盘内 send 成功（--no-wake 不发真实唤醒）', sent.ok === true, { code: sent.code || 'OK', wakeFailed: sent.wakeFailed });
 
   const pmNew = lib.sandboxPath('团队', '状态', '邮箱', 'pm', 'new');
-  const hits = lib.listFiles(pmNew).filter((name) => {
-    try { return fs.readFileSync(path.join(pmNew, name), 'utf8').includes(lib.MESSAGE_MARKER); } catch { return false; }
+  const usersOf = (needle) => lib.listFiles(pmNew).filter((name) => {
+    try { return fs.readFileSync(path.join(pmNew, name), 'utf8').includes(needle); } catch { return false; }
   });
-  checks.add('消息落在沙盘 pm 邮箱（new/）', hits.length === 1, { files: hits });
+  const hitsThisRun = usersOf(runTag);
+  const hitsAll = usersOf(lib.MESSAGE_MARKER);
+  checks.add('本轮消息落在沙盘 pm 邮箱（按本轮唯一探针计数 = 1）', hitsThisRun.length === 1, { files: hitsThisRun, allRuns: hitsAll.length });
 
   const teamJson = lib.readJsonSandbox('团队', '状态', '团队.json');
   const ids = ((teamJson && teamJson.members) || []).map((row) => String(row.sessionId || '').trim()).filter(Boolean);
@@ -32,7 +36,8 @@ if (booted.ok) {
     ok: checks.ok,
     case: '03-message',
     category: '③消息与唤醒',
-    deliveredToSandboxMailbox: hits.length === 1,
+    deliveredToSandboxMailbox: hitsThisRun.length === 1,
+    mailboxMessagesAllRuns: hitsAll.length,
     rosterSessionIdsCleared: cleared,
   }, checks);
 } else {

@@ -176,6 +176,20 @@ const verifyB = cli(['verify', '--root', b1.dir]);
 check('两轮 verify 都判生产零改动', verifyA.status === 0 && verifyB.status === 0 && verifyA.json.leaks.length === 0 && verifyB.json.leaks.length === 0, null, 'AC2');
 check('重复跑之后真实 workbench.json 仍无沙盘标记', !(fs.existsSync(realWorkbench) ? fs.readFileSync(realWorkbench, 'utf8') : '').includes(meta1.marker), null, 'AC2');
 
+// v159 追加：AC2 的「同一测试连跑两次」= 同一个 root 连跑两次（测试人员就是这么复测的）
+const sameRoot = seedRoot('t7841-ac2-sameroot');
+check('同一 root 的 seed 成功', sameRoot.r.status === 0, null, 'AC2');
+const twiceCases = ['01-rotate', '03-message', '04-archive'];
+const twiceRuns = [];
+for (const caseName of twiceCases) {
+  const first = runCase(sameRoot.dir, caseName);
+  const second = runCase(sameRoot.dir, caseName);
+  twiceRuns.push({ case: caseName, first: first.status, second: second.status, firstOk: Boolean(first.caseResult && first.caseResult.ok), secondOk: Boolean(second.caseResult && second.caseResult.ok), idempotent: Boolean(second.caseResult && (second.caseResult.idempotentRerun || false)) });
+  check(`同一 root 连跑两次都通过：${caseName}`, first.status === 0 && second.status === 0 && first.caseResult && second.caseResult && first.caseResult.ok === true && second.caseResult.ok === true, { first: first.status, second: second.status, secondCode: second.caseResult && second.caseResult.archivedCode, failed: (second.caseResult && second.caseResult.checks || []).filter((c) => !c.ok).map((c) => c.name) }, 'AC2');
+}
+const sameRootVerify = cli(['verify', '--root', sameRoot.dir]);
+check('同一 root 连跑两次后 verify 仍判零泄漏', sameRootVerify.status === 0 && sameRootVerify.json && sameRootVerify.json.code === 'SANDBOX_OK' && sameRootVerify.json.leaks.length === 0, { status: sameRootVerify.status, code: sameRootVerify.json && sameRootVerify.json.code }, 'AC2');
+
 /* ───────────── AC3：覆盖清单（六类各 1 例） ───────────── */
 console.log('\n=== AC3 覆盖清单：第四节六类各 1 例');
 const registry = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts', 'sandbox', 'cases', 'index.json'), 'utf8'));

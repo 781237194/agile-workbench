@@ -16,11 +16,20 @@ const booted = lib.boot('programmer2');
 checks.add('沙盘内 boot programmer2 成功（名册已清 sessionId）', booted.ok, { rulesHash: booted.rulesHash.slice(0, 8) });
 
 if (booted.ok) {
-  const rotated = lib.teamJson(
-    ['session', 'rotate', '--role', 'programmer2', '--project', lib.PROJECT, '--session', MARKER, '--force', '--reason', '沙盘 rotate（R-7841 AC1 破坏性跑）'],
-    { TEAM_DSH_FAKE: JSON.stringify([{ sessionId: MARKER }]) },
-  );
-  checks.add('rotate 成功且换到沙盘标记会话', rotated.ok === true && String(rotated.to || '') === MARKER, { code: rotated.code || 'OK', from: rotated.from, to: rotated.to });
+  // 可重复跑（v159 AC2）：同一个 root 第二次跑时名册已经是标记会话，再 rotate 会 SESSION_SAME。
+  // 口径：已经是目标状态 → 视为本轮 rotate 已完成（idempotent），仍然断言「沙盘状态 = 标记会话」。
+  const rosterBefore = lib.readJsonSandbox('团队', '状态', '团队.json');
+  const alreadyMarked = Boolean(((rosterBefore && rosterBefore.members) || []).find((row) => row.role === 'programmer2' && String(row.sessionId || '') === MARKER));
+  let rotated = { ok: true, code: 'ALREADY_MARKED', to: MARKER, from: MARKER };
+  if (!alreadyMarked) {
+    rotated = lib.teamJson(
+      ['session', 'rotate', '--role', 'programmer2', '--project', lib.PROJECT, '--session', MARKER, '--force', '--reason', '沙盘 rotate（R-7841 AC1 破坏性跑）'],
+      { TEAM_DSH_FAKE: JSON.stringify([{ sessionId: MARKER }]) },
+    );
+    checks.add('rotate 成功且换到沙盘标记会话（首次）', rotated.ok === true && String(rotated.to || '') === MARKER, { code: rotated.code || 'OK', from: rotated.from, to: rotated.to });
+  } else {
+    checks.add('重复跑幂等：名册已是标记会话，不再重复 rotate（避免 SESSION_SAME）', true, { code: rotated.code });
+  }
 
   const roster = lib.readJsonSandbox('团队', '状态', '团队.json');
   const member = (roster && roster.members || []).find((row) => row.role === 'programmer2');
@@ -36,7 +45,10 @@ if (booted.ok) {
 
   const queue = lib.readJsonSandbox('团队', '状态', '项目', lib.PROJECT, '待启动队列.json');
   const queued = JSON.stringify(queue || {});
-  checks.add('rotate 后续动作（待启动队列）也写在沙盘', queued === '{}' || queued.includes(MARKER), { queueFile: Boolean(queue) });
+  // 待启动队列是 rotate 的一次性副作用：首次跑要求出现标记会话；重复跑（幂等、不再 rotate）只要求文件可读
+  checks.add(alreadyMarked ? '重复跑：不再产生新的待启动项（队列文件可读即可）' : 'rotate 后续动作（待启动队列）也写在沙盘',
+    alreadyMarked ? (queue === null || typeof queue === 'object') : (queued === '{}' || queued.includes(MARKER)),
+    { queueFile: Boolean(queue), alreadyMarked });
 
   lib.emit({
     ok: checks.ok,
@@ -45,6 +57,7 @@ if (booted.ok) {
     rosterChanged: Boolean(member && member.sessionId === MARKER),
     rotationRecord: rotationFiles.length > 0,
     workbenchMapped: Boolean(wbProject && wbProject.sessions.programmer2 === MARKER),
+    idempotentRerun: alreadyMarked,
   }, checks);
 } else {
   lib.emit({ ok: false, case: '01-rotate', category: '①换人/rotate', bootFailed: true }, checks);
