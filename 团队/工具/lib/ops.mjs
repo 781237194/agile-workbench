@@ -3043,9 +3043,32 @@ export async function cmdTask(args) {
     const requirementAdvance = advanceRequirementAfterTaskDone(b.project, task, b.role);
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'task_done', project: b.project, target: task.id, note: truncate(String(args.evidence), 120), data: { evidence: task.evidence } });
     // B-6818（T0）：完成事件自动唤醒收件人（通常是 PM），不等 PM 轮询；30 秒去抖，失败写 唤醒.jsonl。
-    const doneTo = task.createdBy === 'system' ? 'pm' : String(task.createdBy || 'pm');
-    const doneMsg = notify({ from: b.role, to: doneTo, subject: `完成回执 ${task.id}`, body: clipMessage(`${task.title}\n证据：${task.evidence}`), project: b.project, task: task.id, ackRequired: true, type: 'receipt', sessionId: b.sessionId });
-    const doneWake = await wakeWithGuard({ project: b.project, to: doneTo, msg: doneMsg, isDispatch: false, reason: `task_done:${task.id}`, dedupeKey: `task_done:${task.id}` });
+    // B-cef3：createdBy 可能不是团队成员（route-daemon / system / 历史角色名）——
+    // 直接拿它当收件人会 NO_RECIPIENT，且异常在落库之后抛出 → 表现为「假失败」。
+    // 收件人解析：system / 空 / 非本团队成员 → 统一回退 pm（AC1/AC3）。
+    const doneWarnings = [];
+    let memberRoles = new Set();
+    try { memberRoles = new Set(activeMembers(loadTeam()).map((member) => String(member.role || ''))); } catch { memberRoles = new Set(); }
+    const createdByRole = String(task.createdBy || '').trim();
+    const doneTo = (!createdByRole || createdByRole === 'system' || !memberRoles.has(createdByRole)) ? 'pm' : createdByRole;
+    if (createdByRole && createdByRole !== 'system' && createdByRole !== doneTo) {
+      doneWarnings.push({ code: 'RECEIPT_RECIPIENT_FALLBACK', message: `createdBy=${createdByRole} 不是团队成员，完成回执回退给 pm`, to: doneTo });
+    }
+    let doneMsg = null;
+    try {
+      doneMsg = notify({ from: b.role, to: doneTo, subject: `完成回执 ${task.id}`, body: clipMessage(`${task.title}\n证据：${task.evidence}`), project: b.project, task: task.id, ackRequired: true, type: 'receipt', sessionId: b.sessionId });
+    } catch (e) {
+      // AC2：通知失败只记 warnings，不影响 task done 的 ok 与退出码（任务/需求已落库）。
+      doneWarnings.push({ code: (e && e.code) || 'RECEIPT_NOTIFY_FAILED', message: String((e && e.message) || e).slice(0, 200), to: doneTo });
+    }
+    let doneWake = null;
+    if (doneMsg) {
+      try {
+        doneWake = await wakeWithGuard({ project: b.project, to: doneTo, msg: doneMsg, isDispatch: false, reason: `task_done:${task.id}`, dedupeKey: `task_done:${task.id}` });
+      } catch (e) {
+        doneWarnings.push({ code: (e && e.code) || 'RECEIPT_WAKE_FAILED', message: String((e && e.message) || e).slice(0, 200), to: doneTo });
+      }
+    }
     // R-31b3：完成当前任务后自动续跑同角色的派单队列（避免角色空闲、排队任务还 working）。
     const dispatchQueue = await pumpDispatchQueue(b.project, { role: String(task.owner || b.role) });
     // R-99ff ③：本角色没泵出去时，再兜底泵一次“队列里任意已空闲角色”的一项，
@@ -3078,11 +3101,14 @@ export async function cmdTask(args) {
     const wakeHint = doneWake && doneWake.ok === false
       ? `\n完成事件唤醒失败：${String(doneWake.why || doneWake.code || '').slice(0, 120)}（已写 唤醒.jsonl）`
       : (doneWake && doneWake.skipped === 'DEBOUNCED' ? `\n完成事件唤醒已去抖（30 秒内已提示过 ${doneTo}）` : '');
+    const warningHint = doneWarnings.length
+      ? `\n完成回执警告：${doneWarnings.map((row) => `${row.code}${row.to ? '@' + row.to : ''}`).join('，')}（任务与需求已落库，不影响完成）`
+      : '';
     const lockHint = releasedLock ? `\n派单锁已释放：${releasedLock.messageId}（task ${task.id}，不再挡下一个派单）` : '';
     const evidenceHint = evidenceGate && !evidenceGate.skipped
       ? `\n证据门：已核 ${evidenceGate.files.length} 个证据文件（sha256 已记入任务）`
       : (evidenceGate && evidenceGate.skipped ? '\n证据门：沙盘跳过（TEAM_SELFTEST=1）' : '');
-    out(args, `已完成 ${task.id}，证据：${task.evidence}${evidenceHint}${requirementAdvance ? `\n需求状态：${requirementAdvance.previous} → ${requirementAdvance.status}（phase=${requirementAdvance.phase}）` : ''}${queueHint}${roundHint}${memoryHint}${wakeHint}${lockHint}`, { ok: true, task, evidenceGate, requirementAdvance, dispatchQueue, tailPump, roundInfo, memory: memoryGate, wake: doneWake, releasedLock });
+    out(args, `已完成 ${task.id}，证据：${task.evidence}${evidenceHint}${requirementAdvance ? `\n需求状态：${requirementAdvance.previous} → ${requirementAdvance.status}（phase=${requirementAdvance.phase}）` : ''}${queueHint}${roundHint}${memoryHint}${wakeHint}${warningHint}${lockHint}`, { ok: true, task, evidenceGate, requirementAdvance, dispatchQueue, tailPump, roundInfo, memory: memoryGate, wake: doneWake, warnings: doneWarnings, receiptTo: doneTo, releasedLock });
     return;
   }
   if (sub === 'priority') {
