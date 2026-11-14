@@ -104,9 +104,17 @@ function readDshConfig() {
   }
 }
 
-function persistDshConfig(baseUrl) {
+function persistDshConfig(baseUrl, meta = {}) {
   const tmp = DSH_CONFIG_FILE + '.awb-tmp-' + process.pid + '-' + crypto.randomUUID().slice(0, 8);
-  const body = JSON.stringify({ version: 1, baseUrl: String(baseUrl), updatedAt: new Date().toISOString() }, null, 2) + '\n';
+  // F-4：source=user 才是「显式配置」；自动发现写进来的地址一律 source=auto，避免被当成用户 pin。
+  const source = String(meta.source || 'auto');
+  const body = JSON.stringify({
+    version: 1,
+    baseUrl: String(baseUrl),
+    source,
+    pinned: meta.pinned === true || source === 'user',
+    updatedAt: new Date().toISOString()
+  }, null, 2) + '\n';
   fs.mkdirSync(path.dirname(DSH_CONFIG_FILE), { recursive: true });
   fs.writeFileSync(tmp, body, 'utf8');
   try {
@@ -120,6 +128,23 @@ function persistDshConfig(baseUrl) {
 
 const SAVED_DSH_URL = (() => {
   try { return readDshConfig()?.baseUrl || ''; } catch { return ''; }
+})();
+/**
+ * F-4：显式配置 = 用户自己 pin 的地址（dsh.json 里 source=user / pinned=true）或环境变量。
+ * 只有它能让「多候选」不报 ambiguous；自动发现写进 dsh.json 的地址（source=auto）只是提示，不算显式配置。
+ */
+const DSH_EXPLICIT = (() => {
+  const envUrl = String(process.env.DSH_WEB_URL || '').trim();
+  if (envUrl) return { baseUrl: envUrl, source: '环境变量 DSH_WEB_URL' };
+  const envPort = String(process.env.DSH_WEB_PORT || process.env.DSH_PORT || '').trim();
+  if (/^\d{2,5}$/.test(envPort)) return { baseUrl: 'http://127.0.0.1:' + envPort, source: '环境变量 DSH_WEB_PORT/DSH_PORT' };
+  try {
+    const cfg = readDshConfig();
+    if (cfg && (cfg.pinned === true || String(cfg.source || '') === 'user')) {
+      return { baseUrl: cfg.baseUrl, source: 'dsh.json 显式配置' };
+    }
+  } catch { /* 配置读不到就当没有显式配置 */ }
+  return { baseUrl: '', source: '' };
 })();
 app.setPath('userData', USER_DATA);
 app.setPath('sessionData', USER_DATA);
@@ -4880,10 +4905,35 @@ function registerIpc() {
       if (!role) return { ok: false, code: 'BAD_ROLE', message: '缺少角色' };
       const { name } = teamProjectNameOf(p);
       if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
-      const engineUrl = (dsh && dsh.baseUrl) || '';
-      const result = await teamTools.wakeRole({ projectName: name, role, engineUrl, reason: String(p.reason || 'ui') });
+      let engineUrl = (dsh && dsh.baseUrl) || '';
+      let result = await teamTools.wakeRole({ projectName: name, role, engineUrl, reason: String(p.reason || 'ui') });
+      // F-4：唤醒失败即重解析一次（DSH 重启后端口会变）；解析到新地址再用新地址重试一次。
+      let rediscovered = null;
+      if (!result.ok && dshAutoDiscoveryAllowed()) {
+        const before = engineUrl;
+        try {
+          rediscovered = await runDshDiscovery('wake-failure');
+        } catch (error) {
+          rediscovered = {
+            ok: false,
+            state: 'failed',
+            code: 'DSH_DISCOVERY_CRASHED',
+            message: '唤醒失败后重解析异常：' + String(error && error.message || error).slice(0, 200)
+          };
+        }
+        const nextEngineUrl = (dsh && dsh.baseUrl) || '';
+        if (nextEngineUrl && nextEngineUrl !== before) {
+          engineUrl = nextEngineUrl;
+          result = await teamTools.wakeRole({ projectName: name, role, engineUrl, reason: String(p.reason || 'ui') + '+rediscover' });
+        }
+      }
       if (!result.ok) addEventSafeForProject(name, `界面唤醒失败：${role} · ${(result.wake && (result.wake.why || result.wake.code)) || result.message || result.code || ''}`);
-      return { ...result, project: name };
+      return {
+        ...result,
+        project: name,
+        engineUrl,
+        rediscovery: rediscovered ? dshDiscoverySummary(rediscovered) : null
+      };
     } catch (e) {
       return { ok: false, code: 'TEAM_WAKE_FAILED', message: String((e && e.message) || e).slice(0, 300) };
     }
@@ -8350,7 +8400,8 @@ function registerIpc() {
     let persisted = false;
     let persistError = null;
     try {
-      persistDshConfig(normalized);
+      // F-4：界面里手填地址＝用户显式配置（source=user），自动发现不会再把它当「可随手覆盖的提示」。
+      persistDshConfig(normalized, { source: 'user', pinned: true });
       persisted = true;
     } catch (error) {
       persistError = { code: 'DSH_CONFIG_WRITE_FAILED', message: String(error && error.message || error).slice(0, 200) };
@@ -15580,7 +15631,7 @@ async function adoptDiscoveredDsh(discovery) {
   let persisted = false;
   let persistError = null;
   try {
-    persistDshConfig(baseUrl);
+    persistDshConfig(baseUrl, { source: 'auto' });
     persisted = true;
   } catch (error) {
     persistError = {
@@ -15609,6 +15660,36 @@ async function adoptDiscoveredDsh(discovery) {
   };
 }
 
+/**
+ * F-4 可观测：把一次解析结果落成 `dsh_endpoint` 事件（resolved|ambiguous|failed）。
+ * 追加写 DATA_ROOT/dsh-endpoint.jsonl，同时打 [dsh_endpoint] 日志；写盘失败只记 console，不影响发现主流程。
+ */
+function recordDshEndpointEvent(result) {
+  const state = String((result && result.state) || (result && result.ok ? 'resolved' : (result && result.ambiguous ? 'ambiguous' : 'failed')));
+  const record = {
+    ts: new Date().toISOString(),
+    state,
+    code: String((result && result.code) || ''),
+    baseUrl: String((result && result.baseUrl) || ''),
+    source: String((result && result.source) || ''),
+    explicitBaseUrl: String((result && result.explicitBaseUrl) || ''),
+    previousBaseUrl: String((result && result.previousBaseUrl) || ''),
+    candidates: Array.isArray(result && result.candidates) ? result.candidates.length : 0,
+    valid: Array.isArray(result && result.valid) ? result.valid.map((probe) => probe.baseUrl) : [],
+    portFiles: Array.isArray(result && result.portFiles) ? result.portFiles.map((entry) => entry.port) : [],
+    durationMs: Number(result && result.durationMs) || 0,
+    message: String((result && result.message) || '').slice(0, 400)
+  };
+  try {
+    fs.mkdirSync(DATA_ROOT, { recursive: true });
+    fs.appendFileSync(path.join(DATA_ROOT, 'dsh-endpoint.jsonl'), JSON.stringify(record) + '\n', 'utf8');
+  } catch (error) {
+    console.warn('[dsh_endpoint] 事件落盘失败：' + String(error && error.message || error).slice(0, 160));
+  }
+  console.log('[dsh_endpoint] ' + JSON.stringify({ state: record.state, code: record.code, baseUrl: record.baseUrl, source: record.source }));
+  return record;
+}
+
 async function runDshDiscovery(reason = 'status') {
   if (dshDiscovery.running) return dshDiscovery.running;
   const task = (async () => {
@@ -15618,7 +15699,10 @@ async function runDshDiscovery(reason = 'status') {
       discovery = await discoverDshWeb({
         savedBaseUrl: previousBaseUrl,
         timeoutMs: 1200,
-        env: process.env
+        env: process.env,
+        // F-4：显式配置优先；有它就不再报 ambiguous。
+        explicitBaseUrl: DSH_EXPLICIT.baseUrl,
+        explicitSource: DSH_EXPLICIT.source
       });
     } catch (error) {
       discovery = {
@@ -15646,6 +15730,7 @@ async function runDshDiscovery(reason = 'status') {
         persisted: false,
         code: discovery.code || 'DSH_NOT_FOUND'
       };
+      result.event = recordDshEndpointEvent(result);
       dshDiscovery.last = result;
       console.warn('[dsh] ' + message);
       return result;
@@ -15666,6 +15751,7 @@ async function runDshDiscovery(reason = 'status') {
         code: 'DSH_ADOPT_FAILED',
         error: String(error && error.message || error)
       };
+      result.event = recordDshEndpointEvent(result);
       dshDiscovery.last = result;
       console.error('[dsh] ' + message);
       return result;
@@ -15680,8 +15766,10 @@ async function runDshDiscovery(reason = 'status') {
       at,
       message,
       previousBaseUrl,
-      code: changed ? 'DSH_DISCOVERED' : 'DSH_ALREADY_CURRENT'
+      code: changed ? 'DSH_DISCOVERED' : 'DSH_ALREADY_CURRENT',
+      state: discovery.state || 'resolved'
     };
+    result.event = recordDshEndpointEvent(result);
     dshDiscovery.last = result;
     console.log('[dsh] ' + message + (adopted.webview && adopted.webview.ok ? '；WebView=' + adopted.webview.via : '；WebView 未重载'));
     return result;

@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const net = require('node:net');
 const { execFile } = require('node:child_process');
 
 /**
@@ -277,6 +278,10 @@ const DSH_WEB_DEFAULT_PORT = 52711;
 const DSH_DISCOVERY_MAX_CANDIDATES = 20;
 const DSH_DISCOVERY_MAX_WAVE1 = 16;
 const DSH_DISCOVERY_PROBE_CONCURRENCY = 6;
+// F-4：其它来源全落空时，才在 127.0.0.1 的这个区间做有界扫描（需求写死 6000–7000）。
+const DSH_SCAN_DEFAULT_START = 6000;
+const DSH_SCAN_DEFAULT_END = 7000;
+const DSH_SCAN_MAX_PROBE_PORTS = 12;
 
 function normalizeLocalBaseUrl(raw) {
   let text = String(raw == null ? '' : raw).trim();
@@ -311,6 +316,186 @@ function dshResponseSignature(status, body) {
 }
 
 /**
+ * 端口文件（`~/.dsh/gui.port` 或等价）：DSH 方便外部程序找到自己时写的纯文本端口。
+ * 只接受一个整数端口 / `port=NNNN` / `http://127.0.0.1:NNNN`，别的都当没写。
+ */
+function parsePortFileText(text) {
+  const raw = String(text == null ? '' : text).trim();
+  if (!raw) return 0;
+  const direct = /^(\d{2,5})$/.exec(raw);
+  if (direct) {
+    const port = Number(direct[1]);
+    return port >= 1 && port <= 65535 ? port : 0;
+  }
+  const kv = /(?:^|[\s,{;"'])(?:port|webPort|web_port)["']?\s*[:=]\s*["']?(\d{2,5})/i.exec(raw);
+  if (kv) {
+    const port = Number(kv[1]);
+    if (port >= 1 && port <= 65535) return port;
+  }
+  const url = /https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{2,5})/i.exec(raw);
+  if (url) {
+    const port = Number(url[1]);
+    if (port >= 1 && port <= 65535) return port;
+  }
+  return 0;
+}
+
+function dshHomeDirs(env) {
+  const list = [];
+  const home = String((env && env.DSH_HOME) || process.env.DSH_HOME || '').trim();
+  if (home) list.push(home);
+  list.push(path.join(os.homedir(), '.dsh'));
+  try {
+    if (process.env.APPDATA) list.push(path.join(process.env.APPDATA, 'dsh'));
+  } catch { /* 忽略 */ }
+  const seen = new Set();
+  return list.filter((dir) => {
+    const key = String(dir || '').toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** 读端口文件候选：只读已知文件名，不遍历目录，失败一律返回空数组（不抛）。 */
+function readDshPortFiles(env) {
+  const files = ['gui.port', 'web.port', 'port', 'dsh.port'];
+  const found = [];
+  const seenPorts = new Set();
+  for (const dir of dshHomeDirs(env)) {
+    for (const name of files) {
+      const file = path.join(dir, name);
+      let text;
+      try {
+        const stat = fs.statSync(file);
+        if (!stat.isFile() || stat.size > 4096) continue;
+        text = fs.readFileSync(file, 'utf8');
+      } catch { continue; }
+      const port = parsePortFileText(text);
+      if (!port || seenPorts.has(port)) continue;
+      seenPorts.add(port);
+      found.push({ file, port, baseUrl: 'http://127.0.0.1:' + port, raw: String(text).trim().slice(0, 64) });
+    }
+  }
+  return found;
+}
+
+/**
+ * DSH 特征校验 #2（F-4）：`/json/version`。
+ * 命中口径：正文含 DSH / DeepSeek Harness 标识 → `dsh-json-version`；
+ * 只有 `Browser: Electron/x` 不算（别的 Electron 应用也会这么答），交给 `/` 页面特征复核。
+ */
+function dshVersionSignature(text, json) {
+  const body = String(text || '');
+  if (/deepseek[\s-]*harness/i.test(body)) return 'dsh-json-version';
+  if (/(?:^|[^a-z0-9])dsh(?:[^a-z0-9]|$)/i.test(body)) return 'dsh-json-version';
+  if (json && typeof json === 'object') {
+    const probe = [json.Browser, json['User-Agent'], json.HttpVersion, json.ProtocolVersion]
+      .map((value) => String(value == null ? '' : value)).join(' ');
+    if (/deepseek|\bdsh\b/i.test(probe)) return 'dsh-json-version';
+    if (/^electron\//i.test(String(json.Browser || ''))) return 'electron-json-version';
+  }
+  return '';
+}
+
+async function probeDshVersion(baseUrl, options = {}) {
+  const started = Date.now();
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 800;
+  let response;
+  let text;
+  try {
+    response = await fetch(baseUrl + '/json/version', {
+      method: 'GET',
+      redirect: 'manual',
+      headers: { accept: 'application/json,text/plain;q=0.9,*/*;q=0.8' },
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    text = await response.text();
+  } catch (cause) {
+    const timeout = Boolean(cause && (cause.name === 'TimeoutError' || cause.name === 'AbortError' || cause.code === 'ABORT_ERR'));
+    return {
+      ok: false,
+      code: timeout ? 'DSH_VERSION_TIMEOUT' : 'DSH_VERSION_OFFLINE',
+      signature: '',
+      elapsedMs: Date.now() - started,
+      message: (timeout ? '探测 /json/version 超时：' : '/json/version 不可用：')
+        + String(cause && (cause.cause && cause.cause.message || cause.message) || cause).slice(0, 120)
+    };
+  }
+  const body = String(text || '').slice(0, 4096);
+  let json = null;
+  try { json = JSON.parse(body); } catch { json = null; }
+  const signature = dshVersionSignature(body, json);
+  const strong = signature === 'dsh-json-version';
+  return {
+    ok: strong && response.status === 200,
+    code: strong ? 'DSH_VERSION_OK' : (signature ? 'DSH_VERSION_WEAK' : 'DSH_VERSION_NOT_DSH'),
+    status: response.status,
+    signature,
+    weak: Boolean(signature) && !strong,
+    elapsedMs: Date.now() - started,
+    message: strong
+      ? 'DSH 特征匹配（/json/version，' + signature + '）'
+      : '不是 DSH（/json/version HTTP ' + response.status + '，' + (signature || '无 DSH 特征') + '）'
+  };
+}
+
+/** 单个端口的 TCP 连通性探测：只判「有人在听」，不读任何数据。 */
+function probeTcpPort(host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (open) => {
+      if (settled) return;
+      settled = true;
+      try { socket.destroy(); } catch { /* 忽略 */ }
+      resolve(open);
+    };
+    const socket = net.connect({ host, port });
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+  });
+}
+
+/**
+ * 有界扫描 127.0.0.1 的端口区间（F-4）：先 TCP 判活，再对活端口做 DSH 特征校验。
+ * 只在其它来源全部失败时才调用，避免每次唤醒都扫端口。
+ */
+async function scanLocalPortRange(options = {}) {
+  const started = Date.now();
+  const start = Number(options.start) > 0 ? Number(options.start) : 6000;
+  const end = Number(options.end) > 0 ? Number(options.end) : 7000;
+  const concurrency = Number(options.concurrency) > 0 ? Number(options.concurrency) : 64;
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 220;
+  const budgetMs = Number(options.budgetMs) > 0 ? Number(options.budgetMs) : 4000;
+  const maxOpen = Number(options.maxOpen) > 0 ? Number(options.maxOpen) : 24;
+  if (!(end >= start)) return { ok: false, code: 'DSH_SCAN_BAD_RANGE', ports: [], elapsedMs: 0 };
+  const ports = [];
+  let cursor = start;
+  let budgetHit = false;
+  const worker = async () => {
+    while (cursor <= end) {
+      if (Date.now() - started > budgetMs) { budgetHit = true; return; }
+      const port = cursor++;
+      if (await probeTcpPort('127.0.0.1', port, timeoutMs)) {
+        ports.push(port);
+        if (ports.length >= maxOpen) { budgetHit = true; return; }
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency * 4, Math.max(1, end - start + 1)) }, worker));
+  ports.sort((a, b) => a - b);
+  return {
+    ok: true,
+    code: budgetHit ? 'DSH_SCAN_PARTIAL' : 'DSH_SCAN_OK',
+    ports,
+    budgetHit,
+    elapsedMs: Date.now() - started
+  };
+}
+
+
+/**
  * 只探测一个本机地址的 `/`：401 + DSH 特征、或 200 + DSH 页面特征才算成功。
  * 404/空响应/普通 HTTP 服务（例如 63607 的 ego-cast worker）都会被拒绝。
  */
@@ -327,6 +512,22 @@ async function probeDshWeb(rawUrl, options = {}) {
     };
   }
   const timeoutMs = Number(options && options.timeoutMs) > 0 ? Number(options.timeoutMs) : 1200;
+  // F-4：先验 `/json/version`（DSH 身份最直接的证据），弱特征再回落到 `/` 页面特征。
+  const versionProbe = await probeDshVersion(baseUrl, { timeoutMs: Math.min(timeoutMs, 800) });
+  if (versionProbe.ok) {
+    return {
+      ok: true,
+      code: 'DSH_PROBE_OK',
+      baseUrl,
+      status: versionProbe.status,
+      signature: versionProbe.signature,
+      via: 'json/version',
+      acceptedStatus: true,
+      versionProbe,
+      elapsedMs: Date.now() - started,
+      message: 'DSH 特征匹配（/json/version，' + versionProbe.signature + '）'
+    };
+  }
   let response;
   let text;
   try {
@@ -358,6 +559,7 @@ async function probeDshWeb(rawUrl, options = {}) {
     status: response.status,
     signature,
     acceptedStatus,
+    versionProbe,
     elapsedMs: Date.now() - started,
     bodyPreview: body.replace(/\s+/g, ' ').trim().slice(0, 120),
     message: ok
@@ -611,12 +813,15 @@ async function collectDshProcessInfo(options = {}) {
 
 function candidateSourceLabel(source) {
   const labels = {
+    explicit: '显式配置',
     saved: '上次保存的地址',
     'env-url': '环境变量 DSH_WEB_URL',
     'env-port': '环境变量端口',
+    'port-file': 'DSH 端口文件',
     'process-arg': 'DSH 进程参数',
     'process-port': 'DSH 进程监听端口',
     default: 'DSH 默认端口',
+    'range-scan': '6000–7000 端口扫描',
     range: '小范围探测'
   };
   return labels[source] || source;
@@ -672,13 +877,17 @@ function addRangeCandidates(candidates, seen, centerBaseUrl, span, maxCandidates
 }
 
 /**
- * 发现本机 DSH Web 端口。顺序：
- *   1) 当前保存地址（有效就直接沿用，避免无谓切换）
- *   2) 环境变量（只作为提示，不覆盖显式 pin 的判断在 main.js）
- *   3) DSH 进程参数 `--port`
- *   4) DSH 进程的监听端口（Desktop 用 --port 0，这是主路径）
- *   5) DSH 默认端口
- *   6) 只有全部失败后，才对保存端口/默认端口做 ±3 的有界探测
+ * 发现本机 DSH Web 端口（F-4）。解析顺序（前面的优先，命中即用）：
+ *   0) 显式配置（dsh.json 里用户 pin 的地址 / DSH_WEB_URL，由 main.js 传入）——有显式配置就不报歧义
+ *   1) 上次保存地址（有效就沿用，避免无谓切换）
+ *   2) 环境变量 DSH_WEB_URL / DSH_WEB_PORT / DSH_PORT
+ *   3) 端口文件（~/.dsh/gui.port 等）
+ *   4) DSH 进程参数 `--port`
+ *   5) DSH 进程的监听端口（Desktop 用 --port 0，这是主路径）
+ *   6) DSH 默认端口
+ *   7) 都落空才做有界探测：先保存/默认地址 ±3，再扫 127.0.0.1 的 6000–7000（先 TCP 判活，再验特征）
+ * 任何候选都必须通过 DSH 特征校验（`/json/version` 或 `/` 页面特征），绝不「端口活着就当 DSH」。
+ * 返回 state：resolved / ambiguous / failed，供 `dsh_endpoint` 事件落账。
  */
 async function discoverDshWeb(options = {}) {
   const started = Date.now();
@@ -686,6 +895,10 @@ async function discoverDshWeb(options = {}) {
   const savedBaseUrl = normalizeLocalBaseUrl(options.savedBaseUrl || options.currentBaseUrl || '');
   const env = options.env || process.env;
   const maxCandidates = Number(options.maxCandidates) > 0 ? Number(options.maxCandidates) : DSH_DISCOVERY_MAX_CANDIDATES;
+  const explicitBaseUrl = normalizeLocalBaseUrl(options.explicitBaseUrl || '');
+  const explicitSource = String(options.explicitSource || 'explicit');
+  const scanStart = Number(options.scanRange && options.scanRange.start) > 0 ? Number(options.scanRange.start) : DSH_SCAN_DEFAULT_START;
+  const scanEnd = Number(options.scanRange && options.scanRange.end) > 0 ? Number(options.scanRange.end) : DSH_SCAN_DEFAULT_END;
 
   let processInfo;
   if (options.skipProcessDiscovery) {
@@ -707,8 +920,12 @@ async function discoverDshWeb(options = {}) {
     }
   }
 
+  const portFiles = options.skipPortFiles
+    ? []
+    : readDshPortFiles(env);
   const candidates = [];
   const seen = new Set();
+  if (explicitBaseUrl) addCandidate(candidates, seen, explicitBaseUrl, 'explicit', -1, explicitSource || '显式配置');
   if (savedBaseUrl) addCandidate(candidates, seen, savedBaseUrl, 'saved', 0, '当前 dsh.json');
   if (env && env.DSH_WEB_URL) addCandidate(candidates, seen, env.DSH_WEB_URL, 'env-url', 1, 'DSH_WEB_URL');
   if (env) {
@@ -716,6 +933,9 @@ async function discoverDshWeb(options = {}) {
       if (!env[key]) continue;
       addCandidate(candidates, seen, 'http://127.0.0.1:' + String(env[key]).trim(), 'env-port', 2, key);
     }
+  }
+  for (const entry of portFiles) {
+    addCandidate(candidates, seen, entry.baseUrl, 'port-file', 2, entry.file + ' → ' + entry.raw);
   }
   for (const port of processInfo.argPorts || []) {
     addCandidate(candidates, seen, 'http://127.0.0.1:' + port, 'process-arg', 3, 'DSH 进程 --port');
@@ -729,7 +949,9 @@ async function discoverDshWeb(options = {}) {
   let probes = wave1.length ? await probeCandidates(wave1, probeTimeoutMs) : [];
   let best = pickBestProbe(probes, savedBaseUrl);
   let rangeProbed = false;
-  if (!best && options.includeRange !== false) {
+  let scan = null;
+  const canProbeBeyond = !explicitBaseUrl && options.includeRange !== false;
+  if (!best && canProbeBeyond) {
     rangeProbed = true;
     const before = candidates.length;
     addRangeCandidates(candidates, seen, savedBaseUrl, 3, maxCandidates);
@@ -738,6 +960,32 @@ async function discoverDshWeb(options = {}) {
     if (range.length) {
       const rangeProbes = await probeCandidates(range, probeTimeoutMs);
       probes = probes.concat(rangeProbes);
+      best = pickBestProbe(probes, savedBaseUrl);
+    }
+  }
+  // F-4-7：其它来源全落空，才在 127.0.0.1 的 6000–7000 里做有界扫描（先 TCP 判活，再验 DSH 特征）。
+  if (!best && canProbeBeyond && options.includeScan !== false) {
+    try {
+      scan = await scanLocalPortRange({
+        start: scanStart,
+        end: scanEnd,
+        concurrency: Number(options.scanConcurrency) > 0 ? Number(options.scanConcurrency) : undefined,
+        timeoutMs: Number(options.scanConnectTimeoutMs) > 0 ? Number(options.scanConnectTimeoutMs) : undefined,
+        budgetMs: Number(options.scanBudgetMs) > 0 ? Number(options.scanBudgetMs) : undefined
+      });
+    } catch (error) {
+      scan = { ok: false, code: 'DSH_SCAN_FAILED', ports: [], error: String(error && error.message || error).slice(0, 160) };
+    }
+    const openPorts = (scan && Array.isArray(scan.ports) ? scan.ports : [])
+      .slice(0, DSH_SCAN_MAX_PROBE_PORTS);
+    const before = candidates.length;
+    for (const port of openPorts) {
+      addCandidate(candidates, seen, 'http://127.0.0.1:' + port, 'range-scan', 9, '扫描 127.0.0.1:' + port + ' 有监听');
+    }
+    const scanned = candidates.slice(before);
+    if (scanned.length) {
+      const scannedProbes = await probeCandidates(scanned, probeTimeoutMs);
+      probes = probes.concat(scannedProbes);
       best = pickBestProbe(probes, savedBaseUrl);
     }
   }
@@ -751,39 +999,115 @@ async function discoverDshWeb(options = {}) {
     argPorts: (processInfo.argPorts || []).slice(),
     error: 'error' in processInfo ? String(processInfo.error || '').slice(0, 240) : ''
   };
+  const portFileSummary = portFiles.map((entry) => ({ file: entry.file, port: entry.port }));
+  const valid = probes.filter((probe) => probe.ok).sort((a, b) => a.priority - b.priority);
+  const validDistinct = [];
+  const validSeen = new Set();
+  for (const probe of valid) {
+    if (validSeen.has(probe.baseUrl)) continue;
+    validSeen.add(probe.baseUrl);
+    validDistinct.push(probe);
+  }
+
+  // 有显式配置但显式地址不可达：如实报「配置不可达」，不偷偷改成别的本机端口。
+  if (explicitBaseUrl && !validDistinct.some((probe) => probe.baseUrl === explicitBaseUrl)) {
+    return {
+      ok: false,
+      state: 'failed',
+      code: 'DSH_EXPLICIT_UNREACHABLE',
+      message: '显式配置的 DSH 地址不可达：' + explicitBaseUrl + '（来源：' + explicitSource + '）；请确认 DSH 已启动，或清掉该配置改用自动发现',
+      baseUrl: '',
+      source: '',
+      explicitBaseUrl,
+      explicitSource,
+      savedBaseUrl,
+      candidates,
+      probes,
+      valid: validDistinct,
+      process: processSummary,
+      portFiles: portFileSummary,
+      rangeProbed,
+      scan,
+      durationMs: Date.now() - started
+    };
+  }
+
+  // 歧义（F-4）：没有显式配置且命中多个不同地址 → 不擅自挑一个。
+  if (!explicitBaseUrl && validDistinct.length > 1) {
+    const listed = validDistinct.slice(0, 6)
+      .map((probe) => probe.baseUrl + '（' + candidateSourceLabel(probe.source) + '）')
+      .join('、');
+    return {
+      ok: false,
+      state: 'ambiguous',
+      code: 'DSH_AMBIGUOUS',
+      ambiguous: true,
+      message: '发现 ' + validDistinct.length + ' 个疑似 DSH：' + listed
+        + '；已保留原地址 ' + (savedBaseUrl || '（未设置）')
+        + '。请在工作台里显式指定地址，或只保留一个 DSH 实例',
+      baseUrl: '',
+      source: '',
+      explicitBaseUrl: '',
+      savedBaseUrl,
+      candidates,
+      probes,
+      valid: validDistinct,
+      process: processSummary,
+      portFiles: portFileSummary,
+      rangeProbed,
+      scan,
+      durationMs: Date.now() - started
+    };
+  }
 
   if (best) {
     return {
       ok: true,
+      state: 'resolved',
       code: 'DSH_FOUND',
       message: '已发现 DSH Web：' + best.baseUrl + '（来源：' + candidateSourceLabel(best.source) + '）',
       baseUrl: best.baseUrl,
       source: best.source,
+      explicitBaseUrl,
       savedBaseUrl,
       candidates,
       probes,
+      valid: validDistinct,
       process: processSummary,
+      portFiles: portFileSummary,
       rangeProbed,
+      scan,
       durationMs: Date.now() - started
     };
   }
 
   const list = probedPorts.slice(0, 8).join('/');
-  const reason = probedPorts.length
-    ? '已探测 ' + probedPorts.length + ' 个本机端口（' + list + '），均未返回 401/DSH 特征'
-    : (processSummary.error || '没有可探测的本机端口');
+  const reasons = [];
+  if (probedPorts.length) reasons.push('已探测 ' + probedPorts.length + ' 个本机端口（' + list + '），均未返回 DSH 特征');
+  else reasons.push(processSummary.error || '没有可探测的本机端口');
+  if (scan && Array.isArray(scan.ports)) {
+    reasons.push(scan.ports.length
+      ? '扫描 ' + scanStart + '–' + scanEnd + ' 有 ' + scan.ports.length + ' 个端口在监听但都不是 DSH'
+      : '扫描 ' + scanStart + '–' + scanEnd + ' 没有发现监听端口');
+  }
+  if (portFiles.length) reasons.push('端口文件写了 ' + portFiles.map((entry) => entry.port).join('/') + '，均不可用');
   const suffix = savedBaseUrl ? '；保留原地址 ' + savedBaseUrl : '';
   return {
     ok: false,
+    state: 'failed',
     code: 'DSH_NOT_FOUND',
-    message: '未发现 DSH Web：' + reason + suffix,
+    message: '未发现 DSH Web：' + reasons.join('；') + suffix,
     baseUrl: '',
     source: '',
+    explicitBaseUrl: '',
     savedBaseUrl,
     candidates,
     probes,
+    valid: validDistinct,
     process: processSummary,
+    portFiles: portFileSummary,
     rangeProbed,
+    scan,
     durationMs: Date.now() - started
   };
 }
@@ -792,7 +1116,15 @@ module.exports = {
   DshAdapter,
   discoverDshWeb,
   probeDshWeb,
+  probeDshVersion,
   normalizeLocalBaseUrl,
   isLoopbackBaseUrl,
-  dshResponseSignature
+  dshResponseSignature,
+  dshVersionSignature,
+  parsePortFileText,
+  readDshPortFiles,
+  scanLocalPortRange,
+  DSH_WEB_DEFAULT_PORT,
+  DSH_SCAN_DEFAULT_START,
+  DSH_SCAN_DEFAULT_END
 };
