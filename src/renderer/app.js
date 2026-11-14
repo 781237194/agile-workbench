@@ -9991,28 +9991,59 @@ function renderQuickTechReview(p) {
 }
 
 
-/* ── 需求/缺陷池（R-3f0d）──────────────────────────────────────────── */
-const poolUi = { open: false, filter: 'all', rows: [], lastFetch: 0, loading: false };
-const POOL_FILTERS = [
+/* ── 需求/缺陷池（R-3f0d；R-30e2：行内标题 + 点击详情 + 模糊搜索）──────
+ * 纯逻辑（池行构建 / 筛选 / 行与详情 HTML）在 src/renderer/pool-core.js：
+ *   - 浏览器：index.html 在 app.js 之前引入，挂 window.POOL_CORE；
+ *   - Node  ：scripts/test-pool-30e2.cjs 直接 require 做断言。
+ * 这里只负责数据一次性加载（一次 workflowState）、DOM 渲染与键鼠交互。
+ * 池数据 = 需求行 + type 为 bug / scenario-bug 的任务；加载后渲染与搜索不再读文件。 */
+const POOL_CORE = (typeof window !== 'undefined' && window.POOL_CORE) ? window.POOL_CORE : null;
+const poolUi = {
+  open: false,
+  filter: 'all',
+  kindFilter: 'all',
+  query: '',
+  rows: [],
+  signature: '',
+  detailId: '',
+  lastFetch: 0,
+  loading: false
+};
+// 既有四个状态键：键名 / 标签 / 计数语义一字不改（R-30e2 §二、F-4）。
+const POOL_FILTERS = POOL_CORE ? POOL_CORE.POOL_FILTERS : [
   { key: 'all', label: '全部' },
   { key: 'approved', label: '已通过' },
   { key: 'active', label: '进行中' },
   { key: 'accepted', label: '已验收' }
 ];
-/** 类型：默认需求；type/defect 或 D- 前缀为缺陷（复用工作流 requirementId/type）。 */
+// 新增类型键（F-7）：defect 沿用 poolTypeOf 既有别名，bug / scenario-bug 都归缺陷池。
+const POOL_KIND_FILTERS = POOL_CORE ? POOL_CORE.POOL_KIND_FILTERS : [
+  { key: 'all', label: '全部类型' },
+  { key: 'requirement', label: '需求' },
+  { key: 'defect', label: '缺陷' },
+  { key: 'scenario-bug', label: '场景缺陷' }
+];
+/** 类型：默认需求；type/defect 或 D- 前缀为缺陷；type=scenario-bug 为场景缺陷（R-43ad 枚举）。 */
 function poolTypeOf(row) {
+  if (POOL_CORE) return POOL_CORE.poolTypeOf(row);
   const t = String((row && row.type) || '').toLowerCase();
+  if (t === 'scenario-bug') return 'scenario-bug';
   if (t === 'defect' || t === 'bug' || t === '缺陷') return 'defect';
   if (/^D-/i.test(String((row && row.id) || ''))) return 'defect';
   return 'requirement';
 }
-function poolTypeLabel(row) { return poolTypeOf(row) === 'defect' ? '【缺陷】' : '【需求】'; }
+function poolTypeLabel(row) {
+  const t = poolTypeOf(row);
+  return t === 'scenario-bug' ? '【场景缺陷】' : t === 'defect' ? '【缺陷】' : '【需求】';
+}
 function poolTypeBadge(row) {
   const t = poolTypeOf(row);
-  return `<span class="req-type ${t}" title="${t === 'defect' ? '缺陷' : '需求'}">${t === 'defect' ? '缺陷' : '需求'}</span>`;
+  const label = t === 'scenario-bug' ? '场景缺陷' : t === 'defect' ? '缺陷' : '需求';
+  return `<span class="req-type ${t}" title="${label}">${label}</span>`;
 }
-/** 评审通过判定：draft/review/rejected 之外，或已有 reviewedAt。 */
+/** 池状态桶：需求行沿用 R-3f0d 既有判定；缺陷/场景缺陷任务行按 status 映射（F-1b）。 */
 function poolBucket(row) {
+  if (POOL_CORE) return POOL_CORE.poolBucket(row);
   const s = String((row && row.status) || '');
   if (['accepted', 'done', 'iteration'].includes(s)) return 'accepted';
   if (['dispatched', 'dev', 'dev_review', 'test', 'test_done'].includes(s)) return 'active';
@@ -10020,18 +10051,24 @@ function poolBucket(row) {
   if (row && row.reviewedAt) return 'approved';
   return 'other';
 }
-function poolEntered(row) { return poolBucket(row) !== 'other' || !!(row && row.reviewedAt); }
+function poolEntered(row) {
+  if (POOL_CORE) return POOL_CORE.poolEntered(row);
+  return poolBucket(row) !== 'other' || !!(row && row.reviewedAt);
+}
 function poolStatusLabel(row) {
+  if (POOL_CORE) return POOL_CORE.poolStatusLabel(row);
   const b = poolBucket(row);
   return b === 'accepted' ? '已验收' : b === 'active' ? '进行中' : b === 'approved' ? '已通过' : '待评审';
 }
+/** 一次性加载池数据：**单次** workflowState → 需求行 + bug/scenario-bug 任务（F-30e2-1 / F-8）。
+ *  之后渲染与搜索只用返回的数组，不再发 IPC、不再读文件。 */
 async function poolFetchRows() {
   const p = activeProject();
-  if (!p || !window.workbench || typeof window.workbench.workflowState !== 'function') return null;
+  if (!p || !POOL_CORE || !window.workbench || typeof window.workbench.workflowState !== 'function') return null;
   try {
     const wf = await window.workbench.workflowState({ projectId: p.id });
     if (!wf || wf.ok === false) return null;
-    return Array.isArray(wf.requirements) ? wf.requirements : [];
+    return POOL_CORE.preparePoolRows(wf);
   } catch { return null; }
 }
 function poolPanelEnsure() {
@@ -10043,50 +10080,241 @@ function poolPanelEnsure() {
   mask.hidden = true;
   mask.innerHTML = `<section class="pool-panel" role="dialog" aria-modal="true" aria-label="需求/缺陷池">
     <header class="pool-head"><b>需求 / 缺陷池</b><span class="pool-sub">评审通过自动入池 · 六人/四人同规则</span><button class="pool-close" id="pool-close" type="button" aria-label="关闭">×</button></header>
-    <div class="pool-filters" id="pool-filters"></div>
+    <div class="pool-search-row">
+      <input type="search" id="pool-search" class="pool-search" placeholder="搜编号 / 标题 / 负责人 / 状态" aria-label="搜编号 / 标题 / 负责人 / 状态" autocomplete="off" spellcheck="false">
+      <button type="button" class="pool-search-clear" id="pool-search-clear" hidden>清空</button>
+    </div>
+    <div class="pool-kinds" id="pool-kinds" role="group" aria-label="按类型筛选"></div>
+    <div class="pool-filters" id="pool-filters" role="group" aria-label="按状态筛选"></div>
     <div class="pool-cols">
       <section class="pool-col"><h4>需求池 <span class="pool-n" id="pool-req-n">0</span></h4><div class="pool-list" id="pool-req-list"></div></section>
       <section class="pool-col"><h4>缺陷池 <span class="pool-n" id="pool-def-n">0</span></h4><div class="pool-list" id="pool-def-list"></div></section>
     </div>
+    <div class="pool-nomatch" id="pool-nomatch" hidden>
+      <p class="pool-nomatch-text">没有匹配项</p>
+      <div class="pool-nomatch-actions">
+        <button type="button" class="ghost small" id="pool-nomatch-clear">清空搜索</button>
+        <button type="button" class="ghost small" id="pool-nomatch-reset">重置筛选</button>
+      </div>
+    </div>
     <p class="pool-foot" id="pool-foot"></p>
-  </section>`;
+  </section>
+  <div id="pool-detail-host" class="pool-detail-host" hidden></div>`;
   document.body.appendChild(mask);
-  mask.addEventListener('click', (e) => { if (e.target === mask) closePool(); });
+  // 事件委托：行点击 / 键盘 / 详情内链接都在 mask 上统一处理，行节点重建时不用重绑。
+  mask.addEventListener('click', (e) => {
+    if (e.target === mask) { closePool(); return; }
+    const link = e.target.closest('.pool-link');
+    if (link) { e.preventDefault(); e.stopPropagation(); openPoolLink(link); return; }
+    if (e.target.closest('#pool-detail-close')) { e.stopPropagation(); closePoolDetail(); return; }
+    const row = e.target.closest('.pool-row');
+    if (row) { e.stopPropagation(); togglePoolDetail(row.dataset.id); }
+  });
+  mask.addEventListener('keydown', (e) => {
+    const row = e.target && e.target.closest ? e.target.closest('.pool-row') : null;
+    if (!row) return;
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      togglePoolDetail(row.dataset.id);
+    }
+  });
+  const search = $('#pool-search');
+  if (search) {
+    search.addEventListener('input', (e) => { poolUi.query = String(e.target.value || ''); applyPoolFilters(); });
+    search.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); clearPoolSearch(); }
+      else if (e.key === 'Enter') e.preventDefault();
+    });
+  }
+  $('#pool-search-clear')?.addEventListener('click', () => clearPoolSearch());
+  $('#pool-nomatch-clear')?.addEventListener('click', () => clearPoolSearch());
+  $('#pool-nomatch-reset')?.addEventListener('click', () => resetPoolFilters());
   $('#pool-close')?.addEventListener('click', closePool);
   return mask;
 }
+/** 行 HTML：委托纯逻辑模块。行结构固定为 徽标 → 编号 → 标题 → 状态 → 负责人（F-30e2-1）；
+ *  本函数体内不含 await / fs 读取 / IPC 调用（F-8 静态断言）。 */
 function poolRowMarkup(row) {
+  if (POOL_CORE) return POOL_CORE.poolRowMarkup(row);
   const id = String((row && row.id) || '');
   const b = poolBucket(row);
   const who = String((row && (row.owner || row.ownerRole)) || '');
   return `<div class="pool-row" data-id="${esc(id)}" data-bucket="${b}">${poolTypeBadge(row)}<span class="pool-id">${esc(id)}</span><span class="pool-state s-${b}">${poolStatusLabel(row)}</span>${who ? `<span class="pool-who">${esc(who)}</span>` : ''}</div>`;
 }
+/** 筛选键：首次建 DOM；之后只更新计数与选中态，不重建（AC7④）。 */
+function renderPoolChips() {
+  const statusBox = $('#pool-filters');
+  if (statusBox && statusBox.dataset.built !== '1') {
+    statusBox.innerHTML = POOL_FILTERS.map((f) => `<button class="pool-chip" data-filter="${f.key}" type="button">${f.label}<i>0</i></button>`).join('');
+    statusBox.dataset.built = '1';
+    statusBox.querySelectorAll('.pool-chip').forEach((btn) => btn.addEventListener('click', () => {
+      poolUi.filter = btn.dataset.filter;
+      if (poolUi.detailId) closePoolDetail(false);
+      applyPoolFilters();
+    }));
+  }
+  const kindBox = $('#pool-kinds');
+  if (kindBox && kindBox.dataset.built !== '1') {
+    kindBox.innerHTML = POOL_KIND_FILTERS.map((f) => `<button class="pool-chip pool-kind-chip" data-kind-filter="${f.key}" type="button">${f.label}<i>0</i></button>`).join('');
+    kindBox.dataset.built = '1';
+    kindBox.querySelectorAll('.pool-kind-chip').forEach((btn) => btn.addEventListener('click', () => {
+      poolUi.kindFilter = btn.dataset.kindFilter;
+      if (poolUi.detailId) closePoolDetail(false);
+      applyPoolFilters();
+    }));
+  }
+}
+/** 只切显示与计数：不重建行节点、不读文件、不发 IPC（F-30e2-6⑤ / AC7④）。 */
+function applyPoolFilters() {
+  const mask = $('#pool-mask');
+  const rows = Array.isArray(poolUi.rows) ? poolUi.rows : [];
+  if (!mask || !POOL_CORE) return;
+  const state = { status: poolUi.filter, kind: poolUi.kindFilter, query: poolUi.query };
+  const visible = POOL_CORE.poolVisibleRows(rows, state);
+  const visibleIds = new Set(visible.map((row) => row.id));
+  mask.querySelectorAll('.pool-row').forEach((node) => {
+    const on = visibleIds.has(node.dataset.id);
+    if (node.hidden === on) node.hidden = !on;
+  });
+  const counts = POOL_CORE.poolFilterCounts(rows, state);
+  const statusBox = $('#pool-filters');
+  if (statusBox) {
+    statusBox.querySelectorAll('.pool-chip').forEach((btn) => {
+      const key = btn.dataset.filter;
+      btn.classList.toggle('on', key === poolUi.filter);
+      const n = btn.querySelector('i');
+      if (n) n.textContent = String((counts.status && counts.status[key]) || 0);
+    });
+  }
+  const kindBox = $('#pool-kinds');
+  if (kindBox) {
+    kindBox.querySelectorAll('.pool-kind-chip').forEach((btn) => {
+      const key = btn.dataset.kindFilter;
+      btn.classList.toggle('on', key === poolUi.kindFilter);
+      const n = btn.querySelector('i');
+      if (n) n.textContent = String((counts.kind && counts.kind[key]) || 0);
+    });
+  }
+  const reqN = visible.filter((row) => row.kind === 'requirement').length;
+  const defN = visible.length - reqN;
+  if ($('#pool-req-n')) $('#pool-req-n').textContent = String(reqN);
+  if ($('#pool-def-n')) $('#pool-def-n').textContent = String(defN);
+  const totalReq = rows.filter((row) => row.kind === 'requirement').length;
+  const totalDef = rows.length - totalReq;
+  const statusLabel = (POOL_FILTERS.find((f) => f.key === poolUi.filter) || {}).label || '全部';
+  const kindLabel = (POOL_KIND_FILTERS.find((f) => f.key === poolUi.kindFilter) || {}).label || '全部类型';
+  const query = String(poolUi.query || '').trim();
+  if ($('#pool-foot')) {
+    $('#pool-foot').textContent = `池内 ${rows.length} 条（需求 ${totalReq} · 缺陷 ${totalDef}），当前显示 ${visible.length} 条；状态：${statusLabel} · 类型：${kindLabel}${query ? ` · 搜索：${query}` : ''}`;
+  }
+  const nomatch = $('#pool-nomatch');
+  if (nomatch) nomatch.hidden = !(rows.length > 0 && visible.length === 0);
+  const clearBtn = $('#pool-search-clear');
+  if (clearBtn) clearBtn.hidden = !query;
+  // 筛选后详情不能继续指向被筛掉的行（F-30e2-4）。
+  if (poolUi.detailId && !visibleIds.has(poolUi.detailId)) closePoolDetail(false);
+}
+/** 渲染池子：数据集合变化才重建行节点；筛选/搜索只切 hidden。 */
 function renderPool() {
   poolPanelEnsure();
-  const entered = (poolUi.rows || []).filter(poolEntered);
-  const visible = entered.filter((r) => poolUi.filter === 'all' || poolBucket(r) === poolUi.filter);
-  const req = visible.filter((r) => poolTypeOf(r) === 'requirement');
-  const def = visible.filter((r) => poolTypeOf(r) === 'defect');
-  const filters = $('#pool-filters');
-  if (filters) {
-    filters.innerHTML = POOL_FILTERS.map((f) => {
-      const n = f.key === 'all' ? entered.length : entered.filter((r) => poolBucket(r) === f.key).length;
-      return `<button class="pool-chip${poolUi.filter === f.key ? ' on' : ''}" data-filter="${f.key}" type="button">${f.label}<i>${n}</i></button>`;
-    }).join('');
-    filters.querySelectorAll('.pool-chip').forEach((btn) => btn.addEventListener('click', () => { poolUi.filter = btn.dataset.filter; renderPool(); }));
+  if (!POOL_CORE) {
+    const reqList = $('#pool-req-list');
+    const defList = $('#pool-def-list');
+    if (reqList) reqList.innerHTML = '<p class="pool-empty">池子模块未加载：缺少 renderer/pool-core.js</p>';
+    if (defList) defList.innerHTML = '';
+    return;
   }
+  const rows = Array.isArray(poolUi.rows) ? poolUi.rows : [];
+  const signature = POOL_CORE.poolRowsSignature(rows);
   const reqList = $('#pool-req-list');
   const defList = $('#pool-def-list');
-  if (reqList) reqList.innerHTML = req.length ? req.map(poolRowMarkup).join('') : '<p class="pool-empty">需求池暂无（评审通过后自动入池）</p>';
-  if (defList) defList.innerHTML = def.length ? def.map(poolRowMarkup).join('') : '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
-  if ($('#pool-req-n')) $('#pool-req-n').textContent = String(req.length);
-  if ($('#pool-def-n')) $('#pool-def-n').textContent = String(def.length);
-  if ($('#pool-foot')) {
-    const allReq = entered.filter((r) => poolTypeOf(r) === 'requirement').length;
-    const allDef = entered.filter((r) => poolTypeOf(r) === 'defect').length;
-    const label = (POOL_FILTERS.find((f) => f.key === poolUi.filter) || {}).label || '全部';
-    $('#pool-foot').textContent = `池内 ${entered.length} 条（需求 ${allReq} · 缺陷 ${allDef}）；筛选：${label}`;
+  // 重建条件：数据集合变了、容器缺了、或两列都还没渲染过（空数据首次打开也要出空态文案）。
+  const needsRebuild = signature !== poolUi.signature || !reqList || !defList
+    || !reqList.childElementCount || !defList.childElementCount;
+  if (needsRebuild) {
+    const req = rows.filter((row) => row.kind === 'requirement');
+    const def = rows.filter((row) => row.kind !== 'requirement');
+    if (reqList) reqList.innerHTML = req.length ? req.map(poolRowMarkup).join('') : '<p class="pool-empty">需求池暂无（评审通过后自动入池）</p>';
+    if (defList) defList.innerHTML = def.length ? def.map(poolRowMarkup).join('') : '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
+    poolUi.signature = signature;
+    // 详情打开时数据变了：按 data-id 重渲染，不继续显示旧数据（并发边界）。
+    if (poolUi.detailId) {
+      if (rows.some((row) => row.id === poolUi.detailId)) openPoolDetail(poolUi.detailId);
+      else closePoolDetail(false);
+    }
   }
+  renderPoolChips();
+  applyPoolFilters();
+}
+/** 详情：打开 / 关闭（Esc、关闭按钮、筛选切换都走 closePoolDetail）。 */
+function poolRowNode(id) {
+  const text = String(id || '').replace(/["\\]/g, '\\$&');
+  return document.querySelector(`.pool-row[data-id="${text}"]`);
+}
+function togglePoolDetail(id) {
+  if (!id) return;
+  if (poolUi.detailId === id) { closePoolDetail(); return; }
+  openPoolDetail(id);
+}
+function openPoolDetail(id) {
+  const row = (poolUi.rows || []).find((item) => item.id === id);
+  const host = $('#pool-detail-host');
+  if (!row || !host || !POOL_CORE) return;
+  host.innerHTML = POOL_CORE.poolDetailMarkup(row);
+  host.hidden = false;
+  poolUi.detailId = id;
+  const mask = $('#pool-mask');
+  if (mask) mask.classList.add('detail-open');
+  document.querySelectorAll('.pool-row[aria-expanded="true"]').forEach((node) => {
+    if (node.dataset.id !== id) node.setAttribute('aria-expanded', 'false');
+  });
+  const node = poolRowNode(id);
+  if (node) node.setAttribute('aria-expanded', 'true');
+}
+function closePoolDetail(refocus) {
+  const host = $('#pool-detail-host');
+  const prevId = poolUi.detailId;
+  if (host) { host.hidden = true; host.innerHTML = ''; }
+  poolUi.detailId = '';
+  const mask = $('#pool-mask');
+  if (mask) mask.classList.remove('detail-open');
+  document.querySelectorAll('.pool-row[aria-expanded="true"]').forEach((node) => node.setAttribute('aria-expanded', 'false'));
+  if (refocus !== false && prevId) {
+    const node = poolRowNode(prevId);
+    if (node && !node.hidden) node.focus();
+  }
+}
+/** 详情里的链接：只读打开（files:open），失败就地提示，不触发整行重开。 */
+async function openPoolLink(link) {
+  const rel = String((link && link.dataset && link.dataset.poolRel) || '');
+  const p = activeProject();
+  if (!rel || !p || !window.workbench || typeof window.workbench.filesOpen !== 'function') return;
+  try {
+    const err = await window.workbench.filesOpen({ projectId: p.id, rel });
+    if (err) throw new Error(String(err));
+  } catch (error) {
+    const note = $('#pool-detail-host .pool-detail-link-note') || $('#pool-detail-host .pool-detail-note');
+    if (note) {
+      note.hidden = false;
+      note.classList.add('pool-detail-link-note');
+      note.textContent = `打不开：${rel}（${String((error && error.message) || error).slice(0, 120)}）`;
+    }
+  }
+}
+function clearPoolSearch() {
+  poolUi.query = '';
+  const input = $('#pool-search');
+  if (input) input.value = '';
+  applyPoolFilters();
+}
+function resetPoolFilters() {
+  poolUi.query = '';
+  poolUi.filter = 'all';
+  poolUi.kindFilter = 'all';
+  const input = $('#pool-search');
+  if (input) input.value = '';
+  if (poolUi.detailId) closePoolDetail(false);
+  applyPoolFilters();
 }
 async function refreshPool() {
   if (poolUi.loading) return;
@@ -10102,12 +10330,17 @@ async function togglePool(force) {
   const next = typeof force === 'boolean' ? force : mask.hidden;
   poolUi.open = next;
   mask.hidden = !next;
-  if (next) await refreshPool();
+  if (!next) {
+    if (poolUi.detailId) closePoolDetail(false);
+    return;
+  }
+  await refreshPool();
 }
 function closePool() {
   const mask = $('#pool-mask');
   if (mask) mask.hidden = true;
   poolUi.open = false;
+  if (poolUi.detailId) closePoolDetail(false);
 }
 async function refreshPoolBadge() {
   if (Date.now() - poolUi.lastFetch < 5000) return;
@@ -13463,7 +13696,12 @@ function bind() {
   $('#btn-side-new')?.addEventListener('click', openNewProject);
   $('#btn-team-start')?.addEventListener('click', () => startTeam($('#btn-team-start')));
   $('#btn-pool')?.addEventListener('click', () => togglePool());
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && poolUi.open) closePool(); });
+  // Esc 先收详情（焦点回原行），再收整池；搜索框内的 Esc 已在面板内 stopPropagation 并清空搜索。
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (poolUi.detailId) { closePoolDetail(); return; }
+    if (poolUi.open) closePool();
+  });
   setTimeout(() => { refreshPoolBadge(); }, 1500);
   $('#btn-restore')?.addEventListener('click', () => openRestoreModal());
   $('#btn-clean-missing')?.addEventListener('click', () => cleanMissingProjects());

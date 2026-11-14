@@ -4126,11 +4126,14 @@ html[data-theme="light"] #titlebar .titlebar-center .owner-review-proxy { color:
 .pool-chip i { font-style:normal; font-size:10px; margin-left:4px; color:var(--dim); }
 .pool-chip.on { background:var(--gold-soft); border-color:var(--gold); color:var(--ink); }
 .pool-cols { display:grid; grid-template-columns:1fr 1fr; flex:1; min-height:0; }
-.pool-col { display:flex; flex-direction:column; min-height:0; }
+/* R-30e2 修复：grid/flex 项的自动最小尺寸默认是 min-content，长标题会把「需求池」列撑到上千 px，
+   把状态/负责人挤出可视区、并把「缺陷池」列顶到面板外（实机截图 2026-11-14 复现）。
+   这两条 min-width:0 让列宽回到 1fr、让行内标题自己省略。 */
+.pool-col { display:flex; flex-direction:column; min-height:0; min-width:0; }
 .pool-col + .pool-col { border-left:1px solid var(--line); }
 .pool-col h4 { margin:0; padding:8px 12px; font-size:12.5px; border-bottom:1px solid var(--line); }
 .pool-n { color:var(--dim); font-weight:400; margin-left:4px; }
-.pool-list { overflow:auto; padding:6px; flex:1; }
+.pool-list { overflow:auto; padding:6px; flex:1; min-width:0; }
 .pool-row { display:flex; align-items:center; gap:8px; padding:5px 7px; border-bottom:1px dashed var(--line); font-size:12px; }
 .pool-id { font-family:var(--mono, monospace); font-size:11px; }
 .pool-state { margin-left:auto; font-size:10.5px; color:var(--dim); }
@@ -4140,6 +4143,58 @@ html[data-theme="light"] #titlebar .titlebar-center .owner-review-proxy { color:
 .pool-who { font-size:10.5px; color:var(--dim); }
 .pool-empty { padding:16px 10px; color:var(--dim); font-size:12px; text-align:center; }
 .pool-foot { margin:0; padding:7px 14px; border-top:1px solid var(--line); font-size:11px; color:var(--dim); }
+
+/* R-30e2 需求/缺陷池：行内标题 + 点击详情 + 模糊搜索 */
+.req-type.bug { color:#b23c3c; border-color:#e3b3ae; background:#f7e3e1; }
+.req-type.scenario-bug { color:#8a4b16; border-color:#e0c2a4; background:#f8ecdf; }
+.pool-search-row { display:flex; gap:8px; align-items:center; padding:8px 14px 0; }
+.pool-search { flex:1; min-width:0; border:1px solid var(--line); background:var(--panel-2, transparent); color:var(--ink); border-radius:9px; padding:5px 10px; font-size:12.5px; }
+.pool-search:focus { outline:2px solid var(--gold); outline-offset:-1px; }
+.pool-search-clear { border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:9px; padding:4px 9px; font-size:11.5px; cursor:pointer; }
+.pool-search-clear[hidden] { display:none; }
+.pool-kinds { display:flex; gap:6px; padding:8px 14px 0; flex-wrap:wrap; }
+.pool-chip.pool-kind-chip { font-size:11.5px; }
+.pool-row { cursor:pointer; }
+.pool-row:hover { background:var(--gold-soft); }
+.pool-row:focus { outline:2px solid var(--gold); outline-offset:-2px; background:var(--gold-soft); }
+.pool-row[hidden] { display:none !important; }
+.pool-row[aria-expanded="true"] { background:var(--gold-soft); box-shadow:inset 2px 0 0 var(--gold); }
+.pool-title { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pool-id { flex:0 0 auto; max-width:46%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pool-state { flex:0 0 auto; }
+.pool-who { flex:0 0 auto; max-width:23%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pool-state.s-pending { color:var(--dim); }
+.pool-nomatch { padding:14px 16px; text-align:center; border-top:1px dashed var(--line); }
+.pool-nomatch[hidden] { display:none; }
+.pool-nomatch-text { margin:0 0 8px; color:var(--dim); font-size:12.5px; }
+.pool-nomatch-actions { display:flex; gap:8px; justify-content:center; }
+.pool-detail-host { position:fixed; top:56px; right:16px; z-index:10060; width:min(420px, 34vw); max-height:calc(100vh - 88px); }
+.pool-detail-host[hidden] { display:none; }
+.pool-detail { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:14px; box-shadow:0 24px 60px rgba(0,0,0,.35); display:flex; flex-direction:column; gap:8px; padding:12px 14px; max-height:calc(100vh - 88px); overflow:auto; font-size:12.5px; }
+.pool-detail-head { display:flex; align-items:center; gap:8px; border-bottom:1px solid var(--line); padding-bottom:8px; }
+.pool-detail-title { flex:1 1 auto; min-width:0; font-size:13.5px; overflow-wrap:anywhere; }
+.pool-detail-close { border:0; background:transparent; color:var(--dim); font-size:18px; line-height:1; cursor:pointer; }
+.pool-detail-meta { display:grid; grid-template-columns:1fr 1fr; gap:6px 10px; margin:0; }
+.pool-detail-meta > div { display:flex; flex-direction:column; gap:1px; min-width:0; }
+.pool-detail-meta dt { color:var(--dim); font-size:10.5px; }
+.pool-detail-meta dd { margin:0; overflow-wrap:anywhere; }
+.pool-detail-sec { border-top:1px dashed var(--line); padding-top:8px; }
+.pool-detail-sec h5 { margin:0 0 5px; font-size:11.5px; color:var(--dim); font-weight:700; }
+.pool-detail-sec .pool-field { display:flex; gap:8px; margin:0 0 3px; }
+.pool-field dt { flex:0 0 64px; color:var(--dim); }
+.pool-field dd { margin:0; overflow-wrap:anywhere; }
+.pool-detail-brief { margin:0; line-height:1.55; }
+.pool-detail-more summary { cursor:pointer; color:var(--gold); font-size:11.5px; }
+.pool-detail-full { white-space:pre-wrap; overflow-wrap:anywhere; margin:6px 0 0; font-size:12px; }
+.pool-detail-empty { color:var(--dim); }
+.pool-detail-evidence { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:3px; }
+.pool-detail-evidence li { display:flex; align-items:baseline; gap:6px; min-width:0; }
+.pool-ev-kind { flex:0 0 auto; font-size:10px; color:var(--dim); border:1px solid var(--line); border-radius:5px; padding:0 4px; }
+.pool-ev-sha { color:var(--dim); font-size:10px; }
+.pool-link { color:var(--gold); text-decoration:underline; overflow-wrap:anywhere; }
+.pool-detail-note { margin:0; color:var(--dim); font-size:10.5px; border-top:1px dashed var(--line); padding-top:7px; }
+.pool-detail-link-note { color:#b23c3c; }
+.pool-mask.detail-open { padding-right:min(420px, 34vw); }
 
 /* v4 流程面板：Owner 拍板（宽 560-640、高≤75vh、12-13px） */
 .flow-panel { width: min(620px, calc(100vw - 32px)); max-height: 75vh; }
