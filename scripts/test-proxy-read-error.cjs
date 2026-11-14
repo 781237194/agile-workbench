@@ -58,6 +58,14 @@ if (fnMatch) {
   fs.writeFileSync(file, JSON.stringify({ records: [{ id: 'P-1', scope: 'all', startedAt: 'x' }] }, null, 2), 'utf8');
   const okRun = readOwnerProxy({ path: tmp });
   check('正常 评审代管.json：不返回 readError，records 原样带回', !okRun.readError && Array.isArray(okRun.records) && okRun.records.length === 1, { records: okRun.records.length, readError: okRun.readError || null });
+  // 「恢复后重试回正常」：先把文件写坏 → 读到错误态；修好文件后再次读（= 点重试那一下）→ 回到正常态、无误报
+  fs.writeFileSync(file, '{"records": [ 坏', 'utf8');
+  const brokenAgain = readOwnerProxy({ path: tmp });
+  check('再次写坏：回到错误态（readError 出现）', Boolean(brokenAgain.readError), { code: brokenAgain.readError && brokenAgain.readError.code });
+  fs.writeFileSync(file, JSON.stringify({ records: [{ id: 'P-2', scope: 'all', startedAt: 'y' }] }, null, 2), 'utf8');
+  const recovered = readOwnerProxy({ path: tmp });
+  check('恢复文件后重读（点重试）= 回到正常态：无 readError 且 records 正确', !recovered.readError && Array.isArray(recovered.records) && recovered.records.length === 1 && recovered.records[0].id === 'P-2', { records: recovered.records.length, id: recovered.records[0] && recovered.records[0].id, readError: recovered.readError || null });
+  check('恢复后仍能取到 scope=all 生效记录（行可回到「代管中」而不是空）', Array.isArray(recovered.records) && recovered.records.some((row) => String(row.scope || '') === 'all' && !row.endedAt), null);
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
