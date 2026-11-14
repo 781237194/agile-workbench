@@ -2507,7 +2507,13 @@ function createTeamTools(options = {}) {
     const items = Array.isArray(input.items)
       ? input.items
       : [{ id: input.id, choice: input.choice, opinion: input.opinion }];
+    // 7849 AC3-补：代管期内 PM 代回执——把 channel=proxy 与 proxy 三要素一起透传给团队工具落账。
     const payload = { items };
+    if (String(input.channel || '') === 'proxy' && input.proxy) {
+      payload.channel = 'proxy';
+      payload.proxy = input.proxy;
+      payload.source = String(input.source || 'proxy_ack');
+    }
     const run = await runNode(tool, [projectName, JSON.stringify(payload)], { timeoutMs: TIMEOUTS.send || 30000 });
     const value = run.value || {};
     if (value.ok === false) {

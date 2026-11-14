@@ -3,7 +3,7 @@
   const STATUS_TEXT = { approved: '已通过', rejected: '已打回', skipped: '已先跳过', pending: '等你决定', optional: '等你决定' };
   // B-4baa（R-1cee）：看板与待评估清单默认各展示前 5 条，其余折叠在 DOM 里（不删、不裁切），可展开全部。
   const PREVIEW_ROWS = 5;
-  const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', reject: null, listFilter: 'all', listOpen: new Set(), closedCollapsed: true };
+  const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', reject: null, listFilter: 'all', listOpen: new Set(), closedCollapsed: true, proxyAllActive: false, proxyAllRecord: null, proxyAllExpiresAt: '', decisionBox: [] };
   const KEY_LATER = 'awb.ownerReview.laterUntil';
   const KEY_NO_AUTO = 'awb.ownerReview.noAuto';
   // B-d100：打回后复审的判定收在 owner-review-state.js（Node 可单测）；脚本缺失时退回本文件旧逻辑。
@@ -76,6 +76,80 @@
     });
   }
   function dialogEl() { return document.querySelector('[data-owner-review-dialog]'); }
+
+  /** 7849 AC1：按钮态随代管状态刷新（生效中=「结束代管」，带到期时间；未生效=「全部交 PM 代管」）。 */
+  function syncProxyAllButton() {
+    const btn = document.querySelector('[data-or-proxy-all]');
+    if (!btn) return;
+    const active = Boolean(state.proxyAllActive);
+    btn.textContent = active ? '结束代管' : '全部交 PM 代管';
+    btn.setAttribute('data-proxy-all-state', active ? 'active' : 'idle');
+    if (state.proxyAllExpiresAt) btn.setAttribute('data-proxy-expires-at', state.proxyAllExpiresAt);
+    else btn.removeAttribute('data-proxy-expires-at');
+    btn.title = active
+      ? `全部代管生效中（到期 ${String(state.proxyAllExpiresAt || '').slice(0, 19).replace('T', ' ')}）；点这里结束`
+      : '一次给全部非终态需求开代管（评审 + 决策箱 + 验收，默认 8 小时）；随时可结束';
+  }
+
+  /**
+   * 7849 AC3-补：评审弹窗「决策箱」分区。
+   * - 只在 scope=all 代管有效期内渲染（结束/过期 → 整个分区消失，锚点数量 1 → 0）；
+   * - 按钮带 data-proxy-decide-entry，点击走 owner:decision-ack 的 proxy 通道；
+   * - 已代回执的条目标【PM代管回执】（判据 decision.channel=proxy）。
+   */
+  function decisionBoxSection() {
+    if (!state.proxyAllActive) return null;
+    const rows = Array.isArray(state.decisionBox) ? state.decisionBox : [];
+    const box = el('div', 'or-decisions');
+    box.setAttribute('data-proxy-decide-section', '1');
+    const head = el('h4', 'or-eval-title', '决策箱（PM 代回执）');
+    head.title = `全部代管生效中：到期 ${String(state.proxyAllExpiresAt || '').slice(0, 19).replace('T', ' ')}；结束代管后本区与代回执按钮立即消失`;
+    box.appendChild(head);
+    if (!rows.length) {
+      box.appendChild(el('p', 'or-empty', '决策箱里暂时没有条目'));
+      return box;
+    }
+    for (const item of rows.slice(0, 12)) {
+      const id = String((item && item.id) || '');
+      const status = String((item && item.status) || '');
+      const proxyAcked = String((item && item.decision && item.decision.channel) || '') === 'proxy';
+      const row = el('div', 'or-decision-row');
+      row.setAttribute('data-proxy-decision-id', id);
+      row.appendChild(el('b', 'or-decision-title', clip60(String((item && item.title) || id), 60)));
+      if (proxyAcked) {
+        const tag = el('span', 'or-proxy-tag', '【PM代管回执】');
+        tag.setAttribute('data-proxy-decision-tag', '1');
+        row.appendChild(tag);
+      } else if (status === 'open') {
+        for (const option of (Array.isArray(item.options) ? item.options : [])) {
+          const btn = el('button', 'or-link or-proxy-decide', `代回执：${option}`);
+          btn.type = 'button';
+          btn.setAttribute('data-proxy-decide-entry', '1');
+          btn.setAttribute('data-decision-id', id);
+          btn.setAttribute('data-choice', String(option));
+          btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            try {
+              const r = await window.workbench.ownerDecisionAck({
+                projectId: state.projectId, id, choice: String(option), opinion: '', channel: 'proxy',
+              });
+              if (!r || r.ok === false) throw new Error((r && (r.message || r.code)) || '代回执失败');
+              showNotice(`已代回执 ${id}：${option}（PM 名义落账，不冒充 Owner）`);
+              await loadData();
+            } catch (e) {
+              showBanner(e);
+            } finally { btn.disabled = false; }
+          });
+          row.appendChild(btn);
+        }
+      } else {
+        row.appendChild(el('span', 'or-muted', '（已回执）'));
+      }
+      box.appendChild(row);
+    }
+    if (rows.length > 12) box.appendChild(el('p', 'or-muted', `还有 ${rows.length - 12} 条未列出`));
+    return box;
+  }
 
   // 代管徽标挂载点（T-e921）：标题栏末尾会压住【文件夹】，改放 stage-bar【项目面板】左侧；
   // 找不到 stage-bar 才退回标题栏，保证旧布局/测试页也能挂上。
@@ -215,8 +289,15 @@
         state.skipDraft[key] = event.target.value;
       });
     }
-    // T-69ed：代管入口只留「全部交 PM 代管」（本轮/每轮两个按钮已移除，旧 once/always 记录照常读取）。
-    dialog.querySelector('[data-or-proxy-all]').addEventListener('click', startProxyAll);
+    // T-69ed / 7849 AC1：代管入口只留一个按钮——未生效=「全部交 PM 代管」，生效中=「结束代管」。
+    const proxyAllBtn = dialog.querySelector('[data-or-proxy-all]');
+    if (proxyAllBtn) {
+      proxyAllBtn.addEventListener('click', () => {
+        if (state.proxyAllActive) endProxy();
+        else startProxyAll();
+      });
+      syncProxyAllButton();
+    }
     dialog.querySelector('[data-or-opinion]').addEventListener('input', (event) => { state.draft = event.target.value; });
     dialog.addEventListener('click', (event) => { if (event.target === dialog) closeDialog(); });
     // B-2ed9：卡片点击用事件委托兜底——重渲染/异步刷新后即使原节点被替换，点哪张就选哪张。
@@ -249,6 +330,15 @@
     } catch { state.suggestions = []; }
     // B-20261113-004955-5f62：先取代管记录再算徽标，否则「N 条等你决定」扣不掉已托管的那几条。
     await updateProxyBadge();
+    // 7849 AC3-补：代管期内 PM 代回执需要决策箱条目——只在「全部代管生效」时读，省一次 IPC。
+    if (state.proxyAllActive && api.teamDecisionBox) {
+      try {
+        const box = await api.teamDecisionBox({ projectId: project.id });
+        state.decisionBox = (box && Array.isArray(box.items)) ? box.items : [];
+      } catch { state.decisionBox = []; }
+    } else {
+      state.decisionBox = [];
+    }
     updateBadge();
     if (dialogEl() && !dialogEl().hidden) renderDialog();
     // R-4f99 AC3：验收列表打开时也跟 5 秒轮询刷新（流程图/列表都 ≤6 秒内看到状态变化）。
@@ -263,9 +353,16 @@
   }
   function isProxied(req) {
     const id = String((req && req.id) || '');
-    return Boolean(id) && proxyIdSet().has(id);
+    if (!id) return false;
+    // 7849 AC1：scope=all 是「全项目代管」——非终态需求一律算在代管内（不必逐条有记录）。
+    if (state.proxyAllActive) {
+      const status = String((req && req.status) || '');
+      if (!['accepted', 'terminated', 'rejected'].includes(status)) return true;
+    }
+    return proxyIdSet().has(id);
   }
-  // T-a01d / B-4baa：代管落账标识——PM 代落的显示【PM通过】/【PM打回】/【PM跳过】；
+  // T-a01d / B-4baa / 7849：代管落账标识——PM 代落的显示【PM代管通过】/【PM代管打回】/【PM代管跳过】/
+  // 【PM代管验收】/【PM代管回执】（旧 once/always 记录照读，判定口径 channel/recordedBy 不变）；
   // 代管中还没落账显示【待 PM 评审】；Owner 本人显示【已通过】/【已打回】；
   // 旧数据没有 channel/recordedBy 时显示“来源未记”，不默认成 Owner（R-1cee F-R1/AC1）。
   function proxyTagOf(req) {
@@ -274,10 +371,16 @@
     const recordedBy = String(owner.recordedBy || '');
     const status = String(owner.status || '');
     const terminal = ['approved', 'rejected', 'skipped'].includes(status);
+    // 7849 AC7：代管验收单独一个标识（验收记录在 acceptanceRecord 上，不在 ownerReview 上）。
+    const acceptance = (req && req.acceptanceRecord) || {};
+    if (String(acceptance.channel || '') === 'proxy' && String(acceptance.by || '') === 'pm') {
+      return String(acceptance.status || '') === 'accepted' ? '【PM代管验收】' : '【PM代管验收·打回】';
+    }
+    // 7849 F-7849-7：代管落账标识统一成【PM代管通过/打回/跳过】（旧简短字样同步替换成新文案）。
     if (channel === 'proxy' || recordedBy === 'pm') {
-      if (status === 'approved') return '【PM通过】';
-      if (status === 'rejected') return '【PM打回】';
-      if (status === 'skipped') return '【PM跳过】';
+      if (status === 'approved') return '【PM代管通过】';
+      if (status === 'rejected') return '【PM代管打回】';
+      if (status === 'skipped') return '【PM代管跳过】';
       return '【待 PM 评审】';
     }
     if (terminal) {
@@ -287,6 +390,10 @@
       return `【已跳过${suffix}】`;
     }
     return isProxied(req) ? '【待 PM 评审】' : '';
+  }
+  // 7849 AC7：代管口径的标识集合（含验收/回执），用于列表「已托管」判定。
+  function isProxyTag(tag) {
+    return /PM代管(通过|打回|跳过|验收|回执)|PM通过|PM打回|PM跳过|来源未记/.test(String(tag || ''));
   }
 
   function updateBadge() {
@@ -329,7 +436,15 @@
       // 列表里给“已代管”的需求打标（重开弹窗也能看到“已托管”）。
       state.proxyRecords = (r && Array.isArray(r.records)) ? r.records.filter((row) => !row.endedAt) : [];
       state.proxyIdSet = new Set(state.proxyRecords.map((row) => String(row.requirementId || '')).filter(Boolean));
-      const count = state.proxyIdSet.size;
+      // 7849 AC1：scope=all 是一条全项目记录——只要「未结束 + 未过期」，所有非终态需求都算代管覆盖。
+      state.proxyAllActive = Boolean(r && r.allActive);
+      state.proxyAllRecord = (r && r.allRecord) || null;
+      state.proxyAllExpiresAt = state.proxyAllRecord ? String(state.proxyAllRecord.expiresAt || '') : '';
+      let count = state.proxyIdSet.size;
+      if (state.proxyAllActive) {
+        const rows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
+        count = Math.max(count, rows.filter((row) => row && !['accepted', 'terminated', 'rejected'].includes(String(row.status || ''))).length);
+      }
       if (count) {
         const { proxy, end } = proxyNodes();
         proxy.hidden = false;
@@ -347,6 +462,7 @@
           if (node) node.remove();
         }
       }
+      syncProxyAllButton();
     } catch { /* ignore */ }
   }
 
@@ -715,25 +831,28 @@
     } catch { /* 提示条只是反馈，失败不影响已经成功的操作 */ }
   }
   async function startProxyAll() {
-    const rows = rowsAwaitingOwner();
-    if (!rows.length) {
-      showBanner({ message: '当前没有等你决定或等你验收的需求，不需要批量代管。' });
+    // 7849 AC1：一键入口写 scope=all（一条全项目记录，带 expiresAt，覆盖全部非终态需求）。
+    // 已生效时再点：幂等——不新建、只更新 updatedAt，后端返回 idempotent=true。
+    const rows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
+    const covered = rows.filter((row) => row && !['accepted', 'terminated', 'rejected'].includes(String(row.status || '')));
+    if (!covered.length) {
+      showBanner({ message: '当前没有非终态需求，不需要批量代管。' });
       return;
     }
-    const ids = rows.map((row) => String(row.id));
+    const expiresAt = new Date(Date.now() + 8 * 3600 * 1000).toISOString();
     try {
       const r = await window.workbench.ownerProxyStart({
         projectId: state.projectId,
-        requirementIds: ids,
-        scope: 'always',
+        scope: 'all',
+        expiresAt,
         actor: 'owner',
-        authorization: `Owner 在评审弹窗点击全部交 PM 代管（${ids.length} 条，含等你验收的需求）`,
+        authorization: `Owner 在评审弹窗点击全部交 PM 代管（scope=all，覆盖 ${covered.length} 条非终态需求，到期 ${expiresAt}；含评审 + 决策箱 + 验收）`,
       });
       if (!r || r.ok === false) throw new Error((r && (r.message || r.code)) || '批量开代管失败');
-      // B-5f62：主进程按 requirementIds 逐条写记录后返回 started，这里按实际条数提示。
-      const count = (r && Array.isArray(r.started)) ? r.started.length : ids.length;
       hideBanner();
-      showNotice(`已开代管 ${count} 条：等你决定和等你验收的都在内；后面每轮保持，随时可结束`);
+      // B-5f62 / 7849：幂等返回 idempotent=true，提示要说清「本来就生效中」而不是又开了一次。
+      if (r.idempotent) showNotice('全部代管已在生效中（幂等：未新建记录，只刷新了更新时间）');
+      else showNotice(`已开启全部代管：覆盖 ${covered.length} 条非终态需求（到期 ${String(r.active && r.active.expiresAt || expiresAt).slice(0, 19).replace('T', ' ')}）`);
       await updateProxyBadge();
       updateBadge();
       renderDialog();
@@ -1251,7 +1370,7 @@
       const status = pending ? '等你决定' : (STATUS_TEXT[statusOf(req)] || '已处理');
       const proxyTag = proxyTagOf(req);
       const statusText = proxyTag || (proxyActive ? status + ' · 已托管' : status);
-      const basis = proxyTag && /PM通过|PM打回|PM跳过|来源未记/.test(proxyTag)
+      const basis = isProxyTag(proxyTag)
         ? `${String(owner.authorization || owner.proxy || '').trim() || '依据缺失'}${owner.at ? ' · ' + String(owner.at).slice(0, 16).replace('T', ' ') : ''}`
         : '';
       if (basis) item.setAttribute('data-or-basis', basis);
@@ -1323,6 +1442,11 @@
     }
     evalBox.appendChild(evalInner);
     list.appendChild(evalBox);
+    // 7849 AC3-补：决策箱分区（仅「全部代管」有效期内出现；结束/过期即消失）。
+    const decSection = decisionBoxSection();
+    if (decSection) list.appendChild(decSection);
+    // 7849 AC1：每次重渲染都同步按钮态（否则开/结束代管后按钮文案会停在旧状态）。
+    syncProxyAllButton();
     const req = rows.find((row) => String(row.id) === state.selected) || null;
     dialog.querySelector('[data-or-title]').textContent = req ? humanizeTitle(`${req.title || ''}（${req.id || ''}）`) : '暂时没有等你决定的事';
     // B-2ed9：同一需求已经落过同状态决定时，对应按钮置灰（禁止重复追加）；不同状态（如打回）仍可点。

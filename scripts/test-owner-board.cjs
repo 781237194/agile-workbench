@@ -17,9 +17,12 @@ const push = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: 
 const has = (src, text) => src.includes(text);
 
 // ── 一、来源标识（F-R1）────────────────────────────────────
-push('标签有【PM通过】', has(review, '【PM通过】'));
-push('标签有【PM打回】', has(review, '【PM打回】'));
-push('标签有【PM跳过】', has(review, '【PM跳过】'));
+// 7849 F-7849-7：代管落账标识统一成【PM代管通过/打回/跳过/验收/回执】（旧【PM通过】等字样只在旧记录里照读）。
+push('标签有【PM代管通过】', has(review, '【PM代管通过】'));
+push('标签有【PM代管打回】', has(review, '【PM代管打回】'));
+push('标签有【PM代管跳过】', has(review, '【PM代管跳过】'));
+push('标签有【PM代管验收】', has(review, '【PM代管验收】'));
+push('不再返回旧【PM通过】字样', !has(review, '【PM通过】') && !has(review, '【PM打回】'));
 push('不再返回【PM评审通过】', !has(review, '【PM评审通过】') && !has(review, '【PM评审打回】'));
 push('来源判定用 channel/recordedBy', has(review, "channel === 'proxy' || recordedBy === 'pm'"));
 push('不用 decidedBy 判定来源', !/decidedBy/.test(review.slice(review.indexOf('function proxyTagOf'), review.indexOf('function updateBadge'))));
@@ -31,7 +34,7 @@ push('代管依据可展开', has(review, 'data-or-basis') && has(review, '代�
 push('看板带轮次 data-owner-board-round', has(review, 'data-owner-board-round'));
 push('每条有 是什么/怎么做/建议拍板 三要素', has(review, "setAttribute('data-what'") && has(review, "setAttribute('data-how'") && has(review, "setAttribute('data-advice'"));
 push('三要素写进可见文本', has(review, '是什么：') && has(review, '怎么做：') && has(review, '建议拍板：'));
-push('建议拍板有兜底文案', has(review, '无特别建议，按通过 / 打回即可'));
+push('建议拍板按事实给具体动作（不再空话兜底）', has(review, '建议先问程序员 A 影响面再拍') && !has(review, '无特别建议，按通过 / 打回即可'));
 push('列表摘要 data-or-summary 且 ≤60 字', has(review, 'data-or-summary') && has(review, 'clip60(`${what}；${how}`)'));
 push('摘要容器改名避免与列表摘要冲突', has(review, 'data-or-summary-box') && has(review, "querySelector('[data-or-summary-box]')"));
 push('详情全文 data-or-detail 不裁切', has(review, 'data-or-detail') && has(review, '详情全文') && has(review, 'fullDetail'));

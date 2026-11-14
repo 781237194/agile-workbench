@@ -214,15 +214,38 @@ export function markDecisionRead(projectName, id) {
 }
 
 /**
+ * 7849 AC3-补：代回执的身份口径。
+ * - channel !== 'proxy' → 返回 null（旧 Owner 回执路径一字不改）；
+ * - channel === 'proxy' → 必须带三要素：recordedBy='pm'、scope 非空、authorization 非空，
+ *   缺一 → PROXY_UNAUTHORIZED（零落账）；返回 basis.proxy，落账时 by/decidedBy 一律 pm。
+ */
+function normalizeProxyBasis(proxy, channel) {
+  if (String(channel || '') !== 'proxy') return null;
+  const row = proxy && typeof proxy === 'object' ? proxy : null;
+  const recordedBy = String((row && row.recordedBy) || '').trim();
+  const scope = String((row && row.scope) || '').trim();
+  const authorization = String((row && row.authorization) || '').trim();
+  if (!row || recordedBy !== 'pm' || !scope || !authorization) {
+    fail('PROXY_UNAUTHORIZED', '代回执必须带代管三要素（recordedBy=pm / scope / authorization），且不得冒充 Owner', {
+      channel, recordedBy, scope: scope || null, hasAuthorization: Boolean(authorization),
+    });
+  }
+  return { scope, startedAt: String((row && row.startedAt) || ''), authorization };
+}
+
+/**
  * Owner 回执（F-9db6-4/8）：只能从 options 里选 + 意见≤500；
  * 发 type=owner_decision_receipt 给 PM（默认静默）；同一 D-id 只发一次（幂等）；发送失败 → RECEIPT_FAILED 且保持 open。
  */
+
 export async function acknowledgeDecision(projectName, input = {}) {
   const id = String(input.id || '').trim();
   const choice = clean(input.choice, 40);
   const opinion = clean(input.opinion, 500);
   const channel = clean(input.channel, 20) || 'tty';
   const source = clean(input.source, 40) || 'decision_box_ack';
+  // 7849 AC3-补：代管期内 PM 代回执（channel=proxy）——必须带代管三要素，绝不冒充 Owner。
+  const proxyBasis = normalizeProxyBasis(input.proxy, channel);
   if (!id) fail('DECISION_ID_REQUIRED', '需要 --id D-...');
   const read = readDecisionBox(projectName);
   if (read.corrupt) fail('DECISION_BOX_CORRUPT', '决策箱文件损坏，请先重建', { file: read.file });
@@ -240,15 +263,18 @@ export async function acknowledgeDecision(projectName, input = {}) {
   try {
     message = sendMessage({
       from: 'system', to: 'pm', type: 'owner_decision_receipt', project: projectName,
-      subject: `Owner 回执 ${item.id}：${choice}`,
+      subject: proxyBasis ? `PM 代管回执 ${item.id}：${choice}` : `Owner 回执 ${item.id}：${choice}`,
       body: [
         `决策箱条目：${item.id}`,
         `标题：${item.title}`,
-        `Owner 选择：${choice}`,
-        opinion ? `Owner 意见：${opinion}` : 'Owner 意见：（未写）',
+        `${proxyBasis ? 'PM（代管）选择' : 'Owner 选择'}：${choice}`,
+        opinion ? `${proxyBasis ? 'PM（代管）意见' : 'Owner 意见'}：${opinion}` : `${proxyBasis ? 'PM（代管）意见' : 'Owner 意见'}：（未写）`,
         `回执时间：${at}`,
+        proxyBasis
+          ? `代管依据：scope=${proxyBasis.scope} · authorization=${String(proxyBasis.authorization).slice(0, 80)}`
+          : '',
         '点【回执 PM】不等于评审通过/验收；门禁仍走原入口。',
-      ].join('\n'),
+      ].filter(Boolean).join('\n'),
       replyTo: item.source && item.source.kind === 'message' ? String(item.source.ref) : '',
       ackRequired: false,
     });
@@ -266,15 +292,26 @@ export async function acknowledgeDecision(projectName, input = {}) {
     fresh.status = 'answered';
     fresh.answeredAt = at;
     fresh.updatedAt = at;
-    fresh.decision = { choice, opinion, by: 'owner', decidedBy: 'owner', channel, at, source };
+    fresh.decision = proxyBasis
+      ? {
+        choice, opinion, by: 'pm', decidedBy: 'pm', channel: 'proxy', source: 'proxy_ack', at,
+        basis: { proxy: { scope: proxyBasis.scope, startedAt: proxyBasis.startedAt, authorization: proxyBasis.authorization, recordedBy: 'pm' } },
+      }
+      : { choice, opinion, by: 'owner', decidedBy: 'owner', channel, at, source };
     fresh.receipt = { messageId: message.id, at, choice, opinion, seq };
     fresh.receiptSeq = seq;
     fresh.readAt = String(fresh.readAt || at);
     writeDecisionBox(projectName, again.box);
     appendEvent({
-      role: 'owner', sessionId: channel === 'ui' ? 'ui' : 'tty', action: 'decision_box_ack',
+      role: proxyBasis ? 'pm' : 'owner',
+      sessionId: proxyBasis ? 'proxy' : (channel === 'ui' ? 'ui' : 'tty'),
+      action: proxyBasis ? 'decision_box_ack_proxy' : 'decision_box_ack',
       project: projectName, target: id, note: `choice=${choice} channel=${channel} source=${source}`,
-      data: { id, choice, opinion: truncate(opinion, 160), receiptSeq: seq, messageId: message.id, decidedBy: 'owner', channel, source },
+      data: {
+        id, choice, opinion: truncate(opinion, 160), receiptSeq: seq, messageId: message.id,
+        decidedBy: proxyBasis ? 'pm' : 'owner', channel, source,
+        ...(proxyBasis ? { basis: { proxy: { scope: proxyBasis.scope, startedAt: proxyBasis.startedAt } } } : {}),
+      },
     });
     return { ok: true, item: fresh, receiptMessage: message, messageId: message.id };
   });
@@ -401,6 +438,9 @@ async function wakeDecisionRecipient(projectName, message) {
 export async function acknowledgeDecisions(projectName, input = {}) {
   const channel = clean(input.channel, 20) || 'ui';
   const source = clean(input.source, 40) || 'decision_box_ack';
+  // 7849 AC3-补：代回执三要素先验（缺一 PROXY_UNAUTHORIZED，零副作用）。
+  const proxyBasis = normalizeProxyBasis(input.proxy, channel);
+  const proxyArg = proxyBasis ? { proxy: { ...input.proxy, recordedBy: 'pm' } } : {};
   const raw = Array.isArray(input.items) ? input.items : [{ id: input.id, choice: input.choice, opinion: input.opinion }];
   const entries = raw.map((row) => ({
     id: String((row && row.id) || '').trim(),
@@ -411,7 +451,7 @@ export async function acknowledgeDecisions(projectName, input = {}) {
     fail('DECISION_ID_REQUIRED', '需要 id（单条给 id/choice，批量给 items[].id）', { count: entries.length });
   }
   if (entries.length === 1) {
-    const r = await acknowledgeDecision(projectName, { ...entries[0], channel, source });
+    const r = await acknowledgeDecision(projectName, { ...entries[0], channel, source, ...proxyArg });
     return {
       ok: true, project: projectName, batch: false,
       results: [{
@@ -424,7 +464,7 @@ export async function acknowledgeDecisions(projectName, input = {}) {
       receiptMessage: r.receiptMessage ? { id: r.receiptMessage.id, to: 'pm' } : null,
       wake: r.wake || null,
       counts: decisionCounts(projectName),
-      decidedBy: 'owner', channel, at: (r.item && (r.item.answeredAt || nowIso())) || nowIso(),
+      decidedBy: proxyBasis ? 'pm' : 'owner', channel, at: (r.item && (r.item.answeredAt || nowIso())) || nowIso(),
     };
   }
   // 批量：整批先校验，任一不满足 → 零副作用（不改箱、不发消息、不唤醒）
@@ -446,9 +486,9 @@ export async function acknowledgeDecisions(projectName, input = {}) {
   try {
     message = sendMessage({
       from: 'system', to: 'pm', type: 'owner_decision_receipt', project: projectName,
-      subject: `Owner 回执 ${entries.length} 条决策`,
+      subject: proxyBasis ? `PM 代管回执 ${entries.length} 条决策` : `Owner 回执 ${entries.length} 条决策`,
       body: [
-        `决策箱回执（共 ${entries.length} 条，Owner 在界面一次提交）：`,
+        `决策箱回执（共 ${entries.length} 条，${proxyBasis ? 'PM 在代管期内一次提交' : 'Owner 在界面一次提交'}）：`,
         ...entries.map((entry) => `- ${entry.id}｜选择：${entry.choice}｜意见：${entry.opinion || '（未写）'}`),
         `回执时间：${at}`,
         '点【回执 PM】不等于评审通过/验收；门禁仍走原入口。',
@@ -475,7 +515,12 @@ export async function acknowledgeDecisions(projectName, input = {}) {
       fresh.answeredAt = at;
       fresh.updatedAt = at;
       fresh.readAt = String(fresh.readAt || at);
-      fresh.decision = { choice: entry.choice, opinion: entry.opinion, by: 'owner', decidedBy: 'owner', channel, at, source };
+      fresh.decision = proxyBasis
+        ? {
+          choice: entry.choice, opinion: entry.opinion, by: 'pm', decidedBy: 'pm', channel: 'proxy', source: 'proxy_ack', at,
+          basis: { proxy: { scope: proxyBasis.scope, startedAt: proxyBasis.startedAt, authorization: proxyBasis.authorization, recordedBy: 'pm' } },
+        }
+        : { choice: entry.choice, opinion: entry.opinion, by: 'owner', decidedBy: 'owner', channel, at, source };
       fresh.receipt = { messageId: message.id, at, choice: entry.choice, opinion: entry.opinion, seq };
       fresh.receiptSeq = seq;
       results.push({ id: entry.id, status: 'answered', receiptSeq: seq, messageId: message.id });
@@ -483,12 +528,18 @@ export async function acknowledgeDecisions(projectName, input = {}) {
     again.box.meta = { ...(again.box.meta || {}), receiptSeq: seq };
     writeDecisionBox(projectName, again.box);
     appendEvent({
-      role: 'owner', sessionId: channel === 'ui' ? 'ui' : 'tty', action: 'decision_box_ack',
+      role: proxyBasis ? 'pm' : 'owner',
+      sessionId: proxyBasis ? 'proxy' : (channel === 'ui' ? 'ui' : 'tty'),
+      action: proxyBasis ? 'decision_box_ack_proxy' : 'decision_box_ack',
       project: projectName, target: entries.map((entry) => entry.id).join(','),
       note: `batch=${entries.length} channel=${channel} source=${source}`,
-      data: { ids: entries.map((entry) => entry.id), messageId: message.id, receiptSeq: seq, decidedBy: 'owner', channel, source },
+      data: {
+        ids: entries.map((entry) => entry.id), messageId: message.id, receiptSeq: seq,
+        decidedBy: proxyBasis ? 'pm' : 'owner', channel, source,
+        ...(proxyBasis ? { basis: { proxy: { scope: proxyBasis.scope, startedAt: proxyBasis.startedAt } } } : {}),
+      },
     });
-    return { ok: true, project: projectName, batch: true, results, receiptMessage: { id: message.id, to: 'pm' }, decidedBy: 'owner', channel, at };
+    return { ok: true, project: projectName, batch: true, results, receiptMessage: { id: message.id, to: 'pm' }, decidedBy: proxyBasis ? 'pm' : 'owner', channel, at };
   });
   const wake = await wakeDecisionRecipient(projectName, message);
   return { ...acked, wake, counts: decisionCounts(projectName) };

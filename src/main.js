@@ -4863,8 +4863,36 @@ function registerIpc() {
         }))
         .filter((row) => row.id);
       if (!cleaned.length) return { ok: false, code: 'DECISION_ID_REQUIRED', message: '缺少决策条目 id（D-...）' };
-      const result = await teamTools.decisionAck({ projectName: name, items: cleaned });
-      return { ...result, project: name };
+      // 7849 AC3-补：代管期内 PM 代回执——先在本机验「评审代管.json 里有未结束、未过期的 scope=all 记录」，
+      // 再把 proxy 三要素（recordedBy=pm / scope / authorization）传给团队工具落账；缺一拒（B 域工具再校验一次）。
+      let proxy = null;
+      if (String(p.channel || '') === 'proxy') {
+        const project = requireProject(readStore(), p.projectId);
+        const data = readOwnerProxy(project);
+        const records = Array.isArray(data.records) ? data.records : [];
+        const record = records.filter((row) => !row.endedAt && String(row.scope || '') === 'all').slice(-1)[0] || null;
+        if (!record) {
+          return { ok: false, code: 'PROXY_UNAUTHORIZED', message: '现在没有生效中的「全部交 PM 代管」记录，不能代回执' };
+        }
+        if (record.expiresAt && Date.parse(record.expiresAt) && Date.parse(record.expiresAt) <= Date.now()) {
+          return { ok: false, code: 'PROXY_EXPIRED', message: '代管已过期（' + record.expiresAt + '），不能代回执' };
+        }
+        proxy = {
+          scope: String(record.scope || 'all'),
+          startedAt: String(record.startedAt || ''),
+          authorization: String(record.authorization || ''),
+          recordedBy: 'pm',
+        };
+        if (!proxy.authorization) {
+          return { ok: false, code: 'PROXY_UNAUTHORIZED', message: '代管记录缺少授权来源（authorization），不能代回执' };
+        }
+      }
+      const result = await teamTools.decisionAck({
+        projectName: name,
+        items: cleaned,
+        ...(proxy ? { channel: 'proxy', proxy, source: 'proxy_ack' } : {}),
+      });
+      return { ...result, project: name, ...(proxy ? { proxy } : {}) };
     } catch (e) {
       return { ok: false, code: 'DECISION_ACK_FAILED', message: String((e && e.message) || e).slice(0, 300) };
     }
@@ -6201,7 +6229,19 @@ function registerIpc() {
     const data = readOwnerProxy(project);
     const records = Array.isArray(data.records) ? data.records : [];
     const active = records.filter((row) => !row.endedAt).slice(-1)[0] || null;
-    return { ok: true, active, records, scope: active ? active.scope : null };
+    // 7849 AC1：scope=all 是一条「全项目」记录（没有 requirementId），界面据此把按钮切成「结束代管」，
+    // 并让决策箱代回执锚点只在「未结束 + 未过期」时出现。
+    const allRecord = records.filter((row) => !row.endedAt && String(row.scope || '') === 'all').slice(-1)[0] || null;
+    const allExpired = Boolean(allRecord && allRecord.expiresAt && Date.parse(allRecord.expiresAt) && Date.parse(allRecord.expiresAt) <= Date.now());
+    return {
+      ok: true,
+      active,
+      records,
+      scope: active ? active.scope : null,
+      allRecord,
+      allActive: Boolean(allRecord) && !allExpired,
+      allExpired,
+    };
   });
   ipcMain.handle('owner:proxy-start', async (_e, payload) => {
     const p = payload || {};
@@ -6229,18 +6269,60 @@ function registerIpc() {
         try { addEvent(project, '代管自代校验跳过：团队.json 不可读'); } catch { /* ignore */ }
       }
     }
-    // 支持单条（requirementId）与批量（requirementIds）：「全部交 PM 代管」一次给当前所有待评估需求开 always。
+    // 支持单条（requirementId）/批量（requirementIds）/全项目（scope=all，7849 AC1）。
+    const scope = String(p.scope || 'once');
+    if (!['once', 'always', 'all'].includes(scope)) throw codedError('BAD_SCOPE', '代管范围只能是一轮（once）/每轮（always）/全部（all）');
+    const data = readOwnerProxy(project);
+    data.records = Array.isArray(data.records) ? data.records : [];
+    const at = now();
+    // 7849 AC1：scope=all = 一条全项目记录（没有 requirementId），带 expiresAt（默认 8 小时）。
+    // 已生效时再点：幂等（不新建、只更新 updatedAt，返回 idempotent=true）。
+    if (scope === 'all') {
+      const activeAll = data.records.filter((row) => !row.endedAt && String(row.scope || '') === 'all');
+      const latestAll = activeAll.slice(-1)[0] || null;
+      const latestExpired = Boolean(latestAll && latestAll.expiresAt && Date.parse(latestAll.expiresAt) && Date.parse(latestAll.expiresAt) <= Date.now());
+      if (latestAll && !latestExpired) {
+        latestAll.updatedAt = at;
+        latestAll.authorization = String(p.authorization || latestAll.authorization || 'Owner 在评审弹窗点击全部交 PM 代管');
+        data.updatedAt = at;
+        writeOwnerProxy(project, data);
+        addEvent(project, 'Owner 再次开启全部代管（已生效，幂等）');
+        return { ok: true, idempotent: true, scope: 'all', active: latestAll, started: [], records: data.records, count: 0, warnings: [] };
+      }
+      if (latestAll && latestExpired) {
+        latestAll.endedAt = at;
+        latestAll.endedBy = 'owner';
+        latestAll.endReason = 'expired';
+      }
+      const expiresAt = String(p.expiresAt || '').trim() || new Date(Date.now() + 8 * 3600 * 1000).toISOString();
+      const record = {
+        id: 'PALL-' + String(at).replace(/[^0-9]/g, '').slice(0, 14),
+        scope: 'all',
+        startedAt: at,
+        updatedAt: at,
+        expiresAt,
+        startedBy: 'owner',
+        authorization: String(p.authorization || 'Owner 在评审弹窗点击全部交 PM 代管（评审 + 决策箱 + 验收）'),
+        recordedBy: 'pm',
+        endedAt: null,
+        endedBy: null,
+      };
+      data.records.push(record);
+      data.updatedAt = at;
+      writeOwnerProxy(project, data);
+      addEvent(project, `Owner 开启全部代管（scope=all，到期 ${expiresAt}）`);
+      const warnings = [];
+      try { writeStore(store); } catch (error) {
+        warnings.push({ code: 'STORE_WRITE_FAILED', message: String((error && error.message) || error).slice(0, 200) });
+      }
+      return { ok: true, idempotent: false, scope: 'all', active: record, started: [record], records: data.records, count: 1, warnings };
+    }
     const requirementIds = Array.isArray(p.requirementIds) && p.requirementIds.length
       ? [...new Set(p.requirementIds.map((x) => String(x || '')).filter(Boolean))]
       : [String(p.requirementId || '')].filter(Boolean);
     if (!requirementIds.length) throw codedError('BAD_REQUIREMENT', '缺少需求 id');
-    const scope = String(p.scope || 'once');
-    if (!['once', 'always'].includes(scope)) throw codedError('BAD_SCOPE', '代管范围只能是本轮或每轮');
-    const data = readOwnerProxy(project);
-    data.records = Array.isArray(data.records) ? data.records : [];
     const started = [];
     const deduped = [];
-    const at = now();
     for (const requirementId of requirementIds) {
       // B-20261113-014634-0cdd：按 requirementId upsert，历史（endedAt 非空）一条不动。
       // 旧数据里同一需求可能有多条未结束记录：先取 updatedAt 最新的一条继续用，其余在下方的全局收敛里收口。
@@ -6306,16 +6388,21 @@ function registerIpc() {
     const requirementId = String(p.requirementId || '');
     const data = readOwnerProxy(project);
     data.records = Array.isArray(data.records) ? data.records : [];
+    // 7849 AC1：结束代管要同时收口 scope=all 记录（没有 requirementId 的那条）。
+    let endedCount = 0;
     for (const row of data.records) {
       if (row.endedAt) continue;
       if (requirementId && row.requirementId !== requirementId) continue;
       row.endedAt = now();
       row.endedBy = 'owner';
+      endedCount += 1;
     }
     writeOwnerProxy(project, data);
+    // 已结束时再点结束：幂等（不报错、不再写「结束代管」事件）。
+    if (!endedCount) return { ok: true, idempotent: true, ended: 0, records: data.records };
     addEvent(project, 'Owner 结束代管');
     try { writeStore(store); } catch { /* 事件只是投影，结束代管本身已落盘 */ }
-    return { ok: true, records: data.records };
+    return { ok: true, idempotent: false, ended: endedCount, records: data.records };
   });
   ipcMain.handle('owner:material', async (_e, payload) => {
     const p = payload || {};
@@ -9991,6 +10078,44 @@ async function runReviewCheck() {
   fs.mkdirSync(path.dirname(path.join(projectPath, reportRel)), { recursive: true });
   fs.writeFileSync(path.join(projectPath, reportRel), '# 504a 测试报告\n\n- 结果：PASS\n- 覆盖：全部需求清单/三要素/展开详情/筛选\n', 'utf8');
   check('造数：4 条需求覆盖四个分组', seeded.length === 4 && Boolean(readJsonFile(workflowFile)));
+  // 7849 一键代管要在 owner:proxy-start 里按项目登记找状态目录（teamProjectStateDir 读 项目.json），
+  // 沙盘项目目录是自建的、没有 项目.json，这里补一份最小登记，避免 NO_TEAM_STATE。
+  writeJsonFile(path.join(stateDir, '项目.json'), {
+    name: teamName,
+    path: projectPath,
+    entry: '项目索引.md',
+    index: '项目索引.md',
+    status: 'active',
+    teamMode: 'full',
+    roleIds: ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'],
+    createdAt: at,
+    createdBy: 'owner',
+  });
+  // 决策箱代回执要经过团队工具子进程（decision-ack-ipc.mjs），它要求最小团队名册存在；
+  // 沙盘只 seed 了 store + 项目目录，没写 团队.json，这里补一份六角色名册（沙盘隔离根内）。
+  const teamStateRoot = path.join(teamRoot, '状态');
+  if (!fs.existsSync(path.join(teamStateRoot, '团队.json'))) {
+    writeJsonFile(path.join(teamStateRoot, '团队.json'), {
+      version: 1,
+      name: 'review-check 沙盘团队',
+      phase: 'team',
+      owner: '沙盘 Owner',
+      createdAt: at,
+      activeProject: teamName,
+      members: ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester']
+        .map((role) => ({ role, name: role, status: 'active', joinedAt: at, sessionId: '' })),
+      config: {
+        bootTtlMinutes: 480,
+        reviewReadTtlMinutes: 15,
+        lockTtlSeconds: 60,
+        messageMaxChars: 600,
+        ackNoteMaxChars: 300,
+        codeMaxBytes: 65536,
+      },
+    });
+  }
+  // 每次自检从「无代管」开始：清掉上一轮遗留的 评审代管.json（沙盘根内，不碰真实团队）。
+  try { fs.rmSync(path.join(stateDir, '评审代管.json'), { force: true }); } catch { /* ignore */ }
   // 评审弹窗的数据是 owner-review 模块自己 5 秒轮询拉的：造数后等它重读，否则拿到的是"造数前"的空清单。
   await js('(async()=>{ try { if (typeof refresh === "function") await refresh(); } catch (e) {} return true; })()');
   await sleep(6200);
@@ -10024,8 +10149,12 @@ async function runReviewCheck() {
   })()`));
   report.allBefore = all1;
   check('评审弹窗能打开且出现「全部需求」清单', all1.dialogOpen === true && all1.hasBox === true, all1);
-  check('默认显示全部需求（4 条都在，不是只挑几条）', all1.total === 4 && seeded.every((reqId) => all1.ids.includes(reqId)), all1);
-  check('按状态分成四组', new Set(all1.buckets).size === 4, all1.buckets);
+  // 口径更新（B-6749e80）：已收口默认折叠，不再进默认列表——默认只列未收口 3 条。
+  check('默认显示未收口需求（3 条都在），已收口默认折叠不看',
+    all1.total === 3 && seeded.slice(0, 3).every((reqId) => all1.ids.includes(reqId)) && !all1.ids.includes(seeded[3]),
+    all1);
+  check('默认三组（等决定/进行中/待验收）', new Set(all1.buckets).size === 3
+    && all1.buckets.every((b) => b !== 'closed'), all1.buckets);
   check('每条都有大标题 + 三要素（这是什么/卡在哪/建议你拍什么）',
     all1.whats.every((v) => Boolean(String(v || '').trim()))
     && all1.blocked.every((v) => Boolean(String(v || '').trim()))
@@ -10115,6 +10244,155 @@ async function runReviewCheck() {
     try { await win.webContents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride'); win.webContents.debugger.detach(); } catch { /* ignore */ }
   }
   check('两档宽截图都拍到了', Boolean(report.shots['1600']) && Boolean(report.shots['1280']), report.shots);
+
+  // ── 7849 一键代管界面侧（B-f6ee）：scope=all / 决策箱代回执锚点 / 代管标识 / 结束不回溯 ──
+  const stable = (value) => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (value && typeof value === 'object') {
+      const out = {};
+      for (const key of Object.keys(value).sort()) out[key] = stable(value[key]);
+      return out;
+    }
+    return value;
+  };
+  const ac7Digest = () => {
+    const wf = readJsonFile(workflowFile) || {};
+    const reqs = wf.requirements && typeof wf.requirements === 'object' ? wf.requirements : {};
+    const pack = Object.keys(reqs).sort().map((id) => ({
+      id,
+      acceptanceRecord: reqs[id] && reqs[id].acceptanceRecord ? reqs[id].acceptanceRecord : null,
+      decisions: reqs[id] && Array.isArray(reqs[id].decisions) ? reqs[id].decisions : [],
+    }));
+    return crypto.createHash('sha256').update(JSON.stringify(stable(pack))).digest('hex');
+  };
+  const ac7Before = ac7Digest();
+  // 决策箱造数：一条 open 条目（两个候选），供代回执用。
+  const decisionBoxFile = path.join(stateDir, '决策箱.json');
+  const decisionId = 'D-20261115-000001-b001';
+  writeJsonFile(decisionBoxFile, {
+    version: 1,
+    project: teamName,
+    meta: { receiptSeq: 0 },
+    items: [{
+      id: decisionId,
+      title: '是否先把需求清单默认全量？',
+      question: '沙盘造数：Owner 不在时这条要不要先发？',
+      options: ['先全量', '先折叠'],
+      status: 'open',
+      by: 'pm',
+      createdAt: at,
+      updatedAt: at,
+      source: { kind: 'file', ref: '需求/R-20261114-100001-a001-把评审清单一次看全.md' },
+    }],
+  });
+  const proxyStart = JSON.parse(await js(`(async()=>{
+    try {
+      const r = await window.workbench.ownerProxyStart({
+        projectId: ${JSON.stringify(projectId)},
+        scope: 'all',
+        expiresAt: new Date(Date.now() + 8 * 3600 * 1000).toISOString(),
+        actor: 'owner',
+        authorization: 'review-check 沙盘：Owner 一键全部代管'
+      });
+      return JSON.stringify(r);
+    } catch (e) { return JSON.stringify({ ok: false, message: String((e && e.message) || e) }); }
+  })()`));
+  check('AC1 scope=all 一键入口：写一条全项目记录（含 expiresAt / recordedBy=pm）',
+    proxyStart.ok === true && proxyStart.idempotent === false && String(proxyStart.scope) === 'all'
+    && Boolean(proxyStart.active && proxyStart.active.expiresAt) && String(proxyStart.active.recordedBy || '') === 'pm',
+    { ok: proxyStart.ok, idempotent: proxyStart.idempotent, scope: proxyStart.scope, expiresAt: proxyStart.active && proxyStart.active.expiresAt });
+  const proxyAgain = JSON.parse(await js(`(async()=>{
+    try {
+      const r = await window.workbench.ownerProxyStart({
+        projectId: ${JSON.stringify(projectId)}, scope: 'all', actor: 'owner',
+        authorization: 'review-check 沙盘：再点一次'
+      });
+      return JSON.stringify(r);
+    } catch (e) { return JSON.stringify({ ok: false, message: String((e && e.message) || e) }); }
+  })()`));
+  check('AC1 已生效再点 → 幂等（idempotent=true、不新建）',
+    proxyAgain.ok === true && proxyAgain.idempotent === true && Number(proxyAgain.count || 0) === 0,
+    { idempotent: proxyAgain.idempotent, count: proxyAgain.count });
+  // 等弹窗按 5 秒轮询重读代管状态（或直接重开弹窗）
+  await sleep(6200);
+  await js(`(function(){ const c = document.querySelector('[data-or-close]'); if (c) c.click(); const e = document.querySelector('[data-owner-review-entry]'); if (e) e.click(); return true; })()`);
+  await sleep(1500);
+  const proxyUiOn = JSON.parse(await js(`(()=>{
+    const btn = document.querySelector('[data-or-proxy-all]');
+    const section = document.querySelector('[data-proxy-decide-section]');
+    const anchors = section ? [...section.querySelectorAll('[data-proxy-decide-entry]')] : [];
+    const endBtn = document.querySelector('[data-owner-review-proxy-end]');
+    return JSON.stringify({
+      buttonText: btn ? btn.textContent : '',
+      buttonState: btn ? btn.getAttribute('data-proxy-all-state') : '',
+      expiresAttr: btn ? btn.getAttribute('data-proxy-expires-at') : '',
+      hasSection: Boolean(section),
+      anchorCount: anchors.length,
+      endVisible: Boolean(endBtn && !endBtn.hidden),
+      proxyChip: (document.querySelector('[data-owner-review-proxy]') || {}).textContent || ''
+    });
+  })()`));
+  report.proxyUiOn = proxyUiOn;
+  check('AC1 生效后按钮变「结束代管」（并带数据态与到期）',
+    /结束代管/.test(proxyUiOn.buttonText) && proxyUiOn.buttonState === 'active' && Boolean(proxyUiOn.expiresAttr), proxyUiOn);
+  check('AC3-补 决策箱分区出现且带 data-proxy-decide-entry 锚点',
+    proxyUiOn.hasSection === true && proxyUiOn.anchorCount >= 2, { hasSection: proxyUiOn.hasSection, anchors: proxyUiOn.anchorCount });
+  report.shots['proxy-on'] = await shot('proxy-all-on.png');
+  // 截图 2 要能看见「决策箱代回执锚点」：先把分区滚进可视区（弹窗左列是可滚动容器）。
+  await js(`(function(){ const s = document.querySelector('[data-proxy-decide-section]'); if (s && s.scrollIntoView) s.scrollIntoView({ block: 'center' }); return true; })()`);
+  await sleep(500);
+  await js(`(function(){ const b = document.querySelector('[data-proxy-decide-section] [data-proxy-decide-entry]'); if (b) b.click(); return true; })()`);
+  await sleep(2200);
+  let boxAfter = readJsonFile(decisionBoxFile) || {};
+  let decidedItem = (Array.isArray(boxAfter.items) ? boxAfter.items : []).find((row) => String(row.id) === decisionId) || {};
+  // 兜底诊断：UI 点击若没落账，直接调 IPC 一次，把返回码/信息带进报告（避免下次盲跑）。
+  if (String(decidedItem.status || '') === 'open') {
+    report.ackDebug = JSON.parse(await js(`(async()=>{
+      try {
+        const r = await window.workbench.ownerDecisionAck({ projectId: ${JSON.stringify(projectId)}, id: ${JSON.stringify(decisionId)}, choice: '先全量', opinion: '', channel: 'proxy' });
+        return JSON.stringify({ via: 'ipc-direct', r });
+      } catch (e) { return JSON.stringify({ via: 'ipc-direct', error: String((e && e.message) || e) }); }
+    })()`));
+    const banner = JSON.parse(await js(`(()=>{ const b = document.querySelector('[data-or-banner]'); return JSON.stringify({ text: b ? b.textContent : '', hidden: b ? b.hidden : null }); })()`));
+    report.ackBanner = banner;
+    await sleep(1200);
+    boxAfter = readJsonFile(decisionBoxFile) || {};
+    decidedItem = (Array.isArray(boxAfter.items) ? boxAfter.items : []).find((row) => String(row.id) === decisionId) || {};
+  }
+  const decision = decidedItem.decision || {};
+  check('AC3-补 代回执落 proxy 口径（by/decidedBy=pm、channel=proxy、basis.proxy）',
+    String(decision.by || '') === 'pm' && String(decision.decidedBy || '') === 'pm' && String(decision.channel || '') === 'proxy'
+    && Boolean(decision.basis && decision.basis.proxy && decision.basis.proxy.authorization), decision);
+  check('AC3-补 回执与决定字段齐全（receipt.messageId/at/choice/seq）',
+    Boolean(decidedItem.receipt && decidedItem.receipt.messageId && decidedItem.receipt.at && decidedItem.receipt.choice && Number(decidedItem.receipt.seq) >= 1),
+    decidedItem.receipt || null);
+  check('AC3-补 决策箱条目状态变 answered', String(decidedItem.status || '') === 'answered', decidedItem.status);
+  const proxyTagDom = JSON.parse(await js(`(()=>{
+    const tag = document.querySelector('[data-proxy-decide-section] [data-proxy-decision-tag]');
+    return JSON.stringify({ has: Boolean(tag), text: tag ? tag.textContent : '' });
+  })()`));
+  check('AC7 标识：代回执条目标【PM代管回执】', proxyTagDom.has === true && /PM代管回执/.test(proxyTagDom.text), proxyTagDom);
+  await js(`(function(){ const s = document.querySelector('[data-proxy-decide-section]'); if (s && s.scrollIntoView) s.scrollIntoView({ block: 'center' }); return true; })()`);
+  await sleep(500);
+  report.shots['proxy-decision'] = await shot('proxy-decision-ack.png');
+  // 结束代管 → 锚点消失 + 入口回到「全部交 PM 代管」+ AC7 canonical sha 不变
+  await js(`(function(){ const b = document.querySelector('[data-or-proxy-all]'); if (b && /结束代管/.test(b.textContent)) b.click(); return true; })()`);
+  await sleep(2200);
+  const proxyUiOff = JSON.parse(await js(`(()=>{
+    const btn = document.querySelector('[data-or-proxy-all]');
+    const section = document.querySelector('[data-proxy-decide-section]');
+    return JSON.stringify({
+      buttonText: btn ? btn.textContent : '',
+      buttonState: btn ? btn.getAttribute('data-proxy-all-state') : '',
+      hasSection: Boolean(section),
+      anchors: document.querySelectorAll('[data-proxy-decide-entry]').length
+    });
+  })()`));
+  const ac7After = ac7Digest();
+  report.proxyUiOff = { ...proxyUiOff, ac7Same: ac7After === ac7Before };
+  check('AC3-补 结束代管后锚点消失（1 → 0）', proxyUiOff.anchors === 0 && proxyUiOff.hasSection === false, proxyUiOff);
+  check('AC1 结束后按钮变回「全部交 PM 代管」', /全部交 PM 代管/.test(proxyUiOff.buttonText) && proxyUiOff.buttonState === 'idle', proxyUiOff);
+  check('AC7 结束代管不回溯：acceptanceRecord+decisions 的 canonical sha 前后一致', ac7After === ac7Before, { before: ac7Before.slice(0, 12), after: ac7After.slice(0, 12) });
 
   report.ok = report.failures.length === 0;
   const reportPath = path.join(outDir, 'review-report.json');

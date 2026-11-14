@@ -1656,6 +1656,13 @@ html[data-theme="light"] .modal-mask { background: rgba(40, 32, 22, .46); }
 .or-all-row.selected { border-color: var(--gold); }
 .or-all-head { display: grid; grid-template-columns: 74px 1fr; gap: 2px 6px; width: 100%; text-align: left; background: transparent; border: 0; cursor: pointer; padding: 6px 8px; font: inherit; color: var(--text); }
 .or-all-head b { grid-column: 1 / -1; font-size: 12.5px; margin-bottom: 1px; }
+/* 7849 AC3-补 / AC7：决策箱代回执分区与【PM代管回执】标识 */
+.or-decisions { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(220, 181, 111, .06); }
+.or-decision-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 0; border-top: 1px dashed var(--line); }
+.or-decision-row:first-of-type { border-top: 0; }
+.or-decision-title { font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
+.or-proxy-decide { font-size: 11.5px; }
+.or-proxy-tag { font-size: 11px; color: #a9751a; border: 1px solid #d9a441; border-radius: 999px; padding: 0 6px; background: rgba(217, 164, 65, .16); }
 /* B-d100：打回后改完重新进队列的那条，带「已修改待复审」标记（首次评审不带）。 */
 .or-rework { display: inline-block; margin-left: 6px; padding: 0 6px; border: 1px solid #d9a441; border-radius: 999px; background: rgba(217, 164, 65, .16); color: #a9751a; font-size: 10.5px; font-weight: 600; vertical-align: middle; }
 .or-all-head .or-rework, .or-eval-item .or-rework { flex: 0 0 auto; }

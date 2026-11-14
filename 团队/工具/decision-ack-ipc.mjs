@@ -36,8 +36,10 @@ async function main() {
     id: payload.id,
     choice: payload.choice,
     opinion: payload.opinion,
-    channel: 'ui',
-    source: 'decision_box_ack',
+    // 7849 AC3-补：代管期内 PM 代回执走 proxy 口径（不冒充 Owner）；普通 Owner 回执仍是 ui。
+    channel: String(payload.channel || '') === 'proxy' ? 'proxy' : 'ui',
+    source: String(payload.source || '') || (String(payload.channel || '') === 'proxy' ? 'proxy_ack' : 'decision_box_ack'),
+    ...(String(payload.channel || '') === 'proxy' ? { proxy: payload.proxy } : {}),
   });
   return { ...r, code: 'OK' };
 }
