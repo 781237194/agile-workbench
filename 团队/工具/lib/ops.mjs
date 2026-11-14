@@ -39,7 +39,7 @@ import { assertNoPendingSubagent, subagentAudit } from './subagent.mjs';
 import {
   handoverForBoot, assertSessionMapConsistent, probeRoleSession, nudgeRoleBoot, consumeBootQueue,
 } from './session.mjs';
-import { validatePmAcceptEvidence, parseEvidenceArg } from './pm-accept-evidence.mjs';
+import { validatePmAcceptEvidence, parseEvidenceArg, validateAcceptGates } from './pm-accept-evidence.mjs';
 import { detectOptionalPlugins, optionalPluginMarks, pluginStatusLines } from './plugins.mjs';
 import { auditHardcodedPaths, pathAuditLines } from './path-audit.mjs';
 import { memoryCheck } from './memory-check.mjs';
@@ -51,7 +51,7 @@ import {
 import {
   issueOwnerConfirmation, consumeOwnerConfirmation, ownerConfirmHint,
 } from './owner-confirm.mjs';
-import { activeProxyFor } from './owner-proxy.mjs';
+import { activeProxyFor, assertProxyUsable, autoEndProxyForClosedRequirement } from './owner-proxy.mjs';
 import { readDecisionBox as readDecisionBoxFile } from './decision-box.mjs';
 
 const RISK_RANK = { normal: 1, sensitive: 2, critical: 3 };
@@ -3844,13 +3844,13 @@ export async function cmdOwner(args) {
   // 证据校验必须在任何写盘之前完成，缺项直接 PM_ACCEPT_EVIDENCE_REQUIRED 且零副作用。
   let proxyAcceptEvidence = null;
   if (proxyMode) {
-    proxyRecord = activeProxyFor(projectName, requirementId);
-    if (!proxyRecord) {
-      fail('PROXY_UNAUTHORIZED', `需求 ${requirementId} 当前没有未结束的代管授权：先在评审弹窗点「全部交 PM 代管」，或 owner proxy start --scope always`, { project: projectName, requirementId });
+    // R-7849：代管生命周期（scope=all / expiresAt / 幂等）由 owner-proxy.mjs 统一判定；
+    // 过期 → PROXY_EXPIRED，已结束/不存在 → PROXY_UNAUTHORIZED，缺授权 → PROXY_UNAUTHORIZED。
+    const rawProxy = activeProxyFor(projectName, requirementId);
+    if (actionRaw === 'accept' && !rawProxy) {
+      fail('PROXY_ACCEPT_FORBIDDEN', '代管已结束（或未开启），不能代验收；请 Owner 本人验收或重新开启代管', { requirementId });
     }
-    if (!String(proxyRecord.authorization || '').trim()) {
-      fail('PROXY_UNAUTHORIZED', '代管记录缺少 Owner 授权来源（authorization），不能代落账', { requirementId, proxy: proxyRecord });
-    }
+    proxyRecord = assertProxyUsable(rawProxy, { requirementId });
     if (actionRaw === 'accept') {
       // 代管只能代「验收通过」；打回/迭代/终止仍必须 Owner 本人。
       if (String(decision) !== 'accepted') {
@@ -3858,9 +3858,22 @@ export async function cmdOwner(args) {
       }
       const items = parseEvidenceArg(args.evidence);
       const verdict = validatePmAcceptEvidence({ items, projectPath: project.path });
-      if (!verdict.ok) {
-        fail('PM_ACCEPT_EVIDENCE_REQUIRED', 'PM 代验收必须带测试报告 ≥1、截图 ≥1，且文件存在、sha256 可核对', {
-          requirementId, missing: verdict.missing, maxItems: 12,
+      const gateMissing = verdict.ok
+        ? validateAcceptGates({
+          evidence: verdict.evidence,
+          trqVerdict: String((row && row.trq && row.trq.verdict) || (task.workflow && task.workflow.trq && task.workflow.trq.verdict) || ''),
+          requirementStatus: String((row && row.status) || (task.workflow && task.workflow.status) || ''),
+        }).missing
+        : [];
+      if (!verdict.ok || gateMissing.length) {
+        const code = !verdict.ok && verdict.code === 'EVIDENCE_OUTSIDE_PROJECT'
+          ? 'EVIDENCE_OUTSIDE_PROJECT'
+          : 'PM_ACCEPT_EVIDENCE_REQUIRED';
+        fail(code, code === 'EVIDENCE_OUTSIDE_PROJECT'
+          ? '验收证据必须在项目目录内（项目外路径一律拒收）'
+          : 'PM 代验收四门槛：测试报告 ≥1、截图 ≥1、TR-Q=testable、需求 test_done；缺一不可且零副作用', {
+          requirementId, missing: [...verdict.missing, ...gateMissing], maxItems: 12,
+          gates: ['report', 'screenshot', 'trq', 'status'],
         });
       }
       proxyAcceptEvidence = verdict.evidence;
@@ -3993,6 +4006,28 @@ export async function cmdOwner(args) {
   if (actionRaw === 'accept') {
     acceptance = record;
     task.workflow.ownerAcceptance = record;
+    // R-7849：PM 代验收记录落需求行（by=pm、channel=proxy，绝不写 owner）+ 需求收口自动结束代管。
+    if (proxyMode) {
+      const atIso = String(record.at || at || nowIso());
+      const reportItem = (proxyAcceptEvidence || []).find((item) => String(item.kind) === 'report');
+      row.acceptanceRecord = {
+        status: String(decision),
+        by: 'pm',
+        channel: 'proxy',
+        at: atIso,
+        evidence: (proxyAcceptEvidence || []).map((item) => ({ path: item.path, sha256: item.sha256, kind: item.kind })),
+        testReport: reportItem ? String(reportItem.path || '') : '',
+        basis: {
+          proxy: {
+            scope: String(proxyRecord.scope || ''),
+            startedAt: String(proxyRecord.startedAt || ''),
+            authorization: String(proxyRecord.authorization || ''),
+          },
+        },
+      };
+      task.workflow.acceptanceRecord = row.acceptanceRecord;
+      try { autoEndProxyForClosedRequirement(projectName, requirementId, String(decision)); } catch { /* 占管清理失败不阻断验收落账 */ }
+    }
     if (decision === 'accepted') {
       nextStatus = 'accepted';
       nextPhase = 'accepted';
@@ -4173,7 +4208,8 @@ export async function cmdOwnerProxyDecide(args) {
     }
     const acceptProxy = activeProxyFor(projectName, requirementId);
     if (!acceptProxy) {
-      fail('PROXY_UNAUTHORIZED', `需求 ${requirementId} 当前没有未结束的代管授权：先请 Owner 在评审弹窗点「全部交 PM 代管」，或运行 owner proxy start --scope always`, { project: projectName, requirementId });
+      // R-7849 ⑤：结束代管（或过期）后再代验收 → PROXY_ACCEPT_FORBIDDEN（不是 UNAUTHORIZED）。
+      fail('PROXY_ACCEPT_FORBIDDEN', `需求 ${requirementId} 当前没有可用的代管授权（已结束或未开启），不能代验收；请 Owner 本人验收或重新开启代管`, { project: projectName, requirementId });
     }
     if (!String(acceptProxy.authorization || '').trim()) {
       fail('PROXY_UNAUTHORIZED', '代管记录缺少 Owner 授权来源（authorization），不能代落账', { requirementId, proxy: acceptProxy });

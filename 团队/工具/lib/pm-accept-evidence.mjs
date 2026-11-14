@@ -37,18 +37,47 @@ export function validatePmAcceptEvidence({ items, projectPath, maxItems = PM_ACC
       exists = false;
     }
     const claimed = String((item && item.sha256) || '').toLowerCase();
+    const outside = Boolean(root && abs && !abs.toLowerCase().startsWith(path.resolve(root).toLowerCase() + path.sep));
     if (!rel) missing.push({ path: '', kind, reason: 'EMPTY_PATH' });
+    else if (outside) missing.push({ path: rel, kind, reason: 'EVIDENCE_OUTSIDE_PROJECT', abs });
     else if (!exists) missing.push({ path: rel, kind, reason: 'FILE_NOT_FOUND', abs });
     else if (claimed && claimed !== sha256) missing.push({ path: rel, kind, reason: 'HASH_MISMATCH', sha256, claimed });
-    if (rel && exists) evidence.push({ path: rel, sha256, kind, size });
+    if (rel && exists && !outside) evidence.push({ path: rel, sha256, kind, size });
   }
   if (!evidence.some((row) => row.kind === 'report')) missing.push({ path: '', kind: 'report', reason: 'REPORT_REQUIRED' });
   if (!evidence.some((row) => row.kind === 'screenshot')) missing.push({ path: '', kind: 'screenshot', reason: 'SCREENSHOT_REQUIRED' });
-  return { ok: missing.length === 0, code: missing.length ? 'PM_ACCEPT_EVIDENCE_REQUIRED' : 'OK', evidence, missing };
+  const outsideHit = missing.some((row) => row.reason === 'EVIDENCE_OUTSIDE_PROJECT');
+  return { ok: missing.length === 0, code: missing.length ? (outsideHit ? 'EVIDENCE_OUTSIDE_PROJECT' : 'PM_ACCEPT_EVIDENCE_REQUIRED') : 'OK', evidence, missing };
 }
 
-/** CLI 解析：--evidence 支持 JSON 数组字符串，或 `path[:kind]` 单值（kind 缺省按文件名猜 report/screenshot）。 */
-export function parseEvidenceArg(value) {
+/**
+ * R-7849：PM 代验收四门槛（与证据校验配套，缺一返回 missing[kind=report|screenshot|trq|status]）。
+ * - report：有 kind=report 且文件校验通过；
+ * - screenshot：有 kind=screenshot；
+ * - trq：需求 TR-Q 结论必须 testable；
+ * - status：需求必须 test_done。
+ */
+export function validateAcceptGates({ evidence = [], trqVerdict = '', requirementStatus = '' } = {}) {
+  const rows = Array.isArray(evidence) ? evidence : [];
+  const missing = [];
+  if (!rows.some((row) => String((row && row.kind) || '') === 'report')) {
+    missing.push({ kind: 'report', path: '', reason: 'TEST_REPORT_REQUIRED' });
+  }
+  if (!rows.some((row) => String((row && row.kind) || '') === 'screenshot')) {
+    missing.push({ kind: 'screenshot', path: '', reason: 'SCREENSHOT_REQUIRED' });
+  }
+  const verdict = String(trqVerdict || '').trim().toLowerCase();
+  // 无 TR-Q 记录按兼容放行（与需求推进规则一致：trq.verdict 缺省不阻推进）；有记录则必须 testable。
+  if (verdict && verdict !== 'testable') {
+    missing.push({ kind: 'trq', path: '', reason: 'TRQ_NOT_TESTABLE', actual: String(trqVerdict || '') });
+  }
+  if (String(requirementStatus || '') !== 'test_done') {
+    missing.push({ kind: 'status', path: '', reason: 'REQUIREMENT_NOT_TEST_DONE', actual: String(requirementStatus || '') });
+  }
+  return { ok: missing.length === 0, code: missing.length ? 'PM_ACCEPT_EVIDENCE_REQUIRED' : 'OK', missing };
+}
+
+/** CLI 解析：--evidence 支持 JSON 数组字符串，或 `path[:kind]` 单值（kind 缺省按文件名猜 report/screenshot）。 */export function parseEvidenceArg(value) {
   const text = String(value == null ? '' : value).trim();
   if (!text) return [];
   if (text.startsWith('[')) {

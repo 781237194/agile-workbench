@@ -2646,7 +2646,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     const noProxy = run(['owner', '--project', '试点', '--requirement', ownerReqId, '--decision', 'accepted', '--action', 'accept', '--proxy-recorded-by', 'pm', '--evidence', '[]', '--opinion', 'selftest B-9400 无代管', '--json'], { expectFail: true });
     // 无代管必须被拒；当前 CLI 会先过「需求状态/测试任务」前置（REQUIREMENT_STATE_INVALID/TEST_NOT_DONE），
     // 所以这里断言「任一门拒绝且零副作用」，并把 PROXY_UNAUTHORIZED 作为期望码之一（授权顺序待下一轮调到最前）。
-    if (!/PROXY_UNAUTHORIZED|REQUIREMENT_STATE_INVALID|TEST_NOT_DONE/.test(String(noProxy.stdout + noProxy.stderr))) failStep('无代管时 PM 代验收未被拒', String(noProxy.stdout + noProxy.stderr).slice(0, 240));
+    if (!/PROXY_ACCEPT_FORBIDDEN|PROXY_UNAUTHORIZED|REQUIREMENT_STATE_INVALID|TEST_NOT_DONE/.test(String(noProxy.stdout + noProxy.stderr))) failStep('无代管时 PM 代验收未被拒', String(noProxy.stdout + noProxy.stderr).slice(0, 240));
     {
       const wfNoProxy = JSON.parse(read(path.join(teamRoot, '状态', '项目', '试点', '工作流.json')));
       const rowNoProxy = wfNoProxy.requirements[ownerReqId];
@@ -2700,9 +2700,9 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
         title: 'T-3422 测试', status: 'done', owner: 'tester', createdAt: new Date().toISOString(),
         claimedAt: new Date().toISOString(), doneAt: new Date().toISOString(), evidence: 'selftest T-3422', history: [],
       }, null, 2) + '\n');
-      // ① 无代管 → PROXY_UNAUTHORIZED（入口放开后仍要求有效代管）
+      // ① 无代管 → PROXY_ACCEPT_FORBIDDEN（R-7849 新口径：结束/未开启代管后不得代验收）
       const t3422No = run(['owner', 'proxy', 'decide', '--project', '试点', '--requirement', t3422Id, '--decision', 'accepted', '--action', 'accept', '--evidence', '[]', '--opinion', 'T-3422 无代管', '--json'], { expectFail: true });
-      if (!/PROXY_UNAUTHORIZED/.test(String(t3422No.stdout + t3422No.stderr))) failStep('T-3422 无代管未被拒', String(t3422No.stdout + t3422No.stderr).slice(0, 240));
+      if (!/PROXY_ACCEPT_FORBIDDEN|PROXY_UNAUTHORIZED/.test(String(t3422No.stdout + t3422No.stderr))) failStep('T-3422 无代管未被拒', String(t3422No.stdout + t3422No.stderr).slice(0, 240));
       // ② 有代管 + 缺证据 → PM_ACCEPT_EVIDENCE_REQUIRED 且零副作用
       json(['owner', 'proxy', 'start', '--project', '试点', '--requirement', t3422Id, '--scope', 'always', '--authorization', 'selftest T-3422', '--json']);
       const before3422 = JSON.parse(read(wfFile3422)).requirements[t3422Id];
