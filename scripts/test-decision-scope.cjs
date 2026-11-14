@@ -103,12 +103,18 @@ const intentWord = add({ title: '这单要不要验收通过' });
 check('F-1b 意图词（验收通过）→ DECISION_REVIEW_ACTION_FORBIDDEN', intentWord.ok === false && intentWord.code === 'DECISION_REVIEW_ACTION_FORBIDDEN', intentWord);
 const normalOptions = add({ options: '方案A,方案B' });
 check('F-1b 负例（方案A/方案B）放行', normalOptions.ok === true, normalOptions);
+// v5.1 AC1：正例 question=「方案 A 还是 B」成功；负例 options=[方案A,方案B] 不误拦
+const ac1Positive = add({ title: '方案取舍', question: '方案 A 还是 B？', options: '方案A,方案B' });
+check('AC1 正例：question=方案 A 还是 B 成功入箱', ac1Positive.ok === true, ac1Positive);
+const ac1Negative = add({ title: '选路', options: '方案A,方案B' });
+check('AC1 负例：options=[方案A,方案B] 不误拦', ac1Negative.ok === true, ac1Negative);
 
 // ---------- F-2：文案 5 样本 ----------
 const samples = [
   ['R-20261114-141252-e717 这个怎么定', 'DECISION_COPY_CODE_NAME'],
   ['B-20261114-141700-d1e5 遗留怎么处理', 'DECISION_COPY_CODE_NAME'],
   ['B 方案和 M 轮哪个对', 'OK'],
+  ['XB-20261114-141700-d1e5 不该误伤', 'OK'],
   ['D-20261114-134219 这条怎么办', 'OK'],
 ];
 for (const [title, expect] of samples) {

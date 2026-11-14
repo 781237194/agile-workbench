@@ -501,7 +501,7 @@ export async function acknowledgeDecisions(projectName, input = {}) {
 // F-2：title/summary/question 不得带内部代号/阶段名；历史条目渲染时把代号换成需求名，未知标「（未识别）」。
 export const DECISION_CLOSED_STATUSES = ['accepted', 'terminated', 'rejected'];
 const DECISION_CLOSED_SET = new Set(DECISION_CLOSED_STATUSES);
-const DECISION_CODE_RE = /[RBDSM]-\d{8}(?:-\d{6})?-[0-9a-f]{4}(?![0-9a-f])/gi;
+const DECISION_CODE_RE = /(?<![A-Za-z0-9])[RBDSM]-\d{8}(?:-\d{6})?-[0-9a-f]{4}(?![A-Za-z0-9])/gi;
 const DECISION_STAGE_RE = /\b(?:test_done|dev_done|approved|accepted|owner_review|ready|rejected|terminated)\b/gi;
 const DECISION_INTENT_RE = /(通过|打回|驳回|验收|批准|approve|reject|accept)/gi;
 const DECISION_GATE_OPTIONS = new Set(['通过', '打回', '驳回', '验收通过', '验收不通过', '同意', '不同意']);
