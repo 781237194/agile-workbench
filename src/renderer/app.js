@@ -6732,6 +6732,15 @@ async function loadLegacyDocs(force = false) {
         // workflow:state 里的旧工具能力/文件契约信息必须保留，合并 next 时不能被冲掉。
         legacy: (stateOk && workflow.legacy) || (nextOk && next.legacy) || null
       };
+      // B-2e5 AC3：快照偶发把活跃项目判成 terminated（实测 readWorkflowSnapshot 返回 terminated，
+      // 而 工作流.json 是 dispatch；旧需求文档被合并成 review 行）。有活跃需求时不得显示已终止：
+      // 按活跃需求反推阶段，并把冲突记在快照上供面板提示（中性提示，不是红项）。
+      const liveRows = mergedRequirements.filter((row) => row && String(row.status || '')
+        && !['accepted', 'terminated', 'iteration', 'rejected'].includes(String(row.status)));
+      if (String(merged.phase) === 'terminated' && liveRows.length) {
+        merged.phase = legacyPhaseFromRequirements(mergedRequirements, merged.round);
+        merged.phaseConflict = { reported: 'terminated', liveRows: liveRows.length, correctedTo: merged.phase };
+      }
       const statusKey = (merged.requirements || []).map((row) => String(row.id || '') + ':' + String(row.status || '')).join('|');
       const hint = legacyUi.phaseHint;
       if (hint && Number(hint.round) === Number(merged.round) && hint.statusKey === statusKey) {
@@ -6786,7 +6795,7 @@ function legacyTruthMarkup() {
   const boot = legacyBootSummary();
   const ledger = legacyLedgerDivergences();
   const readiness = legacyDocReadiness();
-  const chip = (cls, text, title) => `<span class="truth-chip ${cls}" title="${esc(title || '')}"><b>${esc(text)}</b></span>`;
+  const chip = (cls, text, title, fix) => `<span class="truth-chip ${cls}" data-legacy-fix="${esc(fix || '')}" title="${esc(title || '')}"><b>${esc(text)}</b></span>`;
   const rows = [];
   if (!wb) rows.push(chip('bad', 'preload 未加载', 'window.workbench 不存在：所有项目/团队数据不可用'));
   else rows.push(chip('ok', 'preload 已加载', 'preload IPC 桥已加载'));
@@ -6816,12 +6825,13 @@ function legacyTruthMarkup() {
       ? chip('warn', `旧命令 未核验 ${unknown.length}`, `能力矩阵没有返回这些命令：${unknown.join('、')}；只写“未核验”，不显示成缺失，也不说成齐全`)
       : chip('ok', '旧命令齐全', (caps.commands ? Object.keys(caps.commands).length : 0) + ' 条命令可用'));
   }
-  const bootText = `boot ${boot.complete}/${boot.total}${boot.expired ? ` · 过期 ${boot.expired}` : ''}`;
-  rows.push(chip(boot.allComplete ? 'ok' : (boot.expired ? 'bad' : (boot.booted ? 'warn' : 'bad')), bootText, `六角色可用 boot：${boot.complete}/${boot.total}；${boot.expired ? boot.expired + ' 个已过期（后端会拒绝推进）；' : ''}${boot.stale ? boot.stale + ' 个文档变更后需重新 boot；' : ''}${boot.roundMismatch ? boot.roundMismatch + ' 个跨轮 boot；' : ''}`));
-  rows.push(chip(ledger.length ? 'bad' : 'ok', ledger.length ? `账本分叉 ${ledger.length}` : '账本一致', ledger.length ? ledger.map(({ req, ledger: row }) => `${req.id}：${row.label}`).join('；') : '工作流.json 与旧 任务/ 状态一致'));
+  // B-2e5 AC2：boot 记录数字只作记录——不再把「过期 N」写进红项/文案。
+  const bootText = `boot ${boot.complete}/${boot.total}`;
+  rows.push(chip(boot.allComplete ? 'ok' : 'muted', bootText, `六角色可用 boot：${boot.complete}/${boot.total}（boot 记录只作记录，不拦推进；过期仅提示，不再算红）`));
+  rows.push(chip(ledger.length ? 'bad' : 'ok', ledger.length ? `账本分叉 ${ledger.length}` : '账本一致', ledger.length ? ledger.map(({ req, ledger: row }) => `${req.id}：${row.label}`).join('；') : '工作流.json 与旧 任务/ 状态一致', ledger.length ? 'ledger' : ''));
   rows.push(readiness.ok
     ? chip('ok', '文档已就绪', `必要文档齐全，且项目信息/项目铁律不是模板占位；六角色目录 ${readiness.dirs}/${readiness.total}、角色卡 ${readiness.cards}/${readiness.total}、文件索引 ${readiness.indexes}/${readiness.total}`)
-    : chip((!legacyUi.files || readiness.pendingRead) ? 'muted' : 'bad', readiness.label, `缺文件：${readiness.missing.join('、') || '无'}；boot 阻断占位：${readiness.bootPlaceholders.join('、') || '无'}；读取失败：${readiness.readErrors.join('、') || '无'}`));
+    : chip((!legacyUi.files || readiness.pendingRead) ? 'muted' : 'bad', readiness.label, `缺文件：${readiness.missing.join('、') || '无'}；boot 阻断占位：${readiness.bootPlaceholders.join('、') || '无'}；读取失败：${readiness.readErrors.join('、') || '无'}`, 'docs'));
   if (readiness.overviewPlaceholder) rows.push(chip('muted', '需求总览待首条需求', '需求/00-需求总览.md 还是模板表头；第一条需求落盘时会被重写，不挡 boot'));
   if (legacyUi.truncated) rows.push(chip('warn', '文件清单已截断', 'files:list 达到 600 项 / 4 层上限；未列出的文件不能当“缺失”'));
   return `<span class="truth-label">数据真源</span>${rows.join('')}`;
@@ -7255,13 +7265,13 @@ function renderLegacyRoleTable(project) {
   const badge = $('#legacy-role-badge');
   if (badge) {
     const boot = legacyBootSummary();
-    badge.textContent = `目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 索引 ${ready.indexes}/${ready.total} · boot ${boot.complete}/${boot.total}${boot.expired ? ` · 过期 ${boot.expired}` : ''}`;
+    badge.textContent = `目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 索引 ${ready.indexes}/${ready.total} · boot ${boot.complete}/${boot.total}`;
     badge.className = 'badge ' + (ready.dirs === ready.total && ready.cards === ready.total && ready.indexes === ready.total && boot.allComplete ? 'badge-approved' : (boot.expired ? 'badge-rejected' : 'badge-skipped'));
   }
   const indexBadge = $('#legacy-role-index-badge');
   if (indexBadge) {
     const boot = legacyBootSummary();
-    indexBadge.textContent = `boot ${boot.complete}/${boot.total}${boot.expired ? ` · 过期 ${boot.expired}` : ''} · 文件索引 ${ready.indexes}/${ready.total} · 项目索引 ${ready.index ? '存在' : '缺失'}`;
+    indexBadge.textContent = `boot ${boot.complete}/${boot.total} · 文件索引 ${ready.indexes}/${ready.total} · 项目索引 ${ready.index ? '存在' : '缺失'}`;
     indexBadge.className = 'badge ' + (boot.allComplete && ready.indexes === ready.total ? 'badge-approved' : 'badge-rejected');
   }
   const summary = $('#legacy-docs-summary');
@@ -7314,7 +7324,7 @@ function renderOverview() {
   round.innerHTML = `
     <div class="legacy-round-top">
       <h3>${esc(p.name)} · 当前轮</h3>
-      <span class="badge ${os.pending ? 'badge-pending' : 'badge-' + os.key}">第 ${Number(wf.round) || 1} 轮 · ${esc(phaseText)}</span>
+      <span class="badge ${os.pending ? 'badge-pending' : 'badge-' + os.key}">${esc(phaseText)}</span>
     </div>
     <div class="legacy-round-grid">
       <div class="legacy-fact"><span>工作流阶段</span><b class="gold">${esc(phaseText)}</b><small>workflow:state · roundKey ${esc(String(roundKey).slice(-28))}</small></div>
@@ -9105,7 +9115,7 @@ function legacyRequirementCard(req) {
       <div class="legacy-req-badges">
         <span class="badge ${req.status === 'accepted' ? 'badge-approved' : (req.status === 'rejected' || req.status === 'terminated' ? 'badge-rejected' : 'badge-skipped')}">${esc(legacyReqStatus(req))}</span>
         <span class="legacy-req-chip">${esc(priority)}</span>
-        <span class="legacy-req-chip">第 ${round} 轮</span>
+        <span class="legacy-req-chip">需求</span>
         <span class="legacy-req-chip">${esc(origin)}</span>
         ${req.origin === 'legacy-doc' ? '<span class="legacy-req-chip warn" title="旧编号需求：只有需求正文、没有工作流行；评审 / Owner / 验收会按正文解析并补建行，4 位编号原样保留">旧编号可评审</span>' : ''}
         ${ownerChip}
@@ -9157,7 +9167,7 @@ function renderLegacyRequirements() {
   }
   const reqs = legacyRequirements();
   if (badge) {
-    badge.textContent = `第 ${Number(wf.round) || 1} 轮 · ${reqs.length} 需求 · phase ${wf.phase || 'idle'}`;
+    badge.textContent = `${reqs.length} 需求 · phase ${wf.phase || 'idle'}`;
     badge.className = 'badge ' + (['accepted', 'iteration'].includes(wf.phase) ? 'badge-approved' : (wf.phase === 'terminated' ? 'badge-rejected' : 'muted-badge'));
   }
   if (!reqs.length) {
@@ -14631,8 +14641,41 @@ function clampFlowPanel() {
   // Owner 不自动弹窗：首屏只显示状态与入口，避免打断 DSH 主画面。
 })();
 
-// Owner 决策箱浮层（右下角【团队看板】按钮正上方）：交互只绑一次，默认收起。
-// 放在初始化 IIFE 之外，避免 DSH 侧 await 失败时把浮层交互一起跳过。
+// B-2e5 AC4：真源条/证据区的提示项可点直达（文档待补→缺文档清单；账本分叉→证据区；哈希→哈希详情）。
+// 用事件委托只绑一次，避免每次渲染重复绑定。
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', bindTruthFixLinks, { once: true });
+} else {
+  bindTruthFixLinks();
+}
+
+function bindTruthFixLinks() {
+  document.addEventListener('click', (event) => {
+    const node = event.target && event.target.closest ? event.target.closest('[data-legacy-fix]') : null;
+    if (!node) return;
+    const kind = String(node.getAttribute('data-legacy-fix') || '');
+    if (!kind) return;
+    event.preventDefault();
+    if (kind === 'docs') {
+      const target = document.getElementById('missing-list');
+      if (target && target.scrollIntoView) target.scrollIntoView({ block: 'center' });
+      if (typeof toast === 'function') toast('缺文档清单：看项目面板「必读与目录」页的 #missing-list（点到具体缺项）', 'warn');
+      return;
+    }
+    if (kind === 'ledger') {
+      const target = document.querySelector('.legacy-evidence-checks') || document.querySelector('.legacy-evidence');
+      if (target && target.scrollIntoView) target.scrollIntoView({ block: 'center' });
+      if (typeof toast === 'function') toast(node.getAttribute('title') || '账本分叉：工作流.json 与旧 任务/ 状态不一致', 'warn');
+      return;
+    }
+    // hash 等其它：滚到证据区
+    const checks = document.querySelector('.legacy-evidence-checks');
+    if (checks && checks.scrollIntoView) checks.scrollIntoView({ block: 'center' });
+    if (typeof toast === 'function') toast(node.getAttribute('title') || '看证据区的哈希详情', 'warn');
+  });
+}
+
+
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => { bindDecisionFloat(); bindDecisionAutoRefresh(); }, { once: true });
 } else {
