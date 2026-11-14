@@ -1856,6 +1856,35 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     if (!wakeLog.includes('TEAM_WAKE_TEST_FAIL')) failStep('唤醒失败未写 唤醒.jsonl', wakeLog.slice(0, 300));
     pass('B-6818（T0）+ B-01d6（R-45c7）：send 默认唤醒（含非 PM 收件人）、取消合并（连续 3 条 3 次唤醒）、--no-wake 关闭、task done 完成事件唤醒、失败写 唤醒.jsonl');
 
+    // ===== B-2736：ack 回执必达——「完成回执」被 ack 后给原发送者投一条静默 notice（只扩散一层）=====
+    {
+      const inboxOf = (token) => json(['inbox', '--boot', token, '--all', '--json']).messages || [];
+      const qDevInbox = () => inboxOf(qDev.token);
+      const pmInboxCount = () => inboxOf(gatePm2.token).length;
+      const beforeDev = qDevInbox().length;
+      const receiptMsg = json(['send', '--boot', qDev.token, '--to', 'pm', '--subject', '完成回执-用例2736', '--body', '程序员2 完成 X', '--type', 'receipt', '--json']);
+      if (!(receiptMsg.message && receiptMsg.message.type === 'receipt')) failStep('B-2736 用例：完成回执未发出', JSON.stringify(receiptMsg).slice(0, 200));
+      const ackRes = json(['ack', '--boot', gatePm2.token, '--id', receiptMsg.message.id, '--note', '收到完成回执', '--json']);
+      if (!(ackRes.receiptMessage && ackRes.receiptMessage.type === 'notice')) failStep('ack 完成回执未投静默 notice', JSON.stringify(ackRes).slice(0, 300));
+      const devAfter = qDevInbox();
+      if (devAfter.length !== beforeDev + 1) failStep('原发送者邮箱未 +1 条 notice', JSON.stringify({ beforeDev, after: devAfter.length }));
+      const notice = devAfter.find((m) => m.id === ackRes.receiptMessage.id);
+      if (!notice || notice.type !== 'notice' || notice.replyTo !== receiptMsg.message.id || notice.ackRequired) failStep('notice 字段不对', JSON.stringify(notice).slice(0, 300));
+      if (!String(notice.body).includes(receiptMsg.message.id) || !String(notice.body).includes('pm')) failStep('notice 正文缺被 ack 消息/回执人', String(notice.body).slice(0, 200));
+      // 回执.jsonl 照旧不重复：同一条消息只有一条非 update 回执
+      const receiptRows = read(path.join(teamRoot, '状态', '回执.jsonl')).split(/\r?\n/).filter(Boolean)
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean)
+        .filter((row) => row.msgId === receiptMsg.message.id && !row.update);
+      if (receiptRows.length !== 1) failStep('回执.jsonl 重复或缺失', JSON.stringify(receiptRows.length));
+      // 防递归只一层：ack 这条 notice 不再产生新消息
+      const pmBefore = pmInboxCount();
+      const ackNotice = json(['ack', '--boot', qDev.token, '--id', notice.id, '--note', '收到通知', '--json']);
+      if (ackNotice.receiptMessage) failStep('notice 被 ack 后仍产生了新消息（扩散）', JSON.stringify(ackNotice.receiptMessage).slice(0, 200));
+      const pmAfter = pmInboxCount();
+      if (pmAfter !== pmBefore) failStep('notice 被 ack 后收件人邮箱变化', JSON.stringify({ pmBefore, pmAfter }));
+    }
+    pass('B-2736：ack 完成回执 → 原发送者 +1 条静默 notice（含被 ack 消息/回执人/备注/时间），只一层不扩散，回执.jsonl 不重复');
+
     // ===== B-d111（已按 Owner 08:08 改口径）：不再有窗口合并；保留 delivered 去重、失败重试、兜底补发 =====
     const wakeQueueFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒队列.json');
     const wakeQueue = fs.existsSync(wakeQueueFile) ? JSON.parse(read(wakeQueueFile)) : {};

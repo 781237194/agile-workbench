@@ -712,6 +712,8 @@ export function sendMessage(msg) {
     ts: nowIso(),
     // R-c651 F-c651-4：投递成功立即写 deliveredAt（未读/未回执都从这一处算，不另建未读表）。
     deliveredAt: nowIso(),
+    // B-2736：静默通知标记——被 ack 时不再回任何消息，防回执/通知互相扩散。
+    ...(msg.noEcho ? { noEcho: true } : {}),
   };
   const box = mailBoxDir(msg.to, 'new');
   ensureDir(box);
@@ -822,20 +824,40 @@ export function ackMessage(role, id, note) {
     ts: nowIso(),
   };
   appendLine(PATHS.receipts, JSON.stringify(ack));
+  const ackedType = String(found.msg.type || 'note');
   let receiptMessage = null;
-  // 关键：回执消息不再回执，否则会 回执→回执→回执 无限递归。
-  if (found.msg.from !== 'system' && found.msg.type !== 'receipt') {
-    receiptMessage = sendMessage({
-      from: role,
-      to: found.msg.from,
-      subject: `回执: ${found.msg.subject}`,
-      body: `已回执 ${id}：${ack.note}\n（仅表示收到/认领，不代表完成；完成另发完成回执 + task done）`,
-      project: found.msg.project,
-      task: found.msg.task,
-      type: 'receipt',
-      replyTo: id,
-      ackRequired: false,
-    });
+  // 回执必达（B-2736 / R-45c7）：普通消息回执仍回一条 type=receipt 的消息；
+  // 被 ack 的是「完成回执」（type=receipt）时，原发送者以前收不到任何东西，这里补一条静默 notice
+  // （含被 ack 的消息 id/主题、回执人、备注、时间）。notice 带 noEcho，ack 它时不再产生消息，
+  // 保证"只扩散一层"，不会 回执↔通知 无限递归。
+  if (found.msg.from !== 'system' && !found.msg.noEcho) {
+    if (ackedType !== 'receipt') {
+      receiptMessage = sendMessage({
+        from: role,
+        to: found.msg.from,
+        subject: `回执: ${found.msg.subject}`,
+        body: `已回执 ${id}：${ack.note}\n（仅表示收到/认领，不代表完成；完成另发完成回执 + task done）`,
+        project: found.msg.project,
+        task: found.msg.task,
+        type: 'receipt',
+        replyTo: id,
+        ackRequired: false,
+      });
+    } else {
+      receiptMessage = sendMessage({
+        from: role,
+        to: found.msg.from,
+        subject: `回执确认: ${found.msg.subject}`,
+        body: `已回执 ${id}：${truncate(ack.note, 240)}\n回执人 ${role}｜${ack.ts}\n（本条仅确认收到，不需要再回执）`,
+        project: found.msg.project,
+        task: found.msg.task,
+        type: 'notice',
+        replyTo: id,
+        ackRequired: false,
+        noEcho: true,
+      });
+      ack.noticeMessageId = receiptMessage.id;
+    }
     ack.receiptMessageId = receiptMessage.id;
     // 回写回执消息 id（追加一行更新记录，保持 append-only）
     appendLine(PATHS.receipts, JSON.stringify({ ...ack, update: true, receiptMessageId: receiptMessage.id }));

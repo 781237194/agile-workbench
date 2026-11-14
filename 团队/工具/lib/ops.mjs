@@ -2404,15 +2404,19 @@ export async function cmdAck(args) {
   clearDispatchLock(r.msg.project, String(args.id));
   appendEvent({
     role: b.role, sessionId: b.sessionId, action: 'ack', project: r.msg.project, target: r.msg.id,
-    note: r.already ? '重复回执' : truncate(String(args.note || '已收到'), 120), data: { ackId: r.ack.id, receiptMessageId: r.receiptMessage?.id || '' },
+    note: r.already ? '重复回执' : truncate(String(args.note || '已收到'), 120), data: { ackId: r.ack.id, receiptMessageId: r.receiptMessage?.id || '', noticeMessageId: r.ack?.noticeMessageId || '' },
   });
   // B-a577：回执也触发一次兜底泵（收了回执说明 PM 锁已释放，队列该接着跑）。
   const ackPump = await pumpQueueSafe(r.msg.project, 'ack');
   const hint = '（仅表示已收到/已认领，不算完成；完成请执行正文任务并 task done --evidence）';
+  // B-2736：只有真的投出了通知才说"已通知"，避免 CLI 打印假象。
+  const ackNotify = r.receiptMessage
+    ? `→ 已通知 ${r.msg.from}（${r.receiptMessage.type === 'notice' ? '静默 notice' : '回执消息'} ${r.receiptMessage.id}）`
+    : (r.msg.from === 'system' ? '' : '（未发通知：静默消息/无需通知）');
   const pumpHint = ackPump && ackPump.pumped
     ? `\n队列自动续跑：已派 ${ackPump.message && ackPump.message.id} → ${ackPump.item && ackPump.item.to}（task ${(ackPump.item && ackPump.item.task) || '-'}）`
     : (ackPump && ackPump.ok === false ? `\n队列泵失败：${String(ackPump.why || ackPump.code || 'QUEUE_PUMP_FAILED').slice(0, 120)}（队列项已保留）` : '');
-  out(args, (r.already ? `已回执过 ${r.msg.id}（${r.ack.id}）${hint}` : `已回执 ${r.msg.id}（${r.ack.id}）→ 已通知 ${r.msg.from}${hint}`) + pumpHint, { ok: true, ...r, dispatchQueue: ackPump });
+  out(args, (r.already ? `已回执过 ${r.msg.id}（${r.ack.id}）${hint}` : `已回执 ${r.msg.id}（${r.ack.id}）${ackNotify}${hint}`) + pumpHint, { ok: true, ...r, dispatchQueue: ackPump });
 }
 
 /** R-c651 F-c651-4：每角色在场（只读）。工作台团队行/角色卡与测试脚本共用这一份口径。 */
