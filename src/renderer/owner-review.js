@@ -3,7 +3,7 @@
   const STATUS_TEXT = { approved: '已通过', rejected: '已打回', skipped: '已先跳过', pending: '等你决定', optional: '等你决定' };
   // B-4baa（R-1cee）：看板与待评估清单默认各展示前 5 条，其余折叠在 DOM 里（不删、不裁切），可展开全部。
   const PREVIEW_ROWS = 5;
-  const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', reject: null, listFilter: 'all', listOpen: new Set(), closedCollapsed: true, proxyAllActive: false, proxyAllRecord: null, proxyAllExpiresAt: '', decisionBox: [] };
+  const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', reject: null, listFilter: 'all', listOpen: new Set(), closedCollapsed: true, proxyAllActive: false, proxyAllRecord: null, proxyAllExpiresAt: '', proxyReadError: '', decisionBox: [] };
   const KEY_LATER = 'awb.ownerReview.laterUntil';
   const KEY_NO_AUTO = 'awb.ownerReview.noAuto';
   // B-d100：打回后复审的判定收在 owner-review-state.js（Node 可单测）；脚本缺失时退回本文件旧逻辑。
@@ -81,18 +81,112 @@
   }
   function dialogEl() { return document.querySelector('[data-owner-review-dialog]'); }
 
-  /** 7849 AC1：按钮态随代管状态刷新（生效中=「结束代管」，带到期时间；未生效=「全部交 PM 代管」）。 */
+  // ── R-b28f：【一键代管】行（唯一挂载点 = 右下 #side-float 容器）────────────────────────
+  // 7849 的「全部交 PM 代管」按钮原来在评审弹窗里；b28f 把入口搬到右下浮动组、改名「一键代管」，
+  // 点击先弹权限说明再落账。锚点沿用 data-or-proxy-all（不新造 data-action="proxy-once"），
+  // 状态唯一真源仍是 ownerProxyStatus()（评审代管.json），这里只做展示与交互，不另存一份状态。
+  const PROXY_ROW_SELECTOR = '[data-or-proxy-all]';
+  function proxyRowEl() { return document.querySelector(PROXY_ROW_SELECTOR); }
+  function proxyRowLabel(row) { return row ? (row.querySelector('[data-proxy-label]') || row) : null; }
+  function proxyApiState() {
+    const api = window.workbench || {};
+    return {
+      canStart: typeof api.ownerProxyStart === 'function',
+      canStatus: typeof api.ownerProxyStatus === 'function',
+      canEnd: typeof api.ownerProxyEnd === 'function',
+    };
+  }
+  function proxyExpiresText(value) {
+    const m = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    return m ? { clock: `${m[4]}:${m[5]}`, full: `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}` } : null;
+  }
+  /** missing=壳层没有代管接口；error=读取代管失败；active/idle=正常两态。 */
+  function proxyRowState() {
+    const api = proxyApiState();
+    if (!api.canStart || !api.canStatus) return 'missing';
+    if (state.proxyReadError) return 'error';
+    return state.proxyAllActive ? 'active' : 'idle';
+  }
+  /**
+   * F-b28f-3 / AC3 / AC7：行态同步（唯一写入口，状态来自 ownerProxyStatus）。
+   * idle「一键代管」｜active「代管中 · 到期 HH:MM」+ data-proxy-state=active｜
+   * missing 置灰 + title「当前版本没有代管接口」，点击零副作用｜error「代管状态读取失败」+ 重试。
+   */
   function syncProxyAllButton() {
-    const btn = document.querySelector('[data-or-proxy-all]');
-    if (!btn) return;
-    const active = Boolean(state.proxyAllActive);
-    btn.textContent = active ? '结束代管' : '全部交 PM 代管';
-    btn.setAttribute('data-proxy-all-state', active ? 'active' : 'idle');
-    if (state.proxyAllExpiresAt) btn.setAttribute('data-proxy-expires-at', state.proxyAllExpiresAt);
-    else btn.removeAttribute('data-proxy-expires-at');
-    btn.title = active
-      ? `全部代管生效中（到期 ${String(state.proxyAllExpiresAt || '').slice(0, 19).replace('T', ' ')}）；点这里结束`
-      : '一次给全部非终态需求开代管（评审 + 决策箱 + 验收，默认 8 小时）；随时可结束';
+    const row = proxyRowEl();
+    if (!row) return;
+    const label = proxyRowLabel(row);
+    const rowState = proxyRowState();
+    const expires = proxyExpiresText(state.proxyAllExpiresAt);
+    row.setAttribute('data-proxy-state', rowState);
+    row.setAttribute('data-proxy-all-state', rowState === 'active' ? 'active' : 'idle');
+    row.disabled = rowState === 'missing';
+    if (rowState === 'active' && state.proxyAllExpiresAt) row.setAttribute('data-proxy-expires-at', state.proxyAllExpiresAt);
+    else row.removeAttribute('data-proxy-expires-at');
+    // 7849 自检用 [data-owner-review-proxy-end] 找「结束代管」：搬家后这个锚点就是生效中的这一行
+    // （点它 → 二次确认 → ownerProxyEnd，语义一致，所以 7849 断言不必改）。
+    if (rowState === 'active') row.setAttribute('data-owner-review-proxy-end', '1');
+    else row.removeAttribute('data-owner-review-proxy-end');
+    if (rowState !== 'error') row.removeAttribute('data-proxy-retry');
+    const modal = proxyModalEl();
+    row.setAttribute('aria-expanded', modal && !modal.hidden ? 'true' : 'false');
+    if (rowState === 'active') {
+      if (label) label.textContent = expires ? `代管中 · 到期 ${expires.clock}` : '代管中';
+      row.setAttribute('aria-label', `代管中${expires ? `，到期 ${expires.full}` : ''}；点这里结束代管`);
+      row.title = expires ? `一键代管生效中（到期 ${expires.full}）；点这里结束` : '一键代管生效中；点这里结束';
+      return;
+    }
+    if (rowState === 'missing') {
+      if (label) label.textContent = '一键代管';
+      row.setAttribute('aria-label', '一键代管：当前版本没有代管接口');
+      row.title = '当前版本没有代管接口';
+      return;
+    }
+    if (rowState === 'error') {
+      if (label) label.textContent = '代管状态读取失败 · 重试';
+      row.setAttribute('data-proxy-retry', '1');
+      row.setAttribute('aria-label', '代管状态读取失败，点这里重试，不会开启或结束代管');
+      row.title = `代管状态读取失败：${state.proxyReadError || '未知原因'}；点这里重试`;
+      return;
+    }
+    if (label) label.textContent = '一键代管';
+    row.setAttribute('aria-label', '一键代管：把评审、验收与决策箱回执的拍板权交给 PM（默认 8 小时，随时可结束）');
+    row.title = '一键代管：点一下先看权限说明，确认后把评审 / 验收 / 决策箱回执的拍板权交给 PM（默认 8 小时，随时可结束）';
+  }
+
+  // 浮动区人话横幅（失败带错误码）：绝对定位在容器上方，不占行位、不影响四行几何。
+  let proxyBannerTimer = null;
+  function proxyBannerHost() {
+    const host = document.getElementById('side-float');
+    if (!host) return null;
+    let box = host.querySelector('[data-proxy-banner]');
+    if (!box) {
+      box = el('div', 'side-float-banner');
+      box.setAttribute('data-proxy-banner', '1');
+      box.setAttribute('role', 'status');
+      box.hidden = true;
+      host.appendChild(box);
+    }
+    return box;
+  }
+  function showProxyBanner(text, kind, code) {
+    const box = proxyBannerHost();
+    if (!box) {
+      if (typeof window.toast === 'function') window.toast(text, kind === 'ok' ? 'ok' : 'bad');
+      return;
+    }
+    box.innerHTML = '';
+    box.setAttribute('data-kind', kind === 'ok' ? 'ok' : 'bad');
+    box.appendChild(el('b', '', String(text || '')));
+    if (code) box.appendChild(el('code', '', String(code)));
+    box.hidden = false;
+    if (proxyBannerTimer) clearTimeout(proxyBannerTimer);
+    proxyBannerTimer = setTimeout(() => { box.hidden = true; }, kind === 'ok' ? 5000 : 12000);
+  }
+  function hideProxyBanner() {
+    const host = document.getElementById('side-float');
+    const box = host ? host.querySelector('[data-proxy-banner]') : null;
+    if (box) box.hidden = true;
   }
 
   /**
@@ -169,22 +263,16 @@
     if (before) host.insertBefore(proxy, before); else host.appendChild(proxy);
   }
 
+  // 只读代管徽标（F-b28f-6）：开/关代管按钮全部搬到右下 #side-float【一键代管】行，
+  // 弹窗里不再有第二个入口；stage-bar 上的徽标保留不动（T-e921），锚点仍唯一。
   function proxyNodes() {
     let proxy = document.querySelector('[data-owner-review-proxy]');
-    let end = document.querySelector('[data-owner-review-proxy-end]');
-    if (proxy && end) return { proxy, end };
+    if (proxy) return { proxy };
     proxy = el('span', 'owner-review-proxy', 'PM 代管中');
     proxy.setAttribute('data-owner-review-proxy', '1');
     proxy.title = 'PM 代管中：Owner 的决定由 PM 代记';
-    end = el('button', 'owner-review-proxy-end', '结束代管');
-    end.type = 'button';
-    end.setAttribute('data-owner-review-proxy-end', '1');
-    end.addEventListener('click', endProxy);
     mountProxy(proxy);
-    // 「结束代管」收进弹窗头部，避免挤占标题栏（Owner 实测：标题栏溢出压住窗口按钮）。
-    const head = dialogEl() && dialogEl().querySelector('.or-head');
-    if (head) head.appendChild(end); else proxy.after(end);
-    return { proxy, end };
+    return { proxy };
   }
 
   function buildShell() {
@@ -248,27 +336,21 @@
       '        <button type="button" class="or-ok" data-or-approve>通过</button>',
       '        <button type="button" class="or-reject" data-or-reject>打回</button>',
       '        <button type="button" class="or-skip-btn" data-or-skip>先跳过</button>',
-      '        <button type="button" class="or-proxy-all" data-or-proxy-all title="一次给当前等你决定和等你验收的需求开代管；后面每次保持，随时可结束">全部交 PM 代管</button>',
+      // F-b28f-6：开/关代管都不在弹窗里了，只留这一行只读说明（开关在右下【一键代管】行）。
+      '        <span class="or-proxy-note" data-or-proxy-note title="开代管 / 结束代管都在主界面右下角的【一键代管】行">开/关代管在右下角【一键代管】</span>',
       '      </div>',
       '    </section>',
       '  </div>',
       '</div>',
     ].join('');
     document.body.appendChild(dialog);
-    // 代管状态（T-e921）：徽标挂 stage-bar「项目面板」旁，不再放标题栏末尾压【文件夹】；
-    // 「结束代管」放弹窗头部（Owner 在弹窗里结束）。
+    // 代管只读徽标（T-e921）：挂 stage-bar「项目面板」旁，不再放标题栏末尾压【文件夹】。
+    // R-b28f：「结束代管」已移出弹窗（改为点右下「代管中 · 到期」行二次确认），此处不再建按钮。
     const proxy = el('span', 'owner-review-proxy is-compact', '');
     proxy.setAttribute('data-owner-review-proxy', '1');
-    proxy.title = 'PM 代管中（Owner 的决定由 PM 代记，可在弹窗里结束代管）';
-    const end = el('button', 'owner-review-proxy-end', '结束代管');
-    end.type = 'button';
-    end.setAttribute('data-owner-review-proxy-end', '1');
-    end.addEventListener('click', endProxy);
-    proxy.__endNode = end;
+    proxy.title = 'PM 代管中（Owner 的决定由 PM 代记；开/关代管在右下角【一键代管】）';
     mountProxy(proxy);
-    dialog.querySelector('.or-head').appendChild(end);
     proxy.hidden = true;
-    end.hidden = true;
     dialog.querySelector('[data-or-close]').addEventListener('click', closeDialog);
     // R-b417：返回列表——保留当前选中项，只把列表滚回顶部（看板/清单常驻左侧）。
     dialog.querySelector('[data-owner-back]')?.addEventListener('click', () => {
@@ -293,15 +375,9 @@
         state.skipDraft[key] = event.target.value;
       });
     }
-    // T-69ed / 7849 AC1：代管入口只留一个按钮——未生效=「全部交 PM 代管」，生效中=「结束代管」。
-    const proxyAllBtn = dialog.querySelector('[data-or-proxy-all]');
-    if (proxyAllBtn) {
-      proxyAllBtn.addEventListener('click', () => {
-        if (state.proxyAllActive) endProxy();
-        else startProxyAll();
-      });
-      syncProxyAllButton();
-    }
+    // R-b28f：开/关代管的唯一入口是右下 #side-float 的【一键代管】行（弹窗里已无按钮）。
+    // 绑定放在这里（buildShell 只跑一次），行是 index.html 的静态节点，脚本加载即有。
+    bindProxyRow();
     dialog.querySelector('[data-or-opinion]').addEventListener('input', (event) => { state.draft = event.target.value; });
     dialog.addEventListener('click', (event) => { if (event.target === dialog) closeDialog(); });
     // B-2ed9：卡片点击用事件委托兜底——重渲染/异步刷新后即使原节点被替换，点哪张就选哪张。
@@ -435,9 +511,15 @@
   }
 
   async function updateProxyBadge() {
-    if (!state.projectId || !window.workbench || !window.workbench.ownerProxyStatus) return;
+    if (!state.projectId) return;
+    // AC7 降级：壳层没有读接口 → 行由 syncProxyAllButton 置灰（missing），不伪装成未启用/已结束。
+    if (!window.workbench || typeof window.workbench.ownerProxyStatus !== 'function') {
+      syncProxyAllButton();
+      return;
+    }
     try {
       const r = await window.workbench.ownerProxyStatus({ projectId: state.projectId });
+      state.proxyReadError = '';
       const active = (r && r.active) || null;
       // 代管落账判定要用：本需求代管中 → decide 传 recordedBy=pm、channel=proxy（R-6f60 AC24.4）。
       state.proxy = active;
@@ -456,24 +538,33 @@
         count = Math.max(count, coveredRows.length);
       }
       if (count) {
-        const { proxy, end } = proxyNodes();
+        const { proxy } = proxyNodes();
         proxy.hidden = false;
-        end.hidden = false;
         // B-5f62：顶部不再只给一个圆点，直接写「PM 代管中 M 条」，M = 未结束代管记录覆盖的需求数。
         proxy.textContent = `PM 代管中 ${count} 条`;
-        proxy.title = `PM 代管中 ${count} 条：Owner 的决定由 PM 代记，可在弹窗里结束代管`;
+        proxy.title = `PM 代管中 ${count} 条：Owner 的决定由 PM 代记；开/关代管在右下角【一键代管】`;
         proxy.setAttribute('data-proxy-count', String(count));
         // B-a1cf：把「什么时候算出来的」也挂上，排查“看着没更新”时能分辨是旧数据还是没刷新。
         proxy.setAttribute('data-proxy-at', new Date().toISOString());
         proxy.classList.remove('is-compact');
       } else {
-        for (const selector of ['[data-owner-review-proxy]', '[data-owner-review-proxy-end]']) {
-          const node = document.querySelector(selector);
-          if (node) node.remove();
-        }
+        // 只清只读徽标；[data-owner-review-proxy-end] 现在挂在右下【一键代管】行上（不是可删节点）。
+        const node = document.querySelector('[data-owner-review-proxy]');
+        if (node) node.remove();
       }
+      state.proxyCount = count;
       syncProxyAllButton();
-    } catch { /* ignore */ }
+      syncProxyNote();
+    } catch (e) {
+      // AC7：读取代管失败 → 行内「代管状态读取失败」+ 重试，绝不显示成未启用（也不静默）。
+      state.proxyReadError = String((e && (e.message || e.code)) || e || '未知原因').slice(0, 160);
+      state.proxyAllActive = false;
+      state.proxyAllRecord = null;
+      state.proxyAllExpiresAt = '';
+      state.proxyCount = 0;
+      syncProxyAllButton();
+      syncProxyNote();
+    }
   }
 
   // Owner 规则（2026-11-13）：弹窗只在“需求评审”与“验收”阶段出现（owner_review 兼容旧流程）。
@@ -920,19 +1011,253 @@
       noticeTimer = setTimeout(() => { box.hidden = true; }, 6000);
     } catch { /* 提示条只是反馈，失败不影响已经成功的操作 */ }
   }
+  // ── R-b28f F-b28f-4：权限说明弹窗（点【一键代管】唤起；取消零副作用）────────────────────
+  // 「复制说明」要复制的整段话（含三项权限 / 两项风险 / DSH 完全权限指引），便于转给 PM。
+  const PROXY_PERMISSION_TEXT = [
+    '一键代管 = 把拍板权交给 PM（默认 8 小时，随时可结束）',
+    '交出的三项权限：',
+    '① 需求评审代记：PM 可代你在需求评审上记「通过 / 打回 / 跳过」，落账标【PM代管通过】等；',
+    '② 验收代点：PM 可代你验收，但必须带测试报告与截图，缺证据会被拒（PM_ACCEPT_EVIDENCE_REQUIRED）；',
+    '③ 决策箱代答：PM 可代你回执需要拍板的事。',
+    '两项风险：',
+    '① 默认 8 小时自动到期，随时可结束（到期不弹提醒，右下角那行会回到「一键代管」）；',
+    '② 每笔代记都写审计（channel=proxy、recordedBy=pm），可在评审 / 验收列表回溯。',
+    '还需你做一件事：在 DSH 输入框左下角把权限切到「完全权限」。工作台壳层改不了 DSH 的权限模式，只给指引；没切也能开代管，但 PM 执行 DSH 动作时可能卡在审批弹窗上。',
+  ].join('\n');
+  function proxyModalEl() { return document.querySelector('[data-proxy-modal]'); }
+  function buildProxyModal() {
+    const existing = proxyModalEl();
+    if (existing) return existing;
+    const mask = el('div', 'proxy-modal-mask');
+    mask.setAttribute('data-proxy-modal', '1');
+    mask.hidden = true;
+    mask.innerHTML = [
+      '<div class="proxy-modal-card" role="dialog" aria-modal="true" aria-labelledby="proxy-modal-title" tabindex="-1">',
+      '  <header class="proxy-modal-head"><b id="proxy-modal-title" data-proxy-modal-title>一键代管 = 把拍板权交给 PM</b>',
+      '    <button type="button" class="proxy-modal-close" data-proxy-modal-close aria-label="关闭">×</button></header>',
+      '  <div class="proxy-modal-body" data-proxy-modal-body></div>',
+      '  <footer class="proxy-modal-foot">',
+      '    <button type="button" class="proxy-modal-copy" data-proxy-copy title="复制这段说明，便于转给 PM">复制说明</button>',
+      '    <button type="button" data-proxy-modal-cancel>取消</button>',
+      '    <button type="button" class="proxy-modal-confirm" data-proxy-confirm>确认开启代管</button>',
+      '  </footer>',
+      '</div>',
+    ].join('');
+    document.body.appendChild(mask);
+    // F-b28f-4：Esc / 点遮罩 /「取消」/× 都等于取消——不写任何代管记录、不发成功提示（AC2 零副作用）。
+    mask.addEventListener('click', (event) => { if (event.target === mask) closeProxyModal(); });
+    mask.querySelector('[data-proxy-modal-close]').addEventListener('click', () => closeProxyModal());
+    mask.querySelector('[data-proxy-modal-cancel]').addEventListener('click', () => closeProxyModal());
+    mask.querySelector('[data-proxy-confirm]').addEventListener('click', () => {
+      if (mask.getAttribute('data-mode') === 'end') confirmProxyEnd();
+      else confirmProxyStart();
+    });
+    mask.querySelector('[data-proxy-copy]').addEventListener('click', copyProxyPermissionText);
+    mask.addEventListener('keydown', proxyModalKeydown);
+    return mask;
+  }
+  /** F-b28f-4：焦点陷阱（Tab / Shift+Tab 只在弹窗内循环，Esc 关闭）。 */
+  function proxyModalKeydown(event) {
+    const mask = proxyModalEl();
+    if (!mask || mask.hidden) return;
+    if (event.key === 'Escape') { event.preventDefault(); closeProxyModal(); return; }
+    if (event.key !== 'Tab') return;
+    const card = mask.querySelector('.proxy-modal-card');
+    if (!card) return;
+    const focusables = Array.from(card.querySelectorAll('button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])'))
+      .filter((node) => !node.disabled && node.offsetParent !== null);
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (!card.contains(document.activeElement)) { event.preventDefault(); first.focus(); return; }
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+  function copyProxyPermissionText() {
+    const text = PROXY_PERMISSION_TEXT;
+    // 弹窗开着时浮动区横幅在遮罩下面（#side-float 自身是叠层），所以复制结果直接回写在按钮上。
+    const btn = document.querySelector('[data-proxy-copy]');
+    const done = (ok) => {
+      if (btn) {
+        btn.textContent = ok ? '已复制' : '复制失败';
+        setTimeout(() => { if (btn) btn.textContent = '复制说明'; }, 1800);
+      }
+      if (!ok) showProxyBanner('复制失败：剪贴板不可用，请手动选中文字复制', 'bad');
+    };
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(text).then(() => done(true)).catch(() => done(false));
+        return;
+      }
+    } catch { /* 落到下面的兜底 */ }
+    try {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      area.remove();
+      done(ok);
+    } catch { done(false); }
+  }
+  /** 评审弹窗若还开着，别把 webview 提前放出来（遮罩会盖不住的合成层问题）。 */
+  function restoreWebviewAfterOverlay() {
+    const dialog = dialogEl();
+    if (dialog && !dialog.hidden) return;
+    document.body.classList.remove('or-webview-hidden');
+  }
+  function openProxyModal(mode) {
+    const mask = buildProxyModal();
+    const card = mask.querySelector('.proxy-modal-card');
+    const titleEl = mask.querySelector('[data-proxy-modal-title]');
+    const bodyEl = mask.querySelector('[data-proxy-modal-body]');
+    const copyBtn = mask.querySelector('[data-proxy-copy]');
+    const cancelBtn = mask.querySelector('[data-proxy-modal-cancel]');
+    const confirmBtn = mask.querySelector('[data-proxy-confirm]');
+    mask.setAttribute('data-mode', mode);
+    if (card) card.setAttribute('data-mode', mode);
+    confirmBtn.disabled = false;
+    if (mode === 'end') {
+      titleEl.textContent = '结束代管？';
+      bodyEl.innerHTML = [
+        '<p>结束后 PM 立刻不能再代你评审、验收或回执；已经落账的记录不回溯（审计里仍是 <code>channel=proxy</code>、<code>recordedBy=pm</code>）。</p>',
+        '<p>下次要托管，再点一次【一键代管】即可，走同一个权限说明弹窗。</p>',
+      ].join('');
+      copyBtn.hidden = true;
+      confirmBtn.textContent = '确认结束代管';
+      confirmBtn.classList.add('is-danger');
+      confirmBtn.setAttribute('data-proxy-end-confirm', '1');
+      confirmBtn.removeAttribute('data-proxy-start-confirm');
+    } else {
+      titleEl.textContent = '一键代管 = 把拍板权交给 PM';
+      bodyEl.innerHTML = [
+        '<h4>交出的三项权限</h4>',
+        '<ul>',
+        '  <li><b>需求评审代记</b>：PM 可代你在需求评审上记「通过 / 打回 / 跳过」，落账标【PM代管通过】等。</li>',
+        '  <li><b>验收代点</b>：PM 可代你验收，但必须带测试报告与截图，缺证据会被拒（<code>PM_ACCEPT_EVIDENCE_REQUIRED</code>）。</li>',
+        '  <li><b>决策箱代答</b>：PM 可代你回执需要拍板的事。</li>',
+        '</ul>',
+        '<h4>两项风险</h4>',
+        '<ul>',
+        '  <li>默认 <b>8 小时</b>自动到期，随时可结束；到期不弹提醒，右下角这行会回到「一键代管」。</li>',
+        '  <li>每笔代记都写审计（<code>channel=proxy</code>、<code>recordedBy=pm</code>），可在评审 / 验收列表回溯。</li>',
+        '</ul>',
+        '<div class="proxy-modal-hint"><b>还需你做一件事</b>：在 DSH 输入框左下角把权限切到「完全权限」。工作台壳层改不了 DSH 的权限模式，只给指引；<b>没切也能开代管</b>，但 PM 执行 DSH 动作时可能卡在审批弹窗上。</div>',
+      ].join('');
+      copyBtn.hidden = false;
+      copyBtn.textContent = '复制说明';
+      confirmBtn.textContent = '确认开启代管';
+      confirmBtn.classList.remove('is-danger');
+      confirmBtn.setAttribute('data-proxy-start-confirm', '1');
+      confirmBtn.removeAttribute('data-proxy-end-confirm');
+    }
+    mask.hidden = false;
+    hideProxyBanner();
+    document.body.classList.add('or-webview-hidden');
+    // 默认焦点在「取消」：误按 Enter 不能把拍板权交出去。
+    try { cancelBtn.focus(); } catch { /* ignore */ }
+    syncProxyAllButton();
+  }
+  function closeProxyModal() {
+    const mask = proxyModalEl();
+    if (!mask || mask.hidden) return;
+    mask.hidden = true;
+    restoreWebviewAfterOverlay();
+    syncProxyAllButton();
+    try { proxyRowEl()?.focus(); } catch { /* ignore */ }
+  }
+  /** 点行：missing 无副作用；error=重试；active=结束二次确认；idle=权限说明。 */
+  function proxyRowClick() {
+    const rowState = proxyRowState();
+    if (rowState === 'missing') return;
+    if (rowState === 'error') { retryProxyRead(); return; }
+    if (rowState === 'active') { openProxyModal('end'); return; }
+    openProxyModal('start');
+  }
+  async function retryProxyRead() {
+    showProxyBanner('正在重读代管状态…', 'ok');
+    await loadData();
+    syncProxyAllButton();
+    if (state.proxyReadError) showProxyBanner(`代管状态还是读不出来：${state.proxyReadError}`, 'bad');
+    else hideProxyBanner();
+  }
+  async function confirmProxyStart() {
+    const mask = proxyModalEl();
+    const btn = mask ? mask.querySelector('[data-proxy-confirm]') : null;
+    if (!btn || btn.disabled) return;
+    // F-b28f-边界「并发」：点下立即禁用，防双击开出两条记录。
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = '开启中…';
+    try {
+      const result = await startProxyAll();
+      // 不论成功/失败都关弹窗：行态由 ownerProxyStatus 真源决定（失败=回 idle + 横幅带错误码）。
+      closeProxyModal();
+      return result;
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = oldText; }
+    }
+  }
+  async function confirmProxyEnd() {
+    const mask = proxyModalEl();
+    const btn = mask ? mask.querySelector('[data-proxy-confirm]') : null;
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    const oldText = btn.textContent;
+    btn.textContent = '结束中…';
+    try {
+      const result = await endProxy();
+      closeProxyModal();
+      if (result && result.ok) showProxyBanner('已结束代管：PM 立刻不能再代你评审 / 验收 / 回执', 'ok');
+      return result;
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = oldText; }
+    }
+  }
+  function bindProxyRow() {
+    const row = proxyRowEl();
+    if (row && row.dataset.bound !== '1') {
+      row.dataset.bound = '1';
+      row.addEventListener('click', proxyRowClick);
+    }
+    syncProxyAllButton();
+    syncProxyNote();
+  }
+  /** F-b28f-6：评审弹窗里那一行只读说明（弹窗不再有开/关按钮）。 */
+  function syncProxyNote() {
+    const note = document.querySelector('[data-or-proxy-note]');
+    if (!note) return;
+    const covered = Math.max(0, Number(state.proxyCount || 0));
+    if (state.proxyAllActive) {
+      note.textContent = `PM 代管中 ${covered} 条 · 开/关代管在右下角【一键代管】`;
+      note.setAttribute('data-proxy-active', '1');
+    } else {
+      note.textContent = '开/关代管在右下角【一键代管】';
+      note.setAttribute('data-proxy-active', '0');
+    }
+  }
+
   async function startProxyAll() {
     // 7849 AC1：一键入口写 scope=all（一条全项目记录，带 expiresAt，覆盖全部非终态需求）。
     // 已生效时再点：幂等——不新建、只更新 updatedAt，后端返回 idempotent=true。
     // B-11ce 更正（PM 2026-11-15 02:35）：根因不是无状态行，而是**弹窗打开时的旧快照**——
     // Owner 连续验收 10+ 条后，state.data 仍是几秒前的，按旧快照算就虚高（25 vs 13）。
-    // 所以点代管前**强制重读**一次（loadData），条数与 authorization 都用**即时值**。
+    // 所以点代管前**强制重读**一次（loadData），条数与 authorization 都用**即时值**（F-b28f-5 沿用）。
+    if (!window.workbench || typeof window.workbench.ownerProxyStart !== 'function') {
+      // AC7：没有接口时绝不假装开成功（行本身也会置灰）。
+      showProxyBanner('当前版本没有代管接口，不能开启代管（没有写任何记录）', 'bad', '（错误码 PROXY_API_MISSING）');
+      return { ok: false, code: 'PROXY_API_MISSING' };
+    }
     await loadData();
     const rows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
     const covered = OR_STATE ? OR_STATE.proxyCoveredRows(rows)
       : rows.filter((row) => row && ![ 'accepted', 'terminated', 'rejected' ].includes(String(row.status || '')) && String(row.status || ''));
     if (!covered.length) {
-      showBanner({ message: '当前没有非终态需求，不需要批量代管。' });
-      return;
+      // 边界「空值」：确认后再判，不静默、也不写半条记录。
+      showProxyBanner('当前没有非终态需求，不需要开代管（没有写任何记录）', 'bad');
+      return { ok: false, skipped: true };
     }
     const expiresAt = new Date(Date.now() + 8 * 3600 * 1000).toISOString();
     try {
@@ -941,18 +1266,26 @@
         scope: 'all',
         expiresAt,
         actor: 'owner',
-        authorization: `Owner 在评审弹窗点击全部交 PM 代管（scope=all，覆盖 ${covered.length} 条非终态需求[${new Date().toLocaleTimeString('zh-CN', { hour12: false })} 即时快照]，到期 ${expiresAt}；含评审 + 决策箱 + 验收）`,
+        authorization: `Owner 在右下角【一键代管】确认开启（scope=all，覆盖 ${covered.length} 条非终态需求[${new Date().toLocaleTimeString('zh-CN', { hour12: false })} 即时快照]，到期 ${expiresAt}；含评审 + 决策箱 + 验收）`,
       });
-      if (!r || r.ok === false) throw new Error((r && (r.message || r.code)) || '批量开代管失败');
+      if (!r || r.ok === false) throw new Error((r && (r.message || r.code)) || '开代管失败');
       hideBanner();
       // B-5f62 / 7849：幂等返回 idempotent=true，提示要说清「本来就生效中」而不是又开了一次。
-      if (r.idempotent) showNotice('全部代管已在生效中（幂等：未新建记录，只刷新了更新时间）');
-      else showNotice(`已开启全部代管：覆盖 ${covered.length} 条非终态需求（到期 ${String(r.active && r.active.expiresAt || expiresAt).slice(0, 19).replace('T', ' ')}）`);
+      if (r.idempotent) showProxyBanner('全部代管已在生效中（幂等：未新建记录，只刷新了更新时间）', 'ok');
+      else showProxyBanner(`已开启一键代管：覆盖 ${covered.length} 条非终态需求（到期 ${String((r.active && r.active.expiresAt) || expiresAt).slice(0, 19).replace('T', ' ')}）`, 'ok');
       await updateProxyBadge();
       updateBadge();
       renderDialog();
+      return { ok: true, idempotent: Boolean(r.idempotent) };
     } catch (e) {
-      showBanner(e);
+      // 边界「异常」：弹窗关闭、行回 idle、人话横幅 + 错误码；后端零半条记录（不本地假装成功）。
+      const info = humanizeError(e);
+      state.proxyAllActive = false;
+      state.proxyAllRecord = null;
+      state.proxyAllExpiresAt = '';
+      syncProxyAllButton();
+      showProxyBanner(`开代管失败：${info.title}`, 'bad', info.code ? `（错误码 ${info.code}）` : '');
+      return { ok: false, code: info.code, message: info.title };
     }
   }
 
@@ -976,7 +1309,9 @@
     const dialog = dialogEl();
     if (!dialog) return;
     dialog.hidden = true;
-    document.body.classList.remove('or-webview-hidden');
+    // R-b28f：一键代管弹窗还开着时不要把 webview 放出来（独立合成层会盖住遮罩）。
+    const proxyMask = proxyModalEl();
+    if (!proxyMask || proxyMask.hidden) document.body.classList.remove('or-webview-hidden');
     if (pendingRows().length) sessionStorage.setItem(KEY_LATER, String(Date.now() + 30 * 60 * 1000));
   }
 
@@ -2200,15 +2535,27 @@
     }
   }
 
+  // F-b28f-3 / S3：结束代管（落 endedAt/endedBy=owner，沿用 owner:proxy-end，actor=owner 硬校验不变）。
   async function endProxy() {
-    if (!state.projectId) return;
+    if (!state.projectId) return { ok: false };
+    if (!window.workbench || typeof window.workbench.ownerProxyEnd !== 'function') {
+      showProxyBanner('当前版本没有结束代管接口，代管仍然生效中', 'bad', '（错误码 PROXY_END_API_MISSING）');
+      return { ok: false, code: 'PROXY_END_API_MISSING' };
+    }
     try {
-      await window.workbench.ownerProxyEnd({ projectId: state.projectId, actor: 'owner' });
+      const r = await window.workbench.ownerProxyEnd({ projectId: state.projectId, actor: 'owner' });
+      if (r && r.ok === false) throw new Error((r && (r.message || r.code)) || '结束代管失败');
       // B-5f62：结束代管后立刻把顶部条数、入口徽标、列表「已托管」一起刷新，不等 5 秒轮询。
       await updateProxyBadge();
       updateBadge();
       renderDialog();
-    } catch { /* ignore */ }
+      return { ok: !state.proxyAllActive, idempotent: Boolean(r && r.idempotent) };
+    } catch (e) {
+      const info = humanizeError(e);
+      showProxyBanner(`结束代管失败：${info.title}`, 'bad', info.code ? `（错误码 ${info.code}）` : '');
+      await updateProxyBadge();
+      return { ok: false, code: info.code, message: info.title };
+    }
   }
 
   function start() {

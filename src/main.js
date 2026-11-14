@@ -9035,6 +9035,29 @@ function measureLayoutInPage() {
   if (proxyNode && proxySource === 'preview' && proxyNode.parentNode) proxyNode.parentNode.removeChild(proxyNode);
   else if (proxyNode) proxyNode.hidden = proxyWasHidden;
 
+  // R-b28f：右下浮动小面板 #side-float 的四行几何（一键代管 / 决策箱 / 团队看板 / 流程）。
+  // 四行=现有元素上的锚点，各一个（AC1）：[data-or-proxy-all] / [data-decision-box] / [data-board] / [data-flow]。
+  // 这里只量几何，不点任何按钮（点击实测在 runLayoutCheck 的 clickTest 里做）。
+  const floatPanel = document.getElementById('side-float');
+  const floatAnchors = ['[data-or-proxy-all]', '[data-decision-box]', '[data-board]', '[data-flow]'];
+  const floatAnchorCounts = floatAnchors.map((sel) => document.querySelectorAll(sel).length);
+  const floatRowNodes = floatAnchors.map((sel) => document.querySelector(sel));
+  const floatRows = floatRowNodes.map((node) => (node ? rectOf(node) : null));
+  const floatReady = Boolean(floatPanel) && floatRows.every(Boolean) && floatAnchorCounts.every((n) => n === 1);
+  const floatPanelRect = floatPanel ? rectOf(floatPanel) : null;
+  const floatGaps = [];
+  for (let i = 1; i < floatRows.length; i++) {
+    if (floatRows[i] && floatRows[i - 1]) floatGaps.push(floatRows[i].y - (floatRows[i - 1].y + floatRows[i - 1].h));
+  }
+  const floatRightEdges = floatRows.filter(Boolean).map((rect) => rect.x + rect.w);
+  const floatProxyRow = floatRows[0] || null;
+  const floatDecisionRow = floatRows[1] || null;
+  const floatRowsTopDown = floatReady && floatRows.every((rect, i) => i === 0 || rect.y >= floatRows[i - 1].y + floatRows[i - 1].h);
+  const floatInViewport = floatReady && floatRows.every((rect) => rect.x >= 0 && rect.y >= 0
+    && rect.x + rect.w <= root.clientWidth && rect.y + rect.h <= root.clientHeight);
+  const titlebarRect = titlebar ? rectOf(titlebar) : null;
+  const floatUnreadNode = document.getElementById('decision-box-count');
+  const floatDecisionOpen = Boolean(floatPanel && floatPanel.querySelector('#decision-box-panel') && !floatPanel.querySelector('#decision-box-panel').hidden);
   const checks = {
     // Owner 2026-11-14 05:38 定夺：入口就放标题栏（46d9 方向），不再要求「在侧栏底部 / 不在标题栏」。
     // 现在只要求：入口在标题栏内、可见、可点、在视口内，且标题栏无重叠。
@@ -9059,6 +9082,15 @@ function measureLayoutInPage() {
     // 避免窄窗口下压住【文件夹】；更多菜单里必须有主题项，功能不丢。
     themeNotInTitlebar: !document.querySelector('#titlebar #btn-theme'),
     themeInMoreMenu: Boolean(document.querySelector('#more-menu [data-more="theme"]')),
+    // R-b28f（F-b28f-8）：浮动小面板，1280/1680/2560 三档 + zoom 90%/150% 都必须全绿。
+    floatPanelInViewport: floatInViewport,
+    floatPanelRightAligned: floatReady && floatRightEdges.length === 4
+      && (Math.max(...floatRightEdges) - Math.min(...floatRightEdges)) <= 2,
+    floatPanelRowsNoOverlap: floatRowsTopDown,
+    floatPanelUniformHeight: floatReady && floatRows.every((rect) => Math.abs(rect.h - 28) <= 1),
+    floatPanelGap6: floatReady && floatGaps.length === 3 && floatGaps.every((gap) => Math.abs(gap - 6) <= 1),
+    proxyRowAboveDecisionBox: Boolean(floatProxyRow && floatDecisionRow && floatProxyRow.y + floatProxyRow.h <= floatDecisionRow.y),
+    floatPanelNotOverTitlebar: Boolean(floatPanelRect && titlebarRect && !overlap(floatPanelRect, titlebarRect)),
   };
   return {
     ok: Object.keys(checks).every((key) => checks[key]),
@@ -9076,6 +9108,20 @@ function measureLayoutInPage() {
     proxyText: proxyNode ? String(proxyNode.textContent || '').trim() : '',
     folderRect,
     boardRect,
+    // R-b28f：四行几何明细（测试/复验要能从报告里看到具体差多少，而不是只有 true/false）。
+    floatPanel: {
+      panel: floatPanelRect,
+      titlebar: titlebarRect,
+      anchorCounts: floatAnchorCounts,
+      rows: floatRows,
+      gaps: floatGaps,
+      rightEdges: floatRightEdges,
+      orderTopDown: floatRowsTopDown,
+      decisionOpen: floatDecisionOpen,
+      // AC4：未读数必须在收起态也可见（这里记录胶囊上的数字与可见性）。
+      decisionUnreadText: floatUnreadNode ? String(floatUnreadNode.textContent || '').trim() : '',
+      decisionUnreadVisible: Boolean(floatUnreadNode && floatUnreadNode.offsetParent !== null),
+    },
   };
 }
 
@@ -9236,8 +9282,74 @@ async function runLayoutCheck() {
   } catch (error) {
     zoomProbe = { ok: false, reason: String((error && error.message) || error) };
   }
+  // R-b28f AC6（产品硬条件 3：zoom 90% / 150% 也要过）：在缩放态下重跑同一套页面测量，
+  // 只断言浮动面板那 7 条（标题栏/入口的既有断言仍由上面三档覆盖），每档再拍一张截图。
+  // 组合按产品口径「三档宽度 × 两档 zoom 不必全排列」：1280@150% 与 2560@90% 各一次。
+  let zoomLayoutProbe = { ok: false, reason: '未执行', results: [] };
+  {
+    const floatCheckNames = [
+      'floatPanelInViewport', 'floatPanelRightAligned', 'floatPanelRowsNoOverlap',
+      'floatPanelUniformHeight', 'floatPanelGap6', 'proxyRowAboveDecisionBox', 'floatPanelNotOverTitlebar',
+    ];
+    let zoomAttached = false;
+    const combos = [
+      { name: '1280@150', width: 1280, height: 800, zoom: 1.5 },
+      { name: '2560@90', width: 2560, height: 1400, zoom: 0.9 },
+    ];
+    try {
+      try { win.webContents.debugger.attach('1.3'); zoomAttached = true; } catch { zoomAttached = false; }
+      const zoomBefore = readZoomPref();
+      const rows = [];
+      for (const combo of combos) {
+        try {
+          if (zoomAttached) {
+            await win.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width: combo.width, height: combo.height, deviceScaleFactor: 1, mobile: false });
+          } else {
+            win.setContentSize(combo.width, combo.height);
+          }
+          applyZoomToAllWindows(combo.zoom);
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          const metrics = await win.webContents.executeJavaScript(`(${measureLayoutInPage.toString()})()`, true);
+          const checksOf = (metrics && metrics.checks) || {};
+          const failed = floatCheckNames.filter((key) => !checksOf[key]);
+          let screenshot = '';
+          if (zoomAttached) {
+            try {
+              const shot = await win.webContents.debugger.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
+              screenshot = path.join(outDir, `layout-zoom-${combo.name}.png`);
+              fs.writeFileSync(screenshot, Buffer.from(shot.data, 'base64'));
+            } catch (shotError) { screenshot = ''; }
+          }
+          rows.push({
+            name: combo.name, width: combo.width, height: combo.height, zoom: combo.zoom,
+            zoomFactor: Math.round(win.webContents.getZoomFactor() * 100) / 100,
+            failed,
+            checks: floatCheckNames.reduce((acc, key) => { acc[key] = Boolean(checksOf[key]); return acc; }, {}),
+            floatPanel: (metrics && metrics.floatPanel) || null,
+            viewport: (metrics && metrics.viewport) || null,
+            screenshot,
+          });
+        } catch (error) {
+          rows.push({ name: combo.name, width: combo.width, height: combo.height, zoom: combo.zoom, failed: floatCheckNames.slice(), error: String((error && error.message) || error) });
+        }
+      }
+      applyZoomToAllWindows(zoomBefore);
+      zoomLayoutProbe = {
+        ok: rows.length === combos.length && rows.every((row) => !row.error && row.failed.length === 0),
+        results: rows,
+      };
+    } catch (error) {
+      zoomLayoutProbe = { ok: false, reason: String((error && error.message) || error), results: [] };
+    } finally {
+      if (zoomAttached) {
+        try { await win.webContents.debugger.sendCommand('Emulation.clearDeviceMetricsOverride'); } catch { /* ignore */ }
+        try { win.webContents.debugger.detach(); } catch { /* ignore */ }
+      }
+    }
+  }
   const report = {
-    ok: results.every((row) => Boolean(row.metrics && row.metrics.ok)) && Boolean(clickTest.ok) && Boolean(zoomProbe.ok) && Boolean(windowFit.fits),
+    ok: results.every((row) => Boolean(row.metrics && row.metrics.ok)) && Boolean(clickTest.ok)
+      && Boolean(zoomProbe.ok) && Boolean(zoomLayoutProbe.ok) && Boolean(windowFit.fits),
     display: displayInfo,
     initialWindow,
     windowFit,
@@ -9250,6 +9362,7 @@ async function runLayoutCheck() {
     results,
     clickTest,
     zoomProbe,
+    zoomLayoutProbe,
   };
   const reportPath = path.join(outDir, 'layout-report.json');
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');

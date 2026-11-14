@@ -625,35 +625,48 @@
     </div>
   </div>
 
-  <!-- Owner 2026-11-14 13:15 定：决策箱主入口 = 主界面右下角【团队看板】按钮正上方的 fixed 浮层；
-       默认收起成小胶囊「决策箱 N」，点开展开列表；团队台抽屉保留作次入口。 -->
-  <section id="decision-box" class="decision-float" data-unread="0" data-open="0" data-total="0" data-state="collapsed" aria-label="Owner 决策箱">
-    <button id="decision-box-pill" class="decision-pill" type="button" aria-expanded="false" title="需要你拍板的事（点开逐条回执）">
-      <span class="decision-pill-ico" aria-hidden="true">◆</span>
-      <span class="decision-pill-text">决策箱</span>
-      <b id="decision-box-count" class="decision-pill-count" data-unread="0">0</b>
+  <!-- R-20261115-061249-b28f（本条取代 R-7849 F-7849-1 的入口落点：评审弹窗底部 → 右下浮动组）：
+       右下四个入口收进唯一父容器 #side-float，自上而下固定 一键代管 → 决策箱 → 团队看板 → 流程。
+       容器只负责定位（right:16px / bottom:14px，≤980px 时 right:12px）与 6px 行间距，本身无背景无边框；
+       行样式统一在 style.css 的 .side-float-row（28px 高、圆角 999px、字号 10.5px、图标 14×14）。
+       锚点（四个各一个）：data-or-proxy-all（scope=all 一键代管，沿用 7849 旧锚点，不新造 proxy-once）
+       / data-decision-box / data-board / data-flow（挂在现有元素上，不造新元素）。
+       原三个入口各自 fixed 的定位样式已删除（.flow-launcher / .board-launcher / .decision-float）。 -->
+  <div id="side-float" class="side-float-panel" aria-label="右下浮动入口（一键代管 / 决策箱 / 团队看板 / 流程）">
+    <button id="proxy-all-launcher" class="side-float-row" type="button" data-or-proxy-all="1" data-proxy-all-state="idle" data-proxy-state="idle" aria-expanded="false" aria-label="一键代管：把评审、验收与决策箱回执的拍板权交给 PM（默认 8 小时，随时可结束）" title="一键代管：点一下先看权限说明，确认后把评审 / 验收 / 决策箱回执的拍板权交给 PM（默认 8 小时，随时可结束）">
+      <span class="side-float-ico" aria-hidden="true">◎</span>
+      <span class="side-float-text" data-proxy-label>一键代管</span>
     </button>
-    <div id="decision-box-panel" class="decision-panel" hidden>
-      <header class="decision-panel-head">
-        <b>Owner 决策箱</b>
-        <span id="decision-box-unread" class="badge muted-badge" data-unread="0">待决 0</span>
-        <button id="decision-box-close" class="decision-close" type="button" title="收起">×</button>
-      </header>
-      <div id="decision-box-list" class="decision-panel-body">
-        <div class="empty-row">还没读取决策箱。</div>
+    <!-- 决策箱主入口（Owner 2026-11-14 13:15 定）：默认收起成小胶囊「决策箱 N」，点开展开列表；
+         团队台抽屉保留作次入口。面板向上展开，锚在此容器（不随行高挤压其它三行）。 -->
+    <section id="decision-box" class="decision-float" data-unread="0" data-open="0" data-total="0" data-state="collapsed" aria-label="Owner 决策箱">
+      <button id="decision-box-pill" class="decision-pill side-float-row" type="button" data-decision-box="1" aria-expanded="false" aria-label="决策箱：打开需要你拍板的事" title="需要你拍板的事（点开逐条回执）">
+        <span class="decision-pill-ico" aria-hidden="true">◆</span>
+        <span class="decision-pill-text">决策箱</span>
+        <b id="decision-box-count" class="decision-pill-count" data-unread="0">0</b>
+      </button>
+      <div id="decision-box-panel" class="decision-panel" hidden>
+        <header class="decision-panel-head">
+          <b>Owner 决策箱</b>
+          <span id="decision-box-unread" class="badge muted-badge" data-unread="0">待决 0</span>
+          <button id="decision-box-close" class="decision-close" type="button" title="收起">×</button>
+        </header>
+        <div id="decision-box-list" class="decision-panel-body">
+          <div class="empty-row">还没读取决策箱。</div>
+        </div>
+        <!-- Owner 2026-11-14 13:55：不要批量勾选（一条一条点），底部批量条已移除；每条自己的红字提示在条目内。 -->
       </div>
-      <!-- Owner 2026-11-14 13:55：不要批量勾选（一条一条点），底部批量条已移除；每条自己的红字提示在条目内。 -->
-    </div>
-  </section>
+    </section>
 
-  <button id="board-launcher" class="flow-launcher board-launcher" type="button" title="团队看板浮窗（可打开/刷新/折叠/切看板项目）" aria-expanded="false">
-    <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.6" width="11.6" height="10.8" rx="1.4"/><path d="M6.2 2.6v10.8M2.2 6.4h11.6"/></svg>
-    <span>团队看板</span>
-  </button>
-  <button id="flow-launcher" class="flow-launcher" type="button" title="项目流程图（实时高亮当前阶段）" aria-expanded="false">
-    <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.7"/><path d="M10.5 5.5 9.1 9.1 5.5 10.5 6.9 6.9z"/></svg>
-    <span>流程</span>
-  </button>
+    <button id="board-launcher" class="flow-launcher board-launcher side-float-row" type="button" data-board="1" title="团队看板浮窗（可打开/刷新/折叠/切看板项目）" aria-expanded="false" aria-label="团队看板：打开团队看板浮窗（可刷新/折叠/切看板项目）">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.6" width="11.6" height="10.8" rx="1.4"/><path d="M6.2 2.6v10.8M2.2 6.4h11.6"/></svg>
+      <span>团队看板</span>
+    </button>
+    <button id="flow-launcher" class="flow-launcher side-float-row" type="button" data-flow="1" title="项目流程图（实时高亮当前阶段）" aria-expanded="false" aria-label="流程：打开项目流程图（实时高亮当前阶段）">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.7"/><path d="M10.5 5.5 9.1 9.1 5.5 10.5 6.9 6.9z"/></svg>
+      <span>流程</span>
+    </button>
+  </div>
   <section id="flow-panel" class="flow-panel" hidden aria-label="项目流程图">
     <header id="flow-drag" class="flow-panel-head">
       <div><b>项目流程</b><span id="flow-project">—</span></div>
