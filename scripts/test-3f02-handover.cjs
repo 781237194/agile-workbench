@@ -54,6 +54,11 @@ check('④ 含未闭环/遗留段', text.includes('【未闭环事项】') && te
   check('⑥ 优先级列表按档位升序', rows.length > 0 && JSON.stringify(tiers) === JSON.stringify([...tiers].sort((a, b) => a - b)), tiers);
   check('⑥ 每行带状态/在途/需准备', rows.every((r) => r.state && Number.isFinite(r.inflight) && typeof r.needPrep === 'boolean'), rows.slice(0, 2));
 
+  // ⑦ 增量：20秒摘要 / 代管状态 / 换人原因字段 / why+blockedBy
+  check('⑦ 含【20秒摘要】三行开头', text.includes('【20秒摘要】'), text.slice(0, 120));
+  check('⑦ 【你是谁】含代管状态与换人原因', /【你是谁】[\s\S]*代管：/.test(text) && /换人原因：/.test(text), text.slice(0, 200));
+  check('⑦ handoverMeta 带 handoffReason{kind,by,at,note}', Boolean(h.handoffReason && h.handoffReason.kind && h.handoffReason.by && h.handoffReason.at && h.handoffReason.note !== undefined), h.handoffReason);
+  check('⑦ 在途任务带 why（及可选 blockedBy）', /【在途任务】[^\n]*why=/.test(text) || text.includes('【在途任务】无'), text.slice(0, 200));
   const passed2 = results.filter((r) => r.ok).length;
   const failed2 = results.filter((r) => !r.ok).length;
   console.log(`\nB-3f02 断言：${passed2}/${results.length} PASS${failed2 ? `，${failed2} FAIL` : ''}`);

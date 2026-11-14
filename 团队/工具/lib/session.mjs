@@ -946,9 +946,41 @@ export function buildHandover({ projectName, role, sessionId = '' }) {
   lines.push(`=== 接任包 · ${ROLE_NAMES[role] || role} · ${name} ===`);
   // B-3f02（设计口径 v1）：6 小节按标题机械检查——在途任务/未闭环事项/最近决策/建议下一步 缺失即拒 rotate；
   // 遗留问题与坑缺失只标红（文末须写「无已知坑」）；总长 ≤2KB。
-  lines.push(`【你是谁】${ROLE_NAMES[role] || role} ｜ 项目 ${name}（${mode}）｜ 换人：${rot ? `${rot.from || '(无)'} → ${rot.to}（${rot.at}，${rot.reason || '未写原因'}）` : (sessionId ? `当前会话 ${sessionId}` : '无轮换记录')}`);
-  const pending = tasks.slice(0, 5);
-  lines.push(`【在途任务】${pending.length ? pending.map((t) => `${t.id} ${t.status}${t.owner ? '/' + t.owner : ''} ${truncate(t.title, 24)}`).join('；') : '无'}${tasks.length > 5 ? `（另有 ${tasks.length - 5} 条见工作流）` : ''}`);
+  const handoffReason = {
+    kind: rot ? 'rotate' : 'manual',
+    by: rot ? String(rot.startedBy || rot.by || 'owner') : 'owner',
+    at: rot ? String(rot.at || '') : nowIso(),
+    note: truncate(rot ? String(rot.reason || '常规轮换') : '手工初始化（无轮换记录）', 60),
+  };
+  const proxyActive = (() => {
+    try {
+      const file = path.join(projectStatePaths(name).dir, '评审代管.json');
+      const records = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')).records || [];
+      return records.filter((r) => !r.endedAt && (!r.expiresAt || Date.parse(r.expiresAt) > Date.now()));
+    } catch { return []; }
+  })();
+  const proxyText = proxyActive.length
+    ? `active（${proxyActive.length} 条：${proxyActive.slice(0, 2).map((r) => `${r.requirementId}/${r.scope}`).join('、')}）`
+    : '未开启';
+  const whyOf = (t) => {
+    const st = String(t.requirementStatus || '');
+    if (['test_done', 'dev_done'].includes(st) && !(t.requirementDecisions || []).length) return { why: 'owner_gate', blockedBy: 'Owner 决定', score: 0, dueMs: Infinity, prio: 0 };
+    if (String(t.status || '') === 'working') return { why: 'chain_block', blockedBy: '等回执/等测试', score: 1, dueMs: Infinity, prio: 2 };
+    const dueMs = Date.parse(String(t.due || ''));
+    const prio = ({ P0: 0, P1: 1, P2: 2, P3: 3 })[String(t.priority || 'P2')] ?? 2;
+    if (Number.isFinite(dueMs)) return { why: 'due', blockedBy: '', score: 2, dueMs, prio };
+    return { why: 'priority', blockedBy: '', score: 3, dueMs: Infinity, prio };
+  };
+  const ordered = [...tasks].sort((a, b) => {
+    const ra = whyOf(a); const rb = whyOf(b);
+    return ra.score - rb.score || ra.dueMs - rb.dueMs || ra.prio - rb.prio || String(a.id).localeCompare(String(b.id));
+  });
+  const top1 = ordered[0];
+  lines.push(`=== 接任包 · ${ROLE_NAMES[role] || role} · ${name} ===`);
+  lines.push(`【20秒摘要】你是${ROLE_NAMES[role] || role}（${name}，${mode}）；最急：${top1 ? `${top1.id} ${truncate(top1.title, 20)}（${whyOf(top1).why}）` : '无在办任务'}；第一句话：先 boot 再读交接包，别立刻派单。`);
+  lines.push(`【你是谁】${ROLE_NAMES[role] || role} ｜ 项目 ${name}（${mode}）｜ 代管：${proxyText} ｜ 换人原因：${handoffReason.kind}/${handoffReason.by}/${handoffReason.at}（${handoffReason.note}）`);
+  const pending = ordered.slice(0, 5);
+  lines.push(`【在途任务】${pending.length ? pending.map((t) => { const r = whyOf(t); return `${t.id} ${t.status}${t.owner ? '/' + t.owner : ''} ${truncate(t.title, 18)}（why=${r.why}${r.blockedBy ? '，blockedBy=' + r.blockedBy : ''}）`; }).join('；') : '无'}${tasks.length > 5 ? `（另有 ${tasks.length - 5} 条见工作流）` : ''}`);
   lines.push(`【未闭环事项】锁：${locks.length ? locks.map((l) => l.key).join('、') : '无'}`);
   lines.push(`【最近决策】${decisions.length ? decisions.slice(0, 3).map((d) => `[${d.at || '-'}/${d.channel || '-'}] ${truncate(d.opinion, 22)}`).join('；') : '无'}`);
   const nextSteps = pending.filter((t) => t.owner === role || !t.owner).slice(0, 3);
@@ -972,7 +1004,7 @@ export function buildHandover({ projectName, role, sessionId = '' }) {
   if (Buffer.byteLength(text, 'utf8') > HANDOVER_MAX) {
     text = text.slice(0, HANDOVER_MAX - 30).replace(/\n[^\n]*$/, '') + '\n…（接任包超 2KB，已截断）';
   }
-  return { text, bytes: Buffer.byteLength(text, 'utf8'), tasks: tasks.map((t) => t.id), locks: locks.map((l) => l.key), decisions: decisions.length, from: rot ? rot.from : '', to: rot ? rot.to : '' };
+  return { text, bytes: Buffer.byteLength(text, 'utf8'), tasks: tasks.map((t) => t.id), locks: locks.map((l) => l.key), decisions: decisions.length, handoffReason, proxyActive: proxyActive.length, from: rot ? rot.from : '', to: rot ? rot.to : '' };
 }
 
 function requireLocks() {
