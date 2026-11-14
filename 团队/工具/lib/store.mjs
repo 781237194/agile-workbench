@@ -888,15 +888,26 @@ export function taskPath(project, id) {
   return path.join(projectStatePaths(project).tasks, `${id}.json`);
 }
 
-export function createTask({ project, title, detail = '', priority, priorityBy, createdBy, owner = null, due = '', type = 'task', requirementId = '', acceptance = '', story = '' }) {
+const TASK_TYPES = new Set(['requirement', 'task', 'bug', 'chore', 'scenario-bug']);
+
+export function createTask({ project, title, detail = '', priority, priorityBy, createdBy, owner = null, due = '', type = '', requirementId = '', acceptance = '', story = '', repro = '', expected = '', actual = '', scenario = '', expectedFlow = [], actualFlow = [], blockedRoles = [] }) {
   if (!['P0', 'P1', 'P2', 'P3'].includes(priority)) fail('BAD_PRIORITY', '优先级必须是 P0/P1/P2/P3');
   if (!title) fail('EMPTY_TITLE', '任务标题不能为空');
-  if (!['requirement', 'task', 'bug', 'chore'].includes(type)) fail('BAD_TYPE', '类型必须是 requirement/task/bug/chore');
-  const id = `${type === 'requirement' ? 'R' : type === 'bug' ? 'B' : 'T'}-${stamp()}-${randomHex(2)}`;
+  // R-43ad F-43ad-1/F-43ad-6：唯一枚举写死；新单缺 type / 未知 type 一律拒建（存量历史行不回填、读取按 requirement 展示）。
+  const taskType = String(type || '').trim();
+  if (!taskType) fail('TASK_TYPE_REQUIRED', '新任务必须显式给 --type（requirement/task/bug/chore/scenario-bug）', { title });
+  if (!TASK_TYPES.has(taskType)) fail('BAD_TYPE', '类型必须是 requirement/task/bug/chore/scenario-bug', { type: taskType });
+  const isDefect = taskType === 'bug' || taskType === 'scenario-bug';
+  // F-43ad-3 / AC2：缺陷单必须带验收标准；F-43ad-4：场景缺陷必须有场景名。
+  if (isDefect && !String(acceptance || '').trim()) fail('ACCEPTANCE_REQUIRED', '缺陷单（bug/scenario-bug）建单必须带验收标准 --acceptance', { type: taskType, title });
+  if (taskType === 'scenario-bug' && !String(scenario || '').trim()) fail('SCENARIO_REQUIRED', '场景缺陷必须带 --scenario（场景名/路径）', { title });
+  if (isDefect && !String(repro || '').trim()) fail('REPRO_REQUIRED', '缺陷单必须带复现步骤 --repro', { type: taskType, title });
+  if (String(title).length > 120) fail('TITLE_TOO_LONG', '标题过长', { length: String(title).length });
+  const id = `${taskType === 'requirement' ? 'R' : isDefect ? 'B' : 'T'}-${stamp()}-${randomHex(2)}`;
   const task = {
     id,
     project,
-    type,
+    type: taskType,
     requirementId: requirementId || '',
     title: truncate(title, 120),
     detail: truncate(detail, 2000),
@@ -914,7 +925,14 @@ export function createTask({ project, title, detail = '', priority, priorityBy, 
     doneAt: null,
     evidence: '',
     rev: 1,
-    history: [{ ts: nowIso(), by: createdBy, action: 'create', note: `${type} priority=${priority}` }],
+    history: [{ ts: nowIso(), by: createdBy, action: 'create', note: `${taskType} priority=${priority}` }],
+    ...(isDefect ? { repro: truncate(repro, 1500), expected: truncate(expected, 1500), actual: truncate(actual, 1500) } : {}),
+    ...(taskType === 'scenario-bug' ? {
+      scenario: truncate(scenario, 300),
+      expectedFlow: Array.isArray(expectedFlow) ? expectedFlow.slice(0, 20) : [],
+      actualFlow: Array.isArray(actualFlow) ? actualFlow.slice(0, 20) : [],
+      blockedRoles: Array.isArray(blockedRoles) ? blockedRoles.slice(0, 10) : [],
+    } : {}),
   };
   ensureDir(path.dirname(taskPath(project, id)));
   writeJson(taskPath(project, id), task);

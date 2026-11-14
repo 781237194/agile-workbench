@@ -2694,7 +2694,7 @@ export async function cmdTask(args) {
   if (sub === 'create') {
     // R-b5fc F-4：测试人员可直接建 type=bug 的 B-* 缺陷任务（旁路不改需求状态机）；其它任务类型仍限 PM/产品/需求分析。
     const wantType = String(args.type || 'task');
-    const canCreate = ['pm', 'product', 'analyst'].includes(b.role) || (b.role === 'tester' && wantType === 'bug');
+    const canCreate = ['pm', 'product', 'analyst'].includes(b.role) || (b.role === 'tester' && (wantType === 'bug' || wantType === 'scenario-bug'));
     if (!canCreate) fail('NOT_PM', '只有 PM / 产品 / 需求分析能建任务（测试人员只能建 type=bug 的缺陷任务）');
     // 长度与引用都在写盘前校验：超限/悬空引用必须零写入，不能“任务已落盘但通知抛错”。
     const detail = String(args.detail || '');
@@ -2709,6 +2709,11 @@ export async function cmdTask(args) {
       project: b.project, title: args.title, detail, priority: args.priority,
       priorityBy: args['priority-by'] || b.role, createdBy: b.role, owner: args.owner || null, due: args.due || '',
       type: wantType, requirementId, acceptance: args.acceptance || '', story: args.story || '',
+      // R-43ad：缺陷单/场景缺陷的复现与场景字段（F-43ad-2/4）。
+      repro: args.repro || '', expected: args.expected || '', actual: args.actual || '', scenario: args.scenario || '',
+      expectedFlow: String(args['expected-flow'] || '').split(/[|,，]/).map((x) => x.trim()).filter(Boolean),
+      actualFlow: String(args['actual-flow'] || '').split(/[|,，]/).map((x) => x.trim()).filter(Boolean),
+      blockedRoles: String(args['blocked-roles'] || '').split(/[|,，]/).map((x) => x.trim()).filter(Boolean),
     });
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'task_create', project: b.project, target: task.id, note: `${task.priority} ${task.title}`, data: { task } });
     if (task.owner) {
@@ -4055,6 +4060,30 @@ export async function cmdOwner(args) {
   if (actionRaw === 'accept') {
     acceptance = record;
     task.workflow.ownerAcceptance = record;
+    // R-43ad F-43ad-3 / AC2/AC3：缺陷单（bug/scenario-bug）验收必须带测试报告，并把验收记录落到任务行 acceptanceRecord。
+    {
+      const defectTask = task && ['bug', 'scenario-bug'].includes(String(task.type || ''));
+      if (defectTask) {
+        const defectItems = parseEvidenceArg(args.evidence);
+        const defectVerdict = validatePmAcceptEvidence({ items: defectItems, projectPath: project.path });
+        const reportItem2 = defectVerdict.evidence.find((item) => String(item.kind) === 'report');
+        if (!reportItem2) {
+          fail('PM_ACCEPT_EVIDENCE_REQUIRED', '缺陷单验收必须带测试报告（含 PASS、不含 FAIL）：--evidence <报告>:report', {
+            taskId: task.id, missing: defectVerdict.missing.length ? defectVerdict.missing : [{ kind: 'report', path: '', reason: 'TEST_REPORT_REQUIRED' }],
+          });
+        }
+        const atIso = String(record.at || at || nowIso());
+        task.acceptanceRecord = {
+          status: String(decision),
+          by: proxyMode ? 'pm' : 'owner',
+          channel: proxyMode ? 'proxy' : String(args.channel || 'ui'),
+          at: atIso,
+          evidence: defectVerdict.evidence.map((item) => ({ path: item.path, sha256: item.sha256, kind: item.kind })),
+          testReport: String(reportItem2.path || ''),
+        };
+        task.workflow.acceptanceRecord = task.acceptanceRecord;
+      }
+    }
     // R-7849：PM 代验收记录落需求行（by=pm、channel=proxy，绝不写 owner）+ 需求收口自动结束代管。
     if (proxyMode) {
       const atIso = String(record.at || at || nowIso());
