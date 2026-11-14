@@ -944,19 +944,21 @@ export function buildHandover({ projectName, role, sessionId = '' }) {
   const rot = latestRotation(name, role);
   const lines = [];
   lines.push(`=== 接任包 · ${ROLE_NAMES[role] || role} · ${name} ===`);
-  // B-3f02：接任包结构化四段（新任 PM 不用问人要东西）；总长仍 ≤2KB（下游 selftest 断言）。
-  lines.push(`【我是谁】${ROLE_NAMES[role] || role} ｜ 项目 ${name}（${mode}）｜ 换人：${rot ? `${rot.from || '(无)'} → ${rot.to}（${rot.at}，${rot.reason || '未写原因'}）` : (sessionId ? `当前会话 ${sessionId}` : '无轮换记录')}`);
+  // B-3f02（设计口径 v1）：6 小节按标题机械检查——在途任务/未闭环事项/最近决策/建议下一步 缺失即拒 rotate；
+  // 遗留问题与坑缺失只标红（文末须写「无已知坑」）；总长 ≤2KB。
+  lines.push(`【你是谁】${ROLE_NAMES[role] || role} ｜ 项目 ${name}（${mode}）｜ 换人：${rot ? `${rot.from || '(无)'} → ${rot.to}（${rot.at}，${rot.reason || '未写原因'}）` : (sessionId ? `当前会话 ${sessionId}` : '无轮换记录')}`);
+  const pending = tasks.slice(0, 5);
+  lines.push(`【在途任务】${pending.length ? pending.map((t) => `${t.id} ${t.status}${t.owner ? '/' + t.owner : ''} ${truncate(t.title, 24)}`).join('；') : '无'}${tasks.length > 5 ? `（另有 ${tasks.length - 5} 条见工作流）` : ''}`);
+  lines.push(`【未闭环事项】锁：${locks.length ? locks.map((l) => l.key).join('、') : '无'}`);
+  lines.push(`【最近决策】${decisions.length ? decisions.slice(0, 3).map((d) => `[${d.at || '-'}/${d.channel || '-'}] ${truncate(d.opinion, 22)}`).join('；') : '无'}`);
+  const nextSteps = pending.filter((t) => t.owner === role || !t.owner).slice(0, 3);
+  lines.push(`【建议下一步】${nextSteps.length ? nextSteps.map((t) => `${t.id} ${truncate(t.title, 22)}`).join('；') : '按项目索引挑下一件，或等 PM 派单'}`);
   if (rot && rot.archiveDeferred) {
     const d = rot.archiveDeferred;
-    lines.push(`【遗留】ARCHIVE_DEFERRED：旧会话未冻结（在途任务 ${(d.tasks || []).length} 个${(d.locks || []).length ? `、锁 ${d.locks.length} 个` : ''}）；先闭环再归档。`);
+    lines.push(`【遗留问题与坑】ARCHIVE_DEFERRED：旧会话未冻结（在途任务 ${(d.tasks || []).length} 个${(d.locks || []).length ? `、锁 ${d.locks.length} 个` : ''}）；先闭环再归档。`);
   } else {
-    lines.push('【遗留】无（无在途交接项）');
+    lines.push('【遗留问题与坑】无已知坑');
   }
-  const pending = tasks.slice(0, 5);
-  lines.push(`【未闭环】${pending.length ? pending.map((t) => `${t.id} ${t.status}${t.owner ? '/' + t.owner : ''} ${truncate(t.title, 24)}`).join('；') : '无'}${tasks.length > 5 ? `（另有 ${tasks.length - 5} 条见工作流）` : ''}`);
-  lines.push(`【卡点】锁：${locks.length ? locks.map((l) => l.key).join('、') : '无'} ｜ 最近决定：${decisions.length ? decisions.slice(0, 3).map((d) => `[${d.channel || '-'}] ${truncate(d.opinion, 20)}`).join('；') : '无'}`);
-  const nextSteps = pending.filter((t) => t.owner === role || !t.owner).slice(0, 3);
-  lines.push(`【下一步】${nextSteps.length ? nextSteps.map((t) => `${t.id} ${truncate(t.title, 22)}`).join('；') : '按 Project 索引挑下一件，或等 PM 派单'}`);
   const hashed = mustRead.map((rel) => {
     try {
       const abs = path.join(project.path, rel);
@@ -965,7 +967,7 @@ export function buildHandover({ projectName, role, sessionId = '' }) {
     } catch { return rel; }
   });
   lines.push(`【必读】${hashed.join('、')}`);
-  lines.push('【纪律】先读必读再开工；ack=已回执 ≠ 已完成；完成要完成回执 + task done --evidence。');
+  lines.push('【纪律】第一件事先 boot 再读交接包，别立刻派单；ack=已回执 ≠ 已完成；完成要完成回执 + task done --evidence。');
   let text = lines.join('\n');
   if (Buffer.byteLength(text, 'utf8') > HANDOVER_MAX) {
     text = text.slice(0, HANDOVER_MAX - 30).replace(/\n[^\n]*$/, '') + '\n…（接任包超 2KB，已截断）';
@@ -997,6 +999,47 @@ export function handoverForBoot(projectName, role, sessionId) {
   return buildHandover({ projectName, role, sessionId });
 }
 
+const HANDOVER_REQUIRED = ['在途任务', '未闭环事项', '最近决策', '建议下一步'];
+
+/** B-3f02：接任包机械检查——4 必填小节缺失即拒 rotate；遗留问题与坑缺失只标红。 */
+export function validateHandover(text) {
+  const t = String(text || '');
+  const missingRequired = HANDOVER_REQUIRED.filter((k) => !new RegExp('【' + k + '】').test(t));
+  const emptyRequired = HANDOVER_REQUIRED.filter((k) => {
+    const m = t.match(new RegExp('【' + k + '】([^\\n]*)'));
+    return !m || !String(m[1] || '').trim();
+  });
+  const redFlags = [];
+  if (!/【遗留问题与坑】/.test(t)) redFlags.push('缺少【遗留问题与坑】小节');
+  if (!/无已知坑/.test(t)) redFlags.push('未写「无已知坑」');
+  return { ok: missingRequired.length === 0 && emptyRequired.length === 0, missingRequired, emptyRequired, redFlags };
+}
+
+/** B-3f02：换人优先级（档位 产品/需求0、测试1、开发2、PM3）× 接手状态 → 建议列表，只给建议。 */
+export function rotationPriority(projectName) {
+  const project = loadProject(projectName);
+  const roleIds = (() => { try { return projectRoleIds(project); } catch { return []; } })();
+  const tierOf = (role) => ({ product: 0, analyst: 0, tester: 1, programmer1: 2, programmer2: 2, pm: 3 })[role] ?? 9;
+  const tasks = listTasks(projectName).filter((t) => t.status !== 'done');
+  const locks = (() => { try { return requireLocks(); } catch { return []; } })();
+  const rows = roleIds.map((role) => {
+    const mine = tasks.filter((t) => String(t.owner || '') === role);
+    const roleLocks = locks.filter((l) => String(l.role || '') === role);
+    const lastActivity = [].concat(
+      mine.map((t) => String(t.doneAt || t.updatedAt || t.claimedAt || t.createdAt || '')),
+      roleLocks.map((l) => String(l.heartbeatAt || l.acquiredAt || '')),
+    ).filter(Boolean).sort().slice(-1)[0] || '';
+    const state = roleLocks.length ? '阻塞' : (mine.length ? '可交接' : '空闲');
+    const needPrep = mine.length > 3 || roleLocks.length > 0;
+    return { role, tier: tierOf(role), state, inflight: mine.length, lastActivity, needPrep, locks: roleLocks.map((l) => l.key) };
+  });
+  const stateRank = { 空闲: 0, 可交接: 1, 阻塞: 2 };
+  rows.sort((a, b) => a.tier - b.tier
+    || stateRank[a.state] - stateRank[b.state]
+    || a.inflight - b.inflight
+    || String(b.lastActivity).localeCompare(String(a.lastActivity)));
+  return rows.map((r, i) => ({ ...r, suggestOrder: i + 1, note: r.needPrep ? '需准备（在途>3 或阻塞）：只给建议，必须逐个确认' : '可直接交接' }));
+}
 // ---------- CLI ----------
 
 function out(args, human, json) {
@@ -1091,6 +1134,14 @@ export async function cmdSession(args) {
     out(args, lines.join('\n'), { ok: r.ok, ...r });
     return;
   }
+  if (action === 'priority') {
+    const rows = rotationPriority(projectName);
+    const human = ['换人优先级建议 · ' + projectName + '（只给建议，必须逐个确认）',
+      ...rows.map((r) => `${r.suggestOrder}. ${ROLE_NAMES[r.role] || r.role}（档位${r.tier}）｜${r.state}｜在途 ${r.inflight}${r.needPrep ? '｜需准备' : ''}`),
+    ].join('\n');
+    out(args, human, { ok: true, project: projectName, rows });
+    return;
+  }
   if (action === 'handover') {
     const role = String(args.role || '');
     if (!role) fail('BAD_ROLE', '需要 --role');
@@ -1101,6 +1152,14 @@ export async function cmdSession(args) {
   if (action === 'rotate') {
     const role = String(args.role || '');
     if (!role) fail('BAD_ROLE', '需要 --role');
+    // B-3f02：rotate 前机械检查接任包 6 小节；4 个必填小节缺失 → 拒 rotate（零副作用）。
+    try {
+      const pre = buildHandover({ projectName, role, sessionId: String(args.session || '') });
+      const v = validateHandover(pre.text);
+      if (!v.ok) {
+        fail('HANDOVER_INCOMPLETE', `接任包缺必填小节：${v.missingRequired.concat(v.emptyRequired).join('、')}；补齐后再 rotate`, { role, missing: v.missingRequired.concat(v.emptyRequired), redFlags: v.redFlags });
+      }
+    } catch (e) { if (e && e.code === 'HANDOVER_INCOMPLETE') throw e; /* 其它失败不阻 rotate */ }
     const dryRun = Boolean(args['dry-run']);
     const record = await rotateSession({
       projectName,

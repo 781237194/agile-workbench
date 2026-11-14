@@ -37,7 +37,7 @@ import {
 import { buildDispatchPrompt, buildNoticePrompt, buildWakeHeader, buildWakeLine, isRegisteredKind } from './dispatch.mjs';
 import { assertNoPendingSubagent, subagentAudit } from './subagent.mjs';
 import {
-  handoverForBoot, assertSessionMapConsistent, probeRoleSession, nudgeRoleBoot, consumeBootQueue,
+  handoverForBoot, validateHandover, assertSessionMapConsistent, probeRoleSession, nudgeRoleBoot, consumeBootQueue,
 } from './session.mjs';
 import { validatePmAcceptEvidence, parseEvidenceArg, validateAcceptGates } from './pm-accept-evidence.mjs';
 import { detectOptionalPlugins, optionalPluginMarks, pluginStatusLines } from './plugins.mjs';
@@ -2035,15 +2035,39 @@ export async function cmdBoot(args) {
   // 接任包：只有“当前会话正是最近一次轮换进来的新会话”才附加，避免每轮都贴。
   let handover = null;
   try { handover = handoverForBoot(projectName, role, sessionId); } catch { handover = null; }
+  // B-3f02（设计口径 v1）：新 PM 激活即注入首条启动包（六项，≤2000 字，超限截断）。
+  let startupPackage = null;
+  if (String(role) === 'pm' && handover) {
+    try {
+      const mustRead = (String(handover.text || '').match(/【必读】([^\n]*)/) || [])[1] || '';
+      const unreadList = (Array.isArray(unread) ? unread : (unread && Array.isArray(unread.items) ? unread.items : []))
+        .slice(0, 3).map((m) => `${m.id} ${String(m.subject || '').slice(0, 24)}`).join('；') || '无';
+      const unfinished = (Array.isArray(tasks) ? tasks : []).length;
+      const redFlags = (() => { try { return validateHandover(handover.text).redFlags || []; } catch { return []; } })();
+      const parts = [
+        '=== 项目经理 启动包（自动注入） ===',
+        `【1 你是谁】项目经理 ｜ 项目 ${projectName} ｜ 会话 ${sessionId || '(未绑定)'}`,
+        `【2 上一任交接包】${String(handover.text || '').replace(/\n/g, ' ⏎ ')}`,
+        ...(redFlags.length ? [`【2 标红】${redFlags.join('；')}`] : []),
+        `【3 当前局面】阶段 ${currentStatus || 'unknown'} ｜ 未闭环任务 ${unfinished} 条 ｜ 未读 ${Array.isArray(unread) ? unread.length : '—'} 条`,
+        `【4 未读邮件摘要】${unreadList}`,
+        `【5 必读文档】${mustRead || '项目铁律/项目信息/项目索引/角色卡/文件索引'}`,
+        `【6 第一件事】先 boot（node 团队\\工具\\team.mjs boot --role pm --project ${projectName}）再读完交接包，别立刻派单。`,
+      ];
+      let text = parts.join('\n');
+      if (text.length > 2000) text = text.slice(0, 1980) + '\n…（启动包超 2000 字已截断）';
+      startupPackage = text;
+    } catch { startupPackage = null; }
+  }
   if (args.json) jsonOut({
     ok: true, token: token.token, role, project: projectName, teamMode, sessionId, rulesHash: docs.rulesHash,
     bootTtlMinutes,
     docHashes: docs.hashes, read: bootRead, briefing, unread, tasks, proposals, grants,
     dispatchQueue: bootPump,
     bootQueue,
-    handover: handover ? handover.text : null, handoverMeta: handover,
+    handover: handover ? handover.text : null, handoverMeta: handover, startupPackage,
   });
-  else textOut(handover ? `${briefing}\n\n${handover.text}` : briefing);
+  else textOut(startupPackage ? `${startupPackage}\n\n${briefing}` : (handover ? `${briefing}\n\n${handover.text}` : briefing));
 }
 
 // ========== 消息 ==========

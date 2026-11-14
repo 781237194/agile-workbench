@@ -29,12 +29,33 @@ run(['project', 'add', '--name', PROJECT, '--team-mode', 'fast', '--json']);
 run(['boot', '--role', 'pm', '--project', PROJECT, '--session', 's-pm', '--json']);
 const h = run(['session', 'handover', '--role', 'pm', '--project', PROJECT, '--json']);
 const text = String(h.text || h.handover || '');
-check('① 接任包含四段标题', ['【我是谁】', '【未闭环】', '【下一步】', '【必读】'].every((k) => text.includes(k)) || text.length > 0, text.slice(0, 120));
+const SIX = ['【你是谁】', '【在途任务】', '【未闭环事项】', '【最近决策】', '【建议下一步】', '【遗留问题与坑】'];
+check('① 接任包六小节齐全', SIX.every((k) => text.includes(k)), SIX.filter((k) => !text.includes(k)));
+check('① 遗留段空时写「无已知坑」', text.includes('无已知坑') || text.includes('ARCHIVE_DEFERRED'), text.slice(0, 160));
 check('② 必读清单带 12 位 hash', /【必读】[^\n]*#[0-9a-f]{12}/.test(text), text.slice(0, 200));
 check('③ 接任包 ≤2KB', Buffer.byteLength(text, 'utf8') <= 2048, Buffer.byteLength(text, 'utf8'));
-check('④ 含卡点/遗留段（可空但字段在）', text.includes('【卡点】') && (text.includes('【遗留】') || text.length > 0), text.slice(0, 120));
+check('④ 含未闭环/遗留段', text.includes('【未闭环事项】') && text.includes('【遗留问题与坑】'), text.slice(0, 120));
 
-const passed = results.filter((r) => r.ok).length;
-const failed = results.filter((r) => !r.ok).length;
-console.log(`\nB-3f02 断言：${passed}/${results.length} PASS${failed ? `，${failed} FAIL` : ''}`);
-fs.writeFileSync(path.join(SB, 'run-b-3f02.json'), JSON.stringify({ passed, failed, results }, null, 2) + '\n', 'utf8');
+// ⑤ 机械检查：缺必填小节 → 拒；缺遗留坑 → 只标红
+(async () => {
+  const lib = await import('file:///' + path.join(TEAM_ROOT, '工具', 'lib', 'session.mjs').replace(/\\/g, '/'));
+  const broken = '【你是谁】x\n【在途任务】无\n【最近决策】无\n【建议下一步】无\n【遗留问题与坑】无已知坑';
+  const v1 = lib.validateHandover(broken);
+  check('⑤ 缺【未闭环事项】→ missingRequired 命中', v1.ok === false && v1.missingRequired.includes('未闭环事项'), v1.missingRequired);
+  const broken2 = '【你是谁】x\n【在途任务】无\n【未闭环事项】无\n【最近决策】无\n【建议下一步】无';
+  const v2 = lib.validateHandover(broken2);
+  check('⑤ 缺【遗留问题与坑】→ 只标红不拒', v2.ok === true && v2.redFlags.length > 0, { ok: v2.ok, redFlags: v2.redFlags });
+  check('⑤ 完整接任包 → ok=true', lib.validateHandover(text).ok === true, lib.validateHandover(text));
+
+  // ⑥ 换人优先级：档位升序 + 状态/在途/需准备字段
+  const pri = run(['session', 'priority', '--project', PROJECT, '--json']);
+  const rows = pri.rows || [];
+  const tiers = rows.map((r) => r.tier);
+  check('⑥ 优先级列表按档位升序', rows.length > 0 && JSON.stringify(tiers) === JSON.stringify([...tiers].sort((a, b) => a - b)), tiers);
+  check('⑥ 每行带状态/在途/需准备', rows.every((r) => r.state && Number.isFinite(r.inflight) && typeof r.needPrep === 'boolean'), rows.slice(0, 2));
+
+  const passed2 = results.filter((r) => r.ok).length;
+  const failed2 = results.filter((r) => !r.ok).length;
+  console.log(`\nB-3f02 断言：${passed2}/${results.length} PASS${failed2 ? `，${failed2} FAIL` : ''}`);
+  fs.writeFileSync(path.join(SB, 'run-b-3f02.json'), JSON.stringify({ passed: passed2, failed: failed2, results }, null, 2) + '\n', 'utf8');
+})();
