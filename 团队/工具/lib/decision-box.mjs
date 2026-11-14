@@ -151,6 +151,10 @@ export function addDecision(projectName, input = {}) {
   const by = String(input.by || 'pm');
   // Owner 09:10：需要 Owner 决策的（含验收）由路由守护以 by=system 自动入箱；CLI 仍只允许 PM。
   if (!['pm', 'system'].includes(by)) fail('DECISION_BOX_FORBIDDEN', '只有 PM（或系统）能把条目放进决策箱', { by });
+  // R-e717 F-1 / F-1b / F-2：范围（需求未收口拦截）、语义（评审/验收动作拦截）、文案（禁内部代号）。
+  assertDecisionScope(projectName, { source, title });
+  assertNotReviewAction({ title, summary, question, options });
+  assertDecisionCopyHuman({ title, summary, question });
 
   return withDecisionBoxLock(projectName, () => {
     const read = readDecisionBox(projectName);
@@ -179,7 +183,15 @@ export function addDecision(projectName, input = {}) {
 export function listDecisionBox(projectName, { includeArchived = false } = {}) {
   const read = readDecisionBox(projectName);
   const box = read.box;
-  const items = box.items.filter((row) => includeArchived || String(row.status) !== 'archived');
+  // R-e717 F-2：历史条目渲染时把内部代号换成需求名（认不出的原样保留并标「（未识别）」），只改展示不改存储。
+  const items = box.items
+    .filter((row) => includeArchived || String(row.status) !== 'archived')
+    .map((row) => ({
+      ...row,
+      title: humanizeDecisionText(projectName, row.title),
+      summary: humanizeDecisionText(projectName, row.summary),
+      question: humanizeDecisionText(projectName, row.question),
+    }));
   const open = items.filter((row) => String(row.status) === 'open');
   const unread = open.filter((row) => !row.readAt);
   return {
@@ -480,4 +492,113 @@ export async function acknowledgeDecisions(projectName, input = {}) {
   });
   const wake = await wakeDecisionRecipient(projectName, message);
   return { ...acked, wake, counts: decisionCounts(projectName) };
+}
+
+// ---------- R-e717（团队工具侧）：决策箱范围 / 语义 / 文案 ----------
+//
+// F-1：来源是「需求」的条目，需求未收口一律拦截（approved 也拦）；唯一放行=收口后复盘（title 以「复盘」开头）。
+// F-1b：实质是评审结论/验收动作的条目（意图词或门禁选项）拦截——评审去评审弹窗、验收去顶部【验】。
+// F-2：title/summary/question 不得带内部代号/阶段名；历史条目渲染时把代号换成需求名，未知标「（未识别）」。
+export const DECISION_CLOSED_STATUSES = ['accepted', 'terminated', 'rejected'];
+const DECISION_CLOSED_SET = new Set(DECISION_CLOSED_STATUSES);
+const DECISION_CODE_RE = /[RBDSM]-\d{8}(?:-\d{6})?-[0-9a-f]{4}(?![0-9a-f])/gi;
+const DECISION_STAGE_RE = /\b(?:test_done|dev_done|approved|accepted|owner_review|ready|rejected|terminated)\b/gi;
+const DECISION_INTENT_RE = /(通过|打回|驳回|验收|批准|approve|reject|accept)/gi;
+const DECISION_GATE_OPTIONS = new Set(['通过', '打回', '驳回', '验收通过', '验收不通过', '同意', '不同意']);
+
+/** 读工作流里的需求行（只读；格式坏了按找不到处理，不让决策箱因此写不出来）。 */
+export function findRequirementRow(projectName, requirementId) {
+  const id = String(requirementId || '').trim();
+  if (!id) return null;
+  try {
+    const file = path.join(projectStatePaths(projectName).dir, '工作流.json');
+    if (!exists(file)) return null;
+    const raw = readJson(file, null);
+    const reqs = raw && raw.requirements;
+    if (!reqs) return null;
+    const rows = Array.isArray(reqs) ? reqs : Object.values(reqs);
+    return rows.find((row) => row && String(row.id || '') === id) || null;
+  } catch { return null; }
+}
+
+/** 需求的人话名字：工作流 title/name 优先，其次 需求/ 目录里文档名去掉 id 前缀。 */
+export function requirementDisplayName(projectName, requirementId) {
+  const id = String(requirementId || '').trim();
+  if (!id) return '';
+  const row = findRequirementRow(projectName, id);
+  const fromRow = row && String(row.title || row.name || '').trim();
+  if (fromRow) return fromRow;
+  try {
+    const project = loadProject(projectName);
+    const dir = path.join(String(project.path || ''), '需求');
+    const hit = fs.readdirSync(dir).find((name) => name.toLowerCase().startsWith(id.toLowerCase()) && name.endsWith('.md'));
+    if (hit) {
+      const rest = hit.replace(/\.md$/i, '').slice(id.length).replace(/^[-_]/, '').trim();
+      if (rest) return rest;
+    }
+  } catch { /* 目录不存在/不可读：走"未识别" */ }
+  return '';
+}
+
+/** F-2 历史兜底：把文案里的代号/简写换成需求名；认不出的原样保留并标「（未识别）」。 */
+export function humanizeDecisionText(projectName, text) {
+  const src = String(text || '');
+  if (!src) return src;
+  return src.replace(DECISION_CODE_RE, (token) => {
+    const name = requirementDisplayName(projectName, token);
+    return name ? name : `${token}（未识别）`;
+  });
+}
+
+/** F-1：来源需求的条目必须已收口，且只有「复盘…」能进箱。 */
+export function assertDecisionScope(projectName, { source, title } = {}) {
+  const kind = String((source && source.kind) || '');
+  if (kind !== 'requirement') return null;
+  const ref = String((source && source.ref) || '').trim();
+  const name = String(title || '').trim();
+  const row = findRequirementRow(projectName, ref);
+  const status = row ? String(row.status || '') : '';
+  if (!row) {
+    fail('DECISION_SCOPE_FORBIDDEN', `来源需求 ${ref} 不在工作流里（无法确认已收口）；这条在评审/开发/验收流程中，请到对应列表处理`, { requirementId: ref, status: '', allowed: false });
+  }
+  if (!DECISION_CLOSED_SET.has(status)) {
+    fail('DECISION_SCOPE_FORBIDDEN', `来源需求 ${ref} 当前状态 ${status || '(无)'}；这条在评审/开发/验收流程中，请到对应列表处理（评审弹窗 / 顶部【验】）；收口后复盘请把标题写成「复盘…」再提交`, { requirementId: ref, status, allowed: false });
+  }
+  if (!/^复盘/.test(name)) {
+    fail('DECISION_SCOPE_FORBIDDEN', `来源需求 ${ref} 已收口，但只有标题以「复盘」开头的条目可以进决策箱；其他内容请到需求/评审/验收列表处理`, { requirementId: ref, status, allowed: false });
+  }
+  return { requirementId: ref, status, allowed: true };
+}
+
+/** F-1b：评审结论/验收动作不得进决策箱（双保险，对任何来源都生效）。 */
+export function assertNotReviewAction({ title, summary, question, options } = {}) {
+  const text = [title, summary, question].filter(Boolean).join(' ');
+  DECISION_INTENT_RE.lastIndex = 0;
+  const hits = [...new Set(String(text).match(DECISION_INTENT_RE) || [])];
+  const list = Array.isArray(options) ? options.map((row) => String(row).trim()).filter(Boolean) : [];
+  const gateOptions = list.filter((row) => DECISION_GATE_OPTIONS.has(row));
+  const allGate = list.length >= 2 && gateOptions.length === list.length;
+  if (hits.length || allGate) {
+    fail('DECISION_REVIEW_ACTION_FORBIDDEN', '这看起来是评审/验收动作：评审请到评审弹窗、验收请到顶部【验】。决策箱只放非评审类的拍板（取舍/优先级/口径/阻塞）', { hits, options: list, allGate });
+  }
+}
+
+/** F-2：文案里不得带内部代号（完整 id / 四段简写）或阶段名。 */
+export function assertDecisionCopyHuman({ title, summary, question } = {}) {
+  const fields = { title, summary, question };
+  const bad = [];
+  for (const [field, value] of Object.entries(fields)) {
+    const text = String(value || '');
+    if (!text) continue;
+    DECISION_CODE_RE.lastIndex = 0;
+    DECISION_STAGE_RE.lastIndex = 0;
+    const tokens = [...new Set([
+      ...(text.match(DECISION_CODE_RE) || []),
+      ...(text.match(DECISION_STAGE_RE) || []),
+    ])];
+    if (tokens.length) bad.push({ field, tokens });
+  }
+  if (bad.length) {
+    fail('DECISION_COPY_CODE_NAME', '文案里带了内部代号/阶段名，请换成需求名或人话（例：把 R-20261114-141252-e717 换成“决策箱产品级收口”）', { hits: bad });
+  }
 }
