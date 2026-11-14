@@ -5427,6 +5427,43 @@ function legacyEvidenceDocChip(doc) {
   return `<span class="legacy-evidence-doc ${state}" title="${esc(doc.path)} · ${doc.exists ? '存在' : '缺失'}${doc.changed ? ' · boot 后已变更' : ''}">${esc(doc.label)} ${mark} ${hash}</span>`;
 }
 
+function legacyPanelOldRed() {  // B-2e5 自检用：仅用于「前/后对照」截图（旧口径：未 boot/过期/无简报哈希都算红）。
+  return typeof window !== 'undefined' && Boolean(window.__AWB_PANEL_OLD_RED);
+}
+
+/**
+ * B-2e5（Owner 2026-11-15）：终止文案只在 phase=terminated 时出现，且必须带原因。
+ * 不再用「工作流已终止」描述未终止的项目状态。
+ */
+function legacyTerminateReasonText() {
+  const wf = legacyWorkflow() || {};
+  if (String(wf.phase || '') !== 'terminated') return '';
+  const reason = String(wf.terminateReason || wf.terminatedReason || wf.reason || '').trim();
+  return reason ? `已终止（原因：${reason}）` : '已终止（未记录原因）';
+}
+
+/** AC4：面板里可点的修复入口（红/警示项点一下直达对应区域）。 */
+function bindLegacyFixLinks(root) {
+  if (!root) return;
+  root.querySelectorAll('[data-legacy-fix]:not([data-bound])').forEach((node) => {
+    node.setAttribute('data-bound', '1');
+    node.addEventListener('click', () => {
+      const checks = root.querySelector('.legacy-evidence-checks');
+      if (checks && checks.scrollIntoView) checks.scrollIntoView({ block: 'center' });
+      node.classList.add('flash');
+      if (typeof toast === 'function') toast('哈希未命中详情：看下方每个角色的「文档哈希」标记（命中/未记录）', 'warn');
+    });
+  });
+  root.querySelectorAll('[data-legacy-terminated]:not([data-bound])').forEach((node) => {
+    node.setAttribute('data-bound', '1');
+    node.addEventListener('click', () => {
+      const target = document.getElementById('legacy-flow-terminate');
+      if (target && target.scrollIntoView) target.scrollIntoView({ block: 'center' });
+      if (typeof toast === 'function') toast('项目已终止：原因写在 工作流.json（phase=terminated / terminateReason）。要恢复请新建工作区', 'warn');
+    });
+  });
+}
+
 function legacyBootEvidenceMarkup() {
   const roles = teamRoles(activeProject());
   if (!roles.length) return '<div class="empty-row">当前团队模式没有角色定义。</div>';
@@ -5439,22 +5476,33 @@ function legacyBootEvidenceMarkup() {
     if (failed.length) hashFailedRoles += 1;
     if (missing.length) hashIncompleteRoles += 1;
     // 后端 briefing 说 boot 完成，但记录里的令牌哈希有未命中/未记录项：不冒充“校验通过”。
+    const oldRed = legacyPanelOldRed();
     const label = failed.length ? `boot 完成 · 哈希未命中（${failed.join('、')}）`
       : (missing.length ? `boot 完成 · 旧记录缺哈希项（${missing.join('、')}）` : ev.boot.label);
-    const cls = failed.length ? 'warn' : (ev.boot.ready ? 'ok' : (ev.boot.expired ? 'bad' : (ev.boot.booted || ev.mem ? 'warn' : 'bad')));
-    const checkChips = ev.checks
-      ? LEGACY_HASH_LABELS.map(([key, name]) => {
-        const ok = ev.checks[key];
-        const text = ok === true ? '命中' : (ok === false ? '未命中' : '未记录');
-        return `<span class="legacy-evidence-check ${ok === true ? 'ok' : (ok === false ? 'bad' : 'muted')}" title="旧启动令牌哈希校验">${esc(name)} ${text}</span>`;
-      }).join('')
-      : '<span class="legacy-evidence-check muted">没有 boot 返回或工作流 boots 记录，无法核对令牌哈希</span>';
-    const tokenLine = ev.bootRecord
-      ? `<span>令牌哈希 <code>${esc(ev.bootRecord.tokenHash || '未记录')}</code></span><span>旧令牌文件 ${ev.bootRecord.legacyTokenFound ? '存在' : '<b class="bad">未找到</b>'}</span><span>会话 <code>${esc(String(ev.bootRecord.sessionId || '').slice(0, 12) || '未记录')}</code></span>`
-      : (ev.briefingHash ? `<span>简报哈希 <code>${esc(legacyHashShort(ev.briefingHash))}</code></span>` : '<span class="bad">没有 boot 返回与简报哈希</span>');
+    // B-2e5：未 boot / 已过期 / 无简报哈希 都不再算红（只作记录，不拦推进）；只有哈希「未命中」是真问题。
+    const cls = failed.length ? 'warn'
+      : (oldRed ? (ev.boot.ready ? 'ok' : (ev.boot.expired ? 'bad' : (ev.boot.booted || ev.mem ? 'warn' : 'bad')))
+        : (ev.boot.ready ? 'ok' : 'muted'));
+    const checkChips = oldRed
+      ? (ev.checks
+        ? LEGACY_HASH_LABELS.map(([key, name]) => {
+          const ok = ev.checks[key];
+          const text = ok === true ? '命中' : (ok === false ? '未命中' : '未记录');
+          return `<span class="legacy-evidence-check ${ok === true ? 'ok' : (ok === false ? 'bad' : 'muted')}" title="旧启动令牌哈希校验">${esc(name)} ${text}</span>`;
+        }).join('')
+        : '<span class="legacy-evidence-check muted">没有 boot 返回或工作流 boots 记录，无法核对令牌哈希</span>')
+      // AC2：启动令牌哈希不再参与红项判定（只保留文档哈希证据）；文案同步清掉令牌口径。
+      : `<span class="legacy-evidence-check muted" data-legacy-token-retired="1" title="B-2e5：启动令牌/过期不再作为红项判定依据">令牌/过期：不作为门槛（已移除）</span>`;
+    const tokenLine = oldRed
+      ? (ev.bootRecord
+        ? `<span>令牌哈希 <code>${esc(ev.bootRecord.tokenHash || '未记录')}</code></span><span>旧令牌文件 ${ev.bootRecord.legacyTokenFound ? '存在' : '<b class="bad">未找到</b>'}</span><span>会话 <code>${esc(String(ev.bootRecord.sessionId || '').slice(0, 12) || '未记录')}</code></span>`
+        : (ev.briefingHash ? `<span>简报哈希 <code>${esc(legacyHashShort(ev.briefingHash))}</code></span>` : '<span class="bad">没有 boot 返回与简报哈希</span>'))
+      // AC2/AC3：简报哈希只作记录（没有也不红）；终止只在 terminated 时由 legacyTerminateReasonText 给出。
+      : `<span data-legacy-briefing-hash="1">简报哈希 ${ev.briefingHash ? `<code>${esc(legacyHashShort(ev.briefingHash))}</code>` : '未记录（不影响推进）'}</span>`
+        + (legacyTerminateReasonText() ? `<span class="bad" data-legacy-terminated="1">${esc(legacyTerminateReasonText())}</span>` : '');
     const displayRound = ev.boot.round || (ev.bootRecord && Number(ev.bootRecord.round)) || null;
     const roundText = displayRound
-      ? `<span class="${ev.boot.roundMismatch ? 'bad' : ''}">boot 轮次 ${displayRound}${ev.boot.roundMismatch ? '（当前轮次不同，需重新 boot）' : ''}</span>`
+      ? `<span class="${oldRed && ev.boot.roundMismatch ? 'bad' : 'muted'}">boot 轮次 ${displayRound}${ev.boot.roundMismatch ? '（本轮记录轮次不同，仅提示）' : ''}</span>`
       : '';
     return `<article class="legacy-evidence-card ${cls}">
       <header>
@@ -5476,7 +5524,9 @@ function legacyBootEvidenceMarkup() {
   return `<div class="legacy-evidence">
     <div class="legacy-evidence-head">
       <b>已读证据</b>
-      <span>boot 记录取自 <code>工作流.json</code>（workflow:briefing 核验 + boots 记录）；本次界面点过 boot 时追加 workflow:boot 的真实返回。文档哈希来自后端读取；没有证据就写“未记录”，不补造。${hashFailedRoles ? `<b class="bad">有 ${hashFailedRoles} 个角色的令牌哈希存在未命中项；这不是“读全”的正向证据。</b>` : ''}${hashIncompleteRoles ? `<b>有 ${hashIncompleteRoles} 个角色的旧 boot 记录缺少部分哈希项（旧版本记录），按“未记录”显示。</b>` : ''}</span>
+      <span>boot 记录取自 <code>工作流.json</code>（workflow:briefing 核验 + boots 记录）；本次界面点过 boot 时追加 workflow:boot 的真实返回。文档哈希来自后端读取；没有证据就写“未记录”，不补造。${hashFailedRoles ? (legacyPanelOldRed()
+        ? `<b class="bad">有 ${hashFailedRoles} 个角色的令牌哈希存在未命中项；这不是“读全”的正向证据。</b>`
+        : `<b class="warn" data-legacy-fix="hash:${esc('all')}" title="点这里查看文档哈希比对详情">有 ${hashFailedRoles} 个角色的文档哈希未命中（点此查看详情）</b>`) : ''}${hashIncompleteRoles ? `<b>有 ${hashIncompleteRoles} 个角色的旧 boot 记录缺少部分哈希项（旧版本记录），按“未记录”显示。</b>` : ''}</span>
     </div>
     <div class="legacy-evidence-grid">${cards}</div>
   </div>`;
@@ -6788,21 +6838,21 @@ function syncBootAllButtons() {
   const pending = teamRoles(activeProject()).filter((role) => !legacyBootFor(role.id).ready);
   const expired = teamRoles(activeProject()).filter((role) => legacyBootFor(role.id).expired);
   const terminated = Boolean(legacyUi.workflow && legacyUi.workflow.phase === 'terminated');
+  const terminateText = legacyTerminateReasonText();
   const gate = legacyActionCommandGate('boot');
   const blocked = !state || !activeProject() || !legacyUi.files || legacyUi.loading
     || legacyUi.bootingAll || terminated || !pending.length || !gate.ok;
-  const pendingText = expired.length
-    ? `全队 boot（过期 ${expired.length}${pending.length > expired.length ? ' · 缺 ' + (pending.length - expired.length) : ''}）`
-    : `全队 boot（缺 ${pending.length}）`;
+  // AC2：过期不再作为门槛/提示口径（只影响“谁还没 boot”的计数），文案不再写「过期」。
+  const pendingText = `全队 boot（缺 ${pending.length}）`;
   for (const id of ['legacy-boot-all', 'roles-boot-all', 'team-boot-all']) {
     const button = document.getElementById(id);
     if (!button) continue;
     button.disabled = blocked;
     button.textContent = legacyUi.bootingAll
       ? '正在 boot…'
-      : (terminated ? '工作流已终止' : (pending.length ? pendingText : '六角色已 boot'));
+      : (terminated ? (terminateText || (legacyTerminateReasonText() || '工作流已终止')) : (pending.length ? pendingText : '六角色已 boot'));
     button.title = terminated
-      ? '工作流已终止：不再接受 boot/推进动作'
+      ? `${terminateText || (legacyTerminateReasonText() || '工作流已终止')}：不再接受 boot/推进动作`
       : (legacyUi.bootingAll
         ? '正在依次调用 workflow:boot'
         : (!gate.ok
@@ -6934,7 +6984,7 @@ function legacyGateResultMarkup() {
       <div class="legacy-gate-facts">
         <span class="${boot.allComplete ? (warn ? 'warn' : 'ok') : 'bad'}">boot/已读 ${boot.complete}/${boot.total}</span>
         <span class="${readiness.ok ? 'ok' : (readiness.pendingRead ? 'warn' : 'bad')}">${esc(readiness.label)} · 文件 ${readyCount}/${readyTotal}</span>
-        <span class="${expired ? 'bad' : 'ok'}">已过期 ${expired} 个角色</span>
+        <span class="${legacyPanelOldRed() && expired ? 'bad' : 'muted'}" data-legacy-expired-summary="1" title="B-2e5：boot 记录超 TTL 只作提示，不再作为门槛/红项">${expired ? `${expired} 个角色 boot 记录超 TTL（只提示，不拦推进）` : 'boot 记录均在 TTL 内'}</span>
         ${readiness.bootPlaceholders.length ? `<span class="bad">项目信息/铁律占位 ${readiness.bootPlaceholders.length}</span>` : '<span class="ok">项目信息/铁律已写实</span>'}
         ${overviewPlaceholder ? '<span class="warn">需求总览待首条需求</span>' : ''}
         <span class="${commandUnknown ? 'warn' : (commandGaps.length || commandUnknowns.length ? 'warn' : 'ok')}">${commandUnknown ? '旧命令 矩阵待核验' : (commandGaps.length ? '缺旧命令 ' + commandGaps.length + (commandUnknowns.length ? ' · 未核验 ' + commandUnknowns.length : '') : (commandUnknowns.length ? '旧命令 未核验 ' + commandUnknowns.length : '旧命令齐全'))}</span>
@@ -7072,12 +7122,14 @@ function renderLegacyGate(project) {
   const warn = open && (commandGaps.length > 0 || commandUnknowns.length > 0);
   const pmReady = legacyRoleReady('pm') && !terminated;
   box.innerHTML = legacyIssueMarkup() + legacyReadStepsMarkup() + legacyGateResultMarkup() + legacyLedgerMarkup() + legacyBootEvidenceMarkup();
+  // AC4：红项/警示项可点直达（哈希未命中 → 滚到证据区；已终止 → 滚到终止入口并说明原因）。
+  bindLegacyFixLinks(box);
   const badge = $('#legacy-gate-badge');
   if (badge) {
     const blocks = [];
-    if (!boot.allComplete) blocks.push(expired ? `boot 已过期 ${expired}` : '未 boot/未读');
+    if (!boot.allComplete) blocks.push('未 boot/未读');
     if (placeholderBlocked) blocks.push(`项目信息/铁律占位 ${placeholders.length}`);
-    badge.textContent = terminated ? '工作流已终止'
+    badge.textContent = terminated ? (legacyTerminateReasonText() || '工作流已终止')
       : (open
         ? (commandGaps.length
           ? `可推进 · 缺命令 ${commandGaps.length}${commandUnknowns.length ? ` · 未核验 ${commandUnknowns.length}` : ''}`
@@ -7112,11 +7164,11 @@ function renderLegacyGate(project) {
     const iterateReady = iterateGuard.ok;
     const iterateVisibleWhy = ['open-requirements', 'not-accepted', 'no-requirements', 'placeholder'].includes(iterateGuard.code)
       ? iterateGuard.reason : '';
-    const ownerCreateWhy = terminated ? '工作流已终止'
+    const ownerCreateWhy = terminated ? (legacyTerminateReasonText() || '工作流已终止')
       : (!ownerDemandGate.ok ? ownerDemandGate.reason
         : (pmReady ? '向 PM 提交需求（Owner）：owner:demand，描述 / 优先级 / 验收标准（可多条），PM 自动 boot 代办建档'
           : 'PM 未 boot；owner:demand 会由后端自动 boot PM 后代办建档'));
-    const terminateWhy = terminated ? '工作流已终止'
+    const terminateWhy = terminated ? (legacyTerminateReasonText() || '工作流已终止')
       : (!terminateGate.ok ? terminateGate.reason : (pmReady ? '终止工作流（PM）' : 'PM 未 boot/未读全；点击执行会先自动 boot，再调用 workflow:terminate'));
     const advanceWhy = open
       ? (commandGaps.length
@@ -9079,7 +9131,7 @@ function syncLegacyGlobalReqButtons(terminated) {
     button.hidden = !ownerDemandVisible;
     if (!ownerDemandVisible) return;
     button.disabled = terminated || !ownerDemandGate.ok;
-    button.title = terminated ? '工作流已终止'
+    button.title = terminated ? (legacyTerminateReasonText() || '工作流已终止')
       : (!ownerDemandGate.ok ? ownerDemandGate.reason
         : (pmReady ? '向 PM 提交需求（Owner）· owner:demand 由 PM 自动 boot 代办建档'
           : 'PM 未 boot；owner:demand 会由后端自动 boot PM 后代办建档'));
@@ -9161,7 +9213,7 @@ function renderLegacyTeamGate() {
       const commandUnknowns = commandSummary.unknown;
       if (legacyUi.briefingError) return `<b class="bad">boot 核验不可用</b><span>${esc(legacyUi.briefingError.code)} · ${esc(legacyUi.briefingError.message)}</span>`;
       if (!boot.allComplete) {
-        const expiredText = boot.expired ? `已过期 ${boot.expired} 个角色；点该行「重新 boot」或下方「全队 boot」。` : '缺哪个角色就直接点该行的 boot。';
+        const expiredText = '缺哪个角色就直接点该行的 boot（boot 记录超 TTL 只提示，不拦推进）。';
         return `<b class="bad">${boot.expired ? 'boot 已过期 · 禁止推进' : '未 boot / 未读 · 禁止推进'}</b><span>boot ${boot.complete}/${boot.total}；${expiredText}</span>`;
       }
       if (placeholders.length) {
@@ -9190,7 +9242,7 @@ function renderLegacyTeamGate() {
     const blocks = [];
     if (!boot.allComplete) blocks.push(boot.expired ? `boot 已过期 ${boot.expired}` : '未 boot/未读');
     if (placeholderBlocked) blocks.push(`项目信息/铁律占位 ${placeholders.length}`);
-    badge.textContent = terminated ? '工作流已终止'
+    badge.textContent = terminated ? (legacyTerminateReasonText() || '工作流已终止')
       : (open
         ? (commandGaps.length
           ? `可推进 · 缺命令 ${commandGaps.length}${commandUnknowns.length ? ` · 未核验 ${commandUnknowns.length}` : ''}`
@@ -10511,10 +10563,10 @@ function renderLegacyFlowExtras(p) {
       gateReasonParts.push(`<span class="legacy-action-note">闸门判定：team.mjs 返回 ${gateData.gates.size} 项${denied.length ? ' · 未满足：' + denied.map((entry) => esc(entry.gate || entry.code || entry.action)).join('、') : ' · 全部满足'}</span>`);
     }
     actions.innerHTML = `
-      <button class="primary small" type="button" id="legacy-flow-advance" ${canAdvance ? '' : 'disabled'} data-legacy-scroll="requirements" title="${canAdvance ? '跳到需求队列' : (terminated ? '工作流已终止' : (placeholders.length ? '项目信息/铁律占位：禁止推进，先写清正文' : '六角色未全部 boot/读全（或已过期）'))}">${canAdvance ? '查看本轮动作' : '禁止推进'}</button>
+      <button class="primary small" type="button" id="legacy-flow-advance" ${canAdvance ? '' : 'disabled'} data-legacy-scroll="requirements" title="${canAdvance ? '跳到需求队列' : (terminated ? (legacyTerminateReasonText() || '工作流已终止') : (placeholders.length ? '项目信息/铁律占位：禁止推进，先写清正文' : '六角色未全部 boot/读全（或已过期）'))}">${canAdvance ? '查看本轮动作' : '禁止推进'}</button>
       <button class="ghost small" type="button" id="legacy-flow-iterate" ${iterateReady ? '' : 'disabled'} data-legacy-req-action="iterate" title="${esc(iterateGuard.reason || '启动下一轮（PM）；执行前会自动补 boot')}">迭代（下一轮）</button>
-      <button class="ghost small danger" type="button" id="legacy-flow-terminate" ${terminateReady ? '' : 'disabled'} data-legacy-req-action="terminate" title="${esc(!terminateGate.ok ? terminateGate.reason : (terminated ? '工作流已终止' : (pmReady ? 'workflow:terminate（PM）' : 'PM 未 boot/未读全；点击执行会先自动 boot，再调用 workflow:terminate')))}">终止</button>
-      <button class="ghost small" type="button" data-legacy-req-action="owner-demand" ${ownerDemandVisible ? '' : 'hidden'} ${ownerDemandReady ? '' : 'disabled'} title="${esc(!ownerDemandGate.ok ? ownerDemandGate.reason : (terminated ? '工作流已终止' : '向 PM 提交需求（Owner）：owner:demand，描述 / 优先级 / 验收标准（可多条），PM 自动 boot 代办建档'))}">向 PM 提交需求（Owner）</button>
+      <button class="ghost small danger" type="button" id="legacy-flow-terminate" ${terminateReady ? '' : 'disabled'} data-legacy-req-action="terminate" title="${esc(!terminateGate.ok ? terminateGate.reason : (terminated ? (legacyTerminateReasonText() || '工作流已终止') : (pmReady ? 'workflow:terminate（PM）' : 'PM 未 boot/未读全；点击执行会先自动 boot，再调用 workflow:terminate')))}">终止</button>
+      <button class="ghost small" type="button" data-legacy-req-action="owner-demand" ${ownerDemandVisible ? '' : 'hidden'} ${ownerDemandReady ? '' : 'disabled'} title="${esc(!ownerDemandGate.ok ? ownerDemandGate.reason : (terminated ? (legacyTerminateReasonText() || '工作流已终止') : '向 PM 提交需求（Owner）：owner:demand，描述 / 优先级 / 验收标准（可多条），PM 自动 boot 代办建档'))}">向 PM 提交需求（Owner）</button>
       <button class="ghost small" type="button" data-legacy-go="docs">必读与目录</button>
       <button class="ghost small" type="button" data-open-team>团队台 / 派单</button>
       ${iterateVisibleWhy ? `<span class="legacy-action-warn">迭代不可用：${esc(iterateVisibleWhy)}</span>` : ''}
