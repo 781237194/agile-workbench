@@ -424,8 +424,11 @@ export function planForRow(row, ctx) {
       const candidates = tasksOf(id, tasks, (t) => ['task', 'bug'].includes(String(t.type || ''))
         && isCurrentRound(row, t)
         && !['done', 'rejected', 'terminated', 'cancelled'].includes(String(t.status || '')));
-      if (candidates.length) {
-        return { skip: 'already_decided', reason: 'carrier_owner_missing', alertPm: true, taskIds: candidates.map((t) => t.id).slice(0, 3) };
+      // T-5238 回归修复：只有“候选存在但 owner 为空”才是 carrier_owner_missing；
+      // 候选 owner 非空但不是程序员A/B（如 analyst）仍按 F-1⑤ 落 no_carrier_task + alertPm。
+      const ownerless = candidates.filter((t) => !String(t.owner || '').trim());
+      if (ownerless.length) {
+        return { skip: 'already_decided', reason: 'carrier_owner_missing', alertPm: true, taskIds: ownerless.map((t) => t.id).slice(0, 3) };
       }
       return { skip: 'no_carrier_task', alertPm: true };
     }

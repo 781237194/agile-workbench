@@ -68,6 +68,15 @@ const appr = [{ status: 'approved', channel: 'ui', at: '2026-11-15T00:00:00Z' }]
   const ownerless = carrier({ owner: '' });
   const p11 = planForRow(baseRow({ decisions: appr }), { tasks: [ownerless], projectPath: ROOT, mode: 'full' });
   check('⑪ 候选 owner 空 → already_decided(carrier_owner_missing)', p11.skip === 'already_decided' && p11.reason === 'carrier_owner_missing', p11);
+
+  // ⑫ T-5238：候选 owner 非空但不是程序员A/B（如 analyst）→ no_carrier_task + alertPm
+  const analystTask = carrier({ owner: 'analyst' });
+  const p12 = planForRow(baseRow({ decisions: appr }), { tasks: [analystTask], projectPath: ROOT, mode: 'full' });
+  check('⑫ 候选 owner=analyst → no_carrier_task（不是 carrier_owner_missing）', p12.skip === 'no_carrier_task' && p12.alertPm === true, p12);
+
+  // ⑬ T-5238：无候选任务 → no_carrier_task
+  const p13 = planForRow(baseRow({ decisions: appr }), { tasks: [], projectPath: ROOT, mode: 'full' });
+  check('⑬ 无候选 → no_carrier_task', p13.skip === 'no_carrier_task' && p13.alertPm === true, p13);
   const passed = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => !r.ok).length;
   console.log(`\nR-5fbd 断言：${passed}/${results.length} PASS${failed ? `，${failed} FAIL` : ''}`);
