@@ -746,7 +746,10 @@ export function findMessage(role, id) {
   for (const box of ['new', 'cur']) {
     const dir = mailBoxDir(role, box);
     if (!exists(dir)) continue;
-    for (const name of fs.readdirSync(dir)) {
+    // B-71f5：目录/文件可能在扫描瞬间被并发移走（投递、ack、自动已读三路），readdir 与单文件读取都要容错。
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch (e) { if (e.code === 'ENOENT') continue; throw e; }
+    for (const name of names) {
       if (!name.endsWith('.json')) continue;
       const file = path.join(dir, name);
       const msg = readJson(file, null);
@@ -757,7 +760,12 @@ export function findMessage(role, id) {
 }
 
 export function readMessage(role, id) {
-  let found = findMessage(role, id);
+  // B-71f5：投递瞬间消息可能在 new/ 与 cur/ 之间搬移，find 会瞬时空；短重试 3 次（每次 15ms）再判不存在。
+  let found = null;
+  for (let i = 0; i < 3 && !found; i += 1) {
+    found = findMessage(role, id);
+    if (!found && i < 2) { const until = Date.now() + 15; while (Date.now() < until) { /* busy wait */ } }
+  }
   if (!found) fail('MESSAGE_NOT_FOUND', `消息不存在：${id}`);
   let targetFile = found.file;
   if (found.box === 'new') {
@@ -771,9 +779,12 @@ export function readMessage(role, id) {
         fs.rmSync(found.file, { force: true });
         targetFile = dst;
       } else if (e.code === 'ENOENT') {
-        // B-c42e：并发（自动已读 / 别人 ack / pump 三路）会把文件从 new 移走，rename 会 ENOENT。
-        // 这时按 id 重新全局定位（new 与 cur 都查），落在哪就按哪处理——不搬回来、不报 INTERNAL。
-        found = findMessage(role, id);
+        // B-c42e / B-71f5：并发（自动已读 / 别人 ack / pump 三路）会把文件从 new 移走，rename 会 ENOENT。
+        // 按 id 重新全局定位（new 与 cur 都查），短重试 3 次（每次 15ms）避免「刚被移走」的瞬时窗口。
+        for (let i = 0; i < 3 && !found; i += 1) {
+          found = findMessage(role, id);
+          if (!found && i < 2) { const until = Date.now() + 15; while (Date.now() < until) { /* busy wait */ } }
+        }
         if (!found) fail('MESSAGE_NOT_FOUND', `消息不存在（可能已被并发移走或删除）：${id}`, { messageId: id });
         targetFile = found.file;
       } else {
