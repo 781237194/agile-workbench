@@ -12,6 +12,7 @@ import {
 } from './lib/ops.mjs';
 import { cmdBrief } from './lib/brief.mjs';
 import { cmdOwnerProxy } from './lib/owner-proxy.mjs';
+import { cmdAutoBoot } from './lib/auto-boot.mjs';
 import { cmdSubagent } from './lib/subagent.mjs';
 import { cmdSession } from './lib/session.mjs';
 import { cmdBroadcast } from './lib/broadcast.mjs';
@@ -244,6 +245,7 @@ async function main() {
     case 'init': cmdInit(args); break;
     case 'project': cmdProject(args); break;
     case 'boot': await cmdBoot(args); break;
+    case 'auto-boot': cmdAutoBoot(args); break;
     case 'send': await cmdSend(args); break;
     case 'inbox': cmdInbox(args); break;
     case 'read': cmdRead(args); break;

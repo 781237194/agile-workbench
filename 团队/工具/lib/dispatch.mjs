@@ -33,6 +33,8 @@ export const WAKE_KIND_LABEL = {
   wake_failed: '唤醒失败',
   // R-b5fc F-4：同一 B-* 缺陷重开 ≥2 次时的升级消息（路由守护发出，PM 收）；未登记类型发送前拦截。
   bug_escalation: '缺陷升级',
+  // R-bad3 F-bad3-5：自动 boot 失败告警（PM 收；未登记类型发送前拦截）。
+  boot_failed: '自动boot失败',
   // R-9db6：Owner 决策箱回执（默认静默 --no-wake；只在防长期静默兜底时才唤醒 PM）。
   owner_decision_receipt: 'Owner决策回执',
   // R-703f F-1：会话用量到提醒阈值（默认 30 万）时的提醒消息；只提醒，不自动换人。
