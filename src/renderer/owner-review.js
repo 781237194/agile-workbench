@@ -10,6 +10,8 @@
   const OR_STATE = (typeof window !== 'undefined' && window.OwnerReviewState) ? window.OwnerReviewState : null;
   // B-1358：验收前置状态（测试任务/测试报告/截图/Owner 决定）判定收在 accept-prereq.js。
   const AP = (typeof window !== 'undefined' && window.AcceptPrereq) ? window.AcceptPrereq : null;
+  // R-5550：AC 结构化解析/校验（正文 AC 块 → 卡片；缺项 → 显式标缺 + 统计）。
+  const ACP = (typeof window !== 'undefined' && window.AcParse) ? window.AcParse : null;
 
   function el(tag, cls, text) {
     const node = document.createElement(tag);
@@ -512,6 +514,15 @@
     const tag = title ? `「${title}」` : '';
     const one = (text, max = 14) => clip60(plainTextOf(text), max);
 
+    // R-5550 F-5550-5：有 AC 结构但四段/选项缺 → 显式报缺（不再拼"无素材"兜底句）；
+    // 旧正文（无 AC 结构）走后面的五要素降级，不在这里报缺（AC6）。
+    const acInfo = row && row.__ac;
+    if (ACP && acInfo && acInfo.structured && Array.isArray(acInfo.issues) && acInfo.issues.length) {
+      const first = acInfo.issues[0];
+      const more = acInfo.issues.length > 1 ? ` 等 ${acInfo.issues.length} 条` : '';
+      return clip60(`${first.acId} 正文缺：${(first.missingFields || []).join('、')}${more}（请分析师补结构）`, 90);
+    }
+
     // 0）已收口：直接说到底，不装还等着拍板（加上收口时间，别看起来一样）
     const shortWhen = (value) => {
       const t = String(value || '');
@@ -670,8 +681,64 @@
     list.appendChild(box);
   }
 
-  function renderAllRow(req) {
-    const id = String(req.id || '');
+  /**
+   * R-5550 F-5550-3：AC 卡片（一条 AC 一张卡）。
+   * - 四段全文展示（不 clip60），缺项显式写「（正文缺：<字段>）」并标 missing；
+   * - 选项渲染成可点按钮，每项显示后果；不足 2 项显式标缺；
+   * - 数据只来自正文（row.__ac 由 ac-parse.js 解析），程序不拼语义。
+   */
+  function acCardsEl(row) {
+    const info = row && row.__ac;
+    if (!ACP || !info || !info.structured || !Array.isArray(info.acs) || !info.acs.length) return null;
+    const box = el('div', 'or-ac-list');
+    box.setAttribute('data-ac-list', '1');
+    const issuesOf = (acId) => (info.issues || []).find((item) => String(item.acId) === String(acId)) || null;
+    const SEGS = [['功能是什么', 'what'], ['目的', 'purpose'], ['风险', 'risk'], ['风险处理', 'mitigation']];
+    for (const ac of info.acs) {
+      const issue = issuesOf(ac.id);
+      const missing = new Set(issue ? issue.missingFields : []);
+      const card = el('div', 'or-ac-card');
+      card.setAttribute('data-ac-id', ac.id);
+      card.setAttribute('data-ac-what', String(ac.what || ''));
+      card.setAttribute('data-ac-purpose', String(ac.purpose || ''));
+      card.setAttribute('data-ac-risk', String(ac.risk || ''));
+      card.setAttribute('data-ac-mitigation', String(ac.mitigation || ''));
+      card.setAttribute('data-ac-options', String((ac.options || []).length));
+      if (missing.size) card.setAttribute('data-ac-missing', [...missing].join(','));
+      card.appendChild(el('b', 'or-ac-head', `${ac.id}：${ac.title || '（未写标题）'}`));
+      for (const [label, key] of SEGS) {
+        const line = el('div', 'or-ac-seg' + (missing.has(label) ? ' missing' : ''));
+        line.setAttribute('data-ac-field', key);
+        line.appendChild(el('span', 'or-ac-k', label + '：'));
+        const value = String(ac[key] || '').trim();
+        line.appendChild(el('span', 'or-ac-v', value || `（正文缺：${label}）`));
+        card.appendChild(line);
+      }
+      if (missing.has('拍板选项') || !Array.isArray(ac.options) || ac.options.length < 2) {
+        const miss = el('div', 'or-ac-seg missing');
+        miss.setAttribute('data-ac-field', 'options');
+        miss.appendChild(el('span', 'or-ac-v', '（正文缺：拍板选项（至少 2 项、各带后果））'));
+        card.appendChild(miss);
+      } else {
+        const opts = el('div', 'or-ac-options');
+        opts.setAttribute('data-ac-options-box', '1');
+        for (const option of ac.options) {
+          const btn = el('button', 'or-ac-option');
+          btn.type = 'button';
+          btn.setAttribute('data-ac-option-key', String(option.key || ''));
+          btn.innerHTML = `<b>${esc(option.key)}. ${esc(option.label)}</b>`
+            + `<span>${esc(option.consequence || '（正文缺：后果）')}</span>`;
+          btn.title = option.consequence ? `选「${option.label}」：${option.consequence}` : '正文没写这一项的后果';
+          opts.appendChild(btn);
+        }
+        card.appendChild(opts);
+      }
+      box.appendChild(card);
+    }
+    return box;
+  }
+
+  function renderAllRow(req) {    const id = String(req.id || '');
     const pending = isPending(req);
     const proxyActive = isProxied(req);
     const what = clip60(humanizeTitle(req.title), 80);
@@ -715,6 +782,9 @@
     if (open) {
       const detail = el('div', 'or-all-detail');
       detail.setAttribute('data-owner-all-detail', '1');
+      // R-5550 F-5550-3：有 AC 结构 → 逐条 AC 卡片（四段全文 + 选项后果 + 显式缺项）。
+      const acBox = acCardsEl(req);
+      if (acBox) detail.appendChild(acBox);
       const body = listDetailTextOf(req);
       const bodyRow = el('div', 'or-all-detail-row');
       bodyRow.appendChild(el('b', '', '正文摘要'));
@@ -1455,12 +1525,23 @@
     const dialog = dialogEl();
     if (!dialog) return;
     const allRows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements.slice() : [];
+    // R-5550：AC 结构分析（只解析正文 AC 块；旧正文 structured=false，按旧五要素降级）。
+    if (ACP) for (const row of allRows) row.__ac = ACP.analyzeRequirement(row);
+    // R-5550 F-5550-7：缺项统计落在弹窗根节点（JSON：total + items[{requirementId,acId,missingFields}]）。
+    const acStats = ACP ? ACP.missingStats(allRows) : { total: 0, items: [] };
+    dialog.setAttribute('data-ac-missing-stats', JSON.stringify(acStats));
     // T-a3e1：看板只列当前轮需求；待评估清单仍看全部（跨轮未决的也要能被点）。
     const round = currentRoundOf(allRows);
     const rows = allRows.filter((row) => (Number(row && row.round) || 1) === round);
     rows.sort((a, b) => (isPending(b) ? 1 : 0) - (isPending(a) ? 1 : 0));
     const list = dialog.querySelector('[data-or-list]');
     list.innerHTML = '';
+    // R-5550 F-5550-6：旧正文只提示一次（全列表一条汇总），绝不逐条报「未按结构写」。
+    if (ACP && allRows.some((row) => !(row.__ac && row.__ac.structured))) {
+      const hint = el('p', 'or-ac-hint', '部分需求正文未按 AC 结构写，建议补结构后重评');
+      hint.setAttribute('data-ac-structure-hint', '1');
+      list.appendChild(hint);
+    }
     if (!rows.length) list.appendChild(el('p', 'or-empty', '本轮暂时没有等你决定的事'));
     // B-504a：先给「全部需求」清单（默认全量、按状态分组、可筛选、点行展开详情）；
     // 只做展示，不改变任何提交/落账口径。

@@ -6204,6 +6204,28 @@ function registerIpc() {
     fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8');
     return file;
   };
+  // R-5550 F-5550-2：AC 结构化渲染的数据只来自「需求正文」。这里给每条需求附带正文文本，
+  // 按文件 mtime 缓存（弹窗 5 秒轮询不会重复读盘）；文档读不到就不带，界面按旧口径降级。
+  const reviewDocCache = new Map();
+  const attachReviewDocText = (project, requirements) => {
+    const base = path.resolve(String((project && project.path) || ''));
+    for (const row of (Array.isArray(requirements) ? requirements : [])) {
+      const rel = String((row && row.doc) || '').replace(/\\/g, '/');
+      if (!rel || rel.includes('..')) continue;
+      const abs = path.resolve(base, rel);
+      if (!abs.toLowerCase().startsWith(base.toLowerCase() + path.sep)) continue;
+      try {
+        const stat = fs.statSync(abs);
+        let cached = reviewDocCache.get(abs);
+        if (!cached || cached.mtimeMs !== stat.mtimeMs) {
+          cached = { mtimeMs: stat.mtimeMs, text: fs.readFileSync(abs, 'utf8').slice(0, 200000) };
+          reviewDocCache.set(abs, cached);
+        }
+        row.docText = cached.text;
+      } catch { /* 读不到正文就降级为旧展示，不阻断评审 */ }
+    }
+    return requirements;
+  };
   ipcMain.handle('owner:review-data', async (_e, payload) => {
     const p = payload || {};
     const project = requireProject(readStore(), p.projectId);
@@ -6219,7 +6241,7 @@ function registerIpc() {
       // B-b55c：列表带上状态来源（同一份 工作流.json + 读盘时间）；确认时把它回传，
       // 后端口径是"同一文件、同一时刻"，不一致就明确说列表过期，而不是报一个相反状态。
       source: snapshot.source || null,
-      requirements: Array.isArray(snapshot.requirements) ? snapshot.requirements : [],
+      requirements: attachReviewDocText(project, Array.isArray(snapshot.requirements) ? snapshot.requirements : []),
       // B-1358：验收前置状态要看「测试任务」——把同一份快照里的任务数组一起带上（不额外读盘）。
       tasks: Array.isArray(snapshot.tasks) ? snapshot.tasks : [],
       materials: p.requirementId ? ownerMaterials(project, String(p.requirementId)) : null,
@@ -10043,11 +10065,46 @@ async function runReviewCheck() {
     const rel = path.join('需求', `${row.id}-${row.title}.md`);
     const abs = path.join(projectPath, rel);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, [
+    // R-5550 夹具：a002 用**新 AC 结构化正文**（A2 缺「风险处理」、A3 选项不足），其余保持旧正文，
+    // 这样一次自检能同时验「有结构按卡片 / 无结构降级 / 缺项统计」。
+    const structured = row.id === 'R-20261114-100002-a002';
+    const body = structured ? [
+      `# ${row.title}`, '', `- 需求 id：${row.id}`, '- 优先级：P1', `- 状态：${row.status}`, '',
+      '## 一、这是什么', '', row.detail, '',
+      '## 二、验收标准', '',
+      '### AC1（列表一眼看全）',
+      '- 功能是什么：评审弹窗默认列出全部需求，按状态分组',
+      '- 目的：Owner 不用逐条翻找，一屏知道哪些在等他',
+      '- 风险：清单很长时首屏渲染变慢，可能卡顿',
+      '- 风险处理：默认前 5 条折叠，其余点「展开全部」再渲染',
+      '- 拍板选项：',
+      '  - A. 现在就做：本轮 Owner 立刻能看到全部需求',
+      '  - B. 下轮再做：本轮沿用旧列表，风险最小',
+      '',
+      '### AC2（缺项演示）',
+      '- 功能是什么：这条故意不写风险处理，用来验证缺项提示',
+      '- 目的：让 Owner 一眼看到正文缺什么',
+      '- 风险：缺项提示不明显就会被当成已经写全',
+      '- 拍板选项：',
+      '  - A. 立即标缺：缺什么直接写在卡片上',
+      '  - B. 不标缺：与本期口径不符',
+      '',
+      '### AC3（选项不足演示）',
+      '- 功能是什么：这条故意只给一个拍板选项',
+      '- 目的：验证选项 ≥2 的校验',
+      '- 风险：选项不足时 Owner 没法做出选择',
+      '- 风险处理：校验发现后让分析师补齐第二项',
+      '- 拍板选项：',
+      '  - A. 只此一项：没有对照项，没法比',
+      '',
+      '## 三、依赖与风险', '',
+      '风险：这里是块外同名字段，程序不得计入任何 AC。', ''
+    ] : [
       `# ${row.title}`, '', `- 需求 id：${row.id}`, '- 优先级：P1', `- 状态：${row.status}`, '',
       '## 用户故事', '', row.detail, '', '## 验收标准', '', '点开一行能看到正文与建议。', '',
       '## 待确认', '', '风险：清单太长找不到重点；取舍：默认全量 + 分组筛选。', ''
-    ].join('\n'), 'utf8');
+    ];
+    fs.writeFileSync(abs, body.join('\n'), 'utf8');
     return rel.split(path.sep).join('/');
   };
   const workflow = readJsonFile(workflowFile) || { schema: teamTools.WORKFLOW_SCHEMA, project: teamName, round: 1, requirements: {}, boots: {}, events: [] };
@@ -10214,6 +10271,73 @@ async function runReviewCheck() {
     return true;
   })()`);
   await sleep(600);
+
+  // ── R-5550：AC 结构化渲染（有结构按卡片 / 缺项显式 / 缺项统计 / 旧正文降级 / 不截断）──
+  await js(`(function(){ const chip = document.querySelector('[data-owner-all-filter="all"]'); if (chip) chip.click(); return true; })()`);
+  await sleep(500);
+  await js(`(function(){
+    const row = document.querySelector('[data-owner-all-item][data-or-req="R-20261114-100002-a002"]');
+    const toggle = row ? row.querySelector('[data-owner-all-toggle]') : null;
+    if (toggle) toggle.click();
+    return true;
+  })()`);
+  await sleep(600);
+  const ac = JSON.parse(await js(`(()=>{
+    const dialog = document.querySelector('[data-owner-review-dialog]');
+    const statsAttr = dialog ? dialog.getAttribute('data-ac-missing-stats') : '';
+    let stats = null;
+    try { stats = statsAttr ? JSON.parse(statsAttr) : null; } catch { stats = null; }
+    const newRow = document.querySelector('[data-owner-all-item][data-or-req="R-20261114-100002-a002"]');
+    const oldRow = document.querySelector('[data-owner-all-item][data-or-req="R-20261114-100001-a001"]');
+    const list = newRow ? newRow.querySelector('[data-ac-list]') : null;
+    const cards = list ? [...list.querySelectorAll('[data-ac-id]')] : [];
+    return JSON.stringify({
+      stats,
+      hasList: Boolean(list),
+      oldHasList: Boolean(oldRow && oldRow.querySelector('[data-ac-list]')),
+      hintCount: document.querySelectorAll('[data-ac-structure-hint]').length,
+      clippedCount: document.querySelectorAll('[data-clipped="1"]').length,
+      clippedMark: (document.body.textContent.match(/（已截断）/g) || []).length,
+      cards: cards.map((card) => ({
+        id: card.getAttribute('data-ac-id'),
+        what: card.getAttribute('data-ac-what'),
+        purpose: card.getAttribute('data-ac-purpose'),
+        risk: card.getAttribute('data-ac-risk'),
+        mitigation: card.getAttribute('data-ac-mitigation'),
+        options: card.getAttribute('data-ac-options'),
+        optionButtons: [...card.querySelectorAll('[data-ac-option-key]')].map((b) => b.textContent),
+        text: card.textContent,
+        missingText: card.querySelectorAll('.or-ac-seg.missing').length
+      }))
+    });
+  })()`));
+  report.ac = ac;
+  check('AC1 结构化需求按 AC 逐条渲染卡片（3 张，data-ac-id 齐全）',
+    ac.hasList === true && ac.cards.length === 3 && ac.cards.map((c) => c.id).join(',') === 'AC1,AC2,AC3',
+    ac.cards.map((c) => c.id));
+  check('AC1 四段值来自正文（AC1：功能是什么/目的/风险/风险处理）',
+    ac.cards[0] && /评审弹窗默认列出全部需求/.test(ac.cards[0].what) && /Owner 不用逐条翻找/.test(ac.cards[0].purpose)
+    && /首屏渲染变慢/.test(ac.cards[0].risk) && /前 5 条折叠/.test(ac.cards[0].mitigation),
+    ac.cards[0] && { what: ac.cards[0].what, risk: ac.cards[0].risk });
+  check('AC1 选项 A/B 都渲染且带后果', ac.cards[0] && ac.cards[0].options === '2' && ac.cards[0].optionButtons.length === 2
+    && ac.cards[0].optionButtons.every((t) => /[/／:：]|：/.test(t) || t.length > 6), ac.cards[0] && ac.cards[0].optionButtons);
+  check('AC2 缺「风险处理」→ 卡片显式「（正文缺：风险处理）」、不拼兜底',
+    ac.cards[1] && /（正文缺：风险处理）/.test(ac.cards[1].text) && ac.cards[1].missingText >= 1, ac.cards[1] && ac.cards[1].text.slice(0, 200));
+  check('AC3 选项不足 2 项 → 显式标「拍板选项」缺', ac.cards[2] && /（正文缺：拍板选项/.test(ac.cards[2].text), ac.cards[2] && ac.cards[2].text.slice(0, 160));
+  check('F-5550-7 弹窗 data-ac-missing-stats：total=2 且含 a002 的 AC2/AC3',
+    ac.stats && ac.stats.total === 2 && Array.isArray(ac.stats.items)
+    && ac.stats.items.some((i) => i.requirementId === 'R-20261114-100002-a002' && i.acId === 'AC2' && i.missingFields.includes('风险处理'))
+    && ac.stats.items.some((i) => i.requirementId === 'R-20261114-100002-a002' && i.acId === 'AC3'),
+    ac.stats);
+  check('AC6 旧正文需求退回五要素（无 data-ac-list），顶部只一条汇总提示',
+    ac.oldHasList === false && ac.hintCount === 1, { oldHasList: ac.oldHasList, hintCount: ac.hintCount });
+  check('AC4 全文不截断（无 data-clipped=1、无「（已截断）」标记）',
+    ac.clippedCount === 0 && ac.clippedMark === 0, { clippedCount: ac.clippedCount, clippedMark: ac.clippedMark });
+  // 截图前把 AC 卡片滚进可视区（否则只拍到列表顶部，看不到卡片与缺项）。
+  await js(`(function(){ const node = document.querySelector('[data-ac-list]'); if (node && node.scrollIntoView) node.scrollIntoView({ block: 'center' }); return true; })()`);
+  await sleep(500);
+  report.shots['ac-structure'] = await shot('ac-structure.png');
+  check('AC 结构化截图落盘', Boolean(report.shots['ac-structure']), report.shots['ac-structure']);
 
   // 703f AC1：侧栏会话用量展示（数据源 会话用量.json；没有数据时也必须显示「会话用量未知 / 阈值 30 万」）。
   const usageDom = JSON.parse(await js(`(()=>{
