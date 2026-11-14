@@ -3,7 +3,7 @@
   const STATUS_TEXT = { approved: '已通过', rejected: '已打回', skipped: '已先跳过', pending: '等你决定', optional: '等你决定' };
   // B-4baa（R-1cee）：看板与待评估清单默认各展示前 5 条，其余折叠在 DOM 里（不删、不裁切），可展开全部。
   const PREVIEW_ROWS = 5;
-  const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', reject: null, listFilter: 'all', listOpen: new Set() };
+  const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', reject: null, listFilter: 'all', listOpen: new Set(), closedCollapsed: true };
   const KEY_LATER = 'awb.ownerReview.laterUntil';
   const KEY_NO_AUTO = 'awb.ownerReview.noAuto';
 
@@ -324,6 +324,8 @@
         proxy.textContent = `PM 代管中 ${count} 条`;
         proxy.title = `PM 代管中 ${count} 条：Owner 的决定由 PM 代记，可在弹窗里结束代管`;
         proxy.setAttribute('data-proxy-count', String(count));
+        // B-a1cf：把「什么时候算出来的」也挂上，排查“看着没更新”时能分辨是旧数据还是没刷新。
+        proxy.setAttribute('data-proxy-at', new Date().toISOString());
         proxy.classList.remove('is-compact');
       } else {
         for (const selector of ['[data-owner-review-proxy]', '[data-owner-review-proxy-end]']) {
@@ -340,11 +342,8 @@
     return ['requirement_review', 'owner_review', 'owner_accept'].includes(stage);
   }
   function suggestTextOf(row, pending) {
-    const status = String((row && row.status) || '');
-    if (pending) return '建议拍板：通过 / 打回（右侧材料可先看）';
-    if (status === 'review' || status === 'requirement_review') return '建议拍板：先过需求评审，再拍板';
-    if (status === 'test_done') return '建议拍板：验收通过 / 打回';
-    return '';
+    // B-d1e5：一律走同一套「事实 + 具体动作」生成，不再输出「通过 / 打回」这类空话。
+    return adviceTextOf(row, pending);
   }
   // T-a3e1：看板补两项——「怎么做」（功能点/方案要点）与「建议你拍板的地方」（待确认/风险/取舍），大白话 ≤60 字。
   function howTextOf(row) {
@@ -358,13 +357,85 @@
     if (acceptance) return clip60(`按验收标准落地：${acceptance}`);
     return '按需求正文的功能点实现（正文未写方案要点）';
   }
+  // B-d1e5（P0）：建议拍板不许再是「建议拍板 / 通过 / 打回」这类空话。
+  // 规则（Owner 2026-11-14）：①必须从这条需求的正文字段里提事实，给一句具体动作；
+  // ②禁止纯兜底；③真没素材明说让分析师补正文；④≤60 字、大白话、不含代号；⑤逐条不同。
+  function plainTextOf(value) {
+    return String(value == null ? '' : value)
+      .replace(/\b[RDTM]-\d{8,}-\w+\b/gi, '')
+      .replace(/\bG\d+\b/gi, '')
+      .replace(/\bAC\d+(?:\.\d+)?\b/gi, '')
+      .replace(/\b(?:pm|programmer[12]|analyst|product|tester)\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
   function adviceTextOf(row, pending) {
-    const detail = String((row && row.detail) || '');
-    const hit = detail.match(/(?:待确认|风险|取舍|建议)[：:]\s*([^；;。]{4,60})/);
-    if (hit) return clip60(`建议你定：${hit[1]}`);
-    if (pending) return '建议你定：通过 / 打回（不定后续派单一直停在这条）';
-    // R-1cee F-R2：看板每条至少三行；已处理的需求也给一句兜底，不留空白。
-    return '无特别建议，按通过 / 打回即可';
+    const rawDetail = String((row && row.detail) || '');
+    const rawEvidence = String((row && row.evidence) || '');
+    const detail = plainTextOf(rawDetail);
+    const acceptance = plainTextOf(row && (row.acceptance || row.acceptanceCriteria));
+    const evidence = plainTextOf(rawEvidence);
+    const status = String((row && row.status) || '');
+    const title = clip60(plainTextOf(row && row.title), 12);
+    const tag = title ? `「${title}」` : '';
+    const one = (text, max = 14) => clip60(plainTextOf(text), max);
+
+    // 0）已收口：直接说到底，不装还等着拍板（加上收口时间，别看起来一样）
+    const shortWhen = (value) => {
+      const t = String(value || '');
+      const m = t.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+      return m ? `${m[2]}-${m[3]} ${m[4]}:${m[5]}` : '';
+    };
+    if (status === 'accepted' || status === 'done') {
+      const when = shortWhen((row && row.closedAt) || (row && row.acceptance && row.acceptance.at) || (row && row.updatedAt));
+      return clip60(`${tag}${when ? when + ' ' : ''}已验收通过，不用再拍`);
+    }
+    if (status === 'terminated') {
+      const when = shortWhen((row && row.closedAt) || (row && row.updatedAt));
+      return clip60(`${tag}${when ? when + ' ' : ''}已终止，不用再拍`);
+    }
+    if (status === 'iteration') return clip60(`${tag}已转下一轮，本轮不用拍`);
+    if (status === 'rejected') return clip60(`${tag}被打回过、还没返工，建议先让分析师改`);
+
+    // 1）被打回过：把上次理由摆出来
+    const decisions = Array.isArray(row && row.decisions) ? row.decisions : [];
+    const lastReject = decisions.filter((d) => d && /rejected/.test(String(d.decision || d.action || ''))).pop();
+    if (lastReject) {
+      const why = one(lastReject.opinion || lastReject.comment || '', 14);
+      return clip60(why ? `${tag}上次被打回：${why}，建议先确认改好了` : `${tag}上次被打回过，建议先确认这版改好了`);
+    }
+
+    // 2）可测性评审/需求评审没过
+    const trq = (row && row.trq) || null;
+    if (trq && String(trq.verdict || '') === 'not_testable') return clip60(`${tag}可测性评审判了不可测，建议打回补验收标准`);
+    if (status === 'review' || status === 'requirement_review') return clip60(`${tag}还没过需求评审，建议先让产品过审再拍`);
+
+    // 3）验收阶段：拿证据说话（缺什么说缺什么）
+    if (status === 'test_done') {
+      if (!evidence) return clip60(`${tag}没交测试证据，建议打回补报告和截图`);
+      if (!/(报告|测试)/.test(evidence)) return clip60(`${tag}证据里只有零散材料、没有测试报告，建议补报告再验收`);
+      if (!/\.(png|jpe?g|webp)/i.test(rawEvidence)) return clip60(`${tag}只有文字证据，建议补张截图再验收`);
+      return clip60(`${tag}材料和截图都齐，建议验收通过`);
+    }
+
+    // 4）评审阶段：先看验收标准，再看正文取舍点，再看动到哪个模块
+    if (!acceptance) return clip60(`${tag}没写验收标准，建议打回补 AC`);
+    if (acceptance.length < 8) return clip60(`${tag}验收标准太笼统，建议打回写清怎么算过`);
+    const point = detail.match(/(?:待确认|风险|取舍|建议)[：:]\s*([^；;。]{4,52})/);
+    if (point) {
+      const picked = one(point[1], 18);
+      if (picked) return clip60(`${tag}正文有取舍没说清，建议你定：${picked}`);
+    }
+    const mod = detail.match(/([\u4e00-\u9fa5A-Za-z0-9_]{2,10})(?:模块|页面|接口|弹窗|面板|看板|表单)/);
+    if (mod) return clip60(`${tag}动到${mod[1]}，建议先问程序员 A 影响面再拍`);
+    // 5）材料里还有别的线索就拿来用，避免所有条目一句话
+    const productComment = one((row && row.productReview && (row.productReview.comment || row.productReview.reason)) || '', 14);
+    if (productComment) return clip60(`${tag}产品评审提了：${productComment}，建议先确认这点`);
+    const rounds = Number((row && row.round) || 1);
+    if (rounds > 1) return clip60(`${tag}已经到第 ${rounds} 轮，建议先看这轮改了什么再拍`);
+    if (pending) return clip60(`${tag}验收标准已写清，建议通过、进开发`);
+    if (/待确认/.test(detail)) return clip60(`${tag}正文还有待确认项，建议让分析师先收口`);
+    return clip60(`${tag}正文没写方案要点，建议让分析师先补正文`);
   }
   // 看板只列当前轮需求（T-a3e1）：本轮 = 需求行里最大的 round（工作流只保留当前轮 + 历史行）。
   function currentRoundOf(rows) {
@@ -439,6 +510,25 @@
       if (!group.rows.length) continue;
       const groupBox = el('div', 'or-all-group');
       groupBox.setAttribute('data-owner-all-group', group.key);
+      // B-77aa（Owner 2026-11-14 14:10）：已收口区太乱、眼痛 —— ①改「最新在前」；②默认折叠，只显「已收口 N 条」。
+      if (group.key === 'closed') {
+        const timeOf = (row) => Date.parse(String((row && row.closedAt) || (row && row.updatedAt) || '')) || 0;
+        group.rows = group.rows.slice().sort((a, b) => timeOf(b) - timeOf(a));
+        const collapsed = state.closedCollapsed !== false;
+        groupBox.setAttribute('data-owner-closed-collapsed', collapsed ? '1' : '0');
+        const titleBtn = el('button', 'or-all-group-title or-closed-toggle',
+          `${group.label} · ${group.rows.length} 条${collapsed ? '（已折叠，点开看）' : ''}`);
+        titleBtn.type = 'button';
+        titleBtn.setAttribute('data-owner-closed-toggle', '1');
+        titleBtn.addEventListener('click', () => {
+          state.closedCollapsed = !collapsed;
+          renderDialog();
+        });
+        groupBox.appendChild(titleBtn);
+        if (!collapsed) for (const req of group.rows) groupBox.appendChild(renderAllRow(req));
+        box.appendChild(groupBox);
+        continue;
+      }
       groupBox.appendChild(el('div', 'or-all-group-title', `${group.label} · ${group.rows.length} 条`));
       for (const req of group.rows) {
         groupBox.appendChild(renderAllRow(req));
@@ -454,10 +544,9 @@
     const proxyActive = isProxied(req);
     const what = clip60(humanizeTitle(req.title), 80);
     const blocked = clip60(blockedTextOf(req, pending, proxyActive));
-    // 第三要素按需求落地人话说：待决定=通过/打回；待验收=验收通过/打回；其余给"要不要现在动它"。
-    const advise = pending ? '建议你拍：通过 / 打回'
-      : (String(req.status) === 'test_done' ? '建议你拍：验收通过 / 打回'
-        : '建议你拍：先不动（继续按当前状态推进）');
+    // B-d1e5：这里以前是三段硬编码（通过/打回、验收通过/打回、先不动），Owner 看到的「清一色」就是它。
+    // 现在统一走 adviceTextOf：按这条需求的状态、证据、验收标准、正文取舍点给一句具体动作。
+    const advise = clip60(adviceTextOf(req, pending));
     const open = state.listOpen.has(id);
     const item = el('div', 'or-all-row');
     item.setAttribute('data-owner-all-item', '1');
@@ -640,6 +729,9 @@
     const dialog = dialogEl();
     if (!dialog || !dialog.hidden) return;
     dialog.hidden = false;
+    // B-77aa 补修（PM 2026-11-14 15:04）：「已收口」区每次打开都要回到折叠态，
+    // 否则上次展开过就一直展开（复验实测 collapsed=0 / 47 行）。重置只在这一处写。
+    state.closedCollapsed = true;
     // R-：DSH WebView 是独立合成层，z-index 盖不过它——打开弹窗时直接藏起 webview，关闭再恢复。
     document.body.classList.add('or-webview-hidden');
     if (!state.selected) {
@@ -1742,6 +1834,12 @@
     loadData();
     state.timer = setInterval(loadData, 5000);
     window.addEventListener('focus', loadData);
+    // B-a1cf：评审代管.json 一变主进程就推事件 → 立刻重算徽标（不再只靠 5 秒轮询；
+    // 窗口隐藏时浏览器会把定时器降到 1 分钟，看起来就像“代管数不更新”）。
+    if (window.workbench && typeof window.workbench.onProxyChanged === 'function') {
+      window.workbench.onProxyChanged(() => { updateProxyBadge(); updateBadge(); });
+    }
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') loadData(); });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
