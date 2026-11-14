@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   PATHS, TeamError, fail, nowIso, exists, ensureDir, readJson, writeJson, appendEvent,
-  jsonOut, textOut, truncate, stamp, listLocks, randomHex,
+  jsonOut, textOut, truncate, stamp, listLocks, randomHex, hashFile,
 } from './core.mjs';
 import {
   loadTeam, mutateTeam, getMember, loadProject, projectStatePaths, listTasks, saveTask,
@@ -944,21 +944,28 @@ export function buildHandover({ projectName, role, sessionId = '' }) {
   const rot = latestRotation(name, role);
   const lines = [];
   lines.push(`=== 接任包 · ${ROLE_NAMES[role] || role} · ${name} ===`);
-  if (rot && (!sessionId || rot.to === sessionId)) {
-    lines.push(`轮换：${rot.from || '(无)'} → ${rot.to}（${rot.at}，${rot.reason || '未写原因'}）`);
-    if (rot.archiveDeferred) {
-      const d = rot.archiveDeferred;
-      lines.push(`归档：ARCHIVE_DEFERRED（未归档；在途任务 ${(d.tasks || []).length} 个${(d.locks || []).length ? `、锁 ${d.locks.length} 个` : ''}；旧会话未冻结，新会话先闭环再归档）`);
-    }
-  } else if (sessionId) {
-    lines.push(`轮换：当前会话 ${sessionId}（未找到对应轮换记录）`);
+  // B-3f02：接任包结构化四段（新任 PM 不用问人要东西）；总长仍 ≤2KB（下游 selftest 断言）。
+  lines.push(`【我是谁】${ROLE_NAMES[role] || role} ｜ 项目 ${name}（${mode}）｜ 换人：${rot ? `${rot.from || '(无)'} → ${rot.to}（${rot.at}，${rot.reason || '未写原因'}）` : (sessionId ? `当前会话 ${sessionId}` : '无轮换记录')}`);
+  if (rot && rot.archiveDeferred) {
+    const d = rot.archiveDeferred;
+    lines.push(`【遗留】ARCHIVE_DEFERRED：旧会话未冻结（在途任务 ${(d.tasks || []).length} 个${(d.locks || []).length ? `、锁 ${d.locks.length} 个` : ''}）；先闭环再归档。`);
+  } else {
+    lines.push('【遗留】无（无在途交接项）');
   }
-  lines.push(`项目：${name}（${mode}）｜ 目录：${project.path}`);
-  lines.push(`未完成任务（${tasks.length}）：${tasks.length ? tasks.slice(0, 5).map((t) => `${t.id} ${t.status}${t.owner ? '/' + t.owner : ''} ${truncate(t.title, 30)}`).join('；') : '无'}`);
-  lines.push(`锁：${locks.length ? locks.map((l) => l.key).join('、') : '无'}`);
-  lines.push(`最近决定（${decisions.length}）：${decisions.length ? decisions.map((d) => `[${d.at || '-'}/${d.channel || '-'}] ${d.opinion}（来源：${d.source}）`).join('；') : '无（工作流.json 与 决策日志.md 均无记录）'}`);
-  lines.push(`必读：${mustRead.join('、')}`);
-  lines.push('纪律：先读必读再开工；ack=已回执 ≠ 已完成；完成要完成回执 + task done --evidence。');
+  const pending = tasks.slice(0, 5);
+  lines.push(`【未闭环】${pending.length ? pending.map((t) => `${t.id} ${t.status}${t.owner ? '/' + t.owner : ''} ${truncate(t.title, 24)}`).join('；') : '无'}${tasks.length > 5 ? `（另有 ${tasks.length - 5} 条见工作流）` : ''}`);
+  lines.push(`【卡点】锁：${locks.length ? locks.map((l) => l.key).join('、') : '无'} ｜ 最近决定：${decisions.length ? decisions.slice(0, 3).map((d) => `[${d.channel || '-'}] ${truncate(d.opinion, 20)}`).join('；') : '无'}`);
+  const nextSteps = pending.filter((t) => t.owner === role || !t.owner).slice(0, 3);
+  lines.push(`【下一步】${nextSteps.length ? nextSteps.map((t) => `${t.id} ${truncate(t.title, 22)}`).join('；') : '按 Project 索引挑下一件，或等 PM 派单'}`);
+  const hashed = mustRead.map((rel) => {
+    try {
+      const abs = path.join(project.path, rel);
+      const h = hashFile(abs).slice(0, 12);
+      return `${rel}#${h}`;
+    } catch { return rel; }
+  });
+  lines.push(`【必读】${hashed.join('、')}`);
+  lines.push('【纪律】先读必读再开工；ack=已回执 ≠ 已完成；完成要完成回执 + task done --evidence。');
   let text = lines.join('\n');
   if (Buffer.byteLength(text, 'utf8') > HANDOVER_MAX) {
     text = text.slice(0, HANDOVER_MAX - 30).replace(/\n[^\n]*$/, '') + '\n…（接任包超 2KB，已截断）';
