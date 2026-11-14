@@ -171,7 +171,11 @@ export function rejectionEvidence(projectName, task) {
  */
 export function latestValidOwnerDecision(row) {
   const list = row && Array.isArray(row.decisions) ? row.decisions.filter(Boolean) : [];
-  const inv = Date.parse(String((row && row.gateInvalidatedAt) || ''));
+  // B-37ea：iterate 返工同样失效旧记录——cutoff 取 gateInvalidatedAt 与 iterationAt 的较晚者。
+  const gateMs = Date.parse(String((row && row.gateInvalidatedAt) || ''));
+  const itMs = Date.parse(String((row && row.iterationAt) || ''));
+  const cutoffs = [gateMs, itMs].filter((n) => Number.isFinite(n) && n > 0);
+  const inv = cutoffs.length ? Math.max(...cutoffs) : NaN;
   const valid = list.filter((d) => {
     const at = Date.parse(String((d && (d.at || d.decidedAt)) || ''));
     if (!Number.isFinite(at)) return true;
@@ -179,6 +183,8 @@ export function latestValidOwnerDecision(row) {
     return at >= inv;
   });
   if (valid.length) return valid[valid.length - 1];
+  // 有 decisions 但全部失效时不得回落 legacy ownerReview（否则 iterate 后旧 rejected 会借壳复活）。
+  if (list.length) return null;
   const legacy = row && row.ownerReview && typeof row.ownerReview === 'object' ? row.ownerReview : null;
   if (legacy && legacy.status && legacy.at) return { status: legacy.status, at: legacy.at, legacyMigrated: true };
   return null;

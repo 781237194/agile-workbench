@@ -6892,8 +6892,14 @@ function createTeamTools(options = {}) {
     const existingDecisions = existingTarget && Array.isArray(existingTarget.row.decisions) ? existingTarget.row.decisions : [];
     // B-96e9：轮次用 d225 的 deliveryRound（缺失回退 round）；早于 gateInvalidatedAt 的旧决定视为已失效，
     // 不再参与“同状态去重”（否则返工后复审的 approved 会被上一轮的 rejected/approved 挡住）。
-    const rowRound = Number((existingTarget && existingTarget.row.deliveryRound) || (existingTarget && existingTarget.row.round) || 1);
-    const gateAtMs = Date.parse(String((existingTarget && existingTarget.row.gateInvalidatedAt) || ''));
+    // B-37ea：轮次与失效 cutoff 都对齐 iterate/reopen 口径——round 取 deliveryRound/iterationRound/round 最大；
+    // cutoff 取 gateInvalidatedAt 与 iterationAt 的较晚者，避免 2a69 这类 iterationRound=1、其它字段为空的真实行漏判。
+    const rowObj = (existingTarget && existingTarget.row) || {};
+    const rowRound = Math.max(Number(rowObj.deliveryRound) || 0, Number(rowObj.iterationRound) || 0, Number(rowObj.round) || 1, 1);
+    const gateMs2 = Date.parse(String(rowObj.gateInvalidatedAt || ''));
+    const iterMs = Date.parse(String(rowObj.iterationAt || ''));
+    const cutList = [gateMs2, iterMs].filter((n) => Number.isFinite(n) && n > 0);
+    const gateAtMs = cutList.length ? Math.max(...cutList) : NaN;
     const stillValid = (d) => {
       const at = Date.parse(String((d && (d.at || d.decidedAt)) || ''));
       if (!Number.isFinite(at) || !Number.isFinite(gateAtMs)) return true;
