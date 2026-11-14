@@ -34,6 +34,80 @@ function rowsHtml(headers, rows, empty = '暂无') {
 }
 function tag(text, ok) { return `<span class="tag ${ok ? 'ok' : 'bad'}">${esc(text)}</span>`; }
 
+// R-45d3 F-45d3-1~5：看板回执区数据准备。计数维度写死 from（回执无 role 字段，to 只是「交给谁」）；
+// 今天/更早按本地日界分组；每角色最新 1 条做保底；每组渲染上限 200（超出提示总数，不做分页）。
+const ACK_ROLE_ORDER = ['programmer1', 'programmer2', 'tester', 'product', 'analyst', 'pm'];
+const ACK_ROLE_LABEL = { programmer1: '程序员A', programmer2: '程序员B', tester: '测试', product: '产品', analyst: '分析师', pm: 'PM' };
+const ACK_OTHER_KEY = 'other';
+const ACK_OTHER_LABEL = '其他';
+const ACK_GROUP_LIMIT = 200;
+function ackRoleKey(from) {
+  const f = String(from || '');
+  return ACK_ROLE_ORDER.indexOf(f) >= 0 ? f : ACK_OTHER_KEY;
+}
+// 未知角色归「其他」置末；行内保留原始 from，便于审计。
+function ackRoleText(from) {
+  const f = String(from || '');
+  if (ACK_ROLE_ORDER.indexOf(f) >= 0) return role(f);
+  return f ? `${ACK_OTHER_LABEL}（${f}）` : ACK_OTHER_LABEL;
+}
+function ackReceiptId(r) {
+  return String((r && r.id) || `${(r && r.msgId) || ''}|${(r && r.from) || ''}|${(r && r.ts) || ''}`);
+}
+// F-45d3-5：备注 title 取 note 原文（log 已截 160 字）；无 note 回退 log 标「（无完整备注）」。
+function ackReceiptTitle(r) {
+  const note = r && r.note != null ? String(r.note) : '';
+  if (note.trim()) return note;
+  const log = r && r.log != null ? String(r.log) : '';
+  return log ? `${log}（无完整备注）` : '（无完整备注）';
+}
+function ackReceiptText(r) {
+  const note = r && r.note != null ? String(r.note) : '';
+  if (note.trim()) return clip(note, 100);
+  const log = r && r.log != null ? String(r.log) : '';
+  return log ? `${clip(log, 100)}（无完整备注）` : '—';
+}
+function ackTsMs(r) {
+  const n = Date.parse(String((r && r.ts) || ''));
+  return Number.isFinite(n) ? n : NaN;
+}
+function ackDayKey(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+// 返回 { total, buckets, pins, pinned, today, earlier }；today/earlier 各含 rows/total/shown/truncated。
+export function prepareReceipts(receipts, nowMs = Date.now()) {
+  const rows = (Array.isArray(receipts) ? receipts : [])
+    .filter((r) => r && typeof r === 'object')
+    .map((r, i) => ({ r, i, ms: ackTsMs(r), id: ackReceiptId(r), key: ackRoleKey(r.from) }));
+  // 按 ts 倒序；ts 非法置末并归「更早」。
+  rows.sort((a, b) => {
+    const av = Number.isFinite(a.ms);
+    const bv = Number.isFinite(b.ms);
+    if (av && bv) return (b.ms - a.ms) || (b.i - a.i);
+    if (av !== bv) return av ? -1 : 1;
+    return b.i - a.i;
+  });
+  const todayKey = ackDayKey(nowMs);
+  const today = [];
+  const earlier = [];
+  for (const row of rows) {
+    if (Number.isFinite(row.ms) && ackDayKey(row.ms) === todayKey) today.push(row);
+    else earlier.push(row);
+  }
+  const counts = new Map();
+  for (const row of rows) counts.set(row.key, (counts.get(row.key) || 0) + 1);
+  const buckets = [...ACK_ROLE_ORDER, ACK_OTHER_KEY]
+    .filter((k) => counts.get(k))
+    .map((k) => ({ key: k, label: k === ACK_OTHER_KEY ? ACK_OTHER_LABEL : ACK_ROLE_LABEL[k], count: counts.get(k) }));
+  // 保底：每个有回执的角色 1 条最新（未知角色合并成「其他」1 条）。
+  const pins = buckets.map((b) => ({ key: b.key, label: b.label, row: rows.find((x) => x.key === b.key) })).filter((p) => p.row);
+  const pinned = new Set(pins.map((p) => p.row.id));
+  const pack = (list) => ({ rows: list.slice(0, ACK_GROUP_LIMIT), total: list.length, shown: Math.min(list.length, ACK_GROUP_LIMIT), truncated: list.length > ACK_GROUP_LIMIT });
+  return { total: rows.length, buckets, pins, pinned, todayKey, today: pack(today), earlier: pack(earlier) };
+}
+
 export function renderBoardMd(d) {
   const lines = [];
   lines.push(`# 团队看板 · ${d.project?.name || '未选项目'}`);
@@ -110,6 +184,41 @@ export function renderBoardHtml(d) {
     return `<tr><td><b>${esc(p.id)}</b><br><span class="sub" title="${titleAttr(p.title)}">${esc(clip(p.title, 48))}</span></td><td>${esc(risk(p.risk))}</td><td>${esc(status(p.status))}</td><td>${esc(role(p.author))}</td><td>${rv}</td><td>${sg}</td><td>${esc(p.commitId || '—')}</td></tr>`;
   }).join('');
   const ackRows = d.receipts.slice(-50).reverse().map((r) => `<tr><td class="muted">${esc(time(r.ts))}</td><td>${esc(role(r.from))}</td><td>${esc(r.project || '—')}</td><td>${esc(r.msgId)}</td><td title="${titleAttr(r.log || r.note)}">${esc(clip(r.log || r.note, 100))}</td></tr>`).join('');
+  // R-45d3 F-45d3-1~6：回执区 = 角色 chip（带计数）+ 每角色保底 1 条 + 今天/更早分组（每组上限 200）。
+  const RCPT = prepareReceipts(d.receipts);
+  const ackRowHtml = (row, opts = {}) => {
+    const r = row.r || {};
+    const tsText = Number.isFinite(row.ms) ? time(r.ts) : `时间未知 ${time(r.ts)}`.trim();
+    const attrs = [
+      `data-ack-role="${esc(row.key)}"`,
+      `data-ack-from="${esc(r.from || '')}"`,
+      `data-receipt-id="${esc(row.id)}"`,
+      opts.pinned ? 'data-pinned="1"' : '',
+      opts.pinRole ? `data-ack-pin-role="${esc(opts.pinRole)}"` : '',
+    ].filter(Boolean).join(' ');
+    return `<tr ${attrs}><td class="muted">${esc(tsText)}</td><td>${esc(ackRoleText(r.from))}</td><td>${esc(r.project || '—')}</td><td>${esc(r.msgId || '—')}</td><td title="${titleAttr(ackReceiptTitle(r))}">${esc(ackReceiptText(r))}</td></tr>`;
+  };
+  const ackChipHtml = [`<button type="button" class="chip" data-ack-role="all" aria-pressed="true">全部(${RCPT.total})</button>`]
+    .concat(RCPT.buckets.map((b) => `<button type="button" class="chip" data-ack-role="${esc(b.key)}" aria-pressed="false">${esc(b.label)}(${b.count})</button>`))
+    .join('');
+  const ackPinsHtml = RCPT.pins.length
+    ? `<div class="ack-pins" data-ack-pins data-ack-pins-count="${RCPT.pins.length}"><div class="ack-pins-head"><b>各角色最新（保底 ${RCPT.pins.length} 条）</b><span>每角色 1 条；同一回执在列表里带 data-pinned="1"</span></div><table class="ack-table"><thead><tr><th>时间</th><th>回执人</th><th>项目</th><th>消息</th><th>备注</th></tr></thead><tbody>${RCPT.pins.map((p) => ackRowHtml(p.row, { pinRole: p.key })).join('')}</tbody></table></div>`
+    : '';
+  const ackGroupText = (name, g) => `${name}（${g.total} 条${g.truncated ? `，已显示 ${g.shown}` : ''}）`;
+  const ackGroupSpan = (key, name, g) => `<span data-ack-group-text="${key}" data-ack-group-name="${esc(name)}" data-ack-group-n="${g.total}" data-ack-group-shown="${g.shown}">${esc(ackGroupText(name, g))}</span>`;
+  const ackGroupsBar = RCPT.total
+    ? `<div class="ack-groups-bar">${ackGroupSpan('today', '今天', RCPT.today)}<button type="button" class="ack-earlier-toggle" data-ack-earlier aria-expanded="false" aria-label="展开更早的回执">${ackGroupSpan('earlier', '更早', RCPT.earlier)} ▾</button></div>`
+    : '';
+  const ackTableHtml = RCPT.total
+    ? `<table class="ack-table"><thead><tr><th>时间</th><th>回执人</th><th>项目</th><th>消息</th><th>备注</th></tr></thead>
+<tbody data-ack-group="today" data-ack-group-total="${RCPT.today.total}" data-ack-group-shown="${RCPT.today.shown}">${RCPT.today.rows.map((row) => ackRowHtml(row, { pinned: RCPT.pinned.has(row.id) })).join('')}</tbody>
+<tbody data-ack-group="earlier" data-ack-group-total="${RCPT.earlier.total}" data-ack-group-shown="${RCPT.earlier.shown}" hidden>${RCPT.earlier.rows.map((row) => ackRowHtml(row, { pinned: RCPT.pinned.has(row.id) })).join('')}</tbody></table>`
+    : '<div class="empty" data-ack-empty>暂无回执</div>';
+  // 每组渲染上限 200：超出时给「共 N 条，已显示 200」（不引入分页/虚拟滚动）。
+  const ackMoreHtml = !RCPT.total ? ''
+    : `${RCPT.today.truncated ? `<div class="ack-more" data-ack-more="today">今天共 ${RCPT.today.total} 条，已显示 ${RCPT.today.shown}</div>` : ''}`
+      + `${RCPT.earlier.truncated ? `<div class="ack-more" data-ack-more="earlier" data-ack-truncated="1" hidden>更早共 ${RCPT.earlier.total} 条，已显示 ${RCPT.earlier.shown}</div>` : ''}`;
+  const ackHtml = `<div class="ack-chips" data-ack-chips>${ackChipHtml}</div>${ackPinsHtml}${ackGroupsBar}${ackTableHtml}${ackMoreHtml}`;
   const fileRows = d.files.slice(0, 400).map((f) => `<tr><td><button class="file-link" data-file="${esc(f.abs)}" title="${titleAttr(f.abs)}">${esc(f.target)}</button></td><td>${f.size} B</td><td class="mono">${esc(shortHash(f.hash || '', 12))}</td><td>${esc(owner(f.owner))}</td></tr>`).join('');
   const memRows = d.members.map((m) => {
     // R-c651 F-c651-3：3 次重试仍唤醒失败 → 该角色红点（tooltip 带消息 id 与原因）；下次唤醒成功由工具清掉。
@@ -216,6 +325,16 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
 .tag{display:inline-block;padding:1px 7px;border-radius:6px;font-size:10.5px;margin:1px;white-space:nowrap}.tag.ok{background:rgba(112,215,181,.13);color:#8be5c7;border:1px solid rgba(112,215,181,.25)}.tag.bad{background:rgba(238,141,127,.12);color:#ffa89d;border:1px solid rgba(238,141,127,.25)}
 .file-link{border:0;background:transparent;color:var(--gold2);font:inherit;text-align:left;padding:0;cursor:pointer;border-bottom:1px dotted rgba(220,181,111,.4)}.file-link:hover{color:#fff;border-bottom-color:var(--gold)}
 .wake-failed-dot{color:var(--bad);font-size:12px;margin-right:4px;text-shadow:0 0 6px rgba(238,141,127,.5)}tr.wake-failed td{background:rgba(238,141,127,.07)}
+/* R-45d3 回执区：角色 chip / 保底区 / 今天·更早 */
+.ack-chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.ack-chips .chip,.ack-groups-bar button{border:1px solid var(--line2);background:transparent;color:var(--gold2);border-radius:999px;padding:2px 10px;font-size:11px;cursor:pointer}
+.ack-chips .chip{color:var(--text);font-size:11.5px}
+.ack-chips .chip:hover,.ack-groups-bar button:hover{background:rgba(220,181,111,.12)}
+.ack-chips .chip[aria-pressed="true"]{background:rgba(220,181,111,.26);border-color:var(--gold);color:var(--strong);font-weight:700}
+.ack-pins{margin:0 0 10px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:rgba(220,181,111,.05)}
+.ack-pins-head,.ack-groups-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--muted2);margin:0 0 6px}
+.ack-more{font-size:11px;color:var(--warn);margin:6px 0 0}
+tbody[hidden],tr[hidden]{display:none}
 .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px}.summary-btn{text-align:left;border:1px solid var(--line);border-radius:10px;background:rgba(255,248,235,.025);color:var(--text);padding:10px 12px;cursor:pointer}.summary-btn:hover{background:rgba(220,181,111,.10);border-color:var(--line2)}.summary-btn b{display:block;color:var(--gold2);font-size:20px}.summary-btn span{font-size:10.5px;color:var(--muted)}
 #pilot-list{list-style:none;margin:10px 0 0;padding:0}#pilot-list li{padding:4px 0;color:var(--muted)}#pilot-list li.ok{color:#a9e8d4}#pilot-list li.bad{color:#ffb1a8}
 footer{padding:0 28px 24px;color:var(--muted2);font-size:10.5px}
@@ -322,7 +441,7 @@ html[data-theme="light"] #source-viewer pre{background:rgba(90,72,48,.06)}
     const sg = Object.entries(d.signatures[p.id] || {}).map(([r, v]) => `<span class="tag ${v.decision === 'approve' ? 'ok' : 'bad'}">${esc(role(r))}：${esc(decision(v.decision))}</span>`).join(' ') || '<span class="muted">—</span>';
     return `<tr><td><b>${esc(p.id)}</b><br><span class="sub" title="${titleAttr(p.title)}">${esc(clip(p.title, 48))}</span></td><td>${esc(risk(p.risk))}</td><td>${esc(status(p.status))}</td><td>${esc(role(p.author))}</td><td>${rv}</td><td>${sg}</td><td>${esc(p.commitId || '—')}</td></tr>`;
   }), '暂无提案')}</section>
-<section><div class="section-head"><h2>四、回执（最近 50 条）</h2><span>鼠标悬停查看完整备注</span></div>${rowsHtml(['时间', '回执人', '项目', '消息', '备注'], (d.receipts || []).slice(-50).reverse().map((r) => `<tr><td class="muted">${esc(time(r.ts))}</td><td>${esc(role(r.from))}</td><td>${esc(r.project || '—')}</td><td>${esc(r.msgId)}</td><td title="${titleAttr(r.log || r.note)}">${esc(clip(r.log || r.note, 100))}</td></tr>`), '暂无回执')}</section>
+<section data-ack-root data-ack-filter="all"><div class="section-head"><h2>四、回执（按角色筛选 · 今天/更早）</h2><span>点角色筛选；「更早」默认收起；鼠标悬停看完整备注</span></div>${ackHtml}</section>
 <section><div class="section-head"><h2>五、项目文件</h2><span>点击文件名在弹窗预览，可关闭返回</span></div>${rowsHtml(['文件', '大小', '哈希', '归属'], (d.files || []).map((f) => `<tr><td><button class="file-link" data-file="${esc(f.abs)}" title="${titleAttr(f.abs)}">${esc(f.target)}</button></td><td>${f.size} B</td><td class="mono">${esc(shortHash(f.hash || '', 12))}</td><td>${esc(owner(f.owner))}</td></tr>`), '暂无索引')}</section>
 <section><div class="section-head"><h2>六、成员</h2><span>角色 / 会话 / 贡献计数</span></div>${rowsHtml(['角色', '会话', '发消息', '评审', '签字', '提交', '回执'], (d.members || []).map((m) => {
     // R-c651 F-c651-3：3 次重试仍唤醒失败 → 该角色红点（tooltip 带消息 id 与原因）；唤醒成功后由工具清掉。
@@ -590,6 +709,62 @@ ${dbHtml}
   document.addEventListener('change', (e) => {
     if (e.target && e.target.matches && e.target.matches('[data-decision-pick]')) dboxUpdateBatch();
   });
+  // ===== R-45d3：回执区「按角色筛选」+「更早」折叠（drawer / data-view 明细入口不动）=====
+  const ackRoot = document.querySelector('[data-ack-root]');
+  if (ackRoot) {
+    const ackChipBtns = Array.from(ackRoot.querySelectorAll('[data-ack-chips] [data-ack-role]'));
+    const ackGroupBodies = Array.from(ackRoot.querySelectorAll('tbody[data-ack-group]'));
+    const ackListRows = Array.from(ackRoot.querySelectorAll('[data-ack-pins] tr[data-ack-role]'))
+      .concat(Array.from(ackRoot.querySelectorAll('tbody[data-ack-group] tr[data-ack-role]')));
+    function ackSyncGroupLabels(filter) {
+      for (const tb of ackGroupBodies) {
+        const key = tb.getAttribute('data-ack-group');
+        const span = ackRoot.querySelector('[data-ack-group-text="' + key + '"]');
+        if (!span) continue;
+        const name = span.getAttribute('data-ack-group-name') || key;
+        const total = Number(span.getAttribute('data-ack-group-n') || 0);
+        const shown = Number(span.getAttribute('data-ack-group-shown') || 0);
+        const hit = Array.from(tb.querySelectorAll('tr[data-ack-role]'))
+          .filter((tr) => filter === 'all' || tr.getAttribute('data-ack-role') === filter).length;
+        const capped = filter === 'all' && total > shown;
+        span.textContent = name + '（' + (filter === 'all' ? total : hit) + ' 条' + (capped ? '，已显示 ' + shown : '') + '）';
+      }
+    }
+    function ackSyncMore() {
+      const tf = ackRoot.getAttribute('data-ack-filter') || 'all';
+      const eb = ackRoot.querySelector('tbody[data-ack-group="earlier"]');
+      const eo = !!eb && !eb.hasAttribute('hidden');
+      for (const box of ackRoot.querySelectorAll('[data-ack-more]')) {
+        const show = tf === 'all' && (box.getAttribute('data-ack-more') === 'today' || eo);
+        if (show) box.removeAttribute('hidden'); else box.setAttribute('hidden', '');
+      }
+    }
+    function ackApply(filter) {
+      ackRoot.setAttribute('data-ack-filter', filter);
+      for (const b of ackChipBtns) b.setAttribute('aria-pressed', b.getAttribute('data-ack-role') === filter ? 'true' : 'false');
+      for (const tr of ackListRows) tr.hidden = !(filter === 'all' || tr.getAttribute('data-ack-role') === filter);
+      ackSyncGroupLabels(filter);
+      ackSyncMore();
+    }
+    for (const b of ackChipBtns) {
+      b.addEventListener('click', () => {
+        const want = b.getAttribute('data-ack-role') || 'all';
+        ackApply((ackRoot.getAttribute('data-ack-filter') || 'all') === want ? 'all' : want);
+      });
+    }
+    const ackEarlierBtn = ackRoot.querySelector('[data-ack-earlier]');
+    if (ackEarlierBtn) {
+      ackEarlierBtn.addEventListener('click', () => {
+        const tb = ackRoot.querySelector('tbody[data-ack-group="earlier"]');
+        if (!tb) return;
+        const open = tb.hasAttribute('hidden');
+        if (open) tb.removeAttribute('hidden'); else tb.setAttribute('hidden', '');
+        ackSyncMore();
+        ackEarlierBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+    }
+    ackApply(ackRoot.getAttribute('data-ack-filter') || 'all');
+  }
 })();
 </script>
 </body></html>`;
