@@ -2279,6 +2279,15 @@ export async function cmdSend(args) {
   // --queue：不硬拒，把本单排进 派单队列.json，等角色 task done 后自动续跑（R-31b3）。
   let releasedLock = null;
   const pmDispatch = isDispatch && b.role === 'pm';
+  // R-bad3 F-bad3-2：派单（含排队派单）前先确保目标角色有有效 boot 令牌；失败不阻塞但返回 pendingBoot。
+  const ensureBootForDispatch = async () => {
+    if (!isDispatch) return null;
+    try {
+      const { ensureBooted, findValidBootToken } = await import('./auto-boot.mjs');
+      if (findValidBootToken(b.project, to, '')) return null;
+      return ensureBooted({ project: b.project, role: to, trigger: 'stale', duringTask: String(args.task || '') });
+    } catch (e) { return { ok: false, why: String((e && e.message) || e) }; }
+  };
   if (pmDispatch && !args.force) {
     // B-384e：先清过期锁（10 分钟无人回执自动释放），再判未回执锁。
     releaseExpiredDispatchLock(b.project, { source: 'send' });
@@ -2287,6 +2296,7 @@ export async function cmdSend(args) {
     const lock = readDispatchLock(b.project);
     if (lock && lock.messageId) {
       if (args.queue) {
+        const bootForQueue = await ensureBootForDispatch();
         const item = enqueueDispatch(b.project, {
           from: b.role, to, subject: args.subject || '(无主题)', body,
           task: String(args.task || ''), project: b.project, ackRequired: Boolean(args.ack),
@@ -2319,6 +2329,10 @@ export async function cmdSend(args) {
   // B-405f ①：派单前探活——冷会话先发启动提示拉起，拉不起来就明确报错（不写消息、不占锁）。
   let targetAlive = null;
   if (isDispatch) targetAlive = await ensureDispatchTargetAlive(b.project, to, taskRow);
+  // R-bad3 F-bad3-2：派单前先确保目标角色有有效 boot 令牌（缺失/过期才自动 boot），
+  // boot 失败不阻塞投递，但标 pendingBoot 并在返回里让 PM 看到卡点。
+  const autoBoot = await ensureBootForDispatch();
+  const pendingBoot = Boolean(autoBoot && autoBoot.ok === false);
   const msg = notify({
     from: b.role, to, subject: args.subject || '(无主题)', body, project: b.project,
     task: args.task || '', ackRequired: Boolean(args.ack), type: msgType, sessionId: b.sessionId,
@@ -2384,6 +2398,7 @@ export async function cmdSend(args) {
         ? { role: to, state: targetAlive.probe.state, sessionId: targetAlive.probe.sessionId, warmup: targetAlive.warmup }
         : null,
       wakeFailed, releasedLock, wakeHeader, wakeRetry: sendWakeRetry, autoRead,
+      ...(pendingBoot ? { pendingBoot: true, autoBoot } : {}),
     });
 }
 
