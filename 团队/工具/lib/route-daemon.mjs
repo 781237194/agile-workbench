@@ -23,7 +23,7 @@ import {
   acquireLock, heartbeatLock, releaseLock, lockInfo,
 } from './core.mjs';
 import {
-  loadProject, projectTeamMode, projectStatePaths, loadTeam, getMember, sendMessage, listTasks,
+  loadProject, projectTeamMode, projectStatePaths, loadTeam, getMember, sendMessage, listTasks, createTask,
 } from './store.mjs';
 import {
   gateRequirementReview, gateOwnerDecision, gateTestability, ownerDecisionsOf,
@@ -308,6 +308,47 @@ export function isCurrentRound(row, task) {
   return r === cur;
 }
 
+/**
+ * R-464f：dev_done 且当前轮没有 tester 任务时，守护**唯一写例外**——先建测试任务，再由调用方唤醒。
+ * 失败不抛（返回 {ok:false, why}），由调用方告警且不空唤醒。
+ */
+export function ensureTestTask(projectName, row, tasks = [], { by = 'router' } = {}) {
+  const requirementId = String((row && row.id) || '');
+  if (!requirementId) return { ok: false, why: 'NO_REQUIREMENT_ID' };
+  const cur = Number((row && (row.deliveryRound ?? row.round)) ?? 0) || 0;
+  const existing = (tasks || []).filter((t) => String(t.requirementId || '') === requirementId
+    && String(t.owner || '') === 'tester'
+    && isCurrentRound(row, t));
+  if (existing.length) return { ok: true, reused: true, task: existing[0] };
+  try {
+    const task = createTask({
+      project: projectName,
+      title: ('测试：' + String(row.title || requirementId)).slice(0, 40),
+      detail: '由路由守护自动创建（R-464f）：需求 ' + requirementId + ' 已 dev_done 且当前轮没有测试任务。',
+      priority: String(row.priority || 'P1'),
+      priorityBy: by,
+      createdBy: by,
+      owner: 'tester',
+      type: 'task',
+      requirementId,
+      acceptance: String(row.acceptance || '按需求验收标准复验').slice(0, 500),
+    });
+    try {
+      if (cur) {
+        const raw = readJson(projectTaskFile(projectName, task.id), null);
+        if (raw) { raw.workflow = { ...(raw.workflow || {}), round: cur }; writeJson(projectTaskFile(projectName, task.id), raw); }
+      }
+    } catch { /* 轮次标记失败不影响建单 */ }
+    appendRouteLog(projectName, { at: nowIso(), event: 'test_task_created', source: 'route', requirementId, taskId: task.id, role: 'tester', action: 'test', ok: true });
+    return { ok: true, reused: false, task };
+  } catch (e) {
+    return { ok: false, why: String((e && e.code) || (e && e.message) || e) };
+  }
+}
+
+function projectTaskFile(projectName, taskId) {
+  return path.join(projectStatePaths(projectName).dir, '任务', taskId + '.json');
+}
 function taskForRequirement(requirementId, tasks) {
   return tasks.find((t) => String(t.id) === String(requirementId)) || null;
 }
@@ -367,6 +408,9 @@ export function planForRow(row, ctx) {
     if (undone.length) {
       return { gateBlocked: { code: 'DEV_TASKS_UNDONE', gate: 'DEV', message: `${undone.length} 个开发任务未完成：${undone.map((t) => t.id).slice(0, 3).join(',')}` } };
     }
+    // R-464f：当前轮没有测试任务 → 先建再叫（needTestTask 由调用方执行 = 守护唯一写例外）。
+    const testsCur = tasksOf(id, tasks, (t) => String(t.owner || '') === 'tester' && isCurrentRound(row, t));
+    if (!testsCur.length) return { role: 'tester', action: 'test', needTestTask: true };
     return { role: 'tester', action: 'test' };
   }
   if (status === 'test_done') {
@@ -868,6 +912,23 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
       });
       out.gateBlocked.push({ ...base, gate: String(plan.gateBlocked.gate || ''), code: String(plan.gateBlocked.code || '') });
       continue;
+    }
+    // R-464f：dev_done 且当前轮没有测试任务 → 先建任务再叫（守护唯一写例外）；建失败告警、不空唤醒。
+    if (plan.needTestTask) {
+      const made = ensureTestTask(name, { ...row, id: event.requirementId }, ctx.tasks || []);
+      if (!made.ok) {
+        appendRouteLog(name, { ...base, event: 'skip', why: `test_task_create_failed:${made.why}`, role: 'tester', action: 'test', ok: false });
+        out.skips.push({ ...base, why: 'test_task_create_failed' });
+        alertPm(name, {
+          type: 'escalation',
+          subject: `建测试任务失败：${event.requirementId}`,
+          body: `requirementId=${event.requirementId}\n为什么：${made.why}\n守护已停止本次唤醒（不空唤醒），请 PM 补测试任务或修项目状态后重派。`,
+          key: `test_task_create_failed|${event.requirementId}`,
+        });
+        continue;
+      }
+      event.taskId = made.task.id;
+      appendRouteLog(name, { ...base, event: 'test_task_created', taskId: made.task.id, role: 'tester', action: 'test', ok: true, reused: Boolean(made.reused) });
     }
     // Owner 09:10：需要 Owner 决策的（含验收）进 Owner 决策箱，不靠唤醒（首唤一次即止也不做）。
     if (['accept', 'decide'].includes(String(plan.action || ''))) {
