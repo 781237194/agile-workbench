@@ -2753,7 +2753,7 @@ export async function cmdTask(args) {
       }
       const beforeRow = String((workflowRowFor(b.project, requirementId) || {}).status || '');
       const beforeTaskStatus = String(reqTask.status || '');
-      const kids = allTasks.filter((row) => row && row.type === 'task' && String(row.requirementId || '') === requirementId);
+      const kids = allTasks.filter((row) => row && ['task', 'bug'].includes(String(row.type || '')) && String(row.requirementId || '') === requirementId);
       const isTestTask = (row) => String(row.owner || '') === 'tester' || String((row.workflow && row.workflow.stage) || '') === 'test';
       const isDevTaskRow = (row) => ['programmer1', 'programmer2'].includes(String(row.owner || '')) || String((row.workflow && row.workflow.stage) || '') === 'dev';
       // 触发器选择按需求阶段来（2026-11-14 阻塞修复）：还在开发阶段（含 legacy approved）时优先用“开发任务 done”，

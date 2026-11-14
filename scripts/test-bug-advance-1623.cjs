@@ -35,7 +35,13 @@ function run(args, allowFail = false) {
 fs.rmSync(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
-run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);
+// 沙盘从“无 advanceRule”起步（真实 团队.json 已被 PM 配了 legacyBugBefore，会改变初始行为）
+{
+  const tf0 = path.join(TEAM_ROOT, '状态', '团队.json');
+  const t0 = JSON.parse(fs.readFileSync(tf0, 'utf8'));
+  if (t0.config) delete t0.config.advanceRule;
+  fs.writeFileSync(tf0, JSON.stringify(t0, null, 2) + '\n', 'utf8');
+}run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);
 const stateDir = path.join(TEAM_ROOT, '状态', '项目', PROJECT);
 const workflowFile = path.join(stateDir, '工作流.json');
 const taskDir = path.join(stateDir, '任务');
@@ -128,6 +134,14 @@ const c8 = mkTask('杂活', r8, { type: 'chore' });
 run(['task', 'done', '--boot', dev.token, '--id', c8, '--evidence', '证据8', '--json'], true);
 check('AC6 chore 仍不推进', reqStatus(r8) === 'dev', reqStatus(r8));
 
+// AC5b（e7e8）：recompute 的候选 kids 必须收 bug——把需求手动退回 dev，再 recompute 应能凭已 done 的 bug 推回 dev_done
+const r9 = mkReq('recompute 需求');
+setStatus(r9, 'dev', decision);
+const b9 = mkTask('recompute bug', r9);
+run(['task', 'done', '--boot', dev.token, '--id', b9, '--evidence', '证据9', '--json'], true);
+setStatus(r9, 'dev', decision);
+run(['task', 'recompute-advance', '--boot', pm.token, '--requirement', r9, '--json'], true);
+check('e7e8 recompute 按 kids 含 bug 重算 → dev_done', reqStatus(r9) === 'dev_done', reqStatus(r9));
 const passed = results.filter((r) => r.ok).length;
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\nR-1623 断言：${passed}/${results.length} PASS${failed ? `，${failed} FAIL` : ''}`);
