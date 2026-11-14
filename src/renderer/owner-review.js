@@ -447,7 +447,9 @@
       let count = state.proxyIdSet.size;
       if (state.proxyAllActive) {
         const rows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
-        count = Math.max(count, rows.filter((row) => row && !['accepted', 'terminated', 'rejected'].includes(String(row.status || ''))).length);
+        // B-11ce：同一口径（无 status 行不计入），别再让徽标数字虚高。
+        const coveredRows = OR_STATE ? OR_STATE.proxyCoveredRows(rows) : rows.filter((row) => String((row && row.status) || ''));
+        count = Math.max(count, coveredRows.length);
       }
       if (count) {
         const { proxy, end } = proxyNodes();
@@ -906,7 +908,9 @@
     // 7849 AC1：一键入口写 scope=all（一条全项目记录，带 expiresAt，覆盖全部非终态需求）。
     // 已生效时再点：幂等——不新建、只更新 updatedAt，后端返回 idempotent=true。
     const rows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
-    const covered = rows.filter((row) => row && !['accepted', 'terminated', 'rejected'].includes(String(row.status || '')));
+    // B-11ce：覆盖条数只算「有真实非终态 status」的行（无 status 的幽灵行不计入，避免 25 vs 13 虚高）。
+    const covered = OR_STATE ? OR_STATE.proxyCoveredRows(rows)
+      : rows.filter((row) => row && ![ 'accepted', 'terminated', 'rejected' ].includes(String(row.status || '')) && String(row.status || ''));
     if (!covered.length) {
       showBanner({ message: '当前没有非终态需求，不需要批量代管。' });
       return;

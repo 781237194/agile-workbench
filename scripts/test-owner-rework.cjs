@@ -92,6 +92,16 @@ check('最后一笔决定是「通过」→ 不进待评审（不被旧打回卡
 check('顶层 decisions 优先于 ownerReview.status', S.decidedStatusOf(reapproved) === 'approved', S.decidedStatusOf(reapproved));
 
 /* ── 七、接线静态断言（防止只改纯逻辑、界面没接上）────────────────────────── */
+// B-11ce：scope=all 覆盖条数口径（无 status / 收口行不计入）
+check('proxyCoveredRows：无 status 行不计入', S.proxyCoveredRows([{ id: 'R-x' }, { id: 'R-y', status: '' }]).length === 0);
+check('proxyCoveredRows：收口行（accepted/terminated/rejected）不计入', S.proxyCoveredRows([
+  { id: 'R-1', status: 'accepted' }, { id: 'R-2', status: 'terminated' }, { id: 'R-3', status: 'rejected' },
+]).length === 0);
+check('proxyCoveredRows：非终态行计入（approved/dev/test_done）', S.proxyCoveredRows([
+  { id: 'R-1', status: 'approved' }, { id: 'R-2', status: 'dev' }, { id: 'R-3', status: 'test_done' }, { id: 'R-4', status: 'accepted' }, { id: 'R-5' },
+]).length === 3, S.proxyCoveredRows([{ id: 'R-1', status: 'approved' }, { id: 'R-2', status: 'dev' }, { id: 'R-3', status: 'test_done' }, { id: 'R-4', status: 'accepted' }, { id: 'R-5' }]).map((row) => row.id));
+check('owner-review.js：一键代管覆盖条数走 proxyCoveredRows（不再直接按 status 过滤）', /OR_STATE\.proxyCoveredRows\(rows\)/.test(fs.readFileSync(REVIEW, 'utf8')));
+
 const reviewSrc = fs.readFileSync(REVIEW, 'utf8');
 check('owner-review.js：isPending 已交给 owner-review-state（OR_STATE.isPending）', /if \(OR_STATE\) return OR_STATE\.isPending\(req\)/.test(reviewSrc));
 check('owner-review.js：复审标记渲染函数存在且带 data-or-rework', /function reworkChipHtml[\s\S]{0,260}data-or-rework/.test(reviewSrc));

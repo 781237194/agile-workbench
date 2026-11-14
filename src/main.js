@@ -10455,7 +10455,9 @@ async function runReviewCheck() {
       hasSection: Boolean(section),
       anchorCount: anchors.length,
       endVisible: Boolean(endBtn && !endBtn.hidden),
-      proxyChip: (document.querySelector('[data-owner-review-proxy]') || {}).textContent || ''
+      proxyChip: (document.querySelector('[data-owner-review-proxy]') || {}).textContent || '',
+      proxyCount: (document.querySelector('[data-owner-review-proxy]') || {}).getAttribute
+        ? document.querySelector('[data-owner-review-proxy]').getAttribute('data-proxy-count') : ''
     });
   })()`));
   report.proxyUiOn = proxyUiOn;
@@ -10463,6 +10465,9 @@ async function runReviewCheck() {
     /结束代管/.test(proxyUiOn.buttonText) && proxyUiOn.buttonState === 'active' && Boolean(proxyUiOn.expiresAttr), proxyUiOn);
   check('AC3-补 决策箱分区出现且带 data-proxy-decide-entry 锚点',
     proxyUiOn.hasSection === true && proxyUiOn.anchorCount >= 2, { hasSection: proxyUiOn.hasSection, anchors: proxyUiOn.anchorCount });
+  // B-11ce：覆盖条数只算有真实非终态 status 的行——夹具里非终态=3（a001 approved/a002 dev/a003 test_done），a004 accepted 不算。
+  check('B-11ce 代管徽标条数 = 工作流实际非终态条数（3，不是虚高）',
+    String(proxyUiOn.proxyCount) === '3' && /3 条/.test(String(proxyUiOn.proxyChip)), { chip: proxyUiOn.proxyChip, count: proxyUiOn.proxyCount });
   report.shots['proxy-on'] = await shot('proxy-all-on.png');
   // 截图 2 要能看见「决策箱代回执锚点」：先把分区滚进可视区（弹窗左列是可滚动容器）。
   await js(`(function(){ const s = document.querySelector('[data-proxy-decide-section]'); if (s && s.scrollIntoView) s.scrollIntoView({ block: 'center' }); return true; })()`);

@@ -108,15 +108,30 @@
     return status === 'approved' || status === 'owner_review';
   }
 
+  /**
+   * B-11ce：scope=all 覆盖的需求条数——只算「有真实非终态 status」的行。
+   * 以前把 status 为空的行（需求正文推导出的幽灵行/跨项目行）也算进去，提示会虚高（25 vs 实际 13）。
+   */
+  const NON_TERMINAL_STATUSES = ['review', 'owner_review', 'tech_review', 'approved', 'ready', 'dispatched', 'dev', 'dev_review', 'dev_done', 'test', 'test_done', 'iteration'];
+  function proxyCoveredRows(rows) {
+    return (Array.isArray(rows) ? rows : []).filter((row) => {
+      const status = textOf(row && row.status).toLowerCase();
+      if (!status) return false; // 无 status 行不计入（AC2）
+      return !CLOSED_REQ_STATUSES.includes(status);
+    });
+  }
+
   const api = {
     CLOSED_REQ_STATUSES,
     REWORK_LABEL,
+    NON_TERMINAL_STATUSES,
     latestOwnerDecision,
     decidedStatusOf,
     rejectedAtOf,
     changedAtOf,
     reworkInfo,
-    isPending
+    isPending,
+    proxyCoveredRows,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
