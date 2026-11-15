@@ -2725,6 +2725,59 @@ async function syncFloatToggleBadge() {
     : '更多入口：一键代管 / 决策箱 / 团队看板 / 流程');
 }
 let floatProxyObserver = null;
+/**
+ * R-c1ed 第一刀：渲染崩溃感知横幅（顶部人话 + 一键重载聊天区）。
+ * 主进程监听 render-process-gone / child-process-gone / unresponsive 后推 app:render-crash；
+ * 这里只负责「看得见、点得动」，审计与写盘在主进程（团队/状态/项目/<项目>/渲染崩溃.jsonl）。
+ */
+function initCrashBanner() {
+  const wb = window.workbench || {};
+  function ensureBanner() {
+    let node = document.getElementById('crash-banner');
+    if (node) return node;
+    node = document.createElement('div');
+    node.id = 'crash-banner';
+    node.className = 'crash-banner';
+    node.setAttribute('data-crash-banner', '1');
+    node.hidden = true;
+    node.innerHTML = '<b data-crash-title>DSH 渲染进程已崩溃</b>'
+      + '<span data-crash-detail></span>'
+      + '<button type="button" class="ghost small" data-crash-reload>重载聊天区</button>'
+      + '<button type="button" class="ghost small" data-crash-dismiss>先不管</button>';
+    if (document.body.firstChild) document.body.insertBefore(node, document.body.firstChild);
+    else document.body.appendChild(node);
+    node.querySelector('[data-crash-reload]').addEventListener('click', async () => {
+      const btn = node.querySelector('[data-crash-reload]');
+      btn.disabled = true;
+      btn.textContent = '重载中…';
+      let result = { ok: false };
+      try {
+        result = typeof wb.reloadDshView === 'function' ? await wb.reloadDshView() : { ok: false, code: 'IPC_MISSING' };
+      } catch { result = { ok: false }; }
+      btn.disabled = false;
+      btn.textContent = result && result.ok ? '已重载' : '重载失败，点重试';
+      node.setAttribute('data-crash-last-reload', result && result.ok ? 'ok' : 'failed');
+      if (result && result.ok) setTimeout(() => { node.hidden = true; }, 1200);
+    });
+    node.querySelector('[data-crash-dismiss]').addEventListener('click', () => { node.hidden = true; });
+    return node;
+  }
+  const show = (row) => {
+    const node = ensureBanner();
+    const info = row && typeof row === 'object' ? row : {};
+    const when = info.at ? String(info.at).slice(0, 19).replace('T', ' ') : '';
+    const parts = [
+      info.reason ? `原因 ${info.reason}` : '',
+      (info.exitCode === null || info.exitCode === undefined) ? '' : `退出码 ${info.exitCode}`
+    ].filter(Boolean);
+    node.querySelector('[data-crash-detail]').textContent = [when, parts.join(' · ')].filter(Boolean).join(' · ') || '（详情已写入审计）';
+    node.setAttribute('data-crash-kind', String(info.kind || ''));
+    node.hidden = false;
+  };
+  if (typeof wb.onRenderCrash === 'function') wb.onRenderCrash(show);
+  window.__awbCrashBanner = { show };
+}
+
 function initFloatToggle() {
   const panel = floatPanelEl();
   const toggle = floatToggleEl();
@@ -14848,6 +14901,8 @@ function bind() {
   $('#board-launcher')?.addEventListener('click', toggleBoardPanel);
   // T-e2a3：右下角收成一个可展开按钮（默认收起；点开才露出 一键代管/决策箱/看板/流程 四行）。
   initFloatToggle();
+  // R-c1ed 第一刀：渲染崩溃感知——顶部人话横幅 + 一键重载（事件由主进程 app:render-crash 推送）。
+  initCrashBanner();
   $('#btn-project-remove')?.addEventListener('click', removeProjectRecord);
   $('#btn-team-board-2')?.addEventListener('click', openBoardPanel);
   $('#btn-team-sync')?.addEventListener('click', syncTeamNow);

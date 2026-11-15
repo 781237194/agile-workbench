@@ -8833,8 +8833,28 @@ function registerIpc() {
       state: statePayload()
     };
   });
-  ipcMain.handle('dsh:status', async () => {
-    // DSH 更新后端口会变：检测失败时先尝试从 DSH 进程/监听端口自动发现，
+  // R-c1ed 第一刀：崩溃感知——自检通道（只在 AWB_CRASH_TEST=1 的隔离实例里可用）+ 一键重载聊天区。
+  ipcMain.handle('app:crash-selftest', async () => {
+    if (String(process.env.AWB_CRASH_TEST || '') !== '1') {
+      return { ok: false, code: 'CRASH_TEST_DISABLED', message: '模拟崩溃只在隔离实例（AWB_CRASH_TEST=1）里可用；真实崩溃会自动落审计' };
+    }
+    const row = recordRenderCrash('selftest', { type: 'renderer', reason: 'crashed-selftest', exitCode: 0 });
+    return { ok: true, row };
+  });
+  ipcMain.handle('app:reload-dsh', async () => reloadDshGuest());
+  ipcMain.handle('app:crash-audit', async (_e, payload) => {
+    // 只读：给界面/自检看最近 N 行审计（不读文件内容以外的任何东西）。
+    const limit = Math.min(50, Math.max(1, Number((payload || {}).limit) || 10));
+    const file = crashAuditFile();
+    if (!file) return { ok: false, code: 'CRASH_AUDIT_UNAVAILABLE', message: '当前没有可写的项目状态目录' };
+    try {
+      const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+      const rows = text.split(/\r?\n/).filter(Boolean).slice(-limit).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
+      return { ok: true, file, rows };
+    } catch (error) { return { ok: false, code: 'CRASH_AUDIT_READ_FAILED', message: String((error && error.message) || error).slice(0, 160) }; }
+  });
+  installCrashSensors();
+  ipcMain.handle('dsh:status', async () => {    // DSH 更新后端口会变：检测失败时先尝试从 DSH 进程/监听端口自动发现，
     // 发现成功则持久化并重载 WebView；失败保留原地址，把原因写进 status.message。
     const canDiscover = dshAutoDiscoveryAllowed();
     const status = await dsh.check({ timeoutMs: canDiscover ? DSH_DISCOVERY_CHECK_TIMEOUT_MS : 8000 });
@@ -17116,6 +17136,85 @@ function dshDiscoverySummary(result) {
     probes: Array.isArray(result.probes) ? result.probes.length : 0,
     durationMs: result.durationMs || 0
   };
+}
+
+/* ── R-c1ed 第一刀：壳层崩溃感知（render-process-gone / child-process-gone / unresponsive）──
+ * 背景：崩溃时壳层完全无感知（全仓 0 命中），只有一行 DSH 日志 + 用户看到白屏。
+ * 口径（需求 §五 F-3 + §八 FAIL 第 1 条）：
+ *   ①三类事件全监听；②落 append-only 审计 团队/状态/项目/<项目>/渲染崩溃.jsonl
+ *     （at/kind/processType/reason/exitCode/memoryMB/project）；③界面顶部人话横幅 + 一键重载；
+ *   ④不碰内存回收策略、不改 DSH asar。
+ * 写盘失败只打日志不抛（fail-open：内存/崩溃观测不能拖垮主流程）。
+ */
+function crashAuditFile() {
+  try {
+    const store = readStore();
+    const project = (store.projects || []).find((item) => item && item.id === store.activeProjectId);
+    const dir = project ? teamProjectStateDir(project) : '';
+    return dir ? path.join(dir, '渲染崩溃.jsonl') : '';
+  } catch { return ''; }
+}
+
+function currentRendererMemoryMB() {
+  try {
+    const rows = app.getAppMetrics() || [];
+    const total = rows.reduce((sum, row) => sum + (((row && row.memory && row.memory.workingSetSize) || 0)), 0);
+    return total > 0 ? Math.round(total / 1024) : null;
+  } catch { return null; }
+}
+
+function recordRenderCrash(kind, details) {
+  const info = details && typeof details === 'object' ? details : {};
+  const row = {
+    at: now(),
+    kind: String(kind || 'unknown'),
+    processType: String(info.type || info.processType || 'renderer'),
+    reason: String(info.reason || ''),
+    exitCode: info.exitCode === undefined || info.exitCode === null ? null : Number(info.exitCode),
+    memoryMB: currentRendererMemoryMB(),
+    project: (() => { try { const s = readStore(); const p = (s.projects || []).find((x) => x && x.id === s.activeProjectId); return p ? String(p.name || '') : ''; } catch { return ''; } })()
+  };
+  const file = crashAuditFile();
+  if (file) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, JSON.stringify(row) + '\n', 'utf8');
+    } catch (error) { console.error('[crash] 审计写盘失败：', String((error && error.message) || error).slice(0, 200)); }
+  }
+  // 顶部人话横幅：只推给主窗渲染层；窗口没了就只留审计。
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) mainWindow.webContents.send('app:render-crash', row);
+  } catch { /* 渲染层不可达时静默降级，审计已落盘 */ }
+  console.log('[crash]', JSON.stringify(row));
+  return row;
+}
+
+function installCrashSensors() {
+  if (installCrashSensors.done) return;
+  installCrashSensors.done = true;
+  app.on('render-process-gone', (_event, _contents, details) => { recordRenderCrash('render-process-gone', details); });
+  app.on('child-process-gone', (_event, details) => { recordRenderCrash('child-process-gone', details); });
+  app.on('web-contents-created', (_event, contents) => {
+    try {
+      contents.on('render-process-gone', (_e, details) => { recordRenderCrash('web-contents-render-gone', details); });
+      contents.on('unresponsive', () => { recordRenderCrash('unresponsive', { type: contents.getType ? contents.getType() : 'unknown' }); });
+    } catch { /* 单个 contents 挂不上不影响其它 */ }
+  });
+}
+
+/** 一键重载 DSH 聊天区：优先 reload 内嵌 webview 的 guest（不换地址，避免 ERR_ABORTED）。 */
+function reloadDshGuest() {
+  try {
+    const guests = typeof webContents.getAllWebContents === 'function' ? webContents.getAllWebContents() : [];
+    const guest = guests.find((contents) => {
+      try { return contents.getType() === 'webview' && !contents.isDestroyed(); } catch { return false; }
+    });
+    if (!guest) return { ok: false, code: 'DSH_WEBVIEW_MISSING', message: '没找到聊天区（可能已被关闭），请点【重载 DSH】重新加载' };
+    guest.reload();
+    return { ok: true, via: 'guest-reload' };
+  } catch (error) {
+    return { ok: false, code: 'DSH_RELOAD_FAILED', message: '重载失败：' + String((error && error.message) || error).slice(0, 160) };
+  }
 }
 
 /**

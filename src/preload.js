@@ -183,6 +183,15 @@ if (IS_BOARD_WINDOW) {
     ownerChallenge: (payload) => ipcRenderer.invoke('owner:challenge', payload),
     ownerConfirm: (payload) => ipcRenderer.invoke('owner:confirm', payload),
     dshStatus: () => ipcRenderer.invoke('dsh:status'),
+    // R-c1ed 第一刀：崩溃感知（顶部横幅 + 一键重载 + 只读审计）。
+    onRenderCrash: (cb) => {
+      const handler = (_e, payload) => { try { cb(payload); } catch { /* 渲染层回调异常不影响主进程 */ } };
+      ipcRenderer.on('app:render-crash', handler);
+      return () => { try { ipcRenderer.off('app:render-crash', handler); } catch { /* ignore */ } };
+    },
+    reloadDshView: () => ipcRenderer.invoke('app:reload-dsh'),
+    crashSelfTest: () => ipcRenderer.invoke('app:crash-selftest'),
+    crashAudit: (payload) => ipcRenderer.invoke('app:crash-audit', payload),
     // 手动重新发现本机 DSH Web 端口；返回结构化结果，界面不新增假按钮。
     dshRediscover: () => ipcRenderer.invoke('dsh:rediscover'),
     dshConfigure: (baseUrl) => ipcRenderer.invoke('dsh:configure', baseUrl),
