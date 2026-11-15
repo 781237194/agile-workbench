@@ -162,6 +162,71 @@ function workflowRowFor(project, requirementId) {
 }
 
 /**
+ * B-2ae4 / 62b9：推进前必须**读测试报告主体结论**，不能只看任务 evidence 字符串。
+ * 62b9 的 测试报告-v190.md 首行 status=不通过，但任务 evidence 里没写「不通过」→ 被误推到 test_done。
+ *
+ * 取报告顺序：①任务 evidenceFiles / evidence 文本里点名的 测试人员/产出/*.md；②该项目最新 测试报告-vN.md。
+ * 只看报告头部（前 20 行 + status/结论/判定 行），命中 不通过/未通过/FAIL → fail；命中 通过/PASS → pass；否则 unknown。
+ */
+function readTestReportVerdict(projectName, task) {
+  const reportPaths = [];
+  const pushUnique = (p) => {
+    const rel = String(p || '').replace(/\\/g, '/').replace(/^\.\//, '').trim();
+    if (!rel) return;
+    if (!/测试人员\/产出\/.+\.md$/i.test(rel) && !/测试报告|测试结论|test-report/i.test(rel)) return;
+    if (!reportPaths.includes(rel)) reportPaths.push(rel);
+  };
+  const evidenceFiles = Array.isArray(task && task.evidenceFiles) ? task.evidenceFiles : [];
+  for (const file of evidenceFiles) {
+    if (!file) continue;
+    if (file.scope === 'workspace') continue;
+    pushUnique(file.path || file.rel || file.name);
+    if (Array.isArray(file.manifest)) for (const item of file.manifest) pushUnique(item && (item.path || item.rel));
+  }
+  const evidenceText = String((task && task.evidence) || '');
+  const pathMatches = evidenceText.match(/测试人员[\\/]+产出[\\/]+[^\s，,；;）)】\]]+\.md/gi) || [];
+  for (const p of pathMatches) pushUnique(p.replace(/\\/g, '/'));
+  let projectPath = '';
+  try { projectPath = loadProject(projectName).path; } catch { projectPath = ''; }
+  if (!projectPath) return { verdict: 'unknown', file: '', snippet: '' };
+  // 兜底：该项目最新 测试报告-vN.md（版本号最大者）
+  try {
+    const dir = path.join(projectPath, '测试人员', '产出');
+    const names = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+    const reports = names
+      .map((name) => ({ name, m: /^测试报告-v(\d+)\.md$/i.exec(name) }))
+      .filter((x) => x.m)
+      .sort((a, b) => Number(b.m[1]) - Number(a.m[1]));
+    if (reports.length) pushUnique(path.join('测试人员', '产出', reports[0].name).replace(/\\/g, '/'));
+  } catch { /* 目录不存在就只靠点名的报告 */ }
+  const FAIL_RE = /(不通过|未通过|\bFAIL\b|失败)/i;
+  const PASS_RE = /(通过|\bPASS\b)/i;
+  // 报告有版本：新报告覆盖旧结论——按 -vN 从大到小排（无版本号排最后），先看最新那份。
+  const versionOf = (rel) => {
+    const m = /-v(\d+)\.md$/i.exec(rel);
+    return m ? Number(m[1]) : 0;
+  };
+  const ordered = [...reportPaths].sort((a, b) => versionOf(b) - versionOf(a));
+  for (const rel of ordered) {
+    const abs = path.join(projectPath, rel);
+    if (!fs.existsSync(abs)) continue;
+    let text = '';
+    try { text = fs.readFileSync(abs, 'utf8'); } catch { continue; }
+    const lines = text.split(/\r?\n/);
+    const head = lines.slice(0, 20);
+    const statusLines = lines.slice(0, 200).filter((line) => /status|结论|判定|verdict/i.test(line));
+    const scan = [...statusLines, ...head].map((line) => String(line || '').trim()).filter(Boolean);
+    for (const line of scan) {
+      if (FAIL_RE.test(line)) return { verdict: 'fail', file: rel, snippet: line.slice(0, 120) };
+    }
+    for (const line of scan) {
+      if (PASS_RE.test(line)) return { verdict: 'pass', file: rel, snippet: line.slice(0, 120) };
+    }
+  }
+  return { verdict: 'unknown', file: ordered[0] || '', snippet: '' };
+}
+
+/**
  * task done 后按「任务类型 + 阶段 + 测试结论」推进需求状态（B-b645）：
  * - 只有 type=task 的任务能推进；TR-Q/评审类任务（既不是开发也不是测试）不推进；
  * - 开发类：需求在 ready/dispatched/dev/dev_review（legacy approved 视同 ready），且该需求全部开发任务 done → dev_done；
@@ -304,6 +369,14 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
     const trqVerdict = String((row.trq && row.trq.verdict) || '');
     if (trqVerdict && trqVerdict !== 'testable') return skip('trq_not_testable', { verdict: trqVerdict });
     if (/(?:FAIL|不通过|未通过)/i.test(String(task.evidence || ''))) return skip('test_not_passed');
+    // B-2ae4 / 62b9：证据字符串干净不等于测试通过——必须读测试报告主体结论（前 20 行 + status/结论行）。
+    // 命中「不通过/未通过/FAIL/失败」→ 不推进，并把匹配到的原文片段写进 requirement_advance_skipped 审计。
+    const reportVerdict = readTestReportVerdict(projectName, task);
+    if (reportVerdict.verdict === 'fail') {
+      return skip('test_report_not_passed', {
+        reportFile: reportVerdict.file, snippet: reportVerdict.snippet, reportVerdict: reportVerdict.verdict,
+      });
+    }
     const tests = listTasks(projectName).filter((rowTask) => rowTask && ['task', 'bug'].includes(String(rowTask.type || ''))
       && String(rowTask.requirementId || '') === requirementId)
       .filter((rowTask) => String(rowTask.owner || '') === 'tester'
@@ -2959,6 +3032,38 @@ export async function cmdAnswer(args) {
 export async function cmdTask(args) {
   const sub = args._[1] || 'list';
   const b = bootFor(args, 'task');
+  // R-62b9（增补卷-62b9-1 §四 E2，维修模式·PM 授权）：缺陷单按操作者角色直接验收。
+  // 用法：team.mjs task accept --project P --task <任务id> --as tester|pm --decision accepted|rejected
+  //       --opinion "…" --evidence <报告>:report --evidence <截图>:screenshot --boot <T>
+  if (sub === 'accept') {
+    const asRole = String(args.as || b.role || '').trim().toLowerCase();
+    if (!['pm', 'tester', 'owner'].includes(asRole)) {
+      fail('ACCEPT_ROLE_INVALID', `--as 只能是 tester / pm / owner（收到 ${asRole || '(空)'}）`, { as: asRole, allowed: ['tester', 'pm', 'owner'] });
+    }
+    if (asRole !== String(b.role || '')) {
+      fail('ACCEPT_ROLE_MISMATCH', `--as ${asRole} 与 boot 令牌角色 ${b.role} 不一致：验收必须由本人角色的令牌执行`, { as: asRole, bootRole: b.role });
+    }
+    if (asRole === 'owner') {
+      fail('OWNER_VIA_TASK_ACCEPT_FORBIDDEN', 'Owner 验收请走 team.mjs owner --requirement <任务id> --action accept（一次性确认码）', { as: asRole });
+    }
+    const taskId = String(args.task || args._[2] || '').trim();
+    if (!taskId) fail('BAD_ARGS', '需要 --task <任务id>（缺陷单）');
+    const task = loadTask(b.project, taskId);
+    if (!['bug', 'scenario-bug'].includes(String(task.type || ''))) {
+      fail('ACCEPT_NOT_DEFECT', `${taskId} 不是缺陷单（type=${task.type || '(空)'}）：task accept 只处理 bug / scenario-bug`, { taskId, type: task.type || '' });
+    }
+    const decision = String(args.decision || 'accepted').trim().toLowerCase();
+    if (!['accepted', 'rejected'].includes(decision)) {
+      fail('ACCEPT_DECISION_INVALID', `--decision 只能是 accepted / rejected（收到 ${decision || '(空)'}）`, { decision, allowed: ['accepted', 'rejected'] });
+    }
+    if (args.opinion === undefined || args.opinion === null) {
+      fail('OPINION_REQUIRED', '需要 --opinion "验收意见"（可以为空字符串，但必须显式给出）');
+    }
+    const opinion = truncate(String(args.opinion || '').trim(), 300);
+    const project = loadProject(b.project);
+    acceptDefectTask(args, { project, projectName: b.project, task, decision, opinion, proxyMode: false, asRole });
+    return;
+  }
   if (sub === 'create') {
     // R-b5fc F-4：测试人员可直接建 type=bug 的 B-* 缺陷任务（旁路不改需求状态机）；其它任务类型仍限 PM/产品/需求分析。
     const wantType = String(args.type || 'task');
@@ -3525,7 +3630,19 @@ function cmdReqReopen(args) {
     }
   }
   const fromStatus = String((row && row.status) || '');
-  if (!['dev_done', 'test_done'].includes(fromStatus)) {
+  // B-2ae4 / b28f：被误推到 accepted 的行（没有 accept 决定）也需要一条合规恢复命令，不能手改 JSON。
+  // 只认显式 --recover-mispushed，且必须"没有任何 accepted 决策"才放行；正常验收过的行仍然拒。
+  const acceptedDecisions = (Array.isArray(row.decisions) ? row.decisions : [])
+    .filter((d) => d && ['accepted', 'accept'].includes(String(d.status || d.decision || '')));
+  const recoverAccepted = fromStatus === 'accepted'
+    && Boolean(args['recover-mispushed'])
+    && acceptedDecisions.length === 0;
+  if (fromStatus === 'accepted' && !recoverAccepted) {
+    fail('REOPEN_NOT_APPLICABLE', `需求 ${requirementId} 当前状态 accepted 不适用返工（只支持 dev_done/test_done）；若是误推且无 accept 决定，用 --recover-mispushed 恢复`, {
+      requirementId, status: fromStatus, allowed: ['dev_done', 'test_done'], acceptedDecisions: acceptedDecisions.length,
+    });
+  }
+  if (!['dev_done', 'test_done'].includes(fromStatus) && !recoverAccepted) {
     fail('REOPEN_NOT_APPLICABLE', `需求 ${requirementId} 当前状态 ${fromStatus || '(空)'} 不适用返工（只支持 dev_done/test_done）`, {
       requirementId, status: fromStatus, allowed: ['dev_done', 'test_done'],
     });
@@ -3614,6 +3731,18 @@ function cmdReqReopen(args) {
     target: requirementId, note: truncate(reason, 160),
     data: { requirementId, role: b.role, reason, count: row.reopenCount, at, fromStatus, toStatus: 'dev', deliveryRound: nextRound, reopenedTasks },
   });
+  // B-2ae4：误推 accepted 的恢复必须单独留痕（审计里能查「谁把哪条从假收口拉回来、依据是什么」）。
+  if (recoverAccepted) {
+    appendEvent({
+      role: b.role, sessionId: b.sessionId, action: 'requirement_recovery_mispushed_accepted', project: projectName,
+      target: requirementId, note: `accepted → dev（无 accept 决定，--recover-mispushed）`,
+      data: {
+        requirementId, role: b.role, reason, at, priorStatus: 'accepted',
+        acceptedDecisions: acceptedDecisions.length, decisions: (Array.isArray(row.decisions) ? row.decisions : []).length,
+        deliveryRound: nextRound,
+      },
+    });
+  }
   out(args, [
     `已返工 ${requirementId}：${fromStatus} → dev（当前，第 ${row.reopenCount} 次返工）`,
     `原因：${reason}`,
@@ -3626,9 +3755,41 @@ function cmdReqReopen(args) {
   });
 }
 
+/**
+ * B-2ae4：只读巡检「被误推到 accepted、但没有任何 accept 决定」的需求行。
+ * 不改任何状态；恢复入口固定为 `req reopen --recover-mispushed`（同一处审计，不手改 JSON）。
+ */
+function cmdReqMispushed(args) {
+  const b = bootFor(args, 'req mispushed');
+  const projectName = String(args.project || b.project);
+  const read = readWorkflowState(projectName);
+  const rows = Object.values((read.state && read.state.requirements) || {});
+  const hits = [];
+  for (const row of rows) {
+    if (!row || String(row.status || '') !== 'accepted') continue;
+    const acceptedDecisions = (Array.isArray(row.decisions) ? row.decisions : [])
+      .filter((d) => d && ['accepted', 'accept'].includes(String(d.status || d.decision || '')));
+    if (acceptedDecisions.length) continue;
+    const id = String(row.id || '');
+    hits.push({
+      requirementId: id,
+      title: String(row.title || ''),
+      decisions: (Array.isArray(row.decisions) ? row.decisions : []).length,
+      ownerAcceptance: row.ownerAcceptance || null,
+      recovery: `team.mjs req reopen --boot <PM令牌> --project "${projectName}" --requirement ${id} --reason "误推 accepted 恢复（无 accept 决定）" --recover-mispushed`,
+    });
+  }
+  const lines = [`疑似误推 accepted：${hits.length} 条（判据＝status=accepted 且 decisions 里无 accept/accepted）`];
+  for (const hit of hits) {
+    lines.push(`- ${hit.requirementId} ${hit.title}`);
+    lines.push(`  恢复：${hit.recovery}`);
+  }
+  if (!hits.length) lines.push('（无：所有 accepted 行都有 accept 决定）');
+  out(args, lines.join('\n'), { ok: true, project: projectName, file: read.file, count: hits.length, hits, readOnly: true });
+}
+
 /** 需求行定位：完整 id 精确优先 → 唯一兼容匹配（同秒撞号时取 Object.values 里 id 全等的那条）。 */
-function findRequirementRow(rows, id) {
-  const table = rows && typeof rows === 'object' ? rows : {};
+function findRequirementRow(rows, id) {  const table = rows && typeof rows === 'object' ? rows : {};
   const key = String(id || '').trim();
   if (!key) return null;
   if (table[key]) return table[key];
@@ -4058,6 +4219,8 @@ export function cmdReq(args) {
   if (sub === 'iterate' || sub === 'terminate') return cmdReqLifecycle(args, sub);
   // R-d225：正式返工入口（dev_done/test_done → dev，deliveryRound+1，门禁失效标记）。
   if (sub === 'reopen') return cmdReqReopen(args);
+  // B-2ae4：只读巡检——被误推到 accepted 但没有任何 accept 决定的需求行（配套恢复：req reopen --recover-mispushed）。
+  if (sub === 'mispushed') return cmdReqMispushed(args);
   // B-155a：幽灵需求登记 / 作废（工作流没有但工作台缓存里有）。
   if (sub === 'register') return cmdReqRegister(args);
   if (sub === 'void') return cmdReqVoid(args);
@@ -4998,8 +5161,13 @@ function cmdOwnerConfirm(args) {
  * 不建镜像需求行、不动需求行 decisions[]；`acceptance`（验收标准字符串）原样不改。
  * 门槛与 PM 代验收同码：缺测试报告/证据 → PM_ACCEPT_EVIDENCE_REQUIRED（Owner 通道不放宽）。
  */
-function acceptDefectTask(args, { project, projectName, task, decision, opinion, proxyMode }) {
+function acceptDefectTask(args, { project, projectName, task, decision, opinion, proxyMode, asRole }) {
   const at = nowIso();
+  const actor = String(asRole || '').trim().toLowerCase();
+  // R-62b9（增补卷-62b9-1 §四 E1/E2）：测试/PM 直接验收缺陷**不要求代管**；owner 走原 ui/tty 通道。
+  if (actor && !['pm', 'tester', 'owner'].includes(actor)) {
+    fail('ACCEPT_ROLE_INVALID', `缺陷验收操作者只能是 pm / tester / owner（收到 ${actor}）`, { as: actor, allowed: ['pm', 'tester', 'owner'] });
+  }
   const channelArg = String(args.channel || '').trim().toLowerCase();
   let channel = 'ui';
   if (proxyMode) {
@@ -5008,6 +5176,10 @@ function acceptDefectTask(args, { project, projectName, task, decision, opinion,
     if (!reqId) fail('PROXY_UNAUTHORIZED', '缺陷单没有绑需求，代管不适用；缺陷验收必须 Owner 本人', { taskId: task.id });
     const proxy = activeProxyFor(projectName, reqId);
     if (!proxy) fail('PROXY_UNAUTHORIZED', `需求 ${reqId} 没有未结束的评审代管，不能代验收缺陷单`, { taskId: task.id, requirementId: reqId });
+  } else if (actor === 'pm') {
+    channel = 'pm';
+  } else if (actor === 'tester') {
+    channel = 'test';
   } else if (channelArg) {
     if (!['ui', 'tty'].includes(channelArg)) {
       fail('OWNER_CHANNEL_INVALID', `Owner 验收通道只允许 ui / tty（收到 ${channelArg}）`, { channel: channelArg, allowed: ['ui', 'tty'] });
@@ -5034,9 +5206,11 @@ function acceptDefectTask(args, { project, projectName, task, decision, opinion,
     });
   }
   const accepted = String(decision) === 'accepted';
+  // 落账人：代管=pm、PM 直接验收=pm/pm、测试直验=tester/test、其余=owner（§四 三条入口同一字段）
+  const byRole = proxyMode ? 'pm' : (actor === 'pm' ? 'pm' : (actor === 'tester' ? 'tester' : 'owner'));
   const record = {
     status: String(decision),
-    by: proxyMode ? 'pm' : 'owner',
+    by: byRole,
     channel,
     at,
     opinion: truncate(opinion, 300),
@@ -5055,15 +5229,15 @@ function acceptDefectTask(args, { project, projectName, task, decision, opinion,
     task.status = task.owner ? 'working' : 'open';
     task.reopenCount = Number(task.reopenCount || 0) + 1;
     task.reopenedAt = at;
-    task.reopenedBy = proxyMode ? 'pm' : 'owner';
+    task.reopenedBy = byRole;
     task.updatedAt = at;
   }
-  task._by = proxyMode ? 'pm' : 'owner';
+  task._by = byRole;
   task._action = accepted ? 'defect_accept' : 'defect_reject';
   task._note = truncate(opinion || (accepted ? '缺陷单验收通过' : '缺陷单验收打回'), 200);
   const saved = saveTask(projectName, task);
   appendEvent({
-    role: proxyMode ? 'pm' : 'owner', sessionId: sessionOf(args), action: accepted ? 'defect_accepted' : 'defect_rejected',
+    role: byRole, sessionId: sessionOf(args), action: accepted ? 'defect_accepted' : 'defect_rejected',
     project: projectName, target: saved.id,
     note: truncate(`${saved.type} ${accepted ? '验收通过' : '验收打回'}${proxyMode ? '（PM 代记）' : ''}`, 160),
     data: { taskId: saved.id, status: decision, channel, testReport: record.testReport, evidence: record.evidence, reopenCount: saved.reopenCount || 0 },
