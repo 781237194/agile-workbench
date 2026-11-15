@@ -55,9 +55,10 @@ function fileBytes(file) {
   try { return fs.statSync(file).size; } catch { return 0; }
 }
 
-/** 采样行归一（只留 §3.2 固定字段；kind 可选且不替代 cause）。 */
+/** 采样行归一（增补卷-c1ed-3 §三 写死：cause 五值白名单、7 键；卷三已取消 5s 行频降级）。 */
 function normalizeSampleLine(row) {
   const src = row && typeof row === 'object' ? row : {};
+  const CAUSES = ['boot', 'sample', 'reused', 'degraded', 'recovered'];
   const out = {};
   for (const key of SAMPLE_FIELDS) out[key] = src[key] === undefined ? null : src[key];
   out.at = String(src.at || new Date().toISOString());
@@ -65,14 +66,17 @@ function normalizeSampleLine(row) {
   out.type = String(src.type || 'renderer');
   out.guestUrl = src.guestUrl === undefined ? null : src.guestUrl;
   out.workingSetMB = src.workingSetMB === undefined || src.workingSetMB === null ? null : Number(src.workingSetMB);
-  out.cause = String(src.cause || 'sample');
-  // §3.2 降级频率变更点必须带 intervalMs（缺了就没法复算 interval）
-  if (src.intervalMs !== undefined && src.intervalMs !== null && Number.isFinite(Number(src.intervalMs))) out.intervalMs = Number(src.intervalMs);
+  const cause = String(src.cause || 'sample');
+  out.cause = CAUSES.includes(cause) ? cause : 'sample';
   if (src.kind) out.kind = String(src.kind);
-  // PM 2026-11-15 15:36 裁决（方案2）：1s 行、每 5 拍真取 metrics、中间行复用上一值并标 sampledFrom（真实采样时刻 ISO）。
-  // 判据用法：斜率只用「有真值」的行（无 sampledFrom 或 sampledFrom===at），R1/R2/R3 用全行。
+  // 卷三：复用行必须带 sampledFrom（真实采样时刻）+ staleSec；真采样行 sampledFrom===at。
   if (src.sampledFrom !== undefined && src.sampledFrom !== null) out.sampledFrom = String(src.sampledFrom);
-  if (src.carried === true) out.carried = true;
+  if (src.staleSec !== undefined && src.staleSec !== null && Number.isFinite(Number(src.staleSec))) out.staleSec = Number(src.staleSec);
+  if (out.cause !== 'reused' && !out.sampledFrom && ['boot', 'sample', 'recovered'].includes(out.cause)) out.sampledFrom = out.at;
+  // 卷三：degraded 行 sampledFrom=null、workingSetMB=null（正常兜底，不是坏行）
+  if (out.cause === 'degraded') { out.sampledFrom = null; out.workingSetMB = null; }
+  // 卷四①：进程变化触发的强制真采样行标 forced（不计入密度分母）。
+  if (src.forced === true) out.forced = true;
   return out;
 }
 
@@ -153,12 +157,15 @@ function readRenderMemoryWindow(projectPath, options = {}) {
     return Number.isFinite(cutoff) ? first <= cutoff : true;
   };
   const byDay = [...new Set(shards.map((s) => s.dateKey))].sort().reverse();
+  let shardReadFailed = false;
+  const shardBadLines = [];
   for (const day of byDay) {
     daysRead.push(day);
     const dayShards = shards.filter((s) => s.dateKey === day).sort((a, b) => b.index - a.index);
     const chunk = [];
     for (const shard of dayShards) {
-      const { rows } = readShardRows(shard);
+      const { rows, readFailed: shardBad } = readShardRows(shard);
+      if (shardBad) { shardReadFailed = true; shardBadLines.push(shard.name); }
       for (let i = rows.length - 1; i >= 0; i -= 1) {
         const row = rows[i];
         const at = Date.parse(String(row && row.at || ''));
@@ -192,51 +199,107 @@ function readRenderMemoryWindow(projectPath, options = {}) {
     }
   }
   if (coverageSec + 1 < windowSec) insufficient = true;
-  return { lines, firstAt, lastAt, coverageSec, gaps, insufficient, windowSec, shardsRead: daysRead };
+  // 卷2 §四 返回矩阵（A/B/C/D），优先级 readFailed > insufficient：
+  //  A 无任何采样文件 → NO_SAMPLE_FILE（不判 FAIL）
+  //  B 分片读失败且凑不满 → READ_FAILED（判 FAIL）
+  //  C 有失败但上游凑满窗口 → PARTIAL_SHARD（不判 FAIL，告警）
+  //  D 跨天无前日分片 → NO_PREV_SHARD（当天内缺口 >30s 才 FAIL，由 R1 判）
+  const readFailed = shardReadFailed;
+  const code = !lines.length
+    ? 'NO_SAMPLE_FILE'
+    : (readFailed
+      ? (insufficient ? 'READ_FAILED' : 'PARTIAL_SHARD')
+      : (insufficient ? 'SAMPLING_WINDOW_INSUFFICIENT' : 'OK'));
+  return {
+    lines, firstAt, lastAt, coverageSec, gaps, insufficient, windowSec,
+    readFailed, code,
+    atCrash: String(options.atCrash || ''),
+    daysRead, shardsRead: daysRead,
+    badLineShards: shardBadLines,
+  };
 }
 
-/** §3.3 可复原三判据：R1 连续性（相邻差 ≤2×interval、单缺口≤10s、累计缺口≤3）、R2 null 占比 ≤10%、R3 coverageSec ≥295。 */
+/**
+ * 可复原判据（增补卷-c1ed-3 §六 写死 + 卷四 三条裁定）：
+ *  R1 全行：相邻 at 差 ≤2s；单缺口 ≤10s；累计缺口 ≤30s
+ *  R2 分母=全行 − cause='degraded' 行：workingSetMB 非 null 占比 ≥95%（degraded 不判 FAIL）
+ *  R3 全行首末：firstAt ≤ atCrash−295s 且 lastAt ≥ atCrash−5s（缺 atCrash 时退化为 coverageSec≥295）
+ *  AC3 行数 ≥300（5 分钟窗口）；真点密度 ∈[15%,25%]，越界 → cadence.verdict='SAMPLE_CADENCE_BAD'
+ *  卷四①：forced 行（进程变化触发的真采样）不计入密度分母；cadence 给 forced/hasForced
+ */
 function evaluateRecoverable(win, options = {}) {
   const window = win && typeof win === 'object' ? win : {};
   const lines = Array.isArray(window.lines) ? window.lines : [];
   const windowSec = Number(options.windowSec) > 0 ? Number(options.windowSec) : (Number(window.windowSec) || 300);
-  const defaultIntervalMs = Number(options.intervalMs) > 0 ? Number(options.intervalMs) : 1000;
-  const intervalAt = (index) => {
-    for (let i = index; i >= 0; i -= 1) {
-      const row = lines[i] || {};
-      if (String(row.cause || '') === 'interval' && Number(row.intervalMs) > 0) return Number(row.intervalMs);
-    }
-    return defaultIntervalMs;
-  };
+  const atCrashMs = Date.parse(String(options.atCrash || window.atCrash || ''));
+
+  // R1：相邻差 ≤2s（全行），单缺口 ≤10s，累计缺口 ≤30s
   const gapRows = [];
-  let cumulative = 0;
+  let cumulativeGapSec = 0;
   for (let i = 1; i < lines.length; i += 1) {
     const prev = Date.parse(String(lines[i - 1].at || ''));
     const cur = Date.parse(String(lines[i].at || ''));
     if (!Number.isFinite(prev) || !Number.isFinite(cur)) continue;
-    const delta = cur - prev;
-    const allowed = 2 * intervalAt(i);
-    if (delta > allowed || delta > 10 * 1000) {
-      gapRows.push({ at: String(lines[i].at || ''), deltaMs: delta, allowedMs: allowed });
-      cumulative += 1;
+    const deltaSec = Math.round((cur - prev) / 1000);
+    if (deltaSec > 2) {
+      gapRows.push({ at: String(lines[i].at || ''), gapSec: deltaSec });
+      if (deltaSec > 10) cumulativeGapSec += deltaSec;
     }
   }
-  const r1 = gapRows.length <= 3 && gapRows.every((gap) => gap.deltaMs <= 12000 + gap.allowedMs);
-  const total = lines.length;
-  const nullCount = lines.filter((row) => row && (row.workingSetMB === null || row.workingSetMB === undefined)).length;
-  const nullRatio = total ? nullCount / total : 1;
-  const r2 = total > 0 && nullRatio <= 0.1;
-  const coverageSec = Number(window.coverageSec) || 0;
-  const r3 = coverageSec >= Math.min(295, Math.max(0, windowSec - 5));
+  const singleGapsOk = gapRows.every((gap) => gap.gapSec <= 10);
+  const r1 = lines.length > 1 && singleGapsOk && cumulativeGapSec <= 30;
+
+  // R2：分母剔除 degraded 行；非 null 占比 ≥95%
+  const measured = lines.filter((row) => String(row && row.cause || '') !== 'degraded');
+  const nullCount = measured.filter((row) => !row || row.workingSetMB === null || row.workingSetMB === undefined).length;
+  const nullRatio = measured.length ? nullCount / measured.length : 1;
+  const r2 = measured.length > 0 && nullRatio <= 0.05;
+
+  // R3：用 atCrash 判端点；没给 atCrash 时退化为 coverage 检查
+  const firstMs = Date.parse(String(window.firstAt || (lines[0] && lines[0].at) || ''));
+  const lastMs = Date.parse(String(window.lastAt || (lines[lines.length - 1] && lines[lines.length - 1].at) || ''));
+  let r3;
+  if (Number.isFinite(atCrashMs)) {
+    r3 = Number.isFinite(firstMs) && Number.isFinite(lastMs)
+      && firstMs <= atCrashMs - 295000 && lastMs >= atCrashMs - 5000;
+  } else {
+    r3 = (Number(window.coverageSec) || 0) >= Math.min(295, Math.max(0, windowSec - 5));
+  }
+
+  // 真点密度（卷三 §六 / 卷四①）：真点=sampledFrom===at，排除 boot 与 forced
+  const realPoints = lines.filter((row) => row && row.sampledFrom && String(row.sampledFrom) === String(row.at) && String(row.cause || '') !== 'boot').length;
+  const forced = lines.filter((row) => row && row.forced === true).length;
+  const hasForced = forced > 0;
+  const densityDenominator = lines.filter((row) => row && row.forced !== true && String(row.cause || '') !== 'boot').length;
+  const densityPct = densityDenominator ? Math.round((realPoints / densityDenominator) * 1000) / 10 : 0;
+  const cadenceVerdict = hasForced ? 'OK' : (densityPct >= 15 && densityPct <= 25 ? 'OK' : 'SAMPLE_CADENCE_BAD');
+  const cadence = { realPoints, forced, hasForced, densityPct, verdict: cadenceVerdict };
+
+  const enoughLines = lines.length >= Math.min(300, Math.max(1, Math.round(windowSec)));
+  const baseCode = (() => {
+    if (!lines.length) return 'NO_SAMPLE_FILE';
+    if (window.readFailed) return 'READ_FAILED';
+    if (window.code === 'PARTIAL_SHARD') return 'PARTIAL_SHARD';
+    if (Number(window.coverageSec) + 5 < windowSec) return 'SAMPLING_WINDOW_INSUFFICIENT';
+    return 'OK';
+  })();
+  const restorable = r1 && r2 && r3;
   return {
-    recoverable: r1 && r2 && r3,
+    recoverable: restorable,
+    restorable,
     R1: r1,
     R2: r2,
     R3: r3,
     gaps: gapRows,
+    cumulativeGapSec,
     nullRatio,
-    coverageSec,
-    code: r1 && r2 && r3 ? 'OK' : (window.insufficient ? 'SAMPLING_WINDOW_INSUFFICIENT' : 'SAMPLING_WINDOW_BROKEN')
+    coverageSec: Number(window.coverageSec) || 0,
+    realPoints,
+    sampleCount: lines.length,
+    enoughLines,
+    degradedLines: lines.length - measured.length,
+    cadence,
+    code: restorable && baseCode === 'OK' && cadenceVerdict === 'OK' ? 'OK' : (cadenceVerdict !== 'OK' ? 'SAMPLE_CADENCE_BAD' : baseCode),
   };
 }
 

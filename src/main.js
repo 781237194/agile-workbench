@@ -17343,22 +17343,51 @@ function startRenderMemorySampler() {
   const REAL_SAMPLE_EVERY = 5;
   let tickIndex = 0;
   let lastReal = null; // { at, workingSetMB, pid }
+  let pidSignature = '';
+  let pidSignatureChanged = false;
+  let lastMetricsOkAt = '';
+  const pidChanged = () => {
+    // 卷三 §五：进程 pid 集合变化必须立即真采样（不等 5 拍）；卷四①：该行标 forced，不计入密度分母。
+    // 注意用 getOSProcessId（廉价），不要用 app.getAppMetrics（13ms/次，会把开销又拉回去）。
+    const pids = [];
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) pids.push(mainWindow.webContents.getOSProcessId());
+      const all = typeof webContents.getAllWebContents === 'function' ? webContents.getAllWebContents() : [];
+      for (const guest of all) {
+        try { if (guest.getType() === 'webview' && !guest.isDestroyed()) pids.push(guest.getOSProcessId()); } catch { /* 单个 guest 取不到就跳过 */ }
+      }
+    } catch { /* 主窗销毁瞬间取不到 pid，按未变化处理 */ }
+    const sig = pids.filter(Boolean).map(String).sort().join(',');
+    pidSignatureChanged = Boolean(pidSignature) && Boolean(sig) && sig !== pidSignature;
+    pidSignature = sig;
+    return pidSignatureChanged;
+  };
   const tick = () => {
     tickIndex += 1;
     const at = now();
-    const needReal = !lastReal || (tickIndex % REAL_SAMPLE_EVERY === 1);
+    const needReal = !lastReal || (tickIndex % REAL_SAMPLE_EVERY === 1) || pidChanged();
     const started = process.hrtime.bigint();
     let row = null;
     if (needReal) {
       const rows = rendererWorkingSetRows();
       const totalMB = rows.length ? rows.reduce((sum, item) => sum + (Number(item.workingSetMB) || 0), 0) : null;
       const first = rows[0] || {};
+      const forced = Boolean(lastReal && pidSignatureChanged);
       lastReal = { at, workingSetMB: totalMB, pid: first.pid === undefined ? null : first.pid };
+      lastMetricsOkAt = at;
       if (totalMB === null) renderMemoryState.samplesNull += 1;
-      row = { at, pid: lastReal.pid, type: 'renderer', guestUrl: null, workingSetMB: totalMB, cause: 'sample' };
+      row = { at, pid: lastReal.pid, type: 'renderer', guestUrl: null, workingSetMB: totalMB, cause: 'sample', sampledFrom: at };
+      if (forced) row.forced = true;
+      if (renderMemoryState.degraded) { renderMemoryState.degraded = false; row.cause = 'recovered'; }
     } else {
-      // 复用上一真值：不打 metrics，成本≈写盘
-      row = { at, pid: lastReal.pid, type: 'renderer', guestUrl: null, workingSetMB: lastReal.workingSetMB, cause: 'sample', sampledFrom: lastReal.at, carried: true };
+      // 复用上一真值（卷三 §三：cause='reused'、sampledFrom=来源真采样 at、staleSec=两者秒差）
+      const staleSec = Math.max(0, Math.round((Date.parse(at) - Date.parse(lastReal.at)) / 1000));
+      row = { at, pid: lastReal.pid, type: 'renderer', guestUrl: null, workingSetMB: lastReal.workingSetMB, cause: 'reused', sampledFrom: lastReal.at, staleSec };
+      // 卷三 §五：连续 60 秒取不到新 metrics 才降级（降级行 workingSetMB=null、sampledFrom=null）
+      if (staleSec > 60) {
+        renderMemoryState.degraded = true;
+        row = { at, pid: lastReal.pid, type: 'renderer', guestUrl: null, workingSetMB: null, cause: 'degraded', sampledFrom: null };
+      }
     }
     try {
       const dir = renderMemoryProjectDir();
@@ -17376,7 +17405,10 @@ function startRenderMemorySampler() {
       renderMemoryState.realMsMax = Math.max(renderMemoryState.realMsMax || 0, costMs);
     }
     // 降级条件按卷3 重定义（连续 60s 取不到 metrics 才算降级）；方案2 下 1s 行不再因单拍耗时降级。
-    renderMemoryState.timer = setTimeout(tick, renderMemoryState.intervalMs);
+    // 行频恒 1000ms（卷三 §一）：用绝对时刻补偿漂移，否则每拍 13ms 的开销累积会让 5 分钟不足 300 行。
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    const nextDelay = Math.max(0, Math.round(renderMemoryState.intervalMs - elapsedMs));
+    renderMemoryState.timer = setTimeout(tick, nextDelay);
     if (renderMemoryState.timer && typeof renderMemoryState.timer.unref === 'function') renderMemoryState.timer.unref();
   };
   renderMemoryState.timer = setTimeout(tick, 1000);

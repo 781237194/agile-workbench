@@ -53,12 +53,22 @@ const sampleAt = (iso, mb, extra) => ({ at: iso, pid: 100, type: 'renderer', gue
       const rows = RM.readRenderMemoryWindow(d2, { atCrash: '2026-11-15T00:00:01.000Z', windowSec: 60 }).lines;
       return rows.length === 1 && rows[0].kind === 'boot' && rows[0].cause === 'boot';
     })());
-  check('S1-06 方案2 字段保留：sampledFrom（复用行）不被归一化丢掉',
+  check('S1-06 卷三字段：复用行 cause=reused 且带 sampledFrom+staleSec',
     (() => {
       const d3 = reset();
-      RM.appendSample(d3, sampleAt('2026-11-15T00:00:00.000Z', 300, { carried: true, sampledFrom: '2026-11-14T23:59:55.000Z' }), { dateKey: '20261115' });
-      const rows = RM.readRenderMemoryWindow(d3, { atCrash: '2026-11-15T00:00:01.000Z', windowSec: 60 }).lines;
-      return rows.length === 1 && rows[0].sampledFrom === '2026-11-14T23:59:55.000Z' && rows[0].carried === true;
+      RM.appendSample(d3, sampleAt('2026-11-15T00:00:05.000Z', 300, { cause: 'reused', sampledFrom: '2026-11-14T23:59:55.000Z', staleSec: 10 }), { dateKey: '20261115' });
+      const rows = RM.readRenderMemoryWindow(d3, { atCrash: '2026-11-15T00:00:06.000Z', windowSec: 60 }).lines;
+      return rows.length === 1 && rows[0].cause === 'reused' && rows[0].sampledFrom === '2026-11-14T23:59:55.000Z' && rows[0].staleSec === 10;
+    })());
+  check('S1-07 卷三白名单：非白名单 cause 被归一到五值内；degraded 行 sampledFrom=null',
+    (() => {
+      const d4 = reset();
+      RM.appendSample(d4, sampleAt('2026-11-15T00:00:01.000Z', 300, { cause: 'interval', intervalMs: 5000 }), { dateKey: '20261115' });
+      RM.appendSample(d4, sampleAt('2026-11-15T00:00:02.000Z', 300, { cause: 'degraded', sampledFrom: 'x' }), { dateKey: '20261115' });
+      const rows = RM.readRenderMemoryWindow(d4, { atCrash: '2026-11-15T00:00:03.000Z', windowSec: 60 }).lines;
+      const found = rows.find((row) => row.cause === 'degraded');
+      return rows.length === 2 && ['boot', 'sample', 'reused', 'degraded', 'recovered'].includes(rows[0].cause)
+        && found && found.sampledFrom === null && found.workingSetMB === null;
     })());
 }
 
@@ -129,15 +139,15 @@ const sampleAt = (iso, mb, extra) => ({ at: iso, pid: 100, type: 'renderer', gue
     RM.appendSample(dir3, sampleAt(new Date(t).toISOString(), 400), { dateKey: '20261115' });
     if (i === 60) { /* 制造 15s 缺口：跳过若干秒 */ }
   }
-  check('S4-04 interval 行被识别（降级频率可复算）',
+  check('S4-04 卷三已取消 interval 行频降级：旧 interval 行不再被当作频率变更点',
     (() => {
-      // 自建隔离目录，避免与上面窗口夹具共享状态（这条只验 §3.2 的 interval 行落盘与字段）。
       const d = path.join(SB, 'interval-selftest');
       fs.rmSync(d, { recursive: true, force: true });
       fs.mkdirSync(d, { recursive: true });
       RM.appendSample(d, { at: '2026-11-15T04:03:20.000Z', pid: 1, type: 'renderer', guestUrl: null, workingSetMB: 500, cause: 'interval', intervalMs: 5000 }, { dateKey: '20261115' });
       const rows = RM.listShards(d).flatMap((shard) => RM.readShardRows(shard).rows);
-      return rows.some((row) => row.cause === 'interval' && Number(row.intervalMs) === 5000);
+      // 归一后 cause 落在白名单内，且不再保留 intervalMs（卷三 §三 取消 5s 行频降级）
+      return rows.length === 1 && ['boot', 'sample', 'reused', 'degraded', 'recovered'].includes(rows[0].cause) && rows[0].intervalMs === undefined;
     })());
 }
 
