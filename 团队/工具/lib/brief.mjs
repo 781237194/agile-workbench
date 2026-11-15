@@ -9,6 +9,8 @@ import {
 } from './core.mjs';
 import { loadProject, requireBoot, addReadReceipt } from './store.mjs';
 import { OUTPUT_DOCS, OUTPUT_DISCIPLINE } from './roles.mjs';
+// R-f9b1 F-7②：已外置小节要能给出 movedTo（不返回空内容）。
+import { movedSectionInfo, movedSectionIndex, validateSupplementLinks } from './doc-split.mjs';
 
 export const BRIEF_TEMPLATE_DIR = path.join(PATHS.teamRoot, '工具', '模板', '角色产出');
 export const BRIEF_SECTION_MAX = 2000;      // 单区块提取默认上限（字符）
@@ -186,6 +188,7 @@ export function cmdBrief(args) {
   }
 
   const limit = Math.max(80, Math.min(Number(args.limit) || BRIEF_SECTION_MAX, 60000));
+  let pickedAny = false;
   if (selRaw.length) {
     for (const d of docs) {
       const parsed = parseDoc(readDocText(d.file));
@@ -196,11 +199,8 @@ export function cmdBrief(args) {
         seen.add(h.title);
         picked.push(h);
       }
-      if (!picked.length) {
-        fail('SECTION_NOT_FOUND', `区块没找到：${selRaw.join('、')}`, {
-          file: d.rel, available: parsed.sections.map((s) => s.title),
-        });
-      }
+      if (!picked.length) continue;
+      pickedAny = true;
       let out = '';
       for (const h of picked) out += (out ? '\n\n' : '') + `## ${h.title}\n` + h.lines.join('\n').replace(/\s+$/, '');
       d.selected = picked.map((h) => h.title);
@@ -210,6 +210,63 @@ export function cmdBrief(args) {
         d.truncated = true;
       }
       d.extracted = out;
+    }
+    // R-f9b1 F-7②：请求的节可能已被外置到增补卷——返回 movedTo（带 path/sha256），不要返回空。
+    if (!pickedAny) {
+      const hits = [];
+      for (const q of selRaw) {
+        const scoped = args.requirement ? movedSectionInfo(project.path, String(args.requirement), q) : null;
+        if (scoped) { hits.push(scoped); continue; }
+        // 指定了需求就只在它的卷里找，不跨需求兜底（否则会读到别人的卷）
+        if (args.requirement) continue;
+        for (const it of movedSectionIndex(project.path)) {
+          if (it.section.includes(q) || q.includes(it.section)) {
+            hits.push({
+              name: it.name, path: it.path, sha256: it.sha256, sha12: String(it.sha256).slice(0, 12),
+              bytes: it.bytes, section: it.section, content: '',
+            });
+          }
+        }
+      }
+      if (!hits.length && args.requirement) {
+        const links = validateSupplementLinks(project.path, String(args.requirement));
+        const missing = links.problems.find((p) => p.code === 'SUPPLEMENT_MISSING');
+        if (missing) fail('SUPPLEMENT_MISSING', `需求 ${args.requirement} 增补卷缺失：${missing.detail}`, { problems: links.problems }, 1);
+      }
+      if (hits.length) {
+        const movedTo = hits.map((h) => ({
+          section: h.section,
+          movedTo: { name: h.name, path: h.path, sha256: h.sha256, sha12: h.sha12, bytes: h.bytes },
+        }));
+        addReadReceipt({
+          role: token.role, sessionId, kind: 'brief', project: projectName,
+          proposalId: '', proposalHash: '', baseHash: hits.map((h) => h.sha256).join(','),
+          docs: hits.map((h) => h.path),
+        });
+        appendEvent({
+          role: token.role, sessionId, action: 'brief', project: projectName, target: role,
+          note: `movedTo=${hits.length} sections=${selRaw.join(',')}`,
+          data: { role, sections: selRaw, movedTo },
+        });
+        if (args.json) {
+          jsonOut({ ok: true, role, project: projectName, section: selRaw.join(','), movedTo, supplements: hits });
+        } else {
+          const lines = [`=== brief · ${spec ? spec.label : role} · ${projectName} ===`];
+          for (const h of hits) {
+            lines.push(`该节已外置到增补卷：${h.section} → ${h.path}（${h.bytes}B / sha256 ${h.sha12}）`);
+            if (h.content) lines.push(h.content);
+          }
+          lines.push('读全文：team.mjs req show --boot <令牌> --id <需求id> --with-supplement');
+          textOut(lines.join('\n'));
+        }
+        return;
+      }
+    }
+    if (!pickedAny) {
+      const first = docs[0];
+      fail('SECTION_NOT_FOUND', `区块没找到：${selRaw.join('、')}`, {
+        file: first ? first.rel : '', available: first ? first.sections.map((s) => s.title) : [],
+      });
     }
   }
 

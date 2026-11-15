@@ -331,5 +331,5 @@ main().then((code) => {
     }
     if (code === 'INTERNAL') process.stderr.write(String(e.stack || '') + '\n');
   }
-  process.exit(code === 'INTERNAL' ? 4 : 3);
+  process.exit(e instanceof TeamError && e.exitCode ? e.exitCode : (code === 'INTERNAL' ? 4 : 3));
 });

@@ -44,16 +44,18 @@ export const PATHS = {
 };
 
 export class TeamError extends Error {
-  constructor(code, message, details = {}) {
+  constructor(code, message, details = {}, exitCode = 0) {
     super(message);
     this.name = 'TeamError';
     this.code = code;
     this.details = details;
+    // R-f9b1：业务失败=1、环境/IO 失败=2（未指定时沿用旧的 3，兼容既有调用）。
+    this.exitCode = Number(exitCode) || 0;
   }
 }
 
-export function fail(code, message, details = {}) {
-  throw new TeamError(code, message, details);
+export function fail(code, message, details = {}, exitCode = 0) {
+  throw new TeamError(code, message, details, exitCode);
 }
 
 export function nowIso() {

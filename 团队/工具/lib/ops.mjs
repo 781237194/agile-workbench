@@ -65,6 +65,14 @@ import {
 import { readRequirementDocVersion, versionForRecord, versionGate } from './req-version.mjs';
 // R-75ec：Owner 决定落账即冻结/解冻（任务层门禁的效果层）。
 import { applyOwnerDecisionEffects } from './task-freeze.mjs';
+// R-f9b1：需求正文上限治理（三入口检查 / 自动拆增补卷 / 卷可读性）。
+import {
+  DOC_SPLIT_RULE, DOC_SPLIT_LIMIT, DOC_SPLIT_TARGET, DOC_SPLIT_TRIGGER,
+  checkDocSize, docSizeReport, scanRequirementDocs, splitRequirementDoc, revertRequirementSplit,
+  listSupplements, supplementRecords, supplementsForShow, validateSupplementLinks,
+  readSplitAudit, splitAuditPath, requirementShortKey, requirementDocFile, isWhitelisted,
+  SUPPLEMENT_RE, supplementIndexOf,
+} from './doc-split.mjs';
 
 const RISK_RANK = { normal: 1, sensitive: 2, critical: 3 };
 const PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -2040,6 +2048,8 @@ export async function cmdBoot(args) {
   } else {
     lines.push('必读-任务相关: （无未完成任务；收到派单后按派单里的「当前必读」补读）');
   }
+  // R-f9b1 F-7⑧：本角色当前任务所涉需求的增补卷（缺失也写一行；不进必读计数、不阻塞 boot）。
+  for (const line of supplementBriefLines(project, tasks)) lines.push(line);
   lines.push(`read 回执: ${PATHS.reads}（kind=boot；需求/任务文档哈希随令牌落盘，评审与派单前复核）`);
   if (bootQueue && bootQueue.consumed) {
     lines.push(`待启动队列: 已消费 ${bootQueue.consumed} 条（${bootQueue.items.map((it) => it.id).join('、')}；轮换后自动拉起）`);
@@ -3920,7 +3930,25 @@ export function cmdReq(args) {
       type: 'requirement', requirementId: '', acceptance: args.acceptance || '', story: args.story || '',
     });
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'req_create', project: b.project, target: task.id, note: `${task.priority} ${task.title}`, data: { task } });
-    out(args, `已建需求 ${task.id} [${task.priority}] ${task.title}`, { ok: true, requirement: task });
+    // R-f9b1 F-11：create 入口——正文已存在才查（新需求正文通常由分析师随后写）。
+    const createdProject = loadProject(b.project);
+    const docCheck = docSizeGate(createdProject, task.id, { entry: 'create', role: b.role, noSplit: Boolean(args['no-split']) });
+    if (docCheck.after.exists && !docCheck.after.whitelisted && docCheck.after.level === 'over') {
+      fail('DOC_TOO_LARGE', `需求 ${task.id} 正文 ${docCheck.after.bytes}B 超过 ${DOC_SPLIT_LIMIT} 字节且拆分不足；先拆需求或人工压缩（需求记录已建）`, {
+        requirementId: task.id, bytes: docCheck.after.bytes, taskCreated: true,
+        split: docCheck.split ? { action: docCheck.split.action, code: docCheck.split.code, afterBytes: docCheck.split.afterBytes } : null,
+      }, 1);
+    }
+    out(args, `已建需求 ${task.id} [${task.priority}] ${task.title}${docCheck.after.exists ? `（正文 ${docCheck.after.bytes}B/${docCheck.after.level}）` : '（正文待写）'}`, {
+      ok: true, requirement: task,
+      docSplit: docCheck.after.exists ? {
+        entry: 'create', beforeBytes: docCheck.before.bytes, afterBytes: docCheck.after.bytes,
+        level: docCheck.after.level, whitelisted: docCheck.after.whitelisted,
+        action: docCheck.split ? docCheck.split.action : 'skip',
+        reason: docCheck.split ? docCheck.split.reason : null,
+        warning: docCheck.after.level === 'near' && docCheck.after.bytes > DOC_SPLIT_TARGET ? 'DOC_NEAR_LIMIT' : null,
+      } : null,
+    });
     return;
   }
   if (sub === 'list') {
@@ -3945,7 +3973,23 @@ export function cmdReq(args) {
     if (!args.id) fail('BAD_ID', '需要 --id');
     const r = loadTask(b.project, String(args.id));
     const kids = listTasks(b.project).filter((t) => t.requirementId === r.id);
-    out(args, JSON.stringify({ requirement: r, tasks: kids }, null, 2), { ok: true, requirement: r, tasks: kids });
+    const project = loadProject(b.project);
+    // R-f9b1 F-7①：正文外置的小节必须能从 req show 读到；卷缺失直接报错，不返回半份正文。
+    const links = validateSupplementLinks(project.path, r.id);
+    if (links.problems.some((p) => p.code === 'SUPPLEMENT_MISSING')) {
+      fail('SUPPLEMENT_MISSING', `需求 ${r.id} 的增补卷缺失，不返回半份正文`, { requirementId: r.id, problems: links.problems }, 1);
+    }
+    const supplements = supplementsForShow(project.path, r.id, { withContent: Boolean(args['with-supplement']) });
+    const payload = { ok: true, requirement: r, tasks: kids, supplements, links: { ok: links.ok, problems: links.problems } };
+    const human = [
+      JSON.stringify({ requirement: r, tasks: kids }, null, 2),
+      supplements.length
+        ? `\n增补卷（${supplements.length}）：\n${supplements.map((s) => `- ${s.name}（${s.bytes}B/sha256 ${s.sha12}）小节：${s.sections.join('、')}`).join('\n')}`
+        : '\n增补卷：无',
+      ...(links.problems.length ? [`\n链接自检：${links.problems.map((p) => p.code + ' ' + p.detail).join('；')}`] : []),
+      ...(Boolean(args['with-supplement']) ? supplements.filter((s) => s.content).map((s) => `\n===== ${s.name} =====\n${s.content}`) : []),
+    ].join('\n');
+    out(args, human, payload);
     return;
   }
   fail('BAD_SUBCOMMAND', `未知 req 子命令：${sub}`);
@@ -4020,6 +4064,22 @@ function cmdReqReview(args) {
   assertRequirementDocsRead(b, project.path, task.id, isTech ? '技术评审' : '需求评审');
   const verdict = String(args.verdict || args.decision || '').toLowerCase();
   if (!['approve', 'reject'].includes(verdict)) fail('BAD_VERDICT', '--verdict 必须是 approve / reject');
+  // R-f9b1 F-11：三入口之一——review 在 G1 前量尺寸并按需外置；随后校验卷链接可解析（AC13）。
+  let reviewDocGate = null;
+  if (!isTech) {
+    reviewDocGate = docSizeGate(project, task.id, { entry: 'review', role: b.role, noSplit: Boolean(args['no-split']) });
+    const afterDoc = reviewDocGate.after;
+    if (afterDoc.exists && !afterDoc.whitelisted && afterDoc.level === 'over') {
+      fail('DOC_TOO_LARGE', `需求 ${task.id} 正文 ${afterDoc.bytes}B 超过 ${DOC_SPLIT_LIMIT} 字节且拆分不足；先拆需求或人工压缩`, {
+        requirementId: task.id, bytes: afterDoc.bytes, split: reviewDocGate.split ? { action: reviewDocGate.split.action, code: reviewDocGate.split.code, afterBytes: reviewDocGate.split.afterBytes } : null, wrote: false,
+      }, 1);
+    }
+    const linkCheck = validateSupplementLinks(project.path, task.id);
+    const missingSup = linkCheck.problems.find((p) => p.code === 'SUPPLEMENT_MISSING');
+    if (missingSup) fail('SUPPLEMENT_MISSING', `需求 ${task.id} 增补卷缺失：${missingSup.detail}`, { problems: linkCheck.problems, wrote: false }, 1);
+    const broken = linkCheck.problems.find((p) => p.code === 'DOC_SPLIT_LINK_MISSING' || p.code === 'SUPPLEMENT_MISMATCH');
+    if (broken) fail(broken.code, `需求 ${task.id} 卷链接不可解析：${broken.detail}`, { problems: linkCheck.problems, wrote: false }, 1);
+  }
   // G1：需求未定稿（验收标准空/无正文）不能评审；G0：阶段-角色表校验。
   if (!isTech) {
     const finalGate = gateRequirementFinal(task, project.path);
@@ -4235,6 +4295,10 @@ function cmdReqReview(args) {
       ? { ownerReview: { required: true, status: 'pending', kind: 'requirement', at: null, opinion: '' } }
       : null,
   });
+  // R-f9b1 AC12：评审入口触发过拆分时，等工作流行建好再把卷挂回需求行/池记录（此前行还不存在）。
+  if (reviewDocGate && reviewDocGate.split && reviewDocGate.split.wrote) {
+    syncRequirementSupplements(b.project, project.path, task.id);
+  }
   appendEvent({
     role: b.role, sessionId: b.sessionId, action: isTech ? 'tech_review' : 'req_review', project: b.project,
     target: task.id, note: `${verdict} ${truncate(comments, 100)}`,
@@ -4254,6 +4318,19 @@ function cmdReqReview(args) {
       ok: true, requirement: task, review: record, kind: record.kind, teamMode,
       reviewFile: reviewFiles.jsonFile, mdFile: reviewFiles.mdFile, workflowFile: workflowSync.file,
       commentsSource, warnings,
+      ...(reviewDocGate ? {
+        docSplit: {
+          entry: 'review',
+          beforeBytes: reviewDocGate.before.bytes,
+          afterBytes: reviewDocGate.after.bytes,
+          level: reviewDocGate.after.level,
+          whitelisted: reviewDocGate.after.whitelisted,
+          action: reviewDocGate.split ? reviewDocGate.split.action : 'skip',
+          reason: reviewDocGate.split ? reviewDocGate.split.reason : null,
+          warning: reviewDocGate.after.level === 'near' && reviewDocGate.after.bytes > DOC_SPLIT_TARGET ? 'DOC_NEAR_LIMIT' : null,
+          supplements: reviewDocGate.after.supplements || [],
+        },
+      } : {}),
       ...(proposal ? { proposal } : {}),
     });
 }
@@ -5506,10 +5583,29 @@ export function cmdFind(args) {
   const data = readJson(indexJson, { files: [] });
   const ql = q.toLowerCase();
   const matches = (data.files || []).filter((f) => String(f.target).toLowerCase().includes(ql));
-  appendEvent({ role: b.role, sessionId: b.sessionId, action: 'index_find', project: b.project, target: q, note: `matches=${matches.length}`, data: { q, matches: matches.map((m) => m.target) } });
-  out(args, `按索引找到 ${matches.length} 个文件（先读索引，再找文件）\n` + table(matches.slice(0, 50).map((f) => ({ target: f.target, size: f.size, hash: shortHash(f.hash || '', 10) })), [
-    { key: 'target', label: '文件' }, { key: 'size', label: '大小' }, { key: 'hash', label: '哈希' },
-  ]), { ok: true, query: q, matches });
+  // R-f9b1 AC11：主正文与同 id 增补卷都要能按需求 id 命中（kind 标 supplement）。
+  const supRows = supplementIndexRows(project).filter((s) => String(s.rel).toLowerCase().includes(ql)
+    || String(s.requirementId).toLowerCase().includes(ql));
+  const supMatches = supRows.map((s) => ({
+    target: s.rel, name: s.name, kind: 'supplement', requirementId: s.requirementId, size: s.bytes, hash: shortHash(s.sha256, 10),
+  }));
+  // 审计里有拆分记录但盘上没有卷 → 明确报缺失，不当作「没搜到」
+  if (/^R-\d{8}-\d{4,6}(?:-[0-9a-z]{2,8})?/i.test(q)) {
+    let audited = [];
+    try { audited = readSplitAudit(b.project).rows.filter((r) => r && r.action === 'split' && String(r.requirementId).toLowerCase() === ql); } catch { audited = []; }
+    if (audited.length && !listSupplements(project.path, q).length) {
+      fail('SUPPLEMENT_MISSING', `需求 ${q} 有 ${audited.length} 条拆分审计记录，但 需求/ 下找不到任何增补卷`, {
+        requirementId: q, auditSplits: audited.length, audit: splitAuditPath(b.project),
+      }, 1);
+    }
+  }
+  appendEvent({ role: b.role, sessionId: b.sessionId, action: 'index_find', project: b.project, target: q, note: `matches=${matches.length} supplements=${supMatches.length}`, data: { q, matches: matches.map((m) => m.target), supplements: supMatches.map((m) => m.target) } });
+  out(args, `按索引找到 ${matches.length} 个文件 + ${supMatches.length} 份增补卷（先读索引，再找文件）\n` + table([
+    ...matches.slice(0, 40).map((f) => ({ target: f.target, size: f.size, hash: shortHash(f.hash || '', 10), kind: 'doc' })),
+    ...supMatches,
+  ].slice(0, 50), [
+    { key: 'target', label: '文件' }, { key: 'kind', label: '类型' }, { key: 'size', label: '大小' }, { key: 'hash', label: '哈希' },
+  ]), { ok: true, query: q, matches, supplements: supMatches, requirementId: supMatches.length ? supMatches[0].requirementId : '' });
 }
 
 // ========== 提案 / 展示 / 评审 / 签字 / 应用 ==========
@@ -6118,6 +6214,8 @@ function reqIdOf(rel) {
 function writeRoleIndexes(project) {
   const out = [];
   let dirs = [];
+  let supIndex = null;
+  try { supIndex = supplementIndexOf(project.path); } catch { supIndex = null; }
   try { dirs = fs.readdirSync(project.path, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return out; }
   for (const name of dirs) {
     const dir = path.join(project.path, name);
@@ -6133,10 +6231,13 @@ function writeRoleIndexes(project) {
         if (ent.isDirectory()) walk(abs, depth + 1);
         else if (ent.isFile() && ent.name !== '文件索引.md') {
           const st = fs.statSync(abs);
-          rows.push({
-            target: relPath(dir, abs), summary: fileSummary(abs, relPath(dir, abs)),
-            size: st.size, updated: fileUpdated(abs), hash: st.size <= 2 * 1024 * 1024 ? shortHash(hashFile(abs), 10) : '(大文件)',
-          });
+          const hash = st.size <= 2 * 1024 * 1024 ? shortHash(hashFile(abs), 10) : '(大文件)';
+          // AC10⑥：卷行必须标注所属需求 id（靠 4 位短 key 反查 R-*.md），否则读者不知道卷属于谁。
+          const supMatch = SUPPLEMENT_RE.exec(ent.name);
+          const summary = supMatch
+            ? `需求 ${(supIndex && supIndex.reqByKey.get(supMatch[1].toLowerCase())) || supMatch[1]} 的增补卷 · ${st.size}B · sha256 ${shortHash(hashFile(abs), 12)}`
+            : fileSummary(abs, relPath(dir, abs));
+          rows.push({ target: relPath(dir, abs), summary, size: st.size, updated: fileUpdated(abs), hash });
         }
       }
     }
@@ -6154,6 +6255,23 @@ function writeRoleIndexes(project) {
     writeText(indexPath, text);
     out.push(indexPath);
   }
+  return out;
+}
+
+/** 增补卷清单（项目索引 §三 / 项目索引.json / find 三处同源，AC11）。 */
+function supplementIndexRows(project) {
+  const out = [];
+  try {
+    const idx = supplementIndexOf(project.path);
+    for (const [key, list] of idx.map) {
+      for (const s of list) {
+        let mtime = '';
+        try { mtime = fs.statSync(path.join(project.path, s.rel)).mtime.toISOString(); } catch { mtime = ''; }
+        out.push({ requirementId: s.requirementId || key, rel: s.rel, name: s.name, bytes: s.bytes, sha256: s.sha256, mtime });
+      }
+    }
+  } catch { /* 没有卷目录就是空表 */ }
+  out.sort((a, b) => a.rel.localeCompare(b.rel, 'zh-Hans-CN'));
   return out;
 }
 
@@ -6246,6 +6364,12 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
       lines.push(`| ${reqIdOf(r.target)} | [${path.basename(r.target)}](${rel(r.target)}) | ${cell(fileSummary(path.join(project.path, r.target), r.target))} | ${verOf(r)} | ${updateOf(r)} |`);
     }
     if (!reqRows.length) lines.push('| — | [00-需求总览.md](需求/00-需求总览.md) | 暂无需求；新需求复制 需求/需求模板.md，另存为 R-...md | 目录 |  |');
+    // R-f9b1 AC11：增补卷按需求 id 单列一行（与 需求/文件索引.md、find 同源），不计入需求数。
+    const supRows = supplementIndexRows(project);
+    for (const s of supRows) {
+      lines.push(`| ${s.requirementId} | [${path.basename(s.rel)}](${rel(s.rel)}) | 需求 ${s.requirementId} 的增补卷 · ${s.bytes}B · sha256 ${String(s.sha256).slice(0, 12)} | 增补卷 | ${String(s.mtime || '').slice(0, 16).replace('T', ' ')} |`);
+    }
+    if (supRows.length) lines.push(`> 增补卷 ${supRows.length} 卷（属「需求」分组，不计入需求数 ${reqRows.length}）。`);
   }
   lines.push('');
   lines.push('## 四、当前任务（详情看看板）');
@@ -6285,6 +6409,8 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
     commits: commits.map(publicCommit),
     required: required.map(([target, purpose, owner, when]) => ({ target, purpose, owner, when })),
     roleDirs, requirements: reqRows.map((r) => ({ id: reqIdOf(r.target), target: r.target })),
+    // R-f9b1：需求正文外置出的增补卷（find/索引共用同一份清单）
+    supplements: supplementIndexRows(project),
   });
   const roleIndexes = writeRoleIndexes(project);
   appendEvent({ role: by, sessionId, action: 'index', project: project.name, target: '项目索引.md', note: `files=${files.length} roleIndexes=${roleIndexes.length}`, data: { files: files.length, roleIndexes: roleIndexes.length } });
@@ -6292,15 +6418,192 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
   return { path: oldPath, files: files.length, rows: rows.length, roleIndexes: roleIndexes.length, requirements: reqRows.length };
 }
 
+// ========== R-f9b1 需求正文上限治理（工具侧：三入口 / 拆卷 / 回滚 / 可读性） ==========
+
+/** splitId = <需求 id>-<内容 sha12>：revert 时允许只给 --split-id，这里反推需求 id。 */
+function requirementIdOfSplitId(splitId) {
+  const s = String(splitId || '');
+  const m = /^(R-\d{8}-\d{4,6}(?:-[0-9a-z]{2,8})?)-[0-9a-f]{12}$/i.exec(s);
+  return m ? m[1] : '';
+}
+
+/**
+ * 拆分/回滚后同步「需求行 + 需求池记录」的 supplements[]（AC12）。
+ * append-only：回滚时把该条标 retractedAt，不物理删（增补卷 §8.2）。
+ */
+function syncRequirementSupplements(projectName, projectPath, requirementId) {
+  const records = supplementRecords(projectPath, requirementId);
+  const now = nowIso();
+  const merge = (prev) => {
+    const list = Array.isArray(prev) ? prev.slice() : [];
+    for (const rec of records) {
+      const hit = list.find((x) => x && x.name === rec.name);
+      if (hit) {
+        hit.bytes = rec.bytes;
+        hit.sha256 = rec.sha256;
+        hit.path = rec.path;
+        hit.splitId = rec.splitId;
+        hit.createdAt = hit.createdAt || rec.createdAt;
+        delete hit.retractedAt;
+      } else {
+        list.push({ name: rec.name, path: rec.path, bytes: rec.bytes, sha256: rec.sha256, createdAt: rec.createdAt, splitId: rec.splitId });
+      }
+    }
+    for (const item of list) {
+      if (!item || item.retractedAt) continue;
+      if (!records.some((r) => r.name === item.name)) item.retractedAt = now;
+    }
+    return list;
+  };
+  let workflow = false;
+  try {
+    const read = readWorkflowState(projectName);
+    if (read.exists) {
+      const rows = (read.state && read.state.requirements) || {};
+      const row = rows[requirementId]
+        || Object.values(rows).find((r) => r && String(r.id || '').toLowerCase() === String(requirementId).toLowerCase());
+      if (row) {
+        row.supplements = merge(row.supplements);
+        writeWorkflowState(projectName, read.state);
+        workflow = true;
+      }
+    }
+  } catch { /* 工作流写不了不影响拆分本身，池记录仍会尝试 */ }
+  try {
+    const task = loadTask(projectName, requirementId);
+    task.supplements = merge(task.supplements);
+    saveTask(projectName, task);
+  } catch { /* 池记录缺失不算失败 */ }
+  return { records, workflow };
+}
+
+/** 单个需求的尺寸体检 + 三入口结论（review/create 共用）。 */
+function docSizeGate(project, requirementId, { entry, role, noSplit = false }) {
+  const before = docSizeReport(project.path, requirementId);
+  const result = { entry, before, split: null, after: before, problems: [] };
+  if (!before.exists || before.level === 'ok' || before.whitelisted || noSplit) return result;
+  result.split = splitRequirementDoc({ projectName: project.name, projectPath: project.path, requirementId, entry, actor: role });
+  result.after = docSizeReport(project.path, requirementId);
+  if (result.split && result.split.wrote) {
+    // AC11/AC12：拆完立刻同步「需求行 + 池记录」并重建索引，否则索引与卷脱节
+    syncRequirementSupplements(project.name, project.path, requirementId);
+    try { generateIndex(project, { by: role || 'system', sessionId: 'doc-split', silent: true }); } catch { /* 索引失败不影响拆分 */ }
+  }
+  if (result.after.exists && (result.after.level === 'over' || result.after.level === 'near')) {
+    result.problems.push({
+      code: result.split && result.split.code ? result.split.code : (result.after.level === 'over' ? 'DOC_TOO_LARGE' : 'DOC_NEAR_LIMIT'),
+      detail: result.after.level === 'over'
+        ? `正文 ${result.after.bytes}B 超过 ${DOC_SPLIT_LIMIT} 字节，拆分后仍超限；先压缩或拆需求`
+        : `正文 ${result.after.bytes}B 仍在线附近（目标 ${DOC_SPLIT_TARGET}），已按 ${DOC_SPLIT_RULE} 尽量外置`,
+      bytes: result.after.bytes,
+      level: result.after.level,
+    });
+  }
+  return result;
+}
+
+/** boot 简报用：本角色当前任务所涉需求的增补卷（F-7⑧；缺失也写一行，不阻塞 boot）。 */
+function supplementBriefLines(project, tasks) {
+  const ids = new Set();
+  for (const t of tasks) {
+    if (!t) continue;
+    if (t.type === 'requirement') ids.add(String(t.id));
+    if (t.requirementId) ids.add(String(t.requirementId));
+  }
+  if (!ids.size) return [];
+  let auditRows = [];
+  try { auditRows = readSplitAudit(project.name).rows; } catch { auditRows = []; }
+  const out = [];
+  for (const id of ids) {
+    const rows = listSupplements(project.path, id);
+    if (!rows.length) {
+      const had = auditRows.filter((r) => r && r.action === 'split' && r.requirementId === id).length;
+      if (had) out.push(`增补卷缺失（SUPPLEMENT_MISSING）：需求 ${id} 有 ${had} 条拆分记录，但 需求/ 下没有卷`);
+      continue;
+    }
+    for (const s of rows) {
+      out.push(`增补卷 ${s.name}（${s.bytes}B，sha256 ${s.sha256.slice(0, 12)}）— 需求 ${id} 主正文已外置的章节在此`);
+    }
+  }
+  return out.slice(0, 6);
+}
+
 export function cmdIndex(args) {
   const team = loadTeam();
   const name = String(args.project || team.activeProject || '');
   if (!name) fail('NO_PROJECT', '需要 --project');
   const project = loadProject(name);
-  const r = generateIndex(project, { by: args.role || 'system', sessionId: sessionOf(args), silent: false });
+  const actor = String(args.role || 'system');
+  const dryRun = Boolean(args['dry-run']);
+  const splitIdArg = String(args['split-id'] || '');
+  const wantRevert = Boolean(args.revert);
+  const wantSplit = Boolean(args.split);
+  const docSplit = { ok: true, rule: DOC_SPLIT_RULE, dryRun, entry: 'index', actions: [] };
+
+  // 1) 回滚：index --revert --split-id <id>
+  if (wantRevert) {
+    const rid = String(args.requirement || '') || requirementIdOfSplitId(splitIdArg);
+    if (!rid) fail('BAD_SPLIT_ID', '需要 --split-id <需求id>-<sha12> 或 --requirement <需求id>', { splitId: splitIdArg }, 1);
+    const res = revertRequirementSplit({
+      projectName: name, projectPath: project.path, requirementId: rid, splitId: splitIdArg, actor, dryRun, entry: 'index',
+    });
+    docSplit.actions.push(res);
+    docSplit.ok = Boolean(res.ok);
+    if (!dryRun && res.wrote) syncRequirementSupplements(name, project.path, rid);
+    if (!docSplit.ok && res.code) docSplit.code = res.code;
+  }
+
+  // 2) 拆分：index --split（默认只巡检，零写入）
+  const docs = scanRequirementDocs(project.path);
+  const candidates = docs.filter((d) => !d.whitelisted && (d.level === 'over' || d.level === 'near'));
+  docSplit.candidates = candidates.map((d) => ({
+    requirementId: d.requirementId, rel: d.rel, bytes: d.bytes, level: d.level,
+    movedSections: d.candidates, whitelisted: d.whitelisted,
+  }));
+  docSplit.summary = {
+    total: docs.length,
+    over: docs.filter((d) => d.level === 'over').length,
+    near: docs.filter((d) => d.level === 'near').length,
+    ok: docs.filter((d) => d.level === 'ok').length,
+    whitelisted: docs.filter((d) => d.whitelisted).length,
+    candidates: candidates.length,
+  };
+  if (wantSplit) {
+    // 覆盖三类：贴线/超限（要拆）、白名单（要落 skip(whitelisted)）、已拆过（要落 skip(already_split) 幂等证据）。
+    const targets = docs.filter((d) => d.whitelisted || d.split || d.level !== 'ok');
+    for (const row of targets) {
+      const res = splitRequirementDoc({
+        projectName: name, projectPath: project.path, requirementId: row.requirementId,
+        entry: 'index', actor, dryRun,
+      });
+      docSplit.actions.push(res);
+      if (!res.ok) docSplit.ok = false;
+      if (!dryRun && res.wrote) syncRequirementSupplements(name, project.path, row.requirementId);
+    }
+  }
+
+  // 3) 索引重建（拆分后要收录卷，AC11）
+  const r = generateIndex(project, { by: actor, sessionId: sessionOf(args), silent: Boolean(args.json) });
   // index 也是“重建项目内可见索引”的手动入口：顺手补齐 提案/ 镜像（曾失败/待重建时用它）。
   const mirror = mirrorSafe(name, 'index');
-  if (args.json) jsonOut({ ok: true, ...r, proposalMirror: mirror });
+
+  if (args.json) {
+    jsonOut({ ok: docSplit.ok, ...r, proposalMirror: mirror, docSplit });
+  } else {
+    const lines = [];
+    lines.push(`正文巡检：${docs.length} 份（超限 ${docSplit.summary.over} ｜ 贴线 ${docSplit.summary.near} ｜ 正常 ${docSplit.summary.ok} ｜ 白名单 ${docSplit.summary.whitelisted}）`);
+    if (!wantSplit && candidates.length) {
+      lines.push('待处理（index 默认零写入；加 --split 执行，--split --dry-run 只看计划）：');
+      for (const c of candidates.slice(0, 12)) lines.push(`  ${c.requirementId}  ${c.bytes}B  ${c.level}  可搬：${c.movedSections.join('、') || '（无）'}`);
+    }
+    for (const a of docSplit.actions) {
+      const head = `${a.requirementId}  ${a.action}${a.reason ? '(' + a.reason + ')' : ''}  ${a.beforeBytes}→${a.afterBytes}B`;
+      lines.push(`${a.ok ? '✓' : '✗'} ${head}${a.code ? ' ' + a.code : ''}${a.supplement ? ' 卷 ' + (a.supplement.rel || a.supplement.name) : ''}`);
+      if (a.message) lines.push(`    ${a.message}`);
+    }
+    textOut(lines.join('\n'));
+  }
+  if (!docSplit.ok) process.exitCode = 1;
 }
 
 // ========== 状态 / 对账 / 验证 ==========
