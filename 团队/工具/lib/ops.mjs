@@ -298,7 +298,7 @@ function segmentLinesForRequirement(text, requirementId, shortKey, knownKeys) {
   return picked;
 }
 
-function readTestReportVerdict(projectName, task) {
+export function readTestReportVerdict(projectName, task) {
   const requirementId = String((task && task.requirementId) || '').trim();
   const shortKey = requirementId ? requirementId.slice(-4).toLowerCase() : '';
   const reportPaths = [];
@@ -329,6 +329,26 @@ function readTestReportVerdict(projectName, task) {
   const PASS_STRONG_RE = /(\bPASS\b|全部通过|通过)/i;
   const CONCLUSION_RE = /^[\s>*\-`|]*?(status|结论|判定|verdict)\s*[=:：|]\s*(.*)$/i;
   const TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
+  // B-c69e：关键词扫描不识别否定句（「不构成不通过 / 无 FAIL / 0 失败」会被误判 fail）。
+  // 判负前先剔除否定短语与零值短语；剩下的文本里出现强否定词才算 fail。
+  const NEGATED_FAIL_RE = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/gi;
+  const ZERO_FAIL_RE = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/gi;
+  const FAIL_ZERO_RE = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
+  const FAIL_ZERO2_RE = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
+  const NEGATED_FAIL_TEST = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/i;
+  const ZERO_FAIL_TEST = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/i;
+  const FAIL_ZERO_TEST = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/i;
+  const FAIL_ZERO2_TEST = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/i;
+  const hasNegatedFailPhrase = (text) => {
+    const t = String(text || '');
+    return NEGATED_FAIL_TEST.test(t) || ZERO_FAIL_TEST.test(t) || FAIL_ZERO_TEST.test(t) || FAIL_ZERO2_TEST.test(t);
+  };
+  const failVerdictText = (text) => {
+    let t = String(text || '');
+    t = t.replace(NEGATED_FAIL_RE, '（否定靶词）').replace(ZERO_FAIL_RE, '（零靶词）');
+    t = t.replace(FAIL_ZERO_RE, '（零靶词）').replace(FAIL_ZERO2_RE, '（零靶词）');
+    return FAIL_STRONG_RE.test(t);
+  };
   // M-20261115-161343-6104c7（第三处假阴性）：一份报告可能同时写多条需求的结论，
   // 旧实现把整份报告当一条需求扫，B 的「不通过」会把 A 判死（v192：b28f 通过 / 62b9 不通过）。
   // 判定前先按需求分段：只扫点名本需求的小节；没有小节才回退报告头，且行内按需求条款裁剪。
@@ -399,21 +419,21 @@ function readTestReportVerdict(projectName, task) {
       }
     }
     for (const line of conclusions) {
-      if (FAIL_STRONG_RE.test(line)) return { verdict: 'fail', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'conclusion' };
+      if (failVerdictText(line)) return { verdict: 'fail', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'conclusion' };
     }
     for (const line of conclusions) {
-      if (PASS_STRONG_RE.test(line)) return { verdict: 'pass', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'conclusion' };
+      if (hasNegatedFailPhrase(line) || PASS_STRONG_RE.test(line)) return { verdict: 'pass', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'conclusion' };
     }
     // ② 没有结论行时兜底看头部：只认强否定/强肯定，裸「失败」不算（数词/散文会误判）
     for (const line of scanLines.slice(0, 20)) {
       const part = scopeLineToRequirement(line, requirementId, shortKey, keys);
       if (!part) continue;
-      if (FAIL_STRONG_RE.test(part)) return { verdict: 'fail', file: rel, snippet: part.slice(0, 120), requirementId, basis: 'head' };
+      if (failVerdictText(part)) return { verdict: 'fail', file: rel, snippet: part.slice(0, 120), requirementId, basis: 'head' };
     }
     for (const line of scanLines.slice(0, 20)) {
       const part = scopeLineToRequirement(line, requirementId, shortKey, keys);
       if (!part) continue;
-      if (PASS_STRONG_RE.test(part)) return { verdict: 'pass', file: rel, snippet: part.slice(0, 120), requirementId, basis: 'head' };
+      if (hasNegatedFailPhrase(part) || PASS_STRONG_RE.test(part)) return { verdict: 'pass', file: rel, snippet: part.slice(0, 120), requirementId, basis: 'head' };
     }
   }
   return { verdict: 'unknown', file: ordered[0] || '', snippet: '', requirementId };
@@ -563,7 +583,7 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
     if (trqVerdict && trqVerdict !== 'testable') return skip('trq_not_testable', { verdict: trqVerdict });
     // 口径统一（M-20261115-161641-a8f13b）：证据串只作「人工备注」信号，先剔路径令牌再判；
     // 真正的结论以报告正文为准（下面的 readTestReportVerdict）。路径名里带 FAIL/不通过 不再误拦。
-    if (/(?:FAIL|不通过|未通过)/i.test(evidenceNoteText(task.evidence))) return skip('test_not_passed');
+    if (failVerdictText(evidenceNoteText(task.evidence))) return skip('test_not_passed');
     // B-2ae4 / 62b9：证据字符串干净不等于测试通过——必须读测试报告主体结论（前 20 行 + status/结论行）。
     // 命中「不通过/未通过/FAIL/失败」→ 不推进，并把匹配到的原文片段写进 requirement_advance_skipped 审计。
     const reportVerdict = readTestReportVerdict(projectName, task);
