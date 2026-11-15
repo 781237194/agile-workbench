@@ -9,6 +9,8 @@ import {
 import { ROLES, ROLE_DIRS, ROLE_NAMES, LIMITS, MODEL_BY_ROLE, normalizeTeamMode, rolesForMode, roleIdsForMode } from './roles.mjs';
 import { initialScenarioConfirm } from './scenario-confirm.mjs';
 import { DEFAULT_IRON, bootDocSpecs, readDocRecord, readRequirementDocs } from './scaffold.mjs';
+// R-75ec：任务层 Owner 门禁唯一判定入口（gates.mjs → taskGateOf）；此处只调用、不自己判 decisions。
+import { taskGateOf, auditGate } from './gates.mjs';
 
 // 角色常量单一真相在 roles.mjs；这里重导出，保持旧调用方向不变。
 export { ROLES, ROLE_NAMES };
@@ -980,11 +982,44 @@ export function listTasks(project) {
   return out.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
 }
 
+/** R-75ec：读该需求在工作流里的行（fail-closed：读失败交给 taskGateOf 拒）。 */
+function requirementRowOf(project, requirementId) {
+  const id = String(requirementId || '');
+  if (!id) return { row: null, readFailed: false };
+  try {
+    const file = path.join(projectStatePaths(project).dir, '工作流.json');
+    if (!fs.existsSync(file)) return { row: null, readFailed: false };
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const rows = raw && raw.requirements && typeof raw.requirements === 'object' ? raw.requirements : {};
+    // 行键可能是完整 id，也可能是归一化后的 key（历史数据），精确优先、再按行内 id 兜底。
+    if (rows[id]) return { row: rows[id], readFailed: false };
+    const hit = Object.values(rows).find((row) => row && String(row.id || '') === id);
+    return { row: hit || null, readFailed: false };
+  } catch { return { row: null, readFailed: true }; }
+}
+
 export function claimTask(project, id, role, sessionId) {
   return withLock(`task:${project}:${id}`, { role, sessionId, ttlMs: 15000, waitMs: 5000, reason: 'claim task' }, () => {
     const task = loadTask(project, id);
     if (task.status === 'done') fail('TASK_DONE', `任务已完成：${id}`);
     if (task.owner && task.owner !== role) fail('TASK_OWNED', `任务已被 ${task.owner} 认领`, { owner: task.owner });
+    // R-75ec：Owner 门未过 → 拒 claim（零副作用 + 审计）；blocked 且门已过 → 先兜底解冻再继续。
+    const gateRow = requirementRowOf(project, task.requirementId);
+    // R-75ec 旧夹具兼容：仅沙盘 + 显式 TEAM_TASK_GATE_LEGACY=1 时放行 claim 门（生产不认）。
+    const legacyGate = process.env.TEAM_SELFTEST === '1' && process.env.TEAM_TASK_GATE_LEGACY === '1';
+    const gate = legacyGate ? null : taskGateOf({ task, row: gateRow.row, readFailed: gateRow.readFailed });
+    if (task.status === 'blocked') {
+      if (gate) {
+        auditGate(project, { ...gate, role, source: 'cli', action: 'task_claim', attempted: 'task_claim' });
+        fail(gate.code === 'TASK_GATE_NOT_APPROVED' ? 'TASK_GATE_NOT_APPROVED' : gate.code === 'TASK_GATE_REQUIREMENT_MISSING' ? gate.code : 'TASK_FROZEN',
+          gate.message, { requirementId: gate.requirementId, cause: gate.cause, gateCode: gate.gateCode, frozen: true });
+      }
+      task.status = String(task.beforeStatus || 'open');
+      delete task.beforeStatus; delete task.blockedAt; delete task.blockedCause; delete task.blockedBy;
+    } else if (gate) {
+      auditGate(project, { ...gate, role, source: 'cli', action: 'task_claim', attempted: 'task_claim' });
+      fail(gate.code, gate.message, { requirementId: gate.requirementId, cause: gate.cause, gateCode: gate.gateCode });
+    }
     task.owner = role;
     task.status = 'working';
     task.claimedAt = nowIso();
@@ -999,6 +1034,19 @@ export function finishTask(project, id, role, evidence, note = '', extra = {}) {
     if (task.status === 'done') fail('TASK_DONE', `任务已完成：${id}`);
     if (task.owner && task.owner !== role && role !== 'pm') fail('TASK_NOT_OWNER', `只有 owner 或 PM 能完成任务`, { owner: task.owner });
     if (!evidence) fail('EVIDENCE_REQUIRED', '完成任务必须带 --evidence（提交号/路径/验证输出）');
+    // R-75ec：Owner 门未过 → 拒 done（零副作用 + 审计）；blocked 且门已过 → 兜底解冻后继续。
+    const gateRow = requirementRowOf(project, task.requirementId);
+    // R-75ec 旧夹具兼容：同上，仅沙盘 + 显式开关时放行 done 门。
+    const legacyGateDone = process.env.TEAM_SELFTEST === '1' && process.env.TEAM_TASK_GATE_LEGACY === '1';
+    const gate = legacyGateDone ? null : taskGateOf({ task, row: gateRow.row, readFailed: gateRow.readFailed });
+    if (gate) {
+      auditGate(project, { ...gate, role, source: 'cli', action: 'task_done', attempted: 'task_done' });
+      fail(gate.code, gate.message, { requirementId: gate.requirementId, cause: gate.cause, gateCode: gate.gateCode });
+    }
+    if (task.status === 'blocked') {
+      task.status = String(task.beforeStatus || 'open');
+      delete task.beforeStatus; delete task.blockedAt; delete task.blockedCause; delete task.blockedBy;
+    }
     task.status = 'done';
     task.doneAt = nowIso();
     task.evidence = truncate(evidence, 500);

@@ -291,8 +291,69 @@ function latestReview(row, task) {
   return r.productReview || r.requirementReview || fromTask.productReview || fromTask.requirementReview || (task && task.review) || null;
 }
 
-/** G3：Owner 已落账（approved/skipped），或明确拒绝（rejected）。 */
-export function gateOwnerDecision(row) {
+/**
+ * 只读投影：给「展示/推进判定」用的 decisions 列表与最新一条。
+ * R-75ec 之后 ops/store 不得再直接调 ownerDecisionsOf/gateOwnerDecision（门只走 taskGateOf），
+ * 需要读决定链的地方统一用这两个投影。
+ */
+export function decisionListOf(row) {
+  return ownerDecisionsOf(row);
+}
+
+export function latestDecisionOf(row) {
+  const list = ownerDecisionsOf(row);
+  return list.length ? list[list.length - 1] : null;
+}
+
+/**
+ * R-75ec：任务层 Owner 门禁的**唯一判定入口**。
+ *
+ * 口径（主正文 §七 + 增补卷 §二）：
+ *   - 只认 `decisions` 里**最新一条**的 status ∈ approved/skipped/accepted → 通过；proxy 与 Owner 同权。
+ *   - 无 `requirementId` → 放行（返回 null，调用方不写审计）。
+ *   - 有 `requirementId` 但工作流没有该行（`row` 缺）→ 拒 `TASK_GATE_REQUIREMENT_MISSING`（脏数据不放行）。
+ *   - 读失败由调用方判定 fail-closed（调用方传 row=null 且 readFailed=true）。
+ *   - 其余一律拒 `TASK_GATE_NOT_APPROVED`，`cause ∈ {missing,pending,rejected}`。
+ * 返回 null（放行）或 {code, gateCode, cause, gate, requirementId, taskId, missing, next, message}。
+ */
+export function taskGateOf({ task, row = null, readFailed = false } = {}) {
+  const requirementId = String((task && task.requirementId) || '');
+  const taskId = String((task && task.id) || '');
+  if (!requirementId) return null;
+  const base = { gate: 'G3', gateCode: 'TASK_GATE_NOT_APPROVED', requirementId, taskId, attempted: 'task_gate' };
+  if (readFailed) {
+    return {
+      ...base, code: 'TASK_GATE_NOT_APPROVED', cause: 'missing',
+      missing: ['工作流.json 读取失败（fail-closed）'],
+      next: '先修 工作流.json（备份后修），读失败不放行',
+      message: `任务 ${taskId} 的 Owner 门判定失败：工作流读取异常，按纪律拒绝`,
+    };
+  }
+  if (!row) {
+    return {
+      ...base, code: 'TASK_GATE_REQUIREMENT_MISSING', gateCode: 'TASK_GATE_REQUIREMENT_MISSING', cause: 'missing',
+      missing: ['工作流里没有该需求行'],
+      next: '先修工作流行（req register / req review 重建），脏数据不放行',
+      message: `任务 ${taskId} 绑的需求 ${requirementId} 在工作流里不存在；按纪律拒绝`,
+    };
+  }
+  const decisions = ownerDecisionsOf(row);
+  const latest = decisions.length ? decisions[decisions.length - 1] : null;
+  const status = String((latest && (latest.status || latest.decision)) || '');
+  const rowStatus = String(row.status || '');
+  const closedBad = ['terminated', 'iteration', 'rejected'].includes(rowStatus);
+  if (!closedBad && ['approved', 'skipped', 'accepted'].includes(status)) return null;
+  const cause = (status === 'rejected' || closedBad || status === 'terminated' || status === 'iteration')
+    ? 'rejected' : (status ? 'pending' : 'missing');
+  return {
+    ...base, code: 'TASK_GATE_NOT_APPROVED', cause,
+    missing: [cause === 'missing' ? 'Owner 决定未落账' : 'Owner 未通过（' + (status || rowStatus) + '）'],
+    next: '先让需求过 Owner 门（owner confirm / 代管落账），未通过不许开工',
+    message: `需求 ${requirementId} 未过 Owner 门（${cause}）；任务 ${taskId} 不许开工/收工`,
+  };
+}
+
+/** G3：Owner 已落账（approved/skipped），或明确拒绝（rejected）。 */export function gateOwnerDecision(row) {
   const decisions = ownerDecisionsOf(row);
   const latest = decisions.length ? decisions[decisions.length - 1] : null;
   if (!latest) {
@@ -581,6 +642,8 @@ export function gateRoleBusy({ role, tasks = [], locks = [], excludeTaskIds = []
     if (!task) return false;
     if (String(task.owner || '') !== String(role || '')) return false;
     if (String(task.status || '') === 'done') return false;
+    // R-75ec：被 Owner 门冻结（blocked）的任务不占角色——角色已被要求停手，不能再因此挡住新派单。
+    if (String(task.status || '') === 'blocked') return false;
     if (skip.has(String(task.id || ''))) return false;
     // working 幽灵：只有调用方显式给 staleWorkingMs（队列 pump）才跳过，普通派单仍严格 G5。
     if (staleWorkingMs > 0 && String(task.status || '') === 'working') {

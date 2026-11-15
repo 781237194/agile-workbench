@@ -30,9 +30,11 @@ import {
 } from './roles.mjs';
 import { ensureProjectStructure, structureReport, readRequirementDocs } from './scaffold.mjs';
 import {
-  auditGate, detectPhaseEdit, gateDesign, gateIteration, gateOwnerDecision, gateRequirementFinal, gateRequirementDoc,
-  gateRequirementReview, gateStageRole, gateTestReport, gateTestability, gateConfig, ownerDecisionsOf,
+  auditGate, detectPhaseEdit, gateDesign, gateIteration, gateRequirementFinal, gateRequirementDoc,
+  gateRequirementReview, gateStageRole, gateTestReport, gateTestability, gateConfig,
   stageOfRow, idMatches, gateRoleBusy, detectPhaseJump,
+  // R-75ec：任务层 Owner 门禁唯一入口与它的只读投影（避免在 ops 里出现第二套判门）。
+  taskGateOf, decisionListOf, latestDecisionOf,
 } from './gates.mjs';
 import { buildDispatchPrompt, buildNoticePrompt, buildWakeHeader, buildWakeLine, isRegisteredKind } from './dispatch.mjs';
 import { assertNoPendingSubagent, subagentAudit } from './subagent.mjs';
@@ -61,6 +63,8 @@ import {
   scenarioConfirmState, applyScenarioTimeout, scenarioConfirmerFor, scenarioTimeoutMs,
 } from './scenario-confirm.mjs';
 import { readRequirementDocVersion, versionForRecord, versionGate } from './req-version.mjs';
+// R-75ec：Owner 决定落账即冻结/解冻（任务层门禁的效果层）。
+import { applyOwnerDecisionEffects } from './task-freeze.mjs';
 
 const RISK_RANK = { normal: 1, sensitive: 2, critical: 3 };
 const PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -83,7 +87,7 @@ function keepForwardStatus(current, target) {
 
 /** 合并工作流行与任务里的 decisions：任一侧缺行时仍能识别“已有 Owner 决定”。 */
 function ownerDecisionList(row, task) {
-  const rowList = ownerDecisionsOf(row);
+  const rowList = decisionListOf(row);
   const taskList = task && task.workflow && Array.isArray(task.workflow.decisions)
     ? task.workflow.decisions.filter(Boolean) : [];
   if (!taskList.length) return rowList;
@@ -234,7 +238,7 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
   if (currentRankForAdvance >= cap) return null;
 
   // ② 无 Owner decision 不得越过 owner_review 门：还在该门（approved 或更早）时必须有落账决定。
-  if (current !== 'iteration' && statusRank(current) <= statusRank('approved') && !ownerDecisionsOf(row).length) {
+  if (current !== 'iteration' && statusRank(current) <= statusRank('approved') && !decisionListOf(row).length) {
     return skip('owner_gate');
   }
 
@@ -433,7 +437,16 @@ function runDispatchGates({ projectName, requirementId, role, targetRole = '', a
       message: `TR-Q 任务 ${taskId} 豁免 G3（Owner 决定前可派）`,
     });
   }
-  const g3 = isTrqTask ? null : gateOwnerDecision(row);
+  // R-75ec：派单与 claim/finish **同源**——都走 taskGateOf；对外 code 保留旧 OWNER_REVIEW_REQUIRED（兼容），
+  // 同时带 gateCode/cause，测试按「同 cause + 同 gateCode」断言。
+  const g3 = isTrqTask ? null : (() => {
+    const gate = taskGateOf({
+      task: { id: String(taskId || (reqTask && reqTask.id) || ''), requirementId },
+      row: row || null,
+    });
+    if (!gate) return null;
+    return { ...gate, code: 'OWNER_REVIEW_REQUIRED', gateCode: gate.gateCode || gate.code, gate: 'G3' };
+  })();
   if (g3) gateFail(projectName, record, g3);
   // G5：目标角色已有未闭环任务/活动锁 → TASK_OPEN / ROLE_BUSY。
   // 排除“本次要派的目标任务”与承载它的需求任务（R-99ff ①：目标自身/已认领不算占用），
@@ -3726,7 +3739,7 @@ function cmdReqStale(args) {
     if (ver) reasons.push('review_stale');
     const trqVerdict = String((row.trq && row.trq.verdict) || '');
     if (String(row.priority || 'P2') === 'P0' && trqVerdict !== 'testable') reasons.push('trq_missing');
-    const decisions = ownerDecisionsOf(row);
+    const decisions = decisionListOf(row);
     const last = decisions.length ? decisions[decisions.length - 1] : null;
     const lastStatus = String((last && (last.status || last.decision)) || '');
     if (!['approved', 'skipped', 'accepted'].includes(lastStatus)) reasons.push('owner_gate');
@@ -4350,6 +4363,20 @@ function cmdReqLifecycle(args, action) {
     fail('NOT_REQUIREMENT', `${task.id} 不是需求（type=${task.type}）；req ${action} 只针对 req create 建的需求`, { id: task.id, type: task.type });
   }
   const reason = String(args.reason || args.comments || args.opinion || '').trim();
+  // R-75ec AC9：终止/迭代的冻结必须发生在"关闭子任务"之前——否则子任务先被置 done 就再也冻结不到。
+  // 先按动作冻结该需求未完成任务（blocked），syncWorkflowRow 会跳过 blocked 子任务。
+  let freezeEffect = null;
+  try {
+    freezeEffect = applyOwnerDecisionEffects(b.project, task.id, action === 'iterate' ? 'iteration' : 'terminated', {
+      row: null, by: b.role, source: 'cli', reason: truncate(reason || '', 200),
+    });
+  } catch (error) {
+    gateWarn(b.project, { role: b.role, action: 'task_freeze', requirementId: task.id, attempted: `req ${action} freeze` }, {
+      code: 'TASK_FREEZE_FAILED', gate: 'G3',
+      missing: [String((error && error.message) || error).slice(0, 160)],
+      next: '用 task show 核对任务状态；必要时补一次 req ' + action,
+    });
+  }
   const result = transitionRequirement({
     project: b.project, task, action, role: b.role, sessionId: b.sessionId, reason, force: Boolean(args.force),
   });
@@ -4387,6 +4414,7 @@ function cmdReqLifecycle(args, action) {
     workflow: result.workflow,
     closedTasks: result.closedTasks,
     ...(queue ? { dispatchQueue: queue } : {}),
+    ...(freezeEffect ? { freezeEffect } : {}),
   });
 }
 
@@ -5290,6 +5318,24 @@ export async function cmdOwner(args) {
     },
   });
   const label = actionRaw === 'accept' ? '验收' : '决定';
+  // R-75ec AC3/AC8：落账的同一写路径立即生效——打回/终止/迭代冻结该需求未完成任务，
+  // 通过则解冻；不等下一次 claim/done。
+  let freezeEffect = null;
+  try {
+    freezeEffect = applyOwnerDecisionEffects(projectName, requirementId, decision, {
+      row: (sync && sync.state && sync.state.requirements) ? sync.state.requirements[requirementId] : null,
+      by: proxyMode ? 'pm' : 'owner',
+      source: 'cli',
+      reason: truncate(opinion || '', 200),
+    });
+  } catch (error) {
+    // 冻结失败不得静默：留审计，但不回滚已落账的决定（决定本身合法）。
+    gateWarn(projectName, { role: proxyMode ? 'pm' : 'owner', action: 'task_freeze', requirementId, attempted: 'freeze after owner decision' }, {
+      code: 'TASK_FREEZE_FAILED', gate: 'G3',
+      missing: [String((error && error.message) || error).slice(0, 160)],
+      next: '用 task show 核对任务状态；必要时手工重跑 req 决定或联系 PM',
+    });
+  }
   // 验收通过后，PM 未消费的派单不得再唤醒角色（AC5.4：验收/终止后队列为 0）。
   const queue = actionRaw === 'accept' && decision === 'accepted'
     ? clearDispatchQueue(projectName, { reason: 'owner_accepted', requirementId })

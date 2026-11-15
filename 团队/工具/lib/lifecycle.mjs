@@ -282,6 +282,8 @@ function closeChildTasks(projectName, requirementId, reason, role, action, ts) {
     if (!child || String(child.id) === String(requirementId)) continue;
     if (String(child.requirementId || '') !== String(requirementId)) continue;
     if (child.status === 'done') continue;
+    // R-75ec：已冻结（blocked）的子任务不被收口覆盖，等需求重新过门解冻后再处理。
+    if (child.status === 'blocked') continue;
     child.status = 'done';
     child.doneAt = ts;
     child.evidence = truncate(reason || (action === 'iterate' ? '随需求进入下一轮关闭' : '随需求终止关闭'), 500);

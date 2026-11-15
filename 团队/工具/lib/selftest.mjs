@@ -69,7 +69,9 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       return { exists: true, size: st.size, mtimeMs: st.mtimeMs, sha256: crypto.createHash('sha256').update(fs.readFileSync(realWorkbenchPath)).digest('hex') };
     } catch { return { exists: false, size: 0, mtimeMs: 0, sha256: '' }; }
   })();
-  const env = { ...process.env, TEAM_ROOT: teamRoot, TEAM_PROJECTS_ROOT: projectsRoot, TEAM_SELFTEST: '1', TEAM_WORKBENCH_JSON: sandboxWorkbenchFile };
+  // R-75ec：本门禁上线前的旧夹具（建任务→直接 claim 测别的机制）用 legacy 开关放行；
+  // 门禁本身由 scripts/test-75ec-task-gate.cjs 独立覆盖（那里不设这个开关）。
+  const env = { ...process.env, TEAM_ROOT: teamRoot, TEAM_PROJECTS_ROOT: projectsRoot, TEAM_SELFTEST: '1', TEAM_WORKBENCH_JSON: sandboxWorkbenchFile, TEAM_TASK_GATE_LEGACY: '1' };
   const results = [];
   const pass = (name, detail = '') => {
     results.push({ ok: true, name, detail });
@@ -910,8 +912,10 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       failStep('req iterate 没有把 iterationRound 写进工作流行', JSON.stringify(lifeWfIter.requirements[lifeReqId]));
     }
     const lifeChildAfter = JSON.parse(read(path.join(stateShiDian, '任务', `${lifeChild.task.id}.json`)));
-    if (lifeChildAfter.status !== 'done' || lifeChildAfter.workflow.requirementStatus !== 'iteration') {
-      failStep('req iterate 没有收口关联子任务', JSON.stringify(lifeChildAfter));
+    // R-75ec AC9：迭代不再把子任务收口成 done，而是冻结成 blocked（blockedCause=iteration），
+    // 等需求重新过 Owner 门后解冻继续。
+    if (lifeChildAfter.status !== 'blocked' || lifeChildAfter.blockedCause !== 'iteration') {
+      failStep('req iterate 没有冻结关联子任务（R-75ec AC9）', JSON.stringify(lifeChildAfter));
     }
 
     const termReq = json(['req', 'create', '--boot', fullPm, '--title', '驳回后终止用例', '--priority', 'P1', '--acceptance', '不再进入开发', '--json']);
@@ -927,8 +931,9 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       failStep('req terminate 没有把需求收口', JSON.stringify(terminated.requirement));
     }
     const termChildAfter = JSON.parse(read(path.join(stateShiDian, '任务', `${termChild.task.id}.json`)));
-    if (termChildAfter.status !== 'done' || !termChildAfter.workflow || termChildAfter.workflow.requirementStatus !== 'terminated') {
-      failStep('req terminate 没有收口关联子任务', JSON.stringify(termChildAfter));
+    // R-75ec AC9：终止同样冻结成 blocked（blockedCause=terminated），不再把子任务置 done。
+    if (termChildAfter.status !== 'blocked' || termChildAfter.blockedCause !== 'terminated') {
+      failStep('req terminate 没有冻结关联子任务（R-75ec AC9）', JSON.stringify(termChildAfter));
     }
     const lifeWfTerm = JSON.parse(read(lifeWfPath));
     if (lifeWfTerm.requirements[termReqId].status !== 'terminated') failStep('req terminate 没有同步 工作流.json');
