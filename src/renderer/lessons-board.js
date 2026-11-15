@@ -19,7 +19,7 @@
     ['tester', '测试']
   ];
   const LABEL = Object.fromEntries(ROLES);
-  const state = { data: null, active: localStorage.getItem('awb.lessonsRole') || 'pm', loading: false };
+  const state = { data: null, active: localStorage.getItem('awb.lessonsTab') || 'pm', loading: false };
 
   function el(tag, cls, text) {
     const node = document.createElement(tag);
@@ -74,7 +74,7 @@
 
   function setActive(role) {
     state.active = ROLES.some(([id]) => id === role) ? role : 'pm';
-    localStorage.setItem('awb.lessonsRole', state.active);
+    localStorage.setItem('awb.lessonsTab', state.active);
     const dialog = state.dialog;
     if (!dialog) return;
     for (const tab of dialog.querySelectorAll('[data-lesson-tab]')) {
