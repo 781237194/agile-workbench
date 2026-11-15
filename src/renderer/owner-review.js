@@ -2384,7 +2384,7 @@
         const label = String(g.label || g.key || '材料');
         const items = Array.isArray(g.items) ? g.items : [];
         // 卷条目与正文条目分开渲染：正文仍按"最多 3 项"收敛，卷必须全数列出（否则被切片吃掉）。
-        const docs = items.filter((item) => String((item && item.kind) || '') !== 'supplement');
+        const docs = items.filter((item) => !['supplement', 'appendix'].includes(String((item && item.kind) || '')));
         const supplements = materialsSupplements(g);
         if (!docs.length && !supplements.length) { group.appendChild(el('span', 'or-muted', `${label}：未记录`)); continue; }
         for (const item of docs.slice(0, 3)) {

@@ -1331,7 +1331,7 @@ function mirrorWorkflowToStore(projectId, teamName, projectPath) {
 /** 统一工作流返回：失败也镜像一次，界面/测试能看到旧状态是否已部分落盘。 */
 function workflowResponse(projectId, teamName, projectPath, result) {
   const mirrored = mirrorWorkflowToStore(projectId, teamName, projectPath);
-  return {
+  const payload = {
     ...(result || {}),
     projectId,
     teamName,
@@ -1342,6 +1342,28 @@ function workflowResponse(projectId, teamName, projectPath, result) {
     } : null,
     state: statePayload()
   };
+  // R-f9b1 补单（T-cb02②）：池行挂增补卷路径——**不改 工作流.json、不改正文哈希**，
+  // 只在返回给界面的快照里按需补一份 supplements[]（真源仍是 需求/增补卷-*.md 文件本身；
+  // 工作流行若已声明 supplements 就原样保留，这里只补缺的那一份）。
+  try {
+    if (projectPath && Array.isArray(payload.requirements) && payload.requirements.length) {
+      const view = { path: projectPath };
+      const index = buildSupplementIndex(view);
+      for (const row of payload.requirements) {
+        if (!row || typeof row !== 'object') continue;
+        if (Array.isArray(row.supplements) && row.supplements.length) continue;
+        try {
+          const rows = requirementSupplements(view, row, index);
+          if (rows.length) {
+            row.supplements = rows.map((item) => ({
+              name: item.name, rel: item.rel, bytes: item.bytes, sha256: item.sha256, missing: Boolean(item.missing), source: item.source || 'disk-scan'
+            }));
+          }
+        } catch { /* 单行失败不影响快照 */ }
+      }
+    }
+  } catch { /* 卷索引失败不影响 workflow:state 主流程 */ }
+  return payload;
 }
 
 /**
@@ -4022,12 +4044,14 @@ function ownerMaterials(project, requirementId) {
     : [];
   const reqRows = matched.length ? matched : (reqId ? [] : reqFiles);
   // R-f9b1 F-7③/AC12：同一张「需求正文」材料卡里追加该需求的增补卷
-  // （kind='supplement'，带 path + 实际 sha256；卷不另立类目，避免多一套入口）。
+  // （kind='appendix'（T-cb02 口径），带 path + 实际 sha256；legacyKind 保留 'supplement' 兼容老消费者；
+  //  卷不另立类目，避免多一套入口）。
   const supplementRows = reqId
     ? (() => { try { return requirementSupplements(project, { id: reqId }); } catch { return []; } })()
     : [];
   const supplementItems = supplementRows.map((row) => ({
-    kind: 'supplement',
+    kind: 'appendix',
+    legacyKind: 'supplement',
     name: row.name,
     rel: row.rel,
     path: row.rel,
@@ -17948,8 +17972,8 @@ async function runSupplementCheck() {
     supMissing.length === 1 && supMissing[0].missing === true, supMissing);
   const mats = ownerMaterials(mainProject, reqVolume);
   const reqGroup = (mats.groups || []).find((g) => g.key === 'req') || { items: [] };
-  const matSupp = (reqGroup.items || []).filter((item) => item.kind === 'supplement');
-  check('owner:materials「需求正文」组含卷条目（kind=supplement + path/sha256）',
+  const matSupp = (reqGroup.items || []).filter((item) => item.kind === 'appendix' || item.kind === 'supplement');
+  check('owner:materials「需求正文」组含卷条目（kind=appendix + path/sha256）',
     matSupp.length === 1 && matSupp[0].rel === `需求/${volumeName}` && matSupp[0].sha256 === volumeSha
     && Array.isArray(reqGroup.supplements) && reqGroup.supplements.length === 1, { items: matSupp, groupSupplements: reqGroup.supplements || null });
   const snap = workflowSnapshot(mainProject);

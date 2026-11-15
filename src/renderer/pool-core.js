@@ -716,7 +716,8 @@
     const seen = new Set();
     for (const item of list) {
       if (!item) continue;
-      if (item && typeof item === 'object' && item.kind && String(item.kind) !== 'supplement') continue;
+      // T-cb02：卷条目 kind 统一为 appendix，老数据仍写 supplement → 两个都认。
+      if (item && typeof item === 'object' && item.kind && !['supplement', 'appendix'].includes(String(item.kind))) continue;
       const row = normalizeSupplement(item, reqId);
       if (!row) continue;
       const key = row.rel + '|' + row.name;
