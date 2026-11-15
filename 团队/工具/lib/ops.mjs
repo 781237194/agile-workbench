@@ -5359,7 +5359,7 @@ function ownerConfirmNonce(args) {
  * Owner 验收前的测试闸门：该需求名下必须有测试任务且全部 done。
  * 只读；不写任何状态。返回 {ok, code, message, mode, taskIds, missing}。
  */
-function ownerTestGate(projectName, requirementId) {
+export function ownerTestGate(projectName, requirementId) {
   const children = listTasks(projectName).filter((row) => row
     && String(row.id) !== String(requirementId)
     && String(row.requirementId || '') === String(requirementId));
@@ -5384,6 +5384,19 @@ function ownerTestGate(projectName, requirementId) {
       requirementId,
       taskIds: testTasks.map((row) => row.id),
       open: open.map((row) => row.id),
+    };
+  }
+  // B-20261115-184535-c98e：验收门第二道——需求名下不得有未完成子任务（开发/补单/复测/签章类），
+  // 否则需求收口后账本分叉（75 条终态需求里 12 条仍有 open 任务）。保留 TEST_NOT_DONE 语义，两道门分开报码。
+  const leftover = children.filter((row) => String(row.status || '') !== 'done');
+  if (leftover.length) {
+    return {
+      ok: false,
+      code: 'REQ_HAS_OPEN_TASKS',
+      message: '需求 ' + requirementId + ' 名下还有未完成任务：' + leftover.map((row) => row.id + ' ' + String(row.title || '').trim()).join('、'),
+      requirementId,
+      taskIds: leftover.map((row) => row.id),
+      open: leftover.map((row) => row.id),
     };
   }
   return { ok: true, mode: 'tasks', taskIds: testTasks.map((row) => row.id) };

@@ -11336,7 +11336,9 @@ async function runReviewCheck() {
         lockTtlSeconds: 60,
         messageMaxChars: 600,
         ackNoteMaxChars: 300,
-        codeMaxBytes: 65536,
+        // B-9c49 / T-5644：与 roles.mjs 的 DEFAULT_CODE_MAX_BYTES（8MB）保持一致；不能写死 65536，
+        // 否则自检沙盘仍按 64KB 限制、大文件用例失真。也不能省掉本键：ops.mjs 读 team.config.codeMaxBytes || 65536。
+        codeMaxBytes: 8 * 1024 * 1024,
       },
     });
   }
