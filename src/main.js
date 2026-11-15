@@ -11,6 +11,7 @@ const { pathToFileURL } = require('node:url');
 const ReviewCopy = require('./review-copy.js');
 // R-c1ed F-1：渲染内存采样分片 / 保留 / 取数通道（纯逻辑，Node 可测）
 const RenderMemory = require('./render-memory.js');
+const SamplerDecide = require('./mem-sampler-decide.js');
 
 const ROOT = path.join(__dirname, '..');
 const APP_ICON = path.join(ROOT, 'assets', 'pm-workbench.ico');
@@ -17357,6 +17358,7 @@ function startRenderMemorySampler() {
   let pidSignature = '';
   let pidSignatureChanged = false;
   let lastMetricsOkAt = '';
+  let lastForcedAtMs = 0;
   const pidChanged = () => {
     // 卷三 §五：进程 pid 集合变化必须立即真采样（不等 5 拍）；卷四①：该行标 forced，不计入密度分母。
     // 注意用 getOSProcessId（廉价），不要用 app.getAppMetrics（13ms/次，会把开销又拉回去）。
@@ -17369,9 +17371,15 @@ function startRenderMemorySampler() {
       }
     } catch { /* 主窗销毁瞬间取不到 pid，按未变化处理 */ }
     const sig = pids.filter(Boolean).map(String).sort().join(',');
-    pidSignatureChanged = Boolean(pidSignature) && Boolean(sig) && sig !== pidSignature;
+    const changed = Boolean(pidSignature) && Boolean(sig) && sig !== pidSignature;
     pidSignature = sig;
-    return pidSignatureChanged;
+    // 判定抽到 src/mem-sampler-decide.js（纯函数，可单测）：30s 宽限 / 5s 限流 / 真变化→forced
+    const decision = SamplerDecide.decideForceSample({ nowMs: Date.now(), bootAtMs, lastForcedAtMs, changed });
+    if (decision.reason === 'pid_grace') reconcile.pidGraceSkips += 1;
+    if (decision.reason === 'forced_throttled') reconcile.forcedThrottled += 1;
+    if (decision.forced) lastForcedAtMs = Date.now();
+    pidSignatureChanged = decision.forced;
+    return decision.forced;
   };
   const tick = () => {
     if (renderMemoryState.chainId !== myChain) return; // 旧链自动退出（单定时器的结构性保证）
@@ -17390,7 +17398,7 @@ function startRenderMemorySampler() {
       lastMetricsOkAt = at;
       if (totalMB === null) renderMemoryState.samplesNull += 1;
       row = { at, pid: lastReal.pid, type: 'renderer', guestUrl: null, workingSetMB: totalMB, cause: 'sample', sampledFrom: at };
-      if (forced) row.forced = true;
+      if (forced) { row.forced = true; reconcile.forced += 1; }
       if (renderMemoryState.degraded) { renderMemoryState.degraded = false; row.cause = 'recovered'; }
     } else {
       // 复用上一真值（卷三 §三：cause='reused'、sampledFrom=来源真采样 at、staleSec=两者秒差）
@@ -17410,6 +17418,15 @@ function startRenderMemorySampler() {
     renderMemoryState.samples += 1;
     renderMemoryState.writeMsTotal += costMs;
     renderMemoryState.writeMsMax = Math.max(renderMemoryState.writeMsMax, costMs);
+    // 行距漂移观测（长跑靠它判断有没有漂移，不是恒 0 假字段）
+    if (renderMemoryState.lastAt) {
+      const gapSec = Math.round(((Date.parse(at) - Date.parse(renderMemoryState.lastAt)) / 1000) * 1000) / 1000;
+      if (Number.isFinite(gapSec) && gapSec >= 0) {
+        renderMemoryState.lastGapSec = gapSec;
+        reconcile.maxGapSec = Math.max(reconcile.maxGapSec || 0, gapSec);
+        if (gapSec > 1.5) reconcile.slowTicks = (reconcile.slowTicks || 0) + 1;
+      }
+    }
     renderMemoryState.lastAt = at;
     renderMemoryState.lastWasReal = needReal;
     renderMemoryState.realSamples = (renderMemoryState.realSamples || 0) + (needReal ? 1 : 0);
@@ -17438,6 +17455,11 @@ function startRenderMemorySampler() {
       realSamples: renderMemoryState.realSamples || 0,
       reusedSamples: Math.max(0, (renderMemoryState.samples || 0) - (renderMemoryState.realSamples || 0)),
       linesPerTick: reconcile.ticks ? Math.round((reconcile.lines / reconcile.ticks) * 1000) / 1000 : 0,
+      // 长跑漂移观测四件（M-20261115-171118-f08c77）：三个计数器都有真实自增点，不是恒 0 的假字段
+      forced: reconcile.forced, pidGraceSkips: reconcile.pidGraceSkips, forcedThrottled: reconcile.forcedThrottled,
+      lastGapSec: renderMemoryState.lastGapSec == null ? null : renderMemoryState.lastGapSec,
+      maxGapSec: reconcile.maxGapSec == null ? null : reconcile.maxGapSec,
+      slowTicks: reconcile.slowTicks || 0,
       lastError: renderMemoryState.lastError || '',
     };
     try { fs.appendFileSync(path.join(dir, '渲染采样自检.jsonl'), JSON.stringify(row) + '\n', 'utf8'); } catch { /* fail-open */ }
@@ -17449,6 +17471,9 @@ function startRenderMemorySampler() {
 function stopRenderMemorySampler() {
   if (renderMemoryState.timer) { try { clearTimeout(renderMemoryState.timer); } catch { /* ignore */ } }
   renderMemoryState.timer = null;
+  // 60s 自检 interval 也要停掉，否则 stop→start 会残留空转的 interval（假观测 + 泄漏）
+  if (renderMemoryState.selfCheckTimer) { try { clearInterval(renderMemoryState.selfCheckTimer); } catch { /* ignore */ } }
+  renderMemoryState.selfCheckTimer = null;
 }
 
 function compactStamp(iso) {
