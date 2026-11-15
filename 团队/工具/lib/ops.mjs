@@ -303,7 +303,7 @@ function segmentLinesForRequirement(text, requirementId, shortKey, knownKeys) {
 // readTestReportVerdict 与 task done 证据备注校验共用本函数。
 const FAIL_STRONG_RE_M = /(不通过|未通过|\bFAIL\b)/i;
 const NEGATED_FAIL_RE = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/gi;
-const ZERO_FAIL_RE = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/gi;
+const ZERO_FAIL_RE = /(?:无|没有|零|(?<![A-Za-z0-9])0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/gi;
 const FAIL_ZERO_RE = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
 const FAIL_ZERO2_RE = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
 // D-20261116-062141-06ec（Owner 06:43 选 B）：只认「带数字的失败 N 项」——`失败 2 项` / `失败 3 条` 判负，
@@ -314,7 +314,7 @@ const FAIL_COUNT_RE = /(?:失败|不通过|未通过)\s*[1-9]\d*\s*(?:项|个|�
 // `失败 2 项未修复` 不会被这里剔掉（前缀只认 已/均已/全部/已全部），仍判负。
 const FAIL_COUNT_RESOLVED_RE = /(?:失败|不通过|未通过)\s*[1-9]\d*\s*(?:项|个|条)\s*(?:已全部|均已全部|已|均已|全部)?\s*(?:修复|解决|处理|关闭|恢复)/g;
 const NEGATED_FAIL_TEST = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/i;
-const ZERO_FAIL_TEST = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/i;
+const ZERO_FAIL_TEST = /(?:无|没有|零|(?<![A-Za-z0-9])0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/i;
 const FAIL_ZERO_TEST = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/i;
 const FAIL_ZERO2_TEST = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/i;
 function hasNegatedFailPhrase(text) {
