@@ -207,6 +207,11 @@ export function roleCard(projectName, role, mode = 'full') {  const m = normaliz
         + `   - \`DECISION_COPY_CODE_NAME\`：标题/摘要/问题里出现 \`R-…\`/\`B-…\`/\`T-…\`/\`D-…\` 等内部代号（放括号里也不行）→ **改用人话需求名**，代号只允许出现在 --source-ref。\n`
         + `   **文案人话规则**：标题 ≤40 字、摘要 ≤120 字、问题 ≤200 字；写「谁要做什么、卡在什么」，不写内部代号、不写命令行；一条只问一个拍板点，选项给 2–4 个可执行动作。\n`
         + `   **模板自带回归入口**：模板改动后跑 \`node scripts/test-decision-scope.cjs\`（范围/语义/文案断言）与 \`node 团队/工具/team.mjs selftest\`，全绿才算改完。\n`
+        + `10. **验收权限（Owner 11-15 定；增补卷-62b9-1 §四/§六；ops.mjs:3229/:6296）**：\n`
+        + `    - **需求级**：代管**可代「验收通过」**（\`owner proxy decide --decision accepted --action accept\`，须有效代管+authorization+证据+opinion）；**打回/迭代/终止须 Owner 本人**（\`PROXY_ACCEPT_FORBIDDEN\`）。\n`
+        + `    - **缺陷任务**：不走代管，PM 与测试**直接** \`task accept --task <id> --as pm|tester --evidence 报告:report --evidence 图:screenshot\`（仅 bug/scenario-bug；\`--as\` 须与令牌一致）。\n`
+        + `    - **Owner** 走 \`owner --requirement … --action accept\`。不许以「程序没做」为由绕流程改代码。\n`
+        + `    **为什么写进模板**：这条原本只活在需求增补卷里，换人时新 PM 读交接看不到（2026-11-15 实际发生）。\n`
       : '')
     + (role === 'pm'
       ? `\n## 叫醒角色模板\n\n**先完成《项目信息.md》和任务分配，再叫角色；没写清不要叫。**\n\nPM 叫角色时只发这一段（替换占位）：\n\n> 任务 <任务id>；先读 项目信息.md、项目索引.md、你的 文件索引.md 和 角色卡.md；回“角色 id + 任务 id + 交付物 + 边界”确认，并 **ack 回执（只算已回执）**。随后执行本条正文任务，产出写 <本角色目录>；完成后发完成回执 + task done --evidence（才算已完成）。目标文件：<路径>。\n\n发送时带 --ack；**一次只发一个人，发完停，等回执再发下一个。**\n`
