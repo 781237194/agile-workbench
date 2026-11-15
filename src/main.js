@@ -5446,6 +5446,29 @@ function registerIpc() {
     const watchTimer = setInterval(ensureDecisionBoxWatch, 5000);
     if (watchTimer && typeof watchTimer.unref === 'function') watchTimer.unref();
   } catch { /* ignore */ }
+  // R-5016 F-8/AC7（界面侧）：三入口数字同源 IPC——只读、无副作用；数字只来自团队工具 ownerPendingCounts。
+  // PM 授权注记 5c：模块只 import 一次（缓存 Promise），不在每次 IPC 调用重复 await import。
+  let ownerPendingCountsModule = null;
+  ipcMain.handle('owner:pending-counts', async (_e, payload) => {
+    try {
+      const { name } = teamProjectNameOf(payload || {});
+      if (!name) return { ok: false, code: 'NO_PROJECT', decisions: 0, reviews: 0, accepts: 0, message: '还没有当前项目' };
+      const teamRoot = (teamTools && teamTools.layout && (teamTools.layout.teamRoot || teamTools.layout.root))
+        || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+      if (!ownerPendingCountsModule) {
+        const routeFile = path.join(teamRoot, '工具', 'lib', 'decision-route.mjs');
+        ownerPendingCountsModule = import(pathToFileURL(routeFile).href).catch((error) => {
+          ownerPendingCountsModule = null; // 加载失败不缓存，下次重试
+          throw error;
+        });
+      }
+      const mod = await ownerPendingCountsModule;
+      const counts = mod.ownerPendingCounts(String(name));
+      return { ...counts, ok: Boolean(counts && counts.ok) };
+    } catch (e) {
+      return { ok: false, code: 'PENDING_COUNTS_FAILED', decisions: 0, reviews: 0, accepts: 0, message: String((e && e.message) || e).slice(0, 300) };
+    }
+  });
   // R-9db6 F-1：Owner 决策箱（只读）。数据真相是 团队/状态/项目/<项目>/决策箱.json，
   // 壳层只读不写；放入由 PM 走团队工具，回执等团队工具侧命令就绪后再接 IPC。
   ipcMain.handle('team:decision-box', async (_e, payload) => {
@@ -5477,6 +5500,14 @@ function registerIpc() {
         summary: String(item.summary || ''),
         question: String(item.question || ''),
         options: Array.isArray(item.options) ? item.options.map(String) : [],
+        // R-5016 F-8/AC7（界面侧）：七要素后端原样透出（缺项由界面不展示，不改存储）。
+        defaultChoice: String(item.defaultChoice || ''),
+        impact: String(item.impact || ''),
+        dueAt: String(item.dueAt || ''),
+        ruleId: String(item.ruleId || ''),
+        redirect: item.redirect && typeof item.redirect === 'object'
+          ? { to: String(item.redirect.to || ''), anchor: String(item.redirect.anchor || ''), reason: String(item.redirect.reason || '') }
+          : null,
         source: item.source && typeof item.source === 'object'
           ? { kind: String(item.source.kind || 'none'), ref: String(item.source.ref || '') }
           : { kind: 'none', ref: '' },

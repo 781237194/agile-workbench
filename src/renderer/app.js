@@ -2827,6 +2827,16 @@ function decisionChoicesOf(item) {
   return opts.length ? opts : ['通过', '打回', '其他'];
 }
 
+/** R-5016 AC3：入箱七要素（source/summary/question/options2-4/defaultChoice/impact/dueAt）；缺项条目不展示。 */
+function decisionIsComplete(item) {
+  if (!item || !item.id) return false;
+  const has = (v) => String(v === undefined || v === null ? '' : v).trim().length > 0;
+  const opts = Array.isArray(item.options) ? item.options.filter((o) => String(o || '').trim()) : [];
+  return has(item.source && item.source.ref) && has(item.summary) && has(item.question)
+    && opts.length >= 2 && opts.length <= 4
+    && has(item.defaultChoice) && has(item.impact) && has(item.dueAt);
+}
+
 function decisionRowMarkup(item) {
   const st = String(item.status || 'open');
   const isOpen = st === 'open';
@@ -2852,6 +2862,12 @@ function decisionRowMarkup(item) {
     <div class="decision-head"><b>${esc(item.title || item.id)}</b><code>${esc(item.id)}</code>${badge}</div>
     <div class="decision-line">${esc(clip60(item.summary || '', 60))}</div>
     <div class="decision-line muted">要决定什么：${esc(item.question || '未写')}</div>
+    <div class="decision-line muted" data-decision-default>默认项：${esc(item.defaultChoice || '未写')}</div>
+    <div class="decision-line muted" data-decision-impact>影响：${esc(item.impact || '未写')}</div>
+    <div class="decision-line muted" data-decision-due>截止：${esc(item.dueAt || '未写')}</div>
+    ${item.redirect && item.redirect.to
+      ? `<div class="decision-line redirect" data-decision-redirect="${esc(item.redirect.to)}">已转投到 ${esc(item.redirect.to)}${item.redirect.reason ? '（' + esc(clip60(item.redirect.reason, 60)) + '）' : ''}</div>`
+      : ''}
     ${reply}
     <div class="decision-actions">${src}<span class="muted">放入于 ${esc(fmtTime(item.createdAt) || '未记')}</span></div>
     <div class="decision-error" data-decision-error hidden></div>
@@ -2869,7 +2885,9 @@ function renderDecisionFloat(data) {
   // B-20261115-162904-f6c0：回执提交中不重绘——自动刷新（fs.watch + 15 秒轮询）会在点选与提交之间
   // 把候选选中态/已填意见整块抹掉，Owner 看到的就是「点了没反应」。提交完成后再统一刷新。
   if (DECISION_FLOAT_STATE.submitting > 0) return;
-  const items = Array.isArray(data.items) ? data.items : [];
+  const allItems = Array.isArray(data.items) ? data.items : [];
+  // R-5016 AC3：缺项条目不展示（后端已拒收；旧条目按展示过滤，不改存储、不迁移）。
+  const items = allItems.filter(decisionIsComplete);
   const openCount = items.filter((item) => String(item.status || 'open') === 'open').length;
   const unreadCount = Math.max(0, Number(data.unread || 0));
   if (unreadEl) {
@@ -2899,18 +2917,15 @@ function renderDecisionBox(data) {
   const box = $('#decision-box-drawer');
   const unread = $('#decision-box-drawer-unread');
   if (!box) return;
-  const items = Array.isArray(data.items) ? data.items : [];
+  const items = (Array.isArray(data.items) ? data.items : []).filter(decisionIsComplete);
   const openItems = items.filter((item) => String(item.status || 'open') === 'open');
   const unreadCount = Number(data.unread || 0);
   box.dataset.unread = String(unreadCount);
   box.dataset.open = String(openItems.length);
   box.dataset.total = String(items.length);
-  if (unread) {
-    unread.textContent = `待决 ${unreadCount}`;
-    unread.setAttribute('data-unread', String(unreadCount));
-    unread.className = 'badge ' + (unreadCount ? 'badge-pending' : 'muted-badge');
-    unread.title = `待决 ${openItems.length} 条，其中未读 ${unreadCount} 条`;
-  }
+  // R-5016 §二（PM 2026-11-15 19:21 约束）：抽屉顶部数字 = ownerPendingCounts().decisions，
+  // 只由 refreshOwnerPendingCounts() 单源写入；这里不再自算 unread 展示，避免与 IPC 两处打架。
+  if (unread) unread.title = `待决由 ownerPendingCounts().decisions 单源提供（未读 ${unreadCount} 条另计）`;
   if (data.degraded) {
     box.dataset.state = 'degraded';
     box.innerHTML = `<div class="empty-row">${esc(data.message || '决策箱读不出来（已按空箱显示）')}</div>`;
@@ -3178,12 +3193,65 @@ function decisionRefresh(reason) {
     box.dataset.refreshSource = DECISION_REFRESH.source;
     box.dataset.refreshAt = new Date().toISOString();
   }
+  void refreshOwnerPendingCounts();
   return loadDecisionBox();
+}
+
+/** R-5016 §二/AC7（界面侧）：三入口数字只读同一 IPC（owner:pending-counts），界面不得自算；无 IPC 显示「待核验」。 */
+async function refreshOwnerPendingCounts() {
+  const anchors = {
+    decisions: document.getElementById('decision-box-pill'),
+    reviews: document.getElementById('owner-review-count'),
+    accepts: document.getElementById('accept-badge'),
+  };
+  const paint = (node, value) => {
+    if (!node) return;
+    node.setAttribute('data-count', String(value));
+    // PM 授权注记 5a（暂不修并写明理由）：胶囊数字位是圆形窄徽标，直接写「待核验」三个字会撑破；
+    // 这里保持「·」占位，并把 aria-label/title 换成「待核验」，另两处（评审/验收角标）仍显示文字。
+    const textNode = node.id === 'decision-box-pill' ? node.querySelector('#decision-box-count') : node;
+    if (textNode && textNode !== node) {
+      if (value === '待核验') {
+        textNode.textContent = '·';
+        node.setAttribute('aria-label', '决策箱：待核验（数字读取不可用）');
+        node.title = '待核验：数字读取不可用（owner:pending-counts 不可用）';
+      }
+    } else if (textNode) {
+      textNode.textContent = value === '待核验' ? '待核验' : String(value);
+    }
+    // PM 授权注记 5b：数字节点缺失时至少保住 data-count 锚点（AC7 断言只认 data-count），并补 title 说明。
+    if (!textNode) node.title = `数字节点缺失（data-count=${String(value)}）`;
+  };
+  const wb = window.workbench || {};
+  if (typeof wb.ownerPendingCounts !== 'function') {
+    for (const node of Object.values(anchors)) paint(node, '待核验');
+    return { ok: false, code: 'IPC_MISSING' };
+  }
+  let result = null;
+  try {
+    const project = activeProject();
+    result = await wb.ownerPendingCounts({ projectId: project ? project.id : '' });
+  } catch { result = null; }
+  if (!result || result.ok === false) {
+    for (const node of Object.values(anchors)) paint(node, '待核验');
+    return { ok: false, code: (result && result.code) || 'PENDING_COUNTS_FAILED' };
+  }
+  paint(anchors.decisions, Number(result.decisions || 0));
+  paint(anchors.reviews, Number(result.reviews || 0));
+  paint(anchors.accepts, Number(result.accepts || 0));
+  // R-5016 §二（PM 19:21 约束）：抽屉顶部「待决」也 = ownerPendingCounts().decisions（单源）。
+  const drawer = document.getElementById('decision-box-drawer-unread');
+  if (drawer) {
+    drawer.textContent = `待决 ${Number(result.decisions || 0)}`;
+    drawer.setAttribute('data-count', String(Number(result.decisions || 0)));
+  }
+  return result;
 }
 
 function bindDecisionAutoRefresh() {
   if (DECISION_REFRESH.bound) return;
   DECISION_REFRESH.bound = true;
+  void refreshOwnerPendingCounts();
   const boxEl = $('#decision-box');
   if (boxEl) boxEl.dataset.autoRefreshBound = '1';
   DECISION_REFRESH.watch = typeof ((window.workbench || {}).onDecisionBoxChanged) === 'function';

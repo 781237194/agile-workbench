@@ -319,6 +319,8 @@
     entry.title = '我的评审：Owner 待决定的需求与当前看板';
     entry.innerHTML = '<span class="tb-entry-ico" aria-hidden="true">审</span><span class="tb-entry-text">我的评审</span>';
     const badge = el('span', 'owner-review-badge', '0');
+    badge.id = 'owner-review-count';
+    badge.setAttribute('data-count', '待核验');
     badge.setAttribute('data-owner-review-badge', '1');
     entry.appendChild(badge);
     entry.addEventListener('click', () => openDialog(true));
@@ -334,6 +336,8 @@
     acceptEntry.title = '我的验收：打开项目面板的验收列表（#accept-list），点通过 / 打回一次落账';
     acceptEntry.innerHTML = '<span class="tb-entry-ico" aria-hidden="true">验</span><span class="tb-entry-text">我的验收</span>';
     const acceptBadge = el('span', 'owner-review-badge', '0');
+    acceptBadge.id = 'accept-badge';
+    acceptBadge.setAttribute('data-count', '待核验');
     acceptBadge.setAttribute('data-owner-accept-badge', '1');
     acceptEntry.appendChild(acceptBadge);
     acceptEntry.addEventListener('click', openAcceptanceEntry);
@@ -589,25 +593,23 @@
     // B-5f62：被代管覆盖的待评估项不再计入「N 条等你决定」，单独在顶部显示「PM 代管中 M 条」。
     const proxiedCount = rows.filter((row) => isProxied(row)).length;
     const count = Math.max(0, rows.length - proxiedCount);
-    // T-46d9：标题栏角标只显示数字（窄宽不撑爆），完整说法放 title。
+    // R-5016 AC7：这两个角标的**数字与 data-count 只允许由 IPC owner:pending-counts 写**
+    // （app.js refreshOwnerPendingCounts）。这里不再自算写入，避免「有代管+有 test_done」时两处分歧；
+    // title 仅作提示，不参与计数口径。
     if (badge) {
-      badge.textContent = String(count);
       badge.classList.toggle('is-zero', count === 0);
       badge.title = count === 0
         ? '没有等你决定的需求'
         : `${count} 条等你决定${proxiedCount ? `；另有 ${proxiedCount} 条已交 PM 代管` : ''}`;
-      badge.setAttribute('data-count', String(count));
     }
-    // T-46d9：「我的验收」角标 = 本轮 test_done 且未交 PM 代管的需求数。
+    // T-46d9：「我的验收」角标 = 本轮 test_done 且未交 PM 代管的需求数（仅 title 提示，数字由 IPC 写）。
     const all = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
     const acceptRows = all.filter((row) => String((row && row.status) || '') === 'test_done' && !isProxied(row));
     if (acceptBadge) {
-      acceptBadge.textContent = String(acceptRows.length);
       acceptBadge.classList.toggle('is-zero', acceptRows.length === 0);
       acceptBadge.title = acceptRows.length
         ? `待你验收 ${acceptRows.length} 条：${acceptRows.slice(0, 3).map((row) => String(row.id || '')).join('、')}${acceptRows.length > 3 ? ' 等' : ''}`
         : '当前没有待验收需求';
-      acceptBadge.setAttribute('data-count', String(acceptRows.length));
     }
     if (count) maybeAutoOpen(count);
   }
