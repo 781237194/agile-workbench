@@ -48,6 +48,7 @@ process.env.TEAM_SELFTEST = '1';
     'status: 通过 3/4，1 项未通过',
     '有 1 项 FAIL',
     '失败 2 项，但另 3 项通过',
+    '失败 2 项未修复',
   ];
   for (const line of mustFail) check(`判负：${line}`, f(line) === true, line);
 
@@ -62,6 +63,9 @@ process.env.TEAM_SELFTEST = '1';
     '未发现 FAIL，全部合格',
     '除非失败，否则通过',
     '通过（26/27）',
+    '失败 2 项已修复',
+    '失败 2 项已全部修复',
+    '失败 2 项已处理',
   ];
   for (const line of mustPass) check(`放过：${line}`, f(line) === false, line);
 

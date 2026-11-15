@@ -310,6 +310,9 @@ const FAIL_ZERO2_RE = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\
 // 但散文里的「失败零副作用」「失败原因见 §二」不判（没有「数字+量词」），`失败 0 项` 已被上面的零式剔除。
 // 之所以不把「失败」加进 FAIL_STRONG_RE：那会让所有提到「失败」二字的散文全被判负（L348-349 注释的原始理由仍成立）。
 const FAIL_COUNT_RE = /(?:失败|不通过|未通过)\s*[1-9]\d*\s*(?:项|个|条)/;
+// D-06ec 测试注记（tester 06:52）：`失败 2 项已修复` 这类「已处置」不该判负——先剔掉再判 FAIL_COUNT_RE；
+// `失败 2 项未修复` 不会被这里剔掉（前缀只认 已/均已/全部/已全部），仍判负。
+const FAIL_COUNT_RESOLVED_RE = /(?:失败|不通过|未通过)\s*[1-9]\d*\s*(?:项|个|条)\s*(?:已全部|均已全部|已|均已|全部)?\s*(?:修复|解决|处理|关闭|恢复)/g;
 const NEGATED_FAIL_TEST = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/i;
 const ZERO_FAIL_TEST = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/i;
 const FAIL_ZERO_TEST = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/i;
@@ -322,6 +325,7 @@ export function failVerdictText(text) {
   let t = String(text || '');
   t = t.replace(NEGATED_FAIL_RE, '（否定靶词）').replace(ZERO_FAIL_RE, '（零靶词）');
   t = t.replace(FAIL_ZERO_RE, '（零靶词）').replace(FAIL_ZERO2_RE, '（零靶词）');
+  t = t.replace(FAIL_COUNT_RESOLVED_RE, '（已处置靶词）');
   return FAIL_STRONG_RE_M.test(t) || FAIL_COUNT_RE.test(t);
 }
 export function readTestReportVerdict(projectName, task) {
@@ -359,6 +363,7 @@ export function readTestReportVerdict(projectName, task) {
     let t = String(text || '');
     t = t.replace(NEGATED_FAIL_RE, '（否定靶词）').replace(ZERO_FAIL_RE, '（零靶词）');
     t = t.replace(FAIL_ZERO_RE, '（零靶词）').replace(FAIL_ZERO2_RE, '（零靶词）');
+    t = t.replace(FAIL_COUNT_RESOLVED_RE, '（已处置靶词）');
     return FAIL_STRONG_RE.test(t) || FAIL_COUNT_RE.test(t);
   };
   // M-20261115-161343-6104c7（第三处假阴性）：一份报告可能同时写多条需求的结论，
