@@ -434,33 +434,51 @@ export function validateSupplementLinks(projectPath, requirementId) {
       if (!exists(abs)) {
         return {
           ok: false, exists: true, supplements: [],
-          problems: [{ code: 'SUPPLEMENT_MISSING', detail: `正文指向的增补卷不存在：${pointer.rel}` }],
+          problems: [{ code: 'SUPPLEMENT_MISSING', level: 'block', detail: `正文指向的增补卷不存在：${pointer.rel}` }],
         };
       }
     }
     return { ok: true, exists: true, problems: [], supplements: [] };
   }
   const problems = [];
-  if (!pointer) problems.push({ code: 'DOC_SPLIT_LINK_MISSING', detail: '正文末尾缺增补卷指针行' });
-  if (!head) problems.push({ code: 'DOC_SPLIT_LINK_MISSING', detail: '正文开头缺增补卷清单（读者第一屏看不到正文不完整）' });
   if (pointer && !exists(path.join(projectPath, pointer.rel))) {
-    problems.push({ code: 'SUPPLEMENT_MISSING', detail: `正文指向的增补卷不存在：${pointer.rel}` });
+    problems.push({ code: 'SUPPLEMENT_MISSING', level: 'block', detail: `正文指向的增补卷不存在：${pointer.rel}` });
   }
+  // 卷分两类：本工具拆的（卷内有 doc-split 元信息，必须「头部清单 + 末尾指针行」）与历史手工卷（没元信息）。
+  // 历史手工卷不强制指针行——否则 f9b1 落地前建档的 11 份手工卷会把老需求评审全挡死（2026-11-15 5550 实测）。
   for (const s of supplements) {
     const abs = path.join(projectPath, s.rel);
-    if (!exists(abs)) { problems.push({ code: 'SUPPLEMENT_MISSING', detail: `卷不存在：${s.rel}` }); continue; }
+    if (!exists(abs)) { problems.push({ code: 'SUPPLEMENT_MISSING', level: 'block', detail: `卷不存在：${s.rel}` }); continue; }
+    const meta = parseSplitMeta(fs.readFileSync(abs, 'utf8'));
+    const managed = Boolean(meta && meta.splitId);
     const sha12 = s.sha256.slice(0, 12);
     const lines = [pointer && pointer.line, head && head.line].filter(Boolean);
     const line = lines.find((l) => l.includes(s.name));
-    if (!line) { problems.push({ code: 'DOC_SPLIT_LINK_MISSING', detail: `正文未指向卷 ${s.name}` }); continue; }
+    if (!line) {
+      if (managed) {
+        problems.push({ code: 'DOC_SPLIT_LINK_MISSING', level: 'block', detail: `正文未指向本工具拆出的卷 ${s.name}（缺头部清单或末尾指针行）` });
+      } else {
+        problems.push({
+          code: 'DOC_SPLIT_LINK_MISSING', level: 'warn', legacy: true,
+          detail: `历史手工增补卷 ${s.name} 在正文里没有指针行（不影响评审；建议补一行「> 增补卷：\`${s.rel}\`」）`,
+        });
+      }
+      continue;
+    }
     if (!line.includes(sha12) || !line.includes(`${s.bytes}B`)) {
-      problems.push({ code: 'SUPPLEMENT_MISMATCH', detail: `${s.name} 的字节/sha 与磁盘不一致（应为 ${s.bytes}B/${sha12}）` });
+      problems.push({
+        code: 'SUPPLEMENT_MISMATCH', level: managed ? 'block' : 'warn',
+        detail: `${s.name} 的字节/sha 与磁盘不一致（应为 ${s.bytes}B/${sha12}）`,
+      });
     }
   }
+  const blocking = problems.filter((p) => p.level === 'block');
   return {
-    ok: problems.length === 0,
+    ok: blocking.length === 0,
     exists: true,
     problems,
+    blocking,
+    warnings: problems.filter((p) => p.level === 'warn'),
     supplements: supplements.map((s) => ({ name: s.name, rel: s.rel, bytes: s.bytes, sha256: s.sha256 })),
   };
 }

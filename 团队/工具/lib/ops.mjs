@@ -4175,6 +4175,7 @@ function cmdReqReview(args) {
   if (!['approve', 'reject'].includes(verdict)) fail('BAD_VERDICT', '--verdict 必须是 approve / reject');
   // R-f9b1 F-11：三入口之一——review 在 G1 前量尺寸并按需外置；随后校验卷链接可解析（AC13）。
   let reviewDocGate = null;
+  let linkWarnings = [];
   if (!isTech) {
     reviewDocGate = docSizeGate(project, task.id, { entry: 'review', role: b.role, noSplit: Boolean(args['no-split']) });
     const afterDoc = reviewDocGate.after;
@@ -4184,9 +4185,12 @@ function cmdReqReview(args) {
       }, 1);
     }
     const linkCheck = validateSupplementLinks(project.path, task.id);
-    const missingSup = linkCheck.problems.find((p) => p.code === 'SUPPLEMENT_MISSING');
+    linkWarnings = (linkCheck.warnings || []).slice();
+    // 只拦「本工具拆出的卷」断链；历史手工卷缺指针行只作 warning（不挡评审，2026-11-15 5550 实测口径）。
+    const blocking = (linkCheck.blocking || linkCheck.problems.filter((p) => p.level !== 'warn'));
+    const missingSup = blocking.find((p) => p.code === 'SUPPLEMENT_MISSING');
     if (missingSup) fail('SUPPLEMENT_MISSING', `需求 ${task.id} 增补卷缺失：${missingSup.detail}`, { problems: linkCheck.problems, wrote: false }, 1);
-    const broken = linkCheck.problems.find((p) => p.code === 'DOC_SPLIT_LINK_MISSING' || p.code === 'SUPPLEMENT_MISMATCH');
+    const broken = blocking.find((p) => p.code === 'DOC_SPLIT_LINK_MISSING' || p.code === 'SUPPLEMENT_MISMATCH');
     if (broken) fail(broken.code, `需求 ${task.id} 卷链接不可解析：${broken.detail}`, { problems: linkCheck.problems, wrote: false }, 1);
   }
   // G1：需求未定稿（验收标准空/无正文）不能评审；G0：阶段-角色表校验。
@@ -4233,7 +4237,7 @@ function cmdReqReview(args) {
     comments = readText(path.resolve(String(args['comments-file'])), '').trim();
     commentsSource = '--comments-file';
   }
-  const warnings = [];
+  const warnings = [...linkWarnings.map((w) => ({ code: w.code, message: w.detail, legacy: Boolean(w.legacy) }))];
   if (commentsSource === '--comments') {
     const raw = String(args.comments || args.comment || '');
     const curly = (raw.match(/[“”]/g) || []).length;

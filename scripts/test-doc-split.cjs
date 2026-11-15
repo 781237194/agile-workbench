@@ -328,6 +328,21 @@ ok('AC15 业务失败退出码 1', badRev.code === 1, String(badRev.code));
 ok('AC15 业务失败 JSON 带 code', Boolean(badRev.json && badRev.json.docSplit && badRev.json.docSplit.code), JSON.stringify(badRev.json && badRev.json.docSplit && badRev.json.docSplit.code));
 ok('AC15 --json 时 stdout 只有 JSON', Boolean(badRev.json), badRev.stdout.slice(0, 80));
 
+// AC13 补丁（2026-11-15 5550 实测口径）：手工卷（无 doc-split 元信息）+ 正文无指针行 → 不挡评审，只给 warning。
+const legacyCreated = runJson(['req', 'create', '--boot', pmToken, '--title', '手工卷夹具', '--priority', 'P1']);
+const legacyId = legacyCreated.json && legacyCreated.json.requirement ? legacyCreated.json.requirement.id : '';
+if (legacyId) {
+  const legacyKey = legacyId.slice(-4).toLowerCase();
+  writeDoc(`${legacyId}-手工卷.md`, makeDoc(legacyId, 9000));
+  fs.writeFileSync(path.join(REQ_DIR, `增补卷-${legacyKey}-1.md`), '# 手工卷（无元信息）\n\n## 一、补充说明\n\n这份卷是人工写的，没有 doc-split 元信息。\n', 'utf8');
+  const legacyToken = bootToken('product');
+  const legacyReview = runJson(['req', 'review', '--boot', legacyToken, '--id', legacyId, '--verdict', 'approve',
+    '--comments', '空值：无正文先报；异常：手工卷缺指针只提示；权限：PM/分析师；并发：锁；降级：只提示；模式：full/fast 同规则。']);
+  ok('AC13 手工卷缺指针不挡评审（只 warning）', legacyReview.code === 0 && legacyReview.json && legacyReview.json.ok === true, (legacyReview.stderr || legacyReview.stdout).slice(0, 200));
+  const warnList = (legacyReview.json && legacyReview.json.warnings) || [];
+  ok('AC13 手工卷给出 DOC_SPLIT_LINK_MISSING warning（legacy=true）', warnList.some((w) => w && w.code === 'DOC_SPLIT_LINK_MISSING' && w.legacy === true), JSON.stringify(warnList.map((w) => w.code)));
+}
+
 // 收尾：报告
 const report = {
   at: new Date().toISOString(), rule: 'R-f9b1/v1', project: PROJECT,
