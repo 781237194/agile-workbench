@@ -9901,6 +9901,23 @@ function measureLayoutInPage() {
   const titlebarRect = titlebar ? rectOf(titlebar) : null;
   const floatUnreadNode = document.getElementById('decision-box-count');
   const floatDecisionOpen = Boolean(floatPanel && floatPanel.querySelector('#decision-box-panel') && !floatPanel.querySelector('#decision-box-panel').hidden);
+  // T-067e（增补卷-b28f-3 §三/§四）：底部状态栏数字区锚点 = .sidebar-foot 内的 #metrics；
+  // 收起态按钮 = #side-float-toggle；展开态面板 = #side-float。相交=交集宽>0 且 高>0（贴边不算）。
+  const metricAnchorNode = document.getElementById('metrics');
+  const sidebarFootNode = document.querySelector('.sidebar-foot');
+  const metricAnchorRect = metricAnchorNode ? rectOf(metricAnchorNode) : null;
+  // 注意：`floatToggleNode` 在上面的「收起态」块里已声明（T-e2a3），这里直接复用，不重复声明。
+  const floatToggleRect = floatToggleNode ? rectOf(floatToggleNode) : null;
+  const floatCountNode = floatToggleNode ? floatToggleNode.querySelector('[data-float-count]') : null;
+  const floatCountSource = floatToggleNode ? String(floatToggleNode.getAttribute('data-float-count-source') || '') : '';
+  const floatCountValue = Number(floatToggleNode ? (floatToggleNode.getAttribute('data-float-count-value') || '') : NaN);
+  const decisionBoxNode = document.getElementById('decision-box');
+  const floatBoxUnread = Number(decisionBoxNode && decisionBoxNode.getAttribute ? decisionBoxNode.getAttribute('data-unread') : NaN);
+  const rectsOverlap = (a, b) => Boolean(a && b)
+    && (Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) > 0
+    && (Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y)) > 0;
+  const unreadRect = floatUnreadNode ? floatUnreadNode.getBoundingClientRect() : null;
+  const unreadVisibleByRect = Boolean(unreadRect && unreadRect.width > 0 && unreadRect.height > 0);
   const checks = {
     // Owner 2026-11-14 05:38 定夺：入口就放标题栏（46d9 方向），不再要求「在侧栏底部 / 不在标题栏」。
     // 现在只要求：入口在标题栏内、可见、可点、在视口内，且标题栏无重叠。
@@ -9938,6 +9955,28 @@ function measureLayoutInPage() {
     floatToggleVisible,
     floatCollapsedByDefault: floatExpandedBefore === '0' && floatCollapsedRowsHidden,
     floatExpandedAfterToggle: floatExpandedNow === '1' && floatAnchors.every((sel) => floatRowVisible(document.querySelector(sel))),
+    // T-067e（增补卷-b28f-3 §四，名字即契约）：
+    floatToggleInViewport: Boolean(floatToggleRect && floatToggleRect.w > 0 && floatToggleRect.h > 0
+      && floatToggleRect.x >= 0 && floatToggleRect.y >= 0
+      && floatToggleRect.x + floatToggleRect.w <= root.clientWidth && floatToggleRect.y + floatToggleRect.h <= root.clientHeight),
+    // 收起态与展开态都要量（展开态按钮位置会随行数上移）。
+    floatToggleNotOverMetrics: Boolean(metricAnchorRect && (floatToggleRectBefore || floatToggleRect))
+      && !rectsOverlap(floatToggleRectBefore || floatToggleRect, metricAnchorRect)
+      && !rectsOverlap(floatToggleRect, metricAnchorRect),
+    floatPanelNotOverMetrics: Boolean(floatPanelRect && metricAnchorRect) && !rectsOverlap(floatPanelRect, metricAnchorRect),
+    floatMetricsAnchorPresent: Boolean(metricAnchorNode && sidebarFootNode && metricAnchorRect && metricAnchorRect.w > 0 && metricAnchorRect.h > 0),
+    // 数字显示口径（增补卷-b28f-3 §二）：source=none → 不显示数字（hidden）；有来源时 hidden===(n<=0)，
+    // n>0 才露出数字；数字必须有限非负。§四那句「source!=='none' → hidden===false」与 §二「n<=0→hidden」冲突，
+    // 以 §二 的显示口径为准（0 条待回执不该在按钮上挂个 0）。
+    floatToggleCountSourceValid: ['decision-stats', 'decision-box', 'none'].includes(floatCountSource)
+      && (floatCountSource === 'none'
+        ? Boolean(floatCountNode && floatCountNode.hidden === true)
+        : Boolean(floatCountNode && Number.isFinite(floatCountValue) && floatCountValue >= 0
+          && floatCountNode.hidden === (floatCountValue <= 0))),
+    floatToggleCountSameAsBox: floatCountSource !== 'decision-box'
+      || (Number.isFinite(floatCountValue) && Number.isFinite(floatBoxUnread) && floatCountValue === floatBoxUnread),
+    // 旧写法用 offsetParent 判 visible：position:fixed 元素该值恒 null → 永远 false（增补卷-b28f-2 同款坑）。改用 rect。
+    floatPanelDecisionUnreadVisibleByRect: unreadVisibleByRect,
   };
   // 还原回收起态（自检不改变用户看到的状态；展开状态本来就不持久化）。
   if (floatToggleNode && floatExpandedBefore !== '1') {
@@ -9972,9 +10011,17 @@ function measureLayoutInPage() {
       decisionOpen: floatDecisionOpen,
       // AC4：未读数必须在收起态也可见（这里记录胶囊上的数字与可见性）。
       decisionUnreadText: floatUnreadNode ? String(floatUnreadNode.textContent || '').trim() : '',
-      decisionUnreadVisible: Boolean(floatUnreadNode && floatUnreadNode.offsetParent !== null),
+      decisionUnreadVisible: unreadVisibleByRect,
       // T-e2a3：容器子元素几何明细（gap6 变红时能直接看出是哪两个子元素在挤，不用再猜）。
       kids: floatKidRects,
+      // T-067e：收起态按钮 / 底部数字区锚点 / 数字来源三件的实测值（断言红了能直接看出为什么）。
+      toggleRect: floatToggleRect,
+      metricsRect: metricAnchorRect,
+      toggleCount: {
+        source: floatCountSource,
+        value: Number.isFinite(floatCountValue) ? floatCountValue : null,
+        hidden: Boolean(floatCountNode && floatCountNode.hidden === true),
+      },
     },
   };
 }
@@ -10139,17 +10186,27 @@ async function runLayoutCheck() {
   // R-b28f AC6（产品硬条件 3：zoom 90% / 150% 也要过）：在缩放态下重跑同一套页面测量，
   // 只断言浮动面板那 7 条（标题栏/入口的既有断言仍由上面三档覆盖），每档再拍一张截图。
   // 组合按产品口径「三档宽度 × 两档 zoom 不必全排列」：1280@150% 与 2560@90% 各一次。
+  // T-067e（增补卷-b28f-3 §四）：断言项名字固定资产 —— 7 项在「三档宽度 × 三 zoom」共 9 组里全绿，每组 1 张截图。
   let zoomLayoutProbe = { ok: false, reason: '未执行', results: [] };
   {
     const floatCheckNames = [
-      'floatPanelInViewport', 'floatPanelRightAligned', 'floatPanelRowsNoOverlap',
-      'floatPanelUniformHeight', 'floatPanelGap6', 'proxyRowAboveDecisionBox', 'floatPanelNotOverTitlebar',
+      'floatToggleInViewport', 'floatToggleNotOverMetrics', 'floatPanelNotOverMetrics',
+      'floatMetricsAnchorPresent', 'floatToggleCountSourceValid', 'floatToggleCountSameAsBox',
+      'floatPanelDecisionUnreadVisibleByRect',
     ];
     let zoomAttached = false;
-    const combos = [
-      { name: '1280@150', width: 1280, height: 800, zoom: 1.5 },
-      { name: '2560@90', width: 2560, height: 1400, zoom: 0.9 },
+    const widths = [
+      { name: '1280', width: 1280, height: 800 },
+      { name: '1680', width: 1680, height: 1000 },
+      { name: '2560', width: 2560, height: 1400 },
     ];
+    const zoomLevels = [1, 0.9, 1.5];
+    const combos = [];
+    for (const size of widths) {
+      for (const zoom of zoomLevels) {
+        combos.push({ name: `${size.name}@${Math.round(zoom * 100)}`, width: size.width, height: size.height, zoom });
+      }
+    }
     try {
       try { win.webContents.debugger.attach('1.3'); zoomAttached = true; } catch { zoomAttached = false; }
       const zoomBefore = readZoomPref();
