@@ -65,7 +65,11 @@ import {
 import { readRequirementDocVersion, versionForRecord, versionGate } from './req-version.mjs';
 // R-75ec：Owner 决定落账即冻结/解冻（任务层门禁的效果层）。
 import { applyOwnerDecisionEffects } from './task-freeze.mjs';
-// R-f9b1：需求正文上限治理（三入口检查 / 自动拆增补卷 / 卷可读性）。
+// R-c6dc：需求正文唯一写入口 / 并发检测 / 登记链 / 审计（工具侧单源）
+import {
+  DOC_WRITER_DEFAULT, docRegistryPath, docLockPath, readDocRegistry, appendDocRegistry,
+  writeRequirementDoc, unlockDocWrite, auditRequirementDocs, docLockStaleMs, verifyDocRegistryChain,
+} from './doc-writer.mjs';
 import {
   DOC_SPLIT_RULE, DOC_SPLIT_LIMIT, DOC_SPLIT_TARGET, DOC_SPLIT_TRIGGER,
   checkDocSize, docSizeReport, scanRequirementDocs, splitRequirementDoc, revertRequirementSplit,
@@ -4227,6 +4231,12 @@ export function cmdReq(args) {
   // B-a17d：作废登记的消费口与双向同步断言（面板/测试都从这里取口径）。
   if (sub === 'voided') return cmdReqVoided(args);
   if (sub === 'sync') return cmdReqSync(args);
+  // R-c6dc：唯一写入口 / 审计 / 冻结解冻 / 清锁（共享层：写需求正文只走这条）
+  if (sub === 'write') return cmdReqWrite(args);
+  if (sub === 'audit') return cmdReqAudit(args);
+  if (sub === 'unlock-write') return cmdReqUnlockWrite(args);
+  if (sub === 'freeze' || sub === 'unfreeze') return cmdReqFreeze(args, sub);
+  if (sub === 'writer') return cmdReqWriter(args);
   // R-9a8e：stale 需求清单（重评成本与信息不对称的出口）。
   if (sub === 'stale') return cmdReqStale(args);
   const b = bootFor(args, 'req');
@@ -4408,6 +4418,162 @@ function cmdReqCopy(args) {
   }
   out(args, `内容未变（SAME_CONTENT），未写盘：${requirementId}`,
     { ok: true, changed: false, reason: decision.reason, requirementId, copy: decision.copy, file: read.file });
+}
+
+// ========== R-c6dc：需求正文唯一写入口 / 审计 / 冻结 / 清锁 ==========
+
+/**
+ * req write：唯一写入口（R-c6dc F-1/F-2/F-3）。
+ * 用法：team.mjs req write --boot T --requirement R-... (--file <路径>|--stdin) --expected-sha <sha12..64>
+ *       [--reason "..."] [--json]
+ * 写者默认 analyst；actor=system 豁免 writer 但不豁免冻结/并发；失败一律零副作用。
+ */
+function cmdReqWrite(args) {
+  const b = bootFor(args, 'req write');
+  if (!args.requirement) fail('REQUIREMENT_REQUIRED', '需要 --requirement R-...', {}, 1);
+  if (!args['expected-sha']) fail('EXPECTED_SHA_REQUIRED', '必须带 --expected-sha（先读正文拿 sha 再写）', {}, 1);
+  let content = '';
+  if (args.file) {
+    const file = path.resolve(String(args.file));
+    if (!exists(file)) fail('FILE_NOT_FOUND', `内容文件不存在：${file}`, { file }, 2);
+    content = readText(file, '');
+  } else if (args.stdin) {
+    content = fs.readFileSync(0, 'utf8');
+  } else {
+    fail('BAD_ARGS', '需要 --file <路径> 或 --stdin 提供新正文', {}, 1);
+  }
+  const project = loadProject(b.project);
+  const result = writeRequirementDoc({
+    projectName: b.project,
+    projectPath: project.path,
+    requirementId: String(args.requirement),
+    expectedSha: String(args['expected-sha']),
+    content,
+    role: b.role,
+    actor: String(args.actor || b.role),
+    reason: String(args.reason || ''),
+    transactionId: String(args['transaction-id'] || ''),
+  });
+  appendEvent({
+    role: b.role, sessionId: b.sessionId, action: 'req_write', project: b.project, target: result.path,
+    note: `${result.baseline ? 'baseline+' : ''}write ${String(result.prevSha).slice(0, 12)}→${String(result.sha256).slice(0, 12)} actor=${String(args.actor || b.role)}`,
+    data: { requirementId: result.requirementId, path: result.path, prevSha: result.prevSha, sha256: result.sha256, baseline: result.baseline },
+  });
+  out(args, `已写入 ${result.path}：${String(result.prevSha).slice(0, 12)} → ${String(result.sha256).slice(0, 12)}（${result.bytes}B${result.baseline ? '，已补 baseline 登记' : ''}）`,
+    { ok: true, ...result, registry: docRegistryPath(b.project) });
+}
+
+/**
+ * req audit：只读审计（R-c6dc F-6 / 增补卷 §二）。
+ * --json 时 stdout 恰好一行 JSON；退出码 0=全 ok / 1=有发现 / 2=参数错或登记损坏。
+ */
+function cmdReqAudit(args) {
+  const projectName = String(args.project || '').trim();
+  if (!projectName) fail('PROJECT_REQUIRED', '需要 --project', {}, 2);
+  let result;
+  try {
+    result = auditRequirementDocs({ projectName, requirementId: String(args.requirement || ''), strict: Boolean(args.strict) });
+  } catch (e) {
+    if (e && e.exitCode) throw e;
+    fail('AUDIT_FAILED', `审计失败：${String((e && e.message) || e)}`, {}, 2);
+  }
+  if (args.json) {
+    // 增补卷 §二：--json 时 stdout **恰好一行 JSON**（不得夹日志），故这里不用 pretty jsonOut。
+    process.stdout.write(JSON.stringify(result) + '\n');
+  } else {
+    const lines = [`需求正文审计（${projectName}）：${result.summary.total} 条 ｜ ${String(result.codes || []).join(' ') || '无问题'}`];
+    for (const row of result.requirements) {
+      lines.push(`- ${row.requirementId}  状态 ${row.state}  sha ${String(row.diskSha || '(缺)').slice(0, 12)}  ${(row.codes || []).join(' ') || 'ok'}`);
+      for (const sup of row.supplements || []) {
+        lines.push(`    卷 ${sup.path}  ${sup.state}  sha ${String(sup.diskSha).slice(0, 12)}  ${(sup.codes || []).join(' ') || 'ok'}`);
+      }
+    }
+    if (result.chain && !result.chain.ok) lines.push(`登记链断点：${result.chain.breaks.length} 处`);
+    textOut(lines.join('\n'));
+  }
+  if (result.exitCode) process.exitCode = result.exitCode;
+}
+
+/** req unlock-write：PM 清写锁（by=pm + reason 非空；锁不存在 → LOCK_NOT_FOUND 幂等）。 */
+function cmdReqUnlockWrite(args) {
+  const b = bootFor(args, 'req unlock-write');
+  if (!['pm', 'owner'].includes(String(b.role))) fail('PERMISSION_DENIED', '只有 PM 能清写锁', { role: b.role }, 1);
+  const project = loadProject(b.project);
+  const result = unlockDocWrite({
+    projectName: b.project, projectPath: project.path,
+    requirementId: String(args.requirement || ''),
+    by: 'pm', reason: String(args.reason || ''),
+  });
+  appendEvent({
+    role: b.role, sessionId: b.sessionId, action: 'req_unlock_write', project: b.project, target: String(args.requirement || ''),
+    note: `lock pid=${result.lock && result.lock.pid} reason=${String(args.reason || '').slice(0, 80)}`,
+    data: { requirementId: String(args.requirement || ''), lock: result.lock, reason: String(args.reason || '') },
+  });
+  out(args, `已清写锁：${String(args.requirement || '')}（pid=${result.lock && result.lock.pid}；已写 unlock_lock 登记）`, { ok: true, ...result });
+}
+
+/** req freeze/unfreeze：冻结/解冻只认登记（PM 专属 + reason 非空；legacy 只读不自动清）。 */
+function cmdReqFreeze(args, action) {
+  const b = bootFor(args, `req ${action}`);
+  if (String(b.role) !== 'pm') fail('PERMISSION_DENIED', `只有 PM 能${action === 'freeze' ? '冻结' : '解冻'}需求正文`, { role: b.role }, 1);
+  const reason = String(args.reason || '').trim();
+  if (!reason) fail('REASON_REQUIRED', `${action === 'freeze' ? '冻结' : '解冻'}必须带 --reason`, {}, 1);
+  const project = loadProject(b.project);
+  const requirementId = String(args.requirement || '');
+  if (!requirementId) fail('REQUIREMENT_REQUIRED', '需要 --requirement', {}, 1);
+  // 定位正文（与写入口同口径）
+  const reqDir = path.join(project.path, '需求');
+  const names = fs.existsSync(reqDir) ? fs.readdirSync(reqDir).filter((n) => /^R-.*\.md$/i.test(n)) : [];
+  const hit = names.find((n) => n.toLowerCase().startsWith(requirementId.toLowerCase() + '-'))
+    || names.find((n) => n.toLowerCase().startsWith(requirementId.toLowerCase()));
+  if (!hit) fail('DOC_MISSING', `找不到需求正文：${requirementId}`, { requirementId }, 1);
+  const rel = '需求/' + hit;
+  const reg = readDocRegistry(b.project);
+  if (reg.broken) fail('REGISTRY_BROKEN', `文档登记损坏（${reg.errors.length} 坏行），先修复登记`, { file: reg.file }, 2);
+  const row = {
+    at: nowIso(), requirementId, path: rel, action, sha256: null, bytes: null,
+    writer: '', actor: 'pm', prevSha: null, reason, transactionId: null,
+  };
+  const written = appendDocRegistry(b.project, row);
+  // 冻结同时设 Windows 只读是附加防线（解冻时只清「有 unfreeze 登记」的残留属性）
+  let readonlyTouched = null;
+  try {
+    if (action === 'freeze') { fs.chmodSync(path.join(project.path, rel), 0o444); readonlyTouched = 'readonly'; }
+    else { fs.chmodSync(path.join(project.path, rel), 0o644); readonlyTouched = 'writable'; }
+  } catch { readonlyTouched = 'unchanged'; }
+  appendEvent({
+    role: b.role, sessionId: b.sessionId, action: `req_doc_${action}`, project: b.project, target: rel,
+    note: reason.slice(0, 120), data: { requirementId, path: rel, reason },
+  });
+  out(args, `已${action === 'freeze' ? '冻结' : '解冻'} ${rel}（登记 ${written.file}，${readonlyTouched}）`, { ok: true, requirementId, path: rel, action, file: written.file, reason, readonlyTouched });
+}
+
+/** req writer：查看/改派写者（默认 analyst；PM 改派留审计）。 */
+function cmdReqWriter(args) {
+  const b = bootFor(args, 'req writer');
+  const project = loadProject(b.project);
+  const reg = readDocRegistry(b.project);
+  if (reg.broken) fail('REGISTRY_BROKEN', '文档登记损坏，先修复', { file: reg.file }, 2);
+  const rows = (reg.rows || []).filter((r) => ['writer', 'reassign'].includes(String(r.action || '')));
+  const current = rows.length ? String(rows[rows.length - 1].writer || DOC_WRITER_DEFAULT) : DOC_WRITER_DEFAULT;
+  if (!args.reassign) {
+    out(args, `当前写者：${current}（登记 ${rows.length} 条）`, { ok: true, project: b.project, writer: current, file: reg.file, rows });
+    return;
+  }
+  if (String(b.role) !== 'pm') fail('PERMISSION_DENIED', '只有 PM 能改派写者', { role: b.role }, 1);
+  const to = String(args.to || '').trim().toLowerCase();
+  const reason = String(args.reason || '').trim();
+  if (!ROLES[to]) fail('BAD_ROLE', `--to 只能是角色 id：${Object.keys(ROLES).join('/')}`, { to }, 1);
+  if (!reason) fail('REASON_REQUIRED', '改派写者必须带 --reason', {}, 1);
+  const written = appendDocRegistry(b.project, {
+    at: nowIso(), requirementId: String(args.requirement || ''), path: '需求/__writer__', action: 'reassign',
+    sha256: null, bytes: null, writer: to, actor: 'pm', prevSha: null, reason, transactionId: null,
+  });
+  appendEvent({
+    role: b.role, sessionId: b.sessionId, action: 'req_doc_writer_reassign', project: b.project, target: to,
+    note: `${current} → ${to}：${reason.slice(0, 80)}`, data: { from: current, to, reason },
+  });
+  out(args, `写者已改派：${current} → ${to}（登记 ${written.file}）`, { ok: true, from: current, to, file: written.file, reason, project: project.name });
 }
 
 function reviewRecordDir(projectName, isTech) {
