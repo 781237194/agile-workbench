@@ -155,7 +155,7 @@ function seedSandbox() {
       item(ITEM_OK, { title: '夹具：七要素完整（应展示）' }),
       item(ITEM_REDIRECT, { title: '夹具：转投条目（应展示目标）', redirect: { to: 'review_dialog', anchor: '#owner-review', reason: '评审类动作用评审弹窗' } }),
       item('D-20261115-999905-uibox', { title: '夹具：七要素完整二（应展示）' }),
-      item(ITEM_INCOMPLETE, { title: '夹具：缺 impact/dueAt（不应展示）', impact: '', dueAt: '', status: 'answered' }),
+      item(ITEM_INCOMPLETE, { title: '夹具：缺 impact/dueAt（不应展示）', impact: '', dueAt: '' }),
     ],
   }, null, 2) + '\n', 'utf8');
   // 工作流：2 条 ownerReview pending（reviews=2）+ 1 条 test_done（accepts=1）
@@ -388,16 +388,16 @@ async function main() {
         await sleep(500);
       }
       const ipc = await countsViaIpc(cdp, { projectId: seed.store.activeProjectId });
-      check('① owner:pending-counts IPC 返回 3/2/1', Boolean(ipc && ipc.ok !== false && Number(ipc.decisions) === 3 && Number(ipc.reviews) === 2 && Number(ipc.accepts) === 1), ipc);
+      check('① owner:pending-counts IPC 返回 4/2/1', Boolean(ipc && ipc.ok !== false && Number(ipc.decisions) === 4 && Number(ipc.reviews) === 2 && Number(ipc.accepts) === 1), ipc);
       // 触发一次刷新后读锚点
       await cdp.evaluate('(function(){ if (typeof decisionRefresh === "function") decisionRefresh("test"); return true; })()');
       await sleep(1500);
       anchors = await anchorsInfo(cdp);
-      check('② 决策箱胶囊 data-count = IPC decisions(3)', Boolean(anchors && anchors.decisions && anchors.decisions.count === '3'), anchors && anchors.decisions);
+      check('② 决策箱胶囊 data-count = IPC decisions(4)', Boolean(anchors && anchors.decisions && anchors.decisions.count === '4'), anchors && anchors.decisions);
       check('② 评审待评估 #owner-review-count = IPC reviews(2)', Boolean(anchors && anchors.reviews && anchors.reviews.count === '2'), anchors && anchors.reviews);
       check('② 验收角标 #accept-badge = IPC accepts(1)', Boolean(anchors && anchors.accepts && anchors.accepts.count === '1'), anchors && anchors.accepts);
       const drawer = await cdp.evaluate('(function(){ const n = document.getElementById("decision-box-drawer-unread"); return n ? { text: n.textContent.trim(), count: n.getAttribute("data-count") } : null; })()');
-      check('② 抽屉顶部「待决」= ownerPendingCounts().decisions(3)', Boolean(drawer && drawer.count === '3' && /待决 3/.test(drawer.text || '')), drawer);
+      check('② 抽屉顶部「待决」= ownerPendingCounts().decisions(4)', Boolean(drawer && drawer.count === '4' && /待决 4/.test(drawer.text || '')), drawer);
 
       const opened = await openDecisionFloat(cdp);
       check('决策箱浮动组可展开（胶囊可点）', Boolean(opened && opened.state && opened.state.panelHidden === false), opened);
@@ -411,7 +411,16 @@ async function main() {
       const rowCount = await cdp.evaluate('document.querySelectorAll("#decision-box-list .decision-row").length');
       check('⑤ 列表只渲染 3 条完整条目', Number(rowCount) === 3, rowCount);
       const hiddenNote = await cdp.evaluate('(function(){ const n = document.querySelector("#decision-box-list [data-decision-hidden]"); return n ? { total: n.getAttribute("data-decision-total"), shown: n.getAttribute("data-decision-shown"), count: n.getAttribute("data-decision-hidden"), text: n.textContent.trim() } : null; })()');
-      check('⑤ 缺项不静默：提示行写全「共 4/显示 3/隐藏 1」且 N=M+隐藏', Boolean(hiddenNote && hiddenNote.total === '4' && hiddenNote.shown === '3' && hiddenNote.count === '1' && /共 4 条，显示 3 条/.test(hiddenNote.text || '')), hiddenNote);
+      check('⑤ 缺项不静默：提示行写全「共 4/显示 3/隐藏 1」且 N=M+隐藏', Boolean(hiddenNote && hiddenNote.total === '4' && hiddenNote.shown === '3' && hiddenNote.count === '1' && /共 4 条待决，显示 3 条/.test(hiddenNote.text || '')), hiddenNote);
+      const linkage = await cdp.evaluate(`(function(){
+        const note = document.querySelector('#decision-box-list [data-decision-hidden]');
+        if (!note) return { missing: true };
+        const total = Number(note.getAttribute('data-decision-total'));
+        const hidden = Number(note.getAttribute('data-decision-hidden'));
+        const shown = document.querySelectorAll('#decision-box-list [data-decision-item][data-status="open"]').length;
+        return { total, hidden, shown, sumOk: total === shown + hidden };
+      })()`);
+      check('⑤ 三数联动：total=IPC(4)、shown=DOM open 条数(3)、total=shown+hidden', Boolean(linkage && !linkage.missing && linkage.total === 4 && linkage.shown === 3 && linkage.sumOk), linkage);
       shots.push(await shot(cdp, path.join(EVID, '01-三入口数字与七要素.png')));
       await cdp.evaluate('(function(){ if (typeof setDecisionExpanded === "function") setDecisionExpanded(false); return true; })()');
       await sleep(400);

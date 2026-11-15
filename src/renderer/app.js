@@ -2566,7 +2566,7 @@ async function loadRoleQueue(opts = {}) {
 // R-9db6 F-1 / T-d2ee：Owner 决策箱。主入口是主界面右下角 #decision-box 浮层（Owner 2026-11-14 13:15 定），
 // 团队台抽屉（#decision-box-drawer）保留作次入口。放入只有 PM 能做（团队工具 decision add），
 // Owner 在这里逐条/批量回执（走壳层 team:decision-receipt；通道没接上时只提示、不提交）。
-const DECISION_FLOAT_STATE = { data: null, expanded: false, drafts: {}, submitting: 0, error: '' };
+const DECISION_FLOAT_STATE = { data: null, expanded: false, drafts: {}, submitting: 0, error: '', decisions: null };
 
 // 摘要裁剪：app.js 里原先没有 clip60（8a9a 抽屉版引用它 → 读箱一直报 "clip60 is not defined"），这里补上。
 function clip60(text, n = 60) {
@@ -2855,7 +2855,7 @@ function decisionRowMarkup(item) {
       ? `<div class="decision-line decision-decided">已回执：${esc(item.decision.choice)}${item.decision.opinion ? ' ｜ 意见：' + esc(item.decision.opinion) : ''}</div>`
       : '');
   // Owner 2026-11-14 13:55：不要批量勾选，一条一条点（勾选框与底部【回执 PM（N 条）】已整体移除）。
-  return `<div class="decision-row${isOpen ? '' : ' done'}" data-decision-id="${esc(item.id)}" data-status="${esc(st)}">
+  return `<div class="decision-row${isOpen ? '' : ' done'}" data-decision-item="1" data-decision-id="${esc(item.id)}" data-status="${esc(st)}">
     <div class="decision-head"><b>${esc(item.title || item.id)}</b><code>${esc(item.id)}</code>${badge}</div>
     <div class="decision-line">${esc(clip60(item.summary || '', 60))}</div>
     <div class="decision-line muted">要决定什么：${esc(item.question || '未写')}</div>
@@ -2907,14 +2907,19 @@ function renderDecisionFloat(data) {
   }
   list.innerHTML = items.map((item) => decisionRowMarkup(item)).join('');
   // PM 19:32 + 项目「禁止静默」口径：缺项历史条目被过滤时必须明说，不能静默隐藏。
-  const hiddenCount = Math.max(0, allItems.length - items.length);
+  // PM 19:36 第四笔：total 必须 = ownerPendingCounts().decisions（IPC，抽屉顶部同值），
+  // shown = 实际渲染的 open 条目数（DOM 可数 [data-decision-item][data-status=open]），hidden = total - shown。
+  const openShown = items.filter((item) => String(item.status || 'open') === 'open').length;
+  const ipcDecisions = Number(DECISION_FLOAT_STATE.decisions);
+  const totalDecisions = Number.isFinite(ipcDecisions) && ipcDecisions >= 0 ? ipcDecisions : openShown;
+  const hiddenCount = Math.max(0, totalDecisions - openShown);
   if (hiddenCount > 0) {
     const note = document.createElement('div');
     note.className = 'empty-row decision-hidden-note';
-    note.setAttribute('data-decision-total', String(allItems.length));
-    note.setAttribute('data-decision-shown', String(items.length));
+    note.setAttribute('data-decision-total', String(totalDecisions));
+    note.setAttribute('data-decision-shown', String(openShown));
     note.setAttribute('data-decision-hidden', String(hiddenCount));
-    note.textContent = `共 ${allItems.length} 条，显示 ${items.length} 条，另有 ${hiddenCount} 条历史条目不满足七要素（缺来源/背景/问题/选项/默认项/影响/截止）未展示`;
+    note.textContent = `共 ${totalDecisions} 条待决，显示 ${openShown} 条，另有 ${hiddenCount} 条历史条目不满足七要素（缺来源/背景/问题/选项/默认项/影响/截止）未展示；补七要素后自动出现`;
     list.appendChild(note);
   }
   // 重绘后把「正在填的草稿」放回去：刷新不该吞掉已选候选与已填意见。
@@ -2951,18 +2956,21 @@ function renderDecisionBox(data) {
     const src = item.source && item.source.ref
       ? `<span class="muted" data-decision-source="${esc(item.source.ref)}" data-decision-source-kind="${esc(item.source.kind || 'none')}">来源：${esc(item.source.ref)}</span>`
       : '<span class="muted">未记来源</span>';
-    return `<div class="decision-row${isOpen ? '' : ' done'}" data-decision-id="${esc(item.id)}" data-status="${esc(String(item.status || 'open'))}">
+    return `<div class="decision-row${isOpen ? '' : ' done'}" data-decision-item="1" data-decision-id="${esc(item.id)}" data-status="${esc(String(item.status || 'open'))}">
       <div class="decision-head"><b>${esc(item.title || item.id)}</b><code>${esc(item.id)}</code>${badge}</div>
       <div class="decision-line">${esc(clip60(item.summary || '', 60))}</div>
       <div class="decision-line muted">要决定什么：${esc(item.question || '未写')}</div>
       <div class="decision-actions">${src}<span class="muted">放入于 ${esc(fmtTime(item.createdAt) || '未记')}</span></div>
     </div>`;
   }).join('');
-  // PM 19:32「禁止静默」：抽屉版同样明说被过滤的历史条数（data-decision-hidden 供断言）。
-  const hiddenCount = Math.max(0, (Array.isArray(data.items) ? data.items.length : 0) - items.length);
+  // PM 19:36 第四笔：total = ownerPendingCounts().decisions（IPC，与抽屉顶部/胶囊同值）；
+  // shown = 实际渲染的 open 条数（DOM [data-decision-item][data-status=open]）；hidden = total - shown。
+  const openShown = openItems.length;
+  const ipcDecisions2 = Number(DECISION_FLOAT_STATE.decisions);
+  const totalDecisions2 = Number.isFinite(ipcDecisions2) && ipcDecisions2 >= 0 ? ipcDecisions2 : openShown;
+  const hiddenCount = Math.max(0, totalDecisions2 - openShown);
   if (hiddenCount > 0) {
-    const total = Array.isArray(data.items) ? data.items.length : 0;
-    box.innerHTML += `<div class="empty-row decision-hidden-note" data-decision-total="${total}" data-decision-shown="${items.length}" data-decision-hidden="${hiddenCount}">共 ${total} 条，显示 ${items.length} 条，另有 ${hiddenCount} 条历史条目不满足七要素未展示</div>`;
+    box.innerHTML += `<div class="empty-row decision-hidden-note" data-decision-total="${totalDecisions2}" data-decision-shown="${openShown}" data-decision-hidden="${hiddenCount}">共 ${totalDecisions2} 条待决，显示 ${openShown} 条，另有 ${hiddenCount} 条历史条目不满足七要素未展示；补七要素后自动出现</div>`;
   }
 }
 
@@ -3248,6 +3256,7 @@ async function refreshOwnerPendingCounts() {
     return { ok: false, code: (result && result.code) || 'PENDING_COUNTS_FAILED' };
   }
   paint(anchors.decisions, Number(result.decisions || 0));
+  DECISION_FLOAT_STATE.decisions = Number(result.decisions || 0);
   paint(anchors.reviews, Number(result.reviews || 0));
   paint(anchors.accepts, Number(result.accepts || 0));
   // R-5016 §二（PM 19:21 约束）：抽屉顶部「待决」也 = ownerPendingCounts().decisions（单源）。
