@@ -5,6 +5,8 @@
  *   ② 报告 status=通过 → 正常推进到 test_done（正向对照，防"一刀切不推进"）
  *   ③ evidence 字符串里写 FAIL → 仍按老规则拦（不回退既有能力）
  *   ④ 递归：recompute-advance 走同一闸门（不能绕过 task done 那条路）
+ *   ⑤ 一份报告两条需求（M-20261115-161343-6104c7）：A 通过 + B 不通过 → A 必须推进、B 必须被挡
+ *      （小节分段 + 无小节时报告头状态行分号条款两种形态）
  *
  * 跑法：node scripts/test-advance-report-gate.cjs
  * 环境：自建沙盘 项目/工作台改造修复/_tmp/advance-report-sandbox（TEAM_ROOT + TEAM_PROJECTS_ROOT + TEAM_SELFTEST=1）
@@ -210,6 +212,69 @@ fs.writeFileSync(path.join(REPORT_DIR, '测试报告-v195.md'), [
 ].join('\n'), 'utf8');
 const recC = runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqCId]);
 ok('汇总报告「0 失败/失败零副作用」不误判 → 仍推进到 test_done', String((rowOf(reqCId) || {}).status || '') === 'test_done', String((rowOf(reqCId) || {}).status));
+
+// ---------- 第三处假阴性（M-20261115-161343-6104c7）：一份报告两条需求，A 通过 + B 不通过 ----------
+// 真实形态：v192 状态行「status: b28f 通过；62b9 不通过」，旧实现整行扫「不通过」→ A 被 B 连坐判死。
+// 期望：按需求分段（小节 / 状态行条款）后，A 正常推进、B 被自己的结论挡住。
+const mkReq = (title) => {
+  const created = runJson(['task', 'create', '--boot', pmToken, '--title', title, '--priority', 'P1', '--type', 'requirement']);
+  return created.json && created.json.task ? created.json.task.id : '';
+};
+const shortOf = (id) => String(id || '').split('-').pop().toLowerCase();
+const seedDevDoneReq = (id, title) => {
+  const wfNow = readJson(WF, { requirements: {} });
+  wfNow.requirements[id] = { id, title, status: 'dev_done', round: 1, deliveryRound: 1, trq: { verdict: 'testable' }, createdAt: now, updatedAt: now, priority: 'P1', decisions: [{ status: 'approved', at: now }] };
+  writeJson(WF, wfNow);
+};
+const reqDId = mkReq('同报告A（通过）');
+const reqEId = mkReq('同报告B（不通过）');
+seedDevDoneReq(reqDId, '同报告A（通过）');
+seedDevDoneReq(reqEId, '同报告B（不通过）');
+seedDoneTestTask('同报告A 测试', reqDId, '测试人员/产出/测试报告-v196.md');
+seedDoneTestTask('同报告B 测试', reqEId, '测试人员/产出/测试报告-v196.md');
+fs.mkdirSync(REPORT_DIR, { recursive: true });
+fs.writeFileSync(path.join(REPORT_DIR, '测试报告-v196.md'), [
+  '---', 'doc: 04-测试报告', 'version: v196',
+  `status: ${shortOf(reqDId)} 通过（26/27）；${shortOf(reqEId)} 不通过（已 iteration 第 3 轮）`,
+  '---', '',
+  '# 04-测试报告 · v196（合并）', '',
+  '> 本报告同时覆盖两条需求：',
+  `> - ${reqDId}（同报告A）→ 通过`,
+  `> - ${reqEId}（同报告B）→ 不通过（已 iteration 第 3 轮）`, '',
+  `## 一、${reqDId}（收口）`, '',
+  '- 结论：**通过**（断言 26/27 + 1 非本需求观察）', '',
+  `## 二、${reqEId}（状态登记）`, '',
+  '- 结论：**不通过**（2 条未过）', '',
+].join('\n'), 'utf8');
+const beforeD = events().length;
+runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqDId]);
+ok('同报告：A（通过）正常推进到 test_done（不再被 B 连坐）', String((rowOf(reqDId) || {}).status || '') === 'test_done', String((rowOf(reqDId) || {}).status));
+ok('同报告：A 无 test_report_not_passed 审计', !events().slice(beforeD).some((e) => e.action === 'requirement_advance_skipped' && String(e.target) === reqDId && String(e.data && e.data.reason) === 'test_report_not_passed'), 'A 被误拦');
+const beforeE = events().length;
+runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqEId]);
+ok('同报告：B（不通过）仍停在 dev_done（闸门没放水）', String((rowOf(reqEId) || {}).status || '') === 'dev_done', String((rowOf(reqEId) || {}).status));
+ok('同报告：B 的 skipped reason=test_report_not_passed 且指向 v196', events().slice(beforeE).some((e) => e.action === 'requirement_advance_skipped' && String(e.target) === reqEId && String(e.data && e.data.reason) === 'test_report_not_passed' && /v196/.test(String(e.data && e.data.reportFile))), JSON.stringify(events().slice(beforeE).map((e) => [e.action, e.data && e.data.reason])));
+
+// ---------- 无小节，只有报告头状态行（回退路径）：分号并列条款也要按需求拆 ----------
+const reqFId = mkReq('状态行A（通过）');
+const reqGId = mkReq('状态行B（不通过）');
+seedDevDoneReq(reqFId, '状态行A（通过）');
+seedDevDoneReq(reqGId, '状态行B（不通过）');
+seedDoneTestTask('状态行A 测试', reqFId, '测试人员/产出/测试报告-v197.md');
+seedDoneTestTask('状态行B 测试', reqGId, '测试人员/产出/测试报告-v197.md');
+fs.writeFileSync(path.join(REPORT_DIR, '测试报告-v197.md'), [
+  '# 测试报告 · v197（无小节，仅状态行）', '',
+  `- 需求：${reqFId} / ${reqGId}`,
+  `- status: ${shortOf(reqGId)} 不通过（2 条未过）；${shortOf(reqFId)} 通过（26/27）`, '',
+].join('\n'), 'utf8');
+const beforeF = events().length;
+runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqFId]);
+ok('状态行回退：A 推进到 test_done', String((rowOf(reqFId) || {}).status || '') === 'test_done', String((rowOf(reqFId) || {}).status));
+ok('状态行回退：A 无 skipped 审计', !events().slice(beforeF).some((e) => e.action === 'requirement_advance_skipped' && String(e.target) === reqFId), 'A 被误拦');
+const beforeG = events().length;
+runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqGId]);
+ok('状态行回退：B 停在 dev_done', String((rowOf(reqGId) || {}).status || '') === 'dev_done', String((rowOf(reqGId) || {}).status));
+ok('状态行回退：B 的 skipped reason=test_report_not_passed', events().slice(beforeG).some((e) => e.action === 'requirement_advance_skipped' && String(e.target) === reqGId && String(e.data && e.data.reason) === 'test_report_not_passed'), JSON.stringify(events().slice(beforeG).map((e) => [e.action, e.data && e.data.reason])));
 
 // ---------- 报告 ----------
 const report = { at: new Date().toISOString(), task: 'B-20261115-145830-2ae4', pass, fail, failures, results };

@@ -177,6 +177,93 @@ function workflowRowFor(project, requirementId) {
  * 2026-11-15 缺陷修复（M-20261115-153130-d8df04）：旧实现「兜底取项目全局最新 vN」会把别的需求的报告
  * （v190=62b9 不通过）读进来挡住 b28f（v185=通过）。现在兜底必须先按 requirementId 过滤。
  */
+/**
+ * 按需求分段的纯函数（M-20261115-161343-6104c7：推进门第三处假阴性）。
+ * 背景：G7 报告门只认「最新一份测试报告」，多需求同轮必须合并成一份；
+ * 旧判定把整份报告当一条需求扫「不通过」，于是 B 的不通过把 A 判死（v192：b28f 通过 / 62b9 不通过）。
+ */
+function requirementTokenHit(line, requirementId, shortKey) {
+  const text = String(line || '');
+  if (!text) return false;
+  const full = String(requirementId || '').toLowerCase();
+  if (full && text.toLowerCase().includes(full)) return true;
+  const key = String(shortKey || '').replace(/[^0-9a-z]/gi, '').toLowerCase();
+  if (!key) return false;
+  return new RegExp(`(^|[^0-9a-z])${key}([^0-9a-z]|$)`, 'i').test(text);
+}
+
+/** 项目里已知的需求 4 位短号（需求/*.md、任务/*.json 文件名 + 报告正文里的完整 id），用于识别「别的需求」。 */
+function knownRequirementShortKeys(projectPath, text) {
+  const keys = new Set();
+  const add = (value) => {
+    const m = /R-20\d{6}-\d{6}-([0-9a-z]{4})/i.exec(String(value || ''));
+    if (m) keys.add(m[1].toLowerCase());
+  };
+  for (const dir of ['需求', '任务']) {
+    try {
+      for (const name of fs.readdirSync(path.join(projectPath, dir))) add(name);
+    } catch { /* 目录不存在：只靠报告正文 */ }
+  }
+  for (const m of String(text || '').matchAll(/R-20\d{6}-\d{6}-([0-9a-z]{4})/gi)) keys.add(m[1].toLowerCase());
+  return keys;
+}
+
+/** 该条款是否「以别的需求为主语」（如「62b9 不通过（…）」）：必须以需求号开头，防「依据 62b9 的对比」误杀。 */
+function clauseStartsWithForeignRequirement(clause, shortKey, knownKeys) {
+  // 结论行重建时首条款带「status= / 结论：」前缀（前缀属于整行，不属于某条需求），先剥掉再判断主语
+  const lead = String(clause || '').trim()
+    .replace(/^[-*>\s`|]+/, '')
+    .replace(/^(status|结论|判定|verdict)\s*[=:：|]\s*/i, '');
+  const m = /^(?:R-20\d{6}-\d{6}-([0-9a-z]{4})|([0-9a-z]{4}))(?![0-9a-z])/i.exec(lead);
+  if (!m) return false;
+  const mine = String(shortKey || '').toLowerCase();
+  const key = String(m[1] || m[2] || '').toLowerCase();
+  if (!key || key === mine) return false;
+  return Boolean(m[1]) || knownKeys.has(key);
+}
+
+/** 行内按条款裁剪：「status: A 通过；B 不通过」只留 A 那一段（含不带需求号的中性条款）；返回 '' = 整行不属于本需求。 */
+function scopeLineToRequirement(line, requirementId, shortKey, knownKeys) {
+  const raw = String(line || '');
+  if (!raw.trim()) return '';
+  const isOurs = (part) => requirementTokenHit(part, requirementId, shortKey);
+  const isForeign = (part) => clauseStartsWithForeignRequirement(part, shortKey, knownKeys);
+  const parts = raw.split(/[；;|]/);
+  if (parts.some(isOurs)) {
+    // 并列条款里有本需求：只留本需求的条款 + 中性条款（表格里「通过」这类单元格不带需求号）
+    return parts.filter((part) => isOurs(part) || !isForeign(part)).join('；').trim();
+  }
+  if (parts.some(isForeign)) return '';
+  return raw.trim();
+}
+
+/** 报告按 Markdown 标题切小节，只返回点名本需求的小节行；没有小节点名则返回 []（由调用方回退到报告头）。 */
+function scopeReportLines(text, requirementId, shortKey) {
+  const lines = String(text || '').split(/\r?\n/);
+  const sections = [];
+  let cur = { heading: '', lines: [] };
+  for (const line of lines) {
+    if (/^#{1,6}\s+\S/.test(line)) {
+      sections.push(cur);
+      cur = { heading: line, lines: [line] };
+    } else {
+      cur.lines.push(line);
+    }
+  }
+  sections.push(cur);
+  const namesOurs = (line) => requirementTokenHit(line, requirementId, shortKey);
+  const headingHit = sections.filter((sec) => sec.heading && namesOurs(sec.heading));
+  if (headingHit.length) {
+    const picked = [];
+    const pre = sections.find((sec) => !sec.heading);
+    if (pre && pre.lines.some(namesOurs)) picked.push(pre);
+    for (const sec of sections) if (headingHit.includes(sec)) picked.push(sec);
+    return picked.reduce((acc, sec) => acc.concat(sec.lines), []);
+  }
+  const bodyHit = sections.filter((sec) => sec.lines.some(namesOurs));
+  return bodyHit.length ? bodyHit.reduce((acc, sec) => acc.concat(sec.lines), []) : [];
+}
+
 function readTestReportVerdict(projectName, task) {
   const requirementId = String((task && task.requirementId) || '').trim();
   const shortKey = requirementId ? requirementId.slice(-4).toLowerCase() : '';
@@ -207,12 +294,11 @@ function readTestReportVerdict(projectName, task) {
   const FAIL_STRONG_RE = /(不通过|未通过|\bFAIL\b)/i;
   const PASS_STRONG_RE = /(\bPASS\b|全部通过|通过)/i;
   const CONCLUSION_RE = /^[\s>*\-`|]*?(status|结论|判定|verdict)\s*[=:：|]\s*(.*)$/i;
-  /** 一行里出现"别的需求"的 4 位短号 → 这行说的不是本需求，跳过（防汇总报告串判）。 */
-  const mentionsOtherRequirement = (line) => {
-    const hits = String(line || '').match(/R-20\d{6}-\d{6}-([0-9a-z]{4})/gi) || [];
-    if (!hits.length) return false;
-    return hits.some((h) => h.slice(-4).toLowerCase() !== shortKey);
-  };
+  const TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
+  // M-20261115-161343-6104c7（第三处假阴性）：一份报告可能同时写多条需求的结论，
+  // 旧实现把整份报告当一条需求扫，B 的「不通过」会把 A 判死（v192：b28f 通过 / 62b9 不通过）。
+  // 判定前先按需求分段：只扫点名本需求的小节；没有小节才回退报告头，且行内按需求条款裁剪。
+  const knownKeys = knownRequirementShortKeys(projectPath, '');
   /** 报告是否属于本需求：正文（前 4KB）出现完整 id 或 4 位短号。 */
   const mentionsRequirement = (abs) => {
     if (!requirementId) return true;
@@ -222,6 +308,17 @@ function readTestReportVerdict(projectName, task) {
     // 短号必须带边界（-b28f / b28f- / b28f. / （b28f）），避免 4 个字母撞词
     if (shortKey && new RegExp(`(^|[^0-9a-z])${shortKey}([^0-9a-z]|$)`).test(head)) return true;
     return false;
+  };
+  /** 报告头：front matter / 第一个 Markdown 标题之前的行（表格式汇总常把状态行放这里）。 */
+  const reportHeadLines = (text) => {
+    const all = String(text || '').split(/\r?\n/);
+    const out = [];
+    for (const line of all) {
+      if (/^#{1,6}\s+\S/.test(line)) break;
+      out.push(line);
+      if (out.length >= 40) break;
+    }
+    return out.length ? out : all.slice(0, 20);
   };
   // 兜底：扫全部 测试报告-vN.md，**只留属于本需求的**，同需求内按 -vN 降序取最新。
   try {
@@ -233,7 +330,7 @@ function readTestReportVerdict(projectName, task) {
       .sort((a, b) => Number(b.m[1]) - Number(a.m[1]));
     for (const item of reports) {
       const rel = path.join('测试人员', '产出', item.name).replace(/\\/g, '/');
-      // 跨需求误读修复：只认"正文提到本需求"的报告，别的需求的报告一律不参与判定
+      // 跨需求误读修复：只认提到本需求的报告，别的需求的报告一律不参与判定
       if (!mentionsRequirement(path.join(dir, item.name))) continue;
       pushUnique(rel, false);
       break; // 只要同需求最新一份
@@ -256,33 +353,40 @@ function readTestReportVerdict(projectName, task) {
     if (!fs.existsSync(abs)) continue;
     let text = '';
     try { text = fs.readFileSync(abs, 'utf8'); } catch { continue; }
-    const lines = text.split(/\r?\n/);
-    const head = lines.slice(0, 20).map((line) => String(line || '').trim()).filter(Boolean);
-    // ① 先看结论行（status/结论/判定/verdict），同一份报告内"先命中先返回"
+    const keys = new Set([...knownKeys, ...knownRequirementShortKeys(projectPath, text)]);
+    const scoped = scopeReportLines(text, requirementId, shortKey);
+    // 回退：报告里没有任何小节点名本需求时，只看报告头；行内仍按需求条款裁剪。
+    const scanLines = scoped.length ? scoped : reportHeadLines(text);
+    // ① 先看结论行（status/结论/判定/verdict），同一份报告内「先命中先返回」；
+    //    表格行（| 需求号 | 结论 |）含本需求号时也按结论行处理。
     const conclusions = [];
-    for (const line of lines.slice(0, 200)) {
-      const m = CONCLUSION_RE.exec(String(line || ''));
-      if (!m) continue;
-      const textPart = `${m[1]}=${m[2] || ''}`.trim();
-      if (!textPart) continue;
-      conclusions.push(textPart);
+    for (const line of scanLines.slice(0, 300)) {
+      const raw = String(line || '');
+      const m = CONCLUSION_RE.exec(raw);
+      if (m) {
+        const part = scopeLineToRequirement(`${m[1]}=${m[2] || ''}`.trim(), requirementId, shortKey, keys);
+        if (part) conclusions.push(part);
+      } else if (TABLE_ROW_RE.test(raw) && requirementTokenHit(raw, requirementId, shortKey)) {
+        const part = scopeLineToRequirement(raw, requirementId, shortKey, keys);
+        if (part) conclusions.push(part);
+      }
     }
     for (const line of conclusions) {
-      if (mentionsOtherRequirement(line)) continue;
       if (FAIL_STRONG_RE.test(line)) return { verdict: 'fail', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'conclusion' };
     }
     for (const line of conclusions) {
-      if (mentionsOtherRequirement(line)) continue;
       if (PASS_STRONG_RE.test(line)) return { verdict: 'pass', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'conclusion' };
     }
     // ② 没有结论行时兜底看头部：只认强否定/强肯定，裸「失败」不算（数词/散文会误判）
-    for (const line of head) {
-      if (mentionsOtherRequirement(line)) continue;
-      if (FAIL_STRONG_RE.test(line)) return { verdict: 'fail', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'head' };
+    for (const line of scanLines.slice(0, 20)) {
+      const part = scopeLineToRequirement(line, requirementId, shortKey, keys);
+      if (!part) continue;
+      if (FAIL_STRONG_RE.test(part)) return { verdict: 'fail', file: rel, snippet: part.slice(0, 120), requirementId, basis: 'head' };
     }
-    for (const line of head) {
-      if (mentionsOtherRequirement(line)) continue;
-      if (PASS_STRONG_RE.test(line)) return { verdict: 'pass', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'head' };
+    for (const line of scanLines.slice(0, 20)) {
+      const part = scopeLineToRequirement(line, requirementId, shortKey, keys);
+      if (!part) continue;
+      if (PASS_STRONG_RE.test(part)) return { verdict: 'pass', file: rel, snippet: part.slice(0, 120), requirementId, basis: 'head' };
     }
   }
   return { verdict: 'unknown', file: ordered[0] || '', snippet: '', requirementId };
