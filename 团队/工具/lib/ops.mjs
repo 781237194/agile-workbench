@@ -306,6 +306,10 @@ const NEGATED_FAIL_RE = /(?:不构成|不算|并非|不是|非|未见|未发现)
 const ZERO_FAIL_RE = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/gi;
 const FAIL_ZERO_RE = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
 const FAIL_ZERO2_RE = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
+// D-20261116-062141-06ec（Owner 06:43 选 B）：只认「带数字的失败 N 项」——`失败 2 项` / `失败 3 条` 判负，
+// 但散文里的「失败零副作用」「失败原因见 §二」不判（没有「数字+量词」），`失败 0 项` 已被上面的零式剔除。
+// 之所以不把「失败」加进 FAIL_STRONG_RE：那会让所有提到「失败」二字的散文全被判负（L348-349 注释的原始理由仍成立）。
+const FAIL_COUNT_RE = /(?:失败|不通过|未通过)\s*[1-9]\d*\s*(?:项|个|条)/;
 const NEGATED_FAIL_TEST = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/i;
 const ZERO_FAIL_TEST = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/i;
 const FAIL_ZERO_TEST = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/i;
@@ -314,11 +318,11 @@ function hasNegatedFailPhrase(text) {
   const t = String(text || '');
   return NEGATED_FAIL_TEST.test(t) || ZERO_FAIL_TEST.test(t) || FAIL_ZERO_TEST.test(t) || FAIL_ZERO2_TEST.test(t);
 }
-function failVerdictText(text) {
+export function failVerdictText(text) {
   let t = String(text || '');
   t = t.replace(NEGATED_FAIL_RE, '（否定靶词）').replace(ZERO_FAIL_RE, '（零靶词）');
   t = t.replace(FAIL_ZERO_RE, '（零靶词）').replace(FAIL_ZERO2_RE, '（零靶词）');
-  return FAIL_STRONG_RE_M.test(t);
+  return FAIL_STRONG_RE_M.test(t) || FAIL_COUNT_RE.test(t);
 }
 export function readTestReportVerdict(projectName, task) {
   const requirementId = String((task && task.requirementId) || '').trim();
@@ -355,7 +359,7 @@ export function readTestReportVerdict(projectName, task) {
     let t = String(text || '');
     t = t.replace(NEGATED_FAIL_RE, '（否定靶词）').replace(ZERO_FAIL_RE, '（零靶词）');
     t = t.replace(FAIL_ZERO_RE, '（零靶词）').replace(FAIL_ZERO2_RE, '（零靶词）');
-    return FAIL_STRONG_RE.test(t);
+    return FAIL_STRONG_RE.test(t) || FAIL_COUNT_RE.test(t);
   };
   // M-20261115-161343-6104c7（第三处假阴性）：一份报告可能同时写多条需求的结论，
   // 旧实现把整份报告当一条需求扫，B 的「不通过」会把 A 判死（v192：b28f 通过 / 62b9 不通过）。
