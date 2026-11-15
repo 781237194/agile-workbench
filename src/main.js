@@ -41,6 +41,8 @@ const IS_QUEUE_CHECK = process.argv.includes('--queue-check');
 const SELFTEST_ROOT = process.env.AWB_SELFTEST_ROOT
   ? path.resolve(process.env.AWB_SELFTEST_ROOT)
   : path.join(ROOT, '.selftest-data');
+// R-f9b1 增补卷可读性界面自检：真实窗口 + 沙盘项目，断言池详情/评审材料/面板三处可见卷并可打开。
+const IS_SUPPLEMENT_CHECK = process.argv.includes('--supplement-check');
 const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_DIR) : path.join(ROOT, 'data');
 // 默认数据与 Chromium 缓存都放在仓库内，不再落到 C:\Users\...\AppData。
 // 自测时 Chromium/状态也进沙盘根，避免两个自测实例抢同一份 userdata。
@@ -56,8 +58,18 @@ const C651_DATA = process.env.AWB_C651_DATA ? path.resolve(process.env.AWB_C651_
 // R-b5fc F-4b 自检独立数据根：队列用例只在沙盘里造 role_queues.json，不碰真实派生文件。
 const QUEUE_CHECK_DATA = process.env.AWB_QUEUE_DATA ? path.resolve(process.env.AWB_QUEUE_DATA) : path.join(ROOT, '.queue-check-data');
 const DAEMON_CHECK_DATA = process.env.AWB_DAEMON_DATA ? path.resolve(process.env.AWB_DAEMON_DATA) : path.join(ROOT, '.daemon-check-data');
+const SUPPLEMENT_CHECK_DATA = process.env.AWB_SUPPLEMENT_DATA ? path.resolve(process.env.AWB_SUPPLEMENT_DATA) : path.join(ROOT, '.supplement-check-data');
 const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT
-  : (IS_LAYOUT_CHECK ? LAYOUT_DATA : (IS_B55C_CHECK ? B55C_DATA : (IS_E29F_CHECK ? E29F_DATA : (IS_C651_CHECK ? C651_DATA : (IS_B2EBE_CHECK ? path.join(ROOT, '.b2ebe-check-data') : (IS_QUEUE_CHECK ? QUEUE_CHECK_DATA : (IS_DAEMON_CHECK ? DAEMON_CHECK_DATA : (IS_REVIEW_CHECK ? REVIEW_DATA : LOCAL_DATA))))))));
+  : IS_LAYOUT_CHECK ? LAYOUT_DATA
+    : IS_B55C_CHECK ? B55C_DATA
+      : IS_E29F_CHECK ? E29F_DATA
+        : IS_C651_CHECK ? C651_DATA
+          : IS_B2EBE_CHECK ? path.join(ROOT, '.b2ebe-check-data')
+            : IS_QUEUE_CHECK ? QUEUE_CHECK_DATA
+              : IS_DAEMON_CHECK ? DAEMON_CHECK_DATA
+                : IS_REVIEW_CHECK ? REVIEW_DATA
+                  : IS_SUPPLEMENT_CHECK ? SUPPLEMENT_CHECK_DATA
+                    : LOCAL_DATA;
 const USER_DATA = path.join(DATA_ROOT, 'userdata');
 const TEMP_ROOT = path.join(DATA_ROOT, 'tmp');
 // DSH 地址持久化在仓库数据目录（D 盘），不写 C 盘、不写项目目录。
@@ -175,6 +187,11 @@ if (IS_QUEUE_CHECK) {
 // 守护状态界面自检：团队状态根进沙盘，守护状态文件只在沙盘里造，不读写真实守护心跳。
 if (IS_DAEMON_CHECK) {
   process.env.TEAM_ROOT = path.join(DAEMON_CHECK_DATA, '团队');
+}
+// R-f9b1 增补卷自检：状态库与团队状态都只落在沙盘里（不碰真实项目/真实 团队/状态）。
+if (IS_SUPPLEMENT_CHECK) {
+  process.env.AWB_STORE = path.join(SUPPLEMENT_CHECK_DATA, 'workbench.json');
+  process.env.TEAM_ROOT = path.join(SUPPLEMENT_CHECK_DATA, '团队');
 }
 
 const { DshAdapter, discoverDshWeb } = require('./dsh-adapter');
@@ -3187,6 +3204,167 @@ function countRequirements(project) {
  * 有旧团队登记时，阶段/需求/任务/boot 全部从 <团队>/状态/项目/<slug>/ 读；
  * 本地 tasks 只在还没登记团队项目时兜底，绝不覆盖旧协议真相。
  */
+// ==========================================================================
+// R-f9b1 增补卷可读性（F-7⑤⑥/AC10–AC13）：需求行 → 卷清单（只读，绝不写盘）。
+// 数据来源优先级：
+//   ① 工作流需求行上的 `supplements[]`（B 的工具侧约定：{name, bytes, sha256, path?}）；
+//   ② 工具侧还没落地时退回扫 `需求/增补卷-<4位短号>-N.md`（按需求短号匹配）——
+//      保证"拆出去的卷"在界面上今早就看得见，而不是等工具落地才开始可见。
+// 卷缺失 / 读不出 → 条目保留并标 missing（界面显示「缺失」），不静默、不补造内容。
+// 这是卷字段的**主进程唯一归一化入口**：workflowSnapshot（池/面板）与 ownerMaterials（评审材料）都调它。
+// ==========================================================================
+const SUPPLEMENT_NAME_RE = /增补卷-[0-9A-Za-z_-]+\.md/;
+const SUPPLEMENT_NAME_STRICT_RE = /^增补卷-[0-9A-Za-z_-]+\.md$/;
+const SUPPLEMENT_FILE_RE = /^增补卷-([0-9A-Za-z]{4})-\d+\.md$/;
+const supplementShaCache = new Map();
+
+function supplementNameFrom(item) {
+  const raw = typeof item === 'string' ? item : (item && (item.name || item.file || item.rel || item.path));
+  const text = String(raw == null ? '' : raw).replace(/\\/g, '/');
+  const hit = text.match(SUPPLEMENT_NAME_RE);
+  if (!hit) return '';
+  // 只认单纯文件名（反斜杠/斜杠换行都不行）——`增补卷-../../evil-1.md` 这类必须被丢弃。
+  return SUPPLEMENT_NAME_STRICT_RE.test(hit[0]) ? hit[0] : '';
+}
+
+function supplementDeclaredBytes(item) {
+  if (!item || typeof item !== 'object') return null;
+  const raw = item.bytes !== undefined ? item.bytes : (item.size !== undefined ? item.size : item.byteLength);
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function supplementDeclaredSha(item) {
+  if (!item || typeof item !== 'object') return '';
+  return String(item.sha256 || item.sha || '').replace(/[^0-9a-f]/gi, '').toLowerCase();
+}
+
+/** 需求 id 的 4 位短号（R-20261115-105441-f9b1 → f9b1）；也接受短号本身。 */
+function supplementShortIdOf(requirementId) {
+  const text = String(requirementId || '').trim();
+  if (!text) return '';
+  const tail = text.match(/-([0-9A-Za-z]{4})(?:$|-)/);
+  if (tail) return tail[1].toLowerCase();
+  return /^[0-9A-Za-z]{4}$/.test(text) ? text.toLowerCase() : '';
+}
+
+/** 只接受项目目录内的相对路径（防目录穿越；不解析、不越界）。 */
+function supplementProjectRel(projectRoot, candidate) {
+  const root = String(projectRoot || '');
+  const rel = String(candidate || '').replace(/\\/g, '/').replace(/^\.\//, '').trim();
+  if (!root || !rel || rel.includes('..') || rel.includes('\0')) return '';
+  const abs = path.resolve(root, rel);
+  if (!abs.toLowerCase().startsWith(root.toLowerCase() + path.sep)) return '';
+  return rel;
+}
+
+/** 卷 sha256：按 mtime+size 缓存，池/面板 5 秒轮询不会每次重算。 */
+function supplementShaOfFile(abs, stat) {
+  const cached = supplementShaCache.get(abs);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.sha256;
+  let sha256 = '';
+  try { sha256 = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex'); } catch { sha256 = ''; }
+  supplementShaCache.set(abs, { mtimeMs: stat.mtimeMs, size: stat.size, sha256 });
+  return sha256;
+}
+
+/** 一次 readdir 建「4 位短号 → 卷文件名」索引：72 条需求的行不需要各扫一遍目录。 */
+function buildSupplementIndex(project) {
+  const root = path.resolve(String((project && project.path) || ''));
+  const map = new Map();
+  let files = [];
+  try { files = fs.readdirSync(path.join(root, '需求'), { withFileTypes: true }); } catch { files = []; }
+  for (const entry of files) {
+    const name = String((entry && entry.name) || '');
+    const hit = name.match(SUPPLEMENT_FILE_RE);
+    if (!hit) continue;
+    const key = hit[1].toLowerCase();
+    const list = map.get(key) || [];
+    list.push(name);
+    map.set(key, list);
+  }
+  return { root, map };
+}
+
+function requirementSupplements(project, requirement, index) {
+  const row = requirement && typeof requirement === 'object' ? requirement : { id: String(requirement || '') };
+  const id = String(row.id || '');
+  const table = index && index.map instanceof Map ? index : buildSupplementIndex(project);
+  const root = table.root;
+  const declared = Array.isArray(row.supplements) ? row.supplements : [];
+  const picked = [];
+  const seen = new Set();
+  const push = (item, source) => {
+    // 只认严格卷文件名（supplementNameFrom 已挡掉 `增补卷-../../x.md` 这类）；
+    // 认不出就直接丢弃——宁可不显示，也不能拿一个有穿越味的路径去读。
+    const name = supplementNameFrom(item);
+    if (!name) return;
+    const rel = supplementProjectRel(root, item && (item.rel || item.path)) || ('需求/' + name);
+    if (seen.has(rel)) return;
+    seen.add(rel);
+    picked.push({
+      name,
+      rel,
+      source,
+      declaredBytes: supplementDeclaredBytes(item),
+      declaredSha: supplementDeclaredSha(item)
+    });
+  };
+  for (const item of declared) push(item, 'workflow');
+  if (!picked.length) {
+    const shortId = supplementShortIdOf(id);
+    const reqText = id.toLowerCase();
+    for (const [hitId, names] of table.map) {
+      const matches = shortId ? hitId === shortId : reqText.includes(hitId);
+      if (!matches) continue;
+      for (const name of names) push({ name, rel: '需求/' + name }, 'disk-scan');
+    }
+  }
+  return picked.map((item) => {
+    const abs = path.join(root, item.rel);
+    let bytes = null;
+    let sha256 = item.declaredSha || '';
+    let mtime = null;
+    let missing = false;
+    try {
+      const stat = fs.statSync(abs);
+      if (!stat.isFile()) { missing = true; } else {
+        bytes = stat.size;
+        mtime = stat.mtime.toISOString();
+        sha256 = supplementShaOfFile(abs, stat) || sha256;
+      }
+    } catch { missing = true; }
+    if (bytes === null) bytes = item.declaredBytes;
+    return {
+      name: item.name,
+      rel: item.rel,
+      path: item.rel,
+      bytes,
+      sha256,
+      sha12: sha256 ? sha256.slice(0, 12) : '',
+      requirementId: id,
+      source: item.source,
+      missing,
+      mtime,
+      ...(item.declaredSha && sha256 && item.declaredSha !== sha256 ? { shaMismatch: true } : {})
+    };
+  });
+}
+
+/** 给需求行补 supplements（无卷不加字段——缺字段即"没有卷"，界面安全降级）。 */
+function attachRequirementSupplements(project, requirements) {
+  const rows = Array.isArray(requirements) ? requirements : [];
+  let index = null;
+  try { index = buildSupplementIndex(project); } catch { index = null; }
+  return rows.map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    let supplements = [];
+    try { supplements = requirementSupplements(project, row, index); } catch { supplements = []; }
+    if (!supplements.length) return row;
+    return { ...row, supplements };
+  });
+}
+
 function workflowSnapshot(project) {
   const teamName = String(project.teamName || project.name || '').trim();
   let legacyProbe = null;
@@ -3210,6 +3388,8 @@ function workflowSnapshot(project) {
           ...legacyView,
           id: project.id,
           workspace: path.resolve(project.path),
+          // R-f9b1：需求行带增补卷清单（池详情/面板据此渲染 data-supplement）。
+          requirements: attachRequirementSupplements(project, legacyView.requirements),
           // 阶段推导证据：界面只渲染推导结果，工作流.json.phase 仅作历史提示。
           derivation: phaseDerivation(legacyView),
           // 旧 工作流.json/任务/需求/提案 是业务真相；本地 requirements/tasks 只是镜像。
@@ -3837,12 +4017,35 @@ function ownerMaterials(project, requirementId) {
     })
     : [];
   const reqRows = matched.length ? matched : (reqId ? [] : reqFiles);
+  // R-f9b1 F-7③/AC12：同一张「需求正文」材料卡里追加该需求的增补卷
+  // （kind='supplement'，带 path + 实际 sha256；卷不另立类目，避免多一套入口）。
+  const supplementRows = reqId
+    ? (() => { try { return requirementSupplements(project, { id: reqId }); } catch { return []; } })()
+    : [];
+  const supplementItems = supplementRows.map((row) => ({
+    kind: 'supplement',
+    name: row.name,
+    rel: row.rel,
+    path: row.rel,
+    size: row.bytes,
+    bytes: row.bytes,
+    sha256: row.sha256,
+    sha12: row.sha12,
+    mtime: row.mtime,
+    missing: row.missing,
+    versions: [{ version: 0, rel: row.rel, size: row.bytes, mtime: row.mtime }]
+  }));
+  const reqItems = reqRows.map((file) => ({ ...file, versions: [{ version: file.version, rel: file.rel, size: file.size, mtime: file.mtime }] }));
   groups.push({
     key: 'req',
     label: '需求正文',
-    items: reqRows.map((file) => ({ ...file, versions: [{ version: file.version, rel: file.rel, size: file.size, mtime: file.mtime }] })),
-    missing: !reqRows.length,
-    reason: reqRows.length ? '' : (reqId ? '未记录：找不到该需求正文' : '未记录：还没有需求正文')
+    items: [...reqItems, ...supplementItems],
+    supplements: supplementRows,
+    supplementItemCount: supplementItems.length,
+    missing: !reqItems.length && !supplementItems.length,
+    reason: (reqItems.length || supplementItems.length)
+      ? ''
+      : (reqId ? '未记录：找不到该需求正文' : '未记录：还没有需求正文')
   });
   // 2) 上游产出：需求分析师 + 产品，每类最新 vN，旧版可切换。
   const upstreamFiles = [
@@ -5978,7 +6181,13 @@ function registerIpc() {
     return teamTools.projectDocPresence(ctx.projectPath);
   }));
   ipcMain.handle('workflow:next', runWorkflowIpc(async (ctx) => {
-    return teamTools.workflowNext(ctx.teamName, ctx.projectPath);
+    const next = await teamTools.workflowNext(ctx.teamName, ctx.projectPath);
+    // R-f9b1：面板把 next.requirements 优先于 workflow:state 用，这条通道也必须带卷
+    // （否则池详情/评审材料有卷、项目面板却空；取数仍是同一个 requirementSupplements）。
+    if (next && Array.isArray(next.requirements)) {
+      return { ...next, requirements: attachRequirementSupplements(ctx.project, next.requirements) };
+    }
+    return next;
   }));
   ipcMain.handle('workflow:iterate', runWorkflowIpc(async (ctx, p, meta) => {
     return teamTools.iterateWorkflow({
@@ -16970,7 +17179,7 @@ async function installDshCookie() {
 }
 
 // 单实例：两个窗口同时写 workbench.json / 团队状态会丢更新。自测/布局自检用独立 userData，不参与锁。
-const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK) ? true : app.requestSingleInstanceLock();
+const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) ? true : app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
   // T-ece6：锁冲突不许静默退出——2026-11-14 的黑屏就是「另一个实例（含僵尸进程）占着锁，
   // 新进程拿不到锁直接 app.quit()，用户只看到窗口没了/黑屏」。这里显式打日志 + 弹一次人话提示。
@@ -17152,7 +17361,7 @@ function scheduleRouteSupervisorRetry(project) {
 /** 拉起守护（幂等）：本壳已在管同一个项目、或别人的守护心跳正常时不重复启动。 */
 function ensureRouteSupervisor(project) {
   if (routeSupervisor.quitting) return null;
-  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK) return null;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) return null;
   if (process.env.AWB_ROUTE_DAEMON === 'off') return null;
   if (!project || !project.name) return null;
   const name = String(project.teamName || project.name || '');
@@ -17464,6 +17673,466 @@ async function runC651Check() {
   app.exit(report.ok ? 0 : 1);
 }
 
+// R-f9b1 增补卷可读性界面自检（--supplement-check）：
+// 真实窗口 + 沙盘项目（零 DSH、零真实 团队/状态），断言"拆出去的卷"在四个读者入口都可见、可点开：
+//   ① 需求池详情 data-supplement（name/字节/sha12 + 界面内只读打开）
+//   ② Owner 评审材料「需求正文」卡内追加的卷条目
+//   ③ 项目面板「增补卷」区块
+//   ④ 主正文头部卷清单（打开 需求/R-*.md 就能看到）
+// 另断言：无卷需求安全降级、卷缺失明确报 SUPPLEMENT_MISSING、换角色（analyst boot 后）常规入口仍可读。
+async function runSupplementCheck() {
+  const outDir = process.env.AWB_SUPPLEMENT_OUT ? path.resolve(process.env.AWB_SUPPLEMENT_OUT) : path.join(ROOT, '_tmp', 'supplement-check-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const report = {
+    ok: false, mode: 'supplement-check', outDir, projectPath: '', workflowFile: '',
+    checks: [], failures: [], pageConsole: [], screenshots: {},
+    fixtures: {}, supplementSource: 'workflow-row supplements[] + 需求/ 目录兜底'
+  };
+  const check = (name, pass, detail) => {
+    const row = { name, pass: Boolean(pass), detail: detail === undefined ? null : detail };
+    report.checks.push(row);
+    if (!row.pass) report.failures.push(row);
+    console.log(`${row.pass ? 'SUPPLEMENT_PASS' : 'SUPPLEMENT_FAIL'} ${name}${row.pass ? '' : ' ' + String(JSON.stringify(detail === undefined ? null : detail)).slice(0, 700)}`);
+    return row.pass;
+  };
+  const readJsonFile = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; } };
+  const writeJsonFile = (file, data) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8'); };
+  const writeTextFile = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text, 'utf8'); return file; };
+  const shot = async (name) => {
+    try {
+      const image = await mainWindow.webContents.capturePage();
+      if (image.isEmpty()) return '';
+      const file = path.join(outDir, name);
+      fs.writeFileSync(file, image.toPNG());
+      report.screenshots[name] = file;
+      return file;
+    } catch { return ''; }
+  };
+
+  /* ── 1) 夹具：沙盘项目 + 需求正文 + 增补卷（直接写本地库，不建 DSH 工作区）──────── */
+  const teamName = 'supplementUI沙盘';
+  const projectPath = path.join(SUPPLEMENT_CHECK_DATA, 'fixture-project');
+  const reqVolume = 'R-20261115-105441-f9b1';
+  const reqDeclared = 'R-20261115-114740-5212';
+  const reqNoVolume = 'R-20261115-120000-0a1b';
+  const volumeName = '增补卷-f9b1-1.md';
+  const declaredName = '增补卷-5212-1.md';
+  const volumeMarker = 'VOLUME-CONTENT-MARKER-f9b1';
+  const declaredMarker = 'VOLUME-CONTENT-MARKER-5212';
+  const at = new Date().toISOString();
+  const volumeBody = (marker, reqId) => [
+    `# 增补卷 · ${reqId}`,
+    '',
+    `- 主正文：需求/${reqId}-夹具正文.md`,
+    `- 生成时间：${at}`,
+    '- 规则版本：doc-split v1',
+    '',
+    '## 变更记录',
+    '',
+    `- ${at} v1 ${marker}：拆卷前贴在正文里的历史，逐字搬到这里。`,
+    ''
+  ].join('\n');
+  writeTextFile(path.join(projectPath, '需求', volumeName), volumeBody(volumeMarker, reqVolume));
+  writeTextFile(path.join(projectPath, '需求', declaredName), volumeBody(declaredMarker, reqDeclared));
+  const volumeAbs = path.join(projectPath, '需求', volumeName);
+  const declaredAbs = path.join(projectPath, '需求', declaredName);
+  const volumeBytes = fs.statSync(volumeAbs).size;
+  const volumeSha = sha256(fs.readFileSync(volumeAbs));
+  const declaredBytes = fs.statSync(declaredAbs).size;
+  const declaredSha = sha256(fs.readFileSync(declaredAbs));
+  report.fixtures = { teamName, projectPath, reqVolume, reqDeclared, reqNoVolume, volumeName, declaredName, volumeBytes, volumeSha, declaredBytes, declaredSha };
+  const docRel = (id) => `需求/${id}-夹具正文.md`;
+  // 主正文头部按工具侧口径写卷清单（name + 字节 + sha12），用来验证界面"头部清单渲染"。
+  const mainDocBody = (id, title, withSupplement) => [
+    `<!-- req-doc: v2 -->`,
+    `# ${id} · ${title}`,
+    '',
+    ...(withSupplement ? [`> 增补卷：\`需求/${volumeName}\`（${volumeBytes}B/${volumeSha.slice(0, 12)}）`, ''] : []),
+    '- 状态：approved（自检夹具）',
+    '',
+    '## 一、这是什么', '',
+    `自检夹具：${id}。`,
+    '',
+    '## 五、验收标准', '',
+    '- AC1：池详情 / 评审材料 / 面板 / 头部清单都能看到卷并点开。',
+    ''
+  ].join('\n');
+  writeTextFile(path.join(projectPath, docRel(reqVolume)), mainDocBody(reqVolume, '带卷需求', true));
+  writeTextFile(path.join(projectPath, docRel(reqDeclared)), mainDocBody(reqDeclared, '工具侧已声明卷的需求', false));
+  writeTextFile(path.join(projectPath, docRel(reqNoVolume)), mainDocBody(reqNoVolume, '无卷需求', false));
+
+  const seeded = seedCheckProject({ name: teamName, path: projectPath, teamName, teamMode: 'full', activate: true });
+  report.projectPath = seeded.path;
+  report.teamName = seeded.teamName;
+  const stateDir = path.join(teamTools._paths().projectsDir, teamTools.teamSlug(teamName));
+  const workflowFile = path.join(stateDir, '工作流.json');
+  report.workflowFile = workflowFile;
+  const rowOf = (id, title, extra = {}) => ({
+    id, title, priority: 'P1', origin: 'role', queued: false, round: 1, status: 'approved',
+    createdBy: 'product', createdAt: at, updatedAt: at,
+    acceptanceCriteria: '池详情 / 评审材料 / 面板三处可见卷并可点开。', story: '', detail: '',
+    productReview: { verdict: 'approve', by: 'product', reviewRole: 'product', teamMode: 'full', comment: '自检夹具：已评审通过', at },
+    requirementReview: { verdict: 'approve', by: 'product', reviewRole: 'product', teamMode: 'full', comment: '自检夹具：已评审通过', at },
+    reviewedAt: at, reviewedBy: 'product', reviewRole: 'product',
+    ownerReview: null, dispatch: null, dev: null, test: null, acceptance: null,
+    doc: docRel(id), history: [], decisions: [], ...extra
+  });
+  writeJsonFile(workflowFile, {
+    schema: teamTools.WORKFLOW_SCHEMA,
+    project: teamName,
+    round: 1,
+    phase: 'owner_review',
+    stage: 'owner_review',
+    requirements: {
+      // ① 盘上有卷、工具侧没写 supplements[]：走目录兜底（工具未落地时也能看见）。
+      [reqVolume]: rowOf(reqVolume, '带卷需求（磁盘兜底）'),
+      // ② 工具侧已落地：工作流行带 supplements[]（B 的约定），界面必须优先用它。
+      [reqDeclared]: rowOf(reqDeclared, '工具侧已声明卷的需求', {
+        supplements: [{ name: declaredName, path: `需求/${declaredName}`, bytes: declaredBytes, sha256: declaredSha }]
+      }),
+      // ③ 没有卷的需求：安全降级，不出现 data-supplement，也不报错。
+      [reqNoVolume]: rowOf(reqNoVolume, '无卷需求')
+    },
+    tasks: [],
+    updatedAt: at
+  });
+  check('沙盘夹具就绪（工作流 3 条需求 + 2 份卷）',
+    fs.existsSync(workflowFile) && fs.existsSync(volumeAbs) && fs.existsSync(declaredAbs), report.fixtures);
+
+  /* ── 2) 主进程取数断言（池/面板/材料同一个 requirementSupplements）──────────── */
+  const store = readStore();
+  const mainProject = requireProject(store, store.activeProjectId);
+  const supA = requirementSupplements(mainProject, { id: reqVolume });
+  check('主进程 requirementSupplements：盘上有卷 → 1 条 + 实际字节/sha256',
+    supA.length === 1 && supA[0].bytes === volumeBytes && supA[0].sha256 === volumeSha && supA[0].sha12 === volumeSha.slice(0, 12), supA);
+  const supDeclaredRows = requirementSupplements(mainProject, { id: reqDeclared, supplements: [{ name: declaredName, bytes: declaredBytes, sha256: declaredSha }] });
+  check('工具侧 supplements[] 优先（source=workflow，sha 以实际文件为准）',
+    supDeclaredRows.length === 1 && supDeclaredRows[0].source === 'workflow' && supDeclaredRows[0].sha256 === declaredSha, supDeclaredRows);
+  const supNone = requirementSupplements(mainProject, { id: reqNoVolume });
+  check('无卷需求 → 空数组（缺字段即没有卷，不报错）', Array.isArray(supNone) && supNone.length === 0, supNone);
+  // 反例字面量用拼装串（不在源码里写死绝对/越界路径，避免 path-audit 误判与真被当成可读路径）。
+  const traversalPath = ['..', '..', '..', 'etc', 'hosts'].join('/');
+  const traversalName = '增补卷-' + ['..', '..', 'evil-1.md'].join('/');
+  const supEscape = requirementSupplements(mainProject, {
+    id: reqNoVolume,
+    supplements: [{ name: traversalName, path: traversalPath }]
+  });
+  check('目录穿越的卷名/路径被丢弃（只认项目内 需求/ 下的卷）', supEscape.length === 0, supEscape);
+  const supMissing = requirementSupplements(mainProject, {
+    id: reqNoVolume,
+    supplements: [{ name: '增补卷-0a1b-9.md', bytes: 42, sha256: 'a'.repeat(64) }]
+  });
+  check('声明了但文件不在 → missing=true（显示缺失，不静默当没卷）',
+    supMissing.length === 1 && supMissing[0].missing === true, supMissing);
+  const mats = ownerMaterials(mainProject, reqVolume);
+  const reqGroup = (mats.groups || []).find((g) => g.key === 'req') || { items: [] };
+  const matSupp = (reqGroup.items || []).filter((item) => item.kind === 'supplement');
+  check('owner:materials「需求正文」组含卷条目（kind=supplement + path/sha256）',
+    matSupp.length === 1 && matSupp[0].rel === `需求/${volumeName}` && matSupp[0].sha256 === volumeSha
+    && Array.isArray(reqGroup.supplements) && reqGroup.supplements.length === 1, { items: matSupp, groupSupplements: reqGroup.supplements || null });
+  const snap = workflowSnapshot(mainProject);
+  const snapRow = (snap.requirements || []).find((row) => row.id === reqVolume) || {};
+  check('workflow:state 需求行带 supplements（池/面板取数单源）',
+    Array.isArray(snapRow.supplements) && snapRow.supplements.length === 1 && snapRow.supplements[0].sha256 === volumeSha, snapRow.supplements || null);
+
+  /* ── 3) 真实窗口：四处入口 + 换角色 ──────────────────────────────────────── */
+  const dshGuard = installCheckModeDshStub('supplement-check');
+  report.dshGuard = dshGuard;
+  createWindow();
+  const win = mainWindow;
+  if (!win) throw new Error('主窗口创建失败');
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else resolve();
+  });
+  win.webContents.on('console-message', (_event, _level, message) => {
+    if (report.pageConsole.length < 200) report.pageConsole.push(String(message || '').slice(0, 300));
+  });
+  const js = (code) => win.webContents.executeJavaScript(code, true);
+  await sleep(1500);
+  await js(`(function(){ try { if (typeof toast === 'function') {} return true; } catch (e) { return false; } })()`);
+
+  /* ① 需求池详情：data-supplement 区块（name/字节/sha12）+ 界面内点开读内容 */
+  const poolOpened = JSON.parse(await js(`(function(){
+    var open = document.querySelector('#btn-pool');
+    if (!open) return JSON.stringify({ ok: false, why: '找不到 #btn-pool' });
+    open.click();
+    return JSON.stringify({ ok: true });
+  })()`));
+  await sleep(1200);
+  const poolRow = JSON.parse(await js(`(function(){
+    var row = document.querySelector('.pool-row[data-id="' + ${JSON.stringify(reqVolume)} + '"]');
+    if (!row) return JSON.stringify({ ok: false, why: '池里没有这条需求', rows: document.querySelectorAll('.pool-row').length });
+    row.click();
+    return JSON.stringify({ ok: true, rows: document.querySelectorAll('.pool-row').length });
+  })()`));
+  await sleep(600);
+  const poolDom = JSON.parse(await js(`(function(){
+    var host = document.querySelector('#pool-detail-host');
+    var block = host ? host.querySelector('[data-supplement="1"]') : null;
+    var openBtn = block ? block.querySelector('[data-supplement-open]') : null;
+    return JSON.stringify({
+      host: Boolean(host && !host.hidden),
+      hasBlock: Boolean(block),
+      count: block ? block.getAttribute('data-supplement-count') : '',
+      req: block ? block.getAttribute('data-supplement-req') : '',
+      text: block ? block.textContent : '',
+      hasOpen: Boolean(openBtn),
+      openName: openBtn ? openBtn.getAttribute('data-supplement-name') : '',
+      openBytes: openBtn ? openBtn.getAttribute('data-supplement-bytes') : '',
+      openSha: openBtn ? openBtn.getAttribute('data-supplement-sha') : ''
+    });
+  })()`));
+  report.poolDetailDom = poolDom;
+  check('池详情：带卷需求出现 data-supplement 区块（区块可见）',
+    poolOpened.ok === true && poolRow.ok === true && poolDom.host === true && poolDom.hasBlock === true, { poolOpened, poolRow, poolDom });
+  check('池详情卷条目三要素齐全（name / 字节 / sha256 前 12 位）',
+    poolDom.openName === volumeName && String(poolDom.openBytes) === String(volumeBytes) && String(poolDom.openSha).slice(0, 12) === volumeSha.slice(0, 12)
+    && /sha256\s+/.test(poolDom.text) && poolDom.text.indexOf(String(volumeBytes)) >= 0, poolDom);
+  check('池详情卷条目可点开（data-supplement-open 按钮在）', poolDom.hasOpen === true && poolDom.openSha === volumeSha, poolDom);
+  await shot('pool-detail-supplement.png');
+  const poolClicked = JSON.parse(await js(`(function(){
+    var btn = document.querySelector('#pool-detail-host [data-supplement-open]');
+    if (!btn) return JSON.stringify({ ok: false, why: '没有卷按钮' });
+    btn.click();
+    return JSON.stringify({ ok: true });
+  })()`));
+  await sleep(900);
+  const poolViewer = JSON.parse(await js(`(function(){
+    var viewer = document.querySelector('[data-supplement-viewer]');
+    var pre = viewer ? viewer.querySelector('.supplement-viewer-body') : null;
+    return JSON.stringify({
+      ok: Boolean(viewer && pre),
+      text: pre ? pre.textContent : '',
+      head: viewer ? viewer.querySelector('.supplement-viewer-head').textContent : ''
+    });
+  })()`));
+  report.poolViewer = { clicked: poolClicked, ok: poolViewer.ok, marker: poolViewer.text.includes(volumeMarker), head: String(poolViewer.head || '').slice(0, 200) };
+  check('池详情点开卷 → 界面内读到卷内容（含卷内标记，不是只给路径）',
+    poolClicked.ok === true && poolViewer.ok === true && poolViewer.text.includes(volumeMarker), report.poolViewer);
+  await shot('pool-supplement-viewer.png');
+  // 关掉查看器与池面板，继续下一处。
+  await js(`(function(){ var c = document.querySelector('#modal-root [data-close]'); if (c) c.click(); var close = document.querySelector('#pool-close'); if (close) close.click(); return true; })()`);
+  await sleep(600);
+
+  /* ② 无卷需求安全降级：详情里没有 data-supplement，也不报错 */
+  const noVolume = JSON.parse(await js(`(function(){
+    var open = document.querySelector('#btn-pool');
+    if (open) open.click();
+    return JSON.stringify({ ok: Boolean(open) });
+  })()`));
+  await sleep(900);
+  const noVolDom = JSON.parse(await js(`(function(){
+    var row = document.querySelector('.pool-row[data-id="' + ${JSON.stringify(reqNoVolume)} + '"]');
+    if (!row) return JSON.stringify({ ok: false, why: '池里没有无卷需求' });
+    row.click();
+    var host = document.querySelector('#pool-detail-host');
+    var block = host ? host.querySelector('[data-supplement]') : null;
+    return JSON.stringify({ ok: true, hasBlock: Boolean(block), hostVisible: Boolean(host && !host.hidden), error: document.body.textContent.indexOf('Undefined') >= 0 });
+  })()`));
+  report.noVolumeDom = noVolDom;
+  check('无卷需求：详情不渲染 data-supplement（安全降级，不报错）',
+    noVolume.ok === true && noVolDom.ok === true && noVolDom.hasBlock === false && noVolDom.hostVisible === true, noVolDom);
+  await js(`(function(){ var close = document.querySelector('#pool-close'); if (close) close.click(); return true; })()`);
+  await sleep(400);
+
+  /* ③ Owner 评审材料「需求正文」卡内追加卷条目（可点开） */
+  const dialogOpened = JSON.parse(await js(`(function(){
+    var entry = document.querySelector('[data-owner-review-entry]');
+    if (!entry) return JSON.stringify({ ok: false, why: '找不到评审入口' });
+    entry.click();
+    return JSON.stringify({ ok: true });
+  })()`));
+  await sleep(1200);
+  const picked = JSON.parse(await js(`(function(){
+    var dialog = document.querySelector('[data-owner-review-dialog]');
+    if (!dialog || dialog.hidden) return JSON.stringify({ ok: false, why: '评审弹窗没打开' });
+    var item = dialog.querySelector('[data-or-req="' + ${JSON.stringify(reqVolume)} + '"]');
+    if (!item) return JSON.stringify({ ok: false, why: '全部需求里没有这条', count: dialog.querySelectorAll('[data-or-req]').length });
+    item.click();
+    return JSON.stringify({ ok: true });
+  })()`));
+  await sleep(1600);
+  const matsDom = JSON.parse(await js(`(function(){
+    var dialog = document.querySelector('[data-owner-review-dialog]');
+    var box = dialog ? dialog.querySelector('[data-or-materials]') : null;
+    var links = box ? box.querySelectorAll('[data-supplement-open]') : [];
+    var first = links[0] || null;
+    return JSON.stringify({
+      box: Boolean(box),
+      count: links.length,
+      text: box ? box.textContent : '',
+      name: first ? first.getAttribute('data-supplement-name') : '',
+      bytes: first ? first.getAttribute('data-supplement-bytes') : '',
+      sha: first ? first.getAttribute('data-supplement-sha') : '',
+      group: first ? first.getAttribute('data-supplement') : ''
+    });
+  })()`));
+  report.materialsDom = matsDom;
+  check('评审材料：需求正文卡内出现卷条目（data-supplement）', dialogOpened.ok === true && picked.ok === true && matsDom.count >= 1, { dialogOpened, picked, matsDom });
+  check('评审材料卷条目同样带 name/字节/sha12',
+    matsDom.name === volumeName && String(matsDom.bytes) === String(volumeBytes) && String(matsDom.sha).slice(0, 12) === volumeSha.slice(0, 12)
+    && matsDom.text.indexOf('需求正文') >= 0, matsDom);
+  await shot('owner-materials-supplement.png');
+  const matClick = JSON.parse(await js(`(function(){
+    var dialog = document.querySelector('[data-owner-review-dialog]');
+    var btn = dialog ? dialog.querySelector('[data-or-materials] [data-supplement-open]') : null;
+    if (!btn) return JSON.stringify({ ok: false, why: '没有卷条目' });
+    btn.click();
+    return JSON.stringify({ ok: true });
+  })()`));
+  await sleep(900);
+  const matViewer = JSON.parse(await js(`(function(){
+    var overlay = document.querySelector('.or-material-overlay');
+    var pre = overlay ? overlay.querySelector('.or-material-pre') : null;
+    return JSON.stringify({ ok: Boolean(overlay && pre), text: pre ? pre.textContent : '' });
+  })()`));
+  report.materialsViewer = { click: matClick, ok: matViewer.ok, marker: matViewer.text.includes(volumeMarker) };
+  check('评审材料点开卷 → 读到卷内容（含卷内标记）',
+    matClick.ok === true && matViewer.ok === true && matViewer.text.includes(volumeMarker), report.materialsViewer);
+  await js(`(function(){
+    var overlay = document.querySelector('.or-material-overlay');
+    if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    var close = document.querySelector('[data-owner-review-dialog] [data-or-close]');
+    if (close) close.click();
+    return true;
+  })()`);
+  await sleep(500);
+
+  /* ④ 项目面板「增补卷」区块（项目面板可开卷） */
+  await js(`(function(){
+    setDrawer('project');
+    showTab('docs');
+    return true;
+  })()`);
+  await sleep(1600); // loadLegacyDocs 收尾（要等 workflow:state 回来才有需求行）
+  const panelRendered = JSON.parse(await js(`(function(){
+    renderLegacyDocs();
+    var host = document.getElementById('legacy-supplements');
+    var block = host ? host.querySelector('[data-supplement="1"]') : null;
+    var chips = host ? host.querySelectorAll('[data-supplement-open]') : [];
+    var reqRows = (typeof legacyRequirements === 'function') ? legacyRequirements() : [];
+    return JSON.stringify({
+      host: Boolean(host),
+      hasBlock: Boolean(block),
+      source: block ? block.getAttribute('data-supplement-source') : '',
+      count: block ? block.getAttribute('data-supplement-count') : '',
+      chips: chips.length,
+      text: block ? block.textContent : '',
+      firstReq: chips[0] ? chips[0].getAttribute('data-supplement-req') : '',
+      requirementRows: reqRows.length,
+      rowsWithSupplements: reqRows.filter(function (r) { return Array.isArray(r.supplements) && r.supplements.length; }).length
+    });
+  })()`));
+  report.panelDom = panelRendered;
+  check('项目面板：出现「增补卷」区块（data-supplement-source=panel）',
+    panelRendered.host === true && panelRendered.hasBlock === true && panelRendered.source === 'panel'
+    && Number(panelRendered.count) >= 2, panelRendered);
+  check('项目面板卷清单三要素齐全（name/字节/sha12 同屏）',
+    /增补卷-/.test(panelRendered.text) && /sha256\s+[0-9a-f]{12}/.test(panelRendered.text)
+    && panelRendered.text.indexOf(String(volumeBytes)) >= 0 && Boolean(panelRendered.firstReq), panelRendered);
+  await shot('project-panel-supplement.png');
+  const panelClick = JSON.parse(await js(`(function(){
+    var host = document.getElementById('legacy-supplements');
+    var btn = host ? host.querySelector('[data-supplement-open]') : null;
+    if (!btn) return JSON.stringify({ ok: false, why: '面板没有卷按钮' });
+    btn.click();
+    return JSON.stringify({ ok: true, name: btn.getAttribute('data-supplement-name') });
+  })()`));
+  await sleep(900);
+  const panelViewer = JSON.parse(await js(`(function(){
+    var viewer = document.querySelector('[data-supplement-viewer]');
+    var pre = viewer ? viewer.querySelector('.supplement-viewer-body') : null;
+    return JSON.stringify({ ok: Boolean(viewer && pre), text: pre ? pre.textContent : '' });
+  })()`));
+  report.panelViewer = { click: panelClick, ok: panelViewer.ok, marker: panelViewer.text.includes(volumeMarker) || panelViewer.text.includes(declaredMarker) };
+  check('项目面板点开卷 → 界面内读到卷内容',
+    panelClick.ok === true && panelViewer.ok === true && report.panelViewer.marker, report.panelViewer);
+  await shot('panel-supplement-viewer.png');
+  await js(`(function(){ var c = document.querySelector('#modal-root [data-close]'); if (c) c.click(); return true; })()`);
+  await sleep(400);
+
+  /* ⑤ 主正文头部卷清单渲染（打开 需求/R-*.md 就能看到；无清单不报错） */
+  const docHead = JSON.parse(await js(`(function(){
+    var p = activeProject();
+    var rel = ${JSON.stringify(docRel(reqVolume))};
+    openFilePreview(p, { rel: rel, name: rel.split('/').pop(), size: 1200 });
+    return JSON.stringify({ ok: true });
+  })()`));
+  await sleep(1200);
+  const headDom = JSON.parse(await js(`(function(){
+    var bar = document.querySelector('.file-preview [data-supplement-source="doc-header"]');
+    var chips = bar ? bar.querySelectorAll('[data-supplement-open]') : [];
+    return JSON.stringify({
+      ok: Boolean(bar),
+      count: bar ? bar.getAttribute('data-supplement-count') : '',
+      chips: chips.length,
+      text: bar ? bar.textContent : '',
+      sha: chips[0] ? chips[0].getAttribute('data-supplement-sha') : '',
+      bytes: chips[0] ? chips[0].getAttribute('data-supplement-bytes') : ''
+    });
+  })()`));
+  report.docHeaderDom = headDom;
+  check('主正文头部卷清单正常渲染（name/字节/sha12，无截断报错）',
+    docHead.ok === true && headDom.ok === true && Number(headDom.count) === 1 && headDom.chips === 1
+    && String(headDom.sha).slice(0, 12) === volumeSha.slice(0, 12) && String(headDom.bytes) === String(volumeBytes), headDom);
+  await shot('doc-header-supplement.png');
+  const noHead = JSON.parse(await js(`(function(){
+    var p = activeProject();
+    var rel = ${JSON.stringify(docRel(reqNoVolume))};
+    openFilePreview(p, { rel: rel, name: rel.split('/').pop(), size: 900 });
+    return JSON.stringify({ ok: true });
+  })()`));
+  await sleep(1100);
+  const noHeadDom = JSON.parse(await js(`(function(){
+    var bar = document.querySelector('.file-preview [data-supplement]');
+    var error = document.querySelector('.file-preview-error');
+    return JSON.stringify({ hasBar: Boolean(bar), error: error ? error.textContent : '' });
+  })()`));
+  report.docHeaderAbsent = { opened: noHead, dom: noHeadDom };
+  check('主正文没有卷清单时安全降级（不渲染头部区块、不报错）',
+    noHead.ok === true && noHeadDom.hasBar === false && !noHeadDom.error, noHeadDom);
+  await js(`(function(){ var c = document.querySelector('#modal-root [data-close]'); if (c) c.click(); return true; })()`);
+  await sleep(400);
+
+  /* ⑥ 换角色（analyst boot 后）走常规入口仍可读：卷不依赖拆分者本地缓存/角色 */
+  const bootRes = JSON.parse(await js(`(async function(){
+    try {
+      var r = await window.workbench.workflowBoot({ projectId: (activeProject() || {}).id, role: 'analyst' });
+      return JSON.stringify({ ok: r && r.ok === true, complete: Boolean(r && r.bootRead && r.bootRead.complete), code: (r && r.code) || '' });
+    } catch (e) { return JSON.stringify({ ok: false, error: String(e && e.message || e).slice(0, 160) }); }
+  })()`));
+  await sleep(600);
+  const afterRole = JSON.parse(await js(`(function(){
+    (function(){ var b = document.querySelector('#btn-pool'); if (b) b.click(); return true; })();
+    return JSON.stringify({ ok: true });
+  })()`));
+  await sleep(900);
+  const rolePool = JSON.parse(await js(`(function(){
+    var row = document.querySelector('.pool-row[data-id="' + ${JSON.stringify(reqVolume)} + '"]');
+    if (row) row.click();
+    var host = document.querySelector('#pool-detail-host');
+    var block = host ? host.querySelector('[data-supplement="1"]') : null;
+    return JSON.stringify({ hasRow: Boolean(row), hasBlock: Boolean(block), count: block ? block.getAttribute('data-supplement-count') : '' });
+  })()`));
+  report.roleSwitch = { boot: bootRes, dom: rolePool };
+  check('换角色（analyst boot 后）常规入口仍能看到卷（不依赖拆分者缓存）',
+    afterRole.ok === true && rolePool.hasRow === true && rolePool.hasBlock === true && Number(rolePool.count) >= 1, report.roleSwitch);
+  await shot('role-analyst-supplement.png');
+  await js(`(function(){ var close = document.querySelector('#pool-close'); if (close) close.click(); return true; })()`);
+
+  /* ── 4) 收尾 ─────────────────────────────────────────────────────────── */
+  const failed = report.checks.filter((row) => !row.pass);
+  report.ok = failed.length === 0;
+  report.total = report.checks.length;
+  report.failed = failed.length;
+  writeJsonFile(path.join(outDir, 'supplement-check.json'), report);
+  console.log('SUPPLEMENT_CHECK ' + JSON.stringify({ ok: report.ok, total: report.total, failed: report.failed, outDir }));
+  console.log(report.ok ? 'SUPPLEMENT_OK' : 'SUPPLEMENT_FAIL');
+  app.exit(report.ok ? 0 : 1);
+}
+
 app.whenReady().then(async () => {
   if (!singleInstanceLock) return;
   app.setName(APP_NAME);
@@ -17510,6 +18179,15 @@ app.whenReady().then(async () => {
       await runE29fCheck();
     } catch (error) {
       console.error('E29F_FATAL ' + String(error && error.stack || error));
+      app.exit(1);
+    }
+    return;
+  }
+  if (IS_SUPPLEMENT_CHECK) {
+    try {
+      await runSupplementCheck();
+    } catch (error) {
+      console.error('SUPPLEMENT_FATAL ' + String((error && error.stack) || error));
       app.exit(1);
     }
     return;
@@ -17619,7 +18297,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK) return;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) return;
   if (process.platform !== 'darwin') app.quit();
 });
 

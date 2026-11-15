@@ -4527,3 +4527,34 @@ html[data-theme="light"] #titlebar .titlebar-center .owner-review-proxy { color:
 .rv-batch-result[data-batch-fail="0"] { border-color: color-mix(in srgb, var(--green) 55%, var(--line)); }
 .rv-batch-result[data-batch-fail="0"] b { color: var(--green); }
 .rv-batch-result-note { margin-left: 6px; color: var(--dim); }
+/* ── R-f9b1 增补卷可读性（池详情 / 评审材料 / 项目面板 / 主正文头部）─────────
+ * 四处共用一套观感：卷名可点、字节+sha12 常显、缺失标红；卷不纳入必读。
+ */
+.pool-detail-supplement .pool-supplement-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.pool-supplement-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; }
+.pool-supplement-open { font-weight: 600; text-align: left; }
+.pool-supplement-meta { color: var(--dim); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; }
+.pool-supplement-warn { color: var(--red, #e06c75); font-size: 10.5px; }
+.pool-supplement-note { margin: 5px 0 0; color: var(--dim); font-size: 10.5px; }
+
+.legacy-supplement-panel .legacy-supplement-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.legacy-supplement-panel .legacy-supplement-list li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; }
+.legacy-supplement-chip { border: 1px solid var(--gold-line, var(--line)); background: transparent; color: inherit; border-radius: 999px; padding: 3px 10px; font-size: 11.5px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.legacy-supplement-chip:hover { border-color: var(--gold-3, var(--line)); }
+.legacy-supplement-chip span { color: var(--dim); font-size: 10.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.legacy-supplement-req { color: var(--dim); font-size: 10.5px; }
+.legacy-supplement-warn { color: var(--red, #e06c75); font-size: 10.5px; }
+.legacy-supplement-empty,
+.legacy-supplement-hint { margin: 4px 0 0; color: var(--dim); font-size: 10.5px; }
+.legacy-supplement-head { border: 1px dashed var(--gold-line, var(--line)); border-radius: 8px; padding: 6px 9px; margin: 6px 0 8px; font-size: 11.5px; }
+.legacy-supplement-head b { color: var(--gold-3, inherit); font-size: 11.5px; }
+.legacy-supplement-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.legacy-supplement-head .legacy-supplement-hint { margin: 6px 0 0; }
+
+.or-supplement-link { border-style: dashed; }
+.supplement-viewer { display: flex; flex-direction: column; gap: 8px; }
+.supplement-viewer-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; font-size: 12px; }
+.supplement-viewer-head b { font-size: 13px; }
+.supplement-viewer-head span { color: var(--dim); font-size: 11px; }
+.supplement-viewer-note { margin: 0; color: var(--dim); font-size: 11px; }
+.supplement-viewer-body { margin: 0; max-height: 52vh; overflow: auto; white-space: pre-wrap; word-break: break-word; background: var(--panel, #14161a); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 12px; line-height: 1.6; }

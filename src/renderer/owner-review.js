@@ -2270,6 +2270,20 @@
     return link;
   }
 
+  /**
+   * R-f9b1（F-7③ / AC10③ / AC12）：材料组里的增补卷。
+   * 唯一取数：主进程 ownerMaterials 给组上的 `supplements[]`（kind='supplement' 的条目也在 items 里），
+   * 归一化统一走 POOL_CORE.supplementsOf —— 这里不另写一套解析。
+   */
+  function materialsSupplements(group) {
+    if (!group) return [];
+    const pool = typeof window !== 'undefined' ? window.POOL_CORE : null;
+    if (!pool || typeof pool.supplementsOf !== 'function') return [];
+    const declared = Array.isArray(group.supplements) ? group.supplements : [];
+    const source = declared.length ? declared : (Array.isArray(group.items) ? group.items : []);
+    return pool.supplementsOf({ supplements: source, requirementId: group.requirementId });
+  }
+
   function renderMaterials(req) {
     const box = dialogEl().querySelector('[data-or-materials]');
     box.innerHTML = '';
@@ -2283,10 +2297,27 @@
       for (const g of groups) {
         const label = String(g.label || g.key || '材料');
         const items = Array.isArray(g.items) ? g.items : [];
-        if (!items.length) { group.appendChild(el('span', 'or-muted', `${label}：未记录`)); continue; }
-        for (const item of items.slice(0, 3)) {
+        // 卷条目与正文条目分开渲染：正文仍按"最多 3 项"收敛，卷必须全数列出（否则被切片吃掉）。
+        const docs = items.filter((item) => String((item && item.kind) || '') !== 'supplement');
+        const supplements = materialsSupplements(g);
+        if (!docs.length && !supplements.length) { group.appendChild(el('span', 'or-muted', `${label}：未记录`)); continue; }
+        for (const item of docs.slice(0, 3)) {
           const rel = String(item.rel || (item.versions && item.versions[0] && item.versions[0].rel) || '');
           if (rel) group.appendChild(materialLink(`${label} · ${item.name || rel}`, rel));
+        }
+        // 增补卷：同一张「需求正文」卡内追加（不另立类目），点开只读看内容。
+        for (const s of supplements) {
+          const sizeText = (s.bytes === null || s.bytes === undefined) ? '字节未记录' : `${s.bytes} B`;
+          const link = materialLink(`${label} · ${s.name}（${sizeText} · sha ${s.sha12 || '—'}）`, s.rel);
+          link.classList.add('or-supplement-link');
+          link.setAttribute('data-supplement', '1');
+          link.setAttribute('data-supplement-open', s.rel);
+          link.setAttribute('data-supplement-name', s.name);
+          link.setAttribute('data-supplement-bytes', (s.bytes === null || s.bytes === undefined) ? '' : String(s.bytes));
+          link.setAttribute('data-supplement-sha', s.sha256 || '');
+          link.setAttribute('data-supplement-req', s.requirementId || String((req && req.id) || ''));
+          if (s.missing) link.setAttribute('data-supplement-missing', '1');
+          group.appendChild(link);
         }
       }
     }
@@ -2355,6 +2386,12 @@
     document.body.appendChild(overlay);
     try {
       const r = await window.workbench.ownerMaterial({ projectId: state.projectId, rel });
+      if (r && r.ok === false) {
+        // 卷被删/改名/超限时明说原因，不静默显示成"未记录"。
+        pre.textContent = `读不到这份材料（${r.code || 'MATERIAL_READ_FAILED'}）：${rel}\n${r.message || ''}\n\n`
+          + '增补卷被删除或改名时会这样；其余材料照常可读，请让 PM/分析师补卷。';
+        return;
+      }
       pre.textContent = String((r && (r.text || r.content || r.body)) || '未记录或不可读');
     } catch { pre.textContent = '未记录或不可读'; }
   }

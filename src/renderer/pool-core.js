@@ -628,6 +628,172 @@
     return `<span class="pool-detail-empty">${EMPTY_FIELD}</span>`;
   }
 
+  /* ── 增补卷（R-f9b1 可读性，F-7⑤⑥）────────────────────────────────────
+   * 数据来源：工作流需求行 `supplements[]`（工具侧拆分时写入，每项 name/bytes/sha256，可带 path/rel）。
+   * 约定未落地 / 该需求没拆过卷 / 字段坏了，一律 `[]`（安全降级：详情里不出现 data-supplement 区块，不报错）。
+   * **卷字段的唯一归一化入口**：app.js（池详情/面板/查看器）与 owner-review.js（评审材料卡）都调这里，
+   * 禁止在别处再解析一遍 supplements —— scripts/test-supplement-ui.cjs 有源码级单源断言。
+   */
+  const SUPPLEMENT_NAME_RE = /增补卷-[0-9A-Za-z_-]+\.md/;
+
+  function supplementNameOf(item) {
+    const raw = typeof item === 'string' ? item : (item && (item.name || item.file || item.rel || item.path));
+    const text = textOf(raw).replace(/\\/g, '/');
+    if (!text) return '';
+    const hit = text.match(SUPPLEMENT_NAME_RE);
+    if (hit) return hit[0];
+    return '';
+  }
+
+  function supplementBytesOf(item) {
+    if (!item || typeof item !== 'object') return null;
+    const raw = item.bytes !== undefined ? item.bytes : (item.size !== undefined ? item.size : item.byteLength);
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
+  function supplementShaOf(item) {
+    if (!item || typeof item !== 'object') return '';
+    return String(item.sha256 || item.sha || '').replace(/[^0-9a-f]/gi, '').toLowerCase().slice(0, 64);
+  }
+
+  /** 一条卷 → {name, bytes, sha256, sha12, rel, requirementId, missing}；认不出卷名返回 null。 */
+  function normalizeSupplement(item, requirementId) {
+    const name = supplementNameOf(item);
+    if (!name) return null;
+    const bytes = supplementBytesOf(item);
+    const sha256 = supplementShaOf(item);
+    const rawRel = textOf(item && (item.rel || item.path)) || ('需求/' + name);
+    const rel = rawRel.replace(/\\/g, '/').replace(/^\.\//, '');
+    return {
+      name,
+      bytes,
+      sha256,
+      sha12: sha256 ? sha256.slice(0, 12) : '',
+      rel,
+      requirementId: textOf(requirementId) || textOf(item && (item.requirementId || item.reqId)),
+      missing: Boolean(item && (item.missing === true || item.unreadable === true))
+    };
+  }
+
+  /**
+   * 行/数组 → 卷清单。接受三种输入：需求行（读 `.supplements`）、裸数组、材料组条目数组。
+   * 有 `kind` 且不是 `supplement` 的条目（正文/报告）不会被当成卷。
+   */
+  function supplementsOf(source) {
+    const list = Array.isArray(source) ? source
+      : (source && Array.isArray(source.supplements) ? source.supplements : []);
+    const reqId = textOf(source && source.id) || textOf(source && source.requirementId);
+    const out = [];
+    const seen = new Set();
+    for (const item of list) {
+      if (!item) continue;
+      if (item && typeof item === 'object' && item.kind && String(item.kind) !== 'supplement') continue;
+      const row = normalizeSupplement(item, reqId);
+      if (!row) continue;
+      const key = row.rel + '|' + row.name;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(row);
+    }
+    return out;
+  }
+
+  function supplementSizeLabel(bytes) {
+    const n = Number(bytes);
+    if (bytes === null || bytes === undefined || !Number.isFinite(n) || n < 0) return '字节未记录';
+    return String(n) + ' B';
+  }
+
+  function supplementMetaLabel(row) {
+    return supplementSizeLabel(row && row.bytes) + ' · ' + (row && row.sha12 ? 'sha256 ' + row.sha12 : 'sha 未记录');
+  }
+
+  function supplementOpenAttrs(row) {
+    const bytes = row && row.bytes !== null && row.bytes !== undefined && Number.isFinite(Number(row.bytes))
+      ? String(Number(row.bytes)) : '';
+    return ` data-supplement-open="${esc(row.rel)}"`
+      + ` data-supplement-name="${esc(row.name)}"`
+      + ` data-supplement-bytes="${bytes}"`
+      + ` data-supplement-sha="${esc(row.sha256 || '')}"`
+      + ` data-supplement-req="${esc(row.requirementId || '')}"`
+      + (row.missing ? ' data-supplement-missing="1"' : '');
+  }
+
+  /** 需求池详情里的「增补卷」区块：有卷才渲染；无卷返回 ''（不报错、不占位）。 */
+  function supplementSectionMarkup(source) {
+    const rows = supplementsOf(source);
+    if (!rows.length) return '';
+    const id = textOf(source && source.id) || rows[0].requirementId || '';
+    const items = rows.map((row) => `<li class="pool-supplement-row" data-supplement-item="${esc(row.name)}">`
+      + `<button type="button" class="pool-link pool-supplement-open"${supplementOpenAttrs(row)} title="${esc(row.rel)}">${esc(row.name)}</button>`
+      + `<span class="pool-supplement-meta">${esc(supplementMetaLabel(row))}</span>`
+      + (row.missing ? '<span class="pool-supplement-warn">缺失</span>' : '')
+      + '</li>').join('');
+    return `<section class="pool-detail-sec pool-detail-supplement" data-supplement="1" data-supplement-count="${rows.length}" data-supplement-req="${esc(id)}">`
+      + `<h5>增补卷（${rows.length}）· 只读 · 不纳入必读</h5>`
+      + `<ul class="pool-supplement-list">${items}</ul>`
+      + '<p class="pool-supplement-note">16KB 拆分产物：点卷名只读打开，不改主正文。</p></section>';
+  }
+
+  /**
+   * 主正文**头部**卷清单解析（工具侧拆分时写在标题下方，例如：
+   *   > 增补卷：`需求/增补卷-f9b1-1.md`（12637B/4b9137ffe2da）
+   * 或 `- 增补卷-xxxx-1.md — 12637 字节 — sha256 4b9137ffe2da`。
+   * 只看文档头部（首个 `## ` 小节之前的 80 行）：正文中部的说明/表格不会被误当清单。
+   * 没有清单 → `[]`（界面不显示、不报错）。
+   */
+  const SUPPLEMENT_HEAD_BYTES_RE = /(\d{2,9})\s*(?:B|b|字节)/;
+  const SUPPLEMENT_HEAD_SHA_RE = /(?<![0-9a-f])([0-9a-f]{12,64})(?![0-9a-f])/gi;
+
+  function supplementHeaderEntries(text) {
+    const raw = String(text == null ? '' : text).replace(/\r\n?/g, '\n');
+    if (!raw || raw.indexOf('增补卷-') < 0) return [];
+    const lines = raw.split('\n').slice(0, 80);
+    const out = [];
+    const seen = new Set();
+    for (const line of lines) {
+      if (/^##\s+\S/.test(line)) break; // 头部结束：以下属正文小节
+      if (line.indexOf('增补卷-') < 0) continue;
+      const names = line.match(new RegExp(SUPPLEMENT_NAME_RE.source, 'g')) || [];
+      for (const name of names) {
+        if (seen.has(name)) continue;
+        let bytes = null;
+        let sha256 = '';
+        const segments = line.split(name);
+        const tail = segments.length > 1 ? segments.slice(1).join(name) : '';
+        const bytesHit = tail.match(SUPPLEMENT_HEAD_BYTES_RE) || line.match(SUPPLEMENT_HEAD_BYTES_RE);
+        if (bytesHit) bytes = Number(bytesHit[1]);
+        SUPPLEMENT_HEAD_SHA_RE.lastIndex = 0;
+        let shaHit = SUPPLEMENT_HEAD_SHA_RE.exec(tail || line);
+        while (shaHit && bytes !== null && String(bytes) === shaHit[1]) {
+          shaHit = SUPPLEMENT_HEAD_SHA_RE.exec(tail || line);
+        }
+        if (shaHit) sha256 = String(shaHit[1]).toLowerCase();
+        // 只认带「字节 + sha」的清单行：正文里顺手提到的卷名（如规范说明）不算头部清单。
+        if (bytes === null && !sha256) continue;
+        const pathHit = line.match(/`([^`]*增补卷-[^`]*\.md)`/);
+        const rel = pathHit ? String(pathHit[1]).replace(/\\/g, '/') : ('需求/' + name);
+        seen.add(name);
+        out.push({ name, rel, bytes, sha256, sha12: sha256 ? sha256.slice(0, 12) : '' });
+      }
+    }
+    return out;
+  }
+
+  /** 头部卷清单渲染（主正文一打开就能看到卷）；没有清单返回 ''。 */
+  function supplementHeaderMarkup(text, options) {
+    const rows = supplementHeaderEntries(text);
+    if (!rows.length) return '';
+    const title = (options && options.title) || '增补卷清单（正文头部）';
+    const chips = rows.map((row) => `<button type="button" class="legacy-supplement-chip"${supplementOpenAttrs(row)} title="${esc(row.rel)}">`
+      + `${esc(row.name)}<span>${esc(supplementMetaLabel(row))}</span></button>`).join('');
+    return `<div class="legacy-supplement-head" data-supplement="1" data-supplement-source="doc-header" data-supplement-count="${rows.length}">`
+      + `<b>${esc(title)} · ${rows.length}</b>`
+      + `<div class="legacy-supplement-chips">${chips}</div>`
+      + '<p class="legacy-supplement-hint">卷不纳入必读，只读查看，不改正文。</p></div>';
+  }
+
   /** 详情：需求显示正文/验收标准；缺陷显示复现/期望/实际/影响面；场景缺陷额外显示场景四字段。 */
   function poolDetailMarkup(row) {
     const source = row && typeof row === 'object' ? row : {};
@@ -696,6 +862,7 @@
       </dl>
       <section class="pool-detail-sec pool-detail-body"><h5>正文 / 摘要</h5>${detailBody}</section>
       ${requirementSection}
+      ${supplementSectionMarkup(source)}
       <section class="pool-detail-sec"><h5>证据（${evidenceItems.length}）</h5>${evidenceList}</section>
       <section class="pool-detail-sec pool-detail-report"><h5>测试报告</h5>${reportMarkup}</section>
       <p class="pool-detail-note">只读详情：编辑仍走各自入口。链接点开用系统程序，文件不存在会就地提示。</p>
@@ -743,7 +910,15 @@
     poolFilterCounts,
     poolRowsSignature,
     poolRowMarkup,
-    poolDetailMarkup
+    poolDetailMarkup,
+    // R-f9b1：增补卷字段的唯一归一化/渲染入口（app.js、owner-review.js 共用）。
+    supplementsOf,
+    supplementSectionMarkup,
+    supplementHeaderEntries,
+    supplementHeaderMarkup,
+    supplementSizeLabel,
+    supplementMetaLabel,
+    supplementOpenAttrs
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

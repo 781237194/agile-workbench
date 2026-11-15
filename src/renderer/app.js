@@ -8472,6 +8472,73 @@ function legacyDedupeStatusRecords(text) {
   };
 }
 
+/* ── R-f9b1：项目面板「增补卷」区块 + 主正文头部卷清单 ─────────────────────
+ * 池详情由 pool-core 渲染；这里补"项目面板能看到/能点开"与"主正文头部清单能正常显示"。
+ * 卷字段唯一来自 POOL_CORE.supplementsOf / supplementHeaderMarkup（不在别处再解析）。
+ */
+function legacySupplementRows() {
+  if (!POOL_CORE || typeof POOL_CORE.supplementsOf !== 'function') return [];
+  const rows = [];
+  for (const req of legacyRequirements()) {
+    for (const item of POOL_CORE.supplementsOf(req)) {
+      rows.push({ ...item, requirementId: item.requirementId || String(req.id || '') });
+    }
+  }
+  return rows;
+}
+
+function legacySupplementPanelMarkup() {
+  const rows = legacySupplementRows();
+  if (!rows.length) {
+    return '<div class="panel-head"><h3>增补卷</h3><span class="badge muted-badge">0 份</span></div>'
+      + '<p class="legacy-supplement-empty">本项目当前没有增补卷（需求正文贴线拆分后才会有）。卷不纳入必读清单。</p>';
+  }
+  const chips = rows.map((row) => '<li>'
+    + `<button type="button" class="legacy-supplement-chip"${POOL_CORE.supplementOpenAttrs(row)} title="${esc(row.rel)}">`
+    + `${esc(row.name)}<span>${esc(POOL_CORE.supplementMetaLabel(row))}</span></button>`
+    + `<span class="legacy-supplement-req mono">${esc(row.requirementId || '—')}</span>`
+    + (row.missing ? '<span class="legacy-supplement-warn">缺失</span>' : '')
+    + '</li>').join('');
+  return `<div class="panel-head"><h3>增补卷（${rows.length}）</h3><span class="badge muted-badge">只读 · 不纳入必读</span></div>`
+    + `<ul class="legacy-supplement-list" data-supplement="1" data-supplement-source="panel" data-supplement-count="${rows.length}">${chips}</ul>`
+    + '<p class="legacy-supplement-hint">卷是需求正文 16KB 上限的拆分产物：点卷名在界面内只读查看（不改正文），内容以文件为准。</p>';
+}
+
+/** 面板里的卷区块挂在「项目必读文档」卡上方（DOM 由 JS 建，不动 index.html 结构）。 */
+function legacySupplementHostEnsure() {
+  const view = $('#view-docs');
+  if (!view) return null;
+  let host = $('#legacy-supplements');
+  if (host && view.contains(host)) return host;
+  host = document.createElement('section');
+  host.id = 'legacy-supplements';
+  host.className = 'panel legacy-supplement-panel';
+  const anchor = view.querySelector('.legacy-doc-panel');
+  if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(host, anchor);
+  else view.appendChild(host);
+  return host;
+}
+
+/** 主正文头部卷清单（工具侧拆分时写在标题下方）；没有清单返回 ''（安全降级）。 */
+function legacySupplementHeaderMarkup(text) {
+  if (!POOL_CORE || typeof POOL_CORE.supplementHeaderMarkup !== 'function') return '';
+  return POOL_CORE.supplementHeaderMarkup(text);
+}
+
+// 面板卷按钮 / 主正文头部卷按钮：统一在界面内只读查看。
+// 池详情与评审材料各自有自己的点击处理（它们 stopPropagation），这里跳过避免重复弹层。
+document.addEventListener('click', (event) => {
+  const node = event.target instanceof Element ? event.target.closest('[data-supplement-open]') : null;
+  if (!node || node.closest('#pool-mask') || node.closest('[data-owner-review-dialog]')) return;
+  event.preventDefault();
+  void openSupplementViewer(node.dataset.supplementOpen, {
+    name: node.dataset.supplementName,
+    bytes: node.dataset.supplementBytes,
+    sha256: node.dataset.supplementSha,
+    requirementId: node.dataset.supplementReq
+  });
+});
+
 function legacyDocPreviewMarkup(selection, project) {
   if (!selection) return '<div class="legacy-doc-empty">没有可显示的文档。</div>';
   if (!selection.rel) return '<div class="legacy-doc-empty">这个角色没有可读的角色卡路径。</div>';
@@ -8506,8 +8573,9 @@ function legacyDocPreviewMarkup(selection, project) {
     }
   }
   const body = markdownToHtml(display);
+  const supplementHead = legacySupplementHeaderMarkup(display);
   const meta = `${selection.rel} · ${fmtSize(entry.size)} · ${entry.kind === 'markdown' ? 'Markdown' : '文本'}${clipped ? ' · 已截断显示' : ''}`;
-  return `<div class="legacy-doc-meta">${esc(meta)}</div>${filterNote}${body || '<div class="legacy-doc-empty">（空文件）</div>'}`;
+  return `<div class="legacy-doc-meta">${esc(meta)}</div>${supplementHead}${filterNote}${body || '<div class="legacy-doc-empty">（空文件）</div>'}`;
 }
 
 function renderLegacyDocs() {
@@ -8521,6 +8589,9 @@ function renderLegacyDocs() {
   renderLegacyRoleTable(p);
   const tabs = $('#legacy-doc-tabs');
   if (tabs) tabs.innerHTML = legacyDocTabsMarkup();
+  // R-f9b1：项目面板的「增补卷」区块（项目内所有需求的卷，只读可点开）。
+  const supplementHost = legacySupplementHostEnsure();
+  if (supplementHost) supplementHost.innerHTML = legacySupplementPanelMarkup();
   const preview = $('#legacy-doc-preview');
   if (preview) preview.innerHTML = legacyDocPreviewMarkup(legacyCurrentDoc(), p);
 }
@@ -11026,6 +11097,19 @@ function poolPanelEnsure() {
   // 事件委托：行点击 / 键盘 / 详情内链接都在 mask 上统一处理，行节点重建时不用重绑。
   mask.addEventListener('click', (e) => {
     if (e.target === mask) { closePool(); return; }
+    // R-f9b1：池详情里的增补卷 → 界面内只读查看（排在 .pool-link 之前：
+    // 卷按钮也带 pool-link 样式，不能让它走"系统程序打开"，否则界面上读不到内容）。
+    const supplementBtn = e.target.closest('[data-supplement-open]');
+    if (supplementBtn) {
+      e.preventDefault(); e.stopPropagation();
+      void openSupplementViewer(supplementBtn.dataset.supplementOpen, {
+        name: supplementBtn.dataset.supplementName,
+        bytes: supplementBtn.dataset.supplementBytes,
+        sha256: supplementBtn.dataset.supplementSha,
+        requirementId: supplementBtn.dataset.supplementReq
+      });
+      return;
+    }
     const link = e.target.closest('.pool-link');
     if (link) { e.preventDefault(); e.stopPropagation(); openPoolLink(link); return; }
     // R-4657：撤回按钮只走 IPC（单条 / 批量），不能触发行详情。
@@ -11340,6 +11424,65 @@ async function openPoolLink(link) {
     }
   }
 }
+
+/* ── R-f9b1 增补卷（16KB 拆分产物）可读性 ────────────────────────────────
+ * 卷必须"不靠知道路径也能找到、不靠记忆也能引用"：池详情 / 评审材料 / 项目面板 / 主正文头部
+ * 四处都能看到 name + 字节 + sha256(12)，点开**在界面里只读看内容**（不是只给一个路径）。
+ * 读取只走主进程 files:read：项目内 realpath 校验（防目录穿越）+ 512KB 文本上限，绝不写盘。
+ * 卷缺失/读不出 → 明说 SUPPLEMENT_MISSING + 路径，不静默返回半份内容。
+ */
+async function openSupplementViewer(rel, info) {
+  const p = activeProject();
+  const meta = info && typeof info === 'object' ? info : {};
+  const target = String(rel || meta.rel || '');
+  if (!p || !target) { toast('没有可打开的卷', 'warn'); return; }
+  const name = String(meta.name || target.split('/').pop() || target);
+  const bytes = meta.bytes !== undefined && meta.bytes !== null && String(meta.bytes) !== '' ? Number(meta.bytes) : null;
+  const sha = String(meta.sha256 || '');
+  const headText = [name, Number.isFinite(bytes) ? fmtSize(bytes) : '字节未记录', sha ? 'sha256 ' + sha.slice(0, 12) : 'sha 未记录'].join(' · ');
+  const reqId = String(meta.requirementId || meta.req || '');
+  const dlg = openModal({
+    title: '增补卷（只读）',
+    subtitle: `${headText} · ${target}`,
+    icon: '📄',
+    width: 820,
+    body: `<div class="supplement-viewer" data-supplement-viewer="${esc(target)}" data-supplement="1" data-supplement-name="${esc(name)}" data-supplement-bytes="${Number.isFinite(bytes) ? bytes : ''}" data-supplement-sha="${esc(sha)}" data-supplement-req="${esc(reqId)}">
+      <div class="supplement-viewer-head"><b>${esc(name)}</b><span>${esc(Number.isFinite(bytes) ? String(bytes) + ' B' : '字节未记录')}</span><span class="mono">${esc(sha ? 'sha256 ' + sha.slice(0, 12) : 'sha 未记录')}</span>${reqId ? `<span class="mono">所属 ${esc(reqId)}</span>` : ''}</div>
+      <p class="supplement-viewer-note">只读查看：卷是主正文的 16KB 拆分产物，不纳入每次必读；这里不修改任何文件。</p>
+      <div class="supplement-viewer-doc"></div>
+      <pre class="supplement-viewer-body">读取中…</pre>
+    </div>`,
+    actions: [
+      {
+        label: '用系统程序打开', kind: 'ghost', onClick: async ({ error: showError }) => {
+          try {
+            const err = await window.workbench.filesOpen({ projectId: p.id, rel: target });
+            if (err) throw new Error(String(err));
+          } catch (error) { showError('打开失败：' + humanError(error.message)); }
+        }
+      },
+      { label: '关闭', kind: 'primary', onClick: ({ close }) => close() }
+    ]
+  });
+  const body = dlg && dlg.body ? dlg.body.querySelector('.supplement-viewer-body') : null;
+  const docBox = dlg && dlg.body ? dlg.body.querySelector('.supplement-viewer-doc') : null;
+  try {
+    const r = await window.workbench.filesRead({ projectId: p.id, rel: target, textMaxBytes: 512 * 1024 });
+    if (!r || r.ok === false) throw new Error((r && (r.code || r.message)) || '读取失败');
+    const text = String(r.text || '');
+    if (body) body.textContent = text || '（空文件）';
+    if (docBox && POOL_CORE && typeof POOL_CORE.supplementHeaderMarkup === 'function') {
+      docBox.innerHTML = POOL_CORE.supplementHeaderMarkup(text, { title: '这份文档头部还列了增补卷' });
+    }
+  } catch (error) {
+    const detail = String((error && error.message) || error).slice(0, 240);
+    if (body) {
+      body.textContent = `读不到这份卷（SUPPLEMENT_MISSING）：${target}\n${detail}\n\n`
+        + '卷可能被删除或改名；主正文与其余材料照常可读，请让 PM/分析师补卷后再验收。';
+    }
+  }
+}
+
 function clearPoolSearch() {
   poolUi.query = '';
   const input = $('#pool-search');
@@ -12781,7 +12924,9 @@ function openFilePreview(project, item) {
       }
       const body = document.createElement('div');
       body.className = 'markdown-body';
-      body.innerHTML = note + markdownToHtml(display);
+      // R-f9b1 F-7⑤：主正文头部若列了增补卷，打开就看得见（name/字节/sha12，可点开）；
+      // 没有清单则什么都不插 —— 不报错、不截断正文。
+      body.innerHTML = legacySupplementHeaderMarkup(display) + note + markdownToHtml(display);
       stage.replaceChildren(body);
     } else {
       const pre = document.createElement('pre');
