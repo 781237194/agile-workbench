@@ -2615,18 +2615,15 @@ async function loadDecisionBox() {
 /** 收起态胶囊：只显示「决策箱 N」。 */
 function renderDecisionPill(data) {
   const box = $('#decision-box');
-  const count = $('#decision-box-count');
   if (!box) return;
   const unread = Math.max(0, Number(data.unread || 0));
   box.dataset.unread = String(unread);
   box.dataset.open = String(data.open || 0);
   box.dataset.total = String(data.total || 0);
   box.dataset.degraded = data.degraded ? '1' : '0';
-  if (count) {
-    count.textContent = String(unread);
-    count.setAttribute('data-unread', String(unread));
-    count.className = 'decision-pill-count' + (unread ? '' : ' zero');
-  }
+  // R-5016 §二（PM 19:21 约束 + tester 19:30 复核第三写者）：胶囊数字只由
+  // refreshOwnerPendingCounts() 从 owner:pending-counts IPC 写；这里不再用 data.unread 覆盖胶囊
+  // （否则每次 loadDecisionBox 都会先闪 unread 再被 decisions 覆盖）。
   const pill = $('#decision-box-pill');
   if (pill) {
     pill.title = data.degraded
