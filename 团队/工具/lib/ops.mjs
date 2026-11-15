@@ -1622,6 +1622,130 @@ export function claimStallCheck(project, { now = Date.now() } = {}) {
   return { ok: true, stallMs, alerted: hits.length, hits };
 }
 
+/**
+ * B-bbf6（P1，2026-11-15）：派单队列「吞单」三件套。
+ * ① `reconcileDispatchQueueSessions`：换人/rotate 后旧会话的队列项要么改投新会话、要么作废并留审计，不许静默悬挂；
+ * ② `queueStaleCheck`：队列项滞留 >5 分钟向 PM 发 escalation（同项 10 分钟去重）——治「锁空着、队列挂着、没人知道」；
+ * ③ 锁一释放就补泵一次（releaseDispatchLockForTask 末尾），配合壳层 60 秒定时器，保证 60 秒内必达。
+ */
+const DISPATCH_QUEUE_STALE_MS = (() => {
+  const raw = Number(process.env.TEAM_DISPATCH_QUEUE_STALE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 5 * 60 * 1000;
+})();
+const DISPATCH_QUEUE_ALERT_DEDUPE_MS = 10 * 60 * 1000;
+
+function dispatchQueueStaleFile(project) {
+  return path.join(projectStatePaths(project).dir, '派单队列滞留.json');
+}
+
+/**
+ * 队列项滞留告警：>5 分钟未投递 → PM 收一条 escalation（含 role/queueId/滞留分钟/卡住原因提示）。
+ * 同一队列项 10 分钟内只告警一次；项被投递/作废后自然不再命中。
+ */
+export function queueStaleCheck(project, { now = Date.now() } = {}) {
+  const name = String(project || '');
+  if (!name) return { ok: false, code: 'BAD_PROJECT' };
+  const file = dispatchQueueStaleFile(name);
+  const state = (() => { try { return readJson(file, {}) || {}; } catch { return {}; } })();
+  const alerted = state.alerted && typeof state.alerted === 'object' ? state.alerted : {};
+  const queue = readDispatchQueue(name);
+  const hits = [];
+  for (const item of queue.items) {
+    if (!item || !item.id) continue;
+    const at = Date.parse(String(item.at || ''));
+    if (!Number.isFinite(at)) continue;
+    const age = now - at;
+    if (age < DISPATCH_QUEUE_STALE_MS) continue;
+    const last = Date.parse(String(alerted[item.id] || ''));
+    if (Number.isFinite(last) && now - last < DISPATCH_QUEUE_ALERT_DEDUPE_MS) continue;
+    const minutes = Math.round(age / 60000);
+    const to = String(item.to || '');
+    const roleName = ROLE_NAMES[to] || to || '（无目标角色）';
+    try {
+      const msg = sendMessage({
+        from: 'system', to: 'pm', type: 'escalation', project: name,
+        subject: `派单队列滞留 ${minutes} 分钟：发给${roleName}`,
+        body: `${item.id} 在队列里挂了 ${minutes} 分钟还没投出去。\n目标角色：${to || '-'}\n队列项创建时间：${item.at || '-'}\n主题：${String(item.subject || '').slice(0, 60)}\n可能原因：目标角色的派单锁未释放 / 角色名册无活会话 / 唤醒失败。\n请 PM 过问（可跑 team.mjs queue status 看现场，queue pump 手动泵一次）。`,
+        ackRequired: false,
+      });
+      alerted[item.id] = nowIso();
+      hits.push({ queueId: item.id, to, minutes, messageId: msg.id });
+      appendEvent({ role: 'system', sessionId: '', action: 'dispatch_queue_stale_alert', project: name, target: String(item.id), note: `to=${to} age=${minutes}min message=${msg.id}` });
+    } catch (e) {
+      hits.push({ queueId: item.id, to, error: String((e && e.message) || e) });
+    }
+  }
+  try { writeJson(file, { schema: 1, project: name, staleMs: DISPATCH_QUEUE_STALE_MS, alerted, updatedAt: nowIso() }); } catch { /* 状态写失败不阻断 */ }
+  return { ok: true, staleMs: DISPATCH_QUEUE_STALE_MS, alerted: hits.length, hits, remaining: queue.items.length };
+}
+
+function dispatchQueueArchiveFile(project) {
+  return path.join(projectStatePaths(project).dir, '派单队列归档.jsonl');
+}
+
+/**
+ * 队列项会话对齐（B-bbf6 ③）：换人/rotate 后旧 `sessionId` 的队列项不能永久悬挂。
+ * - 发件会话过期但发件角色还有活会话 → 改投新会话（写回队列 + 审计 dispatch_queue_session_rebased）；
+ * - 目标角色已不在名册 / 发件角色也没有活会话 → 作废：从队列移除，整条落 派单队列归档.jsonl（可回滚），
+ *   审计 dispatch_queue_discarded；绝不静默删除。
+ */
+export function reconcileDispatchQueueSessions(projectName, { reason = '', by = 'system', dryRun = false } = {}) {
+  const name = String(projectName || '');
+  if (!name) return { ok: false, code: 'BAD_PROJECT', rebased: [], discarded: [], kept: [] };
+  const team = loadTeam();
+  const members = Array.isArray(team.members) ? team.members : [];
+  const memberOf = (role) => members.find((m) => m && String(m.role || '') === String(role || '')) || null;
+  const sessionOf = (role) => {
+    const m = memberOf(role);
+    return m && m.sessionId && String(m.status || 'active') !== 'inactive' ? String(m.sessionId) : '';
+  };
+  const liveSessions = new Set(members.map((m) => String((m && m.sessionId) || '')).filter(Boolean));
+  const queue = readDispatchQueue(name);
+  const rebased = [];
+  const discarded = [];
+  const kept = [];
+  const next = [];
+  const now = nowIso();
+  for (const item of queue.items) {
+    if (!item || typeof item !== 'object') continue;
+    const to = String(item.to || '');
+    const from = String(item.from || 'pm');
+    const targetMember = memberOf(to);
+    const senderSession = sessionOf(from);
+    const queuedSession = String(item.sessionId || '');
+    const staleSession = queuedSession && !liveSessions.has(queuedSession);
+    if (!targetMember) {
+      // 目标角色已不在名册：作废（留审计 + 归档行）
+      discarded.push({ ...item, discardedAt: now, discardedReason: 'target_role_not_in_roster', discardedBy: by });
+      continue;
+    }
+    if (staleSession) {
+      if (!senderSession) {
+        discarded.push({ ...item, discardedAt: now, discardedReason: 'sender_session_gone', discardedBy: by });
+        continue;
+      }
+      const fixed = { ...item, sessionId: senderSession, rebasedAt: now, rebasedReason: reason || 'session_changed' };
+      rebased.push({ id: item.id, to, from, oldSessionId: queuedSession, newSessionId: senderSession });
+      next.push(fixed);
+      continue;
+    }
+    kept.push({ id: item.id, to, from });
+    next.push(item);
+  }
+  const changed = rebased.length || discarded.length;
+  if (changed && !dryRun) {
+    writeDispatchQueue(name, { items: next });
+    for (const row of discarded) {
+      try { appendLine(dispatchQueueArchiveFile(name), JSON.stringify({ at: now, project: name, action: 'discard', item: row })); } catch { /* 归档失败仍要写事件 */ }
+      appendEvent({ role: 'system', sessionId: '', action: 'dispatch_queue_discarded', project: name, target: String(row.id || ''), note: `to=${row.to || ''} reason=${row.discardedReason} by=${by}` });
+    }
+    for (const row of rebased) {
+      appendEvent({ role: 'system', sessionId: '', action: 'dispatch_queue_session_rebased', project: name, target: String(row.id || ''), note: `to=${row.to} old=${String(row.oldSessionId).slice(0, 16)} new=${String(row.newSessionId).slice(0, 16)} reason=${reason || '-'}` });
+    }
+  }
+  return { ok: true, rebased, discarded, kept, changed: Boolean(changed), dryRun, remaining: next.length };
+}
+
 export async function cmdQueue(args) {
   const sub = String((args._ && args._[1]) || 'pump');
   const project = String(args.project || '');
@@ -1631,13 +1755,26 @@ export async function cmdQueue(args) {
     out(args, `派单队列：${queue.items.length} 条`, { ok: true, project, items: queue.items, remaining: queue.items.length });
     return;
   }
-  if (sub !== 'pump') fail('BAD_ARGS', `未知的 queue 子命令：${sub}（用法：queue pump|status --project P）`);
+  if (sub === 'reconcile') {
+    // B-bbf6：换人/rotate 后旧队列项处置（投给新会话或 discarded + 审计）。
+    const recon = reconcileDispatchQueueSessions(project, { reason: String(args.reason || 'manual'), by: String(args.by || 'pm') });
+    out(args, `队列会话对齐：改投 ${recon.rebased.length} 条 ｜ 作废 ${recon.discarded.length} 条 ｜ 保留 ${recon.kept.length} 条`,
+      { ok: true, project, ...recon });
+    return;
+  }
+  if (sub !== 'pump') fail('BAD_ARGS', `未知的 queue 子命令：${sub}（用法：queue pump|status|reconcile --project P）`);
+  // B-bbf6：泵之前先对齐会话（换人后旧 sessionId 会让投递永远失败 → 队列静默悬挂）。
+  let recon = null;
+  try { recon = reconcileDispatchQueueSessions(project, { reason: 'pump', by: 'system' }); } catch (e) { recon = { ok: false, why: String((e && e.message) || e) }; }
   const result = await pumpQueueSafe(project, 'cli');
   // B-d111：兜底补发上一条窗口内被合并的唤醒（窗口结束必发一次，不靠人再触发）。
   const flushed = await flushPendingWakes(project);
   // Owner 2026-11-14 09:15：认领后 5 分钟无状态变化 → 告警 PM（人话，含 role/taskId/claimedAt/当前状态；同任务同状态 10 分钟去重）。
   let claimStall = null;
   try { claimStall = claimStallCheck(project); } catch (e) { claimStall = { ok: false, why: String((e && e.message) || e) }; }
+  // B-bbf6：队列项滞留 >5 分钟 → 向 PM 发 escalation（同项 10 分钟去重），治「队列挂着没人知道」。
+  let queueStale = null;
+  try { queueStale = queueStaleCheck(project); } catch (e) { queueStale = { ok: false, why: String((e && e.message) || e) }; }
   // R-b5fc F-6：壳层每 60 秒调一次 queue pump，顺带检查路由守护心跳——守护挂了也要有人发现，
   // 不能等它自己报警（它已经死了）。停滞 → PM 收 wake_failed（why=daemon_stale），10 分钟去重。
   let routeStale = null;
@@ -1671,7 +1808,11 @@ export async function cmdQueue(args) {
   const detail = result.pumped
     ? `已派 ${result.message && result.message.id} → ${result.item && result.item.to}（task ${(result.item && result.item.task) || '-'}）；剩余 ${result.remaining}`
     : `未派（${result.reason || result.code || 'EMPTY'}）；剩余 ${result.remaining ?? 0}`;
-  out(args, `队列泵：${detail}${flushHint}`, { ok: result.ok !== false, ...result, flush: flushed, routeStale, decisionStale, claimStall });
+  const staleHint = queueStale && queueStale.alerted ? `；滞留告警 ${queueStale.alerted} 条（>${Math.round((queueStale.staleMs || 0) / 60000)} 分钟）` : '';
+  const reconHint = recon && recon.changed ? `；会话对齐 改投 ${recon.rebased.length} / 作废 ${recon.discarded.length}` : '';
+  out(args, `队列泵：${detail}${flushHint}${staleHint}${reconHint}`, {
+    ok: result.ok !== false, ...result, flush: flushed, routeStale, decisionStale, claimStall, queueStale, sessionReconcile: recon,
+  });
 }
 
 /**
@@ -2165,6 +2306,8 @@ function releaseDispatchLockForTask(project, taskId, { source = '' } = {}) {
   if (taskId && String(lock.task || '') !== String(taskId)) return null;
   try { fs.rmSync(dispatchLockPath(project), { force: true }); } catch { /* ignore */ }
   appendEvent({ role: 'system', action: 'dispatch_lock_released', project, target: lock.messageId, note: `task=${taskId} source=${source}` });
+  // B-bbf6 ①：锁一释放就补泵一次——不依赖壳层 60 秒定时器是否在跑，保证队列项 60 秒内被投递。
+  try { Promise.resolve().then(() => pumpQueueSafe(project, 'lock_released')).catch(() => {}); } catch { /* 泵失败不影响释放 */ }
   return lock;
 }
 

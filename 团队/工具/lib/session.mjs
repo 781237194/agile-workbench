@@ -1241,7 +1241,16 @@ export async function cmdSession(args) {
     let archiveWriteBack = null;
     try { archiveWriteBack = writeBackRotated({ projectName, role, oldSessionId: record.from || '', newSessionId: record.to || '' }); } catch { /* 回写失败不阻断轮换 */ }
     if (archiveWriteBack) lines.push(`归档回写：${archiveWriteBack.record.id} nextSessionId=${archiveWriteBack.record.nextSessionId} rotatedAt=${archiveWriteBack.record.rotatedAt}`);
-    out(args, lines.join('\n'), { ok: true, ...record, archiveWriteBack });
+    // B-bbf6 ③：换人后旧队列项要么改投新会话、要么作废并留审计——不许静默悬挂在派单队列里。
+    let queueReconcile = null;
+    try {
+      const opsMod = await import('./ops.mjs');
+      queueReconcile = opsMod.reconcileDispatchQueueSessions(projectName, { reason: `rotate:${role}`, by: 'system' });
+      if (queueReconcile && queueReconcile.changed) {
+        lines.push(`派单队列对齐：改投新会话 ${queueReconcile.rebased.length} 条，作废 ${queueReconcile.discarded.length} 条（已留审计）`);
+      }
+    } catch (e) { queueReconcile = { ok: false, why: String((e && e.message) || e) }; }
+    out(args, lines.join('\n'), { ok: true, ...record, archiveWriteBack, queueReconcile });
     return;
   }
   fail('BAD_ACTION', `会话命令只支持 usage | check | rotate | handover（收到 ${action || '(空)'}）`);
