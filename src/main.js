@@ -9,6 +9,8 @@ const { execFileSync, spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 // R-dba4 / T-3999：评审界面「大白话」持久化的纯逻辑（本文件只做 IPC 与落盘，不碰 工作流.json）。
 const ReviewCopy = require('./review-copy.js');
+// R-c1ed F-1：渲染内存采样分片 / 保留 / 取数通道（纯逻辑，Node 可测）
+const RenderMemory = require('./render-memory.js');
 
 const ROOT = path.join(__dirname, '..');
 const APP_ICON = path.join(ROOT, 'assets', 'pm-workbench.ico');
@@ -8842,6 +8844,25 @@ function registerIpc() {
     return { ok: true, row };
   });
   ipcMain.handle('app:reload-dsh', async () => reloadDshGuest());
+  // R-c1ed F-1 自检/验收通道：读窗口（§3.1 唯一取数）、采样开销统计、手动清理（= --clean 等价入口）。
+  ipcMain.handle('app:render-memory-window', async (_e, payload) => {
+    const p = payload || {};
+    const dir = renderMemoryProjectDir();
+    if (!dir) return { ok: false, code: 'STATE_DIR_UNAVAILABLE' };
+    const win = RenderMemory.readRenderMemoryWindow(dir, { atCrash: String(p.atCrash || now()), windowSec: Number(p.windowSec) || 300 });
+    const report = RenderMemory.evaluateRecoverable(win, { windowSec: Number(p.windowSec) || 300 });
+    return { ok: true, dir, lines: win.lines.length, firstAt: win.firstAt, lastAt: win.lastAt, coverageSec: win.coverageSec, gaps: win.gaps, insufficient: win.insufficient, recoverable: report };
+  });
+  ipcMain.handle('app:render-memory-stats', async () => {
+    const avg = renderMemoryState.samples ? renderMemoryState.writeMsTotal / renderMemoryState.samples : 0;
+    return {
+      ok: true, intervalMs: renderMemoryState.intervalMs, degraded: renderMemoryState.degraded,
+      samples: renderMemoryState.samples, writeMsAvg: Math.round(avg * 1000) / 1000,
+      writeMsMax: Math.round(renderMemoryState.writeMsMax * 1000) / 1000,
+      samplesNull: renderMemoryState.samplesNull, lastAt: renderMemoryState.lastAt, lastError: renderMemoryState.lastError,
+    };
+  });
+  ipcMain.handle('app:render-memory-clean', async (_e, payload) => runRenderMemoryCleanup(String((payload || {}).trigger || 'manual')));
   ipcMain.handle('app:crash-audit', async (_e, payload) => {
     // 只读：给界面/自检看最近 N 行审计（不读文件内容以外的任何东西）。
     const limit = Math.min(50, Math.max(1, Number((payload || {}).limit) || 10));
@@ -17186,6 +17207,8 @@ function recordRenderCrash(kind, details) {
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) mainWindow.webContents.send('app:render-crash', row);
   } catch { /* 渲染层不可达时静默降级，审计已落盘 */ }
   console.log('[crash]', JSON.stringify(row));
+  // R-c1ed §2.4：崩溃归档三件套（渲染崩溃/<ts>/），失败只报不影响感知与审计。
+  try { archiveRenderCrash(row); } catch (error) { console.error('[crash] 归档失败：', String((error && error.message) || error).slice(0, 160)); }
   return row;
 }
 
@@ -17202,7 +17225,191 @@ function installCrashSensors() {
   });
 }
 
-/** 一键重载 DSH 聊天区：优先 reload 内嵌 webview 的 guest（不换地址，避免 ERR_ABORTED）。 */
+/* ── R-c1ed F-1 接线：渲染内存采样（1s/降级 5s）+ 保留清理三时机 + 崩溃三件套 ──────────
+ * 口径：需求 c1ed 正文 + 增补卷-c1ed-1（§2.1 分片/§2.3 清理时机/§2.4 三件套/§3.2 采样频率）。
+ * 分工：分片与窗口读写在 src/render-memory.js（纯逻辑，已由 test-render-memory.cjs 覆盖）；
+ *       这里只做「定时器 / 落盘调用 / 清理执行 / 归档写盘 / 开销统计」。
+ * fail-open：任何采样/清理异常只打日志，不影响主流程与界面。
+ */
+function renderMemoryProjectDir() {
+  try {
+    const store = readStore();
+    const project = (store.projects || []).find((item) => item && item.id === store.activeProjectId);
+    const dir = project ? teamProjectStateDir(project) : '';
+    return dir || '';
+  } catch { return ''; }
+}
+
+const renderMemoryState = {
+  timer: null,
+  intervalMs: 1000,
+  degraded: false,
+  samples: 0,
+  writeMsTotal: 0,
+  writeMsMax: 0,
+  samplesNull: 0,
+  lastAt: '',
+  lastError: '',
+};
+
+function rendererWorkingSetRows() {
+  try {
+    const rows = app.getAppMetrics() || [];
+    return rows
+      .filter((row) => row && ['Tab', 'renderer', 'Renderer'].includes(String(row.type || '')))
+      .map((row) => ({ pid: row.pid, type: 'renderer', workingSetMB: Math.round((((row.memory && row.memory.workingSetSize) || 0)) / 1024) }));
+  } catch { return []; }
+}
+
+function writeRenderSample(cause) {
+  const dir = renderMemoryProjectDir();
+  if (!dir) return { ok: false, code: 'STATE_DIR_UNAVAILABLE' };
+  const rows = rendererWorkingSetRows();
+  const totalMB = rows.length ? rows.reduce((sum, row) => sum + (Number(row.workingSetMB) || 0), 0) : null;
+  const first = rows[0] || {};
+  try {
+    RenderMemory.appendSample(dir, {
+      at: now(),
+      pid: first.pid === undefined ? null : first.pid,
+      type: 'renderer',
+      guestUrl: null,
+      workingSetMB: totalMB,
+      cause: String(cause || 'sample'),
+    });
+    if (totalMB === null) renderMemoryState.samplesNull += 1;
+    return { ok: true, file: dir };
+  } catch (error) {
+    renderMemoryState.lastError = String((error && error.message) || error).slice(0, 160);
+    return { ok: false, code: 'SAMPLE_WRITE_FAILED', message: renderMemoryState.lastError };
+  }
+}
+
+function startRenderMemorySampler() {
+  stopRenderMemorySampler();
+  const tick = () => {
+    const started = process.hrtime.bigint();
+    try { writeRenderSample('sample'); } catch { /* fail-open */ }
+    const costMs = Number(process.hrtime.bigint() - started) / 1e6;
+    renderMemoryState.samples += 1;
+    renderMemoryState.writeMsTotal += costMs;
+    renderMemoryState.writeMsMax = Math.max(renderMemoryState.writeMsMax, costMs);
+    renderMemoryState.lastAt = now();
+    // 边界·降级：采样 >5ms 或 CPU >5% 才允许降级；这里只按写盘耗时判，降级必写 interval 行。
+    if (!renderMemoryState.degraded && costMs > 5) {
+      renderMemoryState.degraded = true;
+      renderMemoryState.intervalMs = 5000;
+      try { writeRenderSample('interval'); } catch { /* fail-open */ }
+      console.log('[render-memory] 采样降级到 5000ms（写盘耗时 ' + costMs.toFixed(2) + 'ms）');
+    }
+    renderMemoryState.timer = setTimeout(tick, renderMemoryState.intervalMs);
+    if (renderMemoryState.timer && typeof renderMemoryState.timer.unref === 'function') renderMemoryState.timer.unref();
+  };
+  renderMemoryState.timer = setTimeout(tick, 1000);
+  if (renderMemoryState.timer && typeof renderMemoryState.timer.unref === 'function') renderMemoryState.timer.unref();
+}
+
+function stopRenderMemorySampler() {
+  if (renderMemoryState.timer) { try { clearTimeout(renderMemoryState.timer); } catch { /* ignore */ } }
+  renderMemoryState.timer = null;
+}
+
+function compactStamp(iso) {
+  const text = String(iso || now());
+  return text.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+}
+
+/** §2.4 崩溃归档三件套：日志副本 / 进程快照 / crash-window.jsonl；缺一记 evidence_missing（不补造）。 */
+function archiveRenderCrash(row) {
+  const dir = renderMemoryProjectDir();
+  if (!dir) return { ok: false, code: 'STATE_DIR_UNAVAILABLE' };
+  const ts = compactStamp(row && row.at);
+  const target = path.join(dir, '渲染崩溃', ts);
+  const missing = [];
+  try {
+    fs.mkdirSync(target, { recursive: true });
+    // ②进程快照
+    let snapshot = { at: now(), metrics: [] };
+    try {
+      snapshot = { at: now(), metrics: (app.getAppMetrics() || []).map((item) => ({ pid: item.pid, type: item.type, workingSetMB: Math.round(((item.memory && item.memory.workingSetSize) || 0)) })) };
+      fs.writeFileSync(path.join(target, 'process-snapshot.json'), JSON.stringify(snapshot, null, 2) + '\n', 'utf8');
+    } catch (error) { missing.push({ file: 'process-snapshot.json', reason: String((error && error.message) || error).slice(0, 120) }); }
+    // ③崩溃窗口（§3.1 通道切最后 5 分钟，原样复制不重采样）
+    try {
+      const win = RenderMemory.readRenderMemoryWindow(dir, { atCrash: String(row && row.at || now()), windowSec: 300 });
+      fs.writeFileSync(path.join(target, 'crash-window.jsonl'), win.lines.map((line) => JSON.stringify(line)).join('\n') + (win.lines.length ? '\n' : ''), 'utf8');
+    } catch (error) { missing.push({ file: 'crash-window.jsonl', reason: String((error && error.message) || error).slice(0, 120) }); }
+    // ①DSH 崩溃日志副本（源日志可能不存在——不存在记 evidence_missing，不补造）
+    const sourceLog = String((row && row.crashLogPath) || '');
+    if (sourceLog && fs.existsSync(sourceLog)) {
+      try { fs.copyFileSync(sourceLog, path.join(target, 'crash-' + ts + '-renderer.log')); } catch (error) { missing.push({ file: 'crash-renderer.log', reason: String((error && error.message) || error).slice(0, 120) }); }
+    } else {
+      missing.push({ file: 'crash-' + ts + '-renderer.log', reason: 'evidence_missing：源崩溃日志未找到' });
+    }
+    appendRenderRetentionLine({ action: 'archive', kept: 1, removed: [], bytesFreed: 0, nextDue: '', note: path.posix.join('渲染崩溃', ts), missing });
+    return { ok: true, dir: target, missing };
+  } catch (error) {
+    return { ok: false, code: 'ARCHIVE_FAILED', message: String((error && error.message) || error).slice(0, 160) };
+  }
+}
+
+/** §2.4 清理审计：渲染保留.jsonl，一行 {at,action,kept,removed,bytesFreed,nextDue}。 */
+function appendRenderRetentionLine(extra) {
+  const dir = renderMemoryProjectDir();
+  if (!dir) return false;
+  const info = extra && typeof extra === 'object' ? extra : {};
+  const line = {
+    at: now(),
+    action: String(info.action || 'clean'),
+    kept: Number(info.kept || 0),
+    removed: Array.isArray(info.removed) ? info.removed : [],
+    bytesFreed: Number(info.bytesFreed || 0),
+    nextDue: String(info.nextDue || ''),
+  };
+  if (info.note) line.note = String(info.note);
+  if (Array.isArray(info.missing) && info.missing.length) line.missing = info.missing;
+  try {
+    fs.appendFileSync(path.join(dir, '渲染保留.jsonl'), JSON.stringify(line) + '\n', 'utf8');
+    return true;
+  } catch { return false; }
+}
+
+/** §2.3/§2.4 清理三时机之一（启动后 ≥5s / 每 24h / --clean 都调它）；只删白名单内、超保留期的对象。 */
+function runRenderMemoryCleanup(trigger) {
+  const dir = renderMemoryProjectDir();
+  if (!dir) return { ok: false, code: 'STATE_DIR_UNAVAILABLE' };
+  const plan = RenderMemory.planRetention(dir);
+  const removed = [];
+  let bytesFreed = 0;
+  for (const rel of plan.removed || []) {
+    const abs = path.join(dir, rel);
+    if (!/^渲染内存-\d{8}(-\d+)?\.jsonl$/.test(path.basename(abs))) continue; // 白名单再核一次
+    try { bytesFreed += fs.statSync(abs).size; fs.unlinkSync(abs); removed.push(rel); } catch { /* 单文件失败不影响其它 */ }
+  }
+  for (const rel of plan.crashRemoved || []) {
+    const abs = path.join(dir, rel);
+    if (!/^渲染崩溃[\\/]\d{8}T\d{6}Z?$/.test(rel)) continue;
+    try {
+      const size = (fs.readdirSync(abs) || []).reduce((sum, name) => { try { return sum + fs.statSync(path.join(abs, name)).size; } catch { return sum; } }, 0);
+      bytesFreed += size;
+      fs.rmSync(abs, { recursive: true, force: true });
+      removed.push(rel);
+    } catch { /* 单目录失败不影响其它 */ }
+  }
+  const nextDue = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+  appendRenderRetentionLine({ action: 'clean', kept: (plan.kept || []).length, removed, bytesFreed, nextDue, note: String(trigger || 'manual') });
+  console.log('[render-memory] 清理(' + String(trigger || 'manual') + ')：removed=' + removed.length + ' bytesFreed=' + bytesFreed);
+  return { ok: true, trigger: String(trigger || 'manual'), removed, bytesFreed, kept: (plan.kept || []).length, nextDue };
+}
+
+function scheduleRenderMemoryMaintenance() {
+  // ①启动后异步（≥5s，不阻塞首屏）
+  setTimeout(() => { try { runRenderMemoryCleanup('startup'); } catch { /* fail-open */ } }, 5000).unref?.();
+  // ②每 24h
+  const daily = setInterval(() => { try { runRenderMemoryCleanup('daily'); } catch { /* fail-open */ } }, 24 * 3600 * 1000);
+  if (daily && typeof daily.unref === 'function') daily.unref();
+}
+
+
 function reloadDshGuest() {
   try {
     const guests = typeof webContents.getAllWebContents === 'function' ? webContents.getAllWebContents() : [];
@@ -18439,6 +18646,11 @@ app.whenReady().then(async () => {
   app.setName(APP_NAME);
   registerIpc();
   await installDshCookie();
+  // R-c1ed F-1 接线：采样定时器 + 启动/24h 清理（自检/布局检查模式不采，避免污染证据目录与拖慢断言）。
+  if (!IS_SELFTEST && !IS_LAYOUT_CHECK) {
+    startRenderMemorySampler();
+    scheduleRenderMemoryMaintenance();
+  }
   if (IS_SELFTEST) {
     try {
       await selftest();

@@ -192,6 +192,10 @@ if (IS_BOARD_WINDOW) {
     reloadDshView: () => ipcRenderer.invoke('app:reload-dsh'),
     crashSelfTest: () => ipcRenderer.invoke('app:crash-selftest'),
     crashAudit: (payload) => ipcRenderer.invoke('app:crash-audit', payload),
+    // R-c1ed F-1：窗口取数 / 采样开销统计 / 手动清理（与 --clean 等价）
+    renderMemoryWindow: (payload) => ipcRenderer.invoke('app:render-memory-window', payload),
+    renderMemoryStats: () => ipcRenderer.invoke('app:render-memory-stats'),
+    renderMemoryClean: (payload) => ipcRenderer.invoke('app:render-memory-clean', payload),
     // 手动重新发现本机 DSH Web 端口；返回结构化结果，界面不新增假按钮。
     dshRediscover: () => ipcRenderer.invoke('dsh:rediscover'),
     dshConfigure: (baseUrl) => ipcRenderer.invoke('dsh:configure', baseUrl),
