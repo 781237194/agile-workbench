@@ -3612,6 +3612,33 @@ export async function cmdTask(args) {
       if (e && (e.code === 'MEMORY_MISSING' || e instanceof TeamError)) throw e;
       memoryGate = { ok: true, code: 'MEMORY_UNKNOWN', readable: false, why: String((e && e.message) || e) };
     }
+    // R-d225 AC3：测试任务 done 时落 acceptanceRecord.testReportGeneratedAt（报告文件 mtime，ISO8601 UTC）。
+    // 只有「报告生成时间 > 需求返工时间」才算本轮；旧报告保留但不计入（跳过推进，留审计）。
+    let testReportMeta = null;
+    if (isTestTask && preTask.requirementId) {
+      try {
+        const projObj = loadProject(b.project);
+        const outDir = path.join(projObj.path, '测试人员', '产出');
+        let newest = null;
+        for (const name of fs.readdirSync(outDir)) {
+          if (!/^测试报告-v\d+\.md$/.test(name)) continue;
+          const file = path.join(outDir, name);
+          const st = fs.statSync(file);
+          if (!newest || st.mtimeMs > newest.mtimeMs) newest = { file, name, mtimeMs: st.mtimeMs };
+        }
+        if (newest) {
+          const wfNow = readWorkflowState(b.project, { fresh: true }).state || {};
+          const reqRow = (wfNow.requirements || {})[preTask.requirementId] || {};
+          const reopenedAt = String(reqRow.lastReopenAt || reqRow.gateInvalidatedAt || '');
+          const testReportGeneratedAt = new Date(newest.mtimeMs).toISOString();
+          const stale = Boolean(reopenedAt) && Date.parse(testReportGeneratedAt) <= Date.parse(reopenedAt);
+          testReportMeta = {
+            testReport: path.relative(projObj.path, newest.file).replace(/\\/g, '/'),
+            testReportGeneratedAt, reopenedAt, stale,
+          };
+        }
+      } catch { testReportMeta = null; }
+    }
     const task = finishTask(b.project, String(args.id), b.role, args.evidence, args.note || '', {
       evidenceFiles: evidenceGate.files,
       checkedAt: evidenceGate.checkedAt,
@@ -3619,7 +3646,20 @@ export async function cmdTask(args) {
     });
     // B-384e：任务完成即释放与它绑定的派单锁（不必等回执），并记事件。
     const releasedLock = releaseDispatchLockForTask(b.project, task.id, { source: 'task_done' });
-    const requirementAdvance = advanceRequirementAfterTaskDone(b.project, task, b.role);
+    // R-d225 AC3：报告时间落任务行 acceptanceRecord；旧报告（早于返工）不计本轮、不推进需求。
+    if (isTestTask && testReportMeta) {
+      task.acceptanceRecord = { ...(task.acceptanceRecord || {}), status: 'done', by: b.role, channel: 'task_done', at: nowIso(), ...testReportMeta };
+      task.updatedAt = nowIso();
+      saveTask(b.project, task);
+    }
+    const requirementAdvance = (!testReportMeta || !testReportMeta.stale) ? advanceRequirementAfterTaskDone(b.project, task, b.role) : null;
+    if (testReportMeta && testReportMeta.stale) {
+      appendEvent({
+        role: b.role, sessionId: b.sessionId, action: 'requirement_advance_skipped', project: b.project, target: task.requirementId,
+        note: `旧测试报告不计本轮：generatedAt=${testReportMeta.testReportGeneratedAt} ≤ reopenedAt=${testReportMeta.reopenedAt}`,
+        data: { taskId: task.id, requirementId: task.requirementId, testReport: testReportMeta.testReport, testReportGeneratedAt: testReportMeta.testReportGeneratedAt, reopenedAt: testReportMeta.reopenedAt },
+      });
+    }
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'task_done', project: b.project, target: task.id, note: truncate(String(args.evidence), 120), data: { evidence: task.evidence } });
     // B-6818（T0）：完成事件自动唤醒收件人（通常是 PM），不等 PM 轮询；30 秒去抖，失败写 唤醒.jsonl。
     // B-cef3：createdBy 可能不是团队成员（route-daemon / system / 历史角色名）——
@@ -3801,8 +3841,9 @@ export function cmdMemory(args) {
 function cmdReqReopen(args) {
   const b = bootFor(args, 'req');
   const projectName = String(args.project || b.project);
-  if (!['pm', 'analyst', 'owner'].includes(String(b.role))) {
-    fail('PERMISSION_DENIED', '只有 PM / 需求分析（或 Owner）能发起需求返工', { role: b.role });
+  // R-d225 AC4：返工只允许 PM / Owner；需求分析等其他角色一律 PERMISSION_DENIED（零副作用）。
+  if (!['pm', 'owner'].includes(String(b.role))) {
+    fail('PERMISSION_DENIED', '只有 PM / Owner 能发起需求返工（其他角色一律拒绝）', { role: b.role });
   }
   const requirementId = String(args.requirement || '').trim();
   const reason = String(args.reason || '').trim();
@@ -3819,6 +3860,13 @@ function cmdReqReopen(args) {
     try { reqTask = loadTask(projectName, requirementId); } catch { reqTask = null; }
     if (!reqTask) fail('REQUIREMENT_NOT_FOUND', `需求不存在：${requirementId}`, { requirementId });
     const fromStatus0 = String((reqTask.workflow && reqTask.workflow.requirementStatus) || '');
+    // R-d225 AC4：rejected 走 iterate；accepted/terminated 是终态，给专属错误码。
+    if (fromStatus0 === 'rejected') {
+      fail('REOPEN_USE_ITERATE', `需求 ${requirementId} 当前状态 rejected：返工请走迭代入口（req iterate），reopen 不适用`, { requirementId, status: fromStatus0 });
+    }
+    if (['accepted', 'terminated'].includes(fromStatus0)) {
+      fail('REQUIREMENT_CLOSED', `需求 ${requirementId} 已收口（${fromStatus0}）：终态不得 reopen，要改须另立新需求`, { requirementId, status: fromStatus0 });
+    }
     if (!['dev_done', 'test_done'].includes(fromStatus0)) {
       fail('REOPEN_NOT_APPLICABLE', `需求 ${requirementId} 当前状态 ${fromStatus0 || '(空)'} 不适用返工（只支持 dev_done/test_done）`, { requirementId, status: fromStatus0 });
     }
@@ -3831,10 +3879,17 @@ function cmdReqReopen(args) {
   const recoverAccepted = fromStatus === 'accepted'
     && Boolean(args['recover-mispushed'])
     && acceptedDecisions.length === 0;
+  // R-d225 AC4：rejected → REOPEN_USE_ITERATE；accepted/terminated → REQUIREMENT_CLOSED（都零副作用）。
+  if (fromStatus === 'rejected') {
+    fail('REOPEN_USE_ITERATE', `需求 ${requirementId} 当前状态 rejected：返工请走迭代入口（req iterate），reopen 不适用`, { requirementId, status: fromStatus });
+  }
   if (fromStatus === 'accepted' && !recoverAccepted) {
-    fail('REOPEN_NOT_APPLICABLE', `需求 ${requirementId} 当前状态 accepted 不适用返工（只支持 dev_done/test_done）；若是误推且无 accept 决定，用 --recover-mispushed 恢复`, {
-      requirementId, status: fromStatus, allowed: ['dev_done', 'test_done'], acceptedDecisions: acceptedDecisions.length,
+    fail('REQUIREMENT_CLOSED', `需求 ${requirementId} 已收口（accepted）：终态不得 reopen，要改须另立新需求；若是误推且无 accept 决定，用 --recover-mispushed 恢复`, {
+      requirementId, status: fromStatus, acceptedDecisions: acceptedDecisions.length,
     });
+  }
+  if (fromStatus === 'terminated') {
+    fail('REQUIREMENT_CLOSED', `需求 ${requirementId} 已收口（terminated）：终态不得 reopen，要改须另立新需求`, { requirementId, status: fromStatus });
   }
   if (!['dev_done', 'test_done'].includes(fromStatus) && !recoverAccepted) {
     fail('REOPEN_NOT_APPLICABLE', `需求 ${requirementId} 当前状态 ${fromStatus || '(空)'} 不适用返工（只支持 dev_done/test_done）`, {

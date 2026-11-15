@@ -265,6 +265,18 @@ export function gateRequirementReview(row, task, projectPath) {
     };
   }
   const recorded = String(review.requirementHash || '');
+  // R-d225 F-reopen-4/AC5：返工失效标记必须被 G2 消费——返工时间晚于评审时间则一律要求重评
+  // （即使正文没变，也不能静默复用旧评审；门禁只读标记，不清标记，通过后由新记录覆盖）。
+  const reopenedAt = String((row && (row.lastReopenAt || row.gateInvalidatedAt)) || '');
+  const reviewAt = String(review.ts || review.at || '');
+  if (reopenedAt && (!reviewAt || Date.parse(reopenedAt) > Date.parse(reviewAt))) {
+    return {
+      code: 'REQ_REVIEW_REQUIRED', gate: 'G2', reason: 'reopened', missing: ['返工后需重新评审需求'],
+      requirementId: (task && task.id) || (row && row.id) || '', reopenedAt, reviewAt,
+      next: '返工后按 gateInvalidatedAt 重跑 req review',
+      message: `需求 ${(task && task.id) || ''} 已返工（${reopenedAt}），旧评审（${reviewAt || '无时间'}）不算本轮；请重跑 req review`,
+    };
+  }
   let current = { hash: '', version: '', change: '' };
   try {
     const doc = readRequirementDocVersion(projectPath, (task && task.id) || (row && row.id) || '');
@@ -407,6 +419,15 @@ export function isLegacyUnrecorded(row) {
 export function gateTestability({ projectPath, task, row }) {
   const priority = String((task && task.priority) || 'P2').toUpperCase();
   const found = findTestabilityRecord(projectPath, (task && task.id) || (row && row.id) || '', row, task);
+  // R-d225 F-reopen-4/AC5：返工把 trq.verdictStale 置 true 后，旧 testable 结论不得静默复用。
+  if (found && found.verdict === 'testable' && found.verdictStale) {
+    return {
+      code: 'TESTABILITY_REVIEW_REQUIRED', gate: 'G2.5', reason: 'stale',
+      missing: ['返工后需重做可测性评审（TR-Q）'], file: found.file, trq: found,
+      next: '返工后旧 TR-Q 结论已失效：重跑 req trq 后再开门',
+      message: `需求 ${task && task.id} 的 TR-Q 结论因返工已失效（verdictStale）；请重做可测性评审`,
+    };
+  }
   if (found && found.verdict === 'testable') return null;
   if (found && found.verdict === 'not_testable') {
     return {

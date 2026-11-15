@@ -456,7 +456,8 @@ export function planForRow(row, ctx) {
     if (!testsCur.length) return { role: 'tester', action: 'test', needTestTask: true };
     // 补单 T-eeff ④：当前轮测试任务全被终止/取消 → 不再叫 tester（否则死循环空转），交 PM 处理。
     const liveTests = testsCur.filter((t) => !['terminated', 'cancelled'].includes(String(t.status || '')));
-    if (!liveTests.length) return { skip: 'test_task_terminated', alertPm: true };
+    // R-464f AC2b：terminated 也算「存在过」——记 test_task_skipped_existing(reason=terminated)，不新建。
+    if (!liveTests.length) return { skip: 'test_task_terminated', reason: 'terminated', testTaskSkippedExisting: true, alertPm: true };
     return { role: 'tester', action: 'test' };
   }
   if (status === 'test_done') {
@@ -583,7 +584,7 @@ function withinWindow(lastAtIso, windowMs, nowMs) {
 
 // ---------- 日志 / 状态文件 ----------
 
-const LOG_FIELDS = ['at', 'event', 'source', 'requirementId', 'fromStatus', 'toStatus', 'role', 'action', 'taskId', 'gate', 'ok', 'why', 'wakeRef', 'triggerChange'];
+const LOG_FIELDS = ['at', 'event', 'source', 'requirementId', 'fromStatus', 'toStatus', 'role', 'action', 'taskId', 'gate', 'ok', 'why', 'wakeRef', 'triggerChange', 'reason'];
 
 /** 写一行路由日志（只允许 F-6 字段 + 幂等键 key，不自由加字段）。 */
 export function appendRouteLog(projectName, row) {
@@ -995,6 +996,14 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
     }
     const plan = planForRow({ ...row, id: event.requirementId }, ctx);
     if (plan.skip) {
+      // R-464f AC2b：terminated 场景的可观测事件名必须是 test_task_skipped_existing(reason=terminated)。
+      if (plan.testTaskSkippedExisting) {
+        const existingTest = tasksOf(event.requirementId, ctx.tasks || [], (t) => String(t.owner || '') === 'tester' && isCurrentRound(row, t))[0];
+        appendRouteLog(name, {
+          ...base, event: 'test_task_skipped_existing', reason: 'terminated', requirementId: event.requirementId,
+          taskId: existingTest ? existingTest.id : '', role: 'tester', action: 'test', ok: true,
+        });
+      }
       // 补单 T-f947：skip 带 reason（如 already_decided(carrier_owner_missing)）时，日志与事件都要带上。
       const skipWhy = plan.reason ? `${plan.skip}(${plan.reason})` : plan.skip;
       appendRouteLog(name, { ...base, event: 'skip', why: skipWhy, ok: plan.skip !== 'closed', ...(plan.reason ? { reason: plan.reason } : {}) });
@@ -1052,7 +1061,8 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
         continue;
       }
       if (!made.ok) {
-        appendRouteLog(name, { ...base, event: 'skip', why: `test_task_create_failed:${made.why}`, role: 'tester', action: 'test', ok: false });
+        // R-464f AC4：建失败事件名必须是 test_task_create_failed（why 里保留细分原因）。
+        appendRouteLog(name, { ...base, event: 'test_task_create_failed', why: `test_task_create_failed:${made.why}`, role: 'tester', action: 'test', ok: false });
         out.skips.push({ ...base, why: 'test_task_create_failed' });
         alertPm(name, {
           type: 'escalation',
@@ -1064,6 +1074,16 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
       }
       event.taskId = made.task.id;
       appendRouteLog(name, { ...base, event: 'test_task_created', taskId: made.task.id, role: 'tester', action: 'test', ok: true, reused: Boolean(made.reused) });
+    }
+    // R-464f AC2：第二拍（needTestTask=false 且当前轮已有测试任务）不建新任务，但必须记 test_task_skipped_existing。
+    if (String(plan.role || '') === 'tester' && String(plan.action || '') === 'test' && !plan.needTestTask) {
+      const existingTests = tasksOf(event.requirementId, ctx.tasks || [], (t) => String(t.owner || '') === 'tester' && isCurrentRound(row, t));
+      if (existingTests.length) {
+        appendRouteLog(name, {
+          ...base, event: 'test_task_skipped_existing', reason: 'existing', requirementId: event.requirementId,
+          taskId: existingTests[0].id, role: 'tester', action: 'test', ok: true, existing: existingTests.length,
+        });
+      }
     }
     // Owner 09:10：需要 Owner 决策的（含验收）进 Owner 决策箱，不靠唤醒（首唤一次即止也不做）。
     if (['accept', 'decide'].includes(String(plan.action || ''))) {
