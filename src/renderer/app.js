@@ -5596,9 +5596,21 @@ function ledgerMarkupFromView(view, options) {
   const level = count ? 'warn' : 'info';
   const projectName = String(opts.projectName || '');
   // 渲染期把项目 id 固化到按钮上：处置行可能在下一次轮询后仍留在 DOM，
-  // 而 activeProject() 可能因 store 刷新短暂为 null（测试复现：点击被「先选中项目」挡回）。
+  // 而 activeProject() 可能因 store 刷新/点项目触发 reload 而瞬时为 null（测试 v170 复现：先选中项目后仍被挡回）。
+  // 取数优先级：① 渲染这份账本用的工作流快照 id（与渲染同源）② 当前项目 ③ 页面 [data-project] 唯一项。
   const ctxProjectId = (() => {
-    try { const ap = activeProject(); return ap && ap.id ? String(ap.id) : ''; } catch { return ''; }
+    try {
+      const wf = legacyWorkflow();
+      if (wf && wf.id) return String(wf.id);
+    } catch { /* 忽略 */ }
+    try { const ap = activeProject(); if (ap && ap.id) return String(ap.id); } catch { /* 忽略 */ }
+    try {
+      const nodes = [...document.querySelectorAll('[data-project]')];
+      const ids = nodes.map((n) => String(n.getAttribute('data-project') || '')).filter(Boolean);
+      const uniq = [...new Set(ids)];
+      if (uniq.length === 1) return uniq[0];
+    } catch { /* 忽略 */ }
+    return '';
   })();
   const projAttr = ctxProjectId ? ` data-ledger-project="${esc(ctxProjectId)}"` : '';
   const head = count
