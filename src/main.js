@@ -4337,7 +4337,7 @@ function registerIpc() {
     const project = requireProject(readStore(), p.projectId);
     const name = project.teamName || project.name;
     try {
-      const out = execFileSync(process.execPath, [TEAM_MJS_PATH, 'finalize', 'status', '--project', name, '--json'], { encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
+      const out = execFileSync(process.execPath, [TEAM_MJS_PATH, 'finalize', 'status', '--project', name, '--json'], { encoding: 'utf8', stdio: 'pipe', timeout: 30000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
       return JSON.parse(String(out || '{}').trim());
     } catch (error) {
       throw codedError('FINALIZE_STATUS_FAILED', String((error && (error.stderr || error.message)) || error).slice(0, 400));
@@ -4351,7 +4351,8 @@ function registerIpc() {
     if (!token) throw codedError('PM_TOKEN_REQUIRED', '没有有效的 PM 启动令牌；请让 PM 先 boot，终验需 PM/Owner 权限');
     const args = [TEAM_MJS_PATH, 'finalize', 'run', '--project', name, '--boot', token, '--json'];
     if (p.force) args.push('--force');
-    const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 120000 });
+    // 同 ledger 处置：主进程 process.execPath 是 electron.exe，子进程必须按 Node 跑，否则命令跑完不退出。
+    const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 120000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
     if (r.status !== 0) {
       const text = String((r.stdout || '') + (r.stderr || ''));
       const code = (text.match(/\[([A-Z_]+)\]/) || [])[1] || 'FINALIZE_FAILED';
@@ -4547,15 +4548,26 @@ function registerIpc() {
       ? ['task', 'release', '--boot', boot.token, '--project', teamName, '--id', taskId, '--reason', reason, '--json']
       : ['req', 'reopen', '--boot', boot.token, '--project', teamName, '--requirement', requirementId, '--reason', reason, '--json'];
     const startedAt = Date.now();
-    const run = spawnSync(process.execPath, [ledgerTeamMjsPath(), ...commandArgs], { encoding: 'utf8', timeout: 120000 });
+    // 坑（v169 真窗口「点了没反应」的第二个根因）：主进程里 process.execPath 是 electron.exe，
+    // 不带 ELECTRON_RUN_AS_NODE=1 时会按 Electron 应用启动 team.mjs——命令跑了但进程永不退出，
+    // spawnSync 卡满 120s 超时被杀，导致「命令已执行、审计没写、IPC 挂 2 分钟、按钮一直 busy」。
+    // 与 16985 行的路由守护同一写法：显式给子进程 ELECTRON_RUN_AS_NODE=1。
+    const run = spawnSync(process.execPath, [ledgerTeamMjsPath(), ...commandArgs], {
+      encoding: 'utf8',
+      timeout: 120000,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+    });
     const rawText = String((run.stdout || '') + (run.stderr || ''));
+    const timedOut = Boolean(run.error && run.error.code === 'ETIMEDOUT');
     let parsed = null;
     const jsonAt = rawText.indexOf('{');
     if (jsonAt >= 0) { try { parsed = JSON.parse(rawText.slice(jsonAt)); } catch { parsed = null; } }
-    const ok = parsed ? parsed.ok === true : (run.status === 0);
-    const code = (parsed && parsed.code)
-      || (rawText.match(/\[([A-Z_]+)\]/) || [])[1]
-      || (ok ? 'OK' : 'LEDGER_COMMAND_FAILED');
+    const ok = timedOut ? false : (parsed ? parsed.ok === true : (run.status === 0));
+    const code = timedOut
+      ? 'LEDGER_COMMAND_TIMEOUT'
+      : ((parsed && parsed.code)
+        || (rawText.match(/\[([A-Z_]+)\]/) || [])[1]
+        || (ok ? 'OK' : 'LEDGER_COMMAND_FAILED'));
 
     // ⑧ 复读快照：处置后分叉应消失；复读失败不回滚已执行的命令，审计里照实记 null。
     let freshAfter = null;

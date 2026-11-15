@@ -5842,7 +5842,12 @@ function ledgerActionHint(code) {
     LEDGER_IPC_MISSING: '当前 preload 没有处置 IPC，重启工作台或更新版本',
     WORKFLOW_STATE_UNREADABLE: '工作流快照读不出来，先修读取再处置（零副作用）',
     REQUIREMENT_NOT_FOUND: '工作流里没有这条需求，先 req sync 登记',
-    REOPEN_NOT_APPLICABLE: '该需求当前状态不适用返工（req reopen 只接受 dev_done / test_done）'
+    REOPEN_NOT_APPLICABLE: '该需求当前状态不适用返工（req reopen 只接受 dev_done / test_done）',
+    LEDGER_ACTION_BAD_BUTTON: '按钮标记不完整（没有 data-ledger-action），界面没发起任何命令；刷新面板后重试',
+    LEDGER_ACTION_NO_PROJECT: '先在工作区里选中项目，再点处置',
+    LEDGER_ACTION_BUSY: '上一次处置还在刷新，等按钮恢复可点再点',
+    LEDGER_ACTION_DISABLED: '按钮被禁用（原因见行内说明）：先按原因处理，再处置',
+    LEDGER_COMMAND_TIMEOUT: '团队工具命令超时被中止，可能已部分执行：先看 账本处置.jsonl 再决定是否重试'
   };
   return table[key] || '';
 }
@@ -5855,15 +5860,30 @@ function ledgerActionHint(code) {
 async function ledgerActionRun(button) {
   const wb = window.workbench || null;
   const p = activeProject();
-  const el = button && button.dataset ? button : null;
-  const kind = String((el && el.ledgerAction) || '');
-  const requirementId = String((el && el.ledgerReq) || '');
-  const taskId = String((el && el.ledgerTask) || '');
+  // 坑（v169 真窗口 0 效果的根因）：data-ledger-action / -req / -task 只在 HTMLButtonElement.dataset 上，
+  // 元素本身没有 ledgerAction/ledgerReq/ledgerTask 属性；以前从元素上读 → kind 恒空 → 只 toast 直接 return，
+  // 不进 IPC、不写横幅、分叉不动。断言脚本只做源码正则，抓不到，所以必须从 dataset 读。
+  const dataset = button && button.dataset ? button.dataset : null;
+  const el = button && typeof button.closest === 'function' ? button : null;
+  const kind = String((dataset && dataset.ledgerAction) || '');
+  const requirementId = String((dataset && dataset.ledgerReq) || '');
+  const taskId = String((dataset && dataset.ledgerTask) || '');
   if (!p || !kind) {
-    toast('账本处置入口不可用：先选中项目', 'bad');
+    // F-9fbe-5：失败也必须落到 [data-ledger-banner]（只 toast 等于静默）。
+    const code = p ? 'LEDGER_ACTION_BAD_BUTTON' : 'LEDGER_ACTION_NO_PROJECT';
+    const text = p
+      ? '这个处置按钮没有带 data-ledger-action（按钮标记不完整），界面无法发起处置，没有改任何文件'
+      : '账本处置入口不可用：先选中项目';
+    ledgerActionUi.banner = { kind: 'bad', text, code };
+    ledgerActionUi.lastAt = Date.now();
+    try { ledgerRenderLedgerBlock(); } catch { /* 概览页没渲染出来时忽略 */ }
+    toast(text, 'bad');
     return;
   }
   if (ledgerActionUi.busy) {
+    ledgerActionUi.banner = { kind: 'warn', text: '上一次处置还没刷新完，等面板刷新后再点（本次没有发起任何命令）', code: 'LEDGER_ACTION_BUSY' };
+    ledgerActionUi.lastAt = Date.now();
+    try { ledgerRenderLedgerBlock(); } catch { /* 概览页没渲染出来时忽略 */ }
     toast('上一次处置还没刷新完，等面板刷新后再点', 'warn');
     return;
   }
@@ -5917,10 +5937,11 @@ async function ledgerActionRun(button) {
     ledgerActionUi.banner = { kind: 'bad', text: `处置失败，界面没有改任何文件：${msg}${hint ? `。${hint}` : ''}`, code };
     toast(`处置失败${code ? `（${code}）` : ''}：${msg}`, 'bad');
   } finally {
-    await ledgerRefreshAfterAction();
+    // busy 必须在任何异常下复位：刷新失败/渲染失败都不能把按钮永久卡在「正在处置」。
+    try { await ledgerRefreshAfterAction(); } catch { /* 刷新失败不影响复位，下一次 5 秒轮询会补上 */ }
     ledgerActionUi.busy = false;
     ledgerActionUi.busyKey = '';
-    ledgerRenderLedgerBlock();
+    try { ledgerRenderLedgerBlock(); } catch { /* 概览页/流程页都不在时忽略 */ }
   }
 }
 
@@ -15039,7 +15060,12 @@ function bind() {
     if (ledgerAction) {
       e.preventDefault();
       if (ledgerAction.disabled) {
-        toast(ledgerAction.title || '该处置按钮当前不可点（行内已写原因）', 'warn');
+        // 禁用也必须留横幅（只 toast 等于静默）；错误码固定，原因照抄行内/标题里的人话。
+        const why = String(ledgerAction.title || '该处置按钮当前不可点（行内已写原因）');
+        ledgerActionUi.banner = { kind: 'warn', text: `暂不可点：${why}`, code: 'LEDGER_ACTION_DISABLED' };
+        ledgerActionUi.lastAt = Date.now();
+        try { ledgerRenderLedgerBlock(); } catch { /* 概览页没渲染出来时忽略 */ }
+        toast(why, 'warn');
         return;
       }
       ledgerActionRun(ledgerAction);
