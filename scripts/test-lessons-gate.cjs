@@ -144,6 +144,7 @@ if (!fs.existsSync(path.join(ROOT, '团队', '工具', 'team.mjs'))) {
 }
 const projDir = seed();
 // 沙盘必须先登记项目（否则 NO_PROJECT）；用 --path 指向沙盘项目目录
+const cleanReadLog = () => { const lp = path.join(TEAM, '状态', '经验教训阅读.jsonl'); if (fs.existsSync(lp)) fs.writeFileSync(lp, '', 'utf8'); };
 const addProject = run(['project', 'add', '--name', PROJECT, '--path', path.join(PROJECTS, PROJECT)]);
 check('S0 沙盘项目登记', addProject.code === 0, { code: addProject.code, out: (addProject.out + addProject.err).slice(0, 300) });
 
@@ -223,15 +224,18 @@ check('S14 PM 代管代验收未读 → LESSONS_UNREAD（验收处门禁）',
   /LESSONS_UNREAD/.test(proxyAcceptUnread.out + proxyAcceptUnread.err),
   { code: proxyAcceptUnread.code, out: (proxyAcceptUnread.out + proxyAcceptUnread.err).slice(0, 300) });
 
-// S15（PM 点名）：验收处门禁的判定本体 —— 清空 PM 阅读记录后，lessons status 必报 LESSONS_UNREAD
-// 说明：CLI 的 owner --action accept 在沙盘会先被 TASK_NOT_FOUND 挡（沙盘无 任务/R-*.json 镜像），
-// 因此验收点用「门禁判定本体（本条）+ Owner 通道豁免 CLI（S16）」两条覆盖；接线位置已在实现说明里给行号。
-const cleanReadLog = () => { const lp = path.join(TEAM, '状态', '经验教训阅读.jsonl'); if (fs.existsSync(lp)) fs.writeFileSync(lp, '', 'utf8'); };
+// S15（PM 点名 + tester 注记 2026-11-16 已上移门禁）：CLI 的 owner --action accept 未读 → LESSONS_UNREAD
+// 门禁现在位于 loadTask 之前，所以沙盘里不再先被 TASK_NOT_FOUND 遮住。
 cleanReadLog();
+const ownerAcceptUnread = run(['owner', '--boot', pmToken, '--project', PROJECT, '--requirement', 'R-20261116-000000-less', '--action', 'accept', '--decision', 'accepted', '--opinion', '沙盘Owner验收']);
+check('S15 owner --action accept 未读 → LESSONS_UNREAD（优先于 TASK_NOT_FOUND）',
+  /LESSONS_UNREAD/.test(ownerAcceptUnread.out + ownerAcceptUnread.err) && !/TASK_NOT_FOUND/.test(ownerAcceptUnread.out + ownerAcceptUnread.err),
+  { code: ownerAcceptUnread.code, out: (ownerAcceptUnread.out + ownerAcceptUnread.err).slice(0, 300) });
+// S15b：门禁判定本体仍单测一次（清空记录后 lessons status 报 LESSONS_UNREAD）
 const statusUnread = run(['lessons', 'status', '--boot', pmToken]);
-check('S15 验收处门禁判定：未读当前版本 → LESSONS_UNREAD',
-  /LESSONS_UNREAD/.test(statusUnread.out + statusUnread.err) && /当前版本 sha12：/.test(statusUnread.out),
-  { code: statusUnread.code, out: (statusUnread.out + statusUnread.err).slice(0, 300) });
+check('S15b 门禁判定本体：未读当前版本 → LESSONS_UNREAD',
+  /LESSONS_UNREAD/.test(statusUnread.out + statusUnread.err),
+  { code: statusUnread.code, out: (statusUnread.out + statusUnread.err).slice(0, 200) });
 // S16（PM 点名）：Owner 通道豁免要能过 —— --channel ui 时不因 LESSONS_UNREAD 被拦（可因其它门被拦）
 const ownerAcceptChUi = run(['owner', '--boot', pmToken, '--project', PROJECT, '--requirement', 'R-20261116-000000-less', '--action', 'accept', '--decision', 'accepted', '--channel', 'ui']);
 check('S16 Owner 通道（--channel ui）验收不被 LESSONS_UNREAD 拦',

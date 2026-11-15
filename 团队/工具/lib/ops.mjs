@@ -5812,6 +5812,9 @@ export async function cmdOwner(args) {
       fail('SKIP_ASSESSMENT_REQUIRED', `Owner 跳过必须先有三方书面评估：缺 ${lack.join('、')}；--opinion 按「分析师：… / 产品：… / 开发：…」写`, { missing: lack, requirementId });
     }
   }
+  // R-51de F-5⑤（前置）：验收门禁放在 loadTask 之前——未读时优先报 LESSONS_UNREAD，
+  // 而不是先被 NOT_REQUIREMENT / PRODUCT_REVIEW_REQUIRED 遮住（tester 注记 2026-11-16）。
+  if (actionRaw === 'accept') failLessonGate(lessonGateFor(ownerGateBoot(args, projectName), args));
   const teamMode = projectTeamMode(project);
   const task = loadTask(projectName, requirementId);
   const defectTask = ['bug', 'scenario-bug'].includes(String(task.type || ''));
@@ -5843,8 +5846,6 @@ export async function cmdOwner(args) {
   }
   let testGate = null;
   if (actionRaw === 'accept') {
-    // R-51de F-5⑤：验收前必须读过当前版本经验教训登记册（Owner 通道豁免，见 isOwnerChannel）
-    failLessonGate(lessonGateFor(ownerGateBoot(args, projectName), args));
     // 验收前 Owner 决定必须已通过/跳过；被 Owner 打回的需求不能直接验收。
     // B-96e9：只认“当前有效”的最近一条决定（忽略早于 gateInvalidatedAt 的旧打回），不再只看 legacy ownerReview。
     const latestOwner = latestValidOwnerDecision(row);
