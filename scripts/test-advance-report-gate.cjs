@@ -150,6 +150,67 @@ writeJson(WF, wf4);
 const okReopen = runJson(['req', 'reopen', '--boot', pmToken, '--project', PROJECT, '--requirement', req4Id, '--reason', '不应允许', '--recover-mispushed']);
 ok('有 accept 决定的行 → --recover-mispushed 仍拒', Boolean(okReopen.json && okReopen.json.code === 'REOPEN_NOT_APPLICABLE'), JSON.stringify(okReopen.json && okReopen.json.code));
 
+// ---------- 跨需求误读（M-20261115-153130-d8df04）：B 的不通过报告不得挡住 A ----------
+// 两条需求都在 dev_done；A 报告 v193=通过，B 报告 v194=不通过（版本更大=项目全局最新）。
+// 期望：A 正常推到 test_done；B 被自己的报告挡住。旧实现会因"全局最新 v194"把 A 也挡住（假阳性）。
+const reqA = runJson(['task', 'create', '--boot', pmToken, '--title', '跨需求A', '--priority', 'P1', '--type', 'requirement']);
+const reqAId = reqA.json && reqA.json.task ? reqA.json.task.id : '';
+const reqB = runJson(['task', 'create', '--boot', pmToken, '--title', '跨需求B', '--priority', 'P1', '--type', 'requirement']);
+const reqBId = reqB.json && reqB.json.task ? reqB.json.task.id : '';
+const wfX = readJson(WF, { requirements: {} });
+wfX.requirements[reqAId] = { id: reqAId, title: '跨需求A', status: 'dev_done', round: 1, deliveryRound: 1, trq: { verdict: 'testable' }, createdAt: now, updatedAt: now, priority: 'P1', decisions: [{ status: 'approved', at: now }] };
+wfX.requirements[reqBId] = { id: reqBId, title: '跨需求B', status: 'dev_done', round: 1, deliveryRound: 1, trq: { verdict: 'testable' }, createdAt: now, updatedAt: now, priority: 'P1', decisions: [{ status: 'approved', at: now }] };
+writeJson(WF, wfX);
+// 用夹具把两条测试任务直接置 done（绕过 G7 报告门，隔离"推进时读报告"这一段）
+const taskDir = path.join(STATE, '任务');
+const seedDoneTestTask = (title, requirementId, reportRel) => {
+  const created = runJson(['task', 'create', '--boot', pmToken, '--title', title, '--priority', 'P1', '--type', 'task', '--owner', 'tester', '--requirement', requirementId]);
+  const id = created.json && created.json.task ? created.json.task.id : '';
+  const file = path.join(taskDir, `${id}.json`);
+  const row = readJson(file, null);
+  if (row) {
+    row.status = 'done';
+    row.doneAt = new Date().toISOString();
+    row.updatedAt = row.doneAt;
+    row.evidence = reportRel;
+    row.workflow = { ...(row.workflow || {}), stage: 'test', round: 1 };
+    writeJson(file, row);
+  }
+  return id;
+};
+const fixA = seedDoneTestTask('跨需求A 测试', reqAId, '测试人员/产出/测试报告-v193.md');
+const fixB = seedDoneTestTask('跨需求B 测试', reqBId, '测试人员/产出/测试报告-v194.md');
+writeReport('测试报告-v193.md', 'status=通过：A 的复验全 PASS', '- 结论：通过', reqAId);
+writeReport('测试报告-v194.md', 'status=不通过：B 还有 2 条未过', '- 结论：不通过', reqBId);
+const recA = runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqAId]);
+ok('跨需求：A（报告通过）正常推到 test_done', String((rowOf(reqAId) || {}).status || '') === 'test_done', String((rowOf(reqAId) || {}).status));
+ok('跨需求：A 未被 B 的不通过报告挡住（假阳性已修）', recA.code === 0, (recA.stderr || '').slice(0, 160));
+const recB = runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqBId]);
+ok('跨需求：B（自己的报告不通过）仍停在 dev_done', String((rowOf(reqBId) || {}).status || '') === 'dev_done', String((rowOf(reqBId) || {}).status));
+ok('跨需求：B 的 skipped 审计仍指向自己的报告', events().some((e) => e.action === 'requirement_advance_skipped' && String(e.target) === reqBId && /v194/.test(String(e.data && e.data.reportFile))), 'B 审计缺 v194');
+
+// ---------- 汇总报告里的「0 失败 / 失败零副作用」不得被当成不通过（v189 同类形态）----------
+const reqC = runJson(['task', 'create', '--boot', pmToken, '--title', '汇总报告夹具', '--priority', 'P1', '--type', 'requirement']);
+const reqCId = reqC.json && reqC.json.task ? reqC.json.task.id : '';
+const wfY = readJson(WF, { requirements: {} });
+wfY.requirements[reqCId] = { id: reqCId, title: '汇总报告夹具', status: 'dev_done', round: 1, deliveryRound: 1, trq: { verdict: 'testable' }, createdAt: now, updatedAt: now, priority: 'P1', decisions: [{ status: 'approved', at: now }] };
+writeJson(WF, wfY);
+seedDoneTestTask('汇总报告夹具 测试', reqCId, '测试人员/产出/测试报告-v195.md');
+fs.mkdirSync(REPORT_DIR, { recursive: true });
+fs.writeFileSync(path.join(REPORT_DIR, '测试报告-v195.md'), [
+  '---', 'doc: 04-测试报告', 'version: v195',
+  `requirement: ${reqCId}`,
+  'status: 全部通过（各单明细见对应分册）',
+  '---', '',
+  `- 需求：${reqCId}`,
+  '- 断言：`node scripts/test-doc-split.cjs` → **77 通过 / 0 失败**',
+  '- 覆盖：claim 前置门、失败零副作用与审计',
+  '- 结论：**通过**',
+  '',
+].join('\n'), 'utf8');
+const recC = runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqCId]);
+ok('汇总报告「0 失败/失败零副作用」不误判 → 仍推进到 test_done', String((rowOf(reqCId) || {}).status || '') === 'test_done', String((rowOf(reqCId) || {}).status));
+
 // ---------- 报告 ----------
 const report = { at: new Date().toISOString(), task: 'B-20261115-145830-2ae4', pass, fail, failures, results };
 const outFile = path.join(REPO, '项目', '工作台改造修复', '_tmp', 'advance-report-run.json');

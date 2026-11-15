@@ -169,31 +169,61 @@ function workflowRowFor(project, requirementId) {
  * B-2ae4 / 62b9：推进前必须**读测试报告主体结论**，不能只看任务 evidence 字符串。
  * 62b9 的 测试报告-v190.md 首行 status=不通过，但任务 evidence 里没写「不通过」→ 被误推到 test_done。
  *
- * 取报告顺序：①任务 evidenceFiles / evidence 文本里点名的 测试人员/产出/*.md；②该项目最新 测试报告-vN.md。
- * 只看报告头部（前 20 行 + status/结论/判定 行），命中 不通过/未通过/FAIL → fail；命中 通过/PASS → pass；否则 unknown。
+ * 取报告顺序：①任务 evidenceFiles / evidence 文本里点名的 测试人员/产出/*.md；
+ *             ②兜底扫 `测试人员/产出/测试报告-vN.md`，**必须属于本需求**（正文出现需求 id 或 4 位短号），
+ *                同一需求内按 -vN 降序取最新。
+ * 只看报告头部（前 20 行 + status/结论/判定 行）；命中 不通过/未通过/FAIL/失败 → fail；命中 通过/PASS → pass；否则 unknown。
+ *
+ * 2026-11-15 缺陷修复（M-20261115-153130-d8df04）：旧实现「兜底取项目全局最新 vN」会把别的需求的报告
+ * （v190=62b9 不通过）读进来挡住 b28f（v185=通过）。现在兜底必须先按 requirementId 过滤。
  */
 function readTestReportVerdict(projectName, task) {
+  const requirementId = String((task && task.requirementId) || '').trim();
+  const shortKey = requirementId ? requirementId.slice(-4).toLowerCase() : '';
   const reportPaths = [];
-  const pushUnique = (p) => {
+  const namedPaths = new Set();
+  const pushUnique = (p, taskScoped = false) => {
     const rel = String(p || '').replace(/\\/g, '/').replace(/^\.\//, '').trim();
     if (!rel) return;
     if (!/测试人员\/产出\/.+\.md$/i.test(rel) && !/测试报告|测试结论|test-report/i.test(rel)) return;
+    if (taskScoped) namedPaths.add(rel);
     if (!reportPaths.includes(rel)) reportPaths.push(rel);
   };
   const evidenceFiles = Array.isArray(task && task.evidenceFiles) ? task.evidenceFiles : [];
   for (const file of evidenceFiles) {
     if (!file) continue;
     if (file.scope === 'workspace') continue;
-    pushUnique(file.path || file.rel || file.name);
-    if (Array.isArray(file.manifest)) for (const item of file.manifest) pushUnique(item && (item.path || item.rel));
+    pushUnique(file.path || file.rel || file.name, true);
+    if (Array.isArray(file.manifest)) for (const item of file.manifest) pushUnique(item && (item.path || item.rel), true);
   }
   const evidenceText = String((task && task.evidence) || '');
   const pathMatches = evidenceText.match(/测试人员[\\/]+产出[\\/]+[^\s，,；;）)】\]]+\.md/gi) || [];
-  for (const p of pathMatches) pushUnique(p.replace(/\\/g, '/'));
+  for (const p of pathMatches) pushUnique(p.replace(/\\/g, '/'), true);
   let projectPath = '';
   try { projectPath = loadProject(projectName).path; } catch { projectPath = ''; }
   if (!projectPath) return { verdict: 'unknown', file: '', snippet: '' };
-  // 兜底：该项目最新 测试报告-vN.md（版本号最大者）
+  // 结论判定只认「结论行」：status/结论/判定/verdict 键值行；头部兜底只认强否定词
+  // （不通过/未通过/FAIL），不认裸「失败」——汇总报告里「0 失败 / 失败零副作用」这类数词/散文会被误判成不通过。
+  const FAIL_STRONG_RE = /(不通过|未通过|\bFAIL\b)/i;
+  const PASS_STRONG_RE = /(\bPASS\b|全部通过|通过)/i;
+  const CONCLUSION_RE = /^[\s>*\-`|]*?(status|结论|判定|verdict)\s*[=:：|]\s*(.*)$/i;
+  /** 一行里出现"别的需求"的 4 位短号 → 这行说的不是本需求，跳过（防汇总报告串判）。 */
+  const mentionsOtherRequirement = (line) => {
+    const hits = String(line || '').match(/R-20\d{6}-\d{6}-([0-9a-z]{4})/gi) || [];
+    if (!hits.length) return false;
+    return hits.some((h) => h.slice(-4).toLowerCase() !== shortKey);
+  };
+  /** 报告是否属于本需求：正文（前 4KB）出现完整 id 或 4 位短号。 */
+  const mentionsRequirement = (abs) => {
+    if (!requirementId) return true;
+    let head = '';
+    try { head = fs.readFileSync(abs, 'utf8').slice(0, 4000).toLowerCase(); } catch { return false; }
+    if (head.includes(requirementId.toLowerCase())) return true;
+    // 短号必须带边界（-b28f / b28f- / b28f. / （b28f）），避免 4 个字母撞词
+    if (shortKey && new RegExp(`(^|[^0-9a-z])${shortKey}([^0-9a-z]|$)`).test(head)) return true;
+    return false;
+  };
+  // 兜底：扫全部 测试报告-vN.md，**只留属于本需求的**，同需求内按 -vN 降序取最新。
   try {
     const dir = path.join(projectPath, '测试人员', '产出');
     const names = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
@@ -201,33 +231,61 @@ function readTestReportVerdict(projectName, task) {
       .map((name) => ({ name, m: /^测试报告-v(\d+)\.md$/i.exec(name) }))
       .filter((x) => x.m)
       .sort((a, b) => Number(b.m[1]) - Number(a.m[1]));
-    if (reports.length) pushUnique(path.join('测试人员', '产出', reports[0].name).replace(/\\/g, '/'));
+    for (const item of reports) {
+      const rel = path.join('测试人员', '产出', item.name).replace(/\\/g, '/');
+      // 跨需求误读修复：只认"正文提到本需求"的报告，别的需求的报告一律不参与判定
+      if (!mentionsRequirement(path.join(dir, item.name))) continue;
+      pushUnique(rel, false);
+      break; // 只要同需求最新一份
+    }
   } catch { /* 目录不存在就只靠点名的报告 */ }
-  const FAIL_RE = /(不通过|未通过|\bFAIL\b|失败)/i;
-  const PASS_RE = /(通过|\bPASS\b)/i;
   // 报告有版本：新报告覆盖旧结论——按 -vN 从大到小排（无版本号排最后），先看最新那份。
   const versionOf = (rel) => {
     const m = /-v(\d+)\.md$/i.exec(rel);
     return m ? Number(m[1]) : 0;
   };
-  const ordered = [...reportPaths].sort((a, b) => versionOf(b) - versionOf(a));
+  const ordered = [...reportPaths]
+    .filter((rel) => {
+      // 任务点名的报告优先信任（taskScoped），其余必须属于本需求
+      if (namedPaths.has(rel)) return true;
+      return mentionsRequirement(path.join(projectPath, rel));
+    })
+    .sort((a, b) => versionOf(b) - versionOf(a));
   for (const rel of ordered) {
     const abs = path.join(projectPath, rel);
     if (!fs.existsSync(abs)) continue;
     let text = '';
     try { text = fs.readFileSync(abs, 'utf8'); } catch { continue; }
     const lines = text.split(/\r?\n/);
-    const head = lines.slice(0, 20);
-    const statusLines = lines.slice(0, 200).filter((line) => /status|结论|判定|verdict/i.test(line));
-    const scan = [...statusLines, ...head].map((line) => String(line || '').trim()).filter(Boolean);
-    for (const line of scan) {
-      if (FAIL_RE.test(line)) return { verdict: 'fail', file: rel, snippet: line.slice(0, 120) };
+    const head = lines.slice(0, 20).map((line) => String(line || '').trim()).filter(Boolean);
+    // ① 先看结论行（status/结论/判定/verdict），同一份报告内"先命中先返回"
+    const conclusions = [];
+    for (const line of lines.slice(0, 200)) {
+      const m = CONCLUSION_RE.exec(String(line || ''));
+      if (!m) continue;
+      const textPart = `${m[1]}=${m[2] || ''}`.trim();
+      if (!textPart) continue;
+      conclusions.push(textPart);
     }
-    for (const line of scan) {
-      if (PASS_RE.test(line)) return { verdict: 'pass', file: rel, snippet: line.slice(0, 120) };
+    for (const line of conclusions) {
+      if (mentionsOtherRequirement(line)) continue;
+      if (FAIL_STRONG_RE.test(line)) return { verdict: 'fail', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'conclusion' };
+    }
+    for (const line of conclusions) {
+      if (mentionsOtherRequirement(line)) continue;
+      if (PASS_STRONG_RE.test(line)) return { verdict: 'pass', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'conclusion' };
+    }
+    // ② 没有结论行时兜底看头部：只认强否定/强肯定，裸「失败」不算（数词/散文会误判）
+    for (const line of head) {
+      if (mentionsOtherRequirement(line)) continue;
+      if (FAIL_STRONG_RE.test(line)) return { verdict: 'fail', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'head' };
+    }
+    for (const line of head) {
+      if (mentionsOtherRequirement(line)) continue;
+      if (PASS_STRONG_RE.test(line)) return { verdict: 'pass', file: rel, snippet: line.slice(0, 120), requirementId, basis: 'head' };
     }
   }
-  return { verdict: 'unknown', file: ordered[0] || '', snippet: '' };
+  return { verdict: 'unknown', file: ordered[0] || '', snippet: '', requirementId };
 }
 
 /**
