@@ -410,8 +410,8 @@ async function main() {
       check('⑤ 缺项条目不在 DOM（不展示）', Boolean(rowMissing && rowMissing.missing === true), rowMissing);
       const rowCount = await cdp.evaluate('document.querySelectorAll("#decision-box-list .decision-row").length');
       check('⑤ 列表只渲染 3 条完整条目', Number(rowCount) === 3, rowCount);
-      const hiddenNote = await cdp.evaluate('(function(){ const n = document.querySelector("#decision-box-list [data-decision-hidden]"); return n ? { count: n.getAttribute("data-decision-hidden"), text: n.textContent.trim() } : null; })()');
-      check('⑤ 缺项不静默：列表底部提示「另有 1 条历史条目未展示」', Boolean(hiddenNote && hiddenNote.count === '1' && /另有 1 条历史条目/.test(hiddenNote.text || '')), hiddenNote);
+      const hiddenNote = await cdp.evaluate('(function(){ const n = document.querySelector("#decision-box-list [data-decision-hidden]"); return n ? { total: n.getAttribute("data-decision-total"), shown: n.getAttribute("data-decision-shown"), count: n.getAttribute("data-decision-hidden"), text: n.textContent.trim() } : null; })()');
+      check('⑤ 缺项不静默：提示行写全「共 4/显示 3/隐藏 1」且 N=M+隐藏', Boolean(hiddenNote && hiddenNote.total === '4' && hiddenNote.shown === '3' && hiddenNote.count === '1' && /共 4 条，显示 3 条/.test(hiddenNote.text || '')), hiddenNote);
       shots.push(await shot(cdp, path.join(EVID, '01-三入口数字与七要素.png')));
       await cdp.evaluate('(function(){ if (typeof setDecisionExpanded === "function") setDecisionExpanded(false); return true; })()');
       await sleep(400);

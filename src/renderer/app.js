@@ -2911,8 +2911,10 @@ function renderDecisionFloat(data) {
   if (hiddenCount > 0) {
     const note = document.createElement('div');
     note.className = 'empty-row decision-hidden-note';
+    note.setAttribute('data-decision-total', String(allItems.length));
+    note.setAttribute('data-decision-shown', String(items.length));
     note.setAttribute('data-decision-hidden', String(hiddenCount));
-    note.textContent = `另有 ${hiddenCount} 条历史条目不满足七要素（缺来源/背景/问题/选项/默认项/影响/截止），未展示`;
+    note.textContent = `共 ${allItems.length} 条，显示 ${items.length} 条，另有 ${hiddenCount} 条历史条目不满足七要素（缺来源/背景/问题/选项/默认项/影响/截止）未展示`;
     list.appendChild(note);
   }
   // 重绘后把「正在填的草稿」放回去：刷新不该吞掉已选候选与已填意见。
@@ -2959,7 +2961,8 @@ function renderDecisionBox(data) {
   // PM 19:32「禁止静默」：抽屉版同样明说被过滤的历史条数（data-decision-hidden 供断言）。
   const hiddenCount = Math.max(0, (Array.isArray(data.items) ? data.items.length : 0) - items.length);
   if (hiddenCount > 0) {
-    box.innerHTML += `<div class="empty-row decision-hidden-note" data-decision-hidden="${hiddenCount}">另有 ${hiddenCount} 条历史条目不满足七要素，未展示</div>`;
+    const total = Array.isArray(data.items) ? data.items.length : 0;
+    box.innerHTML += `<div class="empty-row decision-hidden-note" data-decision-total="${total}" data-decision-shown="${items.length}" data-decision-hidden="${hiddenCount}">共 ${total} 条，显示 ${items.length} 条，另有 ${hiddenCount} 条历史条目不满足七要素未展示</div>`;
   }
 }
 
@@ -3203,7 +3206,9 @@ function decisionRefresh(reason) {
   return loadDecisionBox();
 }
 
-/** R-5016 §二/AC7（界面侧）：三入口数字只读同一 IPC（owner:pending-counts），界面不得自算；无 IPC 显示「待核验」。 */
+/** R-5016 §二/AC7（界面侧）：三入口数字只读同一 IPC（owner:pending-counts），界面不得自算；无 IPC 显示「待核验」。
+ *  文档写死（产品 19:32 附加项）：收起态浮标 = decisionStats().pending；抽屉顶部与胶囊 = ownerPendingCounts().decisions；
+ *  两函数不互调、前端不聚合。 */
 async function refreshOwnerPendingCounts() {
   const anchors = {
     decisions: document.getElementById('decision-box-pill'),
