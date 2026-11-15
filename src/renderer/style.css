@@ -1239,6 +1239,69 @@ html[data-theme="light"] .stage-actions .owner-review-proxy { color: #1f5f8b; bo
 /* F-b28f-3：生效中（data-proxy-state=active）与「读取代管失败」（error）必须看得出来，不许伪装成未启用。 */
 .side-float-panel .side-float-row[data-proxy-state="active"] { border-color: var(--gold); background: var(--gold-soft); color: var(--gold); font-weight: 600; }
 .side-float-panel .side-float-row[data-proxy-state="error"] { border-color: rgba(225, 139, 123, .6); color: var(--red); }
+/* ── T-e2a3（Owner 打回：四个浮块仍一直摊在屏幕上）：收起态只留一个圆形按钮 ─────────────
+   收起态 = data-float-expanded="0"：四行与决策箱节点仍在 DOM 里（display:none），锚点
+   [data-or-proxy-all]/[data-decision-box]/[data-board]/[data-flow] 都还在，只是不可见、不可点；
+   展开态把它们还原成原来的四行（28px 高、6px 行距、右边缘对齐由 align-items:flex-end 保证），
+   按钮是容器里最后一行（DOM 最后一个子元素），所以四行天然排在它上方（bottom = 按钮高度 + 8px 的观感）。
+   展开状态不持久化（刷新回收起态，见 app.js initFloatToggle）。 */
+.side-float-panel[data-float-expanded="0"] > :not(.side-float-toggle) { display: none; }
+.side-float-panel[data-float-expanded="1"] > .side-float-row { animation: side-float-in .16s ease-out both; }
+/* 只淡入、不做位移：位移会让「点开后立刻量几何」的断言（布局自检 / 测试 / Owner 现场）量到动画中的位置，
+   gap6 会随机变 0/12。淡入不影响 getBoundingClientRect，开合手感也够。 */
+@keyframes side-float-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.side-float-toggle {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--gold-line);
+  border-radius: 999px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 96%, white 4%), var(--panel));
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .42);
+  color: var(--gold-2);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.side-float-toggle:hover { border-color: var(--gold); background: var(--gold-soft); }
+.side-float-toggle:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.side-float-panel[data-float-expanded="1"] > .side-float-toggle { border-color: var(--gold); color: var(--gold); }
+.side-float-toggle-ico { font-size: 18px; line-height: 1; transform: translateY(-2px); }
+.side-float-toggle-count {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--gold);
+  color: #191b22;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 17px;
+  text-align: center;
+}
+.side-float-toggle-count[hidden] { display: none; }
+.side-float-toggle-dot {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--gold-line);
+  background: transparent;
+}
+.side-float-toggle-dot[data-float-proxy-dot="active"] { background: var(--gold); border-color: var(--gold); }
+.side-float-toggle-dot[data-float-proxy-dot="error"] { background: var(--red); border-color: var(--red); }
+@media (max-width: 980px) { .side-float-toggle { width: 42px; height: 42px; } }
 /* 浮动区的人话横幅（开启失败 / 读取失败）：绝对定位在容器上方，不占行位、不影响四行几何。 */
 .side-float-banner {
   position: absolute;

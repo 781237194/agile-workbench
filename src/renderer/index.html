@@ -632,7 +632,7 @@
        锚点（四个各一个）：data-or-proxy-all（scope=all 一键代管，沿用 7849 旧锚点，不新造 proxy-once）
        / data-decision-box / data-board / data-flow（挂在现有元素上，不造新元素）。
        原三个入口各自 fixed 的定位样式已删除（.flow-launcher / .board-launcher / .decision-float）。 -->
-  <div id="side-float" class="side-float-panel" aria-label="右下浮动入口（一键代管 / 决策箱 / 团队看板 / 流程）">
+  <div id="side-float" class="side-float-panel" data-float-expanded="0" aria-label="右下浮动入口（一键代管 / 决策箱 / 团队看板 / 流程）">
     <button id="proxy-all-launcher" class="side-float-row" type="button" data-or-proxy-all="1" data-proxy-all-state="idle" data-proxy-state="idle" aria-expanded="false" aria-label="一键代管：把评审、验收与决策箱回执的拍板权交给 PM（默认 8 小时，随时可结束）" title="一键代管：点一下先看权限说明，确认后把评审 / 验收 / 决策箱回执的拍板权交给 PM（默认 8 小时，随时可结束）">
       <span class="side-float-ico" aria-hidden="true">◎</span>
       <span class="side-float-text" data-proxy-label>一键代管</span>
@@ -665,6 +665,14 @@
     <button id="flow-launcher" class="flow-launcher side-float-row" type="button" data-flow="1" title="项目流程图（实时高亮当前阶段）" aria-expanded="false" aria-label="流程：打开项目流程图（实时高亮当前阶段）">
       <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.7"/><path d="M10.5 5.5 9.1 9.1 5.5 10.5 6.9 6.9z"/></svg>
       <span>流程</span>
+    </button>
+    <!-- T-e2a3（b28f 终验打回：四个浮块仍一直摊在屏幕上）：收起态只留这一个按钮，点开才展开上面四行。
+         数字优先取 decisionStats()（0b77 的 team:decision-stats，尚未落地时退回决策箱后端的 unread，见 app.js
+         syncFloatToggleBadge；不用前端自算）；无待决时显示代管实心/空心点。收起态四行仍在 DOM（只 display:none）。 -->
+    <button id="side-float-toggle" class="side-float-toggle" type="button" data-float-toggle="1" aria-expanded="false" aria-controls="side-float" aria-label="更多入口：一键代管 / 决策箱 / 团队看板 / 流程" title="更多入口（一键代管 / 决策箱 / 团队看板 / 流程）">
+      <span class="side-float-toggle-ico" aria-hidden="true">⋯</span>
+      <b class="side-float-toggle-count" data-float-count hidden>0</b>
+      <i class="side-float-toggle-dot" data-float-proxy-dot="idle" aria-hidden="true"></i>
     </button>
   </div>
   <section id="flow-panel" class="flow-panel" hidden aria-label="项目流程图">

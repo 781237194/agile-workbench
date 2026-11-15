@@ -9749,13 +9749,47 @@ function measureLayoutInPage() {
   // R-b28f：右下浮动小面板 #side-float 的四行几何（一键代管 / 决策箱 / 团队看板 / 流程）。
   // 四行=现有元素上的锚点，各一个（AC1）：[data-or-proxy-all] / [data-decision-box] / [data-board] / [data-flow]。
   // 这里只量几何，不点任何按钮（点击实测在 runLayoutCheck 的 clickTest 里做）。
+  // T-e2a3 顺带把容器子元素几何记进报告（gap6 变红时能一眼看出是哪两个子元素在挤）。
   const floatPanel = document.getElementById('side-float');
   const floatAnchors = ['[data-or-proxy-all]', '[data-decision-box]', '[data-board]', '[data-flow]'];
+  // T-e2a3：收起态是默认（只有 #side-float-toggle）。先量收起态：四锚点必须在 DOM 里但不可见，
+  // 判定用 hidden / rect 宽高=0 / display:none（position:fixed 元素 offsetParent 恒 null，不能用它）。
+  const floatToggleNode = document.getElementById('side-float-toggle');
+  const floatExpandedBefore = floatPanel ? String(floatPanel.getAttribute('data-float-expanded') || '') : '';
+  const floatRowVisible = (node) => {
+    if (!node) return false;
+    if (node.hidden === true) return false;
+    const rect = node.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return false;
+    return getComputedStyle(node).display !== 'none';
+  };
+  const floatCollapsedRowsHidden = floatExpandedBefore === '0'
+    && floatAnchors.every((sel) => { const node = document.querySelector(sel); return Boolean(node) && !floatRowVisible(node); });
+  const floatToggleRectBefore = floatToggleNode ? rectOf(floatToggleNode) : null;
+  const floatToggleVisible = Boolean(floatToggleRectBefore && floatToggleRectBefore.w > 0 && floatToggleRectBefore.h > 0);
+  // 几何断言在展开态量（四行 28px / 6px 行距 / 右对齐 / 不越界），量完还原回收起态。
+  if (floatToggleNode && floatExpandedBefore !== '1') floatToggleNode.click();
+  const floatExpandedNow = floatPanel ? String(floatPanel.getAttribute('data-float-expanded') || '') : '';
   const floatAnchorCounts = floatAnchors.map((sel) => document.querySelectorAll(sel).length);
   const floatRowNodes = floatAnchors.map((sel) => document.querySelector(sel));
   const floatRows = floatRowNodes.map((node) => (node ? rectOf(node) : null));
   const floatReady = Boolean(floatPanel) && floatRows.every(Boolean) && floatAnchorCounts.every((n) => n === 1);
   const floatPanelRect = floatPanel ? rectOf(floatPanel) : null;
+  const floatKidRects = floatPanel
+    ? [...floatPanel.children].map((node) => {
+      const style = getComputedStyle(node);
+      return {
+        tag: node.tagName,
+        id: node.id || '',
+        cls: String(node.className || ''),
+        hidden: node.hidden === true,
+        display: style.display,
+        marginTop: style.marginTop,
+        marginBottom: style.marginBottom,
+        ...rectOf(node)
+      };
+    })
+    : [];
   const floatGaps = [];
   for (let i = 1; i < floatRows.length; i++) {
     if (floatRows[i] && floatRows[i - 1]) floatGaps.push(floatRows[i].y - (floatRows[i - 1].y + floatRows[i - 1].h));
@@ -9802,7 +9836,16 @@ function measureLayoutInPage() {
     floatPanelGap6: floatReady && floatGaps.length === 3 && floatGaps.every((gap) => Math.abs(gap - 6) <= 1),
     proxyRowAboveDecisionBox: Boolean(floatProxyRow && floatDecisionRow && floatProxyRow.y + floatProxyRow.h <= floatDecisionRow.y),
     floatPanelNotOverTitlebar: Boolean(floatPanelRect && titlebarRect && !overlap(floatPanelRect, titlebarRect)),
+    // T-e2a3（增补卷-b28f-2 AC-2.1/2.2）：收起态默认只一个按钮、四锚点在 DOM 但不可见；点开后四行才出。
+    floatToggleVisible,
+    floatCollapsedByDefault: floatExpandedBefore === '0' && floatCollapsedRowsHidden,
+    floatExpandedAfterToggle: floatExpandedNow === '1' && floatAnchors.every((sel) => floatRowVisible(document.querySelector(sel))),
   };
+  // 还原回收起态（自检不改变用户看到的状态；展开状态本来就不持久化）。
+  if (floatToggleNode && floatExpandedBefore !== '1') {
+    floatToggleNode.click();
+    checks.floatRestoredCollapsed = String(floatPanel.getAttribute('data-float-expanded') || '') === '0';
+  }
   return {
     ok: Object.keys(checks).every((key) => checks[key]),
     viewport: { w: root.clientWidth, h: root.clientHeight },
@@ -9832,6 +9875,8 @@ function measureLayoutInPage() {
       // AC4：未读数必须在收起态也可见（这里记录胶囊上的数字与可见性）。
       decisionUnreadText: floatUnreadNode ? String(floatUnreadNode.textContent || '').trim() : '',
       decisionUnreadVisible: Boolean(floatUnreadNode && floatUnreadNode.offsetParent !== null),
+      // T-e2a3：容器子元素几何明细（gap6 变红时能直接看出是哪两个子元素在挤，不用再猜）。
+      kids: floatKidRects,
     },
   };
 }

@@ -2633,6 +2633,140 @@ function renderDecisionPill(data) {
       ? (data.message || '决策箱读不出来')
       : `需要你拍板 ${data.open || 0} 条（未读 ${unread} 条），点开逐条回执`;
   }
+  // T-e2a3：收起态那个圆形按钮上的数字跟着决策箱一起变（同一份后端读数，不做前端自算）。
+  syncFloatToggleBadge();
+}
+
+/* ── T-e2a3：右下单一可展开悬浮面板（收起态只留一个圆按钮）─────────────────────────
+   Owner 2026-11-15 13:28 验收打回「四个入口还是四个胶囊竖排=和以前一样」。
+   口径（增补卷-b28f-2 §二/§四）：
+     ①收起态是默认：只显示 #side-float-toggle，四行仍在 DOM（CSS display:none），锚点全保留；
+     ②点按钮展开 → data-float-expanded="1"，四行从按钮上方展开；再点 / 点外部 / Esc / 点看板或流程行后收起；
+     ③展开状态不持久化（刷新回收起态）；
+     ④数字优先取 decisionStats()（0b77 的 team:decision-stats，未落地时退回决策箱后端的 unread，
+       标 data-float-count-source，说明来源不是前端算的）；无待决时用代管实心/空心点。
+     ⑤无障碍：aria-expanded / aria-controls，展开焦点进首行，Esc 回按钮。 */
+function floatPanelEl() { return $('#side-float'); }
+function floatExpanded() {
+  const panel = floatPanelEl();
+  return Boolean(panel && panel.getAttribute('data-float-expanded') === '1');
+}
+function floatToggleEl() { return $('#side-float-toggle'); }
+function floatFirstRow() {
+  const panel = floatPanelEl();
+  if (!panel) return null;
+  return [...panel.querySelectorAll('.side-float-row')].find((node) => {
+    if (!node || node.disabled) return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }) || null;
+}
+function setFloatExpanded(on, options = {}) {
+  const panel = floatPanelEl();
+  const toggle = floatToggleEl();
+  if (!panel || !toggle) return false;
+  const next = Boolean(on);
+  panel.setAttribute('data-float-expanded', next ? '1' : '0');
+  toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
+  if (next) {
+    syncFloatToggleBadge();
+    if (options.focus !== false) {
+      const row = floatFirstRow();
+      if (row) { try { row.focus({ preventScroll: true }); } catch { /* ignore */ } }
+    }
+  } else if (options.focusToggle) {
+    try { toggle.focus({ preventScroll: true }); } catch { /* ignore */ }
+  }
+  return next;
+}
+/**
+ * 收起态按钮数字：优先 decisionStats().pending（0b77 的 IPC，未落地就不硬造），
+ * 其次决策箱后端返回的 unread（#decision-box[data-unread]，仍来自 team:decision-box IPC）。
+ * 两者都没有 / 读到 0 → 不显示数字，只留代管状态点。
+ */
+async function syncFloatToggleBadge() {
+  const toggle = floatToggleEl();
+  if (!toggle) return;
+  const countEl = toggle.querySelector('[data-float-count]');
+  const dotEl = toggle.querySelector('[data-float-proxy-dot]');
+  const proxyNode = document.querySelector('[data-or-proxy-all]');
+  const proxyState = proxyNode ? String(proxyNode.getAttribute('data-proxy-state') || 'idle') : 'idle';
+  if (dotEl) {
+    const dot = proxyState === 'active' ? 'active' : (proxyState === 'error' ? 'error' : 'idle');
+    dotEl.setAttribute('data-float-proxy-dot', dot);
+  }
+  let value = null;
+  let source = 'none';
+  const wb = window.workbench || {};
+  if (typeof wb.decisionStats === 'function') {
+    try {
+      const project = activeProject();
+      const result = await wb.decisionStats({ projectId: project ? project.id : '' });
+      const pending = Number(result && (result.pending !== undefined ? result.pending : (result.unread !== undefined ? result.unread : NaN)));
+      if (Number.isFinite(pending) && pending >= 0) { value = pending; source = 'decision-stats'; }
+    } catch { /* 读不到就退回决策箱读数，不静默假装 0 */ }
+  }
+  if (value === null) {
+    const box = $('#decision-box');
+    const raw = box ? box.getAttribute('data-unread') : null;
+    if (raw !== null && raw !== '' && Number.isFinite(Number(raw)) && !(box && box.getAttribute('data-degraded') === '1')) {
+      value = Number(raw);
+      source = 'decision-box';
+    }
+  }
+  toggle.setAttribute('data-float-count-source', source);
+  if (!countEl) return;
+  const n = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+  countEl.textContent = String(n);
+  countEl.hidden = n <= 0;
+  countEl.setAttribute('data-float-count-value', String(n));
+  toggle.setAttribute('aria-label', n > 0
+    ? `更多入口（一键代管 / 决策箱 / 团队看板 / 流程），待你回执 ${n} 条`
+    : '更多入口：一键代管 / 决策箱 / 团队看板 / 流程');
+}
+let floatProxyObserver = null;
+function initFloatToggle() {
+  const panel = floatPanelEl();
+  const toggle = floatToggleEl();
+  if (!panel || !toggle) return false;
+  // 默认收起（刷新也不记忆：不写 localStorage/sessionStorage）。
+  setFloatExpanded(false, { focus: false });
+  toggle.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setFloatExpanded(!floatExpanded());
+  });
+  // 点外部收起（面板里的三块浮层不受影响：它们不是"外部"）。
+  document.addEventListener('pointerdown', (event) => {
+    if (!floatExpanded()) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest('#side-float')) return;
+    if (target.closest('#decision-box-panel, #flow-panel, #board-panel, .decision-panel')) return;
+    setFloatExpanded(false);
+  }, true);
+  // Esc 收起并回按钮；展开态按 Esc 也把焦点还回去。
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !floatExpanded()) return;
+    setFloatExpanded(false, { focusToggle: true });
+  });
+  // 点「看板 / 流程 / 一键代管」完成跳转后自动收起；决策箱是就地展开自己的面板，保持不变。
+  panel.addEventListener('click', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    if (!target.closest('[data-board], [data-flow], [data-or-proxy-all]')) return;
+    setTimeout(() => { if (floatExpanded()) setFloatExpanded(false); }, 0);
+  });
+  // 代管状态点跟随 [data-or-proxy-all][data-proxy-state]（owner-review.js 是唯一写入口）。
+  if (typeof MutationObserver === 'function') {
+    const proxyNode = document.querySelector('[data-or-proxy-all]');
+    if (proxyNode) {
+      floatProxyObserver = new MutationObserver(() => { void syncFloatToggleBadge(); });
+      floatProxyObserver.observe(proxyNode, { attributes: true, attributeFilter: ['data-proxy-state', 'data-proxy-all-state'] });
+    }
+  }
+  void syncFloatToggleBadge();
+  return true;
 }
 
 function decisionChoicesOf(item) {
@@ -14712,6 +14846,8 @@ function bind() {
     if (window.workbench && typeof window.workbench.memStats === 'function') window.workbench.memStats().then(paint).catch(() => {});
   })();
   $('#board-launcher')?.addEventListener('click', toggleBoardPanel);
+  // T-e2a3：右下角收成一个可展开按钮（默认收起；点开才露出 一键代管/决策箱/看板/流程 四行）。
+  initFloatToggle();
   $('#btn-project-remove')?.addEventListener('click', removeProjectRecord);
   $('#btn-team-board-2')?.addEventListener('click', openBoardPanel);
   $('#btn-team-sync')?.addEventListener('click', syncTeamNow);
