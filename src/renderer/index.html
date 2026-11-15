@@ -122,6 +122,12 @@
 
   <div id="app">
     <div id="bridge-alert" class="bridge-alert" role="alert" hidden></div>
+    <!-- B-20261115-162904-f6c0：决策箱回执失败必须能被看见（顶部红字，不随面板收起/自动刷新消失） -->
+    <div id="decision-error-banner" class="decision-error-banner" role="alert" data-decision-error-banner hidden>
+      <b>决策箱回执失败</b>
+      <span id="decision-error-text" data-decision-error-text></span>
+      <button type="button" class="ghost small" id="decision-error-close" data-decision-error-close>知道了</button>
+    </div>
     <div class="shell-body">
       <aside id="sidebar" aria-label="工作区与六角色会话">
         <div class="sidebar-head">

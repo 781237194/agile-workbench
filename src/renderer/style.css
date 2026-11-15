@@ -90,6 +90,25 @@ button:disabled { cursor: default; }
 .bridge-alert b { color: var(--red); font-size: 10.5px; }
 .bridge-alert span { color: var(--muted); }
 body.bridge-down .shell-body { opacity: .78; }
+/* B-20261115-162904-f6c0：决策箱回执失败横幅——顶部红字，收起面板也要看得见 */
+.decision-error-banner {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin: 8px 10px 0;
+  padding: 8px 11px;
+  border: 1px solid rgba(225, 139, 123, .65);
+  border-radius: 8px;
+  background: rgba(225, 139, 123, .18);
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.55;
+}
+.decision-error-banner b { color: var(--red); font-size: 10.5px; }
+.decision-error-banner span { color: var(--red); }
+.decision-error-banner button { margin-left: auto; }
 [hidden] { display: none !important; }
 button:focus-visible, [tabindex]:focus-visible {
   outline: 2px solid var(--gold-line);

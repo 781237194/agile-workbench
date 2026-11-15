@@ -2566,7 +2566,7 @@ async function loadRoleQueue(opts = {}) {
 // R-9db6 F-1 / T-d2ee：Owner 决策箱。主入口是主界面右下角 #decision-box 浮层（Owner 2026-11-14 13:15 定），
 // 团队台抽屉（#decision-box-drawer）保留作次入口。放入只有 PM 能做（团队工具 decision add），
 // Owner 在这里逐条/批量回执（走壳层 team:decision-receipt；通道没接上时只提示、不提交）。
-const DECISION_FLOAT_STATE = { data: null, expanded: false };
+const DECISION_FLOAT_STATE = { data: null, expanded: false, drafts: {}, submitting: 0, error: '' };
 
 // 摘要裁剪：app.js 里原先没有 clip60（8a9a 抽屉版引用它 → 读箱一直报 "clip60 is not defined"），这里补上。
 function clip60(text, n = 60) {
@@ -2842,7 +2842,7 @@ function decisionRowMarkup(item) {
     ? `<div class="decision-choices" data-decision-choices>${decisionChoicesOf(item).map((o) => `<button type="button" class="decision-opt" data-decision-opt="${esc(o)}">${esc(o)}</button>`).join('')}</div>
        <div class="decision-reply">
          <input class="decision-opinion" data-decision-opinion maxlength="500" placeholder="意见（≤500 字；选“打回”必填）">
-         <button type="button" class="ghost small" data-decision-submit disabled>回执 PM</button>
+         <button type="button" class="ghost small" data-decision-submit data-decision-submit-state="idle">回执 PM</button>
        </div>`
     : (item.decision && item.decision.choice
       ? `<div class="decision-line decision-decided">已回执：${esc(item.decision.choice)}${item.decision.opinion ? ' ｜ 意见：' + esc(item.decision.opinion) : ''}</div>`
@@ -2866,6 +2866,9 @@ function renderDecisionFloat(data) {
   const unreadEl = $('#decision-box-unread');
   const box = $('#decision-box');
   if (!list) return;
+  // B-20261115-162904-f6c0：回执提交中不重绘——自动刷新（fs.watch + 15 秒轮询）会在点选与提交之间
+  // 把候选选中态/已填意见整块抹掉，Owner 看到的就是「点了没反应」。提交完成后再统一刷新。
+  if (DECISION_FLOAT_STATE.submitting > 0) return;
   const items = Array.isArray(data.items) ? data.items : [];
   const openCount = items.filter((item) => String(item.status || 'open') === 'open').length;
   const unreadCount = Math.max(0, Number(data.unread || 0));
@@ -2888,6 +2891,8 @@ function renderDecisionFloat(data) {
     return;
   }
   list.innerHTML = items.map((item) => decisionRowMarkup(item)).join('');
+  // 重绘后把「正在填的草稿」放回去：刷新不该吞掉已选候选与已填意见。
+  decisionRestoreDrafts();
 }
 
 function renderDecisionBox(data) {
@@ -2949,6 +2954,40 @@ function decisionSetError(row, text) {
   if (!el) return;
   el.textContent = text || '';
   el.hidden = !text;
+}
+
+/** B-20261115-162904-f6c0：顶部红色横幅——行内错误会被自动刷新/收起面板吞掉，失败必须有持久可见的落点。 */
+function decisionSetBanner(text) {
+  DECISION_FLOAT_STATE.error = String(text || '');
+  const el = $('#decision-error-banner');
+  const textEl = $('#decision-error-text');
+  if (el) el.hidden = !DECISION_FLOAT_STATE.error;
+  if (textEl) textEl.textContent = DECISION_FLOAT_STATE.error || '';
+}
+
+/** 草稿：刷新重绘后把「已选候选 + 已填意见」放回去（否则 Owner 点选后一刷新就没了）。 */
+function decisionSaveDraft(row) {
+  const p = decisionPayloadOf(row);
+  if (!p.id) return;
+  if (!p.choice && !p.opinion) { delete DECISION_FLOAT_STATE.drafts[p.id]; return; }
+  DECISION_FLOAT_STATE.drafts[p.id] = { choice: p.choice, opinion: p.opinion };
+}
+
+function decisionRestoreDrafts() {
+  const list = $('#decision-box-list');
+  if (!list) return;
+  for (const row of list.querySelectorAll('.decision-row')) {
+    const id = row.getAttribute('data-decision-id') || '';
+    const draft = DECISION_FLOAT_STATE.drafts[id];
+    if (!draft) continue;
+    if (draft.choice) {
+      for (const opt of row.querySelectorAll('.decision-opt')) {
+        opt.classList.toggle('selected', opt.getAttribute('data-decision-opt') === draft.choice);
+      }
+    }
+    const input = row.querySelector('[data-decision-opinion]');
+    if (input && draft.opinion) input.value = draft.opinion;
+  }
 }
 
 function decisionPayloadOf(row) {
@@ -3050,19 +3089,36 @@ function decisionRowById(id) {
 async function decisionSubmitOne(row) {
   const p = decisionPayloadOf(row);
   const why = decisionWhyOf(p);
-  if (why) { decisionSetError(row, why); return false; }
-  const btn = row.querySelector('[data-decision-submit]');
-  if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
-  const out = await decisionAckSend([{ id: p.id, choice: p.choice, opinion: p.opinion }]);
-  if (!out.ok) {
-    if (btn) { btn.disabled = false; btn.textContent = '回执 PM'; }
-    decisionSetError(row, `没提交成功：${out.message || out.code}（${out.code}）`);
+  if (why) {
+    decisionSetError(row, why);
+    decisionSetBanner(why);
     return false;
   }
-  const result = (Array.isArray(out.results) ? out.results : []).find((r) => r && r.id === p.id) || null;
-  decisionApplyResult(row, p, result);
-  decisionApplyCounts(out.counts);
-  return true;
+  const btn = row.querySelector('[data-decision-submit]');
+  DECISION_FLOAT_STATE.submitting += 1;
+  if (btn) { btn.disabled = true; btn.textContent = '提交中…'; btn.setAttribute('data-decision-submit-state', 'busy'); }
+  try {
+    const out = await decisionAckSend([{ id: p.id, choice: p.choice, opinion: p.opinion }]);
+    if (!out.ok) {
+      const text = `没提交成功：${out.message || out.code}（${out.code}）`;
+      if (btn) { btn.disabled = false; btn.textContent = '回执 PM'; btn.setAttribute('data-decision-submit-state', 'error'); }
+      decisionSetError(row, text);
+      decisionSetBanner(text);
+      decisionSaveDraft(row); // 草稿保留，排错后可再点一次
+      return false;
+    }
+    const result = (Array.isArray(out.results) ? out.results : []).find((r) => r && r.id === p.id) || null;
+    delete DECISION_FLOAT_STATE.drafts[p.id];
+    decisionSetBanner('');
+    decisionApplyResult(row, p, result);
+    decisionApplyCounts(out.counts);
+    return true;
+  } finally {
+    DECISION_FLOAT_STATE.submitting = Math.max(0, DECISION_FLOAT_STATE.submitting - 1);
+    if (btn) btn.setAttribute('data-decision-submit-state', 'idle');
+    // 提交结束用磁盘真值回填（成功是 answered，失败仍是 open——绝不前端自己标「已回执」）。
+    void loadDecisionBox();
+  }
 }
 
 /** 浮层交互（只绑一次）：胶囊开关、候选选择、单条回执。
@@ -3073,6 +3129,15 @@ function bindDecisionFloat() {
   box.dataset.bound = '1';
   $('#decision-box-pill')?.addEventListener('click', () => setDecisionExpanded(!DECISION_FLOAT_STATE.expanded));
   $('#decision-box-close')?.addEventListener('click', () => setDecisionExpanded(false));
+  $('#decision-error-close')?.addEventListener('click', () => decisionSetBanner(''));
+  // 意见输入也存草稿：自动刷新重绘后不丢已填内容。
+  box.addEventListener('input', (event) => {
+    const target = event.target;
+    if (!target || !target.closest) return;
+    if (!target.closest('[data-decision-opinion]')) return;
+    const row = target.closest('.decision-row');
+    if (row) decisionSaveDraft(row);
+  });
   box.addEventListener('click', async (event) => {
     const target = event.target;
     if (!target || !target.closest) return;
@@ -3085,6 +3150,8 @@ function bindDecisionFloat() {
       const submit = row ? row.querySelector('[data-decision-submit]') : null;
       if (submit) submit.disabled = false;
       decisionSetError(row, '');
+      decisionSetBanner('');
+      if (row) decisionSaveDraft(row);
       return;
     }
     const one = target.closest('[data-decision-submit]');
