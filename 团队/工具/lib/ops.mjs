@@ -298,6 +298,28 @@ function segmentLinesForRequirement(text, requirementId, shortKey, knownKeys) {
   return picked;
 }
 
+// B-c69e：报告结论关键词不识别否定句（「不构成不通过 / 无 FAIL / 0 失败」被误判 fail）。
+// 模块级 helper：判负前先剔除否定短语与零值短语，剩下的文本里出现强否定词才算 fail；
+// readTestReportVerdict 与 task done 证据备注校验共用本函数。
+const FAIL_STRONG_RE_M = /(不通过|未通过|\bFAIL\b)/i;
+const NEGATED_FAIL_RE = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/gi;
+const ZERO_FAIL_RE = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/gi;
+const FAIL_ZERO_RE = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
+const FAIL_ZERO2_RE = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
+const NEGATED_FAIL_TEST = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/i;
+const ZERO_FAIL_TEST = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/i;
+const FAIL_ZERO_TEST = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/i;
+const FAIL_ZERO2_TEST = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/i;
+function hasNegatedFailPhrase(text) {
+  const t = String(text || '');
+  return NEGATED_FAIL_TEST.test(t) || ZERO_FAIL_TEST.test(t) || FAIL_ZERO_TEST.test(t) || FAIL_ZERO2_TEST.test(t);
+}
+function failVerdictText(text) {
+  let t = String(text || '');
+  t = t.replace(NEGATED_FAIL_RE, '（否定靶词）').replace(ZERO_FAIL_RE, '（零靶词）');
+  t = t.replace(FAIL_ZERO_RE, '（零靶词）').replace(FAIL_ZERO2_RE, '（零靶词）');
+  return FAIL_STRONG_RE_M.test(t);
+}
 export function readTestReportVerdict(projectName, task) {
   const requirementId = String((task && task.requirementId) || '').trim();
   const shortKey = requirementId ? requirementId.slice(-4).toLowerCase() : '';
@@ -329,20 +351,6 @@ export function readTestReportVerdict(projectName, task) {
   const PASS_STRONG_RE = /(\bPASS\b|全部通过|通过)/i;
   const CONCLUSION_RE = /^[\s>*\-`|]*?(status|结论|判定|verdict)\s*[=:：|]\s*(.*)$/i;
   const TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
-  // B-c69e：关键词扫描不识别否定句（「不构成不通过 / 无 FAIL / 0 失败」会被误判 fail）。
-  // 判负前先剔除否定短语与零值短语；剩下的文本里出现强否定词才算 fail。
-  const NEGATED_FAIL_RE = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/gi;
-  const ZERO_FAIL_RE = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/gi;
-  const FAIL_ZERO_RE = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
-  const FAIL_ZERO2_RE = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
-  const NEGATED_FAIL_TEST = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/i;
-  const ZERO_FAIL_TEST = /(?:无|没有|零|0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/i;
-  const FAIL_ZERO_TEST = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/i;
-  const FAIL_ZERO2_TEST = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/i;
-  const hasNegatedFailPhrase = (text) => {
-    const t = String(text || '');
-    return NEGATED_FAIL_TEST.test(t) || ZERO_FAIL_TEST.test(t) || FAIL_ZERO_TEST.test(t) || FAIL_ZERO2_TEST.test(t);
-  };
   const failVerdictText = (text) => {
     let t = String(text || '');
     t = t.replace(NEGATED_FAIL_RE, '（否定靶词）').replace(ZERO_FAIL_RE, '（零靶词）');
