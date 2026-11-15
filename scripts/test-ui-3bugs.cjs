@@ -23,6 +23,10 @@ const PORT = Number(process.env.AWB_UI3_PORT || 9433);
 const EVID = path.join(ROOT, '项目', PROJECT, '程序员B', '产出', '证据-ui3bugs');
 const REQ_OK = 'R-20261115-121640-9f3e';
 const REQ_GHOST = 'R-20261115-133827-253b';
+// PM 2026-11-16 06:31：无门保护区两条夹具（造数据，不依赖真实库）——
+// S7 真待决不能被静默隐藏；S8 approved 但 decisions=[] 走 ownerReview 回退口径。
+const REQ_WAIT = 'R-20261116-999901-wait';
+const REQ_NODEC = 'R-20261116-999902-nodec';
 
 const results = [];
 const log = [];
@@ -114,6 +118,18 @@ function seed() {
         ownerReview: { status: 'approved', at: '2026-11-15T04:55:08.986Z', channel: 'ui', actor: 'owner', decidedBy: 'owner', by: 'Owner' },
         decisions: [{ status: 'approved', at: '2026-11-15T04:55:08.986Z', channel: 'ui', actor: 'owner', by: 'Owner' }],
       },
+      // S7：owner_review + ownerReview.status=pending + decisions=[] → 必须仍进「等你决定」（防「有 ownerReview 就 return running」的回归）。
+      [REQ_WAIT]: {
+        id: REQ_WAIT, title: '夹具：真待决（不能静默隐藏）', status: 'owner_review', createdAt: nowIso,
+        ownerReview: { status: 'pending' },
+        decisions: [],
+      },
+      // S8：ownerReview.status=approved 但 decisions=[] → decidedStatusOf 回退 ownerReview.status=approved → running。
+      [REQ_NODEC]: {
+        id: REQ_NODEC, title: '夹具：approved 无 decisions', status: 'approved', createdAt: nowIso,
+        ownerReview: { status: 'approved', at: '2026-11-16T00:00:00.000Z' },
+        decisions: [],
+      },
     },
   };
   fs.writeFileSync(path.join(STATE_DIR, '工作流.json'), JSON.stringify(wf, null, 2) + '\n', 'utf8');
@@ -187,6 +203,23 @@ async function launch(port) {
       return { unregistered: row.getAttribute('data-or-unregistered'), text: row.textContent || '' };
     })()`);
     check('② 未登记需求在弹窗内可见并标「未登记·不可评审」', Boolean(ghost && /未登记/.test(ghost.text || '')), ghost);
+
+    // S7（PM 06:31）：无门保护区——owner_review + pending + decisions=[] 必须仍进「等你决定」。
+    const s7 = await cdp.evaluate(`(function(){
+      const row=document.querySelector('[data-owner-all-item][data-or-req="${REQ_WAIT}"]');
+      if(!row) return {missing:true};
+      return { bucket: row.getAttribute('data-or-bucket'), text: row.textContent || '' };
+    })()`);
+    check('S7 真待决（owner_review+pending+无 decisions）仍在「等你决定」组', Boolean(s7 && s7.bucket === 'pending'), s7);
+
+    // S8（PM 06:31）：approved 但 decisions=[] → 回退 ownerReview.status=approved → 不落 pending。
+    const s8 = await cdp.evaluate(`(function(){
+      const row=document.querySelector('[data-owner-all-item][data-or-req="${REQ_NODEC}"]');
+      if(!row) return {missing:true};
+      const badge=row.querySelector('[data-or-status-badge]');
+      return { bucket: row.getAttribute('data-or-bucket'), text: (badge&&badge.textContent)||row.textContent||'' };
+    })()`);
+    check('S8 approved 无 decisions → 回退 ownerReview.status，落 running 且徽标已通过', Boolean(s8 && s8.bucket === 'running' && /已通过/.test(s8.text || '')), s8);
 
     // 打开决策箱：先点右下浮标，再点胶囊
     await cdp.evaluate("(function(){ const t=document.querySelector('#side-float-toggle'); if(t) t.click(); return 'ok'; })()");
