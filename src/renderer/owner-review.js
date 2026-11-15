@@ -966,11 +966,37 @@
     return box;
   }
 
+  /**
+   * R-5550（T-c79f）：看板五要素的唯一取数。
+   * ①需求行有 dba4 的持久化 copy（真相源）→ 四块大白话优先用它（what/how/impact/advice），
+   *   blocked 仍取正文派生（copy 没有「卡在哪」这一块，不强塞）；
+   * ②行上没有 copy → 退回 R-5550 的正文结构化解析（acBoard），语义全部来自正文、程序不编。
+   * 返回 { acBoard, fromCopy } 供调用方标 data-copy-source。
+   */
+  function boardFieldsFor(req) {
+    const off = (typeof window !== 'undefined' && window.__AWB_AC_BOARD_OFF);
+    const acBoard = (!off && ACP) ? ACP.boardFieldsOf(req) : null;
+    const copy = storedCopyOf(req);
+    if (!copy) return { acBoard, fromCopy: false };
+    const text = (value) => String(value === null || value === undefined ? '' : value).trim();
+    const merged = {
+      acId: acBoard ? acBoard.acId : ((req && req.id) || ''),
+      what: text(copy.what) || (acBoard ? acBoard.what : ''),
+      how: text(copy.how) || (acBoard ? acBoard.how : ''),
+      impact: text(copy.impact) || (acBoard ? acBoard.impact : ''),
+      advice: text(copy.advice) || (acBoard ? acBoard.advice : ''),
+      blocked: acBoard ? acBoard.blocked : ''
+    };
+    const anyCopy = ['what', 'how', 'impact', 'advice'].some((k) => text(copy[k]));
+    return { acBoard: anyCopy ? merged : acBoard, fromCopy: anyCopy };
+  }
+
   function renderAllRow(req) {    const id = String(req.id || '');
     const pending = isPending(req);
     const proxyActive = isProxied(req);
-    // R-5550 AC5 / F-5550-4：看板五要素与弹窗同源——同一条需求同一次解析（row.__ac），不再有第二套取数。
-    const acBoard = (ACP && !(typeof window !== 'undefined' && window.__AWB_AC_BOARD_OFF)) ? ACP.boardFieldsOf(req) : null;
+    // R-5550 AC5 / F-5550-4：看板五要素与弹窗同源——同一条需求同一次取数（行 copy 优先，其次正文结构化）。
+    const board = boardFieldsFor(req);
+    const acBoard = board.acBoard;
     const what = acBoard ? clip60(acBoard.what, 80) : clip60(humanizeTitle(req.title), 80);
     const blocked = acBoard ? clip60(acBoard.blocked, 120) : clip60(blockedTextOf(req, pending, proxyActive));
     // B-d1e5：这里以前是三段硬编码（通过/打回、验收通过/打回、先不动），Owner 看到的「清一色」就是它。
@@ -2158,8 +2184,9 @@
     rows.forEach((req, index) => {
       const pending = isPending(req);
       const proxyActive = isProxied(req);
-      // R-5550 AC5：看板与弹窗同一解析结果（row.__ac 在 loadData/renderDialog 里统一算），不再另取一套。
-      const acBoard = (ACP && !(typeof window !== 'undefined' && window.__AWB_AC_BOARD_OFF)) ? ACP.boardFieldsOf(req) : null;
+      // R-5550 AC5：看板与弹窗同一取数（行 copy 优先，其次正文结构化解析），不再另取一套。
+      const board = boardFieldsFor(req);
+      const acBoard = board.acBoard;
       const what = acBoard ? clip60(acBoard.what) : clip60(humanizeTitle(req.title));
       const how = acBoard ? clip60(acBoard.how) : clip60(howTextOf(req));
       const advice = acBoard ? clip60(acBoard.advice) : clip60(adviceTextOf(req, pending));
@@ -2169,6 +2196,8 @@
       const fullText = String((req && (req.detail || req.story || req.acceptance || req.acceptanceCriteria)) || '').trim();
       const item = el('button', 'or-item or-board-item');
       item.type = 'button';
+      // R-5550（T-c79f）：看板五要素的取数来源（row=需求行 copy / derived=正文结构化解析），便于测试断言。
+      item.setAttribute('data-board-copy-source', board.fromCopy ? 'row' : 'derived');
       item.setAttribute('data-owner-board-item', '1');
       item.setAttribute('data-or-req', String(req.id || ''));
       item.setAttribute('data-what', what);
