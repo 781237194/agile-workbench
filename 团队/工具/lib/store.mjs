@@ -19,6 +19,23 @@ export const PHASE_PILOT = 'pilot';
 // 默认 8 小时覆盖一个完整工作日；旧项目配置的 30 分钟一次性迁移到 480。
 export const DEFAULT_BOOT_TTL_MINUTES = 480;
 export const LEGACY_BOOT_TTL_MINUTES = 30;
+// B-20261115-152338-9c49：提案暂存单文件上限（代码类）。旧值 64KB 让 ops.mjs/main.js 这类共享层大文件永远进不了提案通道，
+// 只能绕维修模式（无签字链）。新默认 8MB，可用 TEAM_CODE_MAX_BYTES 覆盖；团队.json 里的历史默认 65536 读取时按新默认归一。
+export const LEGACY_CODE_MAX_BYTES = 65536;
+export const DEFAULT_CODE_MAX_BYTES = 8 * 1024 * 1024;
+
+/** 历史团队配置里的 65536 视为「未设置」，按新默认（或 env）解释；显式设成其它值则尊重原值。 */
+export function codeMaxBytesFor(config) {
+  const envMax = Number(process.env.TEAM_CODE_MAX_BYTES);
+  if (Number.isFinite(envMax) && envMax > 0) return envMax;
+  const raw = Number(config && config.codeMaxBytes);
+  if (Number.isFinite(raw) && raw > 0 && raw !== LEGACY_CODE_MAX_BYTES) return raw;
+  return DEFAULT_CODE_MAX_BYTES;
+}
+
+// 记录「由归一 shim 抬到新默认」的 team 对象：写回时还原成旧值，保证 团队.json 不变
+// （teamConfig 哈希参与 rulesHash，写盘会让全员 boot 令牌失效；本次修复不制造无谓的 RULES_CHANGED）。
+const codeMaxShimmed = new WeakSet();
 
 /**
  * 项目团队模式：项目.json 的 teamMode 优先；老项目没有就回退 workspace.json；
@@ -289,7 +306,7 @@ export function defaultTeam() {
       reconcileReportMaxKB: 8,
       bootBriefMaxChars: 2000,
       docMaxBytes: 16384,
-      codeMaxBytes: 65536,
+      codeMaxBytes: DEFAULT_CODE_MAX_BYTES,
       maxStagedBytes: 2 * 1024 * 1024,
       proposalStaleHours: 24,
       taskDueWarnHours: 24,
@@ -369,11 +386,25 @@ export function loadTeam() {
   if (!exists(PATHS.team)) fail('NO_TEAM', `团队未初始化：${PATHS.team}`, { hint: 'node 团队\\工具\\team.mjs init' });
   const team = readJson(PATHS.team);
   if (!team.version || !Array.isArray(team.members)) fail('BAD_TEAM', '团队配置格式不对', { path: PATHS.team });
-  return migrateLegacyBootTtl(team);
+  const migrated = migrateLegacyBootTtl(team);
+  if (migrated && migrated.config && typeof migrated.config === 'object') {
+    const effective = codeMaxBytesFor(migrated.config);
+    if (Number(migrated.config.codeMaxBytes) !== effective) {
+      migrated.config.codeMaxBytes = effective;
+      codeMaxShimmed.add(migrated);
+    }
+  }
+  return migrated;
 }
 
 export function saveTeam(team) {
-  return writeJson(PATHS.team, team);
+  // 归一值不落盘（见 codeMaxShimmed 注释）：只把 shim 抬过的对象还原成历史值，其它情况原样写。
+  let outgoing = team;
+  if (team && codeMaxShimmed.has(team)) {
+    outgoing = { ...team, config: { ...(team.config || {}) } };
+    if (Number(outgoing.config.codeMaxBytes) === codeMaxBytesFor({})) outgoing.config.codeMaxBytes = LEGACY_CODE_MAX_BYTES;
+  }
+  return writeJson(PATHS.team, outgoing);
 }
 
 export function mutateTeam(fn) {

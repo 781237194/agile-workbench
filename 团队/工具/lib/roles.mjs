@@ -135,7 +135,9 @@ export const LIMITS = {
   reviewCommentMaxChars: 600,
   bootBriefMaxChars: 2000,
   docMaxBytes: 16384,
-  codeMaxBytes: 65536,
+  // B-20261115-152338-9c49：提案暂存「代码类」单文件上限按实际大小放宽（64KB → 8MB）。
+  // 只影响「能否暂存」，不改 sensitive/critical 的评审/签字/owner 终端批准门槛；env TEAM_CODE_MAX_BYTES 可覆盖（store.codeMaxBytesFor）。
+  codeMaxBytes: 8 * 1024 * 1024,
   roleIndexMaxBytes: 8192,
 };
 
