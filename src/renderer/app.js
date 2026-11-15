@@ -2906,6 +2906,15 @@ function renderDecisionFloat(data) {
     return;
   }
   list.innerHTML = items.map((item) => decisionRowMarkup(item)).join('');
+  // PM 19:32 + 项目「禁止静默」口径：缺项历史条目被过滤时必须明说，不能静默隐藏。
+  const hiddenCount = Math.max(0, allItems.length - items.length);
+  if (hiddenCount > 0) {
+    const note = document.createElement('div');
+    note.className = 'empty-row decision-hidden-note';
+    note.setAttribute('data-decision-hidden', String(hiddenCount));
+    note.textContent = `另有 ${hiddenCount} 条历史条目不满足七要素（缺来源/背景/问题/选项/默认项/影响/截止），未展示`;
+    list.appendChild(note);
+  }
   // 重绘后把「正在填的草稿」放回去：刷新不该吞掉已选候选与已填意见。
   decisionRestoreDrafts();
 }
@@ -2947,6 +2956,11 @@ function renderDecisionBox(data) {
       <div class="decision-actions">${src}<span class="muted">放入于 ${esc(fmtTime(item.createdAt) || '未记')}</span></div>
     </div>`;
   }).join('');
+  // PM 19:32「禁止静默」：抽屉版同样明说被过滤的历史条数（data-decision-hidden 供断言）。
+  const hiddenCount = Math.max(0, (Array.isArray(data.items) ? data.items.length : 0) - items.length);
+  if (hiddenCount > 0) {
+    box.innerHTML += `<div class="empty-row decision-hidden-note" data-decision-hidden="${hiddenCount}">另有 ${hiddenCount} 条历史条目不满足七要素，未展示</div>`;
+  }
 }
 
 /** 收起/展开浮层（默认收起，只显示胶囊）。 */
