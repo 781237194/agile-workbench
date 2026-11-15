@@ -95,6 +95,89 @@ Promise.all([new Promise((res) => p1.on('exit', res)), new Promise((res) => p2.o
   const boots2 = pmMessages().filter((m) => m.type === 'boot_failed').length;
   check('④ 同 dedupeKey 再次失败不重复发（窗口内仍 1 条）', boots2 === 1, boots2);
 
+  // ── ⑤ B-5989：四类触发归因（trigger 不再恒 stale）──────────────────────
+  // auto-boot.mjs 是 ESM，本脚本是 CJS：用子进程探针跑（env 带 TEAM_ROOT）。
+  const AUTO_URL = require('node:url').pathToFileURL(path.join(TEAM_ROOT, '工具', 'lib', 'auto-boot.mjs')).href;
+  function askAutoBoot(code) {
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', `import * as m from '${AUTO_URL}';\n${code}`], { cwd: SB, env, encoding: 'utf8' });
+    const text = String(out).trim();
+    return JSON.parse(text.slice(text.indexOf('{')));
+  }
+  const mapping = askAutoBoot(`console.log(JSON.stringify({
+    rotate: m.triggerForBoot('session_rotate'),
+    create: m.triggerForBoot('project_create'),
+    rules_changed: m.triggerForBoot('rules_hash'),
+    stale: m.triggerForBoot('expired'),
+    unknown: m.triggerForBoot('whatever'),
+  }));`);
+  check('⑤ triggerForBoot 映射：rotate/create/rules_changed/stale 四类', mapping.rotate === 'rotate' && mapping.create === 'create' && mapping.rules_changed === 'rules_changed' && mapping.stale === 'stale', mapping);
+  check('⑤ 表外原因落 stale（不伪造归因）', mapping.unknown === 'stale', mapping.unknown);
+
+  // create：新项目 + 从未 boot 过的角色 → 派单触发自动 boot，归因 create
+  const FRESH = 'boot新建沙盘';
+  run(['project', 'add', '--name', FRESH, '--team-mode', 'fast', '--json']);
+  const freshPm = run(['boot', '--role', 'pm', '--project', FRESH, '--session', 'fb-pm', '--json']).token;
+  const freshTask = run(['task', 'create', '--boot', freshPm, '--project', FRESH, '--type', 'task', '--title', '自动boot夹具任务', '--priority', 'P2', '--detail', '夹具', '--owner', 'programmer1', '--json'], true);
+  const freshTaskId = freshTask && freshTask.task && freshTask.task.id;
+  run(['send', '--boot', freshPm, '--project', FRESH, '--to', 'programmer1', '--subject', '派单夹具', '--body', '夹具派单', '--ack', '--task', freshTaskId || '', '--json'], true);
+  const freshAudit = path.join(TEAM_ROOT, '状态', '项目', FRESH, '自动boot.jsonl');
+  const freshRows = fs.existsSync(freshAudit) ? fs.readFileSync(freshAudit, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)) : [];
+  check('⑤ e2e create：新项目派单 → 自动boot.jsonl 记 trigger=create',
+    freshRows.some((row) => row.role === 'programmer1' && row.trigger === 'create'), freshRows.map((row) => `${row.role}:${row.trigger}`));
+  check('⑤ e2e create：boot 事件也带 autoBootTrigger=create', (() => {
+    const evFile = path.join(TEAM_ROOT, '状态', '事件.jsonl');
+    if (!fs.existsSync(evFile)) return false;
+    const rows = fs.readFileSync(evFile, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
+    return rows.some((row) => String(row.action) === 'boot' && row.project === FRESH && row.data && row.data.autoBoot === true && row.data.autoBootTrigger === 'create');
+  })(), {});
+
+  // ⑥ 推断：rules_changed / rotate / stale / create（夹具写令牌文件 + 名册会话）
+  const bootsDir = path.join(TEAM_ROOT, '状态', '启动');
+  fs.mkdirSync(bootsDir, { recursive: true });
+  // 沙盘是从真实团队复制的，boots 里可能有该角色的真实令牌：先清掉，夹具才可判。
+  for (const name of fs.readdirSync(bootsDir)) {
+    if (!name.endsWith('.json')) continue;
+    try {
+      const row = JSON.parse(fs.readFileSync(path.join(bootsDir, name), 'utf8'));
+      if (String(row.role || '') === 'programmer2') fs.rmSync(path.join(bootsDir, name), { force: true });
+    } catch { /* 坏文件跳过 */ }
+  }
+  const writeToken = (role, { sessionId = '', rulesHash = '' } = {}) => {
+    fs.writeFileSync(path.join(bootsDir, `fake-${role}.json`), JSON.stringify({ project: PROJECT, role, sessionId, rulesHash, token: 'fake', expiresAt: new Date(Date.now() + 3600000).toISOString() }, null, 2) + '\n', 'utf8');
+  };
+  const curHash = askAutoBoot('console.log(JSON.stringify({ h: m.currentRulesHash() }));').h;
+  const infer = (role, sessionId) => askAutoBoot(`console.log(JSON.stringify({ t: m.inferBootTrigger('${PROJECT}','${role}','${sessionId}') }));`).t;
+  // 名册会话（沙盘是从真实团队复制的，未清空 sessionId）——夹具按名册值构造，避免误落 rotate 分支。
+  const rosterFile = path.join(TEAM_ROOT, '状态', '团队.json');
+  const roster = JSON.parse(fs.readFileSync(rosterFile, 'utf8'));
+  const boundOf = (role) => String(((roster.members || []).find((m) => m.role === role) || {}).sessionId || '');
+  const p2Bound = boundOf('programmer2');
+  const testerBound = boundOf('tester');
+  writeToken('programmer2', { sessionId: p2Bound, rulesHash: 'deadbeef' });
+  check('⑥ 推断 rules_changed：有历史令牌但 rules 哈希不符', infer('programmer2', p2Bound) === 'rules_changed', infer('programmer2', p2Bound));
+  writeToken('programmer2', { sessionId: 's-old', rulesHash: curHash });
+  const teamFile = rosterFile;
+  const teamNow = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
+  for (const member of teamNow.members || []) if (member.role === 'programmer2') member.sessionId = 's-new';
+  fs.writeFileSync(teamFile, JSON.stringify(teamNow, null, 2) + '\n', 'utf8');
+  check('⑥ 推断 rotate：令牌会话 ≠ 名册当前会话', infer('programmer2', 's-new') === 'rotate', infer('programmer2', 's-new'));
+  for (const member of teamNow.members || []) if (member.role === 'programmer2') member.sessionId = 's-old';
+  fs.writeFileSync(teamFile, JSON.stringify(teamNow, null, 2) + '\n', 'utf8');
+  check('⑥ 推断 stale：令牌在、哈希对、会话同 → stale', infer('programmer2', 's-old') === 'stale', infer('programmer2', 's-old'));
+  check('⑥ 推断 create：从来没有令牌 → create', infer('tester', testerBound) === 'create', infer('tester', testerBound));
+
+  // ⑦ 回执链路：自动 boot 令牌 + 派单消息
+  check('⑦ 回执链路：自动boot.jsonl 记 tokenId + 派单消息落盘', (() => {
+    const tokenOk = freshRows.some((row) => row.role === 'programmer1' && String(row.tokenId || '').length === 8);
+    const boxes = ['new', 'cur'];
+    const mails = boxes.flatMap((box) => {
+      const dir = path.join(TEAM_ROOT, '状态', '邮箱', 'programmer1', box);
+      if (!fs.existsSync(dir)) return [];
+      return fs.readdirSync(dir).map((n) => { try { return JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8')); } catch { return null; } }).filter(Boolean);
+    });
+    return tokenOk && mails.some((m) => String(m.subject || '').includes('派单夹具'));
+  })(), {});
+
   const passed = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => !r.ok).length;
   console.log(`\nR-bad3 断言：${passed}/${results.length} PASS${failed ? `，${failed} FAIL` : ''}`);

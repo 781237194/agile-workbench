@@ -1983,6 +1983,10 @@ export async function cmdBoot(args) {
     note: `rules=${shortHash(docs.rulesHash)} index=${shortHash(docs.hashes.projectIndex)} req=${docs.requirements.count} unread=${unread.length}`,
     data: {
       rulesHash: docs.rulesHash, docHashes: docs.hashes, token: token.token, unread: unread.length,
+      // B-5989 AC2：自动 boot 的触发归因也写进 boot 事件（由 auto-boot 通过环境变量传入）。
+      ...(String(process.env.TEAM_AUTO_BOOT || '') === '1'
+        ? { autoBoot: true, autoBootTrigger: String(process.env.TEAM_AUTO_BOOT_TRIGGER || 'stale') }
+        : {}),
       read: {
         docs: docs.readOrder, peers: docs.peers.map((p) => p.rel),
         requirements: docs.requirements.count, requirementsHash: docs.requirements.hash,
@@ -2361,12 +2365,14 @@ export async function cmdSend(args) {
   let releasedLock = null;
   const pmDispatch = isDispatch && b.role === 'pm';
   // R-bad3 F-bad3-2：派单（含排队派单）前先确保目标角色有有效 boot 令牌；失败不阻塞但返回 pendingBoot。
+  // B-5989：trigger 不再写死 stale——按上下文推断 rotate / create / rules_changed / stale 四类。
   const ensureBootForDispatch = async () => {
     if (!isDispatch) return null;
     try {
-      const { ensureBooted, findValidBootToken } = await import('./auto-boot.mjs');
+      const { ensureBooted, findValidBootToken, inferBootTrigger } = await import('./auto-boot.mjs');
       if (findValidBootToken(b.project, to, '')) return null;
-      return ensureBooted({ project: b.project, role: to, trigger: 'stale', duringTask: String(args.task || '') });
+      const trigger = inferBootTrigger(b.project, to, String(args.session || ''));
+      return ensureBooted({ project: b.project, role: to, trigger, duringTask: String(args.task || '') });
     } catch (e) { return { ok: false, why: String((e && e.message) || e) }; }
   };
   if (pmDispatch && !args.force) {

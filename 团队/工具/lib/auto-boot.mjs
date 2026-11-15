@@ -18,6 +18,62 @@ import { projectStatePaths, loadProject, sendMessage, loadTeam } from './store.m
 const LOCK_TTL_SEC = 30;
 const DEFAULT_FAIL_DEDUPE_MIN = 10;
 
+/** 自动 boot 的触发类型（唯一枚举）：rotate / create / rules_changed / stale。 */
+export const BOOT_TRIGGERS = Object.freeze(['rotate', 'create', 'rules_changed', 'stale']);
+
+/**
+ * 原因 → 触发类型映射（B-5989 AC1）：调用方给语境原因，落审计前统一归一。
+ * 表外原因一律落 stale（保守：不伪造更“体面”的归因），未知原样记在 requestedTrigger。
+ */
+export function triggerForBoot(reason) {
+  const raw = String(reason || '').trim().toLowerCase();
+  if (!raw) return 'stale';
+  if (['rotate', 'session_rotate', 'rotated', 'rotation'].includes(raw)) return 'rotate';
+  if (['create', 'project_create', 'created', 'new_project', 'new'].includes(raw)) return 'create';
+  if (['rules_changed', 'rules', 'rules_hash', 'ruleschange', 'rules-changed'].includes(raw)) return 'rules_changed';
+  if (['stale', 'expired', 'expire', 'ttl', 'missing', 'dispatch', 'stale_token'].includes(raw)) return 'stale';
+  return 'stale';
+}
+
+/**
+ * 推断该角色当前「为什么需要自动 boot」（B-5989 AC1/AC3）：
+ *   ① 名册绑定的会话与本会话不同 → rotate（轮换后旧令牌失效）
+ *   ② 有历史令牌但 rules 哈希不符 → rules_changed（改了宪法/铁律/角色卡）
+ *   ③ 从来没 boot 过（无令牌文件）→ create（新项目/新角色第一次派单）
+ *   ④ 其它（令牌过期/被清）→ stale
+ */
+export function inferBootTrigger(project, role, sessionId = '') {
+  try {
+    const team = loadTeam();
+    const member = (team.members || []).find((row) => String(row.role || '') === String(role || ''));
+    const bound = String((member && member.sessionId) || '');
+    if (bound && sessionId && bound !== String(sessionId)) return 'rotate';
+  } catch { /* 名册读不到继续往下判 */ }
+  let tokens = [];
+  try {
+    tokens = tokenFiles().map((file) => ({ file, row: readJson(file, null) }))
+      .filter((item) => item.row && String(item.row.project || '') === String(project || '') && String(item.row.role || '') === String(role || ''));
+  } catch { tokens = []; }
+  if (!tokens.length) return 'create';
+  // 令牌绑的会话与名册当前会话不一致 → rotate（轮换后应重 boot）
+  try {
+    const team = loadTeam();
+    const member = (team.members || []).find((row) => String(row.role || '') === String(role || ''));
+    const bound = String((member && member.sessionId) || '');
+    if (bound) {
+      const staleSession = tokens.some((item) => {
+        const tokenSession = String(item.row.sessionId || '');
+        return tokenSession && tokenSession !== bound;
+      });
+      if (staleSession) return 'rotate';
+    }
+  } catch { /* 名册读不到就按后面的哈希判 */ }
+  const current = currentRulesHash();
+  const matched = tokens.some((item) => String(item.row.rulesHash || '') === current);
+  if (!matched) return 'rules_changed';
+  return 'stale';
+}
+
 function lockFile(project, role) {
   return path.join(PATHS.locks, `boot-${project}-${role}.json`);
 }
@@ -74,7 +130,8 @@ function releaseLock(file) {
   try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
 }
 
-function currentRulesHash() {
+/** 当前规则哈希（宪法文件 sha256）——导出给调度/断言与 inferBootTrigger 共用。 */
+export function currentRulesHash() {
   try {
     return hashFile(path.join(PATHS.teamRoot, '团队宪法.md'));
   } catch { return ''; }
@@ -120,7 +177,10 @@ function alertPmOnce(project, { role, trigger, why, sessionId }) {
  */
 export function ensureBooted({ project, role, sessionId = '', trigger = 'stale', duringTask = '' } = {}) {
   const startedAt = Date.now();
-  const base = { at: nowIso(), project, role, sessionId: String(sessionId || ''), trigger, duringTask: String(duringTask || '') };
+  // B-5989：触发类型归一（四类枚举），原值留在 requestedTrigger 便于对账。
+  const requestedTrigger = String(trigger || '');
+  const normalized = triggerForBoot(requestedTrigger);
+  const base = { at: nowIso(), project, role, sessionId: String(sessionId || ''), trigger: normalized, requestedTrigger, duringTask: String(duringTask || '') };
   // 1) 已有有效令牌：复用（哈希未变，跳过读取）
   const existing = findValidBootToken(project, role, sessionId);
   if (existing) {
@@ -160,7 +220,7 @@ export function ensureBooted({ project, role, sessionId = '', trigger = 'stale',
     let why = '';
     try {
       out = execFileSync(process.execPath, [tool, 'boot', '--role', role, '--project', project, ...(sessionId ? ['--session', sessionId] : []), '--json'], {
-        encoding: 'utf8', env: { ...process.env, TEAM_AUTO_BOOT: '1' }, timeout: 120000,
+        encoding: 'utf8', env: { ...process.env, TEAM_AUTO_BOOT: '1', TEAM_AUTO_BOOT_TRIGGER: normalized }, timeout: 120000,
       });
     } catch (e) {
       ok = false;
@@ -174,7 +234,7 @@ export function ensureBooted({ project, role, sessionId = '', trigger = 'stale',
     const token = parsed && parsed.token ? String(parsed.token) : ((findValidBootToken(project, role, sessionId) || {}).token || '');
     const tokenId = token.slice(0, 8);
     const durationMs = Date.now() - startedAt;
-    const alert = ok ? null : alertPmOnce(project, { role, trigger, why, sessionId });
+    const alert = ok ? null : alertPmOnce(project, { role, trigger: normalized, why, sessionId });
     recordAudit(project, {
       ...base, ok, why, tokenId, rulesHash: currentRulesHash(), durationMs,
       docsRead: ok ? docsReadList(role) : [], reused: false, skippedByHash: false, singleFlight: 'leader', booted: ok,
@@ -196,7 +256,7 @@ export function cmdAutoBoot(args) {
   const result = ensureBooted({
     project, role,
     sessionId: String(args.session || ''),
-    trigger: String(args.trigger || 'stale'),
+    trigger: String(args.trigger || inferBootTrigger(project, role, String(args.session || ''))),
     duringTask: String(args['during-task'] || ''),
   });
   if (args.json) process.stdout.write(JSON.stringify({ ok: result.ok, ...result }) + '\n');
