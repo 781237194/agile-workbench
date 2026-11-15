@@ -204,6 +204,25 @@ check('S10 派单（--ack --task）未读当前版本 → LESSONS_UNREAD',
   /LESSONS_UNREAD/.test(dispatch.out + dispatch.err),
   { code: dispatch.code, out: (dispatch.out + dispatch.err).slice(0, 300) });
 
+// S12（tester 打回补）：req create 未读当前版本 → LESSONS_UNREAD（owner 通道豁免另测）
+const createUnread = run(['req', 'create', '--boot', pmToken, '--title', '沙盘新需求-未读', '--priority', 'P2']);
+check('S12 未读时 req create → LESSONS_UNREAD',
+  createUnread.code !== 0 && /LESSONS_UNREAD/.test(createUnread.out + createUnread.err),
+  { code: createUnread.code, out: (createUnread.out + createUnread.err).slice(0, 300) });
+
+// S13：lessons read 后 req create 放行（正向）
+const readBeforeCreate = run(['lessons', 'read', '--boot', pmToken]);
+const createAfterRead = run(['req', 'create', '--boot', pmToken, '--title', '沙盘新需求-已读', '--priority', 'P2']);
+check('S13 lessons read 后 req create 不再返回 LESSONS_UNREAD',
+  !/LESSONS_UNREAD/.test(createAfterRead.out + createAfterRead.err),
+  { readCode: readBeforeCreate.code, code: createAfterRead.code, out: (createAfterRead.out + createAfterRead.err).slice(0, 300) });
+
+// S14：PM 代管代验收未读 → LESSONS_UNREAD（验收处门禁）
+const proxyAcceptUnread = run(['owner', 'proxy', 'decide', '--boot', pmToken, '--project', PROJECT, '--requirement', 'R-20261116-000000-less', '--decision', 'accepted', '--action', 'accept', '--opinion', '沙盘代验收']);
+check('S14 PM 代管代验收未读 → LESSONS_UNREAD（验收处门禁）',
+  /LESSONS_UNREAD/.test(proxyAcceptUnread.out + proxyAcceptUnread.err),
+  { code: proxyAcceptUnread.code, out: (proxyAcceptUnread.out + proxyAcceptUnread.err).slice(0, 300) });
+
 console.log(`\nlessons 门禁断言：${passed}/${passed + failures.length} PASS`);
 console.log('沙盘：' + SB);
 if (failures.length) { console.error(JSON.stringify(failures, null, 2)); process.exit(1); }

@@ -4580,6 +4580,8 @@ export function cmdReq(args) {
   const b = bootFor(args, 'req');
   if (sub === 'create') {
     if (!['pm', 'product', 'analyst'].includes(b.role)) fail('NOT_PM', '只有 PM / 产品 / 需求分析能建需求');
+    // R-51de F-5②：建需求前必须读过当前版本经验教训登记册（Owner 通道豁免）
+    failLessonGate(lessonGateFor(b, args));
     const task = createTask({
       project: b.project, title: args.title, detail: args.detail || '', priority: args.priority,
       priorityBy: args['priority-by'] || b.role, createdBy: b.role, owner: args.owner || null, due: args.due || '',
@@ -5841,6 +5843,8 @@ export async function cmdOwner(args) {
   }
   let testGate = null;
   if (actionRaw === 'accept') {
+    // R-51de F-5⑤：验收前必须读过当前版本经验教训登记册（Owner 通道豁免，见 isOwnerChannel）
+    failLessonGate(lessonGateFor(ownerGateBoot(args, projectName), args));
     // 验收前 Owner 决定必须已通过/跳过；被 Owner 打回的需求不能直接验收。
     // B-96e9：只认“当前有效”的最近一条决定（忽略早于 gateInvalidatedAt 的旧打回），不再只看 legacy ownerReview。
     const latestOwner = latestValidOwnerDecision(row);
@@ -6402,6 +6406,8 @@ export async function cmdOwner(args) {
  * 代管可代记评审决定与「验收通过」；打回/迭代/终止必须 Owner 本人。
  */
 export async function cmdOwnerProxyDecide(args) {
+  // R-51de F-5⑤（proxy）：PM 代验收前必须读过当前版本经验教训登记册（改用 PM 的阅读记录）
+  failLessonGate(lessonGateFor(ownerGateBoot(args, String(args.project || '').trim()), args));
   const projectName = String(args.project || '').trim();
   if (!projectName) fail('BAD_ARGS', '需要 --project <团队项目名>');
   const requirementId = String(args.requirement || '').trim();
@@ -8730,6 +8736,16 @@ export function cmdDoctor(args) {
 // 依据 需求/R-20261115-170902-51de-经验教训看板.md F-4/F-5/AC4 + 增补卷-51de-1
 // 门禁只比「该角色最近一条阅读记录的 fileSha」与当前文件 sha256；Owner 通道豁免；命中零副作用。
 // ─────────────────────────────────────────────────────────────────────────────
+function ownerGateBoot(args, projectName) {
+  // cmdOwner 的 Owner 通道不强制 boot 令牌；这里给出最小上下文供门禁使用：
+  //  · 有 boot 令牌（PM 代管/CLI）→ 用真实角色
+  //  · 无令牌（Owner UI/终端）→ role=owner，配合 isOwnerChannel 豁免
+  const role = String((args && args.role) || '').trim() || 'owner';
+  let sessionId = '';
+  try { const b = requireBoot(args); sessionId = b.sessionId || ''; } catch { sessionId = ''; }
+  return { project: projectName, role, sessionId };
+}
+
 export function lessonGateFor(b, extra = {}) {
   if (lessons.isOwnerChannel(extra)) return { ok: true, exempt: true, reason: 'OWNER_CHANNEL' };
   let projectPath = '';
