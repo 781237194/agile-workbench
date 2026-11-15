@@ -171,6 +171,10 @@ if (msgFile) {
 const missRes = runJson(['decision', 'miss', '--project', PROJECT, '--now', new Date().toISOString(), '--minutes', String(missMinutes)]);
 ok('AC6/P0① 漏箱判据写明（criterion=message.type=owner_ask）', Boolean(missRes.json && /owner_ask/.test(String(missRes.json.criterion))), JSON.stringify(missRes.json && missRes.json.criterion));
 ok('AC6/P0① 反例（标题含拍板但 type=notice）不计入候选', Boolean(missRes.json && missRes.json.candidates === 1), JSON.stringify(missRes.json && missRes.json.candidates));
+// PM 15:35 裁决条件①：观察清单（未标类型但像拍板）——列出来、不计漏箱、不补录
+ok('观察清单：未标类型的 PM 消息进 observation（count=1）', Boolean(missRes.json && missRes.json.observation && missRes.json.observation.count === 1), JSON.stringify(missRes.json && missRes.json.observation && missRes.json.observation.count));
+ok('观察清单条目带 messageId + 标题前 40 字', Boolean(missRes.json && (missRes.json.observation.items || []).some((x) => /^M-\d{8}-\d{6}-[0-9a-f]+$/.test(String(x.messageId)) && String(x.subject).length <= 40)), JSON.stringify(missRes.json && missRes.json.observation.items && missRes.json.observation.items[0]));
+ok('观察清单不计入漏箱（totalMiss 仍为 1，仅 MISS 占位）', Boolean(missRes.json && missRes.json.totalMiss === 1), JSON.stringify(missRes.json && missRes.json.totalMiss));
 const missItem = boxItems().find((row) => row.missBox === true);
 ok('AC6 漏箱 → 生成 D-…-MISS 占位', Boolean(missItem && /-MISS$/.test(String(missItem.id)) && missItem.status === 'open'), JSON.stringify(missItem && missItem.id));
 ok('AC6 占位字段 missBox/ruleId/source', Boolean(missItem && missItem.missBox === true && missItem.ruleId === 'R-MISS' && missItem.source && missItem.source.kind === 'message'), JSON.stringify(missItem && { r: missItem.ruleId }));

@@ -269,7 +269,44 @@ export function collectPmAsks(projectName, { roles = [], types = OWNER_ASK_MESSA
 }
 
 /**
- * F-7 漏箱检测 + F-9 日报：
+ * PM 2026-11-15 15:35 裁决条件①：**观察清单**——PM 发出、正文命中拍板词、但**没有**标 owner_ask 类型的消息。
+ * 只列出来给人看（messageId + 标题前 40 字），不补 MISS、不计入漏箱、不参与任何判定。
+ * 目的是让 PM 能人工发现自己漏标类型，而不是让程序去猜标题。
+ */
+export function collectUntypedOwnerAskCandidates(projectName, { roles = [], types = OWNER_ASK_MESSAGE_TYPES } = {}) {
+  const name = String(projectName || '');
+  const roleList = roles.length ? roles : Object.keys(ROLE_NAMES);
+  const typeSet = new Set((types || OWNER_ASK_MESSAGE_TYPES).map((t) => String(t || '').toLowerCase()));
+  const out = [];
+  const seen = new Set();
+  for (const role of roleList) {
+    let inbox = null;
+    try { inbox = listInbox(role, { includeCur: true, project: name }); } catch { inbox = null; }
+    const messages = Array.isArray(inbox) ? inbox : (inbox && Array.isArray(inbox.messages) ? inbox.messages : []);
+    for (const msg of messages) {
+      if (!msg || !msg.id) continue;
+      if (String(msg.from || '') !== 'pm') continue;
+      if (seen.has(msg.id)) continue;
+      const type = String(msg.type || '').toLowerCase();
+      if (typeSet.has(type)) continue; // 已正确标类型的不进观察清单
+      const hits = looksLikeOwnerAsk(`${msg.subject || ''} ${msg.body || ''}`);
+      if (!hits.length) continue;
+      seen.add(msg.id);
+      out.push({
+        messageId: msg.id,
+        type: type || '(空)',
+        to: String(msg.to || ''),
+        ts: String(msg.ts || msg.deliveredAt || ''),
+        subject: String(msg.subject || '').slice(0, 40),
+        hits,
+      });
+    }
+  }
+  return out.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
+}
+
+/**
+ * F-7 漏箱检测 + F-9 日报 + 观察清单：
  * 扫 PM 的"拍板问句"消息，超过阈值（默认 30 分钟）仍没有对应 `source.ref` 的入箱条目 →
  * 补录一条 `D-…-MISS`（missBox:true、ruleId:'R-MISS'），同一 source.ref 只补 1 条；
  * 同时写当日 `漏箱-YYYYMMDD.md`（无漏箱写「当日漏箱 0」）。
@@ -318,8 +355,15 @@ export function detectMissedAsks(projectName, { now = Date.now(), minutes = deci
   }
   // 日报：当日（按 now 的日期）一行一条；无漏箱写 0。
   const dateText = new Date(now).toISOString().slice(0, 10).replace(/-/g, '');
-  const allMiss = items.filter((row) => row && row.missBox === true);
+  // 本轮可能刚补录 MISS（`items` 是循环前的快照）→ 重新读一次箱，totalMiss 才准
+  const allMiss = dryRun
+    ? items.filter((row) => row && row.missBox === true)
+    : ((() => { try { const again = readDecisionBox(name); return (again.box && again.box.items) || []; } catch { return items; } })())
+      .filter((row) => row && row.missBox === true);
   const reportFile = missReportPath(name, dateText);
+  // PM 15:35 裁决条件①：观察清单（未标类型但像拍板问句的 PM 消息）——只列出，不计漏箱、不补录
+  const untyped = collectUntypedOwnerAskCandidates(name);
+  const untypedShown = untyped.slice(0, 20);
   const lines = [
     `# 漏箱报告 ${dateText}`,
     '',
@@ -335,6 +379,20 @@ export function detectMissedAsks(projectName, { now = Date.now(), minutes = deci
       lines.push(`| ${row.id} | ${(row.source && row.source.ref) || '-'} | ${(row.origin && row.origin.hitWords) || '-'} | ${row.status} |`);
     }
   }
+  lines.push(
+    '',
+    `## 未标类型的 PM 消息 ${untyped.length} 条（观察清单，不计漏箱）`,
+    '',
+    '> 判据：发件人=pm 且正文/标题命中拍板词，但 type≠owner_ask。只列出来给人看，**不补录、不计入漏箱、不参与判定**——供 PM 人工发现漏标。',
+    '',
+  );
+  if (!untyped.length) lines.push('（无：所有像拍板的 PM 消息都正确标了 owner_ask）');
+  else {
+    lines.push('| messageId | 类型 | 标题前 40 字 |');
+    lines.push('|---|---|---|');
+    for (const row of untypedShown) lines.push(`| ${row.messageId} | ${row.type} | ${row.subject || '(无主题)'} |`);
+    if (untyped.length > untypedShown.length) lines.push(`| … | | 其余 ${untyped.length - untypedShown.length} 条略（共 ${untyped.length} 条） |`);
+  }
   if (!dryRun) {
     ensureDir(path.dirname(reportFile));
     writeText(reportFile, lines.join('\n') + '\n');
@@ -342,6 +400,7 @@ export function detectMissedAsks(projectName, { now = Date.now(), minutes = deci
   return {
     ok: true, project: name, rule: DECISION_ROUTE_RULE, minutes,
     thresholdMs, criterion, candidates: candidates.length, missed, skipped,
+    observation: { count: untyped.length, items: untypedShown, note: '未标类型；只观察，不计漏箱、不补录' },
     totalMiss: allMiss.length, reportFile, dryRun: Boolean(dryRun),
   };
 }
