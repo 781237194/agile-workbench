@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fail, nowIso, sha256, readText } from './core.mjs';
 import { projectStatePaths } from './store.mjs';
 import { readRequirementDocs } from './scaffold.mjs';
+import { readRequirementDocVersion, versionGate } from './req-version.mjs';
 
 export const GATE_ACTIONS = ['requirement_review', 'owner_decision', 'dispatch_dev', 'dispatch_test', 'dev_exec', 'test_exec', 'owner_accept', 'iterate'];
 
@@ -264,18 +265,21 @@ export function gateRequirementReview(row, task, projectPath) {
     };
   }
   const recorded = String(review.requirementHash || '');
-  let current = '';
+  let current = { hash: '', version: '', change: '' };
   try {
-    const docs = readRequirementDocs(projectPath);
-    const doc = docs.list.find((item) => idMatches(item.id, (task && task.id) || ''));
-    current = doc ? String(doc.hash || '') : '';
-  } catch { current = ''; }
-  if (recorded && current && recorded !== current) {
+    const doc = readRequirementDocVersion(projectPath, (task && task.id) || (row && row.id) || '');
+    current = { hash: String(doc.hash || ''), version: String(doc.version || ''), change: String(doc.change || '') };
+  } catch { current = { hash: '', version: '', change: '' }; }
+  // R-9a8e：先按三元组（id, version, hash）判——version 变了报「需重评：v旧→v新」，
+  // version 未涨而 hash 变了报 VERSION_NOT_BUMPED；legacy 记录（无 version）仍按 hash 判。
+  const versionBlock = versionGate({ records: [review], current, gate: 'G2' });
+  if (versionBlock) return { ...versionBlock, requirementId: (task && task.id) || (row && row.id) || '' };
+  if (recorded && current.hash && recorded !== current.hash) {
     return {
       code: 'REQ_REVIEW_REQUIRED', gate: 'G2', reason: 'stale', missing: ['需求评审针对旧版本'],
-      requirementId: task && task.id, recordedHash: recorded, currentHash: current,
+      requirementId: task && task.id, recordedHash: recorded, currentHash: current.hash,
       next: '需求正文已变，重跑 req review',
-      message: `需求 ${task && task.id} 的评审针对旧版本（${recorded.slice(0, 12)} ≠ ${current.slice(0, 12)}）；请重跑 req review`,
+      message: `需求 ${task && task.id} 的评审针对旧版本（${recorded.slice(0, 12)} ≠ ${current.hash.slice(0, 12)}）；请重跑 req review`,
     };
   }
   return null;

@@ -60,6 +60,7 @@ import { detectLedgerForks, requirementLedger, reopenedAtOf } from './ledger.mjs
 import {
   scenarioConfirmState, applyScenarioTimeout, scenarioConfirmerFor, scenarioTimeoutMs,
 } from './scenario-confirm.mjs';
+import { readRequirementDocVersion, versionForRecord, versionGate } from './req-version.mjs';
 
 const RISK_RANK = { normal: 1, sensitive: 2, critical: 3 };
 const PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -401,7 +402,25 @@ function runDispatchGates({ projectName, requirementId, role, targetRole = '', a
     else gateFail(projectName, record, g1);
   }
   const g2 = gateRequirementReview(row, reqTask, project.path);
-  if (g2) gateFail(projectName, record, g2);
+  if (g2) {
+    // R-9a8e AC1：评审针对旧版本/忘涨版被 G2 拦下时，留一条 review_stale_blocked 审计事件。
+    if (String(g2.code) === 'VERSION_NOT_BUMPED' || String(g2.reason || '') === 'version_changed' || String(g2.reason || '') === 'stale') {
+      try {
+        appendEvent({
+          role: record.role || 'pm', sessionId: '', action: 'review_stale_blocked', project: projectName,
+          target: requirementId,
+          note: truncate(String(g2.message || g2.code || ''), 160),
+          data: {
+            requirementId, gate: String(g2.gate || 'G2'), code: String(g2.code || ''), reason: String(g2.reason || ''),
+            recordedVersion: String(g2.recordedVersion || ''), currentVersion: String(g2.currentVersion || ''),
+            change: String(g2.change || ''), recordedHash: String(g2.recordedHash || ''), currentHash: String(g2.currentHash || ''),
+            attempted: String(record.action || '') || 'dispatch',
+          },
+        });
+      } catch { /* 审计失败不改变门禁结论 */ }
+    }
+    gateFail(projectName, record, g2);
+  }
   // B-29b2 门禁互锁修复：可测性评审（TR-Q）属**需求阶段**，必须在 Owner 决定之前能跑；
   // 派 TR-Q 任务时 G3（Owner 落账）豁免，否则「TR-Q 不可测 → 落不了 Owner 决定」与「无 Owner 决定 → 派不了 TR-Q」互锁。
   // 注意：G2.5（Owner 决定时的可测性门）不动，开发派单仍由 G2.5 拦。
@@ -3674,7 +3693,65 @@ function cmdReqVoid(args) {
   });
 }
 
-/** B-a17d：读作废登记（消费方先看这里，不必自己解析 jsonl）。 */
+/** R-9a8e F-rv-3（AC3/AC3b）：stale 需求清单——谁需要重评、卡在哪道门、为什么。 */
+function cmdReqStale(args) {
+  const b = bootFor(args, 'req');
+  const project = loadProject(b.project);
+  const projectPath = String(project.path || '');
+  const stateRead = readWorkflowState(b.project, { fresh: true });
+  const rows = (stateRead.state && stateRead.state.requirements) || {};
+  const stale = [];
+  const consistent = [];
+  const neverReviewed = [];
+  for (const [key, row] of Object.entries(rows)) {
+    if (!row || typeof row !== 'object') continue;
+    const id = String(row.id || key);
+    const status = String(row.status || '');
+    if (['accepted', 'done', 'terminated', 'iteration', 'rejected'].includes(status)) continue;
+    const doc = readRequirementDocVersion(projectPath, id);
+    const review = row.productReview || row.requirementReview || null;
+    const reopenedAt = String(row.lastReopenAt || row.gateInvalidatedAt || '');
+    const reviewAt = String((review && (review.ts || review.at)) || '');
+    if (!review) { neverReviewed.push({ requirementId: id, status }); continue; }
+    // 原因优先级（需求正文写死）：reopened > review_stale > trq_missing > owner_gate
+    const reasons = [];
+    if (reopenedAt && (!reviewAt || Date.parse(reopenedAt) > Date.parse(reviewAt))) reasons.push('reopened');
+    const ver = versionGate({ records: [review], current: { hash: doc.hash, version: doc.version, change: doc.change }, gate: 'G2' });
+    if (ver) reasons.push('review_stale');
+    const trqVerdict = String((row.trq && row.trq.verdict) || '');
+    if (String(row.priority || 'P2') === 'P0' && trqVerdict !== 'testable') reasons.push('trq_missing');
+    const decisions = ownerDecisionsOf(row);
+    const last = decisions.length ? decisions[decisions.length - 1] : null;
+    const lastStatus = String((last && (last.status || last.decision)) || '');
+    if (!['approved', 'skipped', 'accepted'].includes(lastStatus)) reasons.push('owner_gate');
+    if (!reasons.length) { consistent.push({ requirementId: id, status, version: doc.version || 'v1(legacy)' }); continue; }
+    const reason = reasons[0];
+    const gate = reason === 'trq_missing' ? 'TRQ' : (reason === 'owner_gate' ? 'G3_OWNER' : 'G2_REVIEW');
+    stale.push({
+      requirementId: id, title: truncate(String(row.title || ''), 40), status, reason, reasons, gate,
+      currentVersion: doc.version || 'v1(legacy)', change: doc.change || '',
+      recordedVersion: String(review.version || ''), reviewAt,
+      recordedHash: String(review.requirementHash || '').slice(0, 12), currentHash: String(doc.hash || '').slice(0, 12),
+      reopenedAt,
+      ...(ver ? { staleCode: String(ver.code || ''), staleMessage: String(ver.message || '') } : {}),
+    });
+  }
+  stale.sort((a, c) => String(a.requirementId).localeCompare(String(c.requirementId)));
+  out(args, [
+    `stale 需求：${stale.length} 条（已一致 ${consistent.length}，从未评审 ${neverReviewed.length}）`,
+    ...stale.map((row) => `- ${row.requirementId} ｜ ${row.reason} ｜ 卡门 ${row.gate} ｜ 当前 ${row.currentVersion}${row.change ? `（${row.change}）` : ''}`),
+    ...(neverReviewed.length ? [`从未评审：${neverReviewed.map((row) => row.requirementId).join(', ')}`] : []),
+  ].join('\n'), {
+    ok: true, project: b.project, workflow: stateRead.file || '',
+    stale, consistent, neverReviewed,
+    counts: { stale: stale.length, consistent: consistent.length, neverReviewed: neverReviewed.length },
+    reasons: { reopened: stale.filter((row) => row.reason === 'reopened').length, review_stale: stale.filter((row) => row.reason === 'review_stale').length, trq_missing: stale.filter((row) => row.reason === 'trq_missing').length, owner_gate: stale.filter((row) => row.reason === 'owner_gate').length },
+  });
+}
+
+/**
+ * B-a17d：读作废登记（消费方先看这里，不必自己解析 jsonl）。
+ */
 function cmdReqVoided(args) {
   const b = bootFor(args, 'req');
   const project = loadProject(b.project);
@@ -3804,6 +3881,8 @@ export function cmdReq(args) {
   // B-a17d：作废登记的消费口与双向同步断言（面板/测试都从这里取口径）。
   if (sub === 'voided') return cmdReqVoided(args);
   if (sub === 'sync') return cmdReqSync(args);
+  // R-9a8e：stale 需求清单（重评成本与信息不对称的出口）。
+  if (sub === 'stale') return cmdReqStale(args);
   const b = bootFor(args, 'req');
   if (sub === 'create') {
     if (!['pm', 'product', 'analyst'].includes(b.role)) fail('NOT_PM', '只有 PM / 产品 / 需求分析能建需求');
@@ -3984,11 +4063,14 @@ function cmdReqReview(args) {
   // 评审绑定当前需求正文哈希：G2 用它在派单前判断“评审是不是针对旧版本”。
   let requirementHash = '';
   let requirementContentHash = '';
+  let docVersion = { version: '', change: '' };
   try {
     const docs = readRequirementDocs(project.path);
     const doc = docs.list.find((row) => idMatches(row.id, task.id));
     requirementHash = doc ? String(doc.hash || '') : '';
     requirementContentHash = doc ? String(doc.contentHash || '') : '';
+    // R-9a8e：三元组里的 version —— 正文有就照抄；旧正文没有则首记 v1 + legacy=true（只写记录，不改正文）。
+    docVersion = versionForRecord(readRequirementDocVersion(project.path, task.id));
   } catch { requirementHash = ''; }
   const record = {
     id: (isTech ? 'TR-' : 'RR-') + stamp() + '-' + randomHex(2),
@@ -3998,6 +4080,10 @@ function cmdReqReview(args) {
     requirementId: task.id,
     title: task.title,
     requirementHash,
+    // R-9a8e F-rv-2：评审记录绑 (requirementId, version, hash) 三元组；历史只追加不覆盖。
+    version: docVersion.version,
+    change: docVersion.change,
+    legacy: Boolean(docVersion.legacy),
     proposalId: proposal ? proposal.id : '',
     proposalHash: proposal ? proposal.proposalHash : '',
     role: b.role,
@@ -4197,9 +4283,14 @@ function cmdReqTrq(args) {
   }
   writeText(path.join(project.path, rel), text);
   const at = nowIso();
+  const trqReqVersion = versionForRecord(readRequirementDocVersion(project.path, task.id));
   const record = {
     requirementId: task.id,
     requirementHash: doc.hash,
+    // R-9a8e F-rv-2：TR-Q 也绑三元组；reqVersion 是「需求正文版本」（与 TR-Q 自己的 version 分开）。
+    reqVersion: trqReqVersion.version,
+    reqChange: trqReqVersion.change,
+    reqLegacy: Boolean(trqReqVersion.legacy),
     verdict,
     missing,
     file: rel,
@@ -4910,6 +5001,8 @@ export async function cmdOwner(args) {
       recordedBy: 'pm',
     };
   }
+  // R-9a8e F-rv-2：Owner 决定也绑 (requirementId, version, hash) 三元组（决定针对哪一版正文）。
+  const ownerReqVersion = versionForRecord(readRequirementDocVersion(project.path, requirementId));
   const record = {
     status: decision,
     by: proxyMode ? 'PM（代记 Owner 的决定）' : 'Owner',
@@ -4917,6 +5010,9 @@ export async function cmdOwner(args) {
     at,
     opinion,
     channel,
+    reqVersion: ownerReqVersion.version,
+    reqChange: ownerReqVersion.change,
+    reqLegacy: Boolean(ownerReqVersion.legacy),
     basis,
     counted: proxyMode ? true : !testChannel,
     source: proxyMode ? 'team.mjs owner proxy decide' : 'team.mjs owner',
