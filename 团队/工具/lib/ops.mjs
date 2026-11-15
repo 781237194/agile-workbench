@@ -3736,6 +3736,15 @@ function cmdReqStale(args) {
       ...(ver ? { staleCode: String(ver.code || ''), staleMessage: String(ver.message || '') } : {}),
     });
   }
+  // 只有任务文件、工作流还没有行的需求：也要在「从未评审」里露出来（AC3 的 neverReviewed 口径）。
+  const knownIds = new Set(Object.keys(rows));
+  for (const task of listTasks(b.project)) {
+    if (!task || String(task.type || '') !== 'requirement') continue;
+    const id = String(task.id || '');
+    if (!id || knownIds.has(id)) continue;
+    if (neverReviewed.some((row) => row.requirementId === id)) continue;
+    neverReviewed.push({ requirementId: id, status: String(task.status || ''), noWorkflowRow: true });
+  }
   stale.sort((a, c) => String(a.requirementId).localeCompare(String(c.requirementId)));
   out(args, [
     `stale 需求：${stale.length} 条（已一致 ${consistent.length}，从未评审 ${neverReviewed.length}）`,
@@ -4129,6 +4138,11 @@ function cmdReqReview(args) {
       comment: truncate(comments, 600),
       at: ts,
       requirementHash,
+      // R-9a8e F-rv-2：工作流行里的评审视图也要带三元组的 version/change/legacy，
+      // 否则 G2 读 row.productReview 时看不到版本，会退回「只比 hash」的旧路径。
+      version: record.version,
+      change: record.change,
+      legacy: Boolean(record.legacy),
       source: 'team.mjs req review',
       command: 'req review',
     };

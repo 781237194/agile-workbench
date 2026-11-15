@@ -120,7 +120,9 @@ const v1 = docText({ id: R1, version: 'v1', change: '首版', body: '第一版�
 fs.writeFileSync(doc1, v1, 'utf8');
 bootAll();
 
-const rv1 = run(['req', 'review', '--boot', product, '--project', PROJECT, '--id', R1, '--verdict', 'approve', '--comments', 'v1 通过', '--json']);
+// 产品评审必须逐项给六类边界结论（PRODUCT_CHECKLIST_INCOMPLETE），夹具 comments 要覆盖六类关键词。
+const CHECK = '空值：拒绝为空；异常：报错记录；权限：越权拒绝；并发：同时改走版本冲突；降级：不可用提示重试；模式：六人/四人同口径';
+const rv1 = run(['req', 'review', '--boot', product, '--project', PROJECT, '--id', R1, '--verdict', 'approve', '--comments', `v1 通过。${CHECK}`, '--json']);
 check('前置：v1 评审通过并写三元组（version=v1 + hash）', rv1.json && rv1.json.ok === true, rv1.json && (rv1.json.code || rv1.json.message));
 const task1 = JSON.parse(fs.readFileSync(path.join(TEAM_ROOT, '状态', '项目', PROJECT, '任务', `${R1}.json`), 'utf8'));
 const rec1 = task1.workflow && (task1.workflow.productReview || task1.workflow.requirementReview);
@@ -132,7 +134,8 @@ function dispatch() {
   return run(['send', '--boot', pm, '--project', PROJECT, '--to', 'programmer1', '--subject', '派单夹具', '--body', '夹具派单', '--ack', '--task', devTask, '--json']);
 }
 function eventsOf(id) {
-  const file = path.join(TEAM_ROOT, '状态', '事件链.jsonl');
+  // 事件链落在 团队/状态/事件.jsonl（不是项目目录）；只看 action/target 命中的行。
+  const file = path.join(TEAM_ROOT, '状态', '事件.jsonl');
   if (!fs.existsSync(file)) return [];
   return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean).filter((row) => String(row.target || (row.data && row.data.requirementId) || '') === id);
 }
@@ -150,7 +153,7 @@ check('AC1 留一条 review_stale_blocked 事件',
   eventsOf(R1).some((row) => String(row.action) === 'review_stale_blocked'), eventsOf(R1).map((row) => row.action).slice(-6));
 
 // ── AC7：忘涨版（改内容不动 version）──
-const rv2 = run(['req', 'review', '--boot', product, '--project', PROJECT, '--id', R1, '--verdict', 'approve', '--comments', 'v2 通过', '--json']);
+const rv2 = run(['req', 'review', '--boot', product, '--project', PROJECT, '--id', R1, '--verdict', 'approve', '--comments', `v2 通过。${CHECK}`, '--json']);
 check('AC2 前置：v2 评审通过（记录追加）', rv2.json && rv2.json.ok === true, rv2.json && rv2.json.code);
 const taskAfter2 = JSON.parse(fs.readFileSync(path.join(TEAM_ROOT, '状态', '项目', PROJECT, '任务', `${R1}.json`), 'utf8'));
 const reviewsDir = path.join(TEAM_ROOT, '状态', '项目', PROJECT, '需求评审');
@@ -180,6 +183,7 @@ check('AC4 改回历史版本默认仍要重评（版本回退不复活旧评审
 // （lastReopenAt + gateInvalidatedAt + gateInvalidatedBy=reopen，与 ops.mjs cmdReqReopen 同字段），
 // 用来验证 stale 判据的 reopened 分支与 reason 优先级——不是改真相，是沙盘夹具。
 const wfFile = path.join(TEAM_ROOT, '状态', '项目', PROJECT, '工作流.json');
+if (!fs.existsSync(wfFile)) { check('AC3b 前置：工作流.json 存在（评审通过后应有行）', false, wfFile); }
 const wf = JSON.parse(fs.readFileSync(wfFile, 'utf8'));
 const rowR1 = wf.requirements[R1] || Object.values(wf.requirements).find((row) => row && String(row.id) === R1);
 const reopenAt = new Date(Date.now() + 60000).toISOString();

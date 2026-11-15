@@ -14,7 +14,7 @@ import { sha256 } from './core.mjs';
 import { readRequirementDocs } from './scaffold.mjs';
 
 const VERSION_PATTERNS = [
-  /<!--\s*req-doc:\s*(v\d+)\s*-->/i,
+  // 注意：`<!-- req-doc: v2 -->` 是「正文格式版本」（严格四件套闸门用），不是内容版本，不参与解析。
   /^\s*(?:>\s*)?version\s*[:：]\s*(v\d+)/im,
   /（\s*req\s*review\s*[，,]\s*(v\d+)\s*）/i,
   /版本\s*[:：]\s*(v\d+)/i,
