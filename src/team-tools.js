@@ -575,6 +575,8 @@ function applyRequirementCopyToState(state, requirementId, copy, { by = '', at =
     : Object.values(state.requirements).find((item) => item && String(item.id || '') === id) || null;
   if (!row) return { ok: false, code: 'REQUIREMENT_NOT_FOUND', message: `工作流里没有需求 ${id}（先让 PM/分析师登记需求）` };
   const current = isPlainObject(row.copy) ? row.copy : null;
+  // copy JSON 损坏（被手写成字符串/数组等）：视为缺字段展示，但**原值不丢**——写进 copyHistory 留档再覆盖。
+  const brokenCopy = row.copy !== undefined && row.copy !== null && !isPlainObject(row.copy) ? row.copy : null;
   if (expectedUpdatedAt && String(row.updatedAt || '') !== String(expectedUpdatedAt)) {
     // 并发：别人先写了 → 零副作用，把磁盘现值带回去给调用方合并。
     return {
@@ -585,11 +587,16 @@ function applyRequirementCopyToState(state, requirementId, copy, { by = '', at =
   }
   const stampAt = String(at || new Date().toISOString());
   const next = { ...copy, at: stampAt, by: String(by || '') };
-  if (current && requirementCopySameBlocks(current, next)) {
+  if (!brokenCopy && current && requirementCopySameBlocks(current, next)) {
     return { ok: true, code: 'OK', changed: false, reason: 'SAME_CONTENT', copy: current, rowId: String(row.id || id), at: stampAt };
   }
   const history = Array.isArray(row.copyHistory) ? row.copyHistory.slice() : [];
-  if (current) history.push({ ...current, replacedAt: stampAt, replacedBy: String(by || '') });
+  if (brokenCopy !== null) {
+    const rawText = typeof brokenCopy === 'string' ? brokenCopy : (() => { try { return JSON.stringify(brokenCopy); } catch { return String(brokenCopy); } })();
+    history.push({ broken: true, raw: String(rawText).slice(0, REQUIREMENT_COPY_BLOCK_MAX_CHARS), replacedAt: stampAt, replacedBy: String(by || '') });
+  } else if (current) {
+    history.push({ ...current, replacedAt: stampAt, replacedBy: String(by || '') });
+  }
   // 同一秒重复保存（内容相同但 at 不同）会进上面 SAME_CONTENT 分支；这里只保留最近 20 条。
   row.copy = next;
   row.copyHistory = history.slice(-REQUIREMENT_COPY_HISTORY_MAX);
@@ -618,6 +625,8 @@ function requirementCopyView(row) {
   return {
     copy: view,
     copyHistory: Array.isArray(src.copyHistory) ? src.copyHistory.slice(-REQUIREMENT_COPY_HISTORY_MAX) : [],
+    // copy 损坏（不是对象）→ 视为缺字段展示，界面标 data-copy-broken，不覆盖原字段（写入口会留档进 history）
+    copyBroken: src.copy !== undefined && src.copy !== null && !isPlainObject(src.copy),
     // 逐块缺失标记（AC3：哪块缺标哪块；四块全缺也要能渲染占位）
     copyMissing: view
       ? REQUIREMENT_COPY_BLOCKS.filter((key) => !view[key])
@@ -7290,6 +7299,10 @@ function createTeamTools(options = {}) {
       });
     }
     if (!decision.changed) return { ...decision, project: name, file: read.file };
+    // 写盘沿用既有原子写（tmp+rename），并按本项目口径加一份 .bak（与 writeStore 一致）。
+    try {
+      if (read.file && fs.existsSync(read.file)) fs.copyFileSync(read.file, `${read.file}.bak-${Date.now()}`);
+    } catch { /* 备份失败不阻断，但下面写盘失败会回零副作用 */ }
     const written = writeWorkflowState(name, read.state);
     if (!written.ok) return written;
     return { ...decision, project: name, file: written.file };

@@ -171,6 +171,20 @@ console.log(JSON.stringify({ what: row && row.copy && row.copy.what, source: row
 const freshJson = JSON.parse(fresh);
 ok('重启后 copy 仍在（新进程读盘一致）', freshJson.what === '第 23 版' && freshJson.hist === 20, fresh);
 
+// ---------- copy JSON 损坏：视为缺字段但不丢原值（PM 补口径 ③）----------
+const brokenWf = readWf();
+brokenWf.requirements[REQ].copy = '这不是对象，是被手写坏的 copy';
+fs.writeFileSync(WF, JSON.stringify(brokenWf, null, 2) + '\n', 'utf8');
+const viewBroken = tt.requirementCopyView(readWf().requirements[REQ]);
+ok('copy 损坏 → copyBroken=true 且四块全标缺失', viewBroken.copyBroken === true && viewBroken.copy === null && viewBroken.copyMissing.length === 4, JSON.stringify({ b: viewBroken.copyBroken, n: viewBroken.copyMissing.length }));
+const bakBefore = fs.readdirSync(path.dirname(WF)).filter((n) => n.startsWith('工作流.json.bak-')).length;
+const rBroken = runJson(['req', 'copy', '--boot', token, '--project', PROJECT, '--requirement', REQ, '--what', '修好的大白话', '--how', 'h', '--impact', 'i', '--advice', 'a']);
+const rowBroken = rowOf();
+const lastHist = rowBroken.copyHistory[rowBroken.copyHistory.length - 1];
+ok('损坏 copy 被修复且原值留档进 copyHistory', rBroken.code === 0 && rowBroken.copy.what === '修好的大白话' && Boolean(lastHist && lastHist.broken === true && String(lastHist.raw).includes('被手写坏的 copy')), JSON.stringify({ code: rBroken.json && rBroken.json.code, last: lastHist && lastHist.raw }));
+const bakAfter = fs.readdirSync(path.dirname(WF)).filter((n) => n.startsWith('工作流.json.bak-')).length;
+ok('写盘留 .bak（tmp+rename+.bak 口径）', bakAfter > bakBefore, `${bakBefore}→${bakAfter}`);
+
 // ---------- 报告 ----------
 const report = { at: new Date().toISOString(), requirement: REQ, pass, fail, failures, results };
 const outFile = path.join(REPO, '项目', '工作台改造修复', '_tmp', 'requirement-copy-run.json');

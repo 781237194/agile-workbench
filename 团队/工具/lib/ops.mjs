@@ -4037,17 +4037,25 @@ function normalizeReqCopy(raw) {
 
 /** 与 src/team-tools.js → applyRequirementCopyToState 同判据（改一处必须同步改另一处）。 */
 function applyReqCopyToRow(row, copy, { by = '', at = '', expectedUpdatedAt = '' } = {}) {
-  const current = row && typeof row.copy === 'object' && row.copy ? row.copy : null;
+  const current = row && typeof row.copy === 'object' && row.copy && !Array.isArray(row.copy) ? row.copy : null;
+  // copy JSON 损坏（被手写成字符串/数组）：视为缺字段展示，原值留档进 copyHistory 再覆盖。
+  const brokenCopy = row && row.copy !== undefined && row.copy !== null && !current ? row.copy : null;
   if (expectedUpdatedAt && String(row.updatedAt || '') !== String(expectedUpdatedAt)) {
     return { ok: false, code: 'COPY_CONFLICT', message: `需求在读取之后被改过（磁盘 ${String(row.updatedAt || '').slice(0, 19)} ≠ 预期 ${String(expectedUpdatedAt).slice(0, 19)}），未写入`, current };
   }
   const stampAt = String(at || nowIso());
   const next = { ...copy, at: stampAt, by: String(by || '') };
-  const sameBlocks = current && REQ_COPY_BLOCKS.every((key) => String(current[key] || '') === String(next[key] || ''))
+  const sameBlocks = !brokenCopy && current
+    && REQ_COPY_BLOCKS.every((key) => String(current[key] || '') === String(next[key] || ''))
     && String(current.source || '') === String(next.source || '');
   if (sameBlocks) return { ok: true, changed: false, reason: 'SAME_CONTENT', copy: current, at: stampAt };
   const history = Array.isArray(row.copyHistory) ? row.copyHistory.slice() : [];
-  if (current) history.push({ ...current, replacedAt: stampAt, replacedBy: String(by || '') });
+  if (brokenCopy !== null) {
+    const rawText = typeof brokenCopy === 'string' ? brokenCopy : (() => { try { return JSON.stringify(brokenCopy); } catch { return String(brokenCopy); } })();
+    history.push({ broken: true, raw: String(rawText).slice(0, REQ_COPY_BLOCK_MAX), replacedAt: stampAt, replacedBy: String(by || '') });
+  } else if (current) {
+    history.push({ ...current, replacedAt: stampAt, replacedBy: String(by || '') });
+  }
   row.copy = next;
   row.copyHistory = history.slice(-REQ_COPY_HISTORY_MAX);
   row.updatedAt = stampAt;
@@ -4079,6 +4087,10 @@ function cmdReqCopy(args) {
   const decision = applyReqCopyToRow(row, normalized.copy, { by, at, expectedUpdatedAt: String(args['expected-updated-at'] || '') });
   if (!decision.ok) fail(decision.code, decision.message, { requirementId, current: decision.current || null, wrote: false }, 1);
   if (decision.changed) {
+    // 写盘沿用 工作流 的原子写（tmp+rename），并按本项目口径加一份 .bak（与 writeStore 一致）。
+    try {
+      if (read.file && exists(read.file)) fs.copyFileSync(read.file, `${read.file}.bak-${Date.now()}`);
+    } catch { /* 备份失败不阻断写盘 */ }
     const write = writeWorkflowState(b.project, read.state);
     appendEvent({
       role: b.role, sessionId: b.sessionId, action: 'req_copy_save', project: b.project, target: requirementId,
