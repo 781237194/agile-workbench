@@ -217,16 +217,22 @@ function readRenderMemoryWindow(projectPath, options = {}) {
       samplingDisabled = noShards ? dirAgeMs > 24 * 3600 * 1000 : (newestMs > 0 && Date.now() - newestMs > 24 * 3600 * 1000);
     } catch { samplingDisabled = false; }
   }
+  // D 行（卷2 §四）NO_PREV_SHARD：窗口不够，且「确实没有前一日分片可续」——
+  // 判据=①窗口未凑够；②有数据（不是 A 行）；③盘上不存在早于 atCrash 当天的任何分片；
+  //      ④窗口已取到当天最早分片的第一行（说明当天能给的都给了）。
+  // 不满足 ③ 时说明还有前日分片可续（那就是别的异常，不能冒充 D 行）。
   const prevShardMissing = (() => {
     if (!insufficient || !lines.length) return false;
-    const days = [...new Set(shards.map((s) => s.dateKey))];
-    if (days.length !== 1) return false;
-    const dayShards = shards.filter((s) => s.dateKey === days[0]).sort((a, b) => a.index - b.index);
-    if (!dayShards.length || dayShards[0].index !== 1) return false;
-    const firstRowAt = String(lines[0] && lines[0].at || '');
-    const { rows } = readShardRows(dayShards[0]);
-    const firstInShard = rows.length ? String(rows[0].at || '') : '';
-    return Boolean(firstRowAt) && firstRowAt === firstInShard;
+    const atCrashDayKey = dateKeyOf(options.atCrash || Date.now());
+    const earlier = shards.filter((s) => s.dateKey < atCrashDayKey);
+    if (earlier.length) return false;
+    const todayShards = shards.filter((s) => s.dateKey === atCrashDayKey).sort((a, b) => a.index - b.index);
+    if (!todayShards.length) return false;
+    const { rows } = readShardRows(todayShards[0]);
+    if (!rows.length) return false;
+    const firstInWindow = Date.parse(String(lines[0] && lines[0].at || ''));
+    const firstInShard = Date.parse(String(rows[0] && rows[0].at || ''));
+    return Number.isFinite(firstInWindow) && Number.isFinite(firstInShard) && firstInWindow <= firstInShard;
   })();
   const code = noShards
     ? (samplingDisabled ? 'SAMPLING_DISABLED' : 'NO_SAMPLE_FILE')

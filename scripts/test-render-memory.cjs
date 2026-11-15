@@ -269,6 +269,29 @@ const sampleAt = (iso, mb, extra) => ({ at: iso, pid: 100, type: 'renderer', gue
   const recR2 = RM.evaluateRecoverable(winR2, { windowSec: 300 });
   check('S6-08 R2：degraded 行不计入分母（100 好行 + 15 降级 → R2 真）', recR2.R2 === true && recR2.degradedLines === 15, { R2: recR2.R2, degradedLines: recR2.degradedLines, nullRatio: recR2.nullRatio });
 
+  // D 行加强：同一天多个分片、窗口不够、且**盘上无前一日分片** → NO_PREV_SHARD
+  const dD2 = reset();
+  const baseD2 = Date.UTC(2026, 10, 15, 9, 0, 0);
+  const big = 'z'.repeat(1024 * 1024);
+  for (let i = 0; i < 30; i += 1) {
+    RM.appendSample(dD2, sampleAt(iso(baseD2, i), 500, { guestUrl: big }), { dateKey: '20261115' });
+  }
+  const winD2 = RM.readRenderMemoryWindow(dD2, { atCrash: iso(baseD2, 29), windowSec: 300 });
+  check('S6-10 D 行加强：同日多分片+无前日分片 → NO_PREV_SHARD 且 fail=false',
+    winD2.code === 'NO_PREV_SHARD' && winD2.fail === false && winD2.prevShardMissing === true,
+    { code: winD2.code, fail: winD2.fail, prevShardMissing: winD2.prevShardMissing, shards: RM.listShards(dD2).length });
+
+  // 反向：若盘上有前一日分片（可续），就不能冒充 D 行
+  const dD3 = reset();
+  RM.appendSample(dD3, sampleAt('2026-11-14T23:59:50.000Z', 400), { dateKey: '20261114' });
+  for (let i = 0; i < 20; i += 1) {
+    RM.appendSample(dD3, sampleAt(iso(Date.UTC(2026, 10, 15, 9, 0, 0), i), 500), { dateKey: '20261115' });
+  }
+  const winD3 = RM.readRenderMemoryWindow(dD3, { atCrash: iso(Date.UTC(2026, 10, 15, 9, 0, 0), 19), windowSec: 300 });
+  check('S6-11 有前日分片可续时不得判 NO_PREV_SHARD',
+    winD3.code !== 'NO_PREV_SHARD',
+    { code: winD3.code, prevShardMissing: winD3.prevShardMissing });
+
   // cause 白名单：全仓采样行不得出现 cause='interval'
   const allRows = RM.listShards(dC).flatMap((shard) => RM.readShardRows(shard).rows);
   check('S6-09 归一后无 cause=interval（卷3 白名单五值）', allRows.every((row) => ['boot', 'sample', 'reused', 'degraded', 'recovered'].includes(String(row.cause || ''))), { total: allRows.length });
