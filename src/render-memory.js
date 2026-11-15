@@ -312,9 +312,10 @@ function evaluateRecoverable(win, options = {}) {
   //   5 分钟窗口（windowSec ≤ 600）：双边 15–25%，越界（<15 或 >25）都判 SAMPLE_CADENCE_BAD；
   //   2 小时窗口（> 600）：只判下限（<15 才 BAD），>25% 只置 cadence.denseWarn=true、verdict 仍 OK。
   const lowerBad = densityPct < 15;
-  const upperBad = windowSec <= 600 && densityPct > 25;
+  const upperBad = densityPct > 25;
+  const cadenceVerdict = ((windowSec <= 600 ? (lowerBad || upperBad) : lowerBad)) ? 'SAMPLE_CADENCE_BAD' : 'OK';
   const denseWarn = densityPct > 25;
-  const cadenceVerdict = lowerBad || upperBad ? 'SAMPLE_CADENCE_BAD' : 'OK';
+
   const cadence = { realPoints, forced, forcedSamples, hasForced: forcedSamples > 0, densityPct, denseWarn, verdict: cadenceVerdict };
 
   const enoughLines = lines.length >= Math.min(300, Math.max(1, Math.round(windowSec)));
