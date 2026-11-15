@@ -302,12 +302,12 @@ function evaluateRecoverable(win, options = {}) {
   // 卷四① + 返工单 §六②：forced 行从密度分母剔除，但**不再**给「有 forced 就整窗豁免」的假绿。
   const densityDenominator = lines.filter((row) => row && row.forced !== true && String(row.cause || '') !== 'boot').length;
   const densityPct = densityDenominator ? Math.round((realPoints / densityDenominator) * 1000) / 10 : 0;
-  // 返工单 §六①④：密度只判下限（<15% 判 BAD）；上限按窗口分支——
-  //   5 分钟窗口（windowSec ≤ 600）仍按 15–25% 双边；2 小时窗口（>600）>25% 只置 denseWarn=true、verdict 仍 OK。
+  // PM 裁定 M-20261115-154738-a315d1：真点密度**只判下限**——<15% 判 SAMPLE_CADENCE_BAD；
+  // >25% **不判 FAIL**，只置 cadence.denseWarn=true（verdict 仍 'OK'，枚举不变）。
+  // 覆盖返工单 §六④ 的「5 分钟窗口双边」旧口径（那条是上一版裁定，已被本条取代）。
   const lowerBad = densityPct < 15;
-  const upperBad = windowSec <= 600 && densityPct > 25;
   const denseWarn = densityPct > 25;
-  const cadenceVerdict = lowerBad || upperBad ? 'SAMPLE_CADENCE_BAD' : 'OK';
+  const cadenceVerdict = lowerBad ? 'SAMPLE_CADENCE_BAD' : 'OK';
   const cadence = { realPoints, forced, forcedSamples, hasForced: forcedSamples > 0, densityPct, denseWarn, verdict: cadenceVerdict };
 
   const enoughLines = lines.length >= Math.min(300, Math.max(1, Math.round(windowSec)));

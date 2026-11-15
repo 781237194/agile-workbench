@@ -300,12 +300,12 @@ const sampleAt = (iso, mb, extra) => ({ at: iso, pid: 100, type: 'renderer', gue
     rec2hHigh.cadence.verdict === 'OK' && rec2hHigh.cadence.denseWarn === true,
     { densityPct: rec2hHigh.cadence.densityPct, verdict: rec2hHigh.cadence.verdict, denseWarn: rec2hHigh.cadence.denseWarn });
 
-  // ④ 5 分钟窗口：>25% 仍按双边判 BAD
+  // ④ PM 裁 M-20261115-154738：>25% 不判 FAIL（任何窗口），只置 denseWarn=true
   const win5mHigh = mkLines(100, 40);
   const rec5mHigh = RM.evaluateRecoverable(win5mHigh, { windowSec: 300 });
-  check('S7-02 5 分钟窗口密度 40% → verdict=SAMPLE_CADENCE_BAD（双边）',
-    rec5mHigh.cadence.verdict === 'SAMPLE_CADENCE_BAD' && rec5mHigh.cadence.denseWarn === true,
-    { densityPct: rec5mHigh.cadence.densityPct, verdict: rec5mHigh.cadence.verdict });
+  check('S7-02 5 分钟窗口密度 40% → verdict=OK 且 denseWarn=true（只判下限）',
+    rec5mHigh.cadence.verdict === 'OK' && rec5mHigh.cadence.denseWarn === true,
+    { densityPct: rec5mHigh.cadence.densityPct, verdict: rec5mHigh.cadence.verdict, denseWarn: rec5mHigh.cadence.denseWarn });
 
   // ② 去掉 hasForced 整窗豁免：密度 5% + 有 forced 行 → 仍判 BAD
   const winLowForced = mkLines(100, 5, { forced: true });
