@@ -172,6 +172,9 @@ if (IS_BOARD_WINDOW) {
     ownerProxyStatus: (payload) => ipcRenderer.invoke('owner:proxy-status', payload),
     ownerProxyStart: (payload) => ipcRenderer.invoke('owner:proxy-start', payload),
     ownerProxyEnd: (payload) => ipcRenderer.invoke('owner:proxy-end', payload),
+    // R-dba4（T-3999 数据层）：评审界面「大白话」持久化——读回已快照的 copy / 写一份新快照（refresh=点「刷新草案」）。
+    reviewCopyGet: (payload) => ipcRenderer.invoke('review:copy-get', payload),
+    reviewCopySave: (payload) => ipcRenderer.invoke('review:copy-save', payload),
     // Owner 确认码已废弃：决定/验收直接以 role=owner 执行。
     // 以下两个 IPC 仅为兼容旧界面保留，返回固定占位值，后端不再校验确认码。
     ownerChallenge: (payload) => ipcRenderer.invoke('owner:challenge', payload),

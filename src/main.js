@@ -7,6 +7,8 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { execFileSync, spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
+// R-dba4 / T-3999：评审界面「大白话」持久化的纯逻辑（本文件只做 IPC 与落盘，不碰 工作流.json）。
+const ReviewCopy = require('./review-copy.js');
 
 const ROOT = path.join(__dirname, '..');
 const APP_ICON = path.join(ROOT, 'assets', 'pm-workbench.ico');
@@ -6967,6 +6969,40 @@ function registerIpc() {
       tasks: Array.isArray(snapshot.tasks) ? snapshot.tasks : [],
       materials: p.requirementId ? ownerMaterials(project, String(p.requirementId)) : null,
     };
+  });
+  // R-dba4 / T-3999（数据层）：评审界面「大白话」持久化。
+  // 落点只在本壳的 store（workbench.json → projects[].reviewCopy），**不写 工作流.json**——
+  // 需求行的字段白名单与写盘属团队工具（程序员B 域），数据层先保证「写入时快照 + 历史 + 重启不丢」。
+  ipcMain.handle('review:copy-get', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    const rows = (project.reviewCopy && project.reviewCopy.rows && typeof project.reviewCopy.rows === 'object')
+      ? Object.keys(project.reviewCopy.rows)
+      : [];
+    const out = {};
+    for (const id of rows) out[id] = ReviewCopy.recordOf(project, id);
+    return { ok: true, projectId: project.id, version: (project.reviewCopy && project.reviewCopy.version) || 0, rows: out, count: rows.length };
+  });
+  ipcMain.handle('review:copy-save', async (_e, payload) => {
+    const p = payload || {};
+    const store = readStore();
+    const project = requireProject(store, p.projectId);
+    const requirementId = String(p.requirementId || '').trim();
+    if (!requirementId) return { ok: false, code: 'REQUIREMENT_REQUIRED', message: '缺需求 id：这条大白话要挂在一条需求上' };
+    const existing = ReviewCopy.recordOf(project, requirementId);
+    const decision = ReviewCopy.decideSave(existing, p.copy || {}, {
+      refresh: p.refresh === true,
+      at: p.at || now(),
+      by: String(p.by || '')
+    });
+    if (!decision.changed) {
+      return { ok: true, changed: false, reason: decision.reason, requirementId, record: decision.record, note: decision.reason === 'SNAPSHOT_FROZEN' ? '已快照过：正文改动不会重算，点「刷新草案」才更新' : '' };
+    }
+    ReviewCopy.applySave(project, requirementId, decision, p.at || now());
+    project.updatedAt = now();
+    writeStore(store);
+    try { addEvent(project, `评审大白话已落盘（${decision.reason}）：${requirementId}`); } catch { /* 事件失败不影响落盘 */ }
+    return { ok: true, changed: true, reason: decision.reason, requirementId, record: decision.record };
   });
   ipcMain.handle('owner:proxy-status', async (_e, payload) => {
     const p = payload || {};
