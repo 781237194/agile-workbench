@@ -57,7 +57,7 @@ const C651_DATA = process.env.AWB_C651_DATA ? path.resolve(process.env.AWB_C651_
 const QUEUE_CHECK_DATA = process.env.AWB_QUEUE_DATA ? path.resolve(process.env.AWB_QUEUE_DATA) : path.join(ROOT, '.queue-check-data');
 const DAEMON_CHECK_DATA = process.env.AWB_DAEMON_DATA ? path.resolve(process.env.AWB_DAEMON_DATA) : path.join(ROOT, '.daemon-check-data');
 const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT
-  : (IS_LAYOUT_CHECK ? LAYOUT_DATA : (IS_B55C_CHECK ? B55C_DATA : (IS_E29F_CHECK ? E29F_DATA : (IS_C651_CHECK ? C651_DATA : (IS_B2EBE_CHECK ? path.join(ROOT, '.b2ebe-check-data') : (IS_QUEUE_CHECK ? QUEUE_CHECK_DATA : (IS_DAEMON_CHECK ? DAEMON_CHECK_DATA : LOCAL_DATA)))))));
+  : (IS_LAYOUT_CHECK ? LAYOUT_DATA : (IS_B55C_CHECK ? B55C_DATA : (IS_E29F_CHECK ? E29F_DATA : (IS_C651_CHECK ? C651_DATA : (IS_B2EBE_CHECK ? path.join(ROOT, '.b2ebe-check-data') : (IS_QUEUE_CHECK ? QUEUE_CHECK_DATA : (IS_DAEMON_CHECK ? DAEMON_CHECK_DATA : (IS_REVIEW_CHECK ? REVIEW_DATA : LOCAL_DATA))))))));
 const USER_DATA = path.join(DATA_ROOT, 'userdata');
 const TEMP_ROOT = path.join(DATA_ROOT, 'tmp');
 // DSH 地址持久化在仓库数据目录（D 盘），不写 C 盘、不写项目目录。
@@ -10948,8 +10948,22 @@ async function runReviewCheck() {
     });
   })()`));
   report.proxyUiOn = proxyUiOn;
-  check('AC1 生效后按钮变「结束代管」（并带数据态与到期）',
-    /结束代管/.test(proxyUiOn.buttonText) && proxyUiOn.buttonState === 'active' && Boolean(proxyUiOn.expiresAttr), proxyUiOn);
+  // R-b28f：入口迁到右下浮动面板后，行文案变成「代管中 · 到期 HH:MM」（不再是弹窗里的「结束代管」按钮）
+  check('AC1 生效后行变 active（文案「代管中」并带到期）',
+    /代管中/.test(proxyUiOn.buttonText) && proxyUiOn.buttonState === 'active' && Boolean(proxyUiOn.expiresAttr), proxyUiOn);
+  // R-b28f 反向断言：评审弹窗里不再有开/关代管的按钮（收敛到右下浮动面板）
+  const dialogProxyGone = JSON.parse(await js(`(()=>{
+    const dialog = document.querySelector('[data-owner-review-dialog]');
+    const scope = dialog && !dialog.hidden ? dialog : document;
+    const inDialog = scope.querySelectorAll('[data-or-proxy-all], [data-owner-review-proxy-end]').length;
+    const row = document.querySelector('[data-or-proxy-all]');
+    const inFloat = Boolean(row && row.closest('#side-float'));
+    const note = dialog ? dialog.querySelector('[data-or-proxy-note]') : null;
+    return JSON.stringify({ inDialog, inFloat, hasNote: Boolean(note), noteText: note ? note.textContent : '' });
+  })()`));
+  report.proxyDialogGone = dialogProxyGone;
+  check('AC1-反向 评审弹窗内不再有开/关代管按钮（只在右下浮动面板）',
+    dialogProxyGone.inDialog === 0 && dialogProxyGone.inFloat === true && /一键代管/.test(String(dialogProxyGone.noteText || '')), dialogProxyGone);
   check('AC3-补 决策箱分区出现且带 data-proxy-decide-entry 锚点',
     proxyUiOn.hasSection === true && proxyUiOn.anchorCount >= 2, { hasSection: proxyUiOn.hasSection, anchors: proxyUiOn.anchorCount });
   // B-11ce：覆盖条数只算有真实非终态 status 的行——夹具里非终态=3（a001 approved/a002 dev/a003 test_done），a004 accepted 不算。
@@ -10993,9 +11007,11 @@ async function runReviewCheck() {
   await js(`(function(){ const s = document.querySelector('[data-proxy-decide-section]'); if (s && s.scrollIntoView) s.scrollIntoView({ block: 'center' }); return true; })()`);
   await sleep(500);
   report.shots['proxy-decision'] = await shot('proxy-decision-ack.png');
-  // 结束代管 → 锚点消失 + 入口回到「全部交 PM 代管」+ AC7 canonical sha 不变
-  await js(`(function(){ const b = document.querySelector('[data-or-proxy-all]'); if (b && /结束代管/.test(b.textContent)) b.click(); return true; })()`);
-  await sleep(2200);
+  // 结束代管 → 行回「一键代管」+ 决策箱分区消失（R-b28f 起：点 active 行先弹二次确认，再点确认按钮）
+  await js(`(function(){ const b = document.querySelector('[data-or-proxy-all]'); if (b && b.getAttribute('data-proxy-all-state') === 'active') b.click(); return true; })()`);
+  await sleep(900);
+  await js(`(function(){ const c = document.querySelector('[data-proxy-confirm][data-proxy-end-confirm]') || document.querySelector('[data-proxy-confirm]'); if (c && !c.disabled) c.click(); return true; })()`);
+  await sleep(2600);
   const proxyUiOff = JSON.parse(await js(`(()=>{
     const btn = document.querySelector('[data-or-proxy-all]');
     const section = document.querySelector('[data-proxy-decide-section]');
@@ -11009,7 +11025,7 @@ async function runReviewCheck() {
   const ac7After = ac7Digest();
   report.proxyUiOff = { ...proxyUiOff, ac7Same: ac7After === ac7Before };
   check('AC3-补 结束代管后锚点消失（1 → 0）', proxyUiOff.anchors === 0 && proxyUiOff.hasSection === false, proxyUiOff);
-  check('AC1 结束后按钮变回「全部交 PM 代管」', /全部交 PM 代管/.test(proxyUiOff.buttonText) && proxyUiOff.buttonState === 'idle', proxyUiOff);
+  check('AC1 结束后行回到「一键代管」', /一键代管/.test(proxyUiOff.buttonText) && proxyUiOff.buttonState === 'idle', proxyUiOff);
   check('AC7 结束代管不回溯：acceptanceRecord+decisions 的 canonical sha 前后一致', ac7After === ac7Before, { before: ac7Before.slice(0, 12), after: ac7After.slice(0, 12) });
 
   // ── B-11ce 更正：弹窗快照过期 → 点代管前必须强制刷新，条数用即时值（造 1 条验收后应少 1）──
@@ -11026,7 +11042,10 @@ async function runReviewCheck() {
     writeJsonFile(workflowFile, wfStale);
   }
   // 立刻点一键代管（不给 5 秒轮询留时间），修复后 startProxyAll 会先 loadData 再计数。
-  await js(`(function(){ const b = document.querySelector('[data-or-proxy-all]'); if (b && /全部交 PM 代管/.test(b.textContent)) b.click(); return true; })()`);
+  // R-b28f：行是 idle 时点击 → 先弹权限说明 → 点「确认开启代管」。
+  await js(`(function(){ const b = document.querySelector('[data-or-proxy-all]'); if (b && b.getAttribute('data-proxy-all-state') !== 'active') b.click(); return true; })()`);
+  await sleep(900);
+  await js(`(function(){ const c = document.querySelector('[data-proxy-confirm][data-proxy-start-confirm]') || document.querySelector('[data-proxy-confirm]'); if (c && !c.disabled) c.click(); return true; })()`);
   await sleep(4200);
   const staleCount = JSON.parse(await js(`(()=>{
     const notice = document.querySelector('[data-or-notice]') || document.querySelector('.or-notice');
