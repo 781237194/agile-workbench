@@ -5509,6 +5509,37 @@ function ledgerForkRow(req, fork) {
   };
 }
 
+/**
+ * F-9fbe-4：单条需求的账本小字（需求卡片 / 行内用）。
+ * **只认快照 ledger 字段**（`ledgerFork` / `ledgerInFlight`）：
+ *   - `ledgerFork` 非 null → kind='fork'（才算分叉，橙）
+ *   - `ledgerInFlight` 非空 → kind='inflight'（返工在途/任务在办，中性，**不计分叉**）
+ *   - 行上有字段但都为空 → 账本一致，不出小字
+ *   - 行上连字段都没有（旧主进程/旧工具）→ 才回退旧判据，kind='legacy' 且文案自报「旧判据」。
+ * 这样旧算法的「任务已完成 · 工作流未收口」不会与真源条的分叉数同屏出现两个口径。
+ * 返回 {kind:'fork'|'inflight'|'legacy'|'', level, label, fork}
+ */
+function ledgerRowNote(req) {
+  const row = req && typeof req === 'object' ? req : {};
+  const has = (key) => Object.prototype.hasOwnProperty.call(row, key);
+  if (row.ledgerFork) {
+    const fork = ledgerForkRow(row, row.ledgerFork);
+    return { kind: 'fork', level: 'warn', label: fork.label, fork };
+  }
+  const flight = String(row.ledgerInFlight || '');
+  if (flight) {
+    const label = flight === 'rework_in_flight'
+      ? '返工在途（任务完成时间早于重开时间）· 不计分叉'
+      : (flight === 'task_in_progress' ? '任务在办 · 不计分叉' : '账本在途 · 不计分叉');
+    return { kind: 'inflight', level: 'info', label, fork: null };
+  }
+  if (has('ledgerFork') || has('ledgerInFlight')) return { kind: '', level: 'ok', label: '', fork: null };
+  // 快照缺 ledger 字段：旧主进程才回退（label 里已自带「旧判据」字样）。
+  const legacy = legacyRequirementLedger(row);
+  if (!legacy.staleDone && !legacy.staleOpen) return { kind: '', level: 'ok', label: '', fork: null };
+  return { kind: 'legacy', level: 'warn', label: legacy.label, fork: null };
+}
+
 /** 时间只做截断显示，不引入额外格式化依赖（纯函数，测试可直接跑）。 */
 function ledgerWhenText(value) {
   const text = String(value || '');
@@ -5589,10 +5620,20 @@ function ledgerMarkupFromView(view, options) {
       <code>${esc(req.id || '')}</code><span>${esc(statusLabel(req))}</span><b>${esc(kindText)}</b><span class="legacy-ledger-when">不计分叉</span>
     </div>`;
   }).join('');
-  return `${banner}<div class="legacy-ledger ${level}" data-ledger-source="${source}" data-ledger-count="${count}" data-ledger-inflight="${Number(v.inFlightCount) || inFlight.length}" data-panel-level="${level}">
+  // F-9fbe-4：在途条数单独成一个 chip（`data-ledger-inflight-count`），
+  // 分叉数只用 `data-ledger-count`——两个数字各有出处，在途绝不并进分叉。
+  const inFlightListed = inFlight.length;
+  const inFlightTotal = Math.max(Number(v.inFlightCount) || 0, inFlightListed);
+  const reworkCount = inFlight.filter((row) => String((row && row.kind) || '') === 'rework_in_flight').length;
+  const taskCount = inFlightListed - reworkCount;
+  const inFlightChip = inFlightTotal
+    ? `<span class="legacy-ledger-inflight" data-ledger-inflight-count="${inFlightTotal}" data-ledger-rework-count="${reworkCount}" data-ledger-task-count="${taskCount}" data-panel-level="info">在途 ${inFlightTotal} 条：返工在途 ${reworkCount} · 任务在办 ${taskCount}（不计分叉）</span>`
+    : '';
+  return `${banner}<div class="legacy-ledger ${level}" data-ledger-source="${source}" data-ledger-count="${count}" data-ledger-inflight="${inFlightTotal}" data-panel-level="${level}">
     <div class="legacy-ledger-head">
       <b>账本核对</b>
       <span>${esc(head)}</span>
+      ${inFlightChip}
       <span class="legacy-ledger-source" data-ledger-source-label="${source}">${source === 'snapshot' ? '来源：workflow:state 快照（ledgerFork / ledger.inFlight）' : '来源：旧算法（快照缺 ledger 字段）'}</span>
     </div>
     ${rows}
@@ -9935,7 +9976,10 @@ function legacyRequirementCard(req) {
   const origin = req.origin === 'owner' ? 'Owner 新需求'
     : (req.origin === 'legacy-doc' ? '旧正文需求' : '角色需求');
   const active = legacyActiveRequirement();
-  const ledger = legacyRequirementLedger(req);
+  // F-9fbe-4：卡片小字只认快照 ledger 字段（ledgerFork / ledgerInFlight）；
+  // 旧算法只在「快照连字段都没有」时回退，且文案自报「旧判据」——
+  // 不再无条件拿 workflow.status × taskStatus 给每条需求贴「工作流未收口」（返工在途会被误读成分叉）。
+  const ledgerNote = ledgerRowNote(req);
   const ownerView = legacyReqOwnerView(req);
   const ownerChip = String(req.status) === 'approved' && ownerView.status === 'none'
     ? '<span class="legacy-req-chip warn" title="PM 派单要求需求的 ownerReview 为 approved / skipped">Owner 未决定（派单闸门）</span>'
@@ -9955,7 +9999,7 @@ function legacyRequirementCard(req) {
     <div class="legacy-req-facts">
       ${legacyReqMeta(req).map((text) => `<span>${esc(text)}</span>`).join('')}
     </div>
-    ${ledger.label ? `<div class="legacy-req-ledger">${esc(ledger.label)}；界面不替后端同步旧任务状态。</div>` : ''}
+    ${ledgerNote.label ? `<div class="legacy-req-ledger ${esc(ledgerNote.kind)}" data-ledger-card="${esc(ledgerNote.kind)}" data-panel-level="${esc(ledgerNote.level)}">${esc(ledgerNote.label)}</div>` : ''}
     <div class="legacy-req-actions">${legacyReqActions(req)}</div>
   </article>`;
 }

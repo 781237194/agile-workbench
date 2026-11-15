@@ -84,7 +84,7 @@ ${region}
 ${escSource || "const esc = (value) => String(value ?? '');"}
 return {
   panelSeverity, panelLevelLabel, panelLevelClass, panelGateState, panelGateMarkup,
-  ledgerViewFromSnapshot, ledgerMarkupFromView, ledgerForkRow,
+  ledgerViewFromSnapshot, ledgerMarkupFromView, ledgerForkRow, ledgerRowNote, legacyRequirementLedger,
   bootRowFrom, bootSummaryFrom, bootCountText, bootStatusText,
   PANEL_SEVERITY_BLOCK_CODES, PANEL_BLOCK_LABEL
 };
@@ -117,6 +117,23 @@ check('源码：warn 分支没有硬编码「禁止推进」',
   !/level\s*===\s*'warn'[^\n]{0,120}禁止推进/.test(source) && !/禁止推进[^\n]{0,80}level\s*===\s*'warn'/.test(source));
 check('源码：warn 统一文案「可推进 · 待核验 N 项」', source.includes('可推进 · 待核验 ${n} 项') || source.includes('可推进 · 待核验 ${n} 项'));
 check('源码：旧的「旧任务 done · 工作流未收口」误导文案已清除', !source.includes('旧任务 done · 工作流未收口'));
+// ── R6：分叉计数只来自 ledger 字段（源码级，账本对齐 ed7-fix）──────────────
+const cardFn = source.slice(source.indexOf('function legacyRequirementCard'), source.indexOf('function syncLegacyGlobalReqButtons'));
+check('源码：需求卡片改用 ledgerRowNote（不再自己调旧算法 legacyRequirementLedger）',
+  cardFn.includes('ledgerRowNote(req)') && !cardFn.includes('legacyRequirementLedger'));
+check('源码：卡片小字按 kind 打 data-ledger-card（fork/inflight/legacy 可断言）',
+  /data-ledger-card="\$\{esc\(ledgerNote\.kind\)\}"/.test(cardFn));
+const legacyAlgoUses = [];
+for (let i = source.indexOf('legacyRequirementLedger('); i >= 0; i = source.indexOf('legacyRequirementLedger(', i + 1)) {
+  legacyAlgoUses.push(source.slice(Math.max(0, i - 80), i + 24));
+}
+check('源码：旧算法 legacyRequirementLedger 只剩「定义 + 两处回退」（ledgerViewFromSnapshot / ledgerRowNote），没有第三个调用点',
+  legacyAlgoUses.length === 3 && legacyAlgoUses.every((ctx) => !/legacyRequirementCard|renderLegacyRequirements/.test(ctx)),
+  { count: legacyAlgoUses.length, contexts: legacyAlgoUses.map((c) => c.replace(/\s+/g, ' ').slice(-70)) });
+check('源码：账本容器分叉数只在 data-ledger-count（由 count=forks 长度/Math.max 得到）',
+  /data-ledger-count="\$\{count\}"/.test(source));
+check('源码：在途条数单独 data-ledger-inflight-count（不与分叉同属性）',
+  source.includes('data-ledger-inflight-count="${inFlightTotal}"') && !/data-ledger-count="\$\{[^}]*inFlight/.test(source));
 check('源码：旧的 boot X/N 硬拼（boot/已读 ${boot.complete}/${boot.total}）已清除',
   !source.includes('${boot.complete}/${boot.total}') && !source.includes("boot.complete + '/' + boot.total"));
 
@@ -174,6 +191,11 @@ check('(a) 渲染「不计分叉」在途提示', reworkMarkup.includes('不计�
 check('(a) 容器标 data-ledger-source="snapshot"', reworkMarkup.includes('data-ledger-source="snapshot"'));
 check('(a) 在途行挂 data-panel-level="info"（中性）', reworkMarkup.includes('data-panel-level="info"'));
 check('(a) 在途不写「禁止推进」', !reworkMarkup.includes(api.PANEL_BLOCK_LABEL));
+// F-9fbe-4（账本对齐 ed7-fix）：在途条数走独立属性，分叉数只由 ledgerFork 决定。
+check('(a) 在途>0 时分叉计数仍是 0（data-ledger-count="0"）', reworkMarkup.includes('data-ledger-count="0"'), { markup: reworkMarkup.slice(0, 260) });
+check('(a) 在途条数单独一个属性 data-ledger-inflight-count="1"', reworkMarkup.includes('data-ledger-inflight-count="1"'));
+check('(a) 在途 chip 明写「返工在途 1」且标「不计分叉」',
+  /data-ledger-inflight-count="1"[^>]*>在途 1 条：返工在途 1 · 任务在办 0（不计分叉）/.test(reworkMarkup), { markup: reworkMarkup.slice(0, 400) });
 
 // ── 夹具 (b)：真分叉 → 1 分叉 + 处置入口 ────────────────────────────────
 log('\n=== 夹具 (b) 真分叉（开发任务 done、工作流未收口）→ 1 分叉 ===');
@@ -216,6 +238,32 @@ check('(b) 后端有 IPC 时给出两个处置按钮（收口旧任务 / 重开�
   && forkWithCmd.includes('data-ledger-action="task-release"') && forkWithCmd.includes('data-ledger-action="requirement-reopen"'));
 check('(b) 分叉行不出现「禁止推进」', !forkNoCmd.includes(api.PANEL_BLOCK_LABEL));
 
+// ── 夹具 (a2)/(b2)：需求卡片小字只认 ledger 字段（账本对齐 ed7-fix） ────
+log('\n=== 夹具 (a2)/(b2) 需求卡片账本小字（ledgerRowNote） ===');
+const noteRework = api.ledgerRowNote(fixtureRework.requirements[0]);
+check('(a2) 返工在途行 → kind=inflight（不是分叉）', noteRework.kind === 'inflight', { kind: noteRework.kind });
+check('(a2) 返工在途行文案含「返工在途」且写「不计分叉」',
+  noteRework.label.includes('返工在途') && noteRework.label.includes('不计分叉'), { label: noteRework.label });
+check('(a2) 返工在途行是 info（中性灰），不是 warn/橙', noteRework.level === 'info', { level: noteRework.level });
+const noteFork = api.ledgerRowNote(fixtureFork.requirements[0]);
+check('(b2) 真分叉行 → kind=fork', noteFork.kind === 'fork', { kind: noteFork.kind });
+check('(b2) 真分叉行是 warn（橙）', noteFork.level === 'warn', { level: noteFork.level });
+
+// 43ad 那类：test_done + 任务全 done + ledgerFork=null/ledgerInFlight='' → 旧算法会贴「工作流未收口」，现不得再出现
+const rowAwaitingAccept = {
+  id: 'R-20261114-132024-43ad', status: 'test_done', taskStatus: 'done',
+  reopenedAt: '', ledgerFork: null, ledgerInFlight: ''
+};
+const noteAwaiting = api.ledgerRowNote(rowAwaitingAccept);
+const legacyOnSameRow = api.legacyRequirementLedger(rowAwaitingAccept);
+check('(a3) 旧算法在 test_done+任务done 上会误判「工作流未收口」（复现用，证明旧判据确实是误报源）',
+  Boolean(legacyOnSameRow.staleDone) && legacyOnSameRow.label.includes('工作流未收口'), { label: legacyOnSameRow.label });
+check('(a3) 新口径：等验收（test_done/任务全 done）不出任何账本小字', noteAwaiting.kind === '' && noteAwaiting.label === '', { note: noteAwaiting });
+check('(a3) 新口径不再渲染「工作流未收口」字样', !noteAwaiting.label.includes('工作流未收口'));
+// 有字段但都为空（账本一致）→ 不出小字（绝不再回退旧算法）
+const noteClean = api.ledgerRowNote({ id: 'R-x', status: 'dev', taskStatus: 'done', ledgerFork: null, ledgerInFlight: '' });
+check('(a4) 行上有 ledger 字段但都为空 → 不出小字（有字段就不回退旧算法）', noteClean.kind === '' && noteClean.label === '', { note: noteClean });
+
 // ── 旧算法回退（快照缺字段时才用） ──────────────────────────────────────
 log('\n=== 快照缺 ledger 字段 → 才回退旧算法 ===');
 const legacyInput = {
@@ -227,6 +275,10 @@ const legacyInput = {
 const viewLegacy = api.ledgerViewFromSnapshot(legacyInput);
 check('快照缺字段 → source=legacy（容器会标 data-ledger-source="legacy"）', viewLegacy.source === 'legacy', { source: viewLegacy.source });
 check('快照缺字段时旧算法仍能给出 1 条（不静默丢分叉）', viewLegacy.count === 1, { count: viewLegacy.count });
+// 账本对齐 ed7-fix：回退时卡片小字也必须自报「旧判据」，不许冒充真分叉
+const noteLegacy = api.ledgerRowNote({ id: 'R-OLD-1', status: 'dev', taskStatus: 'done' });
+check('缺字段才回退：卡片小字 kind=legacy 且文案含「旧判据」',
+  noteLegacy.kind === 'legacy' && noteLegacy.label.includes('旧判据'), { note: noteLegacy });
 check('快照有字段（哪怕 0 分叉）就不回退旧算法', viewRework.source === 'snapshot' && viewFork.source === 'snapshot');
 
 // ── 夹具 (c)：briefing 不可用 → 待核验、不出现 0/6、不判红 ───────────────
