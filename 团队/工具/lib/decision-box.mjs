@@ -13,6 +13,8 @@ import {
   acquireLock, releaseLock, lockInfo, appendEvent, randomHex, sha256,
 } from './core.mjs';
 import { projectStatePaths, loadProject, sendMessage, findMessage, listInbox } from './store.mjs';
+// R-5016 F-5：guard 转投要写「决策收口.jsonl」；审计实现单源在 decision-route.mjs（只在调用期引用，无初始化期循环依赖）。
+import { appendDecisionRouteAudit, DECISION_TARGET_ANCHORS } from './decision-route.mjs';
 
 export const DECISION_BOX_FILE = '决策箱.json';
 export const DECISION_ID_RE = /^D-\d{8}-\d{6}-[0-9a-f]{4}$/;
@@ -152,9 +154,13 @@ export function addDecision(projectName, input = {}) {
   // Owner 09:10：需要 Owner 决策的（含验收）由路由守护以 by=system 自动入箱；CLI 仍只允许 PM。
   if (!['pm', 'system'].includes(by)) fail('DECISION_BOX_FORBIDDEN', '只有 PM（或系统）能把条目放进决策箱', { by });
   // R-e717 F-1 / F-1b / F-2：范围（需求未收口拦截）、语义（评审/验收动作拦截）、文案（禁内部代号）。
-  assertDecisionScope(projectName, { source, title });
-  assertNotReviewAction({ title, summary, question, options });
-  assertDecisionCopyHuman({ title, summary, question });
+  // R-5016 F-5：命中不再"裸拒"——保留原拒绝码，同时给 redirect 目标并写「决策收口.jsonl」redirect 审计。
+  // skipGuards 只给系统漏箱补录（missBox）用：占位条目本身不是评审动作，不该被语义门挡。
+  if (!input.skipGuards) {
+    assertDecisionScope(projectName, { source, title });
+    assertNotReviewAction({ title, summary, question, options }, { projectName });
+    assertDecisionCopyHuman({ title, summary, question });
+  }
 
   return withDecisionBoxLock(projectName, () => {
     const read = readDecisionBox(projectName);
@@ -164,14 +170,16 @@ export function addDecision(projectName, input = {}) {
       && String((row.source && row.source.ref) || '') === source.ref
       && String(row.question || '').trim() === question);
     if (dup) fail('DECISION_BOX_DUPLICATE', `同来源同问题的条目已在待决：${dup.id}`, { duplicateOf: dup.id, source });
-    const id = newDecisionId(projectName, box);
+    const id = newDecisionId(projectName, box) + String(input.idSuffix || '');
     const at = nowIso();
     const item = {
       id, title, summary, question,
-      source, createdAt: at, by: 'pm', status: 'open',
+      source, createdAt: at, by: String(input.by || 'pm'), status: 'open',
       options, readAt: null, answeredAt: null, archivedAt: null, updatedAt: at,
       decision: null, receipt: { messageId: null, at: null, choice: null, opinion: null },
       receiptSeq: 0,
+      // R-5016 F-4：入箱新增字段（impact/dueAt/defaultChoice/ruleId/origin/missBox），缺省不写空壳值
+      ...(input.extra && typeof input.extra === 'object' ? input.extra : {}),
     };
     box.items.push(item);
     writeDecisionBox(projectName, box);
@@ -291,6 +299,8 @@ export async function acknowledgeDecision(projectName, input = {}) {
     again.box.meta = { ...(again.box.meta || {}), receiptSeq: seq };
     fresh.status = 'answered';
     fresh.answeredAt = at;
+    // R-5016 F-6/AC4：答完即归档——archivedAt 非空（status 仍 answered，界面按 archivedAt 判「已收口」）
+    fresh.archivedAt = at;
     fresh.updatedAt = at;
     fresh.decision = proxyBasis
       ? {
@@ -601,6 +611,29 @@ export function humanizeDecisionText(projectName, text) {
   });
 }
 
+/**
+ * R-5016 F-5：guard 命中后不再"裸拒"——保留原拒绝码，同时给出 redirect 目标并写
+ * 「决策收口.jsonl」一行 action='redirect'（含原码/目标/时间）。界面/CLI 据此显示「已转投到 X」。
+ * 审计不可写时按边界-降级 fail-closed：仍抛原码（redirect 字段保留），但动作不会被放过。
+ */
+function redirectInsteadOfBareFail(projectName, { code, message, details = {}, target = 'review_dialog', ruleId = 'R-REVIEW-INTENT', reason = '' }) {
+  const redirect = { to: target, anchor: DECISION_TARGET_ANCHORS[target] || '', reason, ruleId };
+  let auditFile = null;
+  let auditError = null;
+  try {
+    auditFile = appendDecisionRouteAudit(projectName, {
+      actor: 'system', action: 'redirect', askId: null, target, ruleId, code,
+      note: String(reason || message || '').slice(0, 160), reason: String(reason || ''),
+    }).file;
+  } catch (e) {
+    auditError = String((e && e.message) || e);
+  }
+  const where = target === 'accept_list' ? '验收列表（#accept-list）' : '评审弹窗（#owner-review）';
+  fail(code, `${message}（已转投到${where}）`, {
+    ...details, redirect, auditFile: auditFile || null, ...(auditError ? { auditError } : {}), redirected: true,
+  });
+}
+
 /** F-1：来源需求的条目必须已收口，且只有「复盘…」能进箱。 */
 export function assertDecisionScope(projectName, { source, title } = {}) {
   const kind = String((source && source.kind) || '');
@@ -609,20 +642,29 @@ export function assertDecisionScope(projectName, { source, title } = {}) {
   const name = String(title || '').trim();
   const row = findRequirementRow(projectName, ref);
   const status = row ? String(row.status || '') : '';
+  const gate = (message, details, reason) => redirectInsteadOfBareFail(projectName, {
+    code: 'DECISION_SCOPE_FORBIDDEN', message, details, target: 'review_dialog', ruleId: 'R-SCOPE', reason,
+  });
   if (!row) {
-    fail('DECISION_SCOPE_FORBIDDEN', `来源需求 ${ref} 不在工作流里（无法确认已收口）；这条在评审/开发/验收流程中，请到对应列表处理`, { requirementId: ref, status: '', allowed: false });
+    gate(`来源需求 ${ref} 不在工作流里（无法确认已收口）；这条在评审/开发/验收流程中，请到对应列表处理`,
+      { requirementId: ref, status: '', allowed: false }, `scope:需求不在工作流（${ref}）`);
   }
   if (!DECISION_CLOSED_SET.has(status)) {
-    fail('DECISION_SCOPE_FORBIDDEN', `来源需求 ${ref} 当前状态 ${status || '(无)'}；这条在评审/开发/验收流程中，请到对应列表处理（评审弹窗 / 顶部【验】）；收口后复盘请把标题写成「复盘…」再提交`, { requirementId: ref, status, allowed: false });
+    gate(`来源需求 ${ref} 当前状态 ${status || '(无)'}；这条在评审/开发/验收流程中，请到对应列表处理（评审弹窗 / 顶部【验】）；收口后复盘请把标题写成「复盘…」再提交`,
+      { requirementId: ref, status, allowed: false }, `scope:需求未收口（${ref} ${status || '无'}）`);
   }
   if (!/^复盘/.test(name)) {
-    fail('DECISION_SCOPE_FORBIDDEN', `来源需求 ${ref} 已收口，但只有标题以「复盘」开头的条目可以进决策箱；其他内容请到需求/评审/验收列表处理`, { requirementId: ref, status, allowed: false });
+    gate(`来源需求 ${ref} 已收口，但只有标题以「复盘」开头的条目可以进决策箱；其他内容请到需求/评审/验收列表处理`,
+      { requirementId: ref, status, allowed: false }, `scope:已收口但标题不是「复盘…」（${ref}）`);
   }
   return { requirementId: ref, status, allowed: true };
 }
 
-/** F-1b：评审结论/验收动作不得进决策箱（双保险，对任何来源都生效）。 */
-export function assertNotReviewAction({ title, summary, question, options } = {}) {
+/**
+ * F-1b：评审结论/验收动作不得进决策箱（双保险，对任何来源都生效）。
+ * R-5016：命中即转投评审弹窗（保留原码 + redirect + 审计）。
+ */
+export function assertNotReviewAction({ title, summary, question, options } = {}, { projectName = '' } = {}) {
   const text = [title, summary, question].filter(Boolean).join(' ');
   DECISION_INTENT_RE.lastIndex = 0;
   const hits = [...new Set(String(text).match(DECISION_INTENT_RE) || [])];
@@ -630,7 +672,13 @@ export function assertNotReviewAction({ title, summary, question, options } = {}
   const gateOptions = list.filter((row) => DECISION_GATE_OPTIONS.has(row));
   const allGate = list.length >= 2 && gateOptions.length === list.length;
   if (hits.length || allGate) {
-    fail('DECISION_REVIEW_ACTION_FORBIDDEN', '这看起来是评审/验收动作：评审请到评审弹窗、验收请到顶部【验】。决策箱只放非评审类的拍板（取舍/优先级/口径/阻塞）', { hits, options: list, allGate });
+    redirectInsteadOfBareFail(projectName, {
+      code: 'DECISION_REVIEW_ACTION_FORBIDDEN',
+      message: '这看起来是评审/验收动作：评审请到评审弹窗、验收请到顶部【验】。决策箱只放非评审类的拍板（取舍/优先级/口径/阻塞）',
+      details: { hits, options: list, allGate },
+      target: 'review_dialog', ruleId: 'R-REVIEW-INTENT',
+      reason: hits.length ? `意图词：${hits.join('、')}` : '选项全为通过/打回类',
+    });
   }
 }
 

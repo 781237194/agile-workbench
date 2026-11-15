@@ -23,6 +23,25 @@ import {
   readDecisionBox, DECISION_BOX_FILE,
 } from './decision-box.mjs';
 import { sendMessage } from './store.mjs';
+// R-5016：三入口分流 / 七要素校验 / 转投审计 / 漏箱检测 / 三入口同源计数（工具侧单源）
+import {
+  DECISION_ROUTE_RULE, DECISION_TARGET_ANCHORS, routeOwnerAsk, validateAsk,
+  appendDecisionRouteAudit, ownerPendingCounts, detectMissedAsks, decisionMissThresholdMinutes,
+} from './decision-route.mjs';
+import { readWorkflowState } from './lifecycle.mjs';
+
+/** 审计 note 用的一行摘要（不截断语义、只压空白）。 */
+function clip(text, max = 120) {
+  return String(text || '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+/** 时钟注入：--now <ISO> 或 AWB_FAKE_NOW（漏箱检测/审计统一读同一个 now）。 */
+function nowMsOf(args) {
+  const raw = String((args && args.now) || process.env.AWB_FAKE_NOW || '').trim();
+  if (!raw) return Date.now();
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : Date.now();
+}
 
 /**
  * 损坏自愈（F-9db6-9）：发现 决策箱.json 损坏 → 备份重建 → 给 PM 发 type=wake_failed、why=decision_box_corrupt
@@ -66,14 +85,74 @@ export async function cmdDecision(args) {
   const project = String(args.project || '').trim();
   if (sub === 'add') {
     const b = bootOf(args, 'decision add');
-    ensureBoxHealthy(project);
+    const name = needProject(args);
+    ensureBoxHealthy(name);
     if (b.role !== 'pm') fail('DECISION_BOX_FORBIDDEN', '只有 PM 能把条目放进决策箱', { role: b.role });
+    // R-5016 AC2：不存在"PM 手工指定 target"的入口（源码断言看这里）。
+    if (args.target !== undefined || args.to !== undefined) {
+      fail('DECISION_TARGET_FORBIDDEN', '入箱不接受 --target/--to：去向由 routeOwnerAsk 规则决定（三入口分流），PM 不能手工指定', {
+        target: args.target, to: args.to, route: DECISION_ROUTE_RULE,
+      });
+    }
+    const rawAsk = {
+      kind: args.kind,
+      title: args.title,
+      summary: args.summary,
+      question: args.question,
+      options: args.options,
+      defaultChoice: args.default || args['default-choice'],
+      impact: args.impact,
+      dueAt: args.due || args['due-at'],
+      source: { kind: args['source-kind'], ref: args['source-ref'] },
+      action: args.action,
+    };
+    // 分流要读关联需求状态（规则②R-ACCEPT-STATE）；只是读，不改任何状态。
+    let requirementStatus = '';
+    if (String(rawAsk.source.kind || '') === 'requirement') {
+      try {
+        const read = readWorkflowState(name);
+        const rows = (read.state && read.state.requirements) || {};
+        const row = rows[String(rawAsk.source.ref)] || Object.values(rows).find((r) => r && String(r.id || '') === String(rawAsk.source.ref));
+        requirementStatus = row ? String(row.status || '') : '';
+      } catch { requirementStatus = ''; }
+    }
+    const route = routeOwnerAsk({ ...rawAsk, requirementStatus });
+    // 校验先于任何写盘（七要素缺项 → 零副作用）
+    const checked = validateAsk(rawAsk);
+    if (!checked.ok) fail(checked.code, checked.message, { missing: checked.missing, ruleId: route.ruleId, target: route.target, wrote: false });
+    if (route.target !== 'decision_box') {
+      // 分流器判定"不该进箱"：转投，但保留 guard 语义的原码（AC5）。
+      const code = route.target === 'review_dialog' ? 'DECISION_REVIEW_ACTION_FORBIDDEN' : 'DECISION_ROUTED_AWAY';
+      const anchor = DECISION_TARGET_ANCHORS[route.target] || '';
+      const where = route.target === 'accept_list' ? '验收列表' : '评审弹窗';
+      try {
+        appendDecisionRouteAudit(name, {
+          actor: b.role, action: 'redirect', askId: null, target: route.target, ruleId: route.ruleId,
+          code, note: clip(checked.ask.question, 80), reason: route.reason,
+        });
+      } catch (e) { /* 审计不可写：仍抛原码 + redirect（界面能看到），不静默放过 */ }
+      fail(code, `这条不该进决策箱：已转投到${where}（${anchor}）；原因：${route.reason}`, {
+        target: route.target, anchor, ruleId: route.ruleId, reason: route.reason,
+        redirect: { to: route.target, anchor, reason: route.reason, ruleId: route.ruleId },
+        redirected: true, wrote: false,
+      });
+    }
     const r = addDecision(project, {
-      title: args.title, summary: args.summary, question: args.question,
-      options: args.options, source: { kind: args['source-kind'], ref: args['source-ref'] },
+      title: args.title, summary: checked.ask.summary, question: checked.ask.question,
+      options: checked.ask.options,
+      source: checked.ask.source,
       by: b.role,
+      extra: {
+        impact: checked.ask.impact, dueAt: checked.ask.dueAt, defaultChoice: checked.ask.defaultChoice,
+        ruleId: route.ruleId, origin: { kind: checked.ask.source.kind, ref: checked.ask.source.ref }, missBox: false,
+      },
     });
-    out(args, `已放入 ${r.item.id}（${r.item.title}）；候选：${(r.item.options || []).join(' / ')}`, { ok: true, project, by: b.role, ...r });
+    appendDecisionRouteAudit(name, {
+      actor: b.role, action: 'route', askId: r.item.id, target: 'decision_box', ruleId: route.ruleId,
+      code: 'DECISION_BOXED', note: clip(checked.ask.question, 80), reason: route.reason,
+    });
+    out(args, `已放入 ${r.item.id}（${r.item.title}）；去向 decision_box（${route.ruleId}）；候选：${(r.item.options || []).join(' / ')}`,
+      { ok: true, project, by: b.role, ruleId: route.ruleId, target: 'decision_box', label: '已放入决策箱', ...r });
     return;
   }
   if (sub === 'list') {
@@ -139,10 +218,42 @@ export async function cmdDecision(args) {
     });
     if (!consumed) fail('OWNER_CONFIRM_REQUIRED', 'Owner 确认码无效或已过期', { project: name, id: args.id });
     const r = await acknowledgeDecision(name, { id: String(args.id), choice: args.choice, opinion: args.opinion || '' });
+    // R-5016 F-10/AC4：答完归档写一行 action='answer' 审计（幂等重复回答不写第二行）
+    if (!r.idempotent) {
+      try {
+        appendDecisionRouteAudit(name, {
+          actor: 'owner', action: 'answer', askId: String(args.id), target: 'decision_box', ruleId: 'R-ANSWER',
+          code: 'DECISION_ANSWERED', note: `choice=${String(args.choice || '')}`,
+          reason: `archivedAt=${r.item && r.item.archivedAt}`,
+        });
+      } catch { /* 审计不可写不阻断已完成的归档（回执已发） */ }
+    }
     const human = r.idempotent
       ? `条目 ${args.id} 已回执过（messageId=${r.messageId || '-'}），不重复发送`
       : `已回执 ${args.id}：选择 ${r.item.decision.choice}；回执消息 ${r.messageId} → PM（默认静默，不唤醒）`;
     out(args, human, { ok: true, project: name, ...r });
+    return;
+  }
+  if (sub === 'counts') {
+    // R-5016 F-8/AC7：三入口同源计数（界面 IPC owner:pending-counts 只转发这一份，不自算）
+    const name = needProject(args);
+    loadProject(name);
+    const counts = ownerPendingCounts(name);
+    out(args, `待 Owner 拍板：决策箱 ${counts.decisions} ｜ 评审待评估 ${counts.reviews} ｜ 待验收 ${counts.accepts}`,
+      { ok: true, project: name, ...counts, anchor: { decision_box: '#decision-box-pill[data-count]', reviews: '#owner-review-count[data-count]', accepts: '#accept-badge[data-count]' } });
+    return;
+  }
+  if (sub === 'miss') {
+    // R-5016 F-7/F-9/AC6：漏箱检测 + 日报（阈值 AWB_DECISION_MISS_MINUTES，时钟 --now 注入）
+    const name = needProject(args);
+    loadProject(name);
+    const now = nowMsOf(args);
+    const minutes = args.minutes !== undefined ? Number(args.minutes) : decisionMissThresholdMinutes();
+    const r = detectMissedAsks(name, { now, minutes: Number.isFinite(minutes) ? minutes : decisionMissThresholdMinutes(), dryRun: Boolean(args['dry-run']) });
+    const human = r.missed.length
+      ? `漏箱检测：新补录 ${r.missed.length} 条（累计 ${r.totalMiss}）｜日报 ${r.reportFile}`
+      : `漏箱检测：无新增（累计 ${r.totalMiss}）｜跳过 ${r.skipped.length} 条｜日报 ${r.reportFile}`;
+    out(args, human, { ok: true, project: name, now: new Date(now).toISOString(), ...r });
     return;
   }
   if (sub === 'archive') {

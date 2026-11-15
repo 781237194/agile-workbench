@@ -2740,7 +2740,9 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       const dDev = json(['boot', '--role', 'programmer1', '--project', '试点', '--session', 'session-selftest-9db6-dev', '--json']);
       const boxFile = path.join(teamRoot, '状态', '项目', '试点', '决策箱.json');
       const wfBefore9 = read(path.join(teamRoot, '状态', '项目', '试点', '工作流.json'));
-      const dAdd = (title, question, ref) => JSON.parse(run(['decision', 'add', '--project', '试点', '--boot', dPm.token, '--title', title, '--summary', '一句话摘要', '--question', question, '--options', 'A,B,其他', '--source-kind', 'message', '--source-ref', ref, '--json']).stdout.trim());
+      // R-5016 F-3：入箱要七要素齐（source/summary/question/options/defaultChoice/impact/dueAt），夹具同步补齐后三要素
+  const dDue = new Date(Date.now() + 86400000).toISOString();
+  const dAdd = (title, question, ref) => JSON.parse(run(['decision', 'add', '--project', '试点', '--boot', dPm.token, '--title', title, '--summary', '一句话摘要', '--question', question, '--options', 'A,B,其他', '--default', 'A', '--impact', 'Owner', '--due', dDue, '--source-kind', 'message', '--source-ref', ref, '--json']).stdout.trim());
       const dInvite = (id) => json(['decision', 'invite', '--project', '试点', '--id', id, '--test-owner', '--json']);
       const dAck = (id, choice, extraEnv = null) => {
         const inv = dInvite(id);
@@ -2758,7 +2760,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       const d3 = dAdd('决策三', '第三个问题', 'M-9DB6-3');
       if (new Set([d1.item.id, d2.item.id, d3.item.id]).size !== 3) failStep('R-9db6 AC2 同秒 ID 冲突未重试', JSON.stringify([d1.item.id, d2.item.id, d3.item.id]));
       // AC2 同源去重：同 ref + 同 question → DECISION_BOX_DUPLICATE 零落盘
-      const dup9 = run(['decision', 'add', '--project', '试点', '--boot', dPm.token, '--title', '重复', '--question', '选方案 A 还是 B', '--options', 'A,B', '--source-kind', 'message', '--source-ref', 'M-9DB6-1', '--json'], { expectFail: true });
+      const dup9 = run(['decision', 'add', '--project', '试点', '--boot', dPm.token, '--title', '重复', '--summary', '一句话摘要', '--question', '选方案 A 还是 B', '--options', 'A,B', '--default', 'A', '--impact', 'Owner', '--due', dDue, '--source-kind', 'message', '--source-ref', 'M-9DB6-1', '--json'], { expectFail: true });
       if (!/DECISION_BOX_DUPLICATE/.test(String(dup9.stdout + dup9.stderr))) failStep('R-9db6 AC2 同源去重未生效', String(dup9.stdout).slice(0, 200));
       // AC1：计数与未读
       const list9 = json(['decision', 'list', '--project', '试点', '--json']);
