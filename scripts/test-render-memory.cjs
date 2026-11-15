@@ -149,6 +149,21 @@ const sampleAt = (iso, mb, extra) => ({ at: iso, pid: 100, type: 'renderer', gue
       // 归一后 cause 落在白名单内，且不再保留 intervalMs（卷三 §三 取消 5s 行频降级）
       return rows.length === 1 && ['boot', 'sample', 'reused', 'degraded', 'recovered'].includes(rows[0].cause) && rows[0].intervalMs === undefined;
     })());
+  check('S4-05 强制真采样计数：cadence.forcedSamples 含 forced 行与 recovered 行',
+    (() => {
+      const win = {
+        lines: [
+          { at: '2026-11-15T00:00:00.000Z', cause: 'boot', sampledFrom: '2026-11-15T00:00:00.000Z' },
+          { at: '2026-11-15T00:00:01.000Z', cause: 'sample', sampledFrom: '2026-11-15T00:00:01.000Z', workingSetMB: 300 },
+          { at: '2026-11-15T00:00:02.000Z', cause: 'reused', sampledFrom: '2026-11-15T00:00:01.000Z', staleSec: 1, workingSetMB: 300 },
+          { at: '2026-11-15T00:00:03.000Z', cause: 'sample', sampledFrom: '2026-11-15T00:00:03.000Z', workingSetMB: 301, forced: true },
+          { at: '2026-11-15T00:00:04.000Z', cause: 'recovered', sampledFrom: '2026-11-15T00:00:04.000Z', workingSetMB: 302 },
+        ],
+        firstAt: '2026-11-15T00:00:00.000Z', lastAt: '2026-11-15T00:00:04.000Z', coverageSec: 4,
+      };
+      const r = RM.evaluateRecoverable(win, { windowSec: 300, atCrash: '2026-11-15T00:00:04.000Z' });
+      return r.forcedSamples === 2 && r.cadence && r.cadence.forcedSamples === 2 && r.cadence.hasForced === true;
+    })());
 }
 
 /* ── S5 保留：7 天采样 / 30 天崩溃 / ≤50 目录 / 白名单 ─────────────────── */

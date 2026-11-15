@@ -269,11 +269,13 @@ function evaluateRecoverable(win, options = {}) {
   // 真点密度（卷三 §六 / 卷四①）：真点=sampledFrom===at，排除 boot 与 forced
   const realPoints = lines.filter((row) => row && row.sampledFrom && String(row.sampledFrom) === String(row.at) && String(row.cause || '') !== 'boot').length;
   const forced = lines.filter((row) => row && row.forced === true).length;
-  const hasForced = forced > 0;
+  // PM 附注 b（正文本 2a6f086a）：forcedSamples = 因 pid 集合变化或降级恢复而强制真采样的次数，单独给 TR-Q 按环境判断用。
+  const forcedSamples = lines.filter((row) => row && (row.forced === true || String(row.cause || '') === 'recovered')).length;
+  const hasForced = forcedSamples > 0;
   const densityDenominator = lines.filter((row) => row && row.forced !== true && String(row.cause || '') !== 'boot').length;
   const densityPct = densityDenominator ? Math.round((realPoints / densityDenominator) * 1000) / 10 : 0;
   const cadenceVerdict = hasForced ? 'OK' : (densityPct >= 15 && densityPct <= 25 ? 'OK' : 'SAMPLE_CADENCE_BAD');
-  const cadence = { realPoints, forced, hasForced, densityPct, verdict: cadenceVerdict };
+  const cadence = { realPoints, forced, forcedSamples, hasForced, densityPct, verdict: cadenceVerdict };
 
   const enoughLines = lines.length >= Math.min(300, Math.max(1, Math.round(windowSec)));
   const baseCode = (() => {
@@ -295,6 +297,7 @@ function evaluateRecoverable(win, options = {}) {
     nullRatio,
     coverageSec: Number(window.coverageSec) || 0,
     realPoints,
+    forcedSamples,
     sampleCount: lines.length,
     enoughLines,
     degradedLines: lines.length - measured.length,
