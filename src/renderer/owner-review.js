@@ -26,9 +26,18 @@
       copyCache.loadedAt = Date.now();
     } catch { /* 读不到就全走正文兜底，不阻塞评审 */ } finally { copyCache.loading = false; }
   }
+  /**
+   * R-dba4（PM 2026-11-15 14:32 裁决）：**唯一真相 = 需求行 copy**（工具侧 requirementView 已带
+   * copy/copyHistory）。壳层 store 只当缓存、不参与渲染取数；行上没有 copy 时**一律走正文兜底**
+   * 并在 DOM 标 data-copy-missing，绝不用缓存冒充真相。
+   */
   function storedCopyOf(req) {
-    const row = copyCache.rows[String((req && req.id) || '')];
-    return row && row.copy ? row.copy : null;
+    const own = req && req.copy && typeof req.copy === 'object' ? req.copy : null;
+    return own;
+  }
+  /** 行上有没有真的 copy（渲染层据此标 data-copy-source=row|fallback）。 */
+  function copySourceOf(req) {
+    return storedCopyOf(req) ? 'row' : 'fallback';
   }
 
   function el(tag, cls, text) {
@@ -427,8 +436,8 @@
         for (const row of state.data.requirements) row.__ac = ACP.analyzeRequirement(row);
       }
     } catch { state.data = null; }
-    // R-dba4：把持久化的大白话快照读一次（读不到就全部走正文兜底，不阻塞评审）。
-    await loadCopyCache(project.id);
+    // R-dba4（PM 14:32 裁决）：真相源=需求行 copy，壳层 store 只当缓存且**不参与渲染取数**，
+    // 所以这里不再预热缓存（保留函数仅供后续「加速」用途，取数一律以行字段为准）。
     // R-f8e1 B 清单：读 团队/状态/项目/<项目>/需求建议点.json；文件缺失/坏 JSON 只当作“无建议点”，不阻断评审。
     try {
       if (api.ownerSuggestions) {
@@ -982,7 +991,7 @@
     if (copyBlocks.length) {
       const missing = (RLC && typeof RLC.copyMissingAttr === 'function') ? RLC.copyMissingAttr(copyBlocks) : '';
       item.setAttribute('data-copy-missing', missing);
-      item.setAttribute('data-copy-source', storedCopyOf(req) ? 'snapshot' : 'fallback');
+      item.setAttribute('data-copy-source', copySourceOf(req));
     }
     // B-d100：复审标记（打回后改完重新进队列的那条）。首次评审不带这个标记。
     const rework = reworkInfoOf(req);
