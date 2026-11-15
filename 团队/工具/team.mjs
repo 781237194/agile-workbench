@@ -8,7 +8,7 @@ import {
   cmdShow, cmdReview, cmdSign, cmdApply, cmdGrant, cmdIndex, cmdStatus, cmdReconcile,
   cmdVerify, cmdLog, cmdLock, cmdOwnerApprove, cmdOwner, cmdRoster, cmdPilot, cmdDoctor,
   cmdReq, cmdFind, cmdBoard, cmdVote, cmdWorkflow, cmdOwnerProxyDecide, cmdQueue,
-  cmdAsk, cmdAnswer, cmdPresence, cmdMarkRead, cmdWake,
+  cmdAsk, cmdAnswer, cmdPresence, cmdMarkRead, cmdWake, cmdLessons, failLessonGate, lessonGateFor,
 } from './lib/ops.mjs';
 import { cmdBrief } from './lib/brief.mjs';
 import { cmdOwnerProxy } from './lib/owner-proxy.mjs';
@@ -262,6 +262,7 @@ async function main() {
     case 'task': await cmdTask(args); break;
     case 'memory': cmdMemory(args); break;
     case 'req': cmdReq(args); break;
+    case 'lessons': cmdLessons(args); break;
     case 'owner': {
       // owner proxy status|start|end（代管开关）与 owner proxy decide（PM 代管落账，T-a01d）分开分发。
       const proxySub = String((args._ && args._[1]) || '').toLowerCase();

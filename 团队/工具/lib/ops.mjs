@@ -36,6 +36,7 @@ import {
   // R-75ec：任务层 Owner 门禁唯一入口与它的只读投影（避免在 ops 里出现第二套判门）。
   taskGateOf, decisionListOf, latestDecisionOf,
 } from './gates.mjs';
+import * as lessons from './lessons.mjs';
 import { buildDispatchPrompt, buildNoticePrompt, buildWakeHeader, buildWakeLine, isRegisteredKind } from './dispatch.mjs';
 import { assertNoPendingSubagent, subagentAudit } from './subagent.mjs';
 import {
@@ -2423,6 +2424,12 @@ export async function cmdBoot(args) {
     },
   });
   const lines = [];
+  // R-51de F-5①：boot 简报顶部红条（LESSONS_UNREAD 红条）；只提示、不阻断 boot（AC4④）
+  let bootLessonGate = null;
+  try { bootLessonGate = lessonGateFor({ project: projectName, role }); } catch { bootLessonGate = null; }
+  if (bootLessonGate && !bootLessonGate.ok) {
+    lines.push(`⚠️ ${bootLessonGate.code}：经验教训登记册（${bootLessonGate.currentSha12 || '?'}）尚未读过${bootLessonGate.staleSha12 ? `（上次 ${bootLessonGate.staleSha12}）` : ''}；先跑 team.mjs lessons read（不阻断 boot）`);
+  }
   const bootTtlMinutes = Number(team.config.bootTtlMinutes || DEFAULT_BOOT_TTL_MINUTES);
   const coreDocs = records.filter((d) => d.core);
   const coreRead = coreDocs.filter((d) => d.exists);
@@ -2707,6 +2714,8 @@ function assertRequirementDocsRead(b, projectPath, requirementId, purpose) {
 
 export async function cmdSend(args) {
   const b = bootFor(args, 'send');
+  // R-51de F-5④：派单（--ack --task）前必须读过当前版本经验教训登记册（Owner 通道豁免）
+  if (args.ack && args.task) failLessonGate(lessonGateFor(b, args));
   // R-c651 F-c651-2：send 的唤醒路径也是重试执行者——先消化上一批到期重试，再把本次消息发出去，
   // 避免刚排队的重试被本命令立刻再跑一次（同一条消息出现两条 attempt=1）。
   let sendWakeRetry = null;
@@ -4861,6 +4870,8 @@ function writeReviewFile(dir, record, title) {
  */
 function cmdReqReview(args) {
   const b = bootFor(args, 'req review');
+  // R-51de F-5③：需求评审前必须读过当前版本经验教训登记册（Owner 通道豁免）
+  failLessonGate(lessonGateFor(b, args));
   const kindArg = String(args.kind || args.stage || 'requirement').trim().toLowerCase();
   const isTech = ['tech', 'technical'].includes(kindArg);
   const isReq = ['requirement', 'req'].includes(kindArg);
@@ -8614,4 +8625,61 @@ export function cmdDoctor(args) {
   }
   const pathText = pathAuditLines(pathAudit).join('\n');
   out(args, `doctor：${issues.length ? '❌' : '✅'}\n${issues.join('\n')}\n阶段 ${team.phase} ｜ 成员 ${activeRoles(team).join(', ')}\n试点 ${pc.pass ? 'PASS' : 'FAIL'}\n${pluginText}\n${pathText}`, { ok: issues.length === 0, issues, team, pilot: pc, plugins: pluginCheck, pathAudit });
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R-51de（一）：经验教训登记册 读记录 + 换人门禁
+// 依据 需求/R-20261115-170902-51de-经验教训看板.md F-4/F-5/AC4 + 增补卷-51de-1
+// 门禁只比「该角色最近一条阅读记录的 fileSha」与当前文件 sha256；Owner 通道豁免；命中零副作用。
+// ─────────────────────────────────────────────────────────────────────────────
+export function lessonGateFor(b, extra = {}) {
+  if (lessons.isOwnerChannel(extra)) return { ok: true, exempt: true, reason: 'OWNER_CHANNEL' };
+  let projectPath = '';
+  try { projectPath = loadProject(b.project).path; } catch { projectPath = ''; }
+  if (!projectPath) return { ok: true, exempt: true, reason: 'NO_PROJECT_PATH' };
+  return lessons.runLessonGate(b.role, projectPath, { teamRoot: PATHS.teamRoot });
+}
+
+export function failLessonGate(gate) {
+  if (!gate || gate.ok) return;
+  fail(gate.code, gate.message, {
+    staleSha12: gate.staleSha12 || '',
+    currentSha12: gate.currentSha12 || '',
+    parseWarn: gate.parseWarn || undefined,
+  });
+}
+
+export function cmdLessons(args) {
+  const b = bootFor(args, 'lessons');
+  const sub = String((args._ && args._[1]) || 'status').toLowerCase();
+  const project = loadProject(b.project);
+  const projectPath = project.path;
+  if (sub === 'read') {
+    const parsed = lessons.loadLessons(projectPath);
+    if (parsed.missing) fail('LESSONS_FILE_MISSING', `经验教训登记册缺失：${path.join(projectPath, lessons.LESSONS_FILE)}`);
+    if (parsed.broken) fail('LESSONS_PARSE_BROKEN', '经验教训登记册无法解析（缺 `## <角色名>` 段）', { parseWarn: parsed.parseWarn.slice(0, 5) });
+    const rec = lessons.recordLessonRead(PATHS.teamRoot, {
+      role: b.role, sessionId: b.sessionId || '', fileSha: parsed.fileSha, entries: parsed.totals, source: 'cli',
+    });
+    out(args, rec.alreadyRead
+      ? `已读过（同一版本 ${parsed.fileSha.slice(0, 12)}，${parsed.totals} 条）：只更新阅读时间，未追加行`
+      : `已记录阅读：${b.role} @ ${parsed.fileSha.slice(0, 12)}，${parsed.totals} 条`, {
+      ok: true, action: rec.action, role: b.role, fileSha: parsed.fileSha, entries: parsed.totals, at: rec.at,
+    });
+    return;
+  }
+  if (sub === 'status') {
+    const parsed = lessons.loadLessons(projectPath);
+    const rec = lessons.latestReadRecord(PATHS.teamRoot, b.role);
+    const gate = lessons.runLessonGate(b.role, projectPath, { teamRoot: PATHS.teamRoot });
+    out(args, [
+      `经验教训登记册：${parsed.missing ? '缺失' : parsed.broken ? '解析失败' : `${parsed.totals} 条`}`,
+      `当前版本 sha12：${parsed.fileSha ? parsed.fileSha.slice(0, 12) : '—'}`,
+      `我的最近阅读：${rec ? `${String(rec.at).slice(0, 19)} @ ${String(rec.fileSha).slice(0, 12)}` : '无记录'}`,
+      `门禁：${gate.ok ? 'PASS' : gate.code}`,
+    ].join('\n'), { ok: true, parsed: { totals: parsed.totals, fileSha: parsed.fileSha, broken: parsed.broken, missing: parsed.missing }, latest: rec, gate });
+    return;
+  }
+  fail('BAD_SUB', 'lessons 支持 read / status');
 }
