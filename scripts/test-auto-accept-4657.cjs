@@ -197,7 +197,9 @@ function runCli(args, options = {}) {
 }
 
 function seedStore(options = {}) {
-  const projectAuto = Object.prototype.hasOwnProperty.call(options, 'projectAuto') ? options.projectAuto : null;
+  // 开关口径 v2（PM 裁决 M-20261115-111430-7e9ecf ③）：只有项目级显式 true 才开。
+  // 默认夹具给项目级 true，保证 AC1–AC7 正常收口；开关用例（AC8-*）各自显式覆盖。
+  const projectAuto = Object.prototype.hasOwnProperty.call(options, 'projectAuto') ? options.projectAuto : true;
   const globalAuto = Object.prototype.hasOwnProperty.call(options, 'globalAuto') ? options.globalAuto : true;
   writeJson(STORE_FILE, {
     version: 1,
@@ -507,22 +509,22 @@ function testSwitches() {
   const role = auto.retract(context, { taskIds: [T.OK2], operator: 'tester', allowRealProject: true });
   check('AC8-01', '撤回只允许 Owner/PM → ROLE_NOT_ALLOWED', role.ok === false && role.code === 'ROLE_NOT_ALLOWED', JSON.stringify(role).slice(0, 200));
 
-  // 项目级 false 覆盖全局 true
+  // 口径 v2：项目级 false + 全局 true → 仍关（全局 true 不再能单独开启）
   seedStore({ projectAuto: false, globalAuto: true });
   const before = treeSha();
   const projectOff = runCli(['--project', PROJECT_NAME, '--run', '--once']);
   const after = treeSha();
-  check('AC8-02', '项目级 autoAcceptBugs=false 覆盖全局 true → 全部 skip(switch_off)', projectOff.status === 0
+  check('AC8-02', '项目级 autoAcceptBugs=false + 全局 true → 全部 skip(switch_off)（全局 true 不再能开）', projectOff.status === 0
     && projectOff.json && projectOff.json.groups.switch_off === DONE_BUG_IDS.length
     && projectOff.json.closed.length === 0, JSON.stringify(projectOff.json && projectOff.json.groups));
   check('AC8-03', '开关关闭零写任务文件', before.aggregate === after.aggregate, `${before.aggregate} vs ${after.aggregate}`);
   const offRows = auditRows().filter((row) => row.reason === 'switch_off');
   check('AC8-04', 'switch_off 审计行 12 键且 operator=null', offRows.length >= DONE_BUG_IDS.length && offRows.slice(-DONE_BUG_IDS.length).every(auditKeysOk), `rows=${offRows.length}`);
 
-  // 全局 false + 项目级 null → 同样关闭
+  // 全局 false + 项目级 null → 同样关闭（null 一律视为关）
   seedStore({ projectAuto: null, globalAuto: false });
   const globalOff = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
-  check('AC8-05', '全局 autoAcceptBugs=false + 项目 null → switch_off', globalOff.json && globalOff.json.groups.switch_off === DONE_BUG_IDS.length, JSON.stringify(globalOff.json && globalOff.json.groups));
+  check('AC8-05', '全局 autoAcceptBugs=false + 项目 null → switch_off（null 视为关）', globalOff.json && globalOff.json.groups.switch_off === DONE_BUG_IDS.length, JSON.stringify(globalOff.json && globalOff.json.groups));
 
   // 默认关：ui.autoAcceptBugs 缺失（undefined）不得当开
   writeJson(STORE_FILE, {
@@ -532,9 +534,64 @@ function testSwitches() {
     ui: {}
   });
   const defaultOff = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
-  check('AC8-14', 'ui.autoAcceptBugs 缺失 → 默认关（switch_off=总数、accepted=0）',
+  check('AC8-14', 'ui.autoAcceptBugs 缺失 + 项目 null → 默认关（switch_off=总数、accepted=0）',
     defaultOff.json && defaultOff.json.groups.switch_off === DONE_BUG_IDS.length && Number(defaultOff.json.groups.accepted || 0) === 0,
     JSON.stringify(defaultOff.json && defaultOff.json.groups));
+
+  // ── 新增断言 1（口径 v2）：全局 true 但项目级未写（连 autoAcceptBugs 键都没有）
+  //    plan 全 switch_off；--run 拒绝收口（closed=0/wrote=0/任务文件零写入）。
+  writeJson(STORE_FILE, {
+    version: 1,
+    activeProjectId: 'P-4657-sandbox',
+    projects: [{ id: 'P-4657-sandbox', name: PROJECT_NAME, teamName: PROJECT_NAME, path: PROJECT_ROOT }],
+    ui: { autoAcceptBugs: true }
+  });
+  const globalOnlyPlan = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
+  const beforeGlobalOnlyRun = treeSha();
+  const globalOnlyRun = runCli(['--project', PROJECT_NAME, '--run', '--once']);
+  const afterGlobalOnlyRun = treeSha();
+  const globalOnlySettings = (globalOnlyPlan.json && globalOnlyPlan.json.settings) || {};
+  check('AC8-16', '全局 ui.autoAcceptBugs=true 但项目级未写 → plan 全 switch_off、--run 拒绝收口（零任务写入）',
+    globalOnlyPlan.json
+    && globalOnlyPlan.json.groups.switch_off === DONE_BUG_IDS.length
+    && Number(globalOnlyPlan.json.groups.accepted || 0) === 0
+    && globalOnlySettings.effective === false
+    && globalOnlySettings.global === true
+    && globalOnlySettings.project === null
+    && globalOnlySettings.source === 'global_ignored'
+    && globalOnlyRun.status === 0
+    && globalOnlyRun.json && globalOnlyRun.json.groups.switch_off === DONE_BUG_IDS.length
+    && globalOnlyRun.json.closed.length === 0
+    && globalOnlyRun.json.wrote === 0
+    && beforeGlobalOnlyRun.aggregate === afterGlobalOnlyRun.aggregate,
+    JSON.stringify({ settings: globalOnlySettings, plan: globalOnlyPlan.json && globalOnlyPlan.json.groups, run: globalOnlyRun.json && { closed: globalOnlyRun.json.closed.length, wrote: globalOnlyRun.json.wrote, groups: globalOnlyRun.json.groups } }));
+
+  // ── 新增断言 2（口径 v2）：项目级 projects[].autoAcceptBugs=true 且沙盘 → 正常 plan（有可关闭件）；
+  //    真实（非沙盘）环境仍要显式 AWB_AUTO_ACCEPT_ALLOW_REAL=1（主进程闸门在 runner 之前）。
+  //    复用一个可收口夹具：OK1 此前已被 --run 收口/撤回，这里清掉验收记录模拟「已完成·未验收」。
+  const ok1File = path.join(TASK_DIR, T.OK1 + '.json');
+  const ok1Task = JSON.parse(fs.readFileSync(ok1File, 'utf8').replace(/^\uFEFF/, ''));
+  delete ok1Task.acceptanceRecord;
+  delete ok1Task.acceptedAt;
+  delete ok1Task.acceptedBy;
+  writeJson(ok1File, ok1Task);
+  seedStore({ projectAuto: true, globalAuto: false });
+  const projectOn = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
+  const projectOnSettings = (projectOn.json && projectOn.json.settings) || {};
+  const mainSrcForGate = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const allowRealAt = mainSrcForGate.indexOf("process.env.AWB_AUTO_ACCEPT_ALLOW_REAL === '1'");
+  const runnerAt = mainSrcForGate.indexOf('autoAccept.createAutoAcceptRunner');
+  check('AC8-17', '项目级 true 且沙盘 → 正常 plan（switch_off=0、有可关闭件）；真实环境仍要 AWB_AUTO_ACCEPT_ALLOW_REAL=1',
+    projectOn.json
+    && projectOn.json.groups.switch_off === 0
+    && Number(projectOn.json.groups.accepted || 0) >= 1
+    && Array.isArray(projectOn.json.closeable)
+    && projectOn.json.closeable.includes(T.OK1)
+    && projectOnSettings.effective === true
+    && projectOnSettings.source === 'project'
+    && allowRealAt >= 0 && runnerAt > allowRealAt
+    && mainSrcForGate.includes('全局开关不再单独生效'),
+    JSON.stringify({ settings: projectOnSettings, groups: projectOn.json && projectOn.json.groups, closeable: projectOn.json && projectOn.json.closeable, allowRealAt, runnerAt }));
   seedStore();
 }
 
@@ -601,14 +658,17 @@ function testPoolAndAnchors() {
     && poolSrc.includes('data-accept-missing') && poolSrc.includes('data-bug-retract')
     && appSrc.includes('bug-retract-bar') && appSrc.includes('autoAcceptRetract'), '');
   check('AC8-09', '撤回只走 IPC（app.js 调 autoAcceptRetract，不直接写文件）', appSrc.includes('window.workbench.autoAcceptRetract') && !appSrc.includes("ipcRenderer"), '');
-  check('AC8-10', '开关键名：ui.autoAcceptBugs + projects[].autoAcceptBugs（null=继承）', autoSrc.includes('ui.autoAcceptBugs')
-    && autoSrc.includes("hasOwnProperty.call(entry, 'autoAcceptBugs')") && autoSrc.includes('projectRaw = null'), '');
+  check('AC8-10', '开关键名与口径：ui.autoAcceptBugs（只读）+ projects[].autoAcceptBugs（仅显式 true 开）', autoSrc.includes('ui.autoAcceptBugs')
+    && autoSrc.includes("hasOwnProperty.call(entry, 'autoAcceptBugs')")
+    && autoSrc.includes('const effective = projectRaw === true;')
+    && autoSrc.includes('全局开关不再单独生效'), '');
   check('AC8-11', 'workflow:state 下发 autoAccept 配置（池子拿 retractHours）', mainSrc.includes('autoAccept: autoAcceptUiConfig()')
     && mainSrc.includes('retractHours: autoAccept.resolveRetractHours({})'), '');
   check('AC8-12', '主进程真实项目默认不自动执行（须 AWB_AUTO_ACCEPT_ALLOW_REAL=1）', mainSrc.includes('AWB_AUTO_ACCEPT_ALLOW_REAL')
     && mainSrc.includes('AUTO_ACCEPT_SKIP 真实项目默认不自动执行'), '');
-  check('AC8-13', '主进程每轮解析开关（项目级 false 覆盖全局，null 继承）', mainSrc.includes('settings: autoAccept.resolveAutoAcceptSettings(store, project')
-    && mainSrc.includes('settings: autoAccept.resolveAutoAcceptSettings(store, project, projectPath, teamName)'), '');
+  check('AC8-13', '主进程每轮解析开关（口径 v2：项目级 true 才开，全局不再单独生效）', mainSrc.includes('settings: autoAccept.resolveAutoAcceptSettings(store, project')
+    && mainSrc.includes('settings: autoAccept.resolveAutoAcceptSettings(store, project, projectPath, teamName)')
+    && mainSrc.includes('全局开关不再单独生效'), '');
   check('AC9-08', '审计 12 键常量固定（脚本与 CLI 同源）', auto.AUDIT_KEYS.length === 12 && Object.keys(auto.AUDIT_KEYS).join(',') === '0,1,2,3,4,5,6,7,8,9,10,11', auto.AUDIT_KEYS.join(','));
 }
 

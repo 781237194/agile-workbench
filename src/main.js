@@ -3638,7 +3638,11 @@ function teamProjectStateDir(project) {
 
 /* ── R-4657：缺陷验收自动化（主进程侧上下文 / 推送 / watch+tick） ───────── */
 
-/** 自动验收开关投影（config: ui.autoAcceptBugs + projects[].autoAcceptBugs；null=继承全局）。 */
+/**
+ * 自动验收开关投影。
+ * 开关口径 v2（PM 裁决 M-20261115-111430-7e9ecf ③）：全局开关不再单独生效，仅项目级显式 true 才开——
+ * `projects[].autoAcceptBugs === true` 才启动；`null`/`undefined`/`false`（含全局 `ui.autoAcceptBugs=true`）一律关。
+ */
 function autoAcceptUiConfig() {
   const store = readStore();
   const project = store.projects.find((row) => row.id === store.activeProjectId) || store.projects[0] || null;
@@ -3649,6 +3653,9 @@ function autoAcceptUiConfig() {
     enabled: settings.effective,
     global: settings.global,
     project: settings.project,
+    // 口径 v2 诊断：全局 true 但项目未显式开时 globalIgnored=true / source='global_ignored'。
+    globalIgnored: Boolean(settings.globalIgnored),
+    source: settings.source,
     retractHours: autoAccept.resolveRetractHours({})
   };
 }
@@ -3669,7 +3676,8 @@ function autoAcceptProjectContext(payload) {
     teamRoot: (teamTools.layout && teamTools.layout.root) || process.env.TEAM_ROOT || path.join(ROOT, '团队'),
     projectsRoot: process.env.TEAM_PROJECTS_ROOT || path.join(ROOT, '项目'),
     storeFile: storeFile(),
-    // IPC plan 与主进程 tick 同口径：缺失按默认关，项目级覆盖全局。
+    // IPC plan 与主进程 tick 同口径（开关口径 v2）：全局开关不再单独生效，仅项目级显式 true；
+    // null/undefined/false 一律关（所有判定都走同一个 resolveAutoAcceptSettings，不写第二份）。
     settings: autoAccept.resolveAutoAcceptSettings(store, project, projectPath, teamName),
     retractHours: autoAccept.resolveRetractHours({})
   };
@@ -3686,7 +3694,10 @@ function notifyAutoAcceptChanged(payload) {
 let autoAcceptRunner = null;
 /**
  * 启动主进程自动器：任务目录 watch（debounce 300ms）+ 兜底 tick（默认 30 秒，AWB_AUTO_ACCEPT_TICK_MS 可配）。
- * 沙盘（TEAM_ROOT 指向非真实 团队/）自动启用；真实项目必须显式 AWB_AUTO_ACCEPT_ALLOW_REAL=1。
+ * 三层闸门（开关口径 v2，PM 裁决 M-20261115-111430-7e9ecf ③）：
+ *   ① 项目级 `projects[].autoAcceptBugs === true`（全局 `ui.autoAcceptBugs` 不再单独生效，null/undefined/false 一律关）；
+ *   ② 真实（非沙盘）项目必须显式 `AWB_AUTO_ACCEPT_ALLOW_REAL=1` 才启动自动执行；
+ *   ③ 沙盘按 TEAM_ROOT 判定；非沙盘只 dry-run，不做任何自动收口。
  */
 function startAutoAcceptAuto() {
   if (autoAcceptRunner) return autoAcceptRunner;
@@ -3721,7 +3732,8 @@ function startAutoAcceptAuto() {
         teamRoot: (teamTools.layout && teamTools.layout.root) || process.env.TEAM_ROOT || path.join(ROOT, '团队'),
         projectsRoot: process.env.TEAM_PROJECTS_ROOT || path.join(ROOT, '项目'),
         storeFile: storeFile(),
-        // 开关必须在每轮实时解析（项目级 false 覆盖全局，null 继承），不能只在启动时读一次。
+        // 开关必须在每轮实时解析（配置改动实时生效），不能只在启动时读一次。
+        // 口径 v2：全局开关不再单独生效，仅项目级显式 true 才开；null/undefined/false 一律关。
         settings: autoAccept.resolveAutoAcceptSettings(store, project, path.resolve(String(project.path || '')), String(project.teamName || project.name || '')),
         retractHours: autoAccept.resolveRetractHours({})
       };

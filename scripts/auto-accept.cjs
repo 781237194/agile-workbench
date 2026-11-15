@@ -13,6 +13,9 @@
  *   - 证据合格判定复用 `src/team-tools.js → acceptEvidenceCheck()`，不新写第二套 PASS/FAIL 判法。
  *
  * 安全约定（TR-Q②）：
+ *   - 开关口径 v2（PM 裁决 M-20261115-111430-7e9ecf ③）：全局 `ui.autoAcceptBugs` 不再单独生效，
+ *     仅 `projects[].autoAcceptBugs === true` 才开；null/undefined/false 一律关；
+ *     真实（非沙盘）项目仍须显式 `AWB_AUTO_ACCEPT_ALLOW_REAL=1` 才允许主进程自动执行。
  *   - 真实项目只允许 `--plan`（dry-run）；`--run` / `--retract` 必须用 TEAM_ROOT / TEAM_PROJECTS_ROOT
  *     指向沙盘，否则返回 `AUTO_ACCEPT_REAL_PROJECT_READ_ONLY`；
  *   - 主进程内部路径只有在「沙盘或 AWB_AUTO_ACCEPT_ALLOW_REAL=1」门通过后才传 allowRealProject:true；
@@ -212,10 +215,17 @@ function pickStateDir(teamRoot, projectName) {
   return '';
 }
 
+/**
+ * 自动验收开关解析（开关口径 v2，PM 裁决 M-20261115-111430-7e9ecf ③）：
+ *   - 全局开关不再单独生效：`ui.autoAcceptBugs` 即使为 true 也不启动自动验收（只保留为只读/诊断字段）；
+ *   - 只有项目级显式 true 才开：`projects[].autoAcceptBugs === true`（布尔 true，字符串不算）；
+ *   - 语义：null / undefined / false 一律视为关；true 才开。
+ * 本函数是纯函数、不缓存：主进程每轮重读，配置改动实时生效（不要在启动时缓存结果）。
+ */
 function resolveAutoAcceptSettings(store, storeProject, projectPath, projectName) {
   const ui = isPlainObject(store && store.ui) ? store.ui : {};
+  // 历史字段：仍解析出来供设置页/诊断展示，但不参与 effective 判定（全局开关不再单独生效）。
   const globalRaw = ui.autoAcceptBugs;
-  // 默认关：只有显式 true 才开；缺失/undefined 一律 false（生产事故后收紧，避免「没配=开」）。
   const globalOn = globalRaw === true || globalRaw === 1 || globalRaw === 'true' || globalRaw === '1';
   let entry = storeProject;
   if (!entry && store && Array.isArray(store.projects)) {
@@ -229,8 +239,10 @@ function resolveAutoAcceptSettings(store, storeProject, projectPath, projectName
     else if (value === false) projectRaw = false;
     else projectRaw = null;
   }
-  const effective = projectRaw === false ? false : (projectRaw === true ? true : globalOn);
-  return { global: globalOn, project: projectRaw, effective };
+  // 口径 v2：只有项目级显式 true 才开；全局 true / 项目级 null / undefined / false 一律关。
+  const effective = projectRaw === true;
+  const source = effective ? 'project' : (projectRaw === false ? 'project_off' : (globalOn ? 'global_ignored' : 'off'));
+  return { global: globalOn, project: projectRaw, effective, globalIgnored: globalOn && projectRaw !== true, source };
 }
 
 function resolveRetractHours(options = {}) {
@@ -576,6 +588,7 @@ function decideTask(context, entry, options = {}) {
 
   const record = isPlainObject(task.acceptanceRecord) ? task.acceptanceRecord : null;
   base.acceptanceRecord = record;
+  // 口径 v2：effective 只有「项目级显式 true」才为 true（全局开关不再单独生效）。
   if (context.settings && context.settings.effective === false) {
     base.reason = 'switch_off';
     return base;
