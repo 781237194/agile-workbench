@@ -194,25 +194,50 @@ function readRenderMemoryWindow(projectPath, options = {}) {
     const prev = Date.parse(String(lines[i - 1].at || ''));
     const cur = Date.parse(String(lines[i].at || ''));
     if (Number.isFinite(prev) && Number.isFinite(cur)) {
-      const delta = Math.round((cur - prev) / 1000);
-      if (delta > 10) gaps.push({ at: String(lines[i].at || ''), gapSec: delta });
+      const sec = Math.round((cur - prev) / 1000);
+      // 卷2 §四 / 卷3 §六：gaps 统一四键结构 {from,to,sec,reason}
+      if (sec > 2) gaps.push({ from: String(lines[i - 1].at || ''), to: String(lines[i].at || ''), sec, reason: sec > 10 ? 'GAP_GT_10S' : 'GAP_GT_2S' });
     }
   }
   if (coverageSec + 1 < windowSec) insufficient = true;
-  // 卷2 §四 返回矩阵（A/B/C/D），优先级 readFailed > insufficient：
-  //  A 无任何采样文件 → NO_SAMPLE_FILE（不判 FAIL）
-  //  B 分片读失败且凑不满 → READ_FAILED（判 FAIL）
-  //  C 有失败但上游凑满窗口 → PARTIAL_SHARD（不判 FAIL，告警）
-  //  D 跨天无前日分片 → NO_PREV_SHARD（当天内缺口 >30s 才 FAIL，由 R1 判）
+  // ── 卷2 §四 返回矩阵（A/B/C/D），优先级 readFailed > insufficient ──────────────
   const readFailed = shardReadFailed;
-  const code = !lines.length
-    ? 'NO_SAMPLE_FILE'
+  const dir = String(projectPath || '');
+  const noShards = shards.length === 0;
+  let samplingDisabled = false;
+  if (noShards) {
+    // 24h 内没有任何分片 → SAMPLING_DISABLED（判 FAIL）；否则只是还没开始采 → NO_SAMPLE_FILE（不判 FAIL）
+    if (options.forceSamplingDisabled === true) samplingDisabled = true;
+    else if (dir) {
+      try {
+        const ageMs = Date.now() - fs.statSync(dir).mtimeMs;
+        samplingDisabled = ageMs > 24 * 3600 * 1000;
+      } catch { samplingDisabled = false; }
+    }
+  }
+  const prevShardMissing = (() => {
+    if (!insufficient || !lines.length) return false;
+    const days = [...new Set(shards.map((s) => s.dateKey))];
+    if (days.length !== 1) return false;
+    const dayShards = shards.filter((s) => s.dateKey === days[0]).sort((a, b) => a.index - b.index);
+    if (!dayShards.length || dayShards[0].index !== 1) return false;
+    const firstRowAt = String(lines[0] && lines[0].at || '');
+    const { rows } = readShardRows(dayShards[0]);
+    const firstInShard = rows.length ? String(rows[0].at || '') : '';
+    return Boolean(firstRowAt) && firstRowAt === firstInShard;
+  })();
+  const code = noShards
+    ? (samplingDisabled ? 'SAMPLING_DISABLED' : 'NO_SAMPLE_FILE')
     : (readFailed
       ? (insufficient ? 'READ_FAILED' : 'PARTIAL_SHARD')
-      : (insufficient ? 'SAMPLING_WINDOW_INSUFFICIENT' : 'OK'));
+      : (insufficient ? (prevShardMissing ? 'NO_PREV_SHARD' : 'SAMPLING_WINDOW_INSUFFICIENT') : 'OK'));
   return {
     lines, firstAt, lastAt, coverageSec, gaps, insufficient, windowSec,
     readFailed, code,
+    // 只有 A(无文件)/已停采/双坏(B) 才判 FAIL；C(末片坏但凑满) 与窗口不足都不判 FAIL（卷2 §四）
+    fail: code === 'READ_FAILED' || code === 'SAMPLING_DISABLED',
+    samplingDisabled,
+    prevShardMissing,
     atCrash: String(options.atCrash || ''),
     daysRead, shardsRead: daysRead,
     badLineShards: shardBadLines,
@@ -240,13 +265,14 @@ function evaluateRecoverable(win, options = {}) {
     const prev = Date.parse(String(lines[i - 1].at || ''));
     const cur = Date.parse(String(lines[i].at || ''));
     if (!Number.isFinite(prev) || !Number.isFinite(cur)) continue;
-    const deltaSec = Math.round((cur - prev) / 1000);
-    if (deltaSec > 2) {
-      gapRows.push({ at: String(lines[i].at || ''), gapSec: deltaSec });
-      if (deltaSec > 10) cumulativeGapSec += deltaSec;
+    const sec = Math.round((cur - prev) / 1000);
+    if (sec > 2) {
+      // 卷2 §四：gaps 四键 {from,to,sec,reason}
+      gapRows.push({ from: String(lines[i - 1].at || ''), to: String(lines[i].at || ''), sec, reason: sec > 10 ? 'GAP_GT_10S' : 'GAP_GT_2S' });
+      if (sec > 10) cumulativeGapSec += sec;
     }
   }
-  const singleGapsOk = gapRows.every((gap) => gap.gapSec <= 10);
+  const singleGapsOk = gapRows.every((gap) => gap.sec <= 10);
   const r1 = lines.length > 1 && singleGapsOk && cumulativeGapSec <= 30;
 
   // R2：分母剔除 degraded 行；非 null 占比 ≥95%

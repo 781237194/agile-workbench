@@ -191,5 +191,88 @@ const sampleAt = (iso, mb, extra) => ({ at: iso, pid: 100, type: 'renderer', gue
     { shard: RM.SHARD_MAX_BYTES, sample: RM.SAMPLE_RETENTION_DAYS, crash: RM.CRASH_RETENTION_DAYS, dirs: RM.CRASH_MAX_DIRS });
 }
 
+/* ── S6 返工单五处（卷2 §四 矩阵 + 卷3 §六）───────────────────────────── */
+{
+  const iso = (base, i) => new Date(base + i * 1000).toISOString();
+  const writeRows = (dir, base, count, extra) => {
+    for (let i = 0; i < count; i += 1) {
+      RM.appendSample(dir, sampleAt(iso(base, i), 500 + (i % 3), extra ? extra(i) : undefined), { dateKey: '20261115' });
+    }
+  };
+
+  // A 行：无任何采样文件 → NO_SAMPLE_FILE（不判 FAIL）
+  const dA = reset();
+  const winA = RM.readRenderMemoryWindow(dA, { atCrash: '2026-11-15T00:05:00.000Z', windowSec: 300 });
+  const recA = RM.evaluateRecoverable(winA, { atCrash: '2026-11-15T00:05:00.000Z', windowSec: 300 });
+  check('S6-01 A 行：无采样文件 → code=NO_SAMPLE_FILE 且 fail=false', winA.code === 'NO_SAMPLE_FILE' && recA.code === 'NO_SAMPLE_FILE' && winA.fail === false, { code: winA.code, fail: winA.fail });
+
+  // 24h 无分片 → SAMPLING_DISABLED（判 FAIL）
+  const dS = reset();
+  const winS = RM.readRenderMemoryWindow(dS, { atCrash: '2026-11-15T00:05:00.000Z', windowSec: 300, forceSamplingDisabled: true });
+  check('S6-02 24h 无分片 → code=SAMPLING_DISABLED 且 fail=true', winS.code === 'SAMPLING_DISABLED' && winS.fail === true, { code: winS.code, fail: winS.fail });
+
+  // C 行：末片有坏行但窗口凑满 → PARTIAL_SHARD 且不判 FAIL
+  const dC = reset();
+  const baseC = Date.UTC(2026, 10, 15, 7, 0, 0);
+  writeRows(dC, baseC, 320);
+  const shardC = RM.listShards(dC).pop();
+  fs.appendFileSync(shardC.path, '{"broken":\n', 'utf8'); // 人为坏行（模拟分片损坏）
+  const atC = iso(baseC, 319);
+  const winC = RM.readRenderMemoryWindow(dC, { atCrash: atC, windowSec: 300 });
+  check('S6-03 C 行：readFailed=true 但窗口凑满 → code=PARTIAL_SHARD 且 fail=false',
+    winC.readFailed === true && winC.code === 'PARTIAL_SHARD' && winC.fail === false,
+    { readFailed: winC.readFailed, code: winC.code, fail: winC.fail, lines: winC.lines.length });
+
+  // B 行：分片坏且窗口凑不满 → READ_FAILED（判 FAIL）
+  const dB = reset();
+  const baseB = Date.UTC(2026, 10, 15, 8, 0, 0);
+  writeRows(dB, baseB, 40);
+  const shardB = RM.listShards(dB).pop();
+  fs.appendFileSync(shardB.path, 'not-json\n', 'utf8');
+  const winB = RM.readRenderMemoryWindow(dB, { atCrash: iso(baseB, 39), windowSec: 300 });
+  check('S6-04 B 行：坏片且凑不满 → code=READ_FAILED 且 fail=true',
+    winB.readFailed === true && winB.code === 'READ_FAILED' && winB.fail === true,
+    { readFailed: winB.readFailed, code: winB.code, fail: winB.fail });
+
+  // D 行：单日分片、窗口不足且已到最早分片起点 → NO_PREV_SHARD
+  const dD = reset();
+  const baseD = Date.UTC(2026, 10, 15, 9, 0, 0);
+  writeRows(dD, baseD, 30);
+  const winD = RM.readRenderMemoryWindow(dD, { atCrash: iso(baseD, 29), windowSec: 300 });
+  check('S6-05 D 行：无前日分片可续 → code=NO_PREV_SHARD（不判 FAIL）',
+    winD.code === 'NO_PREV_SHARD' && winD.fail === false, { code: winD.code, fail: winD.fail, insufficient: winD.insufficient });
+
+  // R1：单缺口 >10s 判假，≤10s 判真（卷3 §六收紧）
+  const mkWin = (gapSec) => ({
+    lines: [
+      { at: '2026-11-15T00:00:00.000Z', cause: 'sample', sampledFrom: '2026-11-15T00:00:00.000Z', workingSetMB: 300 },
+      { at: new Date(Date.parse('2026-11-15T00:00:00.000Z') + gapSec * 1000).toISOString(), cause: 'sample', sampledFrom: new Date(Date.parse('2026-11-15T00:00:00.000Z') + gapSec * 1000).toISOString(), workingSetMB: 300 },
+    ],
+    firstAt: '2026-11-15T00:00:00.000Z',
+    lastAt: new Date(Date.parse('2026-11-15T00:00:00.000Z') + gapSec * 1000).toISOString(),
+    coverageSec: gapSec,
+  });
+  const r1Big = RM.evaluateRecoverable(mkWin(15), { windowSec: 300 });
+  const r1Ok = RM.evaluateRecoverable(mkWin(8), { windowSec: 300 });
+  check('S6-06 R1：单缺口 15s → R1 假；8s → R1 真（阈值 10s）', r1Big.R1 === false && r1Ok.R1 === true, { big: r1Big.R1, ok: r1Ok.R1 });
+  check('S6-07 gaps 四键结构 {from,to,sec,reason}', r1Big.gaps.length === 1 && ['from', 'to', 'sec', 'reason'].every((key) => Object.prototype.hasOwnProperty.call(r1Big.gaps[0], key)) && r1Big.gaps[0].reason === 'GAP_GT_10S', r1Big.gaps);
+
+  // R2：degraded 行不计入分母（95% 口径）
+  const linesR2 = [];
+  for (let i = 0; i < 100; i += 1) {
+    linesR2.push({ at: new Date(Date.parse('2026-11-15T00:00:00.000Z') + i * 1000).toISOString(), cause: 'sample', sampledFrom: new Date(Date.parse('2026-11-15T00:00:00.000Z') + i * 1000).toISOString(), workingSetMB: 400 });
+  }
+  for (let i = 0; i < 15; i += 1) {
+    linesR2.push({ at: new Date(Date.parse('2026-11-15T00:01:40.000Z') + i * 1000).toISOString(), cause: 'degraded', sampledFrom: null, workingSetMB: null });
+  }
+  const winR2 = { lines: linesR2, firstAt: linesR2[0].at, lastAt: linesR2[linesR2.length - 1].at, coverageSec: 114 };
+  const recR2 = RM.evaluateRecoverable(winR2, { windowSec: 300 });
+  check('S6-08 R2：degraded 行不计入分母（100 好行 + 15 降级 → R2 真）', recR2.R2 === true && recR2.degradedLines === 15, { R2: recR2.R2, degradedLines: recR2.degradedLines, nullRatio: recR2.nullRatio });
+
+  // cause 白名单：全仓采样行不得出现 cause='interval'
+  const allRows = RM.listShards(dC).flatMap((shard) => RM.readShardRows(shard).rows);
+  check('S6-09 归一后无 cause=interval（卷3 白名单五值）', allRows.every((row) => ['boot', 'sample', 'reused', 'degraded', 'recovered'].includes(String(row.cause || ''))), { total: allRows.length });
+}
+
 console.log(`\nR-c1ed F-1 断言：${passed}/${passed + failures.length} PASS`);
 if (failures.length) { console.error(JSON.stringify(failures, null, 2)); process.exit(1); }
