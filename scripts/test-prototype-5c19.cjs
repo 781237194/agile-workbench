@@ -83,12 +83,43 @@ check('AC9-01', '?particles 夹到 1..160', /160/.test(html) && /Math\.min|clamp
 check('AC9-02', '#style 非法值回落 native（STYLE_KEYS 白名单 + 回落分支）',
   /STYLE_KEYS\.indexOf\(style\)\s*<\s*0/.test(html) && /style\s*=\s*'native'/.test(html));
 
-/* ── AC6 不动 src ─────────────────────────────────────────────────────── */
-let srcStatus = '';
+/* ── AC6 不动 src（收窄口径：并发工作区不能要求全仓 src 干净） ────────── */
+// PM 2026-11-15 返工 M-20261115-143751-8c65e1：原断言 `git status --porcelain src/` 全空，
+// 在多角色并发工作区里永远不可能 PASS（别的需求正在改 src），属断言写错。
+// 改为两条可判且语义正确的断言：
+//   ① 本需求产物（产品/原型/**）无未提交改动；
+//   ② 本需求资产（scripts/test-prototype-5c19.cjs）最近一次提交未碰 src/**（“本轮不动 src” 的真实判据）。
+// 脚本自身未提交（本条返工正在改它）与全仓 src/ 的未提交改动一样，只打 INFO 注记，不参与断言。
+const OWN_ASSET_PATHS = ['项目/工作台改造修复/产品/原型'];
+let ownStatus = '';
+let ownError = '';
 try {
-  srcStatus = execFileSync('git', ['status', '--porcelain', 'src/'], { cwd: ROOT, encoding: 'utf8' }).trim();
-} catch { srcStatus = '(git 调用失败)'; }
-check('AC6-01', 'git status --porcelain src/ 为空（本轮不动 src）', srcStatus === '', { srcStatus });
+  ownStatus = execFileSync('git', ['status', '--porcelain', '--', ...OWN_ASSET_PATHS], { cwd: ROOT, encoding: 'utf8' }).trim();
+} catch (error) { ownError = String((error && error.message) || error); }
+check('AC6-01', '本需求产物无未提交改动（产品/原型/**）', !ownError && ownStatus === '', { ownStatus, ownError });
+// 脚本自身状态只注记：本文件正是返工对象，断言“自己未提交”会形成循环依赖（改断言的会话里永远红）。
+let scriptStatus = '';
+try { scriptStatus = execFileSync('git', ['status', '--porcelain', '--', 'scripts/test-prototype-5c19.cjs'], { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { /* ignore */ }
+console.log(`INFO  AC6-note  脚本自身 git 状态=${scriptStatus || 'clean'}（只注记：本条返工改动需由提交者提交，不参与断言）`);
+
+let ownCommit = '';
+let ownCommitFiles = [];
+let ownGitError = '';
+try {
+  ownCommit = execFileSync('git', ['log', '--format=%H', '-1', '--', 'scripts/test-prototype-5c19.cjs'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  if (ownCommit) {
+    ownCommitFiles = execFileSync('git', ['show', '--name-only', '--pretty=format:', ownCommit], { cwd: ROOT, encoding: 'utf8' })
+      .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  }
+} catch (error) { ownGitError = String((error && error.message) || error); }
+check('AC6-01b', '本需求最近一次提交未碰 src/**（本轮不动 src）',
+  Boolean(ownCommit) && !ownGitError && !ownCommitFiles.some((p) => p.startsWith('src/')),
+  { commit: ownCommit.slice(0, 7), files: ownCommitFiles.slice(0, 8), ownGitError });
+
+let srcStatus = '';
+try { srcStatus = execFileSync('git', ['status', '--porcelain', 'src/'], { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { /* ignore */ }
+console.log(`INFO  AC6-note  全仓 src/ 未提交改动=${srcStatus ? srcStatus.split(/\r?\n/).length + ' 行' : '0 行'}（只注记、不参与断言：并发工作区里其它需求会改 src）`);
+
 check('AC6-02', '原型文件在 产品/原型/ 下（不新增 src/**）',
   path.relative(PROTO_DIR, HTML) === '原型选型-5c19.html' && !HTML.includes(`${path.sep}src${path.sep}`));
 
