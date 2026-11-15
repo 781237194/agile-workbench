@@ -2,12 +2,13 @@
 'use strict';
 
 /**
- * R-4657 缺陷验收自动化 · 断言脚本（T-20261115-104736-3abe）
+ * R-4657 缺陷验收自动化 · 断言脚本（T-20261115-104736-3abe + B-20261115-123102-92eb v6 增量）
  *
  * 约束：
  *   - 纯 Node + 沙盘夹具；执行路径只碰 证据-3abe/sandbox/**；
  *   - 真实项目只跑 --plan（dry-run）与 --run 拒绝，前后 sha256/mtime 全等；
- *   - 覆盖 AC1–AC9：计划零写入、七组互斥、12 键审计、撤回窗口两侧、开关、池标签、IPC/静态锚点。
+ *   - 覆盖 AC1–AC9 + v6（AC15）：零写入快照（任务/工作流/审计 sha+mtime）、reason 两态
+ *     （project_disabled / switch_off）、撤回 autoReverted 与 skip(already_reverted)+exit 0、12 键审计。
  *
  * 用法：node scripts/test-auto-accept-4657.cjs
  * 退出码：0 全部通过；1 有失败。
@@ -56,11 +57,11 @@ const DONE_BUG_IDS = [
   T.NO_EVIDENCE, T.REPORT_MISSING, T.REPORT_NO_PASS, T.REPORT_HAS_FAIL,
   T.SCREENSHOT_MISSING, T.BAD_IMAGE, T.OK1, T.OK2, T.ALREADY, T.DIR_OK
 ];
-const RETRACT_REASONS = ['retracted', 'retract_window_expired', 'retract_not_found', 'retract_noop'];
+const RETRACT_REASONS = ['retracted', 'already_reverted', 'retract_window_expired', 'retract_not_found', 'retract_noop'];
 const SKIP_REASONS = [
   'no_evidence', 'report_missing', 'report_no_pass', 'report_has_fail',
   'screenshot_missing', 'bad_image', 'already_closed', 'evidence_empty',
-  'read_failed', 'switch_off', 'state_changed', 'duplicate'
+  'read_failed', 'switch_off', 'project_disabled', 'state_changed', 'duplicate'
 ];
 
 const results = [];
@@ -138,6 +139,31 @@ function treeSha() {
   return { aggregate, count: Object.keys(snap).length };
 }
 
+/**
+ * v6（AC1/AC15）：三文件零写入快照——任务/*.json、工作流.json、自动验收.jsonl。
+ * 记录 sha256 + mtimeMs，前后逐项全等才算零写入（审计文件也必须在内）。
+ */
+function fileStatSnap(file) {
+  if (!fs.existsSync(file)) return { exists: false };
+  const stat = fs.statSync(file);
+  return { exists: true, sha: sha256File(file), mtimeMs: stat.mtimeMs, size: stat.size };
+}
+
+function threeFileSnap() {
+  const tasks = [];
+  let names = [];
+  try { names = fs.readdirSync(TASK_DIR).filter((name) => name.endsWith('.json') && !/\.(bak|tmp)$/i.test(name)).sort(); } catch { names = []; }
+  for (const name of names) {
+    const stat = fs.statSync(path.join(TASK_DIR, name));
+    tasks.push({ name, sha: sha256File(path.join(TASK_DIR, name)), mtimeMs: stat.mtimeMs });
+  }
+  return {
+    tasks,
+    workflow: fileStatSnap(path.join(STATE_DIR, '工作流.json')),
+    audit: fileStatSnap(AUDIT_FILE)
+  };
+}
+
 function readTasks() {
   const out = {};
   for (const name of fs.readdirSync(TASK_DIR)) {
@@ -197,8 +223,8 @@ function runCli(args, options = {}) {
 }
 
 function seedStore(options = {}) {
-  // 开关口径 v2（PM 裁决 M-20261115-111430-7e9ecf ③）：只有项目级显式 true 才开。
-  // 默认夹具给项目级 true，保证 AC1–AC7 正常收口；开关用例（AC8-*）各自显式覆盖。
+  // 开关口径 v6（2026-11-15）：双开关 AND——全局 true 且项目级显式 true 才开。
+  // 默认夹具给「全局 true + 项目级 true」，保证 AC1–AC7 正常收口；开关用例（AC8-*/V6-*）各自显式覆盖。
   const projectAuto = Object.prototype.hasOwnProperty.call(options, 'projectAuto') ? options.projectAuto : true;
   const globalAuto = Object.prototype.hasOwnProperty.call(options, 'globalAuto') ? options.globalAuto : true;
   writeJson(STORE_FILE, {
@@ -444,8 +470,9 @@ function testRetract() {
   const afterInside = readTasks();
   log(`retract inside: exit=${inside.status} retracted=${inside.json && inside.json.retracted.length}`);
   check('AC7-04', '窗口内撤回（--retract-hours 0.001）成功且退出码 0', inside.status === 0 && inside.json && inside.json.ok === true && inside.json.retracted.length === 1, JSON.stringify(inside.json).slice(0, 300));
-  check('AC7-05', '撤回写 retractedAt/retractedBy，acceptanceRecord.status=retracted', afterInside[T.OK1].json.acceptanceRecord.status === 'retracted'
-    && afterInside[T.OK1].json.acceptanceRecord.retractedAt && afterInside[T.OK1].json.acceptanceRecord.retractedBy === 'owner', JSON.stringify(afterInside[T.OK1].json.acceptanceRecord));
+  check('AC7-05', '撤回写 retractedAt/retractedBy/autoReverted（v6），acceptanceRecord.status=retracted', afterInside[T.OK1].json.acceptanceRecord.status === 'retracted'
+    && afterInside[T.OK1].json.acceptanceRecord.retractedAt && afterInside[T.OK1].json.acceptanceRecord.retractedBy === 'owner'
+    && afterInside[T.OK1].json.acceptanceRecord.autoReverted === true, JSON.stringify(afterInside[T.OK1].json.acceptanceRecord));
 
   const retractRows = auditRows().filter((row) => row.result === 'retract');
   const ok1RetractRow = retractRows.find((row) => row.taskId === T.OK1 && row.reason === 'retracted');
@@ -454,7 +481,10 @@ function testRetract() {
   check('AC9-06', 'retract 行复制原 accepted 的 evidence/testReport', ok1RetractRow && JSON.stringify(ok1RetractRow.evidence) === JSON.stringify(ok1AcceptedRow && ok1AcceptedRow.evidence) && JSON.stringify(ok1RetractRow.testReport) === JSON.stringify(ok1AcceptedRow && ok1AcceptedRow.testReport), '');
 
   const repeat = runCli(['--project', PROJECT_NAME, '--retract', T.OK1, '--now', insideNow]);
-  check('AC7-06', '重复撤回 → RETRACT_NOOP 且退出码 1', repeat.status === 1 && repeat.json && repeat.json.failed.some((row) => row.id === T.OK1 && row.code === 'RETRACT_NOOP'), JSON.stringify(repeat.json && repeat.json.failed));
+  check('AC7-06', '重复撤回 → skip(already_reverted) 且退出码 0（v6 幂等）', repeat.status === 0 && repeat.json
+    && repeat.json.ok === true
+    && Array.isArray(repeat.json.skipped) && repeat.json.skipped.some((row) => row.id === T.OK1 && row.reason === 'already_reverted')
+    && (repeat.json.failed || []).length === 0, JSON.stringify(repeat.json && { status: repeat.status, skipped: repeat.json.skipped, failed: repeat.json.failed }));
 
   const ok2Before = readTasks()[T.OK2].sha;
   const expired = runCli(['--project', PROJECT_NAME, '--retract', T.OK2, '--retract-hours', '0.001', '--now', outsideNow]);
@@ -509,22 +539,27 @@ function testSwitches() {
   const role = auto.retract(context, { taskIds: [T.OK2], operator: 'tester', allowRealProject: true });
   check('AC8-01', '撤回只允许 Owner/PM → ROLE_NOT_ALLOWED', role.ok === false && role.code === 'ROLE_NOT_ALLOWED', JSON.stringify(role).slice(0, 200));
 
-  // 口径 v2：项目级 false + 全局 true → 仍关（全局 true 不再能单独开启）
+  // v6（AC2）：项目级 false + 全局 true → project_disabled（项目未开优先）；零写入（含审计不追加）。
   seedStore({ projectAuto: false, globalAuto: true });
   const before = treeSha();
+  const auditBeforeOff = auditRows().length;
   const projectOff = runCli(['--project', PROJECT_NAME, '--run', '--once']);
   const after = treeSha();
-  check('AC8-02', '项目级 autoAcceptBugs=false + 全局 true → 全部 skip(switch_off)（全局 true 不再能开）', projectOff.status === 0
-    && projectOff.json && projectOff.json.groups.switch_off === DONE_BUG_IDS.length
-    && projectOff.json.closed.length === 0, JSON.stringify(projectOff.json && projectOff.json.groups));
+  const auditAfterOff = auditRows().length;
+  check('AC8-02', '项目级 autoAcceptBugs=false + 全局 true → 全部 skip(project_disabled)（v6 项目未开）', projectOff.status === 0
+    && projectOff.json && projectOff.json.groups.project_disabled === DONE_BUG_IDS.length
+    && Number(projectOff.json.groups.switch_off || 0) === 0
+    && projectOff.json.closed.length === 0
+    && (projectOff.json.skipped || []).every((row) => row.reason === 'project_disabled'), JSON.stringify(projectOff.json && projectOff.json.groups));
   check('AC8-03', '开关关闭零写任务文件', before.aggregate === after.aggregate, `${before.aggregate} vs ${after.aggregate}`);
-  const offRows = auditRows().filter((row) => row.reason === 'switch_off');
-  check('AC8-04', 'switch_off 审计行 12 键且 operator=null', offRows.length >= DONE_BUG_IDS.length && offRows.slice(-DONE_BUG_IDS.length).every(auditKeysOk), `rows=${offRows.length}`);
+  check('AC8-04', '开关关闭不写审计（v6：审计行数不变，自动验收.jsonl 不追加）', auditAfterOff === auditBeforeOff, `${auditBeforeOff} vs ${auditAfterOff}`);
 
-  // 全局 false + 项目级 null → 同样关闭（null 一律视为关）
+  // 全局 false + 项目级 null → 项目未开优先（null 一律视为未开）
   seedStore({ projectAuto: null, globalAuto: false });
   const globalOff = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
-  check('AC8-05', '全局 autoAcceptBugs=false + 项目 null → switch_off（null 视为关）', globalOff.json && globalOff.json.groups.switch_off === DONE_BUG_IDS.length, JSON.stringify(globalOff.json && globalOff.json.groups));
+  check('AC8-05', '全局 autoAcceptBugs=false + 项目 null → project_disabled（null 视为未开）', globalOff.json
+    && globalOff.json.groups.project_disabled === DONE_BUG_IDS.length
+    && Number(globalOff.json.groups.switch_off || 0) === 0, JSON.stringify(globalOff.json && globalOff.json.groups));
 
   // 默认关：ui.autoAcceptBugs 缺失（undefined）不得当开
   writeJson(STORE_FILE, {
@@ -534,40 +569,72 @@ function testSwitches() {
     ui: {}
   });
   const defaultOff = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
-  check('AC8-14', 'ui.autoAcceptBugs 缺失 + 项目 null → 默认关（switch_off=总数、accepted=0）',
-    defaultOff.json && defaultOff.json.groups.switch_off === DONE_BUG_IDS.length && Number(defaultOff.json.groups.accepted || 0) === 0,
+  check('AC8-14', 'ui.autoAcceptBugs 缺失 + 项目 null → 默认关（project_disabled=总数、accepted=0）',
+    defaultOff.json && defaultOff.json.groups.project_disabled === DONE_BUG_IDS.length && Number(defaultOff.json.groups.accepted || 0) === 0,
     JSON.stringify(defaultOff.json && defaultOff.json.groups));
 
-  // ── 新增断言 1（口径 v2）：全局 true 但项目级未写（连 autoAcceptBugs 键都没有）
-  //    plan 全 switch_off；--run 拒绝收口（closed=0/wrote=0/任务文件零写入）。
+  // ── v6（AC1/AC15）：全局 true 但项目级未写（连 autoAcceptBugs 键都没有）
+  //    plan/--run 都只返回 project_disabled，三文件（任务/工作流/审计）sha256+mtime 全等。
   writeJson(STORE_FILE, {
     version: 1,
     activeProjectId: 'P-4657-sandbox',
     projects: [{ id: 'P-4657-sandbox', name: PROJECT_NAME, teamName: PROJECT_NAME, path: PROJECT_ROOT }],
     ui: { autoAcceptBugs: true }
   });
+  const auditBeforeGlobalOnly = auditRows().length;
+  const beforeGlobalOnlyRun = threeFileSnap();
   const globalOnlyPlan = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
-  const beforeGlobalOnlyRun = treeSha();
   const globalOnlyRun = runCli(['--project', PROJECT_NAME, '--run', '--once']);
-  const afterGlobalOnlyRun = treeSha();
+  const afterGlobalOnlyRun = threeFileSnap();
+  const auditAfterGlobalOnly = auditRows().length;
   const globalOnlySettings = (globalOnlyPlan.json && globalOnlyPlan.json.settings) || {};
-  check('AC8-16', '全局 ui.autoAcceptBugs=true 但项目级未写 → plan 全 switch_off、--run 拒绝收口（零任务写入）',
+  check('AC8-16', '全局 ui.autoAcceptBugs=true 但项目级未写 → plan 全 project_disabled、--run 三文件零写入（含审计）',
     globalOnlyPlan.json
-    && globalOnlyPlan.json.groups.switch_off === DONE_BUG_IDS.length
+    && globalOnlyPlan.json.groups.project_disabled === DONE_BUG_IDS.length
     && Number(globalOnlyPlan.json.groups.accepted || 0) === 0
     && globalOnlySettings.effective === false
     && globalOnlySettings.global === true
     && globalOnlySettings.project === null
-    && globalOnlySettings.source === 'global_ignored'
+    && globalOnlySettings.reason === 'project_disabled'
+    && globalOnlySettings.source === 'project_disabled'
     && globalOnlyRun.status === 0
-    && globalOnlyRun.json && globalOnlyRun.json.groups.switch_off === DONE_BUG_IDS.length
+    && globalOnlyRun.json && globalOnlyRun.json.groups.project_disabled === DONE_BUG_IDS.length
     && globalOnlyRun.json.closed.length === 0
     && globalOnlyRun.json.wrote === 0
-    && beforeGlobalOnlyRun.aggregate === afterGlobalOnlyRun.aggregate,
-    JSON.stringify({ settings: globalOnlySettings, plan: globalOnlyPlan.json && globalOnlyPlan.json.groups, run: globalOnlyRun.json && { closed: globalOnlyRun.json.closed.length, wrote: globalOnlyRun.json.wrote, groups: globalOnlyRun.json.groups } }));
+    && auditAfterGlobalOnly === auditBeforeGlobalOnly
+    && JSON.stringify(beforeGlobalOnlyRun) === JSON.stringify(afterGlobalOnlyRun),
+    JSON.stringify({ settings: globalOnlySettings, plan: globalOnlyPlan.json && globalOnlyPlan.json.groups, run: globalOnlyRun.json && { closed: globalOnlyRun.json.closed.length, wrote: globalOnlyRun.json.wrote, groups: globalOnlyRun.json.groups }, audit: [auditBeforeGlobalOnly, auditAfterGlobalOnly] }));
+  check('AC8-16b', '未开启 --plan 同口径：project_disabled=总数、closeable=[]、退出码 0', globalOnlyPlan.status === 0
+    && globalOnlyPlan.json && globalOnlyPlan.json.disabled === true
+    && globalOnlyPlan.json.reason === 'project_disabled'
+    && Array.isArray(globalOnlyPlan.json.closeable) && globalOnlyPlan.json.closeable.length === 0,
+    JSON.stringify(globalOnlyPlan.json && { status: globalOnlyPlan.status, reason: globalOnlyPlan.json.reason, closeable: globalOnlyPlan.json.closeable }));
 
-  // ── 新增断言 2（口径 v2）：项目级 projects[].autoAcceptBugs=true 且沙盘 → 正常 plan（有可关闭件）；
-  //    真实（非沙盘）环境仍要显式 AWB_AUTO_ACCEPT_ALLOW_REAL=1（主进程闸门在 runner 之前）。
+  // ── v6（AC2）：全局 false + 项目 true → switch_off（全局关）；plan/--run 三文件零写入。
+  seedStore({ projectAuto: true, globalAuto: false });
+  const auditBeforeSwitchOff = auditRows().length;
+  const beforeSwitchOff = threeFileSnap();
+  const switchOffPlan = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
+  const switchOffRun = runCli(['--project', PROJECT_NAME, '--run', '--once']);
+  const afterSwitchOff = threeFileSnap();
+  const auditAfterSwitchOff = auditRows().length;
+  const switchOffSettings = (switchOffPlan.json && switchOffPlan.json.settings) || {};
+  check('AC8-17', '全局 false + 项目 true → switch_off（v6 全局关）；plan/--run 三文件零写入',
+    switchOffPlan.status === 0
+    && switchOffPlan.json && switchOffPlan.json.groups.switch_off === DONE_BUG_IDS.length
+    && Number(switchOffPlan.json.groups.project_disabled || 0) === 0
+    && switchOffSettings.effective === false
+    && switchOffSettings.reason === 'switch_off'
+    && switchOffSettings.source === 'switch_off'
+    && switchOffRun.status === 0
+    && switchOffRun.json && switchOffRun.json.groups.switch_off === DONE_BUG_IDS.length
+    && switchOffRun.json.closed.length === 0
+    && switchOffRun.json.wrote === 0
+    && auditAfterSwitchOff === auditBeforeSwitchOff
+    && JSON.stringify(beforeSwitchOff) === JSON.stringify(afterSwitchOff),
+    JSON.stringify({ settings: switchOffSettings, plan: switchOffPlan.json && switchOffPlan.json.groups, run: switchOffRun.json && { closed: switchOffRun.json.closed.length, wrote: switchOffRun.json.wrote }, audit: [auditBeforeSwitchOff, auditAfterSwitchOff] }));
+
+  // ── 双开（全局 true + 项目 true）→ 正常 plan（有可关闭件）；真实（非沙盘）环境仍要 AWB_AUTO_ACCEPT_ALLOW_REAL=1。
   //    复用一个可收口夹具：OK1 此前已被 --run 收口/撤回，这里清掉验收记录模拟「已完成·未验收」。
   const ok1File = path.join(TASK_DIR, T.OK1 + '.json');
   const ok1Task = JSON.parse(fs.readFileSync(ok1File, 'utf8').replace(/^\uFEFF/, ''));
@@ -575,23 +642,149 @@ function testSwitches() {
   delete ok1Task.acceptedAt;
   delete ok1Task.acceptedBy;
   writeJson(ok1File, ok1Task);
-  seedStore({ projectAuto: true, globalAuto: false });
+  seedStore({ projectAuto: true, globalAuto: true });
   const projectOn = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
   const projectOnSettings = (projectOn.json && projectOn.json.settings) || {};
   const mainSrcForGate = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   const allowRealAt = mainSrcForGate.indexOf("process.env.AWB_AUTO_ACCEPT_ALLOW_REAL === '1'");
   const runnerAt = mainSrcForGate.indexOf('autoAccept.createAutoAcceptRunner');
-  check('AC8-17', '项目级 true 且沙盘 → 正常 plan（switch_off=0、有可关闭件）；真实环境仍要 AWB_AUTO_ACCEPT_ALLOW_REAL=1',
+  check('AC8-18', '双开（全局 true + 项目 true）→ 正常 plan（两个拒绝码=0、有可关闭件）；真实环境仍要 AWB_AUTO_ACCEPT_ALLOW_REAL=1',
     projectOn.json
     && projectOn.json.groups.switch_off === 0
+    && projectOn.json.groups.project_disabled === 0
     && Number(projectOn.json.groups.accepted || 0) >= 1
     && Array.isArray(projectOn.json.closeable)
     && projectOn.json.closeable.includes(T.OK1)
     && projectOnSettings.effective === true
     && projectOnSettings.source === 'project'
     && allowRealAt >= 0 && runnerAt > allowRealAt
-    && mainSrcForGate.includes('全局开关不再单独生效'),
+    && mainSrcForGate.includes('双开关 AND'),
     JSON.stringify({ settings: projectOnSettings, groups: projectOn.json && projectOn.json.groups, closeable: projectOn.json && projectOn.json.closeable, allowRealAt, runnerAt }));
+  seedStore();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 4b. v6 增量（B-20261115-123102-92eb）：AC1 零写入 / AC2 reason 码 / AC3 autoReverted
+ * ══════════════════════════════════════════════════════════════════════════ */
+function testV6Delta() {
+  // 工作流.json 夹具：AC1 的三文件范围包含 工作流.json（auto-accept 从不写它，必须前后全等）。
+  const workflowFile = path.join(STATE_DIR, '工作流.json');
+  if (!fs.existsSync(workflowFile)) {
+    writeJson(workflowFile, { version: 1, requirements: {}, tasks: {}, note: 'v6 零写入夹具' });
+  }
+
+  // ── AC1 / AC2-a：项目未开（false）+ 全局 true → project_disabled，三文件零写入
+  seedStore({ projectAuto: false, globalAuto: true });
+  const auditRowsBeforeA = auditRows().length;
+  const snapA = threeFileSnap();
+  const runA = runCli(['--project', PROJECT_NAME, '--run', '--once']);
+  const snapA2 = threeFileSnap();
+  const auditRowsAfterA = auditRows().length;
+  const skippedA = ((runA.json && runA.json.skipped) || []).map((row) => row.reason);
+  check('V6-AC1-01', '项目未开（false）--run：任务/工作流/审计三文件 sha256+mtime 全等、审计不追加、exit 0',
+    runA.status === 0 && JSON.stringify(snapA) === JSON.stringify(snapA2) && auditRowsAfterA === auditRowsBeforeA,
+    JSON.stringify({ status: runA.status, tasksEqual: JSON.stringify(snapA.tasks) === JSON.stringify(snapA2.tasks), workflow: [snapA.workflow, snapA2.workflow], audit: [snapA.audit, snapA2.audit], rows: [auditRowsBeforeA, auditRowsAfterA] }));
+  check('V6-AC1-02', '项目未开 --run：skipped 全部 project_disabled、wrote=0/closed=0、settings.reason 同步',
+    runA.json && runA.json.disabled === true && runA.json.reason === 'project_disabled'
+    && runA.json.groups.project_disabled === DONE_BUG_IDS.length
+    && skippedA.length === DONE_BUG_IDS.length && skippedA.every((reason) => reason === 'project_disabled')
+    && runA.json.wrote === 0 && runA.json.closed.length === 0
+    && runA.json.settings && runA.json.settings.reason === 'project_disabled',
+    JSON.stringify({ reason: runA.json && runA.json.reason, skipped: skippedA, wrote: runA.json && runA.json.wrote, groups: runA.json && runA.json.groups }));
+  const planA = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
+  const snapA3 = threeFileSnap();
+  check('V6-AC1-03', '项目未开 --plan：三文件仍全等、exit 0、closeable=[]、project_disabled=总数',
+    planA.status === 0 && JSON.stringify(snapA2) === JSON.stringify(snapA3)
+    && planA.json && planA.json.disabled === true && planA.json.reason === 'project_disabled'
+    && Array.isArray(planA.json.closeable) && planA.json.closeable.length === 0
+    && planA.json.groups.project_disabled === DONE_BUG_IDS.length,
+    JSON.stringify({ status: planA.status, reason: planA.json && planA.json.reason, closeable: planA.json && planA.json.closeable, groups: planA.json && planA.json.groups }));
+
+  // ── AC1-04：审计文件原本不存在时也不得被创建（v177 D1 原始症状：missing→1473B）
+  const freshName = PROJECT_NAME + '-off';
+  const freshState = path.join(TEAM_ROOT, '状态', '项目', freshName);
+  const freshRoot = path.join(SANDBOX, '项目', freshName);
+  rmrf(freshState);
+  fs.mkdirSync(path.join(freshState, '任务'), { recursive: true });
+  writeJson(path.join(freshState, '项目.json'), { name: freshName, path: freshRoot, teamMode: 'full', createdAt: '2026-11-15T00:00:00.000Z' });
+  writeJson(path.join(freshState, '任务', 'B-20261115-000777-0777.json'), taskBase('B-20261115-000777-0777', [ev('证据/report-pass.md'), ev('证据/shot.png')], { project: freshName }));
+  fs.mkdirSync(path.join(freshRoot, '证据'), { recursive: true });
+  writeText(path.join(freshRoot, '证据', 'report-pass.md'), '# 测试报告\n\n结论：PASS\n');
+  fs.copyFileSync(path.join(PROJECT_ROOT, '证据', 'shot.png'), path.join(freshRoot, '证据', 'shot.png'));
+  writeJson(STORE_FILE, {
+    version: 1,
+    activeProjectId: 'P-4657-off',
+    projects: [
+      { id: 'P-4657-sandbox', name: PROJECT_NAME, teamName: PROJECT_NAME, path: PROJECT_ROOT, autoAcceptBugs: false },
+      { id: 'P-4657-off', name: freshName, teamName: freshName, path: freshRoot, autoAcceptBugs: false }
+    ],
+    ui: { autoAcceptBugs: true }
+  });
+  const freshAudit = path.join(freshState, '自动验收.jsonl');
+  const freshWorkflow = path.join(freshState, '工作流.json');
+  const freshTaskFile = path.join(freshState, '任务', 'B-20261115-000777-0777.json');
+  const freshTaskSha = sha256File(freshTaskFile);
+  const freshRun = runCli(['--project', freshName, '--state-dir', freshState, '--run', '--once']);
+  check('V6-AC1-04', '审计文件原本不存在 → 未开启 --run 也不创建 jsonl/工作流、不改任务文件',
+    freshRun.status === 0 && !fs.existsSync(freshAudit) && !fs.existsSync(freshWorkflow)
+    && sha256File(freshTaskFile) === freshTaskSha
+    && freshRun.json && freshRun.json.reason === 'project_disabled',
+    JSON.stringify({ status: freshRun.status, auditExists: fs.existsSync(freshAudit), reason: freshRun.json && freshRun.json.reason }));
+
+  // ── AC2-b：全局关 + 项目 true → switch_off（与 project_disabled 两态区分）
+  seedStore({ projectAuto: true, globalAuto: false });
+  const auditRowsBeforeB = auditRows().length;
+  const snapB = threeFileSnap();
+  const runB = runCli(['--project', PROJECT_NAME, '--run', '--once']);
+  const snapB2 = threeFileSnap();
+  const auditRowsAfterB = auditRows().length;
+  const skippedB = ((runB.json && runB.json.skipped) || []).map((row) => row.reason);
+  check('V6-AC2-01', '全局关（项目 true）--run：switch_off=总数、三文件零写入、exit 0',
+    runB.status === 0 && JSON.stringify(snapB) === JSON.stringify(snapB2) && auditRowsAfterB === auditRowsBeforeB
+    && runB.json && runB.json.disabled === true && runB.json.reason === 'switch_off'
+    && runB.json.groups.switch_off === DONE_BUG_IDS.length
+    && Number(runB.json.groups.project_disabled || 0) === 0
+    && skippedB.length === DONE_BUG_IDS.length && skippedB.every((reason) => reason === 'switch_off')
+    && runB.json.settings && runB.json.settings.reason === 'switch_off' && runB.json.settings.source === 'switch_off',
+    JSON.stringify({ status: runB.status, reason: runB.json && runB.json.reason, skipped: skippedB, rows: [auditRowsBeforeB, auditRowsAfterB] }));
+  const planB = runCli(['--project', PROJECT_NAME, '--plan', '--once']);
+  const snapB3 = threeFileSnap();
+  check('V6-AC2-02', 'reason 两态互斥且白名单同步：project_disabled ≠ switch_off；plan 同口径零写入',
+    planB.status === 0 && planB.json && planB.json.reason === 'switch_off'
+    && planB.json.groups.switch_off === DONE_BUG_IDS.length
+    && Number(planB.json.groups.project_disabled || 0) === 0
+    && Boolean(runA.json && runA.json.reason === 'project_disabled')
+    && auto.ALLOWED_SKIP_REASONS.has('switch_off') && auto.ALLOWED_SKIP_REASONS.has('project_disabled')
+    && auto.RETRACT_REASONS.includes('already_reverted')
+    && JSON.stringify(snapB2) === JSON.stringify(snapB3),
+    JSON.stringify({ planReason: planB.json && planB.json.reason, groups: planB.json && planB.json.groups }));
+
+  // ── AC3：撤回记录 autoReverted=true；重复撤回 skip(already_reverted) + exit 0
+  seedStore({ projectAuto: true, globalAuto: true });
+  const firstRetract = runCli(['--project', PROJECT_NAME, '--retract', T.OK2, '--operator', 'owner', '--reason', 'v6 事故回滚']);
+  const ok2After = readTasks()[T.OK2];
+  const rec = ok2After.json.acceptanceRecord || {};
+  const retractRow = auditRows().filter((row) => row.result === 'retract' && row.taskId === T.OK2 && row.reason === 'retracted').pop() || null;
+  check('V6-AC3-01', '撤回记录含 autoReverted=true（status/retractedBy/retractReason 保持，任务 status 仍 done）',
+    firstRetract.status === 0 && rec.status === 'retracted' && rec.autoReverted === true
+    && rec.retractedBy === 'owner' && rec.retractReason === 'v6 事故回滚'
+    && ok2After.json.status === 'done',
+    JSON.stringify({ status: rec.status, autoReverted: rec.autoReverted, by: rec.retractedBy, reason: rec.retractReason, taskStatus: ok2After.json.status }));
+  check('V6-AC3-02', '撤回审计行仍是 12 键（autoReverted 落在 acceptanceRecord，不改审计键）', auditKeysOk(retractRow) && retractRow.operator === 'owner', JSON.stringify(retractRow || {}).slice(0, 300));
+  const rowsBeforeRepeat = auditRows().length;
+  const repeatRetract = runCli(['--project', PROJECT_NAME, '--retract', T.OK2, '--operator', 'owner']);
+  const rowsAfterRepeat = auditRows().length;
+  const lastRow = auditRows().slice(-1)[0] || null;
+  const ok2Final = readTasks()[T.OK2];
+  check('V6-AC3-03', '重复撤回 → skip(already_reverted) 且 exit 0、任务文件不再改、审计留 1 行 already_reverted',
+    repeatRetract.status === 0 && repeatRetract.json && repeatRetract.json.ok === true
+    && (repeatRetract.json.skipped || []).some((row) => row.id === T.OK2 && row.reason === 'already_reverted')
+    && (repeatRetract.json.failed || []).length === 0
+    && ok2Final.sha === ok2After.sha
+    && rowsAfterRepeat === rowsBeforeRepeat + 1
+    && lastRow && lastRow.taskId === T.OK2 && lastRow.result === 'retract' && lastRow.reason === 'already_reverted'
+    && auditKeysOk(lastRow),
+    JSON.stringify({ status: repeatRetract.status, skipped: repeatRetract.json && repeatRetract.json.skipped, rows: [rowsBeforeRepeat, rowsAfterRepeat], last: lastRow && { id: lastRow.taskId, reason: lastRow.reason } }));
   seedStore();
 }
 
@@ -658,17 +851,19 @@ function testPoolAndAnchors() {
     && poolSrc.includes('data-accept-missing') && poolSrc.includes('data-bug-retract')
     && appSrc.includes('bug-retract-bar') && appSrc.includes('autoAcceptRetract'), '');
   check('AC8-09', '撤回只走 IPC（app.js 调 autoAcceptRetract，不直接写文件）', appSrc.includes('window.workbench.autoAcceptRetract') && !appSrc.includes("ipcRenderer"), '');
-  check('AC8-10', '开关键名与口径：ui.autoAcceptBugs（只读）+ projects[].autoAcceptBugs（仅显式 true 开）', autoSrc.includes('ui.autoAcceptBugs')
+  check('AC8-10', '开关键名与口径：ui.autoAcceptBugs（只读）+ projects[].autoAcceptBugs（双开关 AND）', autoSrc.includes('ui.autoAcceptBugs')
     && autoSrc.includes("hasOwnProperty.call(entry, 'autoAcceptBugs')")
-    && autoSrc.includes('const effective = projectRaw === true;')
-    && autoSrc.includes('全局开关不再单独生效'), '');
+    && autoSrc.includes('const effective = globalOn && projectOn;')
+    && autoSrc.includes("'project_disabled'")
+    && autoSrc.includes("'switch_off'"), '');
   check('AC8-11', 'workflow:state 下发 autoAccept 配置（池子拿 retractHours）', mainSrc.includes('autoAccept: autoAcceptUiConfig()')
     && mainSrc.includes('retractHours: autoAccept.resolveRetractHours({})'), '');
   check('AC8-12', '主进程真实项目默认不自动执行（须 AWB_AUTO_ACCEPT_ALLOW_REAL=1）', mainSrc.includes('AWB_AUTO_ACCEPT_ALLOW_REAL')
     && mainSrc.includes('AUTO_ACCEPT_SKIP 真实项目默认不自动执行'), '');
-  check('AC8-13', '主进程每轮解析开关（口径 v2：项目级 true 才开，全局不再单独生效）', mainSrc.includes('settings: autoAccept.resolveAutoAcceptSettings(store, project')
+  check('AC8-13', '主进程每轮解析开关（v6 双开关 AND，未开启零写入）', mainSrc.includes('settings: autoAccept.resolveAutoAcceptSettings(store, project')
     && mainSrc.includes('settings: autoAccept.resolveAutoAcceptSettings(store, project, projectPath, teamName)')
-    && mainSrc.includes('全局开关不再单独生效'), '');
+    && mainSrc.includes('双开关 AND')
+    && mainSrc.includes('switch_off / project_disabled'), '');
   check('AC9-08', '审计 12 键常量固定（脚本与 CLI 同源）', auto.AUDIT_KEYS.length === 12 && Object.keys(auto.AUDIT_KEYS).join(',') === '0,1,2,3,4,5,6,7,8,9,10,11', auto.AUDIT_KEYS.join(','));
 }
 
@@ -760,9 +955,10 @@ function testRealProject() {
 
   log(`real plan: exit=${plan.status} total=${plan.json && plan.json.total} taskFiles=${before.taskCount}`);
   check('AC6-11', '真实项目 --plan 退出码 0 且计数等式成立', plan.status === 0 && plan.json && plan.json.ok === true && plan.json.countCheck && plan.json.countCheck.ok === true, `exit=${plan.status} total=${plan.json && plan.json.total}`);
-  check('AC8-15', '真实项目开关缺失 → plan 全部 switch_off、accepted=0（默认关）', plan.json
-    && Number(plan.json.groups.switch_off || 0) === Number(plan.json.total)
-    && Number(plan.json.groups.accepted || 0) === 0, JSON.stringify(plan.json && plan.json.groups));
+  check('AC8-15', '真实项目开关缺失 → 未开启拒绝码合计=总数、accepted=0（默认关；v6 两态互斥）', plan.json
+    && (Number(plan.json.groups.project_disabled || 0) + Number(plan.json.groups.switch_off || 0)) === Number(plan.json.total)
+    && Number(plan.json.groups.accepted || 0) === 0
+    && Boolean(plan.json.settings && plan.json.settings.effective === false), JSON.stringify(plan.json && { groups: plan.json.groups, settings: plan.json.settings }));
   check('AC6-12', '真实 dry-run：工作流.json sha/mtime 全等', workflowSame, `${before.workflow.sha} vs ${after.workflow.sha}`);
   check('AC6-13', '真实 dry-run：团队.json sha/mtime 全等', teamSame, `${before.team.sha} vs ${after.team.sha}`);
   check('AC6-14', '真实 dry-run：workbench.json sha/mtime 全等', storeSame, `${before.store.sha} vs ${after.store.sha}`);
@@ -805,6 +1001,7 @@ function main() {
   testRetract();
   testTickDedupe();
   testSwitches();
+  testV6Delta();
   testPoolAndAnchors();
   testRealProject();
 
@@ -832,7 +1029,8 @@ function main() {
   const failed = results.length - passed;
   const summary = {
     script: 'scripts/test-auto-accept-4657.cjs',
-    task: 'T-20261115-104736-3abe',
+    task: 'T-20261115-104736-3abe + B-20261115-123102-92eb（v6 增量）',
+    requirement: 'R-20261115-065609-4657',
     generatedAt: new Date().toISOString(),
     total: results.length,
     passed,

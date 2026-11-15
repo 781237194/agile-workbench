@@ -3823,8 +3823,9 @@ function teamProjectStateDir(project) {
 
 /**
  * 自动验收开关投影。
- * 开关口径 v2（PM 裁决 M-20261115-111430-7e9ecf ③）：全局开关不再单独生效，仅项目级显式 true 才开——
- * `projects[].autoAcceptBugs === true` 才启动；`null`/`undefined`/`false`（含全局 `ui.autoAcceptBugs=true`）一律关。
+ * 开关口径 v6（2026-11-15，与 `需求/增补卷-4657-1.md` §一-4/AC15 对齐）：双开关 AND——
+ * 全局 `ui.autoAcceptBugs === true` 且 `projects[].autoAcceptBugs === true` 才开；
+ * 两态拒绝码互斥：全局关 = `switch_off`，项目未开 = `project_disabled`（未开启时零写入，连审计也不追加）。
  */
 function autoAcceptUiConfig() {
   const store = readStore();
@@ -3836,8 +3837,8 @@ function autoAcceptUiConfig() {
     enabled: settings.effective,
     global: settings.global,
     project: settings.project,
-    // 口径 v2 诊断：全局 true 但项目未显式开时 globalIgnored=true / source='global_ignored'。
-    globalIgnored: Boolean(settings.globalIgnored),
+    // v6 诊断：未开启时 reason=switch_off|project_disabled，与 CLI/审计同源（单一 resolveAutoAcceptSettings）。
+    reason: settings.reason,
     source: settings.source,
     retractHours: autoAccept.resolveRetractHours({})
   };
@@ -3859,8 +3860,8 @@ function autoAcceptProjectContext(payload) {
     teamRoot: (teamTools.layout && teamTools.layout.root) || process.env.TEAM_ROOT || path.join(ROOT, '团队'),
     projectsRoot: process.env.TEAM_PROJECTS_ROOT || path.join(ROOT, '项目'),
     storeFile: storeFile(),
-    // IPC plan 与主进程 tick 同口径（开关口径 v2）：全局开关不再单独生效，仅项目级显式 true；
-    // null/undefined/false 一律关（所有判定都走同一个 resolveAutoAcceptSettings，不写第二份）。
+    // IPC plan 与主进程 tick 同口径（v6 双开关 AND）：全局 true 且项目级显式 true 才开；
+    // 未开启时 plan 只返回 switch_off/project_disabled，不写任何文件（所有判定都走同一个 resolveAutoAcceptSettings）。
     settings: autoAccept.resolveAutoAcceptSettings(store, project, projectPath, teamName),
     retractHours: autoAccept.resolveRetractHours({})
   };
@@ -3877,8 +3878,9 @@ function notifyAutoAcceptChanged(payload) {
 let autoAcceptRunner = null;
 /**
  * 启动主进程自动器：任务目录 watch（debounce 300ms）+ 兜底 tick（默认 30 秒，AWB_AUTO_ACCEPT_TICK_MS 可配）。
- * 三层闸门（开关口径 v2，PM 裁决 M-20261115-111430-7e9ecf ③）：
- *   ① 项目级 `projects[].autoAcceptBugs === true`（全局 `ui.autoAcceptBugs` 不再单独生效，null/undefined/false 一律关）；
+ * 三层闸门（开关口径 v6，2026-11-15）：
+ *   ① 双开关 AND：全局 `ui.autoAcceptBugs === true` 且项目级 `projects[].autoAcceptBugs === true`；
+ *      未开启时 `run()` 直接零写入返回（switch_off / project_disabled，连审计也不追加）；
  *   ② 真实（非沙盘）项目必须显式 `AWB_AUTO_ACCEPT_ALLOW_REAL=1` 才启动自动执行；
  *   ③ 沙盘按 TEAM_ROOT 判定；非沙盘只 dry-run，不做任何自动收口。
  */
@@ -3916,7 +3918,7 @@ function startAutoAcceptAuto() {
         projectsRoot: process.env.TEAM_PROJECTS_ROOT || path.join(ROOT, '项目'),
         storeFile: storeFile(),
         // 开关必须在每轮实时解析（配置改动实时生效），不能只在启动时读一次。
-        // 口径 v2：全局开关不再单独生效，仅项目级显式 true 才开；null/undefined/false 一律关。
+        // v6 双开关 AND：全局 true 且项目级显式 true 才开；未开启时 run() 零写入返回。
         settings: autoAccept.resolveAutoAcceptSettings(store, project, path.resolve(String(project.path || '')), String(project.teamName || project.name || '')),
         retractHours: autoAccept.resolveRetractHours({})
       };

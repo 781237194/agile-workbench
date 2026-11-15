@@ -12,10 +12,12 @@
  *   - 主进程 watch/tick/IPC 用 `createAutoAcceptRunner()` / `run()`，CLI 用同一个 `run()`；
  *   - 证据合格判定复用 `src/team-tools.js → acceptEvidenceCheck()`，不新写第二套 PASS/FAIL 判法。
  *
- * 安全约定（TR-Q②）：
- *   - 开关口径 v2（PM 裁决 M-20261115-111430-7e9ecf ③）：全局 `ui.autoAcceptBugs` 不再单独生效，
- *     仅 `projects[].autoAcceptBugs === true` 才开；null/undefined/false 一律关；
- *     真实（非沙盘）项目仍须显式 `AWB_AUTO_ACCEPT_ALLOW_REAL=1` 才允许主进程自动执行。
+ * 安全约定（TR-Q②，v6 口径 2026-11-15）：
+ *   - 双开关 AND：`ui.autoAcceptBugs === true` 且 `projects[].autoAcceptBugs === true` 才开；
+ *     两态拒绝码互斥：全局关 = `switch_off`，项目未开 = `project_disabled`；
+ *   - 未开启 = 零写入：`--plan` / `--run` 对 任务/*.json、工作流.json、自动验收.jsonl 一律不写
+ *     （包括审计不追加），退出码 0；拒绝码只出现在返回体；
+ *   - 真实（非沙盘）项目仍须显式 `AWB_AUTO_ACCEPT_ALLOW_REAL=1` 才允许主进程自动执行。
  *   - 真实项目只允许 `--plan`（dry-run）；`--run` / `--retract` 必须用 TEAM_ROOT / TEAM_PROJECTS_ROOT
  *     指向沙盘，否则返回 `AUTO_ACCEPT_REAL_PROJECT_READ_ONLY`；
  *   - 主进程内部路径只有在「沙盘或 AWB_AUTO_ACCEPT_ALLOW_REAL=1」门通过后才传 allowRealProject:true；
@@ -56,11 +58,12 @@ const GROUP_REASONS = Object.freeze([
 ]);
 /** 其它 skip（不含七组）。 */
 const OTHER_REASONS = Object.freeze([
-  'already_closed', 'evidence_empty', 'read_failed', 'switch_off', 'state_changed', 'duplicate'
+  'already_closed', 'evidence_empty', 'read_failed', 'switch_off', 'project_disabled',
+  'state_changed', 'duplicate'
 ]);
 /** 撤回原因白名单（IPC 错误码为大写同名）。 */
 const RETRACT_REASONS = Object.freeze([
-  'retracted', 'retract_window_expired', 'retract_not_found', 'retract_noop'
+  'retracted', 'already_reverted', 'retract_window_expired', 'retract_not_found', 'retract_noop'
 ]);
 const ALLOWED_SKIP_REASONS = new Set([...GROUP_REASONS.filter((r) => r !== 'accepted'), ...OTHER_REASONS]);
 const ALLOWED_RETRACT_REASONS = new Set(RETRACT_REASONS);
@@ -216,15 +219,15 @@ function pickStateDir(teamRoot, projectName) {
 }
 
 /**
- * 自动验收开关解析（开关口径 v2，PM 裁决 M-20261115-111430-7e9ecf ③）：
- *   - 全局开关不再单独生效：`ui.autoAcceptBugs` 即使为 true 也不启动自动验收（只保留为只读/诊断字段）；
- *   - 只有项目级显式 true 才开：`projects[].autoAcceptBugs === true`（布尔 true，字符串不算）；
- *   - 语义：null / undefined / false 一律视为关；true 才开。
+ * 自动验收开关解析（v6 口径 2026-11-15，对齐 `需求/增补卷-4657-1.md` §一-4 / AC15）：
+ *   - 双开关 AND：全局 `ui.autoAcceptBugs === true` 且项目级 `projects[].autoAcceptBugs === true` 才开；
+ *   - 全局缺省/未配置按 off（安全默认）；项目级只认布尔 true，null/undefined/false/字符串/数字一律不开；
+ *   - 两态拒绝码互斥：项目未开（false/缺省）= `project_disabled`；项目已开但全局关 = `switch_off`；
+ *     项目未开优先（更具体的门先报，缺省全局时也报 project_disabled）。
  * 本函数是纯函数、不缓存：主进程每轮重读，配置改动实时生效（不要在启动时缓存结果）。
  */
 function resolveAutoAcceptSettings(store, storeProject, projectPath, projectName) {
   const ui = isPlainObject(store && store.ui) ? store.ui : {};
-  // 历史字段：仍解析出来供设置页/诊断展示，但不参与 effective 判定（全局开关不再单独生效）。
   const globalRaw = ui.autoAcceptBugs;
   const globalOn = globalRaw === true || globalRaw === 1 || globalRaw === 'true' || globalRaw === '1';
   let entry = storeProject;
@@ -239,10 +242,18 @@ function resolveAutoAcceptSettings(store, storeProject, projectPath, projectName
     else if (value === false) projectRaw = false;
     else projectRaw = null;
   }
-  // 口径 v2：只有项目级显式 true 才开；全局 true / 项目级 null / undefined / false 一律关。
-  const effective = projectRaw === true;
-  const source = effective ? 'project' : (projectRaw === false ? 'project_off' : (globalOn ? 'global_ignored' : 'off'));
-  return { global: globalOn, project: projectRaw, effective, globalIgnored: globalOn && projectRaw !== true, source };
+  const projectOn = projectRaw === true;
+  const effective = globalOn && projectOn;
+  const reason = effective ? null : (projectOn ? 'switch_off' : 'project_disabled');
+  // globalIgnored 保留为诊断字段（v2 遗留）：v6 双开关 AND 下全局不再被忽略，恒 false。
+  return {
+    global: globalOn,
+    project: projectRaw,
+    effective,
+    reason,
+    globalIgnored: false,
+    source: effective ? 'project' : reason
+  };
 }
 
 function resolveRetractHours(options = {}) {
@@ -588,9 +599,9 @@ function decideTask(context, entry, options = {}) {
 
   const record = isPlainObject(task.acceptanceRecord) ? task.acceptanceRecord : null;
   base.acceptanceRecord = record;
-  // 口径 v2：effective 只有「项目级显式 true」才为 true（全局开关不再单独生效）。
+  // v6 口径：未开启（全局关 / 项目未开）一律短路；两态 reason 互斥，关闭态不做证据判定。
   if (context.settings && context.settings.effective === false) {
-    base.reason = 'switch_off';
+    base.reason = context.settings.reason || 'switch_off';
     return base;
   }
   const recordStatus = asText(record && record.status).toLowerCase();
@@ -759,6 +770,8 @@ function baseResult(mode, context, options = {}) {
     stateDir: context.stateDir,
     auditFile: auditFileOf(context),
     total: 0,
+    reason: null,
+    disabled: false,
     groups: emptyGroups(),
     closeable: [],
     needEvidence: [],
@@ -789,6 +802,22 @@ function plan(context, options = {}) {
   if (!loaded.ok) return { ...result, ok: false, code: loaded.code, message: loaded.message, taskDir: loaded.taskDir };
   const entries = loaded.tasks.filter((entry) => asText(entry.task.status) === 'done');
   result.total = entries.length;
+  // v6 口径（AC15）：未开启 = 零写入。dry-run 本就不落盘，这里只把分组统一成拒绝码，
+  // 保证 plan 与 run 的 reason 口径一致、closeable 为空。
+  const disabledReason = context.settings && context.settings.effective === false
+    ? (context.settings.reason || 'switch_off')
+    : '';
+  if (disabledReason) {
+    const ids = entries.map((entry) => asText(entry.task.id));
+    result.disabled = true;
+    result.reason = disabledReason;
+    result.groups[disabledReason] = entries.length;
+    result.needEvidence = ids.map((id) => ({ id, reason: disabledReason }));
+    result.skipped = ids.map((id) => ({ id, reason: disabledReason }));
+    result.countCheck = { groupsSum: entries.length, total: entries.length, ok: true };
+    result.wrote = 0;
+    return result;
+  }
   const seen = new Map();
   for (const entry of entries) {
     const decision = decideTask(context, entry, { now: options.now, seen });
@@ -834,6 +863,7 @@ function mapEvidenceCheckReason(check) {
 /**
  * 执行一轮：满足判据的 bug 任务写 acceptanceRecord + acceptedAt/acceptedBy；
  * 每个任务写一行 12 键审计（同状态 60 秒内不重复写，避免 tick 刷屏）。
+ * v6：未开启（switch_off / project_disabled）= 零写入，连审计也不追加，只返回拒绝码。
  */
 function run(context, options = {}) {
   const gate = assertCanWrite(context, options);
@@ -851,6 +881,23 @@ function run(context, options = {}) {
   if (!loaded.ok) return { ...result, ok: false, code: loaded.code, message: loaded.message, taskDir: loaded.taskDir };
   const entries = loaded.tasks.filter((entry) => asText(entry.task.status) === 'done');
   result.total = entries.length;
+  // v6 口径（AC15，v177 D1/D2）：未开启 = 零写入——任务/工作流/自动验收.jsonl 三文件全等，
+  // 不写 skip 审计；skipped 只带拒绝码（两态互斥），退出码 0（CLI 与主进程 tick 共用本函数）。
+  const disabledReason = context.settings && context.settings.effective === false
+    ? (context.settings.reason || 'switch_off')
+    : '';
+  if (disabledReason) {
+    const ids = entries.map((entry) => asText(entry.task.id));
+    result.disabled = true;
+    result.reason = disabledReason;
+    result.groups[disabledReason] = entries.length;
+    result.skipped = ids.map((id) => ({ id, reason: disabledReason }));
+    result.needEvidence = ids.map((id) => ({ id, reason: disabledReason }));
+    result.countCheck = { groupsSum: entries.length, total: entries.length, ok: true };
+    result.wrote = 0;
+    result.ok = true;
+    return result;
+  }
   const seen = options.seen instanceof Map ? options.seen : new Map();
   const lastState = options.lastState instanceof Map ? options.lastState : new Map();
   const batch = options.batch || 'manual';
@@ -988,8 +1035,9 @@ function run(context, options = {}) {
 /* ── retract ───────────────────────────────────────────────────────────── */
 
 /**
- * 撤回自动验收：窗口内把 acceptanceRecord.status 改成 retracted；
- * 超窗/不存在/重复撤回零副作用；成功/失败都写一行 retract 审计。
+ * 撤回自动验收：窗口内把 acceptanceRecord.status 改成 retracted 并标 autoReverted；
+ * 超窗/不存在零副作用；已撤回（重复撤回）→ skip(already_reverted) 且退出码 0。
+ * 成功/失败/skip 都写一行 12 键 retract 审计（v6：审计键不变，autoReverted 落在任务记录里）。
  */
 function retract(context, options = {}) {
   const result = {
@@ -997,6 +1045,7 @@ function retract(context, options = {}) {
     ok: true,
     code: 'OK',
     retracted: [],
+    skipped: [],
     failed: [],
     wrote: 0
   };
@@ -1050,6 +1099,20 @@ function retract(context, options = {}) {
     }
     const record = isPlainObject(task.acceptanceRecord) ? task.acceptanceRecord : null;
     const recordStatus = asText(record && record.status).toLowerCase();
+    // v6 口径（AC3，v177 auto_reverted.4）：已撤回再撤 = 幂等 skip(already_reverted)，不写任务文件、退出码 0。
+    if (recordStatus === 'retracted') {
+      result.skipped.push({ id, reason: 'already_reverted' });
+      try {
+        appendAuditRow(context, {
+          at: nowIso(), project: context.projectName, taskId: id, type: 'bug', rule: RULE,
+          result: 'retract', reason: 'already_reverted',
+          evidence: Array.isArray(record.evidence) ? record.evidence : [],
+          testReport: record.testReport || null,
+          partialMissing: [], batch, operator
+        });
+      } catch { /* 审计失败不改变 skip 结果 */ }
+      continue;
+    }
     if (recordStatus !== 'accepted') {
       result.failed.push({ id, code: 'RETRACT_NOOP', message: `没有可撤回的自动验收记录（当前 ${recordStatus || '无记录'}）` });
       try {
@@ -1083,7 +1146,9 @@ function retract(context, options = {}) {
       status: 'retracted',
       retractedAt: at,
       retractedBy: operator,
-      retractReason: reasonText
+      retractReason: reasonText,
+      // v6 口径（AC3）：撤回自动验收记录标 autoReverted=true；人工通道记录置 false，不冒领「自动撤回」。
+      autoReverted: asText(record.channel) === 'auto' || asText(record.by) === 'system'
     };
     const nextTask = {
       ...task,
@@ -1380,6 +1445,7 @@ function printHuman(result) {
     lines.push(`失败：${result.code || 'AUTO_ACCEPT_FAILED'} ${result.message || ''}`.trim());
   } else if (mode === 'plan') {
     lines.push(`计划（dry-run）：${result.project} 共 ${result.total} 条 done 缺陷`);
+    if (result.disabled) lines.push(`开关未开启（${result.reason}）：零写入，closeable 为空。`);
     lines.push(`分组：${GROUP_REASONS.map((reason) => `${reason}=${result.groups[reason] || 0}`).join(' · ')}`);
     const others = OTHER_REASONS.filter((reason) => Number(result.groups[reason] || 0) > 0)
       .map((reason) => `${reason}=${result.groups[reason]}`);
@@ -1389,12 +1455,14 @@ function printHuman(result) {
     lines.push('dry-run 不写任务文件、不写审计 jsonl。');
   } else if (mode === 'run') {
     lines.push(`执行完成：收口 ${result.closed.length} 条，跳过 ${result.skipped.length} 条，失败 ${result.failed.length} 条`);
+    if (result.disabled) lines.push(`开关未开启（${result.reason}）：零写入（任务/工作流/审计均不写）。`);
     if (result.closed.length) lines.push(`已收口：${result.closed.map((row) => row.id).join(', ')}`);
     if (result.failed.length) lines.push(`失败：${result.failed.map((row) => `${row.id}(${row.code})`).join(', ')}`);
     lines.push(`审计：${result.auditFile}`);
   } else {
-    lines.push(`撤回完成：成功 ${result.retracted.length} 条，失败 ${result.failed.length} 条`);
+    lines.push(`撤回完成：成功 ${result.retracted.length} 条，跳过 ${result.skipped.length} 条，失败 ${result.failed.length} 条`);
     if (result.retracted.length) lines.push(`已撤回：${result.retracted.map((row) => row.id).join(', ')}`);
+    if (result.skipped.length) lines.push(`跳过：${result.skipped.map((row) => `${row.id}(${row.reason})`).join(', ')}`);
     if (result.failed.length) lines.push(`失败：${result.failed.map((row) => `${row.id}(${row.code})`).join(', ')}`);
   }
   process.stdout.write(lines.join('\n') + '\n');
