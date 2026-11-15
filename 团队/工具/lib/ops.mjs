@@ -3321,6 +3321,7 @@ export async function cmdTask(args) {
     let tasks = listTasks(b.project);
     if (args.status) tasks = tasks.filter((t) => t.status === args.status);
     if (args.owner) tasks = tasks.filter((t) => t.owner === args.owner);
+    if (args.cancelled) tasks = tasks.filter((t) => String(t.status || '') === 'cancelled');
     if (!args.all) tasks = tasks.filter((t) => t.status !== 'done');
     const rows = tasks.map((t) => ({ id: t.id, p: t.priority, status: t.status, owner: t.owner || '-', title: t.title, due: t.due || '' }));
     out(args, `任务（${b.project}，${tasks.length}）\n` + table(rows, [
@@ -3328,9 +3329,64 @@ export async function cmdTask(args) {
     ]), { ok: true, tasks });
     return;
   }
+  // T-20261115-110400-7ac3（Owner 2026-11-15 授权）：僵尸任务/需求镜像逻辑删除 + append-only 审计。
+  // 默认只逻辑删（status=cancelled + cancelledAt/By/reason），不物理删文件；--purge 才物理删且须 --confirm。
+  if (sub === 'reap') {
+    const reason = String(args.reason || '').trim();
+    if (!reason) fail('REASON_REQUIRED', 'task reap 必须带 --reason（清什么、依据哪条授权）');
+    const purge = Boolean(args.purge);
+    if (purge && !args.confirm) fail('CONFIRM_REQUIRED', '物理删除必须 --purge 且带 --confirm 二次确认');
+    const ids = asArray(args.ids).map((x) => String(x || '').trim()).filter(Boolean);
+    const filter = String(args.filter || '').trim();
+    if (!ids.length && !filter) fail('BAD_ARGS', '需要 --ids T-... 或 --filter legacy|mirror|closed-req');
+    const all = listTasks(b.project);
+    let picked = all;
+    if (ids.length) picked = all.filter((t) => ids.includes(String(t.id || '')));
+    else if (filter === 'legacy') picked = all.filter((t) => /^T-20261112-/.test(String(t.id || '')));
+    else if (filter === 'mirror') picked = all.filter((t) => String(t.type || '') === 'requirement' && /^R-/.test(String(t.id || '')));
+    else if (filter === 'closed-req') {
+      const wfRead = readWorkflowState(b.project, { fresh: true });
+      const wfRows = (wfRead && wfRead.state && wfRead.state.requirements) || {};
+      const terminal = new Set(['accepted', 'done', 'terminated', 'iteration', 'rejected']);
+      picked = all.filter((t) => terminal.has(String((wfRows[String(t.requirementId || '')] || {}).status || '')));
+    } else fail('BAD_FILTER', `--filter 只能是 legacy|mirror|closed-req，收到：${filter}`);
+    const at = nowIso();
+    const auditPath = path.join(projectStatePaths(b.project).dir, '任务清理.jsonl');
+    const rows = [];
+    for (const task of picked) {
+      const fromStatus = String(task.status || '');
+      if (fromStatus === 'cancelled') { rows.push({ id: task.id, action: 'noop', fromStatus, toStatus: 'cancelled' }); continue; }
+      const hasEvidence = String(task.evidence || '').trim() || (Array.isArray(task.evidenceFiles) && task.evidenceFiles.length);
+      if (purge && hasEvidence) fail('PURGE_REFUSED', `任务 ${task.id} 有证据，拒绝物理删除（只允许逻辑删）`, { taskId: task.id });
+      if (purge) {
+        let reqClosed = false;
+        try {
+          const wfRead = readWorkflowState(b.project, { fresh: true });
+          const reqRow = (wfRead.state && wfRead.state.requirements || {})[String(task.requirementId || '')] || {};
+          reqClosed = ['accepted', 'done', 'terminated', 'iteration', 'rejected'].includes(String(reqRow.status || ''));
+        } catch { reqClosed = false; }
+        if (!reqClosed) fail('PURGE_REFUSED', `任务 ${task.id} 的父需求未收口，拒绝物理删除`, { taskId: task.id, requirementId: task.requirementId || '' });
+        const file = path.join(projectStatePaths(b.project).tasks, `${task.id}.json`);
+        try { fs.rmSync(file, { force: true }); } catch (e) { fail('PURGE_FAILED', `删除 ${task.id} 失败：${String(e && e.message || e)}`); }
+      } else {
+        task.status = 'cancelled';
+        task.cancelledAt = at;
+        task.cancelledBy = b.role;
+        task.cancelReason = truncate(reason, 200);
+        saveTask(b.project, task);
+      }
+      const row = { at, id: task.id, reason: truncate(reason, 200), by: b.role, fromStatus, toStatus: purge ? 'purged' : 'cancelled', physical: purge };
+      try { appendLine(auditPath, JSON.stringify(row)); } catch { /* 审计失败不阻断主流程，但下面会提示 */ }
+      rows.push({ id: task.id, action: purge ? 'purged' : 'cancelled', fromStatus, toStatus: row.toStatus });
+    }
+    appendEvent({ role: b.role, sessionId: b.sessionId, action: 'task_reap', project: b.project, target: '', note: `filter=${filter || '-'} ids=${ids.join(',') || '-'} ${purge ? 'purge' : 'cancel'} ${rows.length}` });
+    const changed = rows.filter((r) => r.action !== 'noop').length;
+    const lines = rows.map((r) => '- ' + r.id + '：' + r.fromStatus + ' → ' + r.toStatus + '（' + r.action + '）').join('\n');
+    const summary = 'task reap（' + b.project + '）' + (purge ? '物理删除' : '逻辑删除') + '：处理 ' + rows.length + '，变化 ' + changed + '，NOOP ' + (rows.length - changed);
+    out(args, summary + '\n' + lines, { ok: true, rows, auditFile: auditPath });
+    return;
+  }
   if (sub === 'show') {
-    if (!args.id) fail('BAD_ID', '需要 --id');
-    const task = loadTask(b.project, String(args.id));
     out(args, JSON.stringify(task, null, 2), { ok: true, task });
     return;
   }
