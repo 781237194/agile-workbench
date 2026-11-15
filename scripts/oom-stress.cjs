@@ -81,7 +81,8 @@ async function cmdWindow() {
     fail: Boolean(result.fail),
     pass: Boolean(result.pass === undefined ? !result.fail : result.pass),
     restorable: Boolean(result.restorable),
-    lines: Number(result.lines || (result.lines === 0 ? 0 : (result.lines || 0))) || 0,
+    // lines 是**行数**（库返回的是数组，取 length；不要 Number(array) → NaN→0）
+    lines: Array.isArray(result.lines) ? result.lines.length : (Number(result.lines) || 0),
     firstAt: result.firstAt || null,
     lastAt: result.lastAt || null,
     coverageSec: Number(result.coverageSec) || 0,
