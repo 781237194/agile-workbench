@@ -17336,6 +17336,17 @@ function writeRenderSample(cause) {
 }
 
 function startRenderMemorySampler() {
+  // 硬要求①：单例守卫 + samplerId/chainId 观测（PM M-20261115-161228-23177f / 163358-9f0ec6）
+  if (renderMemoryState.timer) { renderMemoryState.duplicateStarts = (renderMemoryState.duplicateStarts || 0) + 1; return { started: false, reason: 'ALREADY_RUNNING' }; }
+  const samplerId = 'sa-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  const myChain = (renderMemoryState.chainSeq = (renderMemoryState.chainSeq || 0) + 1);
+  globalThis.__renderSamplerId = samplerId;
+  renderMemoryState.samplerId = samplerId;
+  renderMemoryState.chainId = myChain;
+  renderMemoryState.starts = (renderMemoryState.starts || 0) + 1;
+  const reconcile = { ticks: 0, lines: 0, forced: 0, pidGraceSkips: 0, forcedThrottled: 0 };
+  renderMemoryState.reconcile = reconcile;
+  const bootAtMs = Date.now();
   stopRenderMemorySampler();
   // PM 裁决（M-20261115-153633-f0ea6d，方案2）：**1s 行保住 AC3 的 ≥300 行**，但 getAppMetrics 单次约 13ms，
   // 所以底层 metrics 每 5 拍真取一次（≈5s），中间 4 拍复用上一值并标 sampledFrom（真实采样时刻）。
@@ -17363,7 +17374,9 @@ function startRenderMemorySampler() {
     return pidSignatureChanged;
   };
   const tick = () => {
+    if (renderMemoryState.chainId !== myChain) return; // 旧链自动退出（单定时器的结构性保证）
     tickIndex += 1;
+    reconcile.ticks += 1;
     const at = now();
     const needReal = !lastReal || (tickIndex % REAL_SAMPLE_EVERY === 1) || pidChanged();
     const started = process.hrtime.bigint();
@@ -17391,7 +17404,7 @@ function startRenderMemorySampler() {
     }
     try {
       const dir = renderMemoryProjectDir();
-      if (dir) RenderMemory.appendSample(dir, row);
+      if (dir) { RenderMemory.appendSample(dir, row); reconcile.lines += 1; }
     } catch (error) { renderMemoryState.lastError = String((error && error.message) || error).slice(0, 160); }
     const costMs = Number(process.hrtime.bigint() - started) / 1e6;
     renderMemoryState.samples += 1;
@@ -17413,6 +17426,24 @@ function startRenderMemorySampler() {
   };
   renderMemoryState.timer = setTimeout(tick, 1000);
   if (renderMemoryState.timer && typeof renderMemoryState.timer.unref === 'function') renderMemoryState.timer.unref();
+  // 硬要求③：60s 对账自检（含 samplerId/chainId），落 渲染采样自检.jsonl
+  const selfCheck = setInterval(() => {
+    if (renderMemoryState.chainId !== myChain) return;
+    const dir = renderMemoryProjectDir();
+    if (!dir) return;
+    const row = {
+      at: now(), samplerId, chainId: myChain,
+      starts: renderMemoryState.starts || 0, duplicateStarts: renderMemoryState.duplicateStarts || 0,
+      ticks: reconcile.ticks, lines: reconcile.lines,
+      realSamples: renderMemoryState.realSamples || 0,
+      reusedSamples: Math.max(0, (renderMemoryState.samples || 0) - (renderMemoryState.realSamples || 0)),
+      linesPerTick: reconcile.ticks ? Math.round((reconcile.lines / reconcile.ticks) * 1000) / 1000 : 0,
+      lastError: renderMemoryState.lastError || '',
+    };
+    try { fs.appendFileSync(path.join(dir, '渲染采样自检.jsonl'), JSON.stringify(row) + '\n', 'utf8'); } catch { /* fail-open */ }
+  }, 60000);
+  if (selfCheck && typeof selfCheck.unref === 'function') selfCheck.unref();
+  renderMemoryState.selfCheckTimer = selfCheck;
 }
 
 function stopRenderMemorySampler() {
