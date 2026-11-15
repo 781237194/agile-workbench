@@ -228,7 +228,8 @@ function scopeLineToRequirement(line, requirementId, shortKey, knownKeys) {
   if (!raw.trim()) return '';
   const isOurs = (part) => requirementTokenHit(part, requirementId, shortKey);
   const isForeign = (part) => clauseStartsWithForeignRequirement(part, shortKey, knownKeys);
-  const parts = raw.split(/[；;|]/);
+  // 句号也算条款边界：同一行里「A 通过。B 不通过」这类散文并列要能拆开
+  const parts = raw.split(/[。；;|]/);
   if (parts.some(isOurs)) {
     // 并列条款里有本需求：只留本需求的条款 + 中性条款（表格里「通过」这类单元格不带需求号）
     return parts.filter((part) => isOurs(part) || !isForeign(part)).join('；').trim();
@@ -237,31 +238,63 @@ function scopeLineToRequirement(line, requirementId, shortKey, knownKeys) {
   return raw.trim();
 }
 
-/** 报告按 Markdown 标题切小节，只返回点名本需求的小节行；没有小节点名则返回 []（由调用方回退到报告头）。 */
-function scopeReportLines(text, requirementId, shortKey) {
-  const lines = String(text || '').split(/\r?\n/);
-  const sections = [];
-  let cur = { heading: '', lines: [] };
-  for (const line of lines) {
-    if (/^#{1,6}\s+\S/.test(line)) {
-      sections.push(cur);
-      cur = { heading: line, lines: [line] };
-    } else {
-      cur.lines.push(line);
-    }
+/** 证据串先剔掉路径令牌，只留人工备注——路径名里带 FAIL/不通过 不能当结论（M-20261115-161641-a8f13b 口径统一）。 */
+function evidenceNoteText(evidence) {
+  return String(evidence || '')
+    .replace(/[A-Za-z]:[\\/][^\s，,；;]*/g, ' ')
+    .replace(/(?:^|[\s，,；;])[^\s，,；;]*[\\/][^\s，,；;]*/g, ' ')
+    .trim();
+}
+
+/** A 方案（M-20261115-161641-a8f13b）：按需求号切段——从本需求 id/短号出现处，到下一个 1–2 级标题或别的需求号为止，按整行取范围。 */
+function segmentLinesForRequirement(text, requirementId, shortKey, knownKeys) {
+  const source = String(text || '');
+  if (!source.trim()) return [];
+  const lines = source.split(/\r?\n/);
+  const lineStarts = [];
+  let cursor = 0;
+  for (const line of lines) { lineStarts.push(cursor); cursor += line.length + 1; }
+  const lineOf = (pos) => {
+    for (let i = lines.length - 1; i >= 0; i -= 1) if (lineStarts[i] <= pos) return i;
+    return 0;
+  };
+  const marks = [];
+  // 段在下一个 1–2 级标题处收口（与测试记录「到下一个 ## 为止」同口径；### 子标题不收口，避免截断本节结论）
+  for (const m of source.matchAll(/(^|\n)#{1,2}[ \t]+\S/g)) marks.push(m.index + (m[1] ? m[1].length : 0));
+  // 段在「别的需求号」处收口：完整 id 或项目已知的 4 位短号
+  const mineKey = String(shortKey || '').toLowerCase();
+  for (const other of knownKeys) {
+    if (!other || other === mineKey) continue;
+    const re = new RegExp(`R-20\\d{6}-\\d{6}-${other}|(^|[^0-9a-z])${other}(?![0-9a-z])`, 'gi');
+    for (const m of source.matchAll(re)) marks.push(m.index + (m[1] ? m[1].length : 0));
   }
-  sections.push(cur);
-  const namesOurs = (line) => requirementTokenHit(line, requirementId, shortKey);
-  const headingHit = sections.filter((sec) => sec.heading && namesOurs(sec.heading));
-  if (headingHit.length) {
-    const picked = [];
-    const pre = sections.find((sec) => !sec.heading);
-    if (pre && pre.lines.some(namesOurs)) picked.push(pre);
-    for (const sec of sections) if (headingHit.includes(sec)) picked.push(sec);
-    return picked.reduce((acc, sec) => acc.concat(sec.lines), []);
+  // 本需求号（完整 id + 4 位短号）出现处；短号必须带词边界
+  const appears = [];
+  const full = String(requirementId || '');
+  if (full) {
+    const escaped = full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const m of source.matchAll(new RegExp(escaped, 'gi'))) appears.push(m.index);
   }
-  const bodyHit = sections.filter((sec) => sec.lines.some(namesOurs));
-  return bodyHit.length ? bodyHit.reduce((acc, sec) => acc.concat(sec.lines), []) : [];
+  if (mineKey) {
+    for (const m of source.matchAll(new RegExp(`(^|[^0-9a-z])${mineKey}(?![0-9a-z])`, 'gi'))) appears.push(m.index + (m[1] ? m[1].length : 0));
+  }
+  if (!appears.length) return [];
+  const markList = marks.filter((pos) => Number.isFinite(pos) && pos > 0).sort((a, b) => a - b);
+  const ranges = appears.map((start) => {
+    const next = markList.find((pos) => pos > start);
+    const from = lineOf(start);
+    const to = next === undefined ? lines.length - 1 : lineOf(next);
+    return [from, Math.max(from, to)];
+  }).sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [from, to] of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && from <= last[1] + 1) last[1] = Math.max(last[1], to);
+    else merged.push([from, to]);
+  }
+  const picked = [];
+  for (const [from, to] of merged) for (let i = from; i <= to; i += 1) picked.push(lines[i]);
+  return picked;
 }
 
 function readTestReportVerdict(projectName, task) {
@@ -309,17 +342,6 @@ function readTestReportVerdict(projectName, task) {
     if (shortKey && new RegExp(`(^|[^0-9a-z])${shortKey}([^0-9a-z]|$)`).test(head)) return true;
     return false;
   };
-  /** 报告头：front matter / 第一个 Markdown 标题之前的行（表格式汇总常把状态行放这里）。 */
-  const reportHeadLines = (text) => {
-    const all = String(text || '').split(/\r?\n/);
-    const out = [];
-    for (const line of all) {
-      if (/^#{1,6}\s+\S/.test(line)) break;
-      out.push(line);
-      if (out.length >= 40) break;
-    }
-    return out.length ? out : all.slice(0, 20);
-  };
   // 兜底：扫全部 测试报告-vN.md，**只留属于本需求的**，同需求内按 -vN 降序取最新。
   try {
     const dir = path.join(projectPath, '测试人员', '产出');
@@ -354,9 +376,13 @@ function readTestReportVerdict(projectName, task) {
     let text = '';
     try { text = fs.readFileSync(abs, 'utf8'); } catch { continue; }
     const keys = new Set([...knownKeys, ...knownRequirementShortKeys(projectPath, text)]);
-    const scoped = scopeReportLines(text, requirementId, shortKey);
-    // 回退：报告里没有任何小节点名本需求时，只看报告头；行内仍按需求条款裁剪。
-    const scanLines = scoped.length ? scoped : reportHeadLines(text);
+    // A 方案（M-20261115-161641-a8f13b）：只扫「点名本需求」的段落，段边界见 segmentLinesForRequirement。
+    let scanLines = segmentLinesForRequirement(text, requirementId, shortKey, keys);
+    if (!scanLines.length) {
+      // 报告里没有本需求号：按 PM 口径回退「本需求」字样所在行；再没有就视为不覆盖（不静默判通过）。
+      scanLines = text.split(/\r?\n/).filter((line) => /本需求/.test(String(line || '')));
+      if (!scanLines.length) continue;
+    }
     // ① 先看结论行（status/结论/判定/verdict），同一份报告内「先命中先返回」；
     //    表格行（| 需求号 | 结论 |）含本需求号时也按结论行处理。
     const conclusions = [];
@@ -534,7 +560,9 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
     if (!['dev_done', 'test'].includes(current)) return skip('stage_not_test');
     const trqVerdict = String((row.trq && row.trq.verdict) || '');
     if (trqVerdict && trqVerdict !== 'testable') return skip('trq_not_testable', { verdict: trqVerdict });
-    if (/(?:FAIL|不通过|未通过)/i.test(String(task.evidence || ''))) return skip('test_not_passed');
+    // 口径统一（M-20261115-161641-a8f13b）：证据串只作「人工备注」信号，先剔路径令牌再判；
+    // 真正的结论以报告正文为准（下面的 readTestReportVerdict）。路径名里带 FAIL/不通过 不再误拦。
+    if (/(?:FAIL|不通过|未通过)/i.test(evidenceNoteText(task.evidence))) return skip('test_not_passed');
     // B-2ae4 / 62b9：证据字符串干净不等于测试通过——必须读测试报告主体结论（前 20 行 + status/结论行）。
     // 命中「不通过/未通过/FAIL/失败」→ 不推进，并把匹配到的原文片段写进 requirement_advance_skipped 审计。
     const reportVerdict = readTestReportVerdict(projectName, task);

@@ -5,8 +5,9 @@
  *   ② 报告 status=通过 → 正常推进到 test_done（正向对照，防"一刀切不推进"）
  *   ③ evidence 字符串里写 FAIL → 仍按老规则拦（不回退既有能力）
  *   ④ 递归：recompute-advance 走同一闸门（不能绕过 task done 那条路）
- *   ⑤ 一份报告两条需求（M-20261115-161343-6104c7）：A 通过 + B 不通过 → A 必须推进、B 必须被挡
- *      （小节分段 + 无小节时报告头状态行分号条款两种形态）
+ *   ⑤ 一份报告两条需求（M-20261115-161343-6104c7 / A 方案 M-20261115-161641-a8f13b）：
+ *      A 通过 + B 不通过 → A 必须推进、B 必须被挡（小节、状态行、段落式三种形态）
+ *   ⑥ 口径统一：证据串先剔路径令牌，路径名带 FAIL 不再误拦；报告正文仍作准
  *
  * 跑法：node scripts/test-advance-report-gate.cjs
  * 环境：自建沙盘 项目/工作台改造修复/_tmp/advance-report-sandbox（TEAM_ROOT + TEAM_PROJECTS_ROOT + TEAM_SELFTEST=1）
@@ -275,6 +276,42 @@ const beforeG = events().length;
 runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqGId]);
 ok('状态行回退：B 停在 dev_done', String((rowOf(reqGId) || {}).status || '') === 'dev_done', String((rowOf(reqGId) || {}).status));
 ok('状态行回退：B 的 skipped reason=test_report_not_passed', events().slice(beforeG).some((e) => e.action === 'requirement_advance_skipped' && String(e.target) === reqGId && String(e.data && e.data.reason) === 'test_report_not_passed'), JSON.stringify(events().slice(beforeG).map((e) => [e.action, e.data && e.data.reason])));
+
+// ---------- A 方案（M-20261115-161641-a8f13b）：段落式报告按需求号切段 ----------
+// 形态：无小节，两条需求写在同一段里，句号并列（旧实现整行扫会连坐）。
+const reqHId = mkReq('段落A（通过）');
+const reqIId = mkReq('段落B（不通过）');
+seedDevDoneReq(reqHId, '段落A（通过）');
+seedDevDoneReq(reqIId, '段落B（不通过）');
+seedDoneTestTask('段落A 测试', reqHId, '测试人员/产出/测试报告-v198.md');
+seedDoneTestTask('段落B 测试', reqIId, '测试人员/产出/测试报告-v198.md');
+fs.writeFileSync(path.join(REPORT_DIR, '测试报告-v198.md'), [
+  '# 测试报告 · v198（段落式，无小节）', '',
+  `覆盖 ${reqHId} 与 ${reqIId}：`,
+  `${shortOf(reqHId)} 通过（26/27）。${shortOf(reqIId)} 不通过（2 条未过）。`, '',
+].join('\n'), 'utf8');
+const beforeH = events().length;
+runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqHId]);
+ok('段落式：A 推进到 test_done（句号并列不连坐）', String((rowOf(reqHId) || {}).status || '') === 'test_done', String((rowOf(reqHId) || {}).status));
+ok('段落式：A 无 skipped 审计', !events().slice(beforeH).some((e) => e.action === 'requirement_advance_skipped' && String(e.target) === reqHId), 'A 被误拦');
+const beforeI = events().length;
+runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqIId]);
+ok('段落式：B 停在 dev_done（严格性保留）', String((rowOf(reqIId) || {}).status || '') === 'dev_done', String((rowOf(reqIId) || {}).status));
+ok('段落式：B skipped reason=test_report_not_passed', events().slice(beforeI).some((e) => e.action === 'requirement_advance_skipped' && String(e.target) === reqIId && String(e.data && e.data.reason) === 'test_report_not_passed'), JSON.stringify(events().slice(beforeI).map((e) => [e.action, e.data && e.data.reason])));
+
+// ---------- 口径统一（M-20261115-161641-a8f13b）：证据路径名带 FAIL 不再误拦，正文仍作准 ----------
+const reqJId = mkReq('证据路径名含FAIL');
+seedDevDoneReq(reqJId, '证据路径名含FAIL');
+seedDoneTestTask('证据路径名含FAIL 测试', reqJId, '测试人员/产出/测试报告-FAIL-但通过.md');
+fs.writeFileSync(path.join(REPORT_DIR, '测试报告-FAIL-但通过.md'), [
+  '# 测试报告 · 路径名含关键字（正文通过）', '',
+  `- 需求：${reqJId}`,
+  '- status=通过：正文结论通过，结论不受文件名影响', '',
+].join('\n'), 'utf8');
+const beforeJ = events().length;
+runJson(['task', 'recompute-advance', '--boot', pmToken, '--project', PROJECT, '--requirement', reqJId]);
+ok('证据路径名含 FAIL：不再被路径串误拦 → test_done', String((rowOf(reqJId) || {}).status || '') === 'test_done', String((rowOf(reqJId) || {}).status));
+ok('证据路径名含 FAIL：无 test_not_passed 审计', !events().slice(beforeJ).some((e) => e.action === 'requirement_advance_skipped' && String(e.target) === reqJId && String(e.data && e.data.reason) === 'test_not_passed'), '仍被路径串拦');
 
 // ---------- 报告 ----------
 const report = { at: new Date().toISOString(), task: 'B-20261115-145830-2ae4', pass, fail, failures, results };
