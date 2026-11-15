@@ -74,7 +74,9 @@
     return rows.filter((row) => {
       const status = String((row && row.status) || '');
       if (['accepted', 'terminated', 'iteration', 'rejected'].includes(status)) return false;
-      const owner = String((row && row.ownerReview && row.ownerReview.status) || '');
+      // B-dee4：Owner 决定一律走派生值（decisions 末条优先）。只读 ownerReview.status 时，
+      // 被产品复审重置成 pending 的已通过行会被算进「一键代管覆盖 N 条」，数字虚高、还会被再交出去一次。
+      const owner = decidedStatusOf(row);
       if (['approved', 'skipped', 'rejected'].includes(owner)) return false;
       return isPending(row) || status === 'test_done';
     });
@@ -2185,9 +2187,12 @@
     // B-2ed9 + B-3065 AC2：已决定 / 已离开 Owner 门的行，三个按钮全部 disabled 并写明原因
     // （以前只禁“同状态”那一个，ready+approved 的行还能点打回，点了只撞 DUPLICATE_DECISION → 像没反应）。
     const actionLock = req ? ownerActionLockOf(req) : null;
-    const decidedRow = req ? latestOwnerDecision(req) : null;
-    const decidedStatus = String((decidedRow && (decidedRow.status || decidedRow.decision))
-      || (req && req.ownerReview && req.ownerReview.status) || '');
+    const decidedInfo = req && OR_STATE && typeof OR_STATE.decisionOf === 'function' ? OR_STATE.decisionOf(req) : null;
+    const decidedRow = decidedInfo ? decidedInfo.latest : (req ? latestOwnerDecision(req) : null);
+    const decidedStatus = decidedInfo
+      ? decidedInfo.status
+      : String((decidedRow && (decidedRow.status || decidedRow.decision))
+        || (req && req.ownerReview && req.ownerReview.status) || '');
     for (const [selector, targetStatus, verb] of [
       ['[data-or-approve]', 'approved', '通过'],
       ['[data-or-reject]', 'rejected', '打回'],

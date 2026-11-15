@@ -33,13 +33,54 @@
   }
 
   /** 归一成 approved / rejected / skipped；没有决定返回 ''。 */
-  function decidedStatusOf(req) {
-    const latest = latestOwnerDecision(req);
-    const fromDecision = textOf(latest && (latest.status || latest.decision));
-    if (['approved', 'rejected', 'skipped'].includes(fromDecision)) return fromDecision;
-    const fallback = textOf(req && req.ownerReview && req.ownerReview.status);
-    return ['approved', 'rejected', 'skipped'].includes(fallback) ? fallback : '';
+  function normalizeOwnerStatus(value) {
+    const text = textOf(value);
+    return ['approved', 'rejected', 'skipped'].includes(text) ? text : '';
   }
+
+  /**
+   * B-dee4：Owner 决定的唯一派生口径——先需求行顶层 decisions[] 末条，其次 ownerReview.status。
+   * 背景：产品复审/状态推进会重写 ownerReview（status 回到 pending），但 decisions[] 是 append-only
+   * 真值；只读 ownerReview 会让 Owner 点过的通过「变回待决定」，甚至两边都不显示。
+   * 返回 { status, source, latest, at, channel, recordedBy, opinion }；
+   *   source = 'decisions'（按末条派生）/ 'ownerReview'（无 decisions 时回退）/ 'none'（未决定）。
+   */
+  function decisionOf(req) {
+    const owner = (req && typeof req.ownerReview === 'object' && req.ownerReview) ? req.ownerReview : {};
+    const latest = latestOwnerDecision(req);
+    const fromDecision = normalizeOwnerStatus(latest && (latest.status || latest.decision));
+    if (fromDecision) {
+      const row = latest || {};
+      return {
+        status: fromDecision,
+        source: 'decisions',
+        latest: row,
+        at: textOf(row.at) || textOf(owner.at),
+        channel: textOf(row.channel || owner.channel),
+        recordedBy: textOf(row.recordedBy || owner.recordedBy),
+        opinion: textOf(row.opinion || row.note || owner.opinion)
+      };
+    }
+    const fromOwner = normalizeOwnerStatus(owner.status);
+    if (fromOwner) {
+      return {
+        status: fromOwner,
+        source: 'ownerReview',
+        latest: null,
+        at: textOf(owner.at),
+        channel: textOf(owner.channel),
+        recordedBy: textOf(owner.recordedBy),
+        opinion: textOf(owner.opinion)
+      };
+    }
+    return { status: '', source: 'none', latest: null, at: '', channel: textOf(owner.channel), recordedBy: textOf(owner.recordedBy), opinion: textOf(owner.opinion) };
+  }
+
+  /** 派生后的 Owner 状态快照（旧代码只读 ownerReview 的地方统一换成它）。 */
+  function decidedStatusOf(req) {
+    return decisionOf(req).status;
+  }
+
 
   /** 打回时间：决定时间 → ownerReview.at → 行上的 rejectedAt。 */
   function rejectedAtOf(req) {
@@ -126,6 +167,8 @@
     REWORK_LABEL,
     NON_TERMINAL_STATUSES,
     latestOwnerDecision,
+    decisionOf,
+    normalizeOwnerStatus,
     decidedStatusOf,
     rejectedAtOf,
     changedAtOf,

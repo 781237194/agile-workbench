@@ -5048,15 +5048,48 @@ function legacyOwnerGateRequirements() {
   return legacyRequirements().filter((req) => String(req.status || '') === 'approved');
 }
 
+/**
+ * B-dee4：Owner 决定的唯一派生化（decisions[] 末条优先 → 其次 ownerReview.status）。
+ * 背景：产品复审/状态推进会重写 ownerReview（status 回到 pending），decisions[] 才是 append-only 真值；
+ * 只读 ownerReview 会让 Owner 点过的「通过」在界面上变回「未决定」，甚至两处都看不到（5c19）。
+ * 与 owner-review-state.js 的 decisionOf 同口径（那边有就先用那边，保证单一实现）。
+ */
+function legacyOwnerDecisionOf(req) {
+  const state = (typeof window !== 'undefined' && window.OwnerReviewState) ? window.OwnerReviewState : null;
+  if (state && typeof state.decisionOf === 'function') return state.decisionOf(req);
+  const pick = (value) => {
+    const text = String(value === null || value === undefined ? '' : value);
+    return ['approved', 'rejected', 'skipped'].includes(text) ? text : '';
+  };
+  const owner = (req && req.ownerReview && typeof req.ownerReview === 'object') ? req.ownerReview : {};
+  const top = (req && Array.isArray(req.decisions)) ? req.decisions.filter(Boolean) : [];
+  const legacy = Array.isArray(owner.decisions) ? owner.decisions : [];
+  const latest = top.length ? top[top.length - 1] : (legacy.length ? legacy[legacy.length - 1] : null);
+  const fromDecision = pick(latest && (latest.status || latest.decision));
+  const status = fromDecision || pick(owner.status);
+  return {
+    status,
+    source: fromDecision ? 'decisions' : (status ? 'ownerReview' : 'none'),
+    latest: latest || null,
+    at: String((latest && latest.at) || owner.at || ''),
+    channel: String((latest && latest.channel) || owner.channel || ''),
+    recordedBy: String((latest && latest.recordedBy) || owner.recordedBy || ''),
+    opinion: String((latest && (latest.opinion || latest.note)) || owner.opinion || '')
+  };
+}
+
 function legacyReqOwnerView(req) {
   const owner = req && req.ownerReview && typeof req.ownerReview === 'object' ? req.ownerReview : null;
-  if (!owner) return { owner: null, status: 'none', key: 'pending', label: '未决定' };
-  const status = String(owner.status || '');
+  const decided = legacyOwnerDecisionOf(req);
+  if (!owner && !decided.status) return { owner: null, status: 'none', key: 'pending', label: '未决定' };
+  const status = decided.status || String((owner && owner.status) || '');
   return {
-    owner,
+    owner: owner || { status },
     status: status || 'none',
     key: status || 'optional',
-    label: status ? ownerLabel(status) : '未决定'
+    label: status ? ownerLabel(status) : '未决定',
+    source: decided.source,
+    at: decided.at || null
   };
 }
 
@@ -6967,6 +7000,10 @@ function ownerBasisBits(basis) {
 
 /** decisions[] 优先；没有时给单条旧记录，按 AC-O5 只读标注，不补账。 */
 function ownerDecisionRows(req) {
+  const top = (req && Array.isArray(req.decisions)) ? req.decisions.filter((row) => row && typeof row === 'object') : [];
+  // B-dee4：真值在需求行顶层 decisions[]（R-1cee/B-a08e 已定：ownerReview 只留摘要、不再存 decisions）。
+  // 以前这里只看 ownerReview.decisions，导致点过「通过」的需求在「Owner 决定记录」里仍显示「待决定」。
+  if (top.length) return { rows: top, source: 'decisions[]', legacy: false, empty: false };
   const owner = req && req.ownerReview && typeof req.ownerReview === 'object' ? req.ownerReview : null;
   if (!owner) return { rows: [], source: '', legacy: false, empty: true };
   const decisions = Array.isArray(owner.decisions)
@@ -10206,18 +10243,18 @@ function renderLegacyTeamGate() {
       by: req.productReview.by, actor: req.productReview.actor,
       verdict: req.productReview.verdict, note: req.productReview.comment
     });
-    if (req.ownerReview) {
-      const ownerStatus = String(req.ownerReview.status || '').toLowerCase();
-      // pending 只是产品评审后预写的占位（by=Owner、at=null），没有 Owner 决定，不能当成真实记录。
-      if (['approved', 'skipped', 'rejected'].includes(ownerStatus)) {
-        const ownerConfirm = legacyOwnerConfirmationFor(req.ownerReview, req.id, 'owner');
-        wfRows.push({
-          title: `${req.id} · Owner 评审`, at: req.ownerReview.at, owner: true,
-          by: req.ownerReview.by,
-          actor: req.ownerReview.actor || (ownerConfirm && ownerConfirm.actor) || null,
-          verdict: req.ownerReview.status, note: req.ownerReview.opinion
-        });
-      }
+    // B-dee4：Owner 评审记录按派生值出（decisions 末条优先）。以前只读 ownerReview.status，
+    // 产品复审把 status 重置成 pending 后，Owner 真的点过「通过」的那条在这里就没有记录了。
+    const ownerDecided = legacyOwnerDecisionOf(req);
+    if (ownerDecided.status) {
+      const ownerConfirm = legacyOwnerConfirmationFor(req.ownerReview, req.id, 'owner');
+      const latestOwner = ownerDecided.latest || {};
+      wfRows.push({
+        title: `${req.id} · Owner 评审`, at: ownerDecided.at || null, owner: true,
+        by: latestOwner.by || (req.ownerReview && req.ownerReview.by) || 'Owner',
+        actor: latestOwner.actor || (req.ownerReview && req.ownerReview.actor) || (ownerConfirm && ownerConfirm.actor) || null,
+        verdict: ownerDecided.status, note: ownerDecided.opinion
+      });
     }
     if (req.dev && req.dev.peerReview) wfRows.push({
       title: `${req.id} · 开发互审`, at: req.dev.peerReview.at,
@@ -11028,9 +11065,13 @@ function poolBucket(row) {
   if (POOL_CORE) return POOL_CORE.poolBucket(row);
   const s = String((row && row.status) || '');
   if (['accepted', 'done', 'iteration'].includes(s)) return 'accepted';
-  if (['dispatched', 'dev', 'dev_review', 'test', 'test_done'].includes(s)) return 'active';
+  // B-dee4（AC2）：dev_done 归「进行中」，不能再当 other 丢出池。
+  if (['dispatched', 'dev', 'dev_review', 'dev_done', 'test', 'test_done'].includes(s)) return 'active';
   if (['approved', 'ready'].includes(s)) return 'approved';
   if (row && row.reviewedAt) return 'approved';
+  // B-dee4（AC1/AC2）：Owner 已通过/已跳过的行一律按「已通过」进池（不因 ownerReview 被重置而丢行）。
+  const decided = legacyOwnerDecisionOf(row).status;
+  if (decided === 'approved' || decided === 'skipped') return 'approved';
   return 'other';
 }
 function poolEntered(row) {

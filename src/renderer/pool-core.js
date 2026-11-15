@@ -131,6 +131,27 @@
     return kindOf(row) === 'requirement' ? 'requirement' : 'defect';
   }
 
+  /* ── Owner 决定派生（B-dee4）────────────────────────────────────────────── */
+
+  /**
+   * Owner 决定状态：decisions[] 末条优先，其次 ownerReview.status。
+   * 与 owner-review-state.js 的 decisionOf 同口径；该模块在本文件之后加载（index.html 743 vs 746），
+   * 所以这里按调用时惰性取 window.OwnerReviewState，取不到就用本文件内同口径兜底，保证 Node 单测可用。
+   */
+  function ownerDecisionStatusOf(row) {
+    const state = (globalScope && globalScope.OwnerReviewState) || null;
+    if (state && typeof state.decidedStatusOf === 'function') return String(state.decidedStatusOf(row) || '');
+    const top = (row && Array.isArray(row.decisions)) ? row.decisions.filter(Boolean) : [];
+    const owner = (row && row.ownerReview) || {};
+    const legacy = Array.isArray(owner.decisions) ? owner.decisions : [];
+    const latest = top.length ? top[top.length - 1] : (legacy.length ? legacy[legacy.length - 1] : null);
+    const pick = (value) => {
+      const text = String(value === null || value === undefined ? '' : value);
+      return ['approved', 'rejected', 'skipped'].includes(text) ? text : '';
+    };
+    return pick(latest && (latest.status || latest.decision)) || pick(owner.status);
+  }
+
   /* ── 状态桶 / 状态标签 ────────────────────────────────────────────────── */
 
   /** acceptanceRecord.status === 'accepted' 才算验收通过（F-1b / R-43ad F-3）。 */
@@ -237,9 +258,16 @@
     }
     const s = String((row && row.status) || '');
     if (['accepted', 'done', 'iteration'].includes(s)) return 'accepted';
-    if (['dispatched', 'dev', 'dev_review', 'test', 'test_done'].includes(s)) return 'active';
+    // B-dee4（AC2）：dev_done 属「进行中」——以前漏在映射外被当成 other 丢出池，
+    // 导致「已通过、开发完了待测试」的需求在池里看不见。
+    if (['dispatched', 'dev', 'dev_review', 'dev_done', 'test', 'test_done'].includes(s)) return 'active';
     if (['approved', 'ready'].includes(s)) return 'approved';
     if (row && row.reviewedAt) return 'approved';
+    // B-dee4（AC1/AC2）：Owner 已通过/已跳过的行，即使 status 还停在 review/owner_review/tech_review
+    // 这类「已评审、未派单」的写法，也必须进池并显示「已通过」，不能因为 ownerReview 被重置成
+    // pending 就当成 other 丢掉（5c19 就是这么从池里消失的）。
+    const decided = ownerDecisionStatusOf(row);
+    if (decided === 'approved' || decided === 'skipped') return 'approved';
     return 'other';
   }
 
@@ -892,6 +920,7 @@
     acceptMissingOf,
     retractAllowed,
     taskStatusLabel,
+    ownerDecisionStatusOf,
     poolBucket,
     poolStatusLabel,
     poolEntered,
