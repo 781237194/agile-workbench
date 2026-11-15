@@ -4649,6 +4649,53 @@ function registerIpc() {
     }
     return best ? String(best.token) : '';
   }
+  /** 任意角色的有效启动令牌（R-62b9 E1/E2：验收必须本人角色令牌；壳层不自 boot、不自代）。 */
+  function latestBootTokenOf(projectName, role) {
+    let names = [];
+    const dir = path.join(ledgerTeamRoot(), '状态', '启动');
+    try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return ''; }
+    let best = null;
+    for (const name of names) {
+      try {
+        const j = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+        if (String(j.role || '') !== String(role || '')) continue;
+        if (String(j.project || '') !== String(projectName || '')) continue;
+        if (Date.parse(j.expiresAt) < Date.now()) continue;
+        if (!best || String(j.issuedAt || j.createdAt || '') > String(best.issuedAt || best.createdAt || '')) best = j;
+      } catch { /* 跳过损坏令牌 */ }
+    }
+    return best ? String(best.token) : '';
+  }
+  // R-62b9 E1/E2（维修模式·PM 授权）：缺陷单按角色验收的壳层透传通道。
+  // 只透传，角色校验在团队工具侧（--as 必须与令牌角色一致）；不许壳层自代/自 boot。
+  ipcMain.handle('task:accept', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    const name = project.teamName || project.name;
+    const as = String(p.as || '').trim().toLowerCase();
+    if (!['pm', 'tester'].includes(as)) {
+      throw codedError('ACCEPT_ROLE_INVALID', `验收角色只能是 pm / tester（收到 ${as || '(空)'}）；Owner 请在评审弹窗点验收`);
+    }
+    const taskId = String(p.taskId || '').trim();
+    if (!taskId) throw codedError('TASK_REQUIRED', '缺任务 id：验收必须指定一张缺陷单');
+    const decision = String(p.decision || 'accepted').trim().toLowerCase();
+    if (!['accepted', 'rejected'].includes(decision)) throw codedError('ACCEPT_DECISION_INVALID', '验收决定只能是 accepted / rejected');
+    const token = latestBootTokenOf(name, as);
+    if (!token) {
+      throw codedError('ROLE_TOKEN_REQUIRED', `${as} 没有有效的启动令牌：验收必须由本人角色的令牌执行，先让 ${as} boot`);
+    }
+    const evidence = Array.isArray(p.evidence) ? p.evidence.map(String).filter(Boolean) : [];
+    const args = [ledgerTeamMjsPath(), 'task', 'accept', '--project', name, '--task', taskId, '--as', as,
+      '--decision', decision, '--opinion', String(p.opinion === undefined ? '' : p.opinion), '--boot', token, '--json'];
+    for (const item of evidence) args.push('--evidence', item);
+    const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 120000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
+    const text = String((r.stdout || '') + (r.stderr || ''));
+    if (r.status !== 0) {
+      const code = (text.match(/\[([A-Z_]+)\]/) || [])[1] || 'TASK_ACCEPT_FAILED';
+      throw codedError(code, text.slice(0, 600));
+    }
+    try { return JSON.parse(String(r.stdout || '{}').trim()); } catch { return { ok: true, raw: String(r.stdout || '').trim() }; }
+  });
   ipcMain.handle('finalize:status', async (_e, payload) => {
     const p = payload || {};
     const project = requireProject(readStore(), p.projectId);

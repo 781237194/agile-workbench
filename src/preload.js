@@ -196,6 +196,8 @@ if (IS_BOARD_WINDOW) {
     renderMemoryWindow: (payload) => ipcRenderer.invoke('app:render-memory-window', payload),
     renderMemoryStats: () => ipcRenderer.invoke('app:render-memory-stats'),
     renderMemoryClean: (payload) => ipcRenderer.invoke('app:render-memory-clean', payload),
+    // R-62b9 E2：缺陷单按角色验收的壳层透传（角色校验在团队工具侧；壳层不自代/不自 boot）
+    taskAccept: (payload) => ipcRenderer.invoke('task:accept', payload),
     // 手动重新发现本机 DSH Web 端口；返回结构化结果，界面不新增假按钮。
     dshRediscover: () => ipcRenderer.invoke('dsh:rediscover'),
     dshConfigure: (baseUrl) => ipcRenderer.invoke('dsh:configure', baseUrl),
