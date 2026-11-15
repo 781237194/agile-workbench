@@ -5595,6 +5595,12 @@ function ledgerMarkupFromView(view, options) {
   };
   const level = count ? 'warn' : 'info';
   const projectName = String(opts.projectName || '');
+  // 渲染期把项目 id 固化到按钮上：处置行可能在下一次轮询后仍留在 DOM，
+  // 而 activeProject() 可能因 store 刷新短暂为 null（测试复现：点击被「先选中项目」挡回）。
+  const ctxProjectId = (() => {
+    try { const ap = activeProject(); return ap && ap.id ? String(ap.id) : ''; } catch { return ''; }
+  })();
+  const projAttr = ctxProjectId ? ` data-ledger-project="${esc(ctxProjectId)}"` : '';
   const head = count
     ? '账本对不上：下列需求的任务状态与工作流不一致；界面只读显示，处置走 team.mjs（不改 JSON）'
     : '账本有在途条目：返工在途/任务在办，不计分叉';
@@ -5604,7 +5610,7 @@ function ledgerMarkupFromView(view, options) {
     const doneAt = ledgerWhenText(item.taskDoneAt);
     const reopenedAt = ledgerWhenText(item.reopenedAt);
     const buttons = (actions.taskRelease || actions.requirementReopen)
-      ? `<span class="legacy-ledger-actions">${actions.taskRelease && item.taskId ? actionButton('taskRelease', `data-ledger-action="task-release" data-ledger-task="${esc(item.taskId)}" data-ledger-req="${esc(req.id || '')}"`, '收口旧任务', '把旧任务退回未收口（走 team.mjs task release + 审计）') : ''}${actions.requirementReopen ? actionButton('requirementReopen', `data-ledger-action="requirement-reopen" data-ledger-req="${esc(req.id || '')}" data-ledger-task="${esc(item.taskId || '')}"`, '重开需求记录', '把需求记录重开为返工（走 team.mjs req reopen + 审计）') : ''}</span>`
+      ? `<span class="legacy-ledger-actions">${actions.taskRelease && item.taskId ? actionButton('taskRelease', `data-ledger-action="task-release"${projAttr} data-ledger-task="${esc(item.taskId)}" data-ledger-req="${esc(req.id || '')}"`, '收口旧任务', '把旧任务退回未收口（走 team.mjs task release + 审计）') : ''}${actions.requirementReopen ? actionButton('requirementReopen', `data-ledger-action="requirement-reopen"${projAttr} data-ledger-req="${esc(req.id || '')}" data-ledger-task="${esc(item.taskId || '')}"`, '重开需求记录', '把需求记录重开为返工（走 team.mjs req reopen + 审计）') : ''}</span>`
       : `<span class="legacy-ledger-nocmd" data-ledger-no-command="1">本版后端无处置命令，请手动执行 <code>team.mjs task release --project ${esc(projectName)} --id ${esc(item.taskId || '<任务id>')}</code> 或 <code>team.mjs req reopen --project ${esc(projectName)} --requirement ${esc(req.id || '')}</code>（带 --boot 令牌，写审计）</span>`;
     return `<div class="legacy-ledger-row" data-panel-level="warn" data-ledger-fork="${esc(req.id || '')}" data-ledger-status="${esc(item.status || '')}" data-ledger-kind="${esc(item.kind || '')}">
       <code>${esc(req.id || '')}</code><span>${esc(statusLabel(req))}</span><b>${esc(item.label || '')}</b>
@@ -5900,7 +5906,13 @@ function ledgerActionHint(code) {
  */
 async function ledgerActionRun(button) {
   const wb = window.workbench || null;
-  const p = activeProject();
+  const activeNow = activeProject();
+  // 测试 v170 现场：行还在 DOM，但 activeProject() 因 store 刷新短暂为 null → 点一下只报「先选中项目」。
+  // 处置按钮在渲染期已把项目 id 固化到 data-ledger-project，优先用它；再退回 activeProject()。
+  const datasetEarly = button && button.dataset ? button.dataset : null;
+  const attrProjectId = button && typeof button.getAttribute === 'function' ? String(button.getAttribute('data-ledger-project') || '') : '';
+  const projectId = String((datasetEarly && datasetEarly.ledgerProject) || attrProjectId || (activeNow && activeNow.id) || '');
+  const p = projectId ? (activeNow && String(activeNow.id) === projectId ? activeNow : { id: projectId }) : null;
   // 坑（v169 真窗口 0 效果的根因）：data-ledger-action / -req / -task 只在 HTMLButtonElement.dataset 上，
   // 元素本身没有 ledgerAction/ledgerReq/ledgerTask 属性；以前从元素上读 → kind 恒空 → 只 toast 直接 return，
   // 不进 IPC、不写横幅、分叉不动。断言脚本只做源码正则，抓不到，所以必须从 dataset 读。
