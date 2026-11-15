@@ -180,6 +180,8 @@ if (IS_DAEMON_CHECK) {
 const { DshAdapter, discoverDshWeb } = require('./dsh-adapter');
 // 自测会把 teamTools 换成一个带 mock 旧协议命令的实例；生产始终保持默认工具。
 let teamTools = require('./team-tools');
+// R-4657：缺陷验收自动化单源（CLI 与主进程 watch/tick/IPC 共用；不写第二套判据）。
+const autoAccept = require(path.join(ROOT, 'scripts', 'auto-accept.cjs'));
 const APP_VERSION = require(path.join(ROOT, 'package.json')).version;
 // 2a69 发版：菜单里的「版本 x.y.z · <commit 短号>」用真实 git 短号，取不到就留空（界面只显示版本）。
 // 只在启动时读一次；git 缺失 / 不是仓库 / 超时都吞掉，不影响启动。
@@ -3634,6 +3636,113 @@ function teamProjectStateDir(project) {
   return null;
 }
 
+/* ── R-4657：缺陷验收自动化（主进程侧上下文 / 推送 / watch+tick） ───────── */
+
+/** 自动验收开关投影（config: ui.autoAcceptBugs + projects[].autoAcceptBugs；null=继承全局）。 */
+function autoAcceptUiConfig() {
+  const store = readStore();
+  const project = store.projects.find((row) => row.id === store.activeProjectId) || store.projects[0] || null;
+  const projectPath = project ? path.resolve(String(project.path || '')) : '';
+  const projectName = project ? String(project.teamName || project.name || '') : '';
+  const settings = autoAccept.resolveAutoAcceptSettings(store, project, projectPath, projectName);
+  return {
+    enabled: settings.effective,
+    global: settings.global,
+    project: settings.project,
+    retractHours: autoAccept.resolveRetractHours({})
+  };
+}
+
+/** 把 IPC payload 解析成 auto-accept 上下文；不写盘（plan 也走这里）。 */
+function autoAcceptProjectContext(payload) {
+  const p = payload || {};
+  const store = readStore();
+  const project = requireProject(store, p.projectId);
+  const teamName = String(project.teamName || project.name || '');
+  const projectPath = path.resolve(String(project.path || ''));
+  const stateDir = teamProjectStateDir(project);
+  if (!stateDir) throw codedError('AUTO_ACCEPT_PROJECT_NOT_FOUND', `项目 ${teamName || '(未命名)'} 没有团队状态目录`);
+  return {
+    projectName: teamName,
+    projectPath,
+    stateDir,
+    teamRoot: (teamTools.layout && teamTools.layout.root) || process.env.TEAM_ROOT || path.join(ROOT, '团队'),
+    projectsRoot: process.env.TEAM_PROJECTS_ROOT || path.join(ROOT, '项目'),
+    storeFile: storeFile(),
+    // IPC plan 与主进程 tick 同口径：缺失按默认关，项目级覆盖全局。
+    settings: autoAccept.resolveAutoAcceptSettings(store, project, projectPath, teamName),
+    retractHours: autoAccept.resolveRetractHours({})
+  };
+}
+
+/** 自动收口/撤回后推渲染层刷新（池子开着就重取，不等轮询）。 */
+function notifyAutoAcceptChanged(payload) {
+  const body = { at: now(), ...(payload || {}) };
+  for (const win of BrowserWindow.getAllWindows()) {
+    try { win.webContents.send('auto:accept-changed', body); } catch { /* 窗口销毁中 */ }
+  }
+}
+
+let autoAcceptRunner = null;
+/**
+ * 启动主进程自动器：任务目录 watch（debounce 300ms）+ 兜底 tick（默认 30 秒，AWB_AUTO_ACCEPT_TICK_MS 可配）。
+ * 沙盘（TEAM_ROOT 指向非真实 团队/）自动启用；真实项目必须显式 AWB_AUTO_ACCEPT_ALLOW_REAL=1。
+ */
+function startAutoAcceptAuto() {
+  if (autoAcceptRunner) return autoAcceptRunner;
+  // 安全门 1：真实项目默认不自动执行（本轮硬约束：真实项目只 dry-run）。
+  // 生产启用必须显式 AWB_AUTO_ACCEPT_ALLOW_REAL=1；沙盘（TEAM_ROOT 非真实 团队/）不受限。
+  const realTeamRoot = path.resolve(path.join(ROOT, '团队')).toLowerCase();
+  const envTeamRoot = process.env.TEAM_ROOT ? path.resolve(process.env.TEAM_ROOT).toLowerCase() : '';
+  const sandboxTeam = Boolean(envTeamRoot && envTeamRoot !== realTeamRoot);
+  const allowReal = process.env.AWB_AUTO_ACCEPT_ALLOW_REAL === '1';
+  if (!sandboxTeam && !allowReal) {
+    console.warn('AUTO_ACCEPT_SKIP 真实项目默认不自动执行：只 dry-run；生产启用需 AWB_AUTO_ACCEPT_ALLOW_REAL=1');
+    return null;
+  }
+  // 安全门 2：独立数据根（AWB_DATA_DIR）但没把 TEAM_ROOT 指到沙盘时，团队状态仍是真实的；
+  // 这种「半隔离」启动一律不自动执行，避免测试/复验时误写真实 任务/。
+  const isolatedData = process.env.AWB_DATA_DIR && path.resolve(process.env.AWB_DATA_DIR) !== path.join(ROOT, 'data');
+  if (isolatedData && !sandboxTeam) {
+    console.warn('AUTO_ACCEPT_SKIP 独立数据根但未设置 TEAM_ROOT：为避免写真实任务，本次不启动自动器');
+    return null;
+  }
+  autoAcceptRunner = autoAccept.createAutoAcceptRunner({
+    resolveContext: () => {
+      const store = readStore();
+      const project = store.projects.find((row) => row.id === store.activeProjectId) || store.projects[0] || null;
+      if (!project) return null;
+      const stateDir = teamProjectStateDir(project);
+      if (!stateDir) return null;
+      return {
+        projectName: String(project.teamName || project.name || ''),
+        projectPath: path.resolve(String(project.path || '')),
+        stateDir,
+        teamRoot: (teamTools.layout && teamTools.layout.root) || process.env.TEAM_ROOT || path.join(ROOT, '团队'),
+        projectsRoot: process.env.TEAM_PROJECTS_ROOT || path.join(ROOT, '项目'),
+        storeFile: storeFile(),
+        // 开关必须在每轮实时解析（项目级 false 覆盖全局，null 继承），不能只在启动时读一次。
+        settings: autoAccept.resolveAutoAcceptSettings(store, project, path.resolve(String(project.path || '')), String(project.teamName || project.name || '')),
+        retractHours: autoAccept.resolveRetractHours({})
+      };
+    },
+    allowRealProject: true,
+    batchStart: 'first-scan',
+    initialDelayMs: 5000,
+    tickMs: Number(process.env.AWB_AUTO_ACCEPT_TICK_MS) || autoAccept.DEFAULT_TICK_MS,
+    debounceMs: autoAccept.WATCH_DEBOUNCE_MS,
+    onResult: (result) => {
+      if (result && Array.isArray(result.closed) && result.closed.length) {
+        notifyAutoAcceptChanged({ accepted: result.closed.map((row) => row.id), wrote: result.wrote });
+      }
+    },
+    log: (message) => console.warn(String(message).slice(0, 400))
+  });
+  autoAcceptRunner.start();
+  return autoAcceptRunner;
+}
+
+
 function ownerFileRecord(root, abs, groupKey) {
   let stat;
   try { stat = fs.statSync(abs); } catch { return null; }
@@ -5834,7 +5943,8 @@ function registerIpc() {
     const snapshot = workflowSnapshot(ctx.project);
     // R-9fbe F-9fbe-5：把两个账本处置通道的可用性一起下发（只读、不含令牌值）——
     // 面板据此给按钮禁用原因；真点下去仍由 owner:ledger-* 复核（PM_TOKEN_REQUIRED 等）。
-    return { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName) };
+    // R-4657：附带缺陷自动验收开关与撤回窗口（池行只看这两项，不再自己猜）。
+    return { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName), autoAccept: autoAcceptUiConfig() };
   }));
   ipcMain.handle('workflow:boot', runWorkflowIpc(async (ctx, p, meta) => {
     if (!ROLES.some((role) => role.id === meta.role)) throw codedError('BAD_ROLE', `角色无效：${meta.role || '(空)'}`);
@@ -6167,6 +6277,55 @@ function registerIpc() {
     if (!items.some((row) => row.exists && row.kind === 'report')) missing.push({ path: '', kind: 'report', reason: 'REPORT_REQUIRED' });
     if (!items.some((row) => row.exists && row.kind === 'screenshot')) missing.push({ path: '', kind: 'screenshot', reason: 'SCREENSHOT_REQUIRED' });
     return { ok: missing.length === 0, code: missing.length ? 'PM_ACCEPT_EVIDENCE_REQUIRED' : 'OK', projectPath, items, missing };
+  });
+  // R-4657：缺陷验收自动化。plan 只读（真实项目也可跑）；run 只允许主进程内部执行，渲染层调用必拒。
+  ipcMain.handle('auto:accept-plan', async (_e, payload) => {
+    const p = payload || {};
+    try {
+      const context = autoAcceptProjectContext(p);
+      return autoAccept.plan(context, { batch: 'manual', now: p.now || undefined });
+    } catch (error) {
+      return {
+        ok: false,
+        code: (error && error.code) || 'AUTO_ACCEPT_PLAN_FAILED',
+        message: String((error && error.message) || error).slice(0, 300)
+      };
+    }
+  });
+  ipcMain.handle('auto:accept-run', async () => ({
+    ok: false,
+    code: 'AUTO_REQUIRES_SYSTEM',
+    requiresSystem: true,
+    message: '自动验收执行只允许主进程内部（watch/tick）；渲染层不能直接触发'
+  }));
+  ipcMain.handle('auto:accept-retract', async (_e, payload) => {
+    const p = payload || {};
+    try {
+      const role = String(p.role || 'owner').toLowerCase();
+      if (!['owner', 'pm'].includes(role)) {
+        throw codedError('ROLE_NOT_ALLOWED', `撤回只允许 Owner 或 PM（收到 ${role || '(空)'}）`);
+      }
+      const context = autoAcceptProjectContext(p);
+      const taskIds = Array.isArray(p.taskIds) ? p.taskIds : (p.taskId ? [p.taskId] : []);
+      const result = autoAccept.retract(context, {
+        taskIds,
+        reason: p.reason,
+        operator: role,
+        allowRealProject: true,
+        batch: 'manual',
+        now: p.now || undefined
+      });
+      if (result && Array.isArray(result.retracted) && result.retracted.length) {
+        notifyAutoAcceptChanged({ retracted: result.retracted.map((row) => row.id), wrote: result.wrote });
+      }
+      return result;
+    } catch (error) {
+      return {
+        ok: false,
+        code: (error && error.code) || 'AUTO_ACCEPT_RETRACT_FAILED',
+        message: String((error && error.message) || error).slice(0, 300)
+      };
+    }
   });
   // R-f8e1 F-4：打回后给作者发 type=review_reject（类型已登记才发；发送由团队工具校验，未登记拒绝）。
   ipcMain.handle('owner:reject-notify', async (_e, payload) => {
@@ -17394,6 +17553,8 @@ app.whenReady().then(async () => {
   startDispatchQueuePump();
   // T-b417：启动后自动拉起路由守护（15 秒后，避开首帧）；退出时由 before-quit 收尾。
   startRouteSupervisorSoon();
+  // R-4657：缺陷验收自动化（任务目录 watch 300ms 防抖 + 30 秒兜底 tick；主进程内部执行）。
+  startAutoAcceptAuto();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 

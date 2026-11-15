@@ -158,6 +158,16 @@ if (IS_BOARD_WINDOW) {
     ownerRejectNotify: (payload) => ipcRenderer.invoke('owner:reject-notify', payload),
     // R-4f99 PM 代验收证据校验（存在性 + sha256，不写文件）。
     ownerEvidenceCheck: (payload) => ipcRenderer.invoke('owner:evidence-check', payload),
+    // R-4657 缺陷验收自动化：plan 只读；run 在主进程内部执行（渲染层调用必拒）；retract 只走 IPC。
+    autoAcceptPlan: (payload) => ipcRenderer.invoke('auto:accept-plan', payload),
+    autoAcceptRun: (payload) => ipcRenderer.invoke('auto:accept-run', payload),
+    autoAcceptRetract: (payload) => ipcRenderer.invoke('auto:accept-retract', payload),
+    onAutoAcceptChanged: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      const handler = (_event, payload) => { try { cb(payload || {}); } catch { /* 回调自身异常忽略 */ } };
+      ipcRenderer.on('auto:accept-changed', handler);
+      return () => { try { ipcRenderer.off('auto:accept-changed', handler); } catch { /* ignore */ } };
+    },
     ownerReviewData: (payload) => ipcRenderer.invoke('owner:review-data', payload),
     ownerProxyStatus: (payload) => ipcRenderer.invoke('owner:proxy-status', payload),
     ownerProxyStart: (payload) => ipcRenderer.invoke('owner:proxy-start', payload),

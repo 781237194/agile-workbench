@@ -47,6 +47,11 @@
     'scenario-bug': '场景缺陷'
   };
 
+  /** R-4657：缺陷证据 kind 推断（与 scripts/auto-accept.cjs 的扩展名口径一致）。 */
+  const REPORT_PATH_RE = /\.(md|markdown|txt|log)$/i;
+  const IMAGE_PATH_RE = /\.(png|jpe?g|webp)$/i;
+  const DEFAULT_RETRACT_HOURS = 24;
+
   /**
    * F-1b 写死的任务状态映射。
    * 注意：done ≠ 已验收；只有 acceptanceRecord.status === 'accepted' 才是「已验收」。
@@ -135,8 +140,78 @@
     return String(record.status || '').toLowerCase() === 'accepted';
   }
 
-  /** 缺陷/场景缺陷任务行：F-1b 写死的状态映射。 */
+  /* ── R-4657：任务级自动验收状态（缺陷池行属性 / 撤回入口） ───────────── */
+
+  /**
+   * data-accept-state：accepted | pending | retracted（只对缺陷/场景缺陷任务行有效）。
+   * 判定仍以 acceptanceRecord.status 为准（accepted 才「已验收」；retracted 只是作废自动记录）。
+   */
+  function acceptStateOf(row) {
+    if (kindOf(row) === 'requirement') return '';
+    const record = row && row.acceptanceRecord;
+    if (!record || typeof record !== 'object') return 'pending';
+    const status = String(record.status || '').toLowerCase();
+    if (status === 'accepted') return 'accepted';
+    if (status === 'retracted') return 'retracted';
+    return 'pending';
+  }
+
+  /** 自动验收文案：已验收 / 未验收 / 已撤回（与 data-accept-state 同源）。 */
+  function acceptStateLabel(row) {
+    const state = acceptStateOf(row);
+    if (state === 'accepted') return '已验收';
+    if (state === 'retracted') return '已撤回';
+    return state === 'pending' ? '未验收' : '';
+  }
+
+  /**
+   * data-accept-missing：report | screenshot | none。
+   * 只看任务快照（evidenceFiles 扩展名/scope/kind），不读文件、不发 IPC；
+   * 取 F-4657-2 顺序里的第一个缺件（缺报告优先于缺截图）。
+   */
+  function acceptMissingOf(row) {
+    if (kindOf(row) === 'requirement') return '';
+    const state = acceptStateOf(row);
+    if (state !== 'pending') return 'none';
+    const files = Array.isArray(row && row.evidenceFiles) ? row.evidenceFiles : [];
+    let hasReport = false;
+    let hasScreenshot = false;
+    let hasOpaqueDir = false;
+    for (const item of files) {
+      if (!item || typeof item !== 'object') continue;
+      const kind = String(item.kind || '').toLowerCase();
+      const filePath = String(item.path || item.rel || '');
+      if (kind === 'dir' || kind === 'directory' || /[\\/]$/.test(filePath)) hasOpaqueDir = true;
+      if (kind === 'report' || REPORT_PATH_RE.test(filePath)) hasReport = true;
+      if (kind === 'screenshot' || IMAGE_PATH_RE.test(filePath)) hasScreenshot = true;
+    }
+    // 目录内容前端不可读：交给主进程/自动化判定，不冒充缺件。
+    if (hasOpaqueDir) return 'none';
+    if (!hasReport) return 'report';
+    if (!hasScreenshot) return 'screenshot';
+    return 'none';
+  }
+
+  /** 撤回窗口（默认 24h，可被主进程 workflowState.autoAccept.retractHours 覆盖）。 */
+  function retractAllowed(row, options) {
+    if (acceptStateOf(row) !== 'accepted') return false;
+    const record = row && row.acceptanceRecord;
+    const acceptedAt = Date.parse(String((record && record.at) || ''));
+    if (!Number.isFinite(acceptedAt)) return false;
+    const opts = options && typeof options === 'object' ? options : {};
+    const rawHours = opts.retractHours !== undefined && opts.retractHours !== null
+      ? opts.retractHours
+      : (row && row.retractHours);
+    const hours = Number(rawHours);
+    const windowHours = Number.isFinite(hours) && hours >= 0 ? hours : DEFAULT_RETRACT_HOURS;
+    const nowMs = Number.isFinite(opts.now) ? Number(opts.now) : Date.now();
+    return nowMs - acceptedAt <= windowHours * 3600 * 1000;
+  }
+
+  /** 缺陷/场景缺陷任务行：F-1b 写死的状态映射；R-4657 撤回后显示「已撤回」。 */
   function taskStatusLabel(row) {
+    const record = row && row.acceptanceRecord;
+    if (record && String(record.status || '').toLowerCase() === 'retracted') return '已撤回';
     if (acceptanceAccepted(row)) return '已验收';
     const status = String((row && row.status) || '').toLowerCase();
     if (TASK_STATUS_LABEL[status]) return TASK_STATUS_LABEL[status];
@@ -351,9 +426,11 @@
   }
 
   /** 统一池行：{id, kind, title, status, owner, bucket, ...原始字段}。 */
-  function normalizePoolRow(raw, kind) {
+  function normalizePoolRow(raw, kind, options) {
     const source = raw && typeof raw === 'object' ? raw : {};
     const id = textOf(source.id);
+    const opts = options && typeof options === 'object' ? options : {};
+    const hours = Number(opts.retractHours);
     const row = {
       ...source,
       id,
@@ -364,10 +441,13 @@
       status: textOf(source.status),
       doc: textOf(source.doc),
       detail: textOf(source.detail || source.story || source.description || ''),
-      acceptance: textOf(source.acceptance || source.acceptanceCriteria)
+      acceptance: textOf(source.acceptance || source.acceptanceCriteria),
+      retractHours: Number.isFinite(hours) && hours >= 0 ? hours : DEFAULT_RETRACT_HOURS
     };
     row.bucket = poolBucket(row);
     row.statusLabel = poolStatusLabel(row);
+    row.acceptState = acceptStateOf(row);
+    row.acceptMissing = acceptMissingOf(row);
     row.evidenceItems = parseEvidence(source.evidence, source.acceptanceRecord);
     row.testReport = pickTestReport(source, row.evidenceItems);
     row.lastDecisionAt = lastDecisionAt(source);
@@ -390,10 +470,13 @@
     const tasks = wf && Array.isArray(wf.tasks) ? wf.tasks : [];
     const rows = [];
     const seen = new Set();
+    // R-4657：撤回窗口可由主进程 workflowState.autoAccept.retractHours 覆盖（默认 24h）。
+    const retractHoursRaw = Number(wf && wf.autoAccept && wf.autoAccept.retractHours);
+    const options = { retractHours: Number.isFinite(retractHoursRaw) ? retractHoursRaw : DEFAULT_RETRACT_HOURS };
     for (const item of requirements) {
       const id = textOf(item && item.id);
       if (!id || seen.has(id)) continue;
-      const row = normalizePoolRow(item, 'requirement');
+      const row = normalizePoolRow(item, 'requirement', options);
       if (!poolEntered(row)) continue;
       seen.add(id);
       rows.push(row);
@@ -404,7 +487,7 @@
       const id = textOf(item && item.id);
       if (!id || seen.has(id)) continue;
       seen.add(id);
-      rows.push(normalizePoolRow(item, type));
+      rows.push(normalizePoolRow(item, type, options));
     }
     return rows;
   }
@@ -485,7 +568,8 @@
   function poolRowsSignature(rows) {
     const list = Array.isArray(rows) ? rows : [];
     return list.map((row) => [row.id, kindOf(row), row.bucket, row.statusLabel, row.title,
-      row.unregistered === true ? 'U' : '', row.voided === true ? 'V' : ''].join('~')).join('|');
+      row.unregistered === true ? 'U' : '', row.voided === true ? 'V' : '',
+      acceptStateOf(row), acceptMissingOf(row), retractAllowed(row) ? 'R' : ''].join('~')).join('|');
   }
 
   /* ── 行 HTML（F-30e2-1：徽标 → 编号 → 标题 → 状态 → 负责人）────────── */
@@ -507,13 +591,24 @@
       ? `<span class="req-ghost" title="工作流里没有这条需求，推不动：请一键登记或作废">未登记</span>` : '';
     const voided = row && row.voided === true
       ? `<span class="req-ghost voided" title="${esc(textOf(row.voidedReason) || '已作废')}">已作废</span>` : '';
-    return `<div class="pool-row kind-${kind}" data-id="${esc(id)}" data-bucket="${bucket}" data-kind="${kind}"${ghost ? ' data-unregistered="1"' : ''}${voided ? ' data-voided="1"' : ''} role="button" tabindex="0" aria-label="${esc(id)} ${esc(title)}" aria-expanded="false">`
+    // R-4657：缺陷行带自动验收状态/缺件；仅 accepted 且未超窗才出撤回按钮（只由快照驱动）。
+    const isDefect = kind !== 'requirement';
+    const acceptState = isDefect ? acceptStateOf(row) : '';
+    const acceptMissing = isDefect ? acceptMissingOf(row) : '';
+    const acceptAttrs = isDefect
+      ? ` data-accept-state="${esc(acceptState)}" data-accept-missing="${esc(acceptMissing)}"`
+      : '';
+    const retract = isDefect && acceptState === 'accepted' && retractAllowed(row)
+      ? `<button type="button" class="pool-retract" data-bug-retract="${esc(id)}" title="撤回这条自动验收（窗口内可撤回）" aria-label="撤回自动验收 ${esc(id)}">撤回</button>`
+      : '';
+    return `<div class="pool-row kind-${kind}" data-id="${esc(id)}" data-bucket="${bucket}" data-kind="${kind}"${ghost ? ' data-unregistered="1"' : ''}${voided ? ' data-voided="1"' : ''}${acceptAttrs} role="button" tabindex="0" aria-label="${esc(id)} ${esc(title)}" aria-expanded="false">`
       + `<span class="req-type ${kind}" title="${esc(typeLabel)}">${esc(typeLabel)}</span>`
       + `<span class="pool-id">${esc(id)}</span>`
       + `<span class="pool-title" title="${esc(title)}">${esc(title)}</span>`
       + ghost + voided
       + `<span class="pool-state s-${bucket}">${esc(statusLabel)}</span>`
       + `<span class="pool-who">${esc(owner)}</span>`
+      + retract
       + '</div>';
   }
 
@@ -625,6 +720,10 @@
     kindOf,
     poolTypeGroup,
     acceptanceAccepted,
+    acceptStateOf,
+    acceptStateLabel,
+    acceptMissingOf,
+    retractAllowed,
     taskStatusLabel,
     poolBucket,
     poolStatusLabel,
