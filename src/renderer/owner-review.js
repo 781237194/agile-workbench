@@ -1488,6 +1488,23 @@
     const tasks = (state.data && Array.isArray(state.data.tasks)) ? state.data.tasks : [];
     return AP.acceptPrereq(row, tasks);
   }
+  /**
+   * B-9b05（AC1/AC2/AC5）：按档位取验收前置——owner 档（ui/tty，Owner 本人）= 测试任务 + Owner 决定；
+   * proxy 档（PM 代验收）= 再加报告 + 截图。两档都由 accept-prereq.js 的同一个 acceptGate 算，
+   * 界面不自己判、原因串取 AP.EVIDENCE_INCOMPLETE_LABEL（与主进程 owner:accept 同一个常量）。
+   */
+  function gateOfRow(row, channel) {
+    if (!AP || typeof AP.acceptGate !== 'function') return null;
+    const tasks = (state.data && Array.isArray(state.data.tasks)) ? state.data.tasks : [];
+    return AP.acceptGate(row, tasks, { channel: channel || 'ui' });
+  }
+  /** 证据缺项的统一原因串（AC5）：取 accept-prereq.js 那一个常量拼出来的串，这里不写死文案。 */
+  function evidenceIncompleteTextOf(gate) {
+    if (!AP) return '';
+    if (gate && typeof gate.reasonText === 'string') return gate.reasonText;
+    if (typeof AP.evidenceIncompleteText === 'function') return AP.evidenceIncompleteText(gate && gate.evidenceMissing);
+    return '';
+  }
   /** B-1358：缺失项的去处按钮（测试报告/截图 → 打开材料；测试任务 → 流程图；Owner 决定 → 评审弹窗）。 */
   function acceptGoto(item, row) {
     const key = String((item && item.go) || '');
@@ -1565,22 +1582,36 @@
       info.appendChild(el('b', 'accept-title', clip60(humanizeTitle(row.title || id), 64)));
       info.appendChild(el('span', 'accept-line', `${id} ｜ 状态：待验收 ｜ 测试结论：测试已完成（test_done）`));
       info.appendChild(el('span', 'accept-line', `证据：${evidenceTextOf(row)}`));
-      // B-1358：四项前置状态（测试任务 / 测试报告 / 截图 / Owner 决定）——缺项行不能点【通过】，并给出原因。
+      // B-1358：四项前置状态（测试任务 / 测试报告 / 截图 / Owner 决定）——四项都展示；
+      // B-9b05：只有 owner 档两项（测试任务/Owner 决定）才拦【通过】，证据只展示不拦截。
       const prereq = prereqOfRow(row);
+      const gate = gateOfRow(row, 'ui');
       if (prereq) {
         const pre = el('span', 'accept-line accept-prereq');
         pre.setAttribute('data-accept-prereq', '1');
-        pre.setAttribute('data-accept-can', prereq.canAccept ? '1' : '0');
+        pre.setAttribute('data-accept-can', gate && gate.canAccept ? '1' : '0');
+        if (gate) pre.setAttribute('data-accept-proxy-can', gate.canProxy ? '1' : '0');
         for (const check of prereq.checks) {
           const chip = el('span', `accept-pre ${check.ok ? 'ok' : 'bad'}`, `${check.label}${check.ok ? '✓' : '✗'}`);
           chip.setAttribute('data-accept-pre', check.key);
           chip.setAttribute('data-accept-pre-ok', check.ok ? '1' : '0');
+          // AC1：证据两项在 owner 档只是提示，不参与拦截——芯片上标明档位归属。
+          const gateKey = gate && Array.isArray(gate.requiredKeys) ? gate.requiredKeys.includes(check.key) : true;
+          chip.setAttribute('data-accept-pre-gate', gateKey ? 'block' : 'show');
           chip.title = check.reason;
           pre.appendChild(chip);
         }
         info.appendChild(pre);
-        if (!prereq.canAccept) {
-          const why = el('span', 'accept-line accept-pre-why', '不可验：' + prereq.missing.map((item) => item.label).join('、') + ' 还缺（鼠标停在 ✗ 上看原因）');
+        // AC5：证据不全只出一条统一原因串（与后端门同一个常量），不写成拦截文案。
+        const evidenceText = evidenceIncompleteTextOf(gate);
+        if (gate && evidenceText) {
+          const tip = el('span', 'accept-line accept-pre-evidence', evidenceText);
+          tip.setAttribute('data-accept-evidence-missing', gate.evidenceMissingKeys.join(','));
+          info.appendChild(tip);
+        }
+        // owner 档缺项（测试任务/Owner 决定）才是真拦截；拦截文案不再用旧的四字短语，改为说清缺哪项。
+        if (gate && !gate.canAccept) {
+          const why = el('span', 'accept-line accept-pre-why', '还不能验收：' + gate.missing.map((item) => item.label).join('、') + ' 没齐（鼠标停在 ✗ 上看原因）');
           why.setAttribute('data-accept-pre-why', '1');
           info.appendChild(why);
         }
@@ -1596,11 +1627,18 @@
       ownerBtn.type = 'button';
       ownerBtn.setAttribute('data-action', 'owner-accept');
       ownerBtn.title = '验收通过：需求出池归档';
-      if (prereq && !prereq.canAccept) {
-        // 前置不齐：直接置灰并写明缺什么，避免 "点了才弹错"。
-        ownerBtn.disabled = true;
-        ownerBtn.setAttribute('data-accept-blocked', prereq.missing.map((item) => item.key).join(','));
-        ownerBtn.title = '前置不齐，暂不能验收：' + prereq.missing.map((item) => `${item.label}（${item.reason}）`).join('；');
+      if (gate) {
+        // AC3：缺证据时【通过】必须可点（Owner 本人验收不强制截图）；只有测试任务/Owner 决定没齐才置灰。
+        ownerBtn.setAttribute('data-accept-gate', gate.canAccept ? 'open' : 'blocked');
+        if (gate.evidenceMissingKeys.length) {
+          ownerBtn.setAttribute('data-accept-evidence-missing', gate.evidenceMissingKeys.join(','));
+          ownerBtn.title = gate.reasonText + '（仍可直接验收，点开确认框会列出缺项）';
+        }
+        if (!gate.canAccept) {
+          ownerBtn.disabled = true;
+          ownerBtn.setAttribute('data-accept-blocked', gate.missing.map((item) => item.key).join(','));
+          ownerBtn.title = '还不能验收：' + gate.missing.map((item) => `${item.label}（${item.reason}）`).join('；');
+        }
       }
       ownerBtn.addEventListener('click', () => ownerAcceptFlow(row, 'accepted'));
       // R-c431：验收行上直接给【打回】，打回必须填原因；打回后需求回到可整改，不再出池。
@@ -1612,9 +1650,19 @@
       const pmBtn = el('button', 'accept-btn proxy', '代验收（凭证据）');
       pmBtn.type = 'button';
       pmBtn.setAttribute('data-action', 'pm-accept');
+      const proxyGate = gateOfRow(row, 'proxy');
       if (!isProxied(row)) {
         pmBtn.disabled = true;
         pmBtn.title = '该需求没有进行中的代管记录：请 Owner 先开代管，或由 Owner 本人验收';
+        pmBtn.setAttribute('data-accept-proxy-blocked', 'no-proxy');
+      } else if (proxyGate && !proxyGate.canProxy) {
+        // AC2/AC4：代验收仍是两件套——缺证据时禁用并给原因（与后端 PM_ACCEPT_EVIDENCE_REQUIRED 同源）。
+        pmBtn.disabled = true;
+        pmBtn.setAttribute('data-accept-proxy-blocked', proxyGate.missing.map((item) => item.key).join(','));
+        pmBtn.setAttribute('data-accept-proxy-code', proxyGate.code || '');
+        pmBtn.title = '代验收需要报告 + 截图：' + proxyGate.proxyBlockedReason;
+      } else {
+        pmBtn.setAttribute('data-accept-proxy-blocked', '');
       }
       pmBtn.addEventListener('click', () => pmAcceptFlow(row));
       const goto = el('button', 'accept-btn link', '在流程图里看');
@@ -1667,6 +1715,23 @@
     form.appendChild(el('h4', '', `${rejecting ? '确认打回' : '确认验收'}：${clip60(row.title || row.id, 60)}`));
     form.appendChild(el('p', 'accept-p', `需求：${row.id} ｜ 测试结论：测试已完成（test_done）`));
     form.appendChild(el('p', 'accept-p', `证据：${evidenceTextOf(row)}`));
+    // AC3：确认弹窗里把缺项列清楚（人话），但**不拦提交**——Owner 本人验收不强制截图；
+    // 缺项说明与后端门同源（accept-prereq.js 的 acceptGate + EVIDENCE_INCOMPLETE_LABEL）。
+    const dialogGate = gateOfRow(row, 'ui');
+    const dialogEvidenceText = evidenceIncompleteTextOf(dialogGate);
+    if (dialogGate && dialogEvidenceText) {
+      const box = el('div', 'accept-dialog-missing');
+      box.setAttribute('data-accept-dialog-missing', dialogGate.evidenceMissingKeys.join(','));
+      box.appendChild(el('b', '', dialogEvidenceText));
+      for (const miss of dialogGate.evidenceMissing) {
+        const line = el('div', 'accept-dialog-missing-row');
+        line.setAttribute('data-accept-dialog-pre', miss.key);
+        line.textContent = `${miss.label}：${miss.reason}`;
+        box.appendChild(line);
+      }
+      box.appendChild(el('span', 'accept-dialog-missing-note', '仍可直接验收；只有 PM 代验收才必须补齐这两件。'));
+      form.appendChild(box);
+    }
     form.appendChild(el('p', 'accept-warn', rejecting
       ? '打回后该需求回到可整改（不再出池），PM 会收到打回原因。'
       : '验收后该需求出池并归档（已闭环），不会再有“迭代/下一次”。'));

@@ -4477,6 +4477,11 @@ html[data-theme="light"] #titlebar .titlebar-center .owner-review-proxy { color:
 .accept-pre.ok { color:#2f7d57; border-color:#9ccfae; background:rgba(47,125,87,.10); }
 .accept-pre.bad { color:#b23c3c; border-color:#e3b3ae; background:rgba(178,60,60,.10); }
 .accept-pre-why { color:var(--dim); font-size:10.5px; }
+/* B-9b05：证据不全只提示不拦截（Owner 本人验收不强制截图）；确认框里列出缺项。 */
+.accept-pre-evidence { color:var(--gold); font-size:10.5px; }
+.accept-dialog-missing { display:flex; flex-direction:column; gap:2px; border:1px dashed var(--line); border-radius:7px; padding:4px 7px; font-size:11px; color:var(--text); }
+.accept-dialog-missing-row { color:var(--dim); font-size:10.5px; }
+.accept-dialog-missing-note { color:var(--dim); font-size:10.5px; }
 .accept-missing-list { display:inline-flex; flex-wrap:wrap; gap:4px; margin-left:2px; }
 .accept-missing-list .accept-btn { padding:0 6px; font-size:10.5px; }
 .accept-input { width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:6px; padding:4px 6px; font:inherit; font-size:11.5px; background:var(--panel); color:var(--text); }

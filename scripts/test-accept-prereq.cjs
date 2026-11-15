@@ -82,7 +82,11 @@ check('任务级测试判定：tester/stage=test/标题含测试 都算', P.isTe
 
 /* ── 六、接线静态断言 ───────────────────────────────────────────────── */
 check('owner-review.js：每行渲染四项 data-accept-pre', /data-accept-pre=|setAttribute\('data-accept-pre'/.test(REVIEW) && /accept-prereq/.test(REVIEW));
-check('owner-review.js：前置不齐时【通过】置灰并写 data-accept-blocked', /data-accept-blocked/.test(REVIEW) && /prereq\.canAccept/.test(REVIEW));
+check('owner-review.js：只有 owner 档缺项才置灰并写 data-accept-blocked', /data-accept-blocked/.test(REVIEW) && /gate\.canAccept/.test(REVIEW) && /acceptGate/.test(REVIEW));
+// B-9b05（AC1/AC3）：证据缺项不再拦【通过】——可点性只由 acceptGate(owner 档) 决定，缺项走展示位。
+check('B-9b05：证据缺项只展示不拦截（data-accept-evidence-missing + gateOfRow(ui)）',
+  /data-accept-evidence-missing/.test(REVIEW) && /gateOfRow\(row, 'ui'\)/.test(REVIEW) && /acceptGate/.test(REVIEW));
+check('B-9b05：界面不再出现「前置不齐/暂不能验收」拦截文案', !/暂不能验收/.test(REVIEW) && !/前置不齐/.test(REVIEW));
 check('owner-review.js：错误横幅挂缺失项去处 data-accept-goto', /data-accept-goto/.test(REVIEW) && /appendMissingLinks\(err, row\)/.test(REVIEW));
 check('owner-review.js：去处含 报告/截图/测试任务/Owner 决定 四种分支', /key === 'test_report'/.test(REVIEW) && /key === 'shot'/.test(REVIEW) && /key === 'test_task'/.test(REVIEW) && /Owner 决定/.test(REVIEW));
 check('index.html：accept-prereq.js 在 owner-review.js 之前引入', (() => {

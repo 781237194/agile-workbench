@@ -182,6 +182,9 @@ const { DshAdapter, discoverDshWeb } = require('./dsh-adapter');
 let teamTools = require('./team-tools');
 // R-4657：缺陷验收自动化单源（CLI 与主进程 watch/tick/IPC 共用；不写第二套判据）。
 const autoAccept = require(path.join(ROOT, 'scripts', 'auto-accept.cjs'));
+// B-9b05（AC1/AC2/AC5）：验收前置两档判定与渲染层共用同一份实现——
+// 主进程直接 require src/renderer/accept-prereq.js，不再另写一套（原因串也取它的常量）。
+const acceptPrereq = require(path.join(__dirname, 'renderer', 'accept-prereq.js'));
 const APP_VERSION = require(path.join(ROOT, 'package.json')).version;
 // 2a69 发版：菜单里的「版本 x.y.z · <commit 短号>」用真实 git 短号，取不到就留空（界面只显示版本）。
 // 只在启动时读一次；git 缺失 / 不是仓库 / 超时都吞掉，不影响启动。
@@ -6180,13 +6183,13 @@ function registerIpc() {
     // R-4f99 F-3：两种身份两种通道——Owner 本人 ui；PM 仅在有效代管下凭证据代验收 proxy。
     // 代管有效性在这里查评审代管.json；证据存在性/哈希由 team-tools 的 ownerAccept 复核（缺一即拒）。
     const role = String(p.role || 'owner');
+    // B-9b05：两条通道都要先拿到项目（验收前置与看板刷新共用，避免只在 pm 分支里声明）。
+    const acceptProject = requireProject(readStore(), p.projectId);
     let channel = 'ui';
     let proxyFields = {};
     if (role === 'pm') {
-      const store = readStore();
-      const project = requireProject(store, p.projectId);
       const requirementId = String(p.requirementId || '');
-      const proxyRow = readOwnerProxy(project).records.find((row) => row.requirementId === requirementId && !row.endedAt);
+      const proxyRow = readOwnerProxy(acceptProject).records.find((row) => row.requirementId === requirementId && !row.endedAt);
       if (!proxyRow) {
         throw codedError('OWNER_ACTION_REQUIRED', 'PM 代验收被拒：该需求没有进行中的代管记录，请 Owner 本人验收或先开代管');
       }
@@ -6198,6 +6201,51 @@ function registerIpc() {
         recordedBy: 'pm',
         proxy: String(proxyRow.scope || ''),
         authorization: String(proxyRow.authorization || '')
+      };
+    }
+    // B-9b05（AC1/AC2/AC5）：验收前置两档——判定与渲染层共用 accept-prereq.js 的 acceptGate，
+    // 原因串共用 EVIDENCE_INCOMPLETE_LABEL（不在这里另写一份文案）。
+    //   owner 档（channel=ui/tty）：测试任务全 done + 最近 Owner 决定 approved/skipped；报告/截图不拦。
+    //   proxy 档（channel=proxy）：再加 报告≥1 + 截图≥1，缺项沿用 PM_ACCEPT_EVIDENCE_REQUIRED。
+    const acceptGate = (() => {
+      try {
+        const snapshot = teamTools.readWorkflowSnapshot(String(acceptProject.teamName || acceptProject.name || ''), acceptProject.path) || {};
+        const requirementId = String(p.requirementId || '');
+        const row = (Array.isArray(snapshot.requirements) ? snapshot.requirements : [])
+          .find((item) => item && String(item.id || '') === requirementId) || null;
+        // 需求不存在时不在这里判：交给 team-tools 的 REQUIREMENT_NOT_FOUND（保持原来的错误码与文案）。
+        if (!row) return null;
+        // PM 代验收的证据是提交时给的：把本次提交的证据并进判定，否则「行里没挂截图」会误伤
+        // 已经带着两件套来验收的 PM（真正存在性/哈希/魔数仍由 team-tools 的 acceptEvidenceCheck 复核）。
+        const submitted = Array.isArray(p.evidence) ? p.evidence : [];
+        const mergedRow = submitted.length
+          ? { ...row, acceptance: { ...(row.acceptance && typeof row.acceptance === 'object' ? row.acceptance : {}), evidence: [...((row.acceptance && Array.isArray(row.acceptance.evidence)) ? row.acceptance.evidence : []), ...submitted] } }
+          : row;
+        return acceptPrereq.acceptGate(mergedRow, Array.isArray(snapshot.tasks) ? snapshot.tasks : [], { channel });
+      } catch (error) {
+        // 快照读不到不能把 Owner 卡死：记一条 warn，放行到 team-tools 的真实门。
+        console.warn('ACCEPT_GATE_SNAPSHOT_FAIL ' + JSON.stringify({ detail: String((error && error.message) || error).slice(0, 160) }));
+        return null;
+      }
+    })();
+    if (acceptGate && !acceptGate.canAccept) {
+      const missingRows = [];
+      for (const item of acceptGate.evidenceMissing) {
+        const reason = item.key === 'shot' ? 'SCREENSHOT_REQUIRED' : 'REPORT_REQUIRED';
+        missingRows.push({ path: '', kind: item.key === 'shot' ? 'screenshot' : 'report', reason, note: item.reason });
+      }
+      for (const item of acceptGate.missing) missingRows.push({ path: '', kind: item.key, reason: item.reason, note: item.reason });
+      return {
+        ok: false,
+        code: channel === 'proxy' ? acceptPrereq.PROXY_EVIDENCE_CODE : 'ACCEPT_PREREQ_BLOCKED',
+        gateTier: acceptGate.tier,
+        reason: acceptGate.evidenceMissingKeys.join(',') || acceptGate.missing.map((item) => item.key).join(','),
+        message: channel === 'proxy'
+          ? `${acceptGate.reasonText || acceptPrereq.EVIDENCE_INCOMPLETE_LABEL}；PM 代验收必须带测试报告 + 截图，补齐后再提交`
+          : `还不能验收：${acceptGate.blockerText}；补齐后再点验收`,
+        missing: missingRows,
+        gate: acceptGate,
+        requirementId: String(p.requirementId || '')
       };
     }
     const result = await teamTools.ownerAccept({
@@ -6217,7 +6265,7 @@ function registerIpc() {
     if (result && result.ok) {
       const boardStarted = Date.now();
       try {
-        const boardResult = await teamTools.generateBoard(project);
+        const boardResult = await teamTools.generateBoard(acceptProject);
         result.boardRefresh = {
           ok: Boolean(boardResult && boardResult.ok),
           ms: Date.now() - boardStarted,
