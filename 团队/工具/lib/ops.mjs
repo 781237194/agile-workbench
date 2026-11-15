@@ -587,11 +587,11 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
         return same.length ? same : allDevTasks;
       })()
       : allDevTasks;
-    if (devTasks.length && devTasks.every((rowTask) => String(rowTask.status || '') === 'done')) target = 'dev_done';
+    if (devTasks.length && devTasks.every((rowTask) => ['done', 'cancelled', 'terminated'].includes(String(rowTask.status || '')))) target = 'dev_done';
     // 还有开发任务没 done 时必须留痕，不能静默返回 null：否则现场看起来就是「task done 没推进需求」，
     // 排查只能靠翻文件（2026-11-14 ea86 就被一条遗留 open 旧单卡住，且当时没有任何事件）。
     else if (devTasks.length) {
-      const openTasks = devTasks.filter((rowTask) => String(rowTask.status || '') !== 'done').map((rowTask) => `${rowTask.id}:${rowTask.status || 'unknown'}`);
+      const openTasks = devTasks.filter((rowTask) => !['done', 'cancelled', 'terminated'].includes(String(rowTask.status || ''))).map((rowTask) => `${rowTask.id}:${rowTask.status || 'unknown'}`);
       // 事件 note 直接写出「哪条任务在挡」（reason 里带清单），人看一眼就够，不用再点开 data。
       return skip(`dev_tasks_open(${openTasks.join(',')})`, { openTasks });
     }
@@ -615,7 +615,7 @@ function advanceRequirementAfterTaskDone(projectName, task, role, opts = {}) {
       && String(rowTask.requirementId || '') === requirementId)
       .filter((rowTask) => String(rowTask.owner || '') === 'tester'
         || String((rowTask.workflow && rowTask.workflow.stage) || '') === 'test');
-    if (tests.length && tests.every((rowTask) => String(rowTask.status || '') === 'done')) target = 'test_done';
+    if (tests.length && tests.every((rowTask) => ['done', 'cancelled', 'terminated'].includes(String(rowTask.status || '')))) target = 'test_done';
   }
   if (!target || currentRankForAdvance >= statusRank(target)) return null;
   const at = nowIso();
@@ -5497,7 +5497,7 @@ export function ownerTestGate(projectName, requirementId) {
       taskIds: [],
     };
   }
-  const open = testTasks.filter((row) => String(row.status || '') !== 'done');
+  const open = testTasks.filter((row) => !['done', 'cancelled', 'terminated'].includes(String(row.status || '')));
   if (open.length) {
     return {
       ok: false,
@@ -5510,7 +5510,7 @@ export function ownerTestGate(projectName, requirementId) {
   }
   // B-20261115-184535-c98e：验收门第二道——需求名下不得有未完成子任务（开发/补单/复测/签章类），
   // 否则需求收口后账本分叉（75 条终态需求里 12 条仍有 open 任务）。保留 TEST_NOT_DONE 语义，两道门分开报码。
-  const leftover = children.filter((row) => String(row.status || '') !== 'done');
+  const leftover = children.filter((row) => !['done', 'cancelled', 'terminated'].includes(String(row.status || '')));
   if (leftover.length) {
     return {
       ok: false,
