@@ -129,15 +129,21 @@ export function roleDisplayName(role, { members } = {}) {
   return ROLE_NAMES[role] || String(role || '系统');
 }
 
+// B-9c49 / T-f79c：提案暂存单文件上限（代码类）的**唯一常量来源**（store.mjs 引用，避免两处 8MB 漂移）。
+// 旧值 64KB 让 ops.mjs/main.js 这类共享层大文件永远进不了提案通道；新默认 8MB，env TEAM_CODE_MAX_BYTES 可覆盖。
+export const LEGACY_CODE_MAX_BYTES = 65536;
+export const DEFAULT_CODE_MAX_BYTES = 8 * 1024 * 1024;
+
 export const LIMITS = {
   messageMaxChars: 600,
   ackNoteMaxChars: 300,
   reviewCommentMaxChars: 600,
   bootBriefMaxChars: 2000,
   docMaxBytes: 16384,
-  // B-20261115-152338-9c49：提案暂存「代码类」单文件上限按实际大小放宽（64KB → 8MB）。
+  // B-20261115-152338-9c49 / T-f79c：提案暂存「代码类」单文件上限按实际大小放宽（64KB → 8MB）。
+  // 常量单一来源就是本文件；store.mjs 从 roles 引用并 re-export，不再各写一份（避免两处 8MB 漂移）。
   // 只影响「能否暂存」，不改 sensitive/critical 的评审/签字/owner 终端批准门槛；env TEAM_CODE_MAX_BYTES 可覆盖（store.codeMaxBytesFor）。
-  codeMaxBytes: 8 * 1024 * 1024,
+  codeMaxBytes: DEFAULT_CODE_MAX_BYTES,
   roleIndexMaxBytes: 8192,
 };
 

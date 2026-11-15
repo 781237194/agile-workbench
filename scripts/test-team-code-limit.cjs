@@ -139,9 +139,19 @@ function probeShim(extra = {}) {
     return { error: String(e.stdout || e.message).slice(0, 300) };
   }
 }
+function probeSingleSource() {
+  const code = "(async()=>{const fs=require('node:fs');const path=require('node:path');const {pathToFileURL}=require('node:url');const dir=process.env.LIB_DIR;const roles=await import(pathToFileURL(path.join(dir,'roles.mjs')).href);const store=await import(pathToFileURL(path.join(dir,'store.mjs')).href);console.log(JSON.stringify({rolesDefault:roles.DEFAULT_CODE_MAX_BYTES,storeDefault:store.DEFAULT_CODE_MAX_BYTES,rolesLegacy:roles.LEGACY_CODE_MAX_BYTES,storeLegacy:store.LEGACY_CODE_MAX_BYTES,limits:roles.LIMITS.codeMaxBytes}));})().catch(e=>{console.error(String((e&&e.message)||e));process.exit(1)})";
+  try {
+    const out = execFileSync(process.execPath, ['-e', code], { env: env({ LIB_DIR: path.join(TEAM, '工具', 'lib') }), encoding: 'utf8', windowsHide: true });
+    const m = /\{[\s\S]*\}/.exec(String(out));
+    return m ? JSON.parse(m[0]) : null;
+  } catch (e) { return { error: String(e.stdout || e.message).slice(0, 300) }; }
+}
 const shim1 = probeShim();
 ok('兼容归一：旧 config=65536 时 loadTeam 读出 8MB', Boolean(shim1 && shim1.loadedCodeMaxBytes === 8 * 1024 * 1024), shim1);
 ok('修复标记：store 导出 DEFAULT_CODE_MAX_BYTES=8MB 与 LEGACY_CODE_MAX_BYTES=65536', Boolean(shim1 && shim1.defaultCodeMaxBytes === 8 * 1024 * 1024 && shim1.legacyCodeMaxBytes === 65536), shim1);
+const single = probeSingleSource();
+ok('常量单源（T-f79c）：roles/store 的 DEFAULT/LEGACY 相等，且 LIMITS.codeMaxBytes 引用同一常量', Boolean(single && single.rolesDefault === single.storeDefault && single.rolesLegacy === single.storeLegacy && single.limits === 8 * 1024 * 1024), single);
 ok('兼容归一：saveTeam 后团队.json 仍是 65536（不落盘，无 RULES_CHANGED）', Boolean(shim1 && shim1.fileCodeMaxBytes === 65536 && shim1.teamFileUnchanged === true), shim1);
 ok('兼容归一：探针全程不改 团队.json', shaFile(teamFile) === teamShaBefore, { now: shaFile(teamFile), before: teamShaBefore });
 const shim2 = probeShim({ TEAM_CODE_MAX_BYTES: '1048576' });

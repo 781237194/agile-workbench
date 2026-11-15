@@ -6,7 +6,7 @@ import {
   writeText, writeJson, appendLine, readJsonl, readJsonlTolerant, slug, safeName, isInside,
   relPath, truncate, randomHex, stamp, acquireLock, releaseLock, withLock, appendEvent,
 } from './core.mjs';
-import { ROLES, ROLE_DIRS, ROLE_NAMES, LIMITS, MODEL_BY_ROLE, normalizeTeamMode, rolesForMode, roleIdsForMode } from './roles.mjs';
+import { ROLES, ROLE_DIRS, ROLE_NAMES, LIMITS, MODEL_BY_ROLE, normalizeTeamMode, rolesForMode, roleIdsForMode, DEFAULT_CODE_MAX_BYTES, LEGACY_CODE_MAX_BYTES } from './roles.mjs';
 import { initialScenarioConfirm } from './scenario-confirm.mjs';
 import { DEFAULT_IRON, bootDocSpecs, readDocRecord, readRequirementDocs } from './scaffold.mjs';
 // R-75ec：任务层 Owner 门禁唯一判定入口（gates.mjs → taskGateOf）；此处只调用、不自己判 decisions。
@@ -19,10 +19,9 @@ export const PHASE_PILOT = 'pilot';
 // 默认 8 小时覆盖一个完整工作日；旧项目配置的 30 分钟一次性迁移到 480。
 export const DEFAULT_BOOT_TTL_MINUTES = 480;
 export const LEGACY_BOOT_TTL_MINUTES = 30;
-// B-20261115-152338-9c49：提案暂存单文件上限（代码类）。旧值 64KB 让 ops.mjs/main.js 这类共享层大文件永远进不了提案通道，
-// 只能绕维修模式（无签字链）。新默认 8MB，可用 TEAM_CODE_MAX_BYTES 覆盖；团队.json 里的历史默认 65536 读取时按新默认归一。
-export const LEGACY_CODE_MAX_BYTES = 65536;
-export const DEFAULT_CODE_MAX_BYTES = 8 * 1024 * 1024;
+// B-20261115-152338-9c49 / T-f79c：上限常量单一来源=roles.mjs（本文件只引用并 re-export，兼容旧 import）。
+// 旧值 64KB 让大文件进不了提案通道；新默认 8MB，env TEAM_CODE_MAX_BYTES 可覆盖；团队.json 历史默认 65536 读取时归一。
+export { DEFAULT_CODE_MAX_BYTES, LEGACY_CODE_MAX_BYTES };
 
 /** 历史团队配置里的 65536 视为「未设置」，按新默认（或 env）解释；显式设成其它值则尊重原值。 */
 export function codeMaxBytesFor(config) {
