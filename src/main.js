@@ -12,6 +12,7 @@ const ReviewCopy = require('./review-copy.js');
 // R-c1ed F-1：渲染内存采样分片 / 保留 / 取数通道（纯逻辑，Node 可测）
 const RenderMemory = require('./render-memory.js');
 const SamplerDecide = require('./mem-sampler-decide.js');
+const RenderMemDir = require('./render-mem-dir.js');
 
 const ROOT = path.join(__dirname, '..');
 const APP_ICON = path.join(ROOT, 'assets', 'pm-workbench.ico');
@@ -17287,6 +17288,13 @@ function renderMemoryProjectDir() {
   try {
     const store = readStore();
     const project = (store.projects || []).find((item) => item && item.id === store.activeProjectId);
+    // 缺陷 B-20261115-171218-3fb8（P1）：优先尊重隔离根，否则测量实例会与真实实例共写同一分片
+    const envRoot = String(process.env.AWB_TEAM_ROOT || process.env.TEAM_ROOT || '').trim();
+    if (envRoot) {
+      const name = String((project && (project.teamName || project.name)) || store.activeProjectId || '').trim();
+      const isolated = name ? RenderMemDir.resolveIsolatedDir({ envRoot, projectName: name }) : '';
+      if (isolated) return isolated;
+    }
     const dir = project ? teamProjectStateDir(project) : '';
     return dir || '';
   } catch { return ''; }
