@@ -536,6 +536,7 @@
   }
   // AC5 状态徽标：先看需求行走到哪（已派单/开发中），再看 Owner 决定（已通过/已打回）。
   function statusBadgeOf(req) {
+    if (isUnregisteredOf(req)) return { text: '未登记·不可评审', kind: 'warn' };
     const status = String((req && req.status) || '');
     if (status === 'accepted') return { text: '已完成', kind: 'ok' };
     if (status === 'terminated') return { text: '已终止', kind: 'bad' };
@@ -563,6 +564,8 @@
    */
   function ownerActionLockOf(req) {
     if (!req) return null;
+    // B-6155：未登记需求一律禁用；错误由界面当场说明，不再让 Owner 白点一次。
+    if (isUnregisteredOf(req)) return { code: 'REQ_UNREGISTERED', text: '未登记·不可评审（工作流里没有这条需求；先让 PM 登记或作废）' };
     if (isPending(req)) return null;
     const decided = ownerReviewStatusOf(req);
     if (!DECISION_BADGE[decided]) return null;
@@ -812,9 +815,19 @@
     { key: 'closed', label: '已收口' },
   ];
   const CLOSED_REQ_STATUSES = ['accepted', 'done', 'terminated', 'iteration', 'rejected'];
+  // B-20261116-061156-6155：列表里混入「工作流没有、只有任务镜像/缓存」的需求时，必须当场标出并禁用决定，
+  // 不能等点了 owner:decide 才报 WORKFLOW_MUTATE_FAILED。source='task-only' 就是快照里 task 兜底出来的行。
+  function isUnregisteredOf(req) {
+    return Boolean(req && (req.source === 'task-only' || req.__wfRegistered === false || req.unregistered === true));
+  }
   function listBucketOf(req) {
+    if (isUnregisteredOf(req)) return 'running'; // 不混进「等你决定」，避免 Owner 以为可点
     const status = String((req && req.status) || '');
     if (isPending(req)) return 'pending';
+    // B-20261116-061155-dfe6：Owner 已通过/已跳过（ownerReview.status 或 decisions 末条）的行
+    // 不能再落「等你决定」组——这是数据层已 approve、渲染层没消费导致的假待决。
+    const decided = decidedStatusOf(req);
+    if (decided === 'approved' || decided === 'skipped') return 'running';
     // R-dba4（T-3957）：四组映射收在 review-list-core.js；未列状态落「等你决定」并标 unknown（以前会整行消失）。
     if (RLC && typeof RLC.groupOf === 'function') return RLC.groupOf(req).group;
     if (status === 'test_done') return 'test_done';

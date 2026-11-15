@@ -2871,6 +2871,18 @@ function decisionRowMarkup(item) {
   </div>`;
 }
 
+/** B-20261116-061156-60ae：「计数有 N、列表被过滤空」时必须给三数说明行（禁止静默）。
+ *  total=IPC decisions，shown=实际渲染 open 条数，hidden=total-shown。 */
+function decisionHiddenNoteNode(total, shown, hidden) {
+  const note = document.createElement('div');
+  note.className = 'empty-row decision-hidden-note';
+  note.setAttribute('data-decision-total', String(total));
+  note.setAttribute('data-decision-shown', String(shown));
+  note.setAttribute('data-decision-hidden', String(hidden));
+  note.textContent = `共 ${total} 条待决，显示 ${shown} 条，另有 ${hidden} 条历史条目不满足七要素（缺来源/背景/问题/选项/默认项/影响/截止）未展示；补七要素后自动出现`;
+  return note;
+}
+
 /** 展开态列表（浮层）：与团队台抽屉共用同一份数据，回执控件只在这里给。 */
 function renderDecisionFloat(data) {
   DECISION_FLOAT_STATE.data = data || null;
@@ -2901,26 +2913,30 @@ function renderDecisionFloat(data) {
     list.innerHTML = `<div class="empty-row">${esc(data.message || '决策箱读不出来（已按空箱显示）')}</div>`;
     return;
   }
+  // B-20261116-061156-60ae：不能先返回「暂无待决事项」把被过滤的条目吞掉——
+  // 先算好 total/shown/hidden，空列表但 hidden>0 时仍要给出三数说明行（禁止静默）。
+  const openShown = items.filter((item) => String(item.status || 'open') === 'open').length;
+  const ipcDecisions = Number(DECISION_FLOAT_STATE.decisions);
+  const totalDecisions = Math.max(openShown, Number.isFinite(ipcDecisions) && ipcDecisions >= 0 ? ipcDecisions : 0, Number(data.open || 0) || 0);
+  const hiddenCount = Math.max(0, totalDecisions - openShown);
   if (!items.length) {
-    list.innerHTML = '<div class="empty-row">暂无待决事项</div>';
+    list.innerHTML = '';
+    if (hiddenCount > 0) {
+      list.appendChild(document.createElement('div')).className = 'empty-row';
+      list.firstChild.textContent = '暂无可展示的待决条目';
+      list.appendChild(decisionHiddenNoteNode(totalDecisions, openShown, hiddenCount));
+    } else {
+      list.innerHTML = '<div class="empty-row">暂无待决事项</div>';
+    }
+    decisionRestoreDrafts();
     return;
   }
   list.innerHTML = items.map((item) => decisionRowMarkup(item)).join('');
   // PM 19:32 + 项目「禁止静默」口径：缺项历史条目被过滤时必须明说，不能静默隐藏。
   // PM 19:36 第四笔：total 必须 = ownerPendingCounts().decisions（IPC，抽屉顶部同值），
   // shown = 实际渲染的 open 条目数（DOM 可数 [data-decision-item][data-status=open]），hidden = total - shown。
-  const openShown = items.filter((item) => String(item.status || 'open') === 'open').length;
-  const ipcDecisions = Number(DECISION_FLOAT_STATE.decisions);
-  const totalDecisions = Number.isFinite(ipcDecisions) && ipcDecisions >= 0 ? ipcDecisions : openShown;
-  const hiddenCount = Math.max(0, totalDecisions - openShown);
   if (hiddenCount > 0) {
-    const note = document.createElement('div');
-    note.className = 'empty-row decision-hidden-note';
-    note.setAttribute('data-decision-total', String(totalDecisions));
-    note.setAttribute('data-decision-shown', String(openShown));
-    note.setAttribute('data-decision-hidden', String(hiddenCount));
-    note.textContent = `共 ${totalDecisions} 条待决，显示 ${openShown} 条，另有 ${hiddenCount} 条历史条目不满足七要素（缺来源/背景/问题/选项/默认项/影响/截止）未展示；补七要素后自动出现`;
-    list.appendChild(note);
+    list.appendChild(decisionHiddenNoteNode(totalDecisions, openShown, hiddenCount));
   }
   // 重绘后把「正在填的草稿」放回去：刷新不该吞掉已选候选与已填意见。
   decisionRestoreDrafts();
@@ -2944,9 +2960,19 @@ function renderDecisionBox(data) {
     box.innerHTML = `<div class="empty-row">${esc(data.message || '决策箱读不出来（已按空箱显示）')}</div>`;
     return;
   }
+  // B-20261116-061156-60ae：抽屉同样不能空列表吞条目——先算三数，空列表但 hidden>0 仍给说明。
+  const openShown2 = openItems.length;
+  const ipcDecisions2 = Number(DECISION_FLOAT_STATE.decisions);
+  const totalDecisions2 = Math.max(openShown2, Number.isFinite(ipcDecisions2) && ipcDecisions2 >= 0 ? ipcDecisions2 : 0, Number(data.open || 0) || 0);
+  const hiddenCount2 = Math.max(0, totalDecisions2 - openShown2);
   if (!items.length) {
     box.dataset.state = 'empty';
-    box.innerHTML = '<div class="empty-row">暂无待决事项</div>';
+    if (hiddenCount2 > 0) {
+      box.innerHTML = '<div class="empty-row">暂无可展示的待决条目</div>';
+      box.insertAdjacentHTML('beforeend', `<div class="empty-row decision-hidden-note" data-decision-total="${totalDecisions2}" data-decision-shown="${openShown2}" data-decision-hidden="${hiddenCount2}">共 ${totalDecisions2} 条待决，显示 ${openShown2} 条，另有 ${hiddenCount2} 条历史条目不满足七要素未展示；补七要素后自动出现</div>`);
+    } else {
+      box.innerHTML = '<div class="empty-row">暂无待决事项</div>';
+    }
     return;
   }
   box.dataset.state = 'ready';
@@ -2965,14 +2991,11 @@ function renderDecisionBox(data) {
   }).join('');
   // PM 19:36 第四笔：total = ownerPendingCounts().decisions（IPC，与抽屉顶部/胶囊同值）；
   // shown = 实际渲染的 open 条数（DOM [data-decision-item][data-status=open]）；hidden = total - shown。
-  const openShown = openItems.length;
-  const ipcDecisions2 = Number(DECISION_FLOAT_STATE.decisions);
-  const totalDecisions2 = Number.isFinite(ipcDecisions2) && ipcDecisions2 >= 0 ? ipcDecisions2 : openShown;
-  const hiddenCount = Math.max(0, totalDecisions2 - openShown);
-  if (hiddenCount > 0) {
+  // 三数已在本函数开头算好（openShown2/totalDecisions2/hiddenCount2），这里只追加说明行。
+  if (hiddenCount2 > 0) {
     // tester 19:36 注记：innerHTML += 会重解析并重建抽屉所有子节点（将来若给行绑事件/草稿状态会丢），
     // 改用 insertAdjacentHTML('beforeend') 只追加。
-    box.insertAdjacentHTML('beforeend', `<div class="empty-row decision-hidden-note" data-decision-total="${totalDecisions2}" data-decision-shown="${openShown}" data-decision-hidden="${hiddenCount}">共 ${totalDecisions2} 条待决，显示 ${openShown} 条，另有 ${hiddenCount} 条历史条目不满足七要素未展示；补七要素后自动出现</div>`);
+    box.insertAdjacentHTML('beforeend', `<div class="empty-row decision-hidden-note" data-decision-total="${totalDecisions2}" data-decision-shown="${openShown2}" data-decision-hidden="${hiddenCount2}">共 ${totalDecisions2} 条待决，显示 ${openShown2} 条，另有 ${hiddenCount2} 条历史条目不满足七要素未展示；补七要素后自动出现</div>`);
   }
 }
 
