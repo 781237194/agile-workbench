@@ -2466,7 +2466,9 @@ export async function cmdBoot(args) {
   const optionalRead = optionalDocs.filter((d) => d.exists);
   const optionalMissing = optionalDocs.filter((d) => !d.exists);
   lines.push(`=== 启动简报 · ${ROLE_NAMES[role] || role} · ${projectName} ===`);
-  lines.push(`令牌: ${token.token}（${bootTtlMinutes} 分钟 = ${bootTtlMinutes / 60} 小时；当前所有写操作都要带 --boot）｜ 哈希 rules ${shortHash(docs.rulesHash)} / index ${shortHash(docs.hashes.projectIndex)}`);
+  // B-defb（Owner 2026-11-16 06:19）：令牌实际不会过期（store.mjs requireBoot 已取消 BOOT_EXPIRED，
+  // expiresAt 只作审计/展示）。旧文案写「480 分钟 = 8 小时」会让 Owner 与 PM 误以为要重 boot——改成不限时。
+  lines.push(`令牌: ${token.token}（**不限时**，expiresAt 仅审计展示、不作拒绝依据；当前所有写操作都要带 --boot）｜ 哈希 rules ${shortHash(docs.rulesHash)} / index ${shortHash(docs.hashes.projectIndex)}`);
   lines.push(`身份: ${member.name}（${role}）｜ 会话: ${sessionId}`);
   lines.push(`团队模式: ${TEAM_MODE_LABELS[teamMode]}（${teamModeDescription(teamMode)}）｜ 角色集: ${rolesForMode(teamMode).join(' / ')}`);
   lines.push(teamMode === 'fast'

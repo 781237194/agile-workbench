@@ -224,13 +224,15 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     if (!Array.isArray(pmBoot.read && pmBoot.read.core) || pmBoot.read.core.length !== 4) failStep('boot read 证据缺 core 4 份', JSON.stringify(pmBoot.read && pmBoot.read.core));
     if (!Array.isArray(pmBoot.read && pmBoot.read.taskDocs)) failStep('boot read 证据缺 taskDocs 字段');
     if (Number(pmBoot.bootTtlMinutes) !== 480) failStep('boot 返回的 bootTtlMinutes 不是 480', String(pmBoot.bootTtlMinutes));
-    if (!String(pmBoot.briefing || '').includes('480 分钟 = 8 小时')) failStep('boot 简报没有写明 480 分钟 = 8 小时', String(pmBoot.briefing || '').slice(0, 300));
+    // B-defb（Owner 2026-11-16 06:19）：简报不再写「480 分钟 = 8 小时」——令牌实际不限时，
+    // 旧文案会让 Owner/PM 误以为要重 boot。断言改为检查新文案；expiresAt 值仍按 480 校验（L232）。
+    if (!String(pmBoot.briefing || '').includes('不限时')) failStep('boot 简报没有写明令牌不限时', String(pmBoot.briefing || '').slice(0, 300));
     // 令牌落盘的真实有效期也必须是 8 小时，不能只是简报文字。
     const pmTokenFile = path.join(teamRoot, '状态', '启动', `${pmBoot.token}.json`);
     const pmToken = JSON.parse(read(pmTokenFile));
     const ttlMinutes = (Date.parse(pmToken.expiresAt) - Date.parse(pmToken.createdAt)) / 60000;
     if (!(ttlMinutes >= 479 && ttlMinutes <= 481)) failStep('令牌 expiresAt 不是 480 分钟', String(ttlMinutes));
-    pass('boot：两角色拿到令牌（简报含四纪律 + 网关提取 + 中文/派单闭环 + 480 分钟 TTL）');
+    pass('boot：两角色拿到令牌（简报含四纪律 + 网关提取 + 中文/派单闭环 + 不限时说明）');
 
     const pmRead = pmBoot.read || {};
     if (!pmRead.complete) failStep('boot 没返回完整 read 证据', JSON.stringify(pmRead.missing || []));
