@@ -69,7 +69,21 @@ function normalizeSampleLine(row) {
   // §3.2 降级频率变更点必须带 intervalMs（缺了就没法复算 interval）
   if (src.intervalMs !== undefined && src.intervalMs !== null && Number.isFinite(Number(src.intervalMs))) out.intervalMs = Number(src.intervalMs);
   if (src.kind) out.kind = String(src.kind);
+  // PM 2026-11-15 15:36 裁决（方案2）：1s 行、每 5 拍真取 metrics、中间行复用上一值并标 sampledFrom（真实采样时刻 ISO）。
+  // 判据用法：斜率只用「有真值」的行（无 sampledFrom 或 sampledFrom===at），R1/R2/R3 用全行。
+  if (src.sampledFrom !== undefined && src.sampledFrom !== null) out.sampledFrom = String(src.sampledFrom);
+  if (src.carried === true) out.carried = true;
   return out;
+}
+
+/** 当前分片缓存（dir|dateKey → {path,index,dateKey}）：避免每拍都 readdir+stat 全目录（实测那是 11ms 级开销）。 */
+const shardCache = new Map();
+
+function cachedShards(dir, dateKey) {
+  const key = `${dir}|${dateKey}`;
+  const hit = shardCache.get(key);
+  if (hit && Array.isArray(hit.list)) return hit.list;
+  return null;
 }
 
 /**
@@ -84,17 +98,30 @@ function appendSample(projectPath, row, options = {}) {
   const lineBytes = Buffer.byteLength(line, 'utf8');
   if (lineBytes > SHARD_MAX_BYTES) throw new Error('SAMPLE_LINE_TOO_LARGE');
   fs.mkdirSync(dir, { recursive: true });
-  const shards = listShards(dir).filter((item) => item.dateKey === dateKey);
-  let target = shards.length ? shards[shards.length - 1] : null;
+  const cacheKey = `${dir}|${dateKey}`;
+  let cached = shardCache.get(cacheKey);
+  if (!cached) {
+    const shards = listShards(dir).filter((item) => item.dateKey === dateKey);
+    const last = shards.length ? shards[shards.length - 1] : null;
+    cached = { path: last ? last.path : '', index: last ? last.index : 0, bytes: last ? fileBytes(last.path) : 0 };
+    shardCache.set(cacheKey, cached);
+  }
   let created = false;
-  if (!target || fileBytes(target.path) + lineBytes > SHARD_MAX_BYTES) {
-    const nextIndex = target ? target.index + 1 : 1;
+  if (!cached.path || cached.bytes + lineBytes > SHARD_MAX_BYTES) {
+    const nextIndex = cached.index ? cached.index + 1 : 1;
     const name = shardNameOf(dateKey, nextIndex);
-    target = { name, rel: name, dateKey, index: nextIndex, path: path.join(dir, name) };
+    cached = { path: path.join(dir, name), index: nextIndex, bytes: fileBytes(path.join(dir, name)) };
+    shardCache.set(cacheKey, cached);
     created = true;
   }
-  fs.appendFileSync(target.path, line, 'utf8');
-  return { file: target.path, created, bytes: fileBytes(target.path), lineBytes };
+  fs.appendFileSync(cached.path, line, 'utf8');
+  cached.bytes += lineBytes;
+  return { file: cached.path, created, bytes: cached.bytes, lineBytes };
+}
+
+/** 测试/清理用：清空分片缓存（外部删了分片后要清，否则会写回旧路径）。 */
+function resetShardCache() {
+  shardCache.clear();
 }
 
 /** 读一个分片（容错：坏行跳过并记 read_failed）。 */
@@ -264,6 +291,7 @@ const api = {
   listShards,
   normalizeSampleLine,
   appendSample,
+  resetShardCache,
   readShardRows,
   readRenderMemoryWindow,
   evaluateRecoverable,

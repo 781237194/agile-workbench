@@ -8858,6 +8858,10 @@ function registerIpc() {
     return {
       ok: true, intervalMs: renderMemoryState.intervalMs, degraded: renderMemoryState.degraded,
       samples: renderMemoryState.samples, writeMsAvg: Math.round(avg * 1000) / 1000,
+      realSamples: renderMemoryState.realSamples || 0,
+      carriedSamples: Math.max(0, renderMemoryState.samples - (renderMemoryState.realSamples || 0)),
+      realMsAvg: renderMemoryState.realSamples ? Math.round(((renderMemoryState.realMsTotal || 0) / renderMemoryState.realSamples) * 1000) / 1000 : 0,
+      realMsMax: Math.round((renderMemoryState.realMsMax || 0) * 1000) / 1000,
       writeMsMax: Math.round(renderMemoryState.writeMsMax * 1000) / 1000,
       samplesNull: renderMemoryState.samplesNull, lastAt: renderMemoryState.lastAt, lastError: renderMemoryState.lastError,
     };
@@ -17286,21 +17290,45 @@ function writeRenderSample(cause) {
 
 function startRenderMemorySampler() {
   stopRenderMemorySampler();
+  // PM 裁决（M-20261115-153633-f0ea6d，方案2）：**1s 行保住 AC3 的 ≥300 行**，但 getAppMetrics 单次约 13ms，
+  // 所以底层 metrics 每 5 拍真取一次（≈5s），中间 4 拍复用上一值并标 sampledFrom（真实采样时刻）。
+  // 判据：斜率只用真采样点（sampledFrom 缺省或等于 at），R1/R2/R3 用全行。
+  const REAL_SAMPLE_EVERY = 5;
+  let tickIndex = 0;
+  let lastReal = null; // { at, workingSetMB, pid }
   const tick = () => {
+    tickIndex += 1;
+    const at = now();
+    const needReal = !lastReal || (tickIndex % REAL_SAMPLE_EVERY === 1);
     const started = process.hrtime.bigint();
-    try { writeRenderSample('sample'); } catch { /* fail-open */ }
+    let row = null;
+    if (needReal) {
+      const rows = rendererWorkingSetRows();
+      const totalMB = rows.length ? rows.reduce((sum, item) => sum + (Number(item.workingSetMB) || 0), 0) : null;
+      const first = rows[0] || {};
+      lastReal = { at, workingSetMB: totalMB, pid: first.pid === undefined ? null : first.pid };
+      if (totalMB === null) renderMemoryState.samplesNull += 1;
+      row = { at, pid: lastReal.pid, type: 'renderer', guestUrl: null, workingSetMB: totalMB, cause: 'sample' };
+    } else {
+      // 复用上一真值：不打 metrics，成本≈写盘
+      row = { at, pid: lastReal.pid, type: 'renderer', guestUrl: null, workingSetMB: lastReal.workingSetMB, cause: 'sample', sampledFrom: lastReal.at, carried: true };
+    }
+    try {
+      const dir = renderMemoryProjectDir();
+      if (dir) RenderMemory.appendSample(dir, row);
+    } catch (error) { renderMemoryState.lastError = String((error && error.message) || error).slice(0, 160); }
     const costMs = Number(process.hrtime.bigint() - started) / 1e6;
     renderMemoryState.samples += 1;
     renderMemoryState.writeMsTotal += costMs;
     renderMemoryState.writeMsMax = Math.max(renderMemoryState.writeMsMax, costMs);
-    renderMemoryState.lastAt = now();
-    // 边界·降级：采样 >5ms 或 CPU >5% 才允许降级；这里只按写盘耗时判，降级必写 interval 行。
-    if (!renderMemoryState.degraded && costMs > 5) {
-      renderMemoryState.degraded = true;
-      renderMemoryState.intervalMs = 5000;
-      try { writeRenderSample('interval'); } catch { /* fail-open */ }
-      console.log('[render-memory] 采样降级到 5000ms（写盘耗时 ' + costMs.toFixed(2) + 'ms）');
+    renderMemoryState.lastAt = at;
+    renderMemoryState.lastWasReal = needReal;
+    renderMemoryState.realSamples = (renderMemoryState.realSamples || 0) + (needReal ? 1 : 0);
+    if (needReal) {
+      renderMemoryState.realMsTotal = (renderMemoryState.realMsTotal || 0) + costMs;
+      renderMemoryState.realMsMax = Math.max(renderMemoryState.realMsMax || 0, costMs);
     }
+    // 降级条件按卷3 重定义（连续 60s 取不到 metrics 才算降级）；方案2 下 1s 行不再因单拍耗时降级。
     renderMemoryState.timer = setTimeout(tick, renderMemoryState.intervalMs);
     if (renderMemoryState.timer && typeof renderMemoryState.timer.unref === 'function') renderMemoryState.timer.unref();
   };

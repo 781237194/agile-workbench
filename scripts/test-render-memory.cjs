@@ -53,6 +53,13 @@ const sampleAt = (iso, mb, extra) => ({ at: iso, pid: 100, type: 'renderer', gue
       const rows = RM.readRenderMemoryWindow(d2, { atCrash: '2026-11-15T00:00:01.000Z', windowSec: 60 }).lines;
       return rows.length === 1 && rows[0].kind === 'boot' && rows[0].cause === 'boot';
     })());
+  check('S1-06 方案2 字段保留：sampledFrom（复用行）不被归一化丢掉',
+    (() => {
+      const d3 = reset();
+      RM.appendSample(d3, sampleAt('2026-11-15T00:00:00.000Z', 300, { carried: true, sampledFrom: '2026-11-14T23:59:55.000Z' }), { dateKey: '20261115' });
+      const rows = RM.readRenderMemoryWindow(d3, { atCrash: '2026-11-15T00:00:01.000Z', windowSec: 60 }).lines;
+      return rows.length === 1 && rows[0].sampledFrom === '2026-11-14T23:59:55.000Z' && rows[0].carried === true;
+    })());
 }
 
 /* ── S2 取数通道：末分片倒读 + 续读上一分片（滚动后仍能取最后 5 分钟）────── */
