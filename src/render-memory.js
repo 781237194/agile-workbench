@@ -324,7 +324,9 @@ function evaluateRecoverable(win, options = {}) {
     if (Number(window.coverageSec) + 5 < windowSec) return 'SAMPLING_WINDOW_INSUFFICIENT';
     return 'OK';
   })();
-  const restorable = r1 && r2 && r3;
+  // PM 裁 M-20261115-155734-0e3913（返工单 §七）：restorable = R1∧R2∧R3 全真 **且** 行数达阈值；
+  // 它只说明「这份窗口能不能用于复盘」，不参与需求 FAIL 判定（FAIL 只看 fail/code）。
+  const restorable = r1 && r2 && r3 && enoughLines;
   return {
     recoverable: restorable,
     restorable,
