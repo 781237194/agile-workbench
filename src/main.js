@@ -5469,6 +5469,50 @@ function registerIpc() {
       return { ok: false, code: 'PENDING_COUNTS_FAILED', decisions: 0, reviews: 0, accepts: 0, message: String((e && e.message) || e).slice(0, 300) };
     }
   });
+  // R-51de（T-410c）：经验教训登记册只读看板 —— 数据只来自项目 md 的实时解析（lessons.mjs loadLessons），
+  // 不落缓存、无写通道；返回六段条数/最近更新/最新 3 条（按文件行序取最后 3 行，行序倒序由前端处理）。
+  let lessonsBoardModule = null;
+  ipcMain.handle('lessons:read', async (_e, payload) => {
+    try {
+      const { name, project } = teamProjectNameOf(payload || {});
+      if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
+      const projectDir = (project && project.path) || path.join(ROOT, '项目', name);
+      const teamRoot = (teamTools && teamTools.layout && (teamTools.layout.teamRoot || teamTools.layout.root))
+        || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+      if (!lessonsBoardModule) {
+        lessonsBoardModule = import(pathToFileURL(path.join(teamRoot, '工具', 'lib', 'lessons.mjs')).href).catch((error) => {
+          lessonsBoardModule = null;
+          throw error;
+        });
+      }
+      const mod = await lessonsBoardModule;
+      const parsed = mod.loadLessons(projectDir);
+      const roles = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
+      const sections = roles.map((role) => {
+        const sec = (parsed.sections || []).find((s) => s.role === role) || null;
+        const rows = sec && Array.isArray(sec.rows) ? sec.rows : [];
+        const latest = rows.slice(-3).reverse().map((row) => ({
+          date: String(row.date || ''), scene: String(row.scene || ''),
+          lesson: String(row.lesson || ''), next: String(row.next || ''),
+        }));
+        return {
+          role, title: sec ? String(sec.title || '') : '',
+          count: rows.length,
+          updatedAt: rows.length ? String(rows[rows.length - 1].date || '') : '',
+          latest,
+        };
+      });
+      return {
+        ok: true, project: name,
+        file: path.join(projectDir, mod.LESSONS_FILE),
+        fileSha: parsed.fileSha || '', mtime: parsed.mtime || null,
+        missing: Boolean(parsed.missing), broken: Boolean(parsed.broken),
+        parseWarn: (parsed.parseWarn || []).slice(0, 20), totals: parsed.totals || 0, sections,
+      };
+    } catch (e) {
+      return { ok: false, code: 'LESSONS_READ_FAILED', message: String((e && e.message) || e).slice(0, 300) };
+    }
+  });
   // R-9db6 F-1：Owner 决策箱（只读）。数据真相是 团队/状态/项目/<项目>/决策箱.json，
   // 壳层只读不写；放入由 PM 走团队工具，回执等团队工具侧命令就绪后再接 IPC。
   ipcMain.handle('team:decision-box', async (_e, payload) => {
@@ -10031,6 +10075,9 @@ function measureLayoutInPage() {
   const metricAnchorNode = document.getElementById('metrics');
   const sidebarFootNode = document.querySelector('.sidebar-foot');
   const metricAnchorRect = metricAnchorNode ? rectOf(metricAnchorNode) : null;
+  // R-51de（T-410c）：经验教训入口在 .sidebar-foot 内（B-0538：不进标题栏），六页签常驻 DOM。
+  const lessonsEntryNode = document.getElementById('lessons-entry');
+  const lessonsEntryRect = lessonsEntryNode ? rectOf(lessonsEntryNode) : null;
   // 注意：`floatToggleNode` 在上面的「收起态」块里已声明（T-e2a3），这里直接复用，不重复声明。
   const floatToggleRect = floatToggleNode ? rectOf(floatToggleNode) : null;
   const floatCountNode = floatToggleNode ? floatToggleNode.querySelector('[data-float-count]') : null;
@@ -10102,6 +10149,13 @@ function measureLayoutInPage() {
       || (Number.isFinite(floatCountValue) && Number.isFinite(floatBoxUnread) && floatCountValue === floatBoxUnread),
     // 旧写法用 offsetParent 判 visible：position:fixed 元素该值恒 null → 永远 false（增补卷-b28f-2 同款坑）。改用 rect。
     floatPanelDecisionUnreadVisibleByRect: unreadVisibleByRect,
+    // R-51de（T-410c）：入口在侧栏底部、可见、在视口内、不压 #metrics；六页签（3 个检查名即契约）。
+    lessonsEntryInSidebar: Boolean(lessonsEntryNode && sidebarFootNode && sidebarFootNode.contains(lessonsEntryNode)),
+    lessonsEntryVisible: Boolean(lessonsEntryRect && lessonsEntryRect.w > 0 && lessonsEntryRect.h > 0),
+    lessonsEntryInViewport: Boolean(lessonsEntryRect && lessonsEntryRect.x >= 0 && lessonsEntryRect.y >= 0
+      && lessonsEntryRect.x + lessonsEntryRect.w <= root.clientWidth && lessonsEntryRect.y + lessonsEntryRect.h <= root.clientHeight),
+    lessonsEntryNotOverMetrics: Boolean(lessonsEntryRect && metricAnchorRect) && !rectsOverlap(lessonsEntryRect, metricAnchorRect),
+    lessonsTabsSix: document.querySelectorAll('[data-lesson-tab]').length === 6,
   };
   // 还原回收起态（自检不改变用户看到的状态；展开状态本来就不持久化）。
   if (floatToggleNode && floatExpandedBefore !== '1') {
@@ -10287,6 +10341,27 @@ async function runLayoutCheck() {
   } catch (error) {
     clickTest = { ok: false, reason: String((error && error.message) || error) };
   }
+  // R-51de（T-410c）：经验教训入口点击实测 —— 入口在侧栏、点开浮层、六页签、默认一个 aria-selected。
+  let lessonsClickTest = { ok: false, reason: '未执行' };
+  try {
+    lessonsClickTest = await win.webContents.executeJavaScript(`(function () {
+      var entry = document.getElementById('lessons-entry');
+      if (!entry) return { ok: false, reason: '没有经验教训入口' };
+      var rect = entry.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) return { ok: false, reason: '入口不可见' };
+      entry.click();
+      var dialog = document.getElementById('lessons-dialog');
+      var opened = Boolean(dialog && !dialog.hidden);
+      var tabs = dialog ? dialog.querySelectorAll('[data-lesson-tab]').length : 0;
+      var selected = dialog ? dialog.querySelectorAll('[data-lesson-tab][aria-selected="true"]').length : 0;
+      var close = dialog ? dialog.querySelector('[data-lessons-close]') : null;
+      if (close) close.click();
+      return { ok: opened && tabs === 6 && selected === 1, opened: opened, tabs: tabs, selected: selected,
+        reason: opened ? ('已打开，页签 ' + tabs + '，默认选中 ' + selected) : '点击后浮层未打开' };
+    })()`, true);
+  } catch (error) {
+    lessonsClickTest = { ok: false, reason: String((error && error.message) || error) };
+  }
   // B-52f3：字号只作用于看板类界面——临时调到 1.2 核对：主窗全部跟随；DSH 聊天区 webview 必须恒 1.0。
   let zoomProbe = { ok: false, reason: '未执行' };
   try {
@@ -10385,7 +10460,7 @@ async function runLayoutCheck() {
   }
   const report = {
     ok: results.every((row) => Boolean(row.metrics && row.metrics.ok)) && Boolean(clickTest.ok)
-      && Boolean(zoomProbe.ok) && Boolean(zoomLayoutProbe.ok) && Boolean(windowFit.fits),
+      && Boolean(lessonsClickTest.ok) && Boolean(zoomProbe.ok) && Boolean(zoomLayoutProbe.ok) && Boolean(windowFit.fits),
     display: displayInfo,
     initialWindow,
     windowFit,
@@ -10397,6 +10472,7 @@ async function runLayoutCheck() {
     outDir,
     results,
     clickTest,
+    lessonsClickTest,
     zoomProbe,
     zoomLayoutProbe,
   };

@@ -58,6 +58,8 @@ if (IS_BOARD_WINDOW) {
     teamRouteStatus: (payload) => ipcRenderer.invoke('team:route-status', payload),
     // R-9db6 F-1：Owner 决策箱（只读：未读计数 + 逐条列表）。
     teamDecisionBox: (payload) => ipcRenderer.invoke('team:decision-box', payload),
+    // R-51de（T-410c）：经验教训看板只读取数（md 实时解析；无保存通道）。
+    lessonsRead: (payload) => ipcRenderer.invoke('lessons:read', payload),
     // R-5016 F-8/AC7：三入口数字同源（决策箱 / 评审待评估 / 验收），只读。
     ownerPendingCounts: (payload) => ipcRenderer.invoke('owner:pending-counts', payload),
     // B-a1cf：评审代管.json 变化推送（标题栏「PM 代管中 N 条」实时刷新）。

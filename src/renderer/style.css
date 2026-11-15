@@ -4664,3 +4664,28 @@ html[data-theme="light"] #titlebar .titlebar-center .owner-review-proxy { color:
 .crash-banner button { margin-left: auto; }
 .crash-banner [data-crash-reload] { margin-left: auto; border-color: rgba(225, 139, 123, .6); color: #ffd9cd; }
 .crash-banner [data-crash-dismiss] { margin-left: 0; }
+
+/* R-51de（T-410c）：经验教训看板（侧栏入口 + 六页签只读浮层） */
+.lessons-entry { margin-top: 6px; }
+.lessons-dialog { position: fixed; inset: 0; z-index: 9600; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); }
+.lessons-dialog[hidden] { display: none; }
+.lessons-card { width: min(980px, 92vw); max-height: 84vh; display: flex; flex-direction: column; background: var(--panel, #1c1f26); color: var(--fg, #e7e3d8); border: 1px solid rgba(255,255,255,.14); border-radius: 10px; box-shadow: 0 18px 60px rgba(0,0,0,.45); }
+.lessons-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,.1); }
+.lessons-head b { font-size: 15px; }
+.lessons-meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; opacity: .72; }
+.lessons-close { border: 1px solid rgba(255,255,255,.18); background: transparent; color: inherit; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.lessons-error { margin: 10px 14px 0; padding: 8px 10px; border: 1px solid rgba(225,139,123,.6); background: rgba(225,139,123,.12); color: #ffd9cd; border-radius: 6px; font-size: 12px; }
+.lessons-error[hidden] { display: none; }
+.lessons-tabs { display: flex; gap: 6px; padding: 10px 14px; flex-wrap: wrap; border-bottom: 1px solid rgba(255,255,255,.08); }
+.lessons-tab { border: 1px solid rgba(255,255,255,.16); background: transparent; color: inherit; border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 12px; opacity: .78; }
+.lessons-tab[aria-selected="true"] { background: rgba(214,178,96,.2); border-color: rgba(214,178,96,.7); opacity: 1; font-weight: 600; }
+.lessons-body { overflow: auto; padding: 10px 14px 16px; }
+.lessons-section-head { display: flex; align-items: baseline; gap: 10px; margin: 4px 0 8px; }
+.lessons-section-head b { font-size: 14px; }
+.lessons-count, .lessons-updated { font-size: 12px; opacity: .72; }
+.lessons-empty { font-size: 12px; opacity: .6; padding: 6px 0; }
+.lessons-item { display: block; width: 100%; text-align: left; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.03); color: inherit; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; cursor: pointer; }
+.lessons-item:hover { border-color: rgba(214,178,96,.55); }
+.lessons-item-title { display: block; font-size: 13px; }
+.lessons-detail { margin-top: 6px; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.55; opacity: .92; border-top: 1px dashed rgba(255,255,255,.14); padding-top: 6px; }
+.lessons-detail[hidden] { display: none; }
