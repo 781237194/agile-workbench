@@ -223,6 +223,21 @@ check('S14 PM 代管代验收未读 → LESSONS_UNREAD（验收处门禁）',
   /LESSONS_UNREAD/.test(proxyAcceptUnread.out + proxyAcceptUnread.err),
   { code: proxyAcceptUnread.code, out: (proxyAcceptUnread.out + proxyAcceptUnread.err).slice(0, 300) });
 
+// S15（PM 点名）：验收处门禁的判定本体 —— 清空 PM 阅读记录后，lessons status 必报 LESSONS_UNREAD
+// 说明：CLI 的 owner --action accept 在沙盘会先被 TASK_NOT_FOUND 挡（沙盘无 任务/R-*.json 镜像），
+// 因此验收点用「门禁判定本体（本条）+ Owner 通道豁免 CLI（S16）」两条覆盖；接线位置已在实现说明里给行号。
+const cleanReadLog = () => { const lp = path.join(TEAM, '状态', '经验教训阅读.jsonl'); if (fs.existsSync(lp)) fs.writeFileSync(lp, '', 'utf8'); };
+cleanReadLog();
+const statusUnread = run(['lessons', 'status', '--boot', pmToken]);
+check('S15 验收处门禁判定：未读当前版本 → LESSONS_UNREAD',
+  /LESSONS_UNREAD/.test(statusUnread.out + statusUnread.err) && /当前版本 sha12：/.test(statusUnread.out),
+  { code: statusUnread.code, out: (statusUnread.out + statusUnread.err).slice(0, 300) });
+// S16（PM 点名）：Owner 通道豁免要能过 —— --channel ui 时不因 LESSONS_UNREAD 被拦（可因其它门被拦）
+const ownerAcceptChUi = run(['owner', '--boot', pmToken, '--project', PROJECT, '--requirement', 'R-20261116-000000-less', '--action', 'accept', '--decision', 'accepted', '--channel', 'ui']);
+check('S16 Owner 通道（--channel ui）验收不被 LESSONS_UNREAD 拦',
+  !/LESSONS_UNREAD/.test(ownerAcceptChUi.out + ownerAcceptChUi.err),
+  { code: ownerAcceptChUi.code, out: (ownerAcceptChUi.out + ownerAcceptChUi.err).slice(0, 300) });
+
 console.log(`\nlessons 门禁断言：${passed}/${passed + failures.length} PASS`);
 console.log('沙盘：' + SB);
 if (failures.length) { console.error(JSON.stringify(failures, null, 2)); process.exit(1); }
