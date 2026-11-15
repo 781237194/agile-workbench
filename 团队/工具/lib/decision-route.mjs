@@ -36,8 +36,13 @@ export const DECISION_KINDS = ['口径', '取舍', '优先级', '阻塞', '风�
 export const ASK_FIELDS = ['source', 'summary', 'question', 'options', 'defaultChoice', 'impact', 'dueAt'];
 export const ASK_OPTIONS_MIN = 2;
 export const ASK_OPTIONS_MAX = 4;
-/** 漏箱"拍板问句"词表（F-7）。 */
+/** 漏箱"拍板问句"词表（F-7）：只用于**正文/主题文案**的二次确认，不再作为"是不是 Owner 问句"的判据。 */
 export const OWNER_ASK_WORDS = ['要不要', '是否', '能否', '怎么办', '怎么选', '继续还是停', '何时', '谁来决定', '拍板', '你定', '请示'];
+/**
+ * PM 2026-11-15 有条件确认①：漏箱扫描**只认消息类型**，不靠标题猜。
+ * `owner_ask` 已登记进 dispatch.mjs 的 WAKE_KIND_LABEL（唯一类型登记表），未登记类型 send 会被 MSG_TYPE_UNKNOWN 拒。
+ */
+export const OWNER_ASK_MESSAGE_TYPES = ['owner_ask'];
 /** 决策收口审计固定 9 键（F-10；含 reason）。 */
 export const DECISION_ROUTE_AUDIT_KEYS = ['at', 'actor', 'action', 'askId', 'target', 'ruleId', 'code', 'note', 'reason'];
 
@@ -229,10 +234,15 @@ function missReportPath(projectName, dateText) {
   return path.join(projectStatePaths(String(projectName)).dir, `漏箱-${dateText}.md`);
 }
 
-/** 收集 PM 发出的候选"拍板问句"消息（已落地消息，跨角色邮箱去重）。 */
-export function collectPmAsks(projectName, { roles = [] } = {}) {
+/**
+ * 收集 PM 发出的「问 Owner 拍板」消息（已落地消息，跨角色邮箱去重）。
+ * PM 2026-11-15 有条件确认①：判据收窄为**消息类型** `owner_ask`（dispatch.mjs 已登记），
+ * 不再用「标题含拍板/请示」这类脆弱判据；`criterion` 字段把本次用的判据回传给调用方，便于在报告里写明。
+ */
+export function collectPmAsks(projectName, { roles = [], types = OWNER_ASK_MESSAGE_TYPES } = {}) {
   const name = String(projectName || '');
   const roleList = roles.length ? roles : Object.keys(ROLE_NAMES);
+  const typeSet = new Set((types || OWNER_ASK_MESSAGE_TYPES).map((t) => String(t || '').toLowerCase()));
   const out = [];
   const seen = new Set();
   for (const role of roleList) {
@@ -244,14 +254,15 @@ export function collectPmAsks(projectName, { roles = [] } = {}) {
       if (!msg || !msg.id) continue;
       if (String(msg.from || '') !== 'pm') continue;
       if (seen.has(msg.id)) continue;
-      const isOwnerAsk = String(msg.type || '') === 'owner_ask'
-        || ['pm', 'owner'].includes(String(msg.to || ''))
-        || /拍板|请示/.test(String(msg.subject || ''));
-      if (!isOwnerAsk) continue;
-      const hits = looksLikeOwnerAsk(`${msg.subject || ''} ${msg.body || ''}`);
-      if (!hits.length) continue;
+      const type = String(msg.type || '').toLowerCase();
+      if (!typeSet.has(type)) continue;
       seen.add(msg.id);
-      out.push({ id: msg.id, to: msg.to, ts: Date.parse(String(msg.ts || msg.deliveredAt || '')), hits, subject: msg.subject || '' });
+      out.push({
+        id: msg.id, to: msg.to, type, ts: Date.parse(String(msg.ts || msg.deliveredAt || '')),
+        // 词表只做"文案命中提示"（写进摘要给人看），不参与判定
+        hits: looksLikeOwnerAsk(`${msg.subject || ''} ${msg.body || ''}`),
+        subject: msg.subject || '', body: String(msg.body || '').slice(0, 200),
+      });
     }
   }
   return out;
@@ -273,6 +284,7 @@ export function detectMissedAsks(projectName, { now = Date.now(), minutes = deci
   const knownRefs = new Set(items.map((row) => String((row.source && row.source.ref) || '')).filter(Boolean));
   const misses = items.filter((row) => row && row.missBox === true);
   const candidates = collectPmAsks(name);
+  const criterion = 'message.type=owner_ask（登记在 dispatch.mjs WAKE_KIND_LABEL；不看标题/文案）';
   const missed = [];
   const skipped = [];
   for (const msg of candidates) {
@@ -329,7 +341,7 @@ export function detectMissedAsks(projectName, { now = Date.now(), minutes = deci
   }
   return {
     ok: true, project: name, rule: DECISION_ROUTE_RULE, minutes,
-    thresholdMs, candidates: candidates.length, missed, skipped,
+    thresholdMs, criterion, candidates: candidates.length, missed, skipped,
     totalMiss: allMiss.length, reportFile, dryRun: Boolean(dryRun),
   };
 }

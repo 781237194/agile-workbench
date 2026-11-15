@@ -39,6 +39,9 @@ export const WAKE_KIND_LABEL = {
   owner_decision_receipt: 'Owner决策回执',
   // R-703f F-1：会话用量到提醒阈值（默认 30 万）时的提醒消息；只提醒，不自动换人。
   session_rotate_warn: '会话轮换提醒',
+  // R-5016 F-7（PM 2026-11-15 有条件确认①）：PM 正式「问 Owner 要不要拍板」的消息类型。
+  // 登记后它成为漏箱检测的**唯一类型判据**——不再靠标题里出现「拍板/请示」去猜（标题判据脆弱）。
+  owner_ask: '问Owner拍板',
 };
 
 /** 已登记的消息类型（发送前校验；不在表里的 --type 一律 MSG_TYPE_UNKNOWN）。 */

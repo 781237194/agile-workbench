@@ -152,9 +152,12 @@ ok('AC7 返回界面锚点契约', Boolean(counts.json && counts.json.anchor && 
 
 // ---------- AC6 漏箱检测 + 日报 ----------
 const missMinutes = 30;
-// 造一条 PM 发出的"拍板问句"消息（发给 programmer1：pm 不能发给自己；subject 带「拍板」走 owner-ask 口径），再改成 2 小时前
-const sent = run(['send', '--boot', pmToken, '--to', 'programmer1', '--subject', '拍板：这批要不要回滚', '--body', '要不要现在回滚，还是观察一天？请你拍板', '--type', 'question']);
-ok('造 1 条 PM 拍板问句消息', sent.code === 0, (sent.stderr || sent.stdout).slice(0, 120));
+// 造一条 PM 发出的 owner_ask 消息（PM 2026-11-15 有条件确认①：漏箱只认登记类型 owner_ask，不看标题），再改成 2 小时前
+const sent = run(['send', '--boot', pmToken, '--to', 'programmer1', '--subject', '拍板：这批要不要回滚', '--body', '要不要现在回滚，还是观察一天？请你拍板', '--type', 'owner_ask']);
+ok('造 1 条 PM owner_ask 消息（类型已登记）', sent.code === 0, (sent.stderr || sent.stdout).slice(0, 120));
+// 反例：标题写「拍板」但类型是 notice → 不得计入（不再靠标题猜）
+const decoy = run(['send', '--boot', pmToken, '--to', 'programmer1', '--subject', '拍板：仅标题有拍板字样的通知', '--body', '要不要都不重要，这只是个通知', '--type', 'notice']);
+ok('造 1 条标题含「拍板」但 type=notice 的反例', decoy.code === 0, (decoy.stderr || decoy.stdout).slice(0, 120));
 const mailDirs = ['new', 'cur'].map((box) => path.join(TEAM_ROOT, '状态', '邮箱', 'programmer1', box));
 const mailFiles = mailDirs.flatMap((dir) => (fs.existsSync(dir) ? fs.readdirSync(dir).map((n) => path.join(dir, n)) : []));
 let msgFile = null;
@@ -166,6 +169,8 @@ if (msgFile) {
   writeJson(msgFile, m);
 }
 const missRes = runJson(['decision', 'miss', '--project', PROJECT, '--now', new Date().toISOString(), '--minutes', String(missMinutes)]);
+ok('AC6/P0① 漏箱判据写明（criterion=message.type=owner_ask）', Boolean(missRes.json && /owner_ask/.test(String(missRes.json.criterion))), JSON.stringify(missRes.json && missRes.json.criterion));
+ok('AC6/P0① 反例（标题含拍板但 type=notice）不计入候选', Boolean(missRes.json && missRes.json.candidates === 1), JSON.stringify(missRes.json && missRes.json.candidates));
 const missItem = boxItems().find((row) => row.missBox === true);
 ok('AC6 漏箱 → 生成 D-…-MISS 占位', Boolean(missItem && /-MISS$/.test(String(missItem.id)) && missItem.status === 'open'), JSON.stringify(missItem && missItem.id));
 ok('AC6 占位字段 missBox/ruleId/source', Boolean(missItem && missItem.missBox === true && missItem.ruleId === 'R-MISS' && missItem.source && missItem.source.kind === 'message'), JSON.stringify(missItem && { r: missItem.ruleId }));
