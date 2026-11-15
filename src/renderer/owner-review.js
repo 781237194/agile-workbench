@@ -12,6 +12,24 @@
   const AP = (typeof window !== 'undefined' && window.AcceptPrereq) ? window.AcceptPrereq : null;
   // R-5550：AC 结构化解析/校验（正文 AC 块 → 卡片；缺项 → 显式标缺 + 统计）。
   const ACP = (typeof window !== 'undefined' && window.AcParse) ? window.AcParse : null;
+  // R-dba4（T-3957 渲染层）：四组映射 / 组内排序 / AC 逐条 / 四块大白话的纯逻辑（review-list-core.js，Node 可断言）。
+  const RLC = (typeof window !== 'undefined' && window.ReviewListCore) ? window.ReviewListCore : null;
+  // R-dba4：持久化的「大白话」缓存（review:copy-get 读一次，渲染时按需求 id 取；没有就走正文兜底）。
+  const copyCache = { rows: {}, loadedAt: 0, loading: false };
+  async function loadCopyCache(projectId) {
+    const api = window.workbench || {};
+    if (copyCache.loading || typeof api.reviewCopyGet !== 'function' || !projectId) return;
+    copyCache.loading = true;
+    try {
+      const got = await api.reviewCopyGet({ projectId });
+      if (got && got.ok && got.rows) copyCache.rows = got.rows;
+      copyCache.loadedAt = Date.now();
+    } catch { /* 读不到就全走正文兜底，不阻塞评审 */ } finally { copyCache.loading = false; }
+  }
+  function storedCopyOf(req) {
+    const row = copyCache.rows[String((req && req.id) || '')];
+    return row && row.copy ? row.copy : null;
+  }
 
   function el(tag, cls, text) {
     const node = document.createElement(tag);
@@ -409,6 +427,8 @@
         for (const row of state.data.requirements) row.__ac = ACP.analyzeRequirement(row);
       }
     } catch { state.data = null; }
+    // R-dba4：把持久化的大白话快照读一次（读不到就全部走正文兜底，不阻塞评审）。
+    await loadCopyCache(project.id);
     // R-f8e1 B 清单：读 团队/状态/项目/<项目>/需求建议点.json；文件缺失/坏 JSON 只当作“无建议点”，不阻断评审。
     try {
       if (api.ownerSuggestions) {
@@ -784,9 +804,21 @@
   function listBucketOf(req) {
     const status = String((req && req.status) || '');
     if (isPending(req)) return 'pending';
+    // R-dba4（T-3957）：四组映射收在 review-list-core.js；未列状态落「等你决定」并标 unknown（以前会整行消失）。
+    if (RLC && typeof RLC.groupOf === 'function') return RLC.groupOf(req).group;
     if (status === 'test_done') return 'test_done';
     if (CLOSED_REQ_STATUSES.includes(status)) return 'closed';
     return 'running';
+  }
+  /** R-dba4：状态不在四组白名单里（渲染层要挂 data-status-unknown）。 */
+  function statusUnknownOf(req) {
+    if (RLC && typeof RLC.groupOf === 'function') return RLC.groupOf(req).statusUnknown === true;
+    return false;
+  }
+  /** R-dba4：组内排序（逾期 > 未读 > updatedAt 倒序 > id 字典序）。 */
+  function sortRowsOf(rows) {
+    if (RLC && typeof RLC.sortRows === 'function') return RLC.sortRows(rows);
+    return Array.isArray(rows) ? rows.slice() : [];
   }
   function listDetailTextOf(req) {
     const body = String((req && (req.detail || req.story || req.acceptance || req.acceptanceCriteria)) || '').replace(/\s+/g, ' ').trim();
@@ -833,8 +865,9 @@
     const visible = allRows.filter((row) => active === 'all' || listBucketOf(row) === active);
     if (!visible.length) box.appendChild(el('p', 'or-empty', '这个分组里暂时没有需求'));
     const groups = active === 'all'
-      ? LIST_BUCKETS.map((bucket) => ({ ...bucket, rows: visible.filter((row) => listBucketOf(row) === bucket.key) }))
-      : [{ key: active, label: (LIST_BUCKETS.find((b) => b.key === active) || {}).label || active, rows: visible }];
+      // R-dba4（T-3957）：四组恒定都在（空组也给计数），组内按 逾期>未读>updatedAt 倒序>id 排序。
+      ? LIST_BUCKETS.map((bucket) => ({ ...bucket, rows: sortRowsOf(visible.filter((row) => listBucketOf(row) === bucket.key)) }))
+      : [{ key: active, label: (LIST_BUCKETS.find((b) => b.key === active) || {}).label || active, rows: sortRowsOf(visible) }];
     for (const group of groups) {
       if (!group.rows.length) continue;
       const groupBox = el('div', 'or-all-group');
@@ -940,6 +973,17 @@
     item.setAttribute('data-or-req', id);
     item.setAttribute('data-or-status', String(req.status || ''));
     item.setAttribute('data-or-bucket', listBucketOf(req));
+    // R-dba4（T-3957）：状态不在四组白名单里 → 明确标出来（以前这种行会整条消失，谁也不知道）。
+    if (statusUnknownOf(req)) item.setAttribute('data-status-unknown', '1');
+    // R-dba4：四块大白话 + 缺块标记（持久化 copy 优先，缺哪块标哪块，整块永不消失）。
+    const copyBlocks = (RLC && typeof RLC.copyBlocksOf === 'function')
+      ? RLC.copyBlocksOf(req, storedCopyOf(req))
+      : [];
+    if (copyBlocks.length) {
+      const missing = (RLC && typeof RLC.copyMissingAttr === 'function') ? RLC.copyMissingAttr(copyBlocks) : '';
+      item.setAttribute('data-copy-missing', missing);
+      item.setAttribute('data-copy-source', storedCopyOf(req) ? 'snapshot' : 'fallback');
+    }
     // B-d100：复审标记（打回后改完重新进队列的那条）。首次评审不带这个标记。
     const rework = reworkInfoOf(req);
     if (rework.isRework) item.setAttribute('data-or-rework', '1');
@@ -986,6 +1030,34 @@
     if (open) {
       const detail = el('div', 'or-all-detail');
       detail.setAttribute('data-owner-all-detail', '1');
+      // R-dba4（T-3957 ③）：AC / 功能点 / 边界逐条 <li data-ac-id>，保留编号、不合并、不截断。
+      const acItems = (RLC && typeof RLC.acItemsOf === 'function') ? RLC.acItemsOf(req, req.__ac) : [];
+      if (acItems.length) {
+        const acUl = el('ul', 'or-ac-items');
+        acUl.setAttribute('data-ac-items', '1');
+        acUl.setAttribute('data-ac-count', String(acItems.length));
+        for (const item of acItems) {
+          const li = el('li', 'or-ac-item');
+          li.setAttribute('data-ac-id', item.id);
+          li.setAttribute('data-ac-kind', item.kind);
+          li.textContent = item.text; // 保留全文，不 clip
+          acUl.appendChild(li);
+        }
+        detail.appendChild(acUl);
+      }
+      // R-dba4（T-3957 ④）：四块大白话——持久化 copy 优先，缺的块用正文兜底并挂 data-copy-missing。
+      if (copyBlocks.length) {
+        const copyUl = el('ul', 'or-copy-blocks');
+        copyUl.setAttribute('data-copy-blocks', '1');
+        for (const block of copyBlocks) {
+          const li = el('li', 'or-copy-block' + (block.missing ? ' missing' : ''));
+          li.setAttribute('data-copy-key', block.key);
+          li.setAttribute('data-copy-filled-by', block.filledBy);
+          li.innerHTML = `<b>${esc(block.label)}：</b>${esc(block.text)}`;
+          copyUl.appendChild(li);
+        }
+        detail.appendChild(copyUl);
+      }
       // R-5550 F-5550-3：有 AC 结构 → 逐条 AC 卡片（四段全文 + 选项后果 + 显式缺项）。
       const acBox = acCardsEl(req);
       if (acBox) detail.appendChild(acBox);
