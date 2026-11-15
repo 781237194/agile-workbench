@@ -3,7 +3,7 @@
   const STATUS_TEXT = { approved: '已通过', rejected: '已打回', skipped: '已先跳过', pending: '等你决定', optional: '等你决定' };
   // B-4baa（R-1cee）：看板与待评估清单默认各展示前 5 条，其余折叠在 DOM 里（不删、不裁切），可展开全部。
   const PREVIEW_ROWS = 5;
-  const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', reject: null, listFilter: 'all', listOpen: new Set(), closedCollapsed: true, proxyAllActive: false, proxyAllRecord: null, proxyAllExpiresAt: '', proxyReadError: '', decisionBox: [] };
+  const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', batchResult: null, reject: null, listFilter: 'all', listOpen: new Set(), closedCollapsed: true, proxyAllActive: false, proxyAllRecord: null, proxyAllExpiresAt: '', proxyReadError: '', decisionBox: [] };
   const KEY_LATER = 'awb.ownerReview.laterUntil';
   const KEY_NO_AUTO = 'awb.ownerReview.noAuto';
   // B-d100：打回后复审的判定收在 owner-review-state.js（Node 可单测）；脚本缺失时退回本文件旧逻辑。
@@ -339,6 +339,8 @@
       // F-b28f-6：开/关代管都不在弹窗里了，只留这一行只读说明（开关在右下【一键代管】行）。
       '        <span class="or-proxy-note" data-or-proxy-note title="开代管 / 结束代管都在主界面右下角的【一键代管】行">开/关代管在右下角【一键代管】</span>',
       '      </div>',
+      // B-3065 AC2：已决定的行按钮禁用时，把「为什么不能点」写在这里（不只靠 title）。
+      '      <p class="or-hint or-lock-reason" data-or-lock-reason hidden></p>',
       '    </section>',
       '  </div>',
       '</div>',
@@ -478,6 +480,75 @@
   // 7849 AC7：代管口径的标识集合（含验收/回执），用于列表「已托管」判定。
   function isProxyTag(tag) {
     return /PM代管(通过|打回|跳过|验收|回执)|PM通过|PM打回|PM跳过|来源未记/.test(String(tag || ''));
+  }
+
+  // ── B-3065 批量评审口径（AC1/AC2/AC5）──────────────────────────────────────
+  // 只读需求行现有字段，不新造状态：来源判定沿用 R-1cee 的 ownerReview.channel/recordedBy 口径。
+  const DECISION_BADGE = { approved: '已通过', rejected: '已打回', skipped: '已跳过' };
+  function ownerReviewStatusOf(req) {
+    const fromDecision = decidedStatusOf(req);
+    if (fromDecision) return fromDecision;
+    return String((req && req.ownerReview && req.ownerReview.status) || '');
+  }
+  function ownerReviewSourceOf(req) {
+    const owner = (req && req.ownerReview) || {};
+    const latest = latestOwnerDecision(req) || {};
+    const channel = String(owner.channel || latest.channel || '').toLowerCase();
+    const recordedBy = String(owner.recordedBy || latest.recordedBy || '').toLowerCase();
+    if (channel === 'proxy' || recordedBy === 'pm') return 'PM 代记';
+    if (channel === 'ui' || channel === 'tty') return '本人';
+    return '来源未记';
+  }
+  // AC5 状态徽标：先看需求行走到哪（已派单/开发中），再看 Owner 决定（已通过/已打回）。
+  function statusBadgeOf(req) {
+    const status = String((req && req.status) || '');
+    if (status === 'accepted') return { text: '已完成', kind: 'ok' };
+    if (status === 'terminated') return { text: '已终止', kind: 'bad' };
+    if (status === 'iteration') return { text: '迭代中', kind: 'warn' };
+    if (status === 'rejected') return { text: '已打回', kind: 'bad' };
+    if (status === 'ready') return { text: '已通过', kind: 'ok' };
+    if (status === 'dispatched') return { text: '已派单', kind: 'warn' };
+    if (['dev', 'dev_review', 'dev_done'].includes(status)) return { text: '开发中', kind: 'info' };
+    if (status === 'test') return { text: '测试中', kind: 'info' };
+    if (status === 'test_done') return { text: '待验收', kind: 'warn' };
+    const owner = ownerReviewStatusOf(req);
+    if (DECISION_BADGE[owner]) return { text: DECISION_BADGE[owner], kind: owner === 'approved' ? 'ok' : (owner === 'rejected' ? 'bad' : 'warn') };
+    return { text: '等你决定', kind: 'pending' };
+  }
+  function stageLabelOf(req) {
+    const map = {
+      ready: '待派单', dispatched: '已派单', dev: '开发中', dev_review: '开发互审', dev_done: '等测试',
+      test: '测试中', test_done: '待验收', accepted: '已验收', terminated: '已终止', iteration: '迭代中', rejected: '已打回',
+    };
+    return map[String((req && req.status) || '')] || '';
+  }
+  /**
+   * AC2：这条还能不能点 Owner 决定。null=可点；否则 {code,text} 说明为什么禁用。
+   * 打回后已修改（复审）仍算等你决定；已通过/已跳过/已越门的一律锁定。
+   */
+  function ownerActionLockOf(req) {
+    if (!req) return null;
+    if (isPending(req)) return null;
+    const decided = ownerReviewStatusOf(req);
+    if (!DECISION_BADGE[decided]) return null;
+    const source = ownerReviewSourceOf(req);
+    const stage = stageLabelOf(req);
+    return {
+      code: 'OWNER_ALREADY_DECIDED',
+      text: `${DECISION_BADGE[decided]}（${source}）${stage ? ' · ' + stage : ''}`,
+    };
+  }
+  function statusBadgeEl(req) {
+    const badge = statusBadgeOf(req);
+    const node = el('span', 'or-status-badge', badge.text);
+    node.setAttribute('data-or-status-badge', '1');
+    node.setAttribute('data-badge-kind', badge.kind);
+    return node;
+  }
+  function sourceBadgeEl(req) {
+    const node = el('span', 'or-source-badge', ownerReviewSourceOf(req));
+    node.setAttribute('data-or-source-badge', '1');
+    return node;
   }
 
   function updateBadge() {
@@ -903,6 +974,12 @@
       selectRequirement(id);
     });
     item.appendChild(headRow);
+    // B-3065 AC5：每条需求都带状态徽标 + ownerReview 来源（PM 代记 / 本人 / 来源未记）。
+    const metaRow = el('div', 'or-all-meta');
+    metaRow.setAttribute('data-or-meta', '1');
+    metaRow.appendChild(statusBadgeEl(req));
+    metaRow.appendChild(sourceBadgeEl(req));
+    item.appendChild(metaRow);
 
     if (open) {
       const detail = el('div', 'or-all-detail');
@@ -2040,7 +2117,9 @@
     syncProxyAllButton();
     const req = rows.find((row) => String(row.id) === state.selected) || null;
     dialog.querySelector('[data-or-title]').textContent = req ? humanizeTitle(`${req.title || ''}（${req.id || ''}）`) : '暂时没有等你决定的事';
-    // B-2ed9：同一需求已经落过同状态决定时，对应按钮置灰（禁止重复追加）；不同状态（如打回）仍可点。
+    // B-2ed9 + B-3065 AC2：已决定 / 已离开 Owner 门的行，三个按钮全部 disabled 并写明原因
+    // （以前只禁“同状态”那一个，ready+approved 的行还能点打回，点了只撞 DUPLICATE_DECISION → 像没反应）。
+    const actionLock = req ? ownerActionLockOf(req) : null;
     const decidedRow = req ? latestOwnerDecision(req) : null;
     const decidedStatus = String((decidedRow && (decidedRow.status || decidedRow.decision))
       || (req && req.ownerReview && req.ownerReview.status) || '');
@@ -2051,10 +2130,25 @@
     ]) {
       const btn = dialog.querySelector(selector);
       if (!btn) continue;
-      const done = Boolean(req && decidedRow && decidedStatus === targetStatus);
-      btn.disabled = done;
-      btn.setAttribute('data-or-decided', done ? '1' : '0');
-      btn.title = done ? `已决定：${STATUS_TEXT[targetStatus] || targetStatus}；同一决定不重复落账` : `提交${verb}`;
+      const sameDone = Boolean(req && decidedRow && decidedStatus === targetStatus);
+      const disabled = Boolean(actionLock) || sameDone;
+      btn.disabled = disabled;
+      btn.setAttribute('data-or-decided', disabled ? '1' : '0');
+      btn.setAttribute('data-or-lock-code', actionLock ? actionLock.code : '');
+      btn.title = actionLock
+        ? `已决定：${actionLock.text}；这条不再重复落账`
+        : (sameDone ? `已决定：${STATUS_TEXT[targetStatus] || targetStatus}；同一决定不重复落账` : `提交${verb}`);
+    }
+    const lockReason = dialog.querySelector('[data-or-lock-reason]');
+    if (lockReason) {
+      lockReason.hidden = !actionLock;
+      lockReason.removeAttribute('data-or-lock-code');
+      if (actionLock) {
+        lockReason.setAttribute('data-or-lock-code', actionLock.code);
+        lockReason.textContent = `这条已经决定了：${actionLock.text}；按钮已禁用，失败/重复的提交不会改账。`;
+      } else {
+        lockReason.textContent = '';
+      }
     }
     // R-1cee F-R5/AC5：双模式同一口径；fast 的需求评审人是分析师，full 是产品。
     const reviewer = dialog.querySelector('[data-or-reviewer]');
@@ -2145,6 +2239,14 @@
     idRow.appendChild(el('b', '', '当前选中'));
     idRow.appendChild(el('span', '', `${req.id || ''}${req.title ? ' · ' + humanizeTitle(req.title) : ''}`));
     box.appendChild(idRow);
+    // B-3065 AC5：右侧详情同口径显示状态徽标 + ownerReview 来源。
+    const statusRow = el('div', 'or-summary-row or-status-row');
+    statusRow.setAttribute('data-or-summary-status', '1');
+    statusRow.appendChild(el('b', '', '状态'));
+    const statusText = el('span', '', `${statusBadgeOf(req).text} · ${ownerReviewSourceOf(req)}`);
+    statusText.setAttribute('data-or-summary-status-text', '1');
+    statusRow.appendChild(statusText);
+    box.appendChild(statusRow);
     const acceptance = typeof req.acceptance === 'string' && req.acceptance ? req.acceptance : '未记录';
     const fullDetail = String(req.detail || req.story || '').trim();
     // R-1cee F-R3/AC3：摘要 ≤60 字；全文另起一块（[data-or-detail]），不裁切。
@@ -2192,23 +2294,55 @@
     } catch { pre.textContent = '未记录或不可读'; }
   }
 
-  // ── R-f8e1 批量评审：A 本次待审需求 / B 需要你提建议的点 ────────────────
-  // 口径：full 只收 status=ready（产品评审后的修改版）；fast 收分析师初版经 TR-Q 通过（open/review + trq.verdict=pass）。
+  // ── B-3065 批量评审：A 本次待审需求 / B 需要你提建议的点 ────────────────
+  // AC1 唯一口径：只收「ownerReview=pending|rejected 且需求行 status=owner_review」。
+  // 旧实现 full 收 status=ready，把 4657/9a8e 两条已 approved（PM 代记/本人）的需求当成待审，
+  // 点通过/打回只会撞 DUPLICATE_DECISION；界面又没有失败反馈，Owner 看到的就是“点了没反应”。
   // 落账只写行级 decisions[]（走 owner:decide 的 applyOwnerDecisionToRequirement），打回另发 type=review_reject 给作者。
   function batchMode() {
     return String((state.data && state.data.teamMode) || 'full') === 'fast' ? 'fast' : 'full';
   }
   function batchCandidates() {
-    const mode = batchMode();
     const all = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
     return all.filter((row) => {
-      const st = String((row && row.status) || '');
-      if (mode === 'fast') {
-        const verdict = String((row && row.trq && row.trq.verdict) || '');
-        return ['open', 'review'].includes(st) && verdict === 'pass';
-      }
-      return st === 'ready';
+      // ① 需求行必须停在 Owner 门：ready（已批准待派单）、开发/测试/收口一律不进。
+      if (String((row && row.status) || '') !== 'owner_review') return false;
+      // ② Owner 门必须还没决：pending / rejected（打回后复审）；approved/skipped 不进。
+      const owner = ownerReviewStatusOf(row);
+      if (owner && !['pending', 'rejected'].includes(owner)) return false;
+      // ③ 打回后没改（OR_STATE 判 isRework=false）不算待复审。
+      return OR_STATE ? OR_STATE.isPending(row) : true;
     });
+  }
+  function rememberBatchResult(ok, fail) {
+    state.batchResult = {
+      ok: Number(ok) || 0,
+      fail: (Array.isArray(fail) ? fail : []).slice(0, 20).map((item) => ({ id: String(item.id || ''), reason: String(item.reason || '未返回原因') })),
+      at: new Date().toISOString(),
+    };
+  }
+  function batchFailureReason(err) {
+    const info = humanizeError(err);
+    return info.code ? `${info.title}（错误码 ${info.code}）` : info.title;
+  }
+  function batchResultEl() {
+    const r = state.batchResult;
+    if (!r) return null;
+    const ok = Number(r.ok) || 0;
+    const fails = Array.isArray(r.fail) ? r.fail : [];
+    const box = el('div', 'rv-batch-result');
+    box.setAttribute('data-batch-result', '1');
+    box.setAttribute('data-batch-success', String(ok));
+    box.setAttribute('data-batch-fail', String(fails.length));
+    box.appendChild(el('b', '', `批量提交结果：成功 ${ok} 条 / 失败 ${fails.length} 条`));
+    if (!fails.length) box.appendChild(el('span', 'rv-batch-result-note', '失败的条目保持原状态，不会改账。'));
+    for (const f of fails.slice(0, 6)) {
+      const line = el('p', 'rv-batch-error', `失败 ${f.id}：${f.reason}`);
+      line.setAttribute('data-batch-fail-id', f.id);
+      box.appendChild(line);
+    }
+    if (fails.length > 6) box.appendChild(el('p', 'rv-batch-error', `另有 ${fails.length - 6} 条失败未展开`));
+    return box;
   }
   function suggestionItems() {
     return Array.isArray(state.suggestions) ? state.suggestions : [];
@@ -2239,13 +2373,14 @@
     const head = el('div', 'rv-batch-head');
     head.appendChild(el('b', '', `批量评审 · A 本次待审需求（${rows.length} 条）`));
     head.appendChild(el('span', 'rv-batch-note', mode === 'fast'
-      ? '四人 fast：分析师初版经 TR-Q 通过；每条都未经产品评审'
-      : '六人 full：只收产品评审后的修改版（ready）'));
+      ? '四人 fast：TR-Q 通过后进入 Owner 门才显示；已通过/已派单不再列'
+      : '六人 full：只收 Owner 门待决（owner_review + 未决定）；已通过/已派单不再列'));
     // 全选通过：仍逐条落 decisions，不写汇总。
     const selectAll = el('label', 'rv-selectall');
     const allCheck = el('input');
     allCheck.type = 'checkbox';
     allCheck.setAttribute('data-batch-select-all', '1');
+    allCheck.disabled = !rows.length;
     allCheck.addEventListener('change', () => {
       state.batchSelected = allCheck.checked ? new Set(rows.map((row) => String(row.id))) : new Set();
       renderDialog();
@@ -2260,7 +2395,10 @@
     approveSelected.addEventListener('click', () => submitBatchApproved());
     head.appendChild(approveSelected);
     box.appendChild(head);
-    if (!rows.length) box.appendChild(el('p', 'rv-empty', '暂无待审需求（full 需 ready；fast 需初版经 TR-Q 通过）'));
+    // AC3：批量提交的结果常驻在批量区（不只靠 6 秒 toast），成功 N / 失败 M + 每条原因。
+    const resultBox = batchResultEl();
+    if (resultBox) box.appendChild(resultBox);
+    if (!rows.length) box.appendChild(el('p', 'rv-empty', '暂无待审需求（只收 owner_review 且 ownerReview=pending/已打回未复审）'));
     // 排序：P0 优先 → 有待建议点优先 → 停顿时长（updatedAt 旧）倒序。
     const rank = { P0: 0, P1: 1, P2: 2, P3: 3 };
     rows.sort((a, b) => {
@@ -2276,14 +2414,23 @@
     const inner = el('div', 'rv-batch-items');
     rows.forEach((row) => {
       const id = String(row.id || '');
-      const item = el('div', 'rv-batch-item');
+      const badge = statusBadgeOf(row);
+      const source = ownerReviewSourceOf(row);
+      const lock = ownerActionLockOf(row);
+      // AC4：批量行复用「全部需求」行的 .or-all-row 口径（同一套底色/边框/圆角/内边距/字号）。
+      const item = el('div', 'or-all-row rv-batch-item');
+      item.setAttribute('data-owner-batch-item', '1');
       item.setAttribute('data-req-id', id);
       item.setAttribute('data-brief', batchBriefOf(row));
       item.setAttribute('data-mode', mode);
+      item.setAttribute('data-batch-status', badge.text);
+      item.setAttribute('data-batch-source', source);
+      item.setAttribute('data-batch-locked', lock ? '1' : '0');
       const check = el('input', 'rv-batch-check');
       check.type = 'checkbox';
       check.setAttribute('data-batch-check', '1');
       check.checked = selected.has(id);
+      check.disabled = Boolean(lock);
       check.addEventListener('change', () => {
         if (!state.batchSelected) state.batchSelected = new Set();
         if (check.checked) state.batchSelected.add(id); else state.batchSelected.delete(id);
@@ -2293,21 +2440,36 @@
       const main = el('div', 'rv-batch-main');
       const title = el('b', 'rv-batch-title', clip60(humanizeTitle(row.title || id), 70));
       main.appendChild(title);
-      main.appendChild(el('span', 'rv-batch-line', `${row.kind === 'defect' ? '缺陷' : '需求'} ｜ ${id} ｜ 当前：${STATUS_TEXT[String(row.status || '')] || String(row.status || '')}`));
+      // AC5：状态徽标（已通过/已派单/开发中/等你决定）+ ownerReview 来源（PM 代记/本人/来源未记）。
+      const meta = el('span', 'rv-batch-meta');
+      meta.appendChild(statusBadgeEl(row));
+      meta.appendChild(sourceBadgeEl(row));
+      main.appendChild(meta);
+      main.appendChild(el('span', 'rv-batch-line', `${row.kind === 'defect' ? '缺陷' : '需求'} ｜ ${id} ｜ 当前：${badge.text}`));
       main.appendChild(el('span', 'rv-batch-line', `我做了什么：${batchBriefOf(row)}`));
       main.appendChild(el('span', 'rv-batch-line', `要你定什么：${batchPendingOf(row)}`));
       if (mode === 'fast') main.appendChild(el('span', 'rv-batch-tag', '未经产品评审'));
       const sug = suggestionsOf(id);
       if (sug.length) main.appendChild(el('span', 'rv-batch-sug', `有 ${sug.length} 条待你提建议`));
+      if (lock) {
+        // AC2：已决定/已越门的行，按钮禁用并写明原因，不让 Owner 点了没反应。
+        const why = el('span', 'rv-batch-error', `这条不能点：${lock.text}`);
+        why.setAttribute('data-batch-lock-reason', '1');
+        main.appendChild(why);
+      }
       item.appendChild(main);
       const actions = el('div', 'rv-batch-actions');
       const okBtn = el('button', 'rv-mini-btn ok', '通过');
       okBtn.type = 'button';
       okBtn.setAttribute('data-action', 'batch-approve');
+      okBtn.disabled = Boolean(lock);
+      if (lock) okBtn.title = `已决定：${lock.text}；这条不再重复落账`;
       okBtn.addEventListener('click', () => decideBatchOne(row, 'approved'));
       const noBtn = el('button', 'rv-mini-btn bad', '打回');
       noBtn.type = 'button';
       noBtn.setAttribute('data-action', 'batch-reject');
+      noBtn.disabled = Boolean(lock);
+      if (lock) noBtn.title = `已决定：${lock.text}；这条不再重复落账`;
       noBtn.addEventListener('click', () => { state.reject = { id, reason: '', picks: new Set() }; renderDialog(); });
       actions.appendChild(okBtn);
       actions.appendChild(noBtn);
@@ -2353,11 +2515,16 @@
         cancel.addEventListener('click', () => { state.reject = null; renderDialog(); });
         row2.appendChild(go); row2.appendChild(cancel);
         rej.appendChild(row2);
-        if (state.batchError) rej.appendChild(el('p', 'rv-batch-error', state.batchError));
         inner.appendChild(rej);
       }
     });
     box.appendChild(inner);
+    // AC2/AC3：任何批量失败都在批量区留人话一行（以前 approve 失败只写 state.batchError，界面不渲染 → 点了没反应）。
+    if (state.batchError) {
+      const err = el('p', 'rv-batch-error', state.batchError);
+      err.setAttribute('data-batch-error', '1');
+      box.appendChild(err);
+    }
     // B 清单：数据源 需求建议点.json；缺失/空显示“无建议点，可整体通过”。
     const sugBox = el('div', 'rv-sugs');
     sugBox.setAttribute('data-owner-suggest', '1');
@@ -2388,6 +2555,14 @@
   async function decideBatchOne(row, status) {
     const id = String((row && row.id) || '');
     if (!id) return;
+    // AC2：已决定/已越门的行直接给出原因，不再发一次注定失败的 owner:decide。
+    const lock = ownerActionLockOf(row);
+    if (lock) {
+      state.batchError = '';
+      rememberBatchResult(0, [{ id, reason: lock.text }]);
+      renderDialog();
+      return;
+    }
     let opinion = '';
     if (status === 'rejected') {
       const reason = String((state.reject && state.reject.reason) || '').trim();
@@ -2411,11 +2586,14 @@
       });
       if (!r || r.ok === false) throw new Error((r && (r.message || r.code)) || '落账失败');
     } catch (e) {
-      state.batchError = humanizeError(e).title;
+      // AC3：失败要有条目 + 原因（写进批量结果条，6 秒 toast 之外还能回看）。
+      state.batchError = '';
+      rememberBatchResult(0, [{ id, reason: batchFailureReason(e) }]);
       renderDialog();
       return;
     }
     state.batchError = '';
+    rememberBatchResult(1, []);
     if (status === 'rejected') {
       const to = String((row && (row.createdBy || row.owner)) || '').trim();
       const picks = suggestionsOf(id).filter((s) => state.reject && state.reject.picks && state.reject.picks.has(s.id));
@@ -2438,33 +2616,47 @@
     state.reject = null;
     if (state.batchSelected) state.batchSelected.delete(id);
     await loadData();
-    showNotice(status === 'approved' ? `已通过：${id}` : `已打回：${id}`);
+    showNotice(`${status === 'approved' ? '已通过' : '已打回'}：${id}（成功 1 条 / 失败 0 条）`);
     renderDialog();
   }
 
   async function submitBatchApproved() {
     const ids = Array.from(state.batchSelected || []);
     if (!ids.length) return;
-    const rows = ((state.data && state.data.requirements) || []).filter((row) => ids.includes(String(row.id)));
+    const all = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
+    const rows = ids.map((id) => all.find((row) => String(row.id) === String(id))).filter(Boolean);
+    const found = new Set(rows.map((row) => String(row.id)));
     let ok = 0;
-    const fails = [];
+    const fails = ids.filter((id) => !found.has(String(id)))
+      .map((id) => ({ id: String(id), reason: '列表里已找不到这条（可能刚被其他人处理），已跳过' }));
+    state.batchError = '';
     for (const row of rows) {
+      const id = String(row.id);
+      // AC2：已决定的条目不再发一次注定失败的请求，直接计入失败并写原因。
+      const lock = ownerActionLockOf(row);
+      if (lock) { fails.push({ id, reason: lock.text }); continue; }
       try {
-        const proxyActive = Boolean(state.proxy && String(state.proxy.requirementId || '') === String(row.id) && !state.proxy.endedAt);
+        const proxyActive = Boolean(state.proxy && String(state.proxy.requirementId || '') === id && !state.proxy.endedAt);
         const r = await window.workbench.ownerDecide({
           projectId: state.projectId,
-          requirementId: String(row.id),
+          requirementId: id,
           status: 'approved',
           channel: proxyActive ? 'proxy' : 'ui',
           ...(proxyActive ? { recordedBy: 'pm' } : {}),
         });
-        if (r && r.ok !== false) ok += 1; else fails.push(String(row.id));
-      } catch { fails.push(String(row.id)); }
+        if (r && r.ok !== false) ok += 1;
+        else fails.push({ id, reason: String((r && (r.message || r.code)) || '落账返回失败（无原因）') });
+      } catch (e) {
+        fails.push({ id, reason: batchFailureReason(e) });
+      }
     }
+    // AC3：成功 N 条 / 失败 M 条 + 每条原因；失败条目由后端拒绝，状态零改动。
+    rememberBatchResult(ok, fails);
     state.batchSelected = new Set();
     await loadData();
     renderDialog();
-    showNotice(`批量通过 ${ok}/${rows.length}${fails.length ? `；失败：${fails.join('、')}` : ''}`);
+    const brief = fails.length ? `；失败：${fails.slice(0, 3).map((f) => `${f.id}（${f.reason}）`).join('、')}` : '';
+    showNotice(`批量通过：成功 ${ok} 条 / 失败 ${fails.length} 条${brief}`);
   }
 
   async function submit(status) {

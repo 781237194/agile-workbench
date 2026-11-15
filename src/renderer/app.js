@@ -2958,6 +2958,21 @@ function bindDecisionAutoRefresh() {
   schedule();
 }
 
+/** R-4657：主进程自动收口/撤回后推 auto:accept-changed，池子开着就立刻重取（不轮询）。 */
+const AUTO_ACCEPT_REFRESH = { bound: false };
+function bindAutoAcceptRefresh() {
+  if (AUTO_ACCEPT_REFRESH.bound) return;
+  AUTO_ACCEPT_REFRESH.bound = true;
+  const wb = window.workbench || {};
+  if (typeof wb.onAutoAcceptChanged !== 'function') return;
+  wb.onAutoAcceptChanged((payload) => {
+    const mask = $('#pool-mask');
+    if (mask) mask.dataset.autoAcceptAt = String((payload && payload.at) || '');
+    if (poolUi.open) void refreshPool();
+    void refreshPoolBadge();
+  });
+}
+
 function renderTeam() {
   const summary = $('#team-summary');
   const log = $('#team-log');
@@ -10988,6 +11003,11 @@ function poolPanelEnsure() {
       <button type="button" class="ghost small" id="pool-ghost-register">一键登记</button>
       <button type="button" class="ghost small" id="pool-ghost-void">一键作废</button>
     </div>
+    <div class="pool-accept-bar" id="bug-retract-bar" hidden>
+      <span class="pool-accept-text" id="bug-retract-text">可撤回的自动验收 0 条</span>
+      <input type="text" id="bug-retract-reason" class="pool-accept-reason" placeholder="撤回原因（可选）" aria-label="撤回原因" autocomplete="off">
+      <button type="button" class="ghost small" id="bug-retract-run">撤回自动验收</button>
+    </div>
     <div class="pool-cols">
       <section class="pool-col"><h4>需求池 <span class="pool-n" id="pool-req-n">0</span></h4><div class="pool-list" id="pool-req-list"></div></section>
       <section class="pool-col"><h4>缺陷池 <span class="pool-n" id="pool-def-n">0</span></h4><div class="pool-list" id="pool-def-list"></div></section>
@@ -11008,11 +11028,16 @@ function poolPanelEnsure() {
     if (e.target === mask) { closePool(); return; }
     const link = e.target.closest('.pool-link');
     if (link) { e.preventDefault(); e.stopPropagation(); openPoolLink(link); return; }
+    // R-4657：撤回按钮只走 IPC（单条 / 批量），不能触发行详情。
+    const retractBtn = e.target.closest('[data-bug-retract]');
+    if (retractBtn) { e.preventDefault(); e.stopPropagation(); void runBugRetract([retractBtn.dataset.bugRetract]); return; }
+    if (e.target.closest('#bug-retract-run')) { e.preventDefault(); e.stopPropagation(); void runBugRetractBatch(); return; }
     if (e.target.closest('#pool-detail-close')) { e.stopPropagation(); closePoolDetail(); return; }
     const row = e.target.closest('.pool-row');
     if (row) { e.stopPropagation(); togglePoolDetail(row.dataset.id); }
   });
   mask.addEventListener('keydown', (e) => {
+    if (e.target && e.target.closest && e.target.closest('[data-bug-retract]')) return;
     const row = e.target && e.target.closest ? e.target.closest('.pool-row') : null;
     if (!row) return;
     if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
@@ -11070,6 +11095,61 @@ async function runPoolGhostAction(kind) {
     ? `${isVoid ? '作废' : '登记'}完成：成功 ${ids.length - failed.length} / ${ids.length}，失败 ${failed.length}（${failed[0].code || '未知'}）`
     : `已${isVoid ? '作废' : '登记'} ${ids.length} 条未登记需求`, failed.length ? 'warn' : '');
   await refreshPool();
+}
+/** R-4657：可撤回的自动验收行（accepted + 未超窗；判定全在 pool-core，不读文件）。 */
+function poolRetractableRows(rows) {
+  if (!POOL_CORE) return [];
+  return (Array.isArray(rows) ? rows : []).filter((row) => row && row.kind !== 'requirement'
+    && POOL_CORE.acceptStateOf(row) === 'accepted'
+    && POOL_CORE.retractAllowed(row));
+}
+/** R-4657：批量撤回条（有可撤回行才显示）。 */
+function renderBugRetractBar(rows) {
+  const bar = $('#bug-retract-bar');
+  if (!bar) return;
+  const eligible = poolRetractableRows(rows);
+  bar.hidden = eligible.length === 0;
+  bar.dataset.count = String(eligible.length);
+  const text = $('#bug-retract-text');
+  if (text) text.textContent = eligible.length
+    ? `可撤回的自动验收 ${eligible.length} 条（窗口内）`
+    : '';
+  const btn = $('#bug-retract-run');
+  if (btn) btn.textContent = eligible.length > 1 ? `批量撤回（${eligible.length}）` : '撤回自动验收';
+}
+/** R-4657：撤回只走 IPC auto:accept-retract；成功后重取池数据（IPC 返回 retracted/failed）。 */
+async function runBugRetract(ids) {
+  const list = (Array.isArray(ids) ? ids : [ids]).map((id) => String(id || '').trim()).filter(Boolean);
+  if (!list.length) { toast('没有可撤回的自动验收', 'warn'); return; }
+  const p = activeProject();
+  if (!p || !window.workbench || typeof window.workbench.autoAcceptRetract !== 'function') {
+    toast('当前版本不支持撤回自动验收', 'bad');
+    return;
+  }
+  if (list.length > 1 && typeof window.confirm === 'function' && !window.confirm(`确定撤回 ${list.length} 条自动验收？`)) return;
+  const reasonInput = $('#bug-retract-reason');
+  const reason = String((reasonInput && reasonInput.value) || '').trim();
+  let result = null;
+  try {
+    result = await window.workbench.autoAcceptRetract({ projectId: p.id, taskIds: list, reason, role: 'owner' });
+  } catch (error) {
+    toast(`撤回失败：${String((error && error.message) || error).slice(0, 120)}`, 'bad');
+    return;
+  }
+  if (!result || result.ok === false) {
+    toast(`撤回失败：${String((result && (result.message || result.code)) || '未知错误').slice(0, 120)}`, 'bad');
+    return;
+  }
+  const retracted = Array.isArray(result.retracted) ? result.retracted : [];
+  const failed = Array.isArray(result.failed) ? result.failed : [];
+  toast(failed.length
+    ? `撤回完成：成功 ${retracted.length} / ${list.length}，失败 ${failed.length}（${(failed[0] && failed[0].code) || '未知'}）`
+    : `已撤回 ${retracted.length} 条自动验收`, failed.length ? 'warn' : '');
+  if (reasonInput) reasonInput.value = '';
+  await refreshPool();
+}
+function runBugRetractBatch() {
+  return runBugRetract(poolRetractableRows(poolUi.rows).map((row) => row.id));
 }
 /** 行 HTML：委托纯逻辑模块。行结构固定为 徽标 → 编号 → 标题 → 状态 → 负责人（F-30e2-1）；
  *  本函数体内不含 await / fs 读取 / IPC 调用（F-8 静态断言）。 */
@@ -11186,6 +11266,7 @@ function renderPool() {
   const reqList = $('#pool-req-list');
   const defList = $('#pool-def-list');
   renderPoolGhostBar(rows);
+  renderBugRetractBar(rows);
   // 重建条件：数据集合变了、容器缺了、或两列都还没渲染过（空数据首次打开也要出空态文案）。
   const needsRebuild = signature !== poolUi.signature || !reqList || !defList
     || !reqList.childElementCount || !defList.childElementCount;
@@ -15294,8 +15375,9 @@ function bindTruthFixLinks() {
 
 
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => { bindDecisionFloat(); bindDecisionAutoRefresh(); }, { once: true });
+  document.addEventListener('DOMContentLoaded', () => { bindDecisionFloat(); bindDecisionAutoRefresh(); bindAutoAcceptRefresh(); }, { once: true });
 } else {
   bindDecisionFloat();
   bindDecisionAutoRefresh();
+  bindAutoAcceptRefresh();
 }

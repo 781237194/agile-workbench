@@ -4494,3 +4494,31 @@ html[data-theme="light"] #titlebar .titlebar-center .owner-review-proxy { color:
 .session-usage[hidden] { display: none; }
 .session-usage.warn { color: var(--gold-3); }
 .session-usage.bad { color: var(--red); }
+
+/* R-4657 缺陷验收自动化：缺陷池行撤回按钮 + 批量撤回条（新增块放文件尾，避免与 B 的改动冲突） */
+.pool-retract { margin-left:6px; padding:0 6px; font-size:10.5px; line-height:18px; color:var(--gold-3); border:1px solid currentColor; border-radius:5px; background:transparent; cursor:pointer; }
+.pool-retract:hover { background:rgba(180,120,40,.12); }
+.pool-accept-bar { display:flex; align-items:center; gap:8px; margin:6px 0; padding:6px 8px; border:1px dashed var(--line); border-radius:7px; color:var(--dim); font-size:11px; }
+.pool-accept-bar[hidden] { display:none; }
+.pool-accept-text { flex:0 0 auto; }
+.pool-accept-reason { flex:0 1 220px; min-width:120px; border:1px solid var(--line); border-radius:6px; padding:3px 6px; font:inherit; background:var(--panel); color:var(--text); }
+
+/* B-3065 批量评审区（AC4/AC5）：行样式与「全部需求」同一套 token/间距/行高，不用临时样式。
+   追加在文件尾：与同批程序员B 的 style.css 改动（pool-* 块）互不覆盖。 */
+.rv-batch-item { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 0; padding: 6px 8px; }
+.rv-batch-title { font-size: 12.5px; }
+.rv-batch-line { font-size: 11px; }
+.rv-batch-meta { display: flex; gap: 5px; flex-wrap: wrap; margin: 1px 0 2px; }
+.or-all-meta { display: flex; gap: 5px; flex-wrap: wrap; padding: 0 8px 6px; }
+.or-status-badge, .or-source-badge { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; font-size: 10.5px; line-height: 17px; color: var(--muted); background: var(--panel-3); }
+.or-status-badge[data-badge-kind="ok"] { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+.or-status-badge[data-badge-kind="bad"] { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+.or-status-badge[data-badge-kind="warn"] { color: var(--gold-3); border-color: var(--gold-line); background: var(--gold-soft); }
+.or-status-badge[data-badge-kind="pending"] { color: var(--gold-3); border-color: var(--gold-line); }
+.or-source-badge { color: var(--dim); }
+.or-lock-reason { margin: 8px 0 0; }
+.rv-batch-result { margin: 6px 0 0; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 11px; line-height: 1.55; }
+.rv-batch-result b { font-size: 11.5px; color: var(--text); }
+.rv-batch-result[data-batch-fail="0"] { border-color: color-mix(in srgb, var(--green) 55%, var(--line)); }
+.rv-batch-result[data-batch-fail="0"] b { color: var(--green); }
+.rv-batch-result-note { margin-left: 6px; color: var(--dim); }
