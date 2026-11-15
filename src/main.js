@@ -7004,6 +7004,44 @@ function registerIpc() {
     try { addEvent(project, `评审大白话已落盘（${decision.reason}）：${requirementId}`); } catch { /* 事件失败不影响落盘 */ }
     return { ok: true, changed: true, reason: decision.reason, requirementId, record: decision.record };
   });
+  // R-dba4（工具侧，T-20261115-142650-acfe）：需求行「大白话 copy」写入口。
+  // 唯一真相 = 工作流需求行 requirements[id].copy；判据全在 team-tools.saveRequirementCopy
+  // （字段白名单 copy/copyHistory、四块 600 字上限、source∈{author,derived}、内容相同幂等、
+  //  copyHistory append-only ≤20、expectedUpdatedAt 不一致 COPY_CONFLICT 且零副作用）。
+  // 与上面 review:copy-save 的区别：review:copy-* 是评审稿快照（workbench store），本通道才是需求行真相。
+  ipcMain.handle('requirement:copy-save', async (_e, payload) => {
+    const p = payload || {};
+    const store = readStore();
+    const project = requireProject(store, p.projectId);
+    const teamName = String(project.teamName || project.name || '');
+    const result = teamTools.saveRequirementCopy({
+      projectName: teamName,
+      requirementId: String(p.requirementId || ''),
+      copy: p.copy && typeof p.copy === 'object' ? p.copy : {},
+      by: String(p.by || ''),
+      expectedUpdatedAt: String(p.expectedUpdatedAt || ''),
+      at: p.at ? String(p.at) : ''
+    });
+    if (!result || result.ok === false) {
+      return {
+        ok: false,
+        code: (result && result.code) || 'COPY_SAVE_FAILED',
+        message: (result && result.message) || '大白话保存失败',
+        current: (result && result.details && result.details.current) || null,
+        fields: (result && result.details && result.details.fields) || []
+      };
+    }
+    return {
+      ok: true,
+      changed: Boolean(result.changed),
+      reason: result.reason || '',
+      requirementId: String(p.requirementId || ''),
+      copy: result.copy || null,
+      copyHistory: result.copyHistory || [],
+      file: result.file || '',
+      note: result.changed === false && result.reason === 'SAME_CONTENT' ? '内容未变，未重复落盘' : ''
+    };
+  });
   ipcMain.handle('owner:proxy-status', async (_e, payload) => {
     const p = payload || {};
     const project = requireProject(readStore(), p.projectId);

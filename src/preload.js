@@ -175,6 +175,9 @@ if (IS_BOARD_WINDOW) {
     // R-dba4（T-3999 数据层）：评审界面「大白话」持久化——读回已快照的 copy / 写一份新快照（refresh=点「刷新草案」）。
     reviewCopyGet: (payload) => ipcRenderer.invoke('review:copy-get', payload),
     reviewCopySave: (payload) => ipcRenderer.invoke('review:copy-save', payload),
+    // R-dba4（工具侧，T-20261115-142650-acfe）：需求行大白话 copy 写入口（工作流需求行是唯一真相；
+    // review:copy-* 是评审稿快照，两者不混）。判据在 team-tools.saveRequirementCopy。
+    requirementCopySave: (payload) => ipcRenderer.invoke('requirement:copy-save', payload),
     // Owner 确认码已废弃：决定/验收直接以 role=owner 执行。
     // 以下两个 IPC 仅为兼容旧界面保留，返回固定占位值，后端不再校验确认码。
     ownerChallenge: (payload) => ipcRenderer.invoke('owner:challenge', payload),

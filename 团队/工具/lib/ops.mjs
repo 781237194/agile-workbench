@@ -3904,6 +3904,8 @@ function cmdReqSync(args) {
 
 export function cmdReq(args) {
   const sub = args._[1] || 'list';
+  // R-dba4（工具侧，T-20261115-142650-acfe）：需求行「大白话 copy」写入口（与壳层 requirement:copy-save 同判据）
+  if (sub === 'copy') return cmdReqCopy(args);
   // 需求评审 / 技术评审记录：fast 由需求分析师评审，full 由产品设计师评审；
   // 技术评审记录在 fast 由程序员A、full 由产品或程序员A记录。PM 不评审。
   if (sub === 'review') return cmdReqReview(args);
@@ -3993,6 +3995,101 @@ export function cmdReq(args) {
     return;
   }
   fail('BAD_SUBCOMMAND', `未知 req 子命令：${sub}`);
+}
+
+// ========== R-dba4（工具侧）：需求行大白话 copy ==========
+
+/** copy 四块（写死，口径 R-dba4 §七-2）；与 src/team-tools.js 的 REQUIREMENT_COPY_BLOCKS 保持一致。 */
+const REQ_COPY_BLOCKS = ['what', 'how', 'impact', 'advice'];
+const REQ_COPY_SOURCES = ['author', 'derived'];
+const REQ_COPY_HISTORY_MAX = 20;
+const REQ_COPY_BLOCK_MAX = 600;
+
+/** 纯校验（零副作用）：返回 {ok, copy} 或 {ok:false, code, message, fields}。 */
+function normalizeReqCopy(raw) {
+  const input = raw && typeof raw === 'object' ? raw : {};
+  const source = String(input.source === undefined || input.source === '' ? 'author' : input.source).trim().toLowerCase();
+  if (!REQ_COPY_SOURCES.includes(source)) {
+    return { ok: false, code: 'COPY_SOURCE_INVALID', message: `copy.source 只能是 author / derived：${source || '(空)'}`, fields: ['source'] };
+  }
+  const copy = {};
+  const bad = [];
+  for (const key of REQ_COPY_BLOCKS) {
+    const value = input[key];
+    if (value === undefined || value === null || value === true) { copy[key] = ''; continue; }
+    if (typeof value !== 'string') { bad.push(`${key} 必须是字符串`); continue; }
+    const text = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+    if (text.length > REQ_COPY_BLOCK_MAX) { bad.push(`${key} 超过 ${REQ_COPY_BLOCK_MAX} 字`); continue; }
+    copy[key] = text;
+  }
+  if (bad.length) return { ok: false, code: 'COPY_FIELD_INVALID', message: `大白话字段不合法：${bad.join('；')}`, fields: bad };
+  const known = new Set([...REQ_COPY_BLOCKS, 'source', 'at', 'by']);
+  const unknown = Object.keys(input).filter((key) => !known.has(key));
+  if (unknown.length) {
+    return { ok: false, code: 'COPY_FIELD_UNKNOWN', message: `copy 不接受未登记字段：${unknown.join('、')}（白名单只有 what/how/impact/advice）`, fields: unknown };
+  }
+  if (REQ_COPY_BLOCKS.every((key) => !copy[key])) {
+    return { ok: false, code: 'COPY_EMPTY', message: '四块全空：至少给一块大白话，否则整卡会退回正文兜底' };
+  }
+  copy.source = source;
+  return { ok: true, copy };
+}
+
+/** 与 src/team-tools.js → applyRequirementCopyToState 同判据（改一处必须同步改另一处）。 */
+function applyReqCopyToRow(row, copy, { by = '', at = '', expectedUpdatedAt = '' } = {}) {
+  const current = row && typeof row.copy === 'object' && row.copy ? row.copy : null;
+  if (expectedUpdatedAt && String(row.updatedAt || '') !== String(expectedUpdatedAt)) {
+    return { ok: false, code: 'COPY_CONFLICT', message: `需求在读取之后被改过（磁盘 ${String(row.updatedAt || '').slice(0, 19)} ≠ 预期 ${String(expectedUpdatedAt).slice(0, 19)}），未写入`, current };
+  }
+  const stampAt = String(at || nowIso());
+  const next = { ...copy, at: stampAt, by: String(by || '') };
+  const sameBlocks = current && REQ_COPY_BLOCKS.every((key) => String(current[key] || '') === String(next[key] || ''))
+    && String(current.source || '') === String(next.source || '');
+  if (sameBlocks) return { ok: true, changed: false, reason: 'SAME_CONTENT', copy: current, at: stampAt };
+  const history = Array.isArray(row.copyHistory) ? row.copyHistory.slice() : [];
+  if (current) history.push({ ...current, replacedAt: stampAt, replacedBy: String(by || '') });
+  row.copy = next;
+  row.copyHistory = history.slice(-REQ_COPY_HISTORY_MAX);
+  row.updatedAt = stampAt;
+  return { ok: true, changed: true, reason: current ? 'UPDATED' : 'CREATED', copy: next, copyHistory: row.copyHistory, at: stampAt };
+}
+
+/**
+ * req copy：把四块大白话写进需求行 copy（唯一真相）+ copyHistory（append-only，≤20）。
+ * 用法：team.mjs req copy --boot T --requirement R-... --what "…" --how "…" --impact "…" --advice "…"
+ *       [--source author|derived] [--by 角色] [--expected-updated-at ISO] [--json]
+ */
+function cmdReqCopy(args) {
+  const b = bootFor(args, 'req copy');
+  if (!args.requirement) fail('REQUIREMENT_REQUIRED', '需要 --requirement R-...（大白话必须挂在一条需求上）', {}, 1);
+  const requirementId = String(args.requirement);
+  const normalized = normalizeReqCopy({
+    what: args.what, how: args.how, impact: args.impact, advice: args.advice, source: args.source,
+  });
+  if (!normalized.ok) fail(normalized.code, normalized.message, { fields: normalized.fields || [], wrote: false }, 1);
+  const read = readWorkflowState(b.project);
+  if (!read.exists) fail('WORKFLOW_MISSING', `工作流不存在：${read.file}；先 req register 登记需求`, { file: read.file, wrote: false }, 1);
+  const rows = (read.state && read.state.requirements) || {};
+  const key = Object.keys(rows).find((k) => k === requirementId)
+    || Object.keys(rows).find((k) => String((rows[k] && rows[k].id) || '') === requirementId);
+  const row = key ? rows[key] : null;
+  if (!row) fail('REQUIREMENT_NOT_FOUND', `工作流里没有需求 ${requirementId}；先 req register 登记`, { requirementId, wrote: false }, 1);
+  const by = String(args.by || b.role);
+  const at = nowIso();
+  const decision = applyReqCopyToRow(row, normalized.copy, { by, at, expectedUpdatedAt: String(args['expected-updated-at'] || '') });
+  if (!decision.ok) fail(decision.code, decision.message, { requirementId, current: decision.current || null, wrote: false }, 1);
+  if (decision.changed) {
+    const write = writeWorkflowState(b.project, read.state);
+    appendEvent({
+      role: b.role, sessionId: b.sessionId, action: 'req_copy_save', project: b.project, target: requirementId,
+      note: `${decision.reason} by ${by}`, data: { requirementId, source: decision.copy.source, changed: true, at },
+    });
+    const human = `已保存大白话：${requirementId}（${decision.reason}，来源 ${decision.copy.source}）\n工作流：${write.file}\n四块：${REQ_COPY_BLOCKS.map((k) => `${k}=${decision.copy[k] ? '有' : '空'}`).join(' ')}｜copyHistory ${(decision.copyHistory || []).length} 条`;
+    out(args, human, { ok: true, changed: true, reason: decision.reason, requirementId, copy: decision.copy, copyHistory: decision.copyHistory || [], file: write.file });
+    return;
+  }
+  out(args, `内容未变（SAME_CONTENT），未写盘：${requirementId}`,
+    { ok: true, changed: false, reason: decision.reason, requirementId, copy: decision.copy, file: read.file });
 }
 
 function reviewRecordDir(projectName, isTech) {

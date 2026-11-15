@@ -66,6 +66,9 @@ const HELP = `团队工作台 v2 · 多会话敏捷团队
         排除出阻塞清单（受控校准，事件里记被忽略的任务 id）
   req create --boot T --title X --priority P1 --acceptance "..." [--story "..."]
   req list --boot T
+  req copy --boot T --requirement R-... [--what "…" --how "…" --impact "…" --advice "…"] [--source author|derived] [--expected-updated-at ISO] [--json]
+       需求行「大白话 copy」写入口（唯一真相=工作流需求行 copy）：四块各 ≤600 字、source=author|derived、
+       同一内容重复保存幂等（SAME_CONTENT）、copyHistory append-only ≤20 条、expectedUpdatedAt 不一致 → COPY_CONFLICT 零副作用
   req review --boot T --id R-... --verdict approve|reject [--kind requirement|tech] [--proposal P-...] [--comments "..."]
        需求评审：full 由产品设计师、fast 由需求分析师执行；技术评审记录：full 产品/程序员A、fast 程序员A；PM 不评审
         技术评审写 状态/项目/<项目>/技术评审/TR-*.json（JSON 是真相，.md 人读镜像）；驳回同时写 工作流.json

@@ -500,6 +500,131 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+// ==========================================================================
+// R-dba4（工具侧，T-20261115-142650-acfe）：需求行「大白话 copy」写入口 + 字段白名单
+//
+// 口径来源：需求/R-20261115-125659-dba4-评审界面整理与大白话固定.md（v3）
+//   §四 F-1：需求行 copy = {what, how, impact, advice, at, by, source}，source ∈ {author, derived}
+//   §四 F-1：copyHistory[] append-only，最多 20 条；写入用 writeStore（tmp+rename+.bak），不改其它字段
+//   §七-2：字段名写死 copy.what/how/impact/advice + at/by/source
+//   边界-并发：写前 fresh 读 + 比对 updatedAt，不一致 → COPY_CONFLICT 零副作用
+//
+// 白名单 = 这条通道**只允许**写 copy / copyHistory 两个字段；其它需求行字段一律不动。
+// 唯一真相是需求行 copy；壳层禁止再另存一份（A 侧 review:copy-save 是评审稿，不是本口径）。
+// ==========================================================================
+const REQUIREMENT_COPY_BLOCKS = ['what', 'how', 'impact', 'advice'];
+const REQUIREMENT_COPY_SOURCES = ['author', 'derived'];
+const REQUIREMENT_COPY_WRITABLE_FIELDS = ['copy', 'copyHistory'];
+const REQUIREMENT_COPY_HISTORY_MAX = 20;
+const REQUIREMENT_COPY_BLOCK_MAX_CHARS = 600;
+const COPY_FALLBACK_PREFIX = '（待补：见正文 §对应段）';
+
+/**
+ * 校验并归一化一份 copy 入参（纯函数，不读盘不写盘）。
+ * 返回 {ok:true, copy} 或 {ok:false, code, message, fields[]}；任何失败都不产生副作用。
+ */
+function normalizeRequirementCopy(input = {}) {
+  const raw = isPlainObject(input) ? input : {};
+  const source = String(raw.source || 'author').trim().toLowerCase();
+  if (!REQUIREMENT_COPY_SOURCES.includes(source)) {
+    return { ok: false, code: 'COPY_SOURCE_INVALID', message: `copy.source 只能是 ${REQUIREMENT_COPY_SOURCES.join(' / ')}：${source || '(空)'}`, fields: ['source'] };
+  }
+  const copy = {};
+  const bad = [];
+  for (const key of REQUIREMENT_COPY_BLOCKS) {
+    const value = raw[key];
+    if (value === undefined || value === null) { copy[key] = ''; continue; }
+    if (typeof value !== 'string') { bad.push(`${key} 必须是字符串`); continue; }
+    // 换行归一（Windows CRLF → LF），并截断到 600 字；不静默丢内容，截断在返回里标 truncated。
+    const text = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+    if (text.length > REQUIREMENT_COPY_BLOCK_MAX_CHARS) { bad.push(`${key} 超过 ${REQUIREMENT_COPY_BLOCK_MAX_CHARS} 字`); continue; }
+    copy[key] = text;
+  }
+  if (bad.length) return { ok: false, code: 'COPY_FIELD_INVALID', message: `大白话字段不合法：${bad.join('；')}`, fields: bad };
+  const known = new Set([...REQUIREMENT_COPY_BLOCKS, 'source', 'at', 'by']);
+  const unknown = Object.keys(raw).filter((key) => !known.has(key));
+  if (unknown.length) {
+    return { ok: false, code: 'COPY_FIELD_UNKNOWN', message: `copy 不接受未登记字段：${unknown.join('、')}（白名单只有 what/how/impact/advice）+ source/at/by`, fields: unknown };
+  }
+  if (REQUIREMENT_COPY_BLOCKS.every((key) => !copy[key])) {
+    return { ok: false, code: 'COPY_EMPTY', message: '四块全空：至少给一块大白话（what/how/impact/advice），否则整卡会退回正文兜底' };
+  }
+  copy.source = source;
+  return { ok: true, copy };
+}
+
+/** 判两份 copy 的四个正文块是否一致（不看 at/by，幂等以此为据）。 */
+function requirementCopySameBlocks(left, right) {
+  if (!isPlainObject(left) || !isPlainObject(right)) return false;
+  return REQUIREMENT_COPY_BLOCKS.every((key) => String(left[key] || '') === String(right[key] || ''))
+    && String(left.source || '') === String(right.source || '');
+}
+
+/**
+ * 纯状态层写入：把 copy 落到需求行（调用方负责 final state 落盘）。
+ * mutate 语义：copy 覆盖、copyHistory 追加、updatedAt 更新；**其它字段一个不碰**。
+ */
+function applyRequirementCopyToState(state, requirementId, copy, { by = '', at = '', expectedUpdatedAt = '' } = {}) {
+  const id = String(requirementId || '').trim();
+  if (!id) return { ok: false, code: 'REQUIREMENT_REQUIRED', message: '缺需求 id：这条大白话要挂在一条需求上' };
+  if (!isPlainObject(state) || !isPlainObject(state.requirements)) {
+    return { ok: false, code: 'WORKFLOW_CORRUPT', message: '工作流没有 requirements，不能写大白话' };
+  }
+  const row = state.requirements[id] && isPlainObject(state.requirements[id])
+    ? state.requirements[id]
+    : Object.values(state.requirements).find((item) => item && String(item.id || '') === id) || null;
+  if (!row) return { ok: false, code: 'REQUIREMENT_NOT_FOUND', message: `工作流里没有需求 ${id}（先让 PM/分析师登记需求）` };
+  const current = isPlainObject(row.copy) ? row.copy : null;
+  if (expectedUpdatedAt && String(row.updatedAt || '') !== String(expectedUpdatedAt)) {
+    // 并发：别人先写了 → 零副作用，把磁盘现值带回去给调用方合并。
+    return {
+      ok: false, code: 'COPY_CONFLICT',
+      message: `需求 ${id} 在你读取之后已被改过（磁盘 ${String(row.updatedAt || '').slice(0, 19)} ≠ 你的 ${String(expectedUpdatedAt).slice(0, 19)}），未写入`,
+      current
+    };
+  }
+  const stampAt = String(at || new Date().toISOString());
+  const next = { ...copy, at: stampAt, by: String(by || '') };
+  if (current && requirementCopySameBlocks(current, next)) {
+    return { ok: true, code: 'OK', changed: false, reason: 'SAME_CONTENT', copy: current, rowId: String(row.id || id), at: stampAt };
+  }
+  const history = Array.isArray(row.copyHistory) ? row.copyHistory.slice() : [];
+  if (current) history.push({ ...current, replacedAt: stampAt, replacedBy: String(by || '') });
+  // 同一秒重复保存（内容相同但 at 不同）会进上面 SAME_CONTENT 分支；这里只保留最近 20 条。
+  row.copy = next;
+  row.copyHistory = history.slice(-REQUIREMENT_COPY_HISTORY_MAX);
+  row.updatedAt = stampAt;
+  return {
+    ok: true, code: 'OK', changed: true, reason: current ? 'UPDATED' : 'CREATED',
+    copy: next, copyHistory: row.copyHistory, rowId: String(row.id || id), at: stampAt
+  };
+}
+
+/** 把需求行 copy 投影成视图（缺字段返回 null / []，界面据此走兜底并打 data-copy-missing）。 */
+function requirementCopyView(row) {
+  const src = isPlainObject(row) ? row : {};
+  const copy = isPlainObject(src.copy) ? src.copy : null;
+  const view = copy
+    ? {
+      what: String(copy.what || ''),
+      how: String(copy.how || ''),
+      impact: String(copy.impact || ''),
+      advice: String(copy.advice || ''),
+      at: String(copy.at || ''),
+      by: String(copy.by || ''),
+      source: REQUIREMENT_COPY_SOURCES.includes(String(copy.source || '')) ? String(copy.source) : 'author'
+    }
+    : null;
+  return {
+    copy: view,
+    copyHistory: Array.isArray(src.copyHistory) ? src.copyHistory.slice(-REQUIREMENT_COPY_HISTORY_MAX) : [],
+    // 逐块缺失标记（AC3：哪块缺标哪块；四块全缺也要能渲染占位）
+    copyMissing: view
+      ? REQUIREMENT_COPY_BLOCKS.filter((key) => !view[key])
+      : REQUIREMENT_COPY_BLOCKS.slice()
+  };
+}
+
 /** 浅合并对象；非对象忽略。后给的字段覆盖先给的字段。 */
 function mergePlainObjects(...values) {
   const out = {};
@@ -5429,7 +5554,9 @@ function createTeamTools(options = {}) {
       test: row.test || null,
       ownerAcceptance: row.acceptance || null,
       doc: String(row.doc || ''),
-      history: Array.isArray(row.history) ? row.history : []
+      history: Array.isArray(row.history) ? row.history : [],
+      // R-dba4 工具侧：大白话 copy 的唯一真相在需求行（壳层只读这里，不再现算第二份）
+      ...requirementCopyView(row)
     };
   }
 
@@ -7136,6 +7263,36 @@ function createTeamTools(options = {}) {
         missingCommands: (ctx.capabilities.missing || []).filter((name) => !(shellOwnedOwner && name === 'owner'))
       }
     };
+  }
+
+  /**
+   * R-dba4（工具侧）F-2：需求行「大白话 copy」写入口——CLI `team.mjs req copy` 与壳层
+   * `requirement:copy-save` IPC 共用这一份判据（校验 / 幂等 / append-only / 失败零副作用）。
+   * 入参：{ projectName, requirementId, copy:{what,how,impact,advice,source}, by, at, expectedUpdatedAt }
+   * 返回：{ ok, code, changed, reason, copy, copyHistory?, file }；失败一律不动盘。
+   */
+  function saveRequirementCopy(input = {}) {
+    const name = String(input.projectName || input.project || '').trim();
+    if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
+    const normalized = normalizeRequirementCopy(input.copy || input);
+    if (!normalized.ok) return failure(normalized.code, normalized.message, { fields: normalized.fields || [] });
+    const read = readWorkflowState(name, { fresh: true });
+    if (!read.ok) return read;
+    const decision = applyRequirementCopyToState(read.state, input.requirementId, normalized.copy, {
+      by: input.by,
+      at: input.at,
+      expectedUpdatedAt: input.expectedUpdatedAt
+    });
+    if (!decision.ok) {
+      return failure(decision.code, decision.message, {
+        requirementId: String(input.requirementId || ''),
+        current: decision.current || null
+      });
+    }
+    if (!decision.changed) return { ...decision, project: name, file: read.file };
+    const written = writeWorkflowState(name, read.state);
+    if (!written.ok) return written;
+    return { ...decision, project: name, file: written.file };
   }
 
   /**
@@ -9979,6 +10136,8 @@ function createTeamTools(options = {}) {
     writeOwnerWorkflow,
     recordOwnerDecision,
     applyOwnerDecisionToRequirement,
+    // R-dba4（工具侧）：需求行大白话 copy 写入口（IPC requirement:copy-save / CLI req copy 共用一个判据）
+    saveRequirementCopy,
     launchSessions,
     resolveProjectName: (project) => resolveProjectName(project, readRegistrations()),
     normalizeRoles,
@@ -10652,7 +10811,18 @@ module.exports = {
   isInside,
   // R-ea86：PM 代验收证据校验（纯函数，供 ownerAccept 与可复跑测试共用同一份判据）
   acceptEvidenceCheck,
-  acceptEvidenceStaleness
+  acceptEvidenceStaleness,
+  // R-dba4：需求行大白话 copy 的白名单与纯函数（供壳层 IPC 与 scripts/test-requirement-copy.cjs 共用）
+  REQUIREMENT_COPY_BLOCKS,
+  REQUIREMENT_COPY_SOURCES,
+  REQUIREMENT_COPY_WRITABLE_FIELDS,
+  REQUIREMENT_COPY_HISTORY_MAX,
+  REQUIREMENT_COPY_BLOCK_MAX_CHARS,
+  COPY_FALLBACK_PREFIX,
+  normalizeRequirementCopy,
+  applyRequirementCopyToState,
+  requirementCopySameBlocks,
+  requirementCopyView
 };
 
 if (require.main === module) {
