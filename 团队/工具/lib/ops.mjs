@@ -56,6 +56,8 @@ import {
 } from './owner-confirm.mjs';
 import { activeProxyFor, assertProxyUsable, autoEndProxyForClosedRequirement } from './owner-proxy.mjs';
 import { readDecisionBox as readDecisionBoxFile } from './decision-box.mjs';
+// B-20261116-062204-89c6：PM 用消息问 Owner 必须标 owner_ask（漏箱扫描只认类型，不再靠标题猜）。
+import { looksLikeOwnerAsk, appendDecisionRouteAudit } from './decision-route.mjs';
 import {
   voidRegistryFile, legacyVoidRegistryFile, readVoidRegistry, appendVoidEntry,
 } from './req-void-registry.mjs';
@@ -2787,6 +2789,29 @@ export async function cmdSend(args) {
       registered: ['dispatch', 'receipt', 'notice', 'request', 'merge', 'system', 'question', 'answer', 'escalation', 'review_reject'],
       wrote: false
     });
+  }
+  // B-20261116-062204-89c6（AC1/AC3/AC6）：PM 用消息问 Owner 拍板却标成 notice/dispatch → 拒（零写入）。
+  // 判据避免误拦：①发给 owner 且命中拍板词 → 拦；②其它收件人仅在「无 task 绑定 + 带问号 + 命中拍板词」时拦，
+  // 所以「要不要只是举例」这类派单/说明不会被打死（AC3 反向断言）。
+  if (b.role === 'pm' && requestedType !== 'owner_ask') {
+    const askText = `${String(args.subject || '')} ${body}`;
+    const askHits = looksLikeOwnerAsk(askText);
+    const asksOwner = to === 'owner';
+    const questionLike = /[？?]/.test(askText);
+    if (askHits.length && (asksOwner || (!args.task && questionLike))) {
+      try {
+        appendDecisionRouteAudit(b.project, {
+          actor: 'pm', action: 'rejected_type', askId: null, target: to,
+          ruleId: 'R-ASK-TYPE', code: 'OWNER_ASK_REQUIRES_TYPE',
+          note: String(args.subject || '').slice(0, 80), reason: askHits.join(','),
+        });
+      } catch { /* 审计写不了也不能把原命令放过去：下面照样拒 */ }
+      fail('OWNER_ASK_REQUIRES_TYPE',
+        `PM 问 Owner 的话必须走决策箱：` +
+        `node 团队/工具/team.mjs send --project ${b.project} --boot <PM令牌> --to owner --type owner_ask --subject "…" --body "…"` +
+        `（命中拍板词：${askHits.join('、')}；也可用 decision add 建条目后再发）`,
+        { to, type: requestedType || 'notice', hits: askHits, wrote: false });
+    }
   }
   let taskRow = null;
   if (args.task) {
