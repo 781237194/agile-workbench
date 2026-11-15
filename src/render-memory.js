@@ -205,15 +205,17 @@ function readRenderMemoryWindow(projectPath, options = {}) {
   const dir = String(projectPath || '');
   const noShards = shards.length === 0;
   let samplingDisabled = false;
-  if (noShards) {
-    // 24h 内没有任何分片 → SAMPLING_DISABLED（判 FAIL）；否则只是还没开始采 → NO_SAMPLE_FILE（不判 FAIL）
-    if (options.forceSamplingDisabled === true) samplingDisabled = true;
-    else if (dir) {
-      try {
-        const ageMs = Date.now() - fs.statSync(dir).mtimeMs;
-        samplingDisabled = ageMs > 24 * 3600 * 1000;
-      } catch { samplingDisabled = false; }
-    }
+  if (options.forceSamplingDisabled === true) samplingDisabled = true;
+  else if (dir) {
+    // 卷2 §四 A 行 + 返工单 §六③：24h 内没有任何分片（无分片或最新分片都早于 24h）→ SAMPLING_DISABLED（判 FAIL）。
+    try {
+      const dirAgeMs = Date.now() - fs.statSync(dir).mtimeMs;
+      const newestShardMs = shards.reduce((max, shard) => {
+        try { return Math.max(max, fs.statSync(shard.path).mtimeMs); } catch { return max; }
+      }, 0);
+      const newestMs = Math.max(newestShardMs, 0);
+      samplingDisabled = noShards ? dirAgeMs > 24 * 3600 * 1000 : (newestMs > 0 && Date.now() - newestMs > 24 * 3600 * 1000);
+    } catch { samplingDisabled = false; }
   }
   const prevShardMissing = (() => {
     if (!insufficient || !lines.length) return false;
@@ -297,11 +299,16 @@ function evaluateRecoverable(win, options = {}) {
   const forced = lines.filter((row) => row && row.forced === true).length;
   // PM 附注 b（正文本 2a6f086a）：forcedSamples = 因 pid 集合变化或降级恢复而强制真采样的次数，单独给 TR-Q 按环境判断用。
   const forcedSamples = lines.filter((row) => row && (row.forced === true || String(row.cause || '') === 'recovered')).length;
-  const hasForced = forcedSamples > 0;
+  // 卷四① + 返工单 §六②：forced 行从密度分母剔除，但**不再**给「有 forced 就整窗豁免」的假绿。
   const densityDenominator = lines.filter((row) => row && row.forced !== true && String(row.cause || '') !== 'boot').length;
   const densityPct = densityDenominator ? Math.round((realPoints / densityDenominator) * 1000) / 10 : 0;
-  const cadenceVerdict = hasForced ? 'OK' : (densityPct >= 15 && densityPct <= 25 ? 'OK' : 'SAMPLE_CADENCE_BAD');
-  const cadence = { realPoints, forced, forcedSamples, hasForced, densityPct, verdict: cadenceVerdict };
+  // 返工单 §六①④：密度只判下限（<15% 判 BAD）；上限按窗口分支——
+  //   5 分钟窗口（windowSec ≤ 600）仍按 15–25% 双边；2 小时窗口（>600）>25% 只置 denseWarn=true、verdict 仍 OK。
+  const lowerBad = densityPct < 15;
+  const upperBad = windowSec <= 600 && densityPct > 25;
+  const denseWarn = densityPct > 25;
+  const cadenceVerdict = lowerBad || upperBad ? 'SAMPLE_CADENCE_BAD' : 'OK';
+  const cadence = { realPoints, forced, forcedSamples, hasForced: forcedSamples > 0, densityPct, denseWarn, verdict: cadenceVerdict };
 
   const enoughLines = lines.length >= Math.min(300, Math.max(1, Math.round(windowSec)));
   const baseCode = (() => {

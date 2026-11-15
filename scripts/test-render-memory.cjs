@@ -274,5 +274,57 @@ const sampleAt = (iso, mb, extra) => ({ at: iso, pid: 100, type: 'renderer', gue
   check('S6-09 归一后无 cause=interval（卷3 白名单五值）', allRows.every((row) => ['boot', 'sample', 'reused', 'degraded', 'recovered'].includes(String(row.cause || ''))), { total: allRows.length });
 }
 
+/* ── S7 返工单 §六（密度只判下限 + 去 hasForced 豁免 + SAMPLING_DISABLED + 双窗口）── */
+{
+  const mkLines = (total, real, opts) => {
+    const rows = [];
+    const base = Date.parse('2026-11-15T00:00:00.000Z');
+    let realLeft = real;
+    for (let i = 0; i < total; i += 1) {
+      const at = new Date(base + i * 1000).toISOString();
+      const isReal = realLeft > 0 && i % Math.max(1, Math.floor(total / real)) === 0;
+      if (isReal) realLeft -= 1;
+      const row = isReal
+        ? { at, cause: 'sample', sampledFrom: at, workingSetMB: 500 }
+        : { at, cause: 'reused', sampledFrom: new Date(base + (i - 1) * 1000).toISOString(), staleSec: 1, workingSetMB: 500 };
+      if (opts && opts.forced && i === 3) row.forced = true;
+      rows.push(row);
+    }
+    return { lines: rows, firstAt: rows[0].at, lastAt: rows[rows.length - 1].at, coverageSec: total - 1 };
+  };
+
+  // ① 2h 窗口：密度 >25% 只 denseWarn，verdict 仍 OK
+  const win2hHigh = mkLines(400, 160);
+  const rec2hHigh = RM.evaluateRecoverable(win2hHigh, { windowSec: 7200 });
+  check('S7-01 2h 窗口密度 40% → verdict=OK 且 denseWarn=true',
+    rec2hHigh.cadence.verdict === 'OK' && rec2hHigh.cadence.denseWarn === true,
+    { densityPct: rec2hHigh.cadence.densityPct, verdict: rec2hHigh.cadence.verdict, denseWarn: rec2hHigh.cadence.denseWarn });
+
+  // ④ 5 分钟窗口：>25% 仍按双边判 BAD
+  const win5mHigh = mkLines(100, 40);
+  const rec5mHigh = RM.evaluateRecoverable(win5mHigh, { windowSec: 300 });
+  check('S7-02 5 分钟窗口密度 40% → verdict=SAMPLE_CADENCE_BAD（双边）',
+    rec5mHigh.cadence.verdict === 'SAMPLE_CADENCE_BAD' && rec5mHigh.cadence.denseWarn === true,
+    { densityPct: rec5mHigh.cadence.densityPct, verdict: rec5mHigh.cadence.verdict });
+
+  // ② 去掉 hasForced 整窗豁免：密度 5% + 有 forced 行 → 仍判 BAD
+  const winLowForced = mkLines(100, 5, { forced: true });
+  const recLowForced = RM.evaluateRecoverable(winLowForced, { windowSec: 7200 });
+  check('S7-03 密度 5% 且含 forced 行 → 仍 SAMPLE_CADENCE_BAD（无整窗豁免）',
+    recLowForced.cadence.verdict === 'SAMPLE_CADENCE_BAD' && recLowForced.cadence.hasForced === true,
+    { densityPct: recLowForced.cadence.densityPct, verdict: recLowForced.cadence.verdict, hasForced: recLowForced.cadence.hasForced });
+
+  // ③ SAMPLING_DISABLED 真实可达：创建 24h 前的（空）状态目录 → 不靠 force 也判出
+  const dOld = path.join(SB, 'disabled-selftest');
+  fs.rmSync(dOld, { recursive: true, force: true });
+  fs.mkdirSync(dOld, { recursive: true });
+  const old = new Date(Date.now() - 26 * 3600 * 1000);
+  fs.utimesSync(dOld, old, old);
+  const winDisabled = RM.readRenderMemoryWindow(dOld, { atCrash: new Date().toISOString(), windowSec: 300 });
+  check('S7-04 24h 内无任何分片（目录 mtime 26h 前）→ code=SAMPLING_DISABLED 且 fail=true',
+    winDisabled.code === 'SAMPLING_DISABLED' && winDisabled.fail === true,
+    { code: winDisabled.code, fail: winDisabled.fail, samplingDisabled: winDisabled.samplingDisabled });
+}
+
 console.log(`\nR-c1ed F-1 断言：${passed}/${passed + failures.length} PASS`);
 if (failures.length) { console.error(JSON.stringify(failures, null, 2)); process.exit(1); }
