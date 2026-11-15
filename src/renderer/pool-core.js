@@ -387,14 +387,28 @@
   /* ── 验收人（R-62b9 F-accby-1/2/3）──────────────────────────────────── */
 
   /**
-   * 验收人五值枚举（判据=「谁点 + 什么渠道」，只用池加载快照，不读文件）：
-   *   owner        → Owner 本人（by/decidedBy=owner，channel=ui/tty）
-   *   pm_proxy     → PM 代管验收（channel=proxy + recordedBy=pm + basis.proxy 齐）
-   *   pm           → PM 非代管防御态（by=pm 但 channel 不是 proxy）
-   *   pm_incomplete→ 代管验收但缺 basis.proxy（记录不完整，不冒充）
-   *   none         → 未验收（没有验收结论）
-   * pm_signed 只作副标（data-accept-test-gate），**不参与**验收人取值（产品复审 v3 明确语义错位）。
+   * 验收人七值枚举（增补卷-62b9-1 §二，顺序固定、判据自左向右命中即停、不按标签反推）：
+   *   1 owner         by=owner  且 channel∈{ui,tty}                        → 【Owner 验收】
+   *   2 pm_proxy      channel=proxy 且 recordedBy=pm 且 basis.proxy 三字段齐 → 【PM代管验收】
+   *   3 pm            by=pm     且 channel=pm                              → 【PM 验收】
+   *   4 tester        by=tester 且 channel=test                            → 【测试验收】
+   *   5 auto          by=system 且 channel=auto                            → 【自动验收（系统）】
+   *   6 pm_incomplete channel=proxy 但缺 basis.proxy / recordedBy          → 【PM代管·记录不完整】
+   *   7 none          无 accepted 记录                                     → （未验收）
+   * 兼容：旧记录 by=pm 且 channel 缺失 → code=pm、【PM 验收（来源未记）】（不冒充 Owner、不判 none）。
+   * 副标 testGate=pm_signed 只回传给 data-accept-test-gate，**不参与**验收人取值。
    */
+  const ACCEPT_BY_LABELS = {
+    owner: '【Owner 验收】',
+    pm_proxy: '【PM代管验收】',
+    pm: '【PM 验收】',
+    tester: '【测试验收】',
+    auto: '【自动验收（系统）】',
+    pm_incomplete: '【PM代管·记录不完整】',
+    none: '（未验收）'
+  };
+  const ACCEPT_BY_PM_LEGACY = '【PM 验收（来源未记）】';
+
   function acceptByOf(row) {
     const source = row && typeof row === 'object' ? row : {};
     const record = source.acceptanceRecord && typeof source.acceptanceRecord === 'object' ? source.acceptanceRecord : null;
@@ -405,18 +419,32 @@
     const accepted = recordStatus === 'accepted' || decided === 'accepted';
     const at = textOf((record && record.at) || (last && last.at) || '');
     const testGate = textOf((record && record.testGate) || (last && last.testGate) || '');
-    if (!accepted) return { code: 'none', label: '（未验收）', at: '', testGate };
+    const make = (code, legacy) => ({ code, label: legacy || ACCEPT_BY_LABELS[code] || ACCEPT_BY_LABELS.none, at, testGate });
+    if (!accepted) return make('none');
     const channel = textOf((record && record.channel) || (last && last.channel) || '').toLowerCase();
     const by = textOf((record && record.by) || (last && (last.decidedBy || last.actor || last.by)) || '').toLowerCase();
     const recordedBy = textOf((record && record.recordedBy) || (last && last.recordedBy) || '').toLowerCase();
-    const basisProxy = Boolean(((record && record.basis) || (last && last.basis) || {}).proxy);
-    if (channel === 'proxy') {
-      if (recordedBy === 'pm' && basisProxy) return { code: 'pm_proxy', label: 'PM（代管）', at, testGate };
-      return { code: 'pm_incomplete', label: 'PM（代管记录缺依据）', at, testGate };
-    }
-    if (by === 'owner') return { code: 'owner', label: 'Owner（本人）', at, testGate };
-    if (by === 'pm') return { code: 'pm', label: 'PM', at, testGate };
-    return { code: 'none', label: '（未验收）', at, testGate };
+    const proxyBasis = ((record && record.basis) || (last && last.basis) || {}).proxy || null;
+    const basisComplete = Boolean(proxyBasis
+      && textOf(proxyBasis.scope).trim()
+      && textOf(proxyBasis.startedAt).trim()
+      && textOf(proxyBasis.authorization).trim());
+    // ① Owner 本人
+    if (by === 'owner' && (channel === 'ui' || channel === 'tty')) return make('owner');
+    // ② PM 代管（三要素齐）
+    if (channel === 'proxy' && recordedBy === 'pm' && basisComplete) return make('pm_proxy');
+    // ③ PM 直接验收（正常路径，不是防御态）
+    if (by === 'pm' && channel === 'pm') return make('pm');
+    // ①-兼容：旧记录 by=pm 但 channel 缺失 → 仍是 pm（来源未记）
+    if (by === 'pm' && !channel) return make('pm', ACCEPT_BY_PM_LEGACY);
+    // ④ 测试验收
+    if (by === 'tester' && channel === 'test') return make('tester');
+    // ⑤ 自动验收（4657：by=system + channel=auto，不得落 none）
+    if (by === 'system' && channel === 'auto') return make('auto');
+    // ⑥ 代管记录不完整（防御分支）
+    if (channel === 'proxy') return make('pm_incomplete');
+    // ⑦ 其它组合：认不出人就不冒充（保留 by 供详情提示，但取值仍是 none）
+    return make('none');
   }
 
   /** 最近决策时间：decisions[]/ownerReview/acceptanceRecord/各时间戳里最大的 ISO 串。 */
@@ -629,12 +657,19 @@
     const retract = isDefect && acceptState === 'accepted' && retractAllowed(row)
       ? `<button type="button" class="pool-retract" data-bug-retract="${esc(id)}" title="撤回这条自动验收（窗口内可撤回）" aria-label="撤回自动验收 ${esc(id)}">撤回</button>`
       : '';
+    // R-62b9（增补卷-62b9-1 §五）：缺陷池列表在状态徽标旁加同源「验收人」小字徽标，
+    // 文案与池详情逐字一致（都来自 acceptByOf，三处同源、不新增数字统计）。
+    const acceptBy = isDefect ? acceptByOf(row) : null;
+    const acceptByBadge = isDefect && acceptBy && acceptBy.code !== 'none'
+      ? `<span class="pool-accept-by" data-accept-by="${esc(acceptBy.code)}" title="验收人（与池详情同源）">${esc(acceptBy.label)}</span>`
+      : '';
     return `<div class="pool-row kind-${kind}" data-id="${esc(id)}" data-bucket="${bucket}" data-kind="${kind}"${ghost ? ' data-unregistered="1"' : ''}${voided ? ' data-voided="1"' : ''}${acceptAttrs} role="button" tabindex="0" aria-label="${esc(id)} ${esc(title)}" aria-expanded="false">`
       + `<span class="req-type ${kind}" title="${esc(typeLabel)}">${esc(typeLabel)}</span>`
       + `<span class="pool-id">${esc(id)}</span>`
       + `<span class="pool-title" title="${esc(title)}">${esc(title)}</span>`
       + ghost + voided
       + `<span class="pool-state s-${bucket}">${esc(statusLabel)}</span>`
+      + acceptByBadge
       + `<span class="pool-who">${esc(owner)}</span>`
       + retract
       + '</div>';
@@ -930,6 +965,8 @@
     pickTestReport,
     lastDecisionAt,
     acceptByOf,
+    ACCEPT_BY_LABELS,
+    ACCEPT_BY_PM_LEGACY,
     titleOf,
     normalizePoolRow,
     preparePoolRows,
