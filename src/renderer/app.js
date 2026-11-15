@@ -2970,7 +2970,9 @@ function renderDecisionBox(data) {
   const totalDecisions2 = Number.isFinite(ipcDecisions2) && ipcDecisions2 >= 0 ? ipcDecisions2 : openShown;
   const hiddenCount = Math.max(0, totalDecisions2 - openShown);
   if (hiddenCount > 0) {
-    box.innerHTML += `<div class="empty-row decision-hidden-note" data-decision-total="${totalDecisions2}" data-decision-shown="${openShown}" data-decision-hidden="${hiddenCount}">共 ${totalDecisions2} 条待决，显示 ${openShown} 条，另有 ${hiddenCount} 条历史条目不满足七要素未展示；补七要素后自动出现</div>`;
+    // tester 19:36 注记：innerHTML += 会重解析并重建抽屉所有子节点（将来若给行绑事件/草稿状态会丢），
+    // 改用 insertAdjacentHTML('beforeend') 只追加。
+    box.insertAdjacentHTML('beforeend', `<div class="empty-row decision-hidden-note" data-decision-total="${totalDecisions2}" data-decision-shown="${openShown}" data-decision-hidden="${hiddenCount}">共 ${totalDecisions2} 条待决，显示 ${openShown} 条，另有 ${hiddenCount} 条历史条目不满足七要素未展示；补七要素后自动出现</div>`);
   }
 }
 
