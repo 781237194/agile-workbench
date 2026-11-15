@@ -277,7 +277,8 @@ function evaluateRecoverable(win, options = {}) {
     if (sec > 2) {
       // 卷2 §四：gaps 四键 {from,to,sec,reason}
       gapRows.push({ from: String(lines[i - 1].at || ''), to: String(lines[i].at || ''), sec, reason: sec > 10 ? 'GAP_GT_10S' : 'GAP_GT_2S' });
-      if (sec > 10) cumulativeGapSec += sec;
+      // 缺陷 B-cb78：累计缺口必须把**全部**缺口秒数相加（不能只加 >10s 的，否则 4×9s=36s 仍判真 = 假绿）
+      cumulativeGapSec += sec;
     }
   }
   const singleGapsOk = gapRows.every((gap) => gap.sec <= 10);
@@ -301,7 +302,9 @@ function evaluateRecoverable(win, options = {}) {
   }
 
   // 真点密度（卷三 §六 / 卷四①）：真点=sampledFrom===at，排除 boot 与 forced
-  const realPoints = lines.filter((row) => row && row.sampledFrom && String(row.sampledFrom) === String(row.at) && String(row.cause || '') !== 'boot').length;
+  // PM 裁 M-20261115-164553-b59b04：forced 行**分子分母都剔除**——密度只在非强制真采样行上算，
+  // 否则高 forced 窗口 densityPct 虚高（分子含 forced、分母不含）会把 5 分钟窗口假判红。
+  const realPoints = lines.filter((row) => row && row.forced !== true && row.sampledFrom && String(row.sampledFrom) === String(row.at) && String(row.cause || '') !== 'boot').length;
   const forced = lines.filter((row) => row && row.forced === true).length;
   // PM 附注 b（正文本 2a6f086a）：forcedSamples = 因 pid 集合变化或降级恢复而强制真采样的次数，单独给 TR-Q 按环境判断用。
   const forcedSamples = lines.filter((row) => row && (row.forced === true || String(row.cause || '') === 'recovered')).length;
