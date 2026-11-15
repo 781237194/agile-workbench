@@ -1336,43 +1336,6 @@ html[data-theme="light"] .stage-actions .owner-review-proxy { color: #1f5f8b; bo
 .flow-board.compact .flow-edge { flex-basis: 54px; min-width: 54px; }
 .flow-panel .flow-meta { margin-top: 8px; }
 
-/* 提案 */
-.proposal-list { display: flex; flex-direction: column; gap: 6px; }
-.proposal-card { padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 96%, white 4%), var(--panel)); }
-.proposal-card:hover { border-color: var(--line-strong); }
-.proposal-card.is-legacy { border-left: 2px solid var(--gold); background: linear-gradient(180deg, color-mix(in srgb, var(--gold-soft) 55%, var(--panel)), var(--panel)); }
-.legacy-badge { border-color: var(--gold-line); color: var(--gold); }
-.proposal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-.proposal-head h3 { color: var(--text); font-size: 11.5px; font-weight: 650; }
-.proposal-meta { margin-top: 3px; color: var(--dim); font-size: 9px; }
-.proposal-file { margin-top: 5px; color: var(--gold); font-family: var(--mono); font-size: 9px; }
-.proposal-reviews { margin-top: 6px; color: var(--muted); font-size: 9.5px; line-height: 1.7; }
-.proposal-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
-.proposal-actions .ghost, .proposal-actions .primary { height: 22px; padding: 0 7px; font-size: 9px; }
-.proposal-protocol { margin-bottom: 8px; padding: 8px 9px; border: 1px dashed var(--gold-line); border-radius: 7px; background: var(--gold-soft); }
-.protocol-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; color: var(--muted); font-size: 8.5px; line-height: 1.6; }
-.protocol-head b { color: var(--gold); font-weight: 650; }
-.protocol-head span { color: var(--dim); font-size: 8px; }
-.protocol-head code { color: var(--muted); font-family: var(--mono); font-size: 7.5px; }
-.protocol-steps { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 5px; }
-.protocol-step { display: inline-flex; align-items: baseline; gap: 3px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 3px; color: var(--dim); font-size: 7px; line-height: 1.55; }
-.protocol-step i { color: var(--dim); font-style: normal; }
-.protocol-step b { color: var(--muted); font-weight: 500; }
-.protocol-note { margin-top: 5px; color: var(--muted); font-size: 8px; line-height: 1.6; }
-.protocol-note code { color: var(--text); font-family: var(--mono); font-size: 7.5px; }
-.proposal-local-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 6px; padding-top: 5px; border-top: 1px dashed var(--line); }
-.local-flag { padding: 0 4px; border: 1px solid var(--gold-line); border-radius: 3px; color: var(--gold); font-size: 7px; line-height: 1.55; }
-.local-flag.legacy { border-color: var(--gold); background: var(--gold-soft); color: var(--gold-2); }
-.local-step { display: inline-flex; align-items: baseline; gap: 3px; padding: 0 4px; border: 1px solid var(--line-strong); border-radius: 3px; color: var(--dim); font-size: 7px; line-height: 1.55; }
-.local-step i { color: var(--dim); font-style: normal; }
-.local-step.ok { border-color: rgba(95, 213, 163, .38); color: var(--green); }
-.local-step.current { border-color: var(--gold); background: var(--gold-soft); color: var(--gold-2); }
-.local-step.warn { border-color: var(--gold-line); color: var(--gold); }
-.local-step.local { border-color: var(--line-strong); color: var(--muted); }
-.local-step.unknown, .local-step.muted { opacity: .78; }
-.local-arrow { color: var(--line-strong); font-size: 7px; }
-.proposal-note { flex: 1 1 100%; color: var(--dim); font-size: 7.5px; line-height: 1.5; }
-
 /* 文件 */
 .files-panel { min-height: 280px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: color-mix(in srgb, var(--panel) 84%, transparent); }
 .file-toolbar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel-2) 82%, transparent); }

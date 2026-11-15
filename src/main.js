@@ -3603,7 +3603,8 @@ function phaseDerivation(snapshot) {
 }
 
 // ==========================================================================
-// Owner 评审材料（只读）：五类清单，带路径/大小/更新时间/版本；不补造、不写盘。
+// Owner 评审材料（只读）：四类清单，带路径/大小/更新时间/版本；不补造、不写盘。
+// 历史提案数据不再进材料清单；追溯走 proposal:list / proposal:legacy（只读，界面无入口）。
 // ==========================================================================
 const OWNER_MATERIAL_MAX_BYTES = 1024 * 1024;
 const OWNER_ACK_MAX_COMMITS = 5;
@@ -3732,48 +3733,7 @@ function ownerMaterials(project, requirementId) {
     missing: !upstreamRows.length,
     reason: upstreamRows.length ? '' : '未记录：需求分析师 / 产品还没有产出'
   });
-  // 3) 提案：团队工具 P-* 记录（含轮次），项目内 提案/*.md 作为镜像兜底。
-  let proposals = [];
-  const teamName = String(project.teamName || project.name || '').trim();
-  if (teamName && typeof teamTools.listLegacyProposals === 'function') {
-    try {
-      const listed = teamTools.listLegacyProposals(teamName);
-      if (listed && listed.ok && Array.isArray(listed.proposals)) {
-        proposals = listed.proposals.slice(0, 6).map((row) => ({
-          kind: 'proposal',
-          group: 'proposal',
-          id: String(row.id || ''),
-          title: String(row.title || ''),
-          status: String(row.status || ''),
-          author: String(row.author || ''),
-          risk: String(row.risk || ''),
-          rationale: String(row.rationale || ''),
-          at: String(row.createdAt || ''),
-          reviews: Object.values(row.reviews || {}).map((review) => ({
-            role: String((review && review.role) || ''),
-            verdict: String((review && review.verdict) || ''),
-            comment: String((review && review.comment) || '')
-          })),
-          files: Array.isArray(row.files) ? row.files.map((file) => ({ target: String((file && file.target) || ''), size: Number((file && file.size) || 0) })).slice(0, 8) : []
-        }));
-      }
-    } catch { proposals = []; }
-  }
-  if (!proposals.length) {
-    const proposalDocs = readDirFiles(path.join(root, '提案')).map((abs) => ownerFileRecord(root, abs, 'proposal')).filter(Boolean);
-    proposals = proposalDocs.slice(0, 6).map((file) => ({
-      kind: 'file', group: 'proposal', rel: file.rel, name: file.name, size: file.size,
-      mtime: file.mtime, version: file.version, versions: [{ version: file.version, rel: file.rel, size: file.size, mtime: file.mtime }]
-    }));
-  }
-  groups.push({
-    key: 'proposal',
-    label: '提案',
-    items: proposals,
-    missing: !proposals.length,
-    reason: proposals.length ? '' : '未记录：还没有提案'
-  });
-  // 4) 测试报告 / 可测性评审 / 验收报告：最新 vN。
+  // 3) 测试报告 / 可测性评审 / 验收报告：最新 vN。
   const testFiles = [
     ...readDirFiles(path.join(root, '测试人员', '产出')).map((abs) => ownerFileRecord(root, abs, 'test'))
   ].filter(Boolean);
@@ -3785,7 +3745,7 @@ function ownerMaterials(project, requirementId) {
     missing: !testRows.length,
     reason: testRows.length ? '' : '未记录：还没有测试报告'
   });
-  // 5) 最近提交 ≤5。
+  // 4) 最近提交 ≤5。
   const commits = readTeamCommits(project);
   groups.push({
     key: 'commit',

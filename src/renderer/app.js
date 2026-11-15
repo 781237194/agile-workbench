@@ -753,12 +753,7 @@ const legacyUi = {
   lastAction: null,
   // 本机 Owner 记录：只有用户点下 Owner（我）一次点击按钮，才在这里留下 actor；
   // 它只用于界面显示“谁在本机点击”，不冒充后端返回的身份证明。
-  ownerConfirmations: Object.create(null),
-  // 旧协议提案只读镜像：直接读 team.mjs 的 提案/，不再要求先手动 show。
-  legacyProposals: [],
-  proposalsProjectId: null,
-  proposalsAt: 0,
-  proposalsLoading: false
+  ownerConfirmations: Object.create(null)
 };
 
 
@@ -1794,7 +1789,6 @@ function showTab(name, opts = {}) {
   if (name === 'files') loadFiles();
   if (name === 'docs' || name === 'roles' || name === 'flow') loadLegacyDocs();
   if (name === 'flow') { loadGateCheck(); loadGateAudit(); }
-  if (name === 'proposals') renderProposals();
   if (name === 'roles') loadDshTeamStatus();
 }
 
@@ -3388,7 +3382,7 @@ function boardMatchesProject(board, project) {
 
 function boardCountsMarkup(counts) {
   const nums = [
-    ['需求', counts.requirements], ['任务', counts.tasks], ['提案', counts.proposals],
+    ['需求', counts.requirements], ['任务', counts.tasks],
     ['提交', counts.commits], ['回执', counts.receipts], ['文件', counts.files]
   ];
   if (!nums.some(([, n]) => n !== null)) return '';
@@ -3450,7 +3444,6 @@ function renderBoardSummary() {
   const counts = {
     requirements: boardCount(source, 'requirements'),
     tasks: boardCount(source, 'tasks'),
-    proposals: boardCount(source, 'proposals'),
     commits: boardCount(source, 'commits'),
     receipts: boardCount(source, 'receipts'),
     files: boardCount(source, 'files')
@@ -3482,7 +3475,6 @@ function boardPanelMetaHtml(p) {
   const counts = {
     requirements: boardCount(summary, 'requirements'),
     tasks: boardCount(summary, 'tasks'),
-    proposals: boardCount(summary, 'proposals'),
     commits: boardCount(summary, 'commits'),
     receipts: boardCount(summary, 'receipts'),
     files: boardCount(summary, 'files')
@@ -3665,7 +3657,6 @@ function boardPanelCounts(data) {
   return {
     requirements: boardCount(summary, 'requirements'),
     tasks: boardCount(summary, 'tasks'),
-    proposals: boardCount(summary, 'proposals'),
     commits: boardCount(summary, 'commits'),
     receipts: boardCount(summary, 'receipts'),
     files: boardCount(summary, 'files')
@@ -6251,7 +6242,7 @@ const LEGACY_IPC = [
   { ipc: 'requirement:dispatch', fn: 'requirementDispatch', label: 'PM 派单' },
   { ipc: 'task:claim', fn: 'taskClaim', label: '任务认领' },
   { ipc: 'task:done', fn: 'taskDone', label: '任务完成' },
-  { ipc: 'dev:submit', fn: 'devSubmit', label: '开发提交提案' },
+  { ipc: 'dev:submit', fn: 'devSubmit', label: '提交开发产出' },
   { ipc: 'dev:review', fn: 'devReview', label: '开发互审' },
   { ipc: 'dev:apply', fn: 'devApply', label: 'PM 签字 apply' },
   { ipc: 'test:dispatch', fn: 'testDispatch', label: '派测试' },
@@ -8959,10 +8950,10 @@ function legacyActionBody(action, req) {
       const submitRoles = teamRoleIds().filter((id) => ['programmer1', 'programmer2'].includes(id));
       return legacyField('需求', legacyReqSelect('legacy-a-req', ['dev'], selected))
         + legacyField('提交角色', `<select id="legacy-a-role" class="select">${legacyRoleOptions(submitRoles, (selectedReq && selectedReq.dev && selectedReq.dev.claimBy) || 'programmer1')}</select>`)
-        + legacyField('提案标题', '<input id="legacy-a-title" class="input" placeholder="可选">')
+        + legacyField('标题', '<input id="legacy-a-title" class="input" placeholder="可选">')
         + legacyField('目标文件（项目内相对路径）', '<input id="legacy-a-target" class="input" placeholder="site/index.html">')
         + legacyField('暂存内容', '<textarea id="legacy-a-content" class="textarea" placeholder="写入目标文件的完整内容；apply 前只落暂存"></textarea>')
-        + legacyField('提案理由', '<textarea id="legacy-a-rationale" class="textarea" placeholder="为什么改、边界、风险"></textarea>')
+        + legacyField('提交理由', '<textarea id="legacy-a-rationale" class="textarea" placeholder="为什么改、边界、风险"></textarea>')
         + legacyField('风险', '<select id="legacy-a-risk" class="select"><option value="normal">normal</option><option value="sensitive">sensitive</option><option value="critical">critical</option></select>');
     }
     case 'dev-review': {
@@ -9360,9 +9351,10 @@ function legacyOwnerSuccessMarkup(action, req, form, result) {
 }
 
 /**
- * Owner 评审材料：五类（需求正文 / 上游产出 / 提案 / 测试报告 / 最近提交）。
+ * Owner 评审材料：四类（需求正文 / 上游产出 / 测试报告 / 最近提交）。
  * 清单来自主进程 owner:materials（带路径、大小、更新时间、版本），单项读取走 owner:material；
  * 缺失写“未记录”，不可读写“不可读（原因）”，不补造内容；1 MB 上限由主进程校验。
+ * 历史提案数据保留只读通道（proposal:list / proposal:legacy），界面不再提供入口与摘要。
  */
 function ownerMaterialVersionLabel(item) {
   const versions = Array.isArray(item.versions) ? item.versions : [];
@@ -9418,20 +9410,6 @@ async function enhanceOwnerReviewModal(dlg, project, req) {
     catch (e) { status.textContent = '打开失败：' + humanError(e.message); }
   });
 
-  const showProposal = (item) => {
-    setOpen('');
-    versionSel.hidden = true;
-    pathEl.textContent = `提案 ${item.id}（团队状态目录 · 只读摘要）`;
-    const reviews = (item.reviews || []).map((row) => `${roleById(row.role).name}：${row.verdict || '—'}${row.comment ? ' · ' + row.comment : ''}`).join('\n') || '（暂无评审）';
-    const files = (item.files || []).map((file) => file.target || file).filter(Boolean).join('\n') || '（无文件）';
-    preview.textContent = [
-      `${item.id} · ${item.title || ''}`,
-      `作者：${item.author || '—'} ｜ 状态：${item.status || '—'} ｜ 风险：${item.risk || '—'}`,
-      item.at ? `创建：${ownerMaterialTime(item.at)}` : '',
-      '', '涉及文件：', files, '', '理由：', item.rationale || '（未写）', '', '评审：', reviews
-    ].filter((line) => line !== null).join('\n');
-  };
-
   const showCommit = (item) => {
     setOpen('');
     versionSel.hidden = true;
@@ -9466,7 +9444,6 @@ async function enhanceOwnerReviewModal(dlg, project, req) {
   const selectItem = (button, item) => {
     list.querySelectorAll('.owner-material').forEach((el) => el.classList.toggle('active', el === button));
     box._ownerItem = item;
-    if (item.kind === 'proposal') { showProposal(item); return; }
     if (item.kind === 'commit') { showCommit(item); return; }
     const versions = Array.isArray(item.versions) ? item.versions : [];
     if (versions.length > 1) {
@@ -9492,14 +9469,12 @@ async function enhanceOwnerReviewModal(dlg, project, req) {
     if (group.missing) return `${head}<div class="owner-material-missing">${esc(group.reason || '未记录')}</div></div>`;
     const rows = group.items.map((item, idx) => {
       itemsByKey.set(`${group.key}:${idx}`, item);
-      const isProposal = item.kind === 'proposal';
       const isCommit = item.kind === 'commit';
-      const name = isProposal || isCommit ? (item.title || item.id) : item.name;
+      const name = isCommit ? (item.title || item.id) : item.name;
       const meta = [
         item.size ? fmtSize(item.size) : '',
         ownerMaterialTime(item.mtime || item.at),
         ownerMaterialVersionLabel(item),
-        isProposal ? item.status : '',
         isCommit ? item.author : ''
       ].filter(Boolean).join(' · ');
       return `<button type="button" class="owner-material" role="treeitem" data-owner-item="${esc(group.key + ':' + idx)}" title="${esc(item.rel || item.id || '')}">
@@ -9520,7 +9495,7 @@ async function enhanceOwnerReviewModal(dlg, project, req) {
     const trqText = trq
       ? ` ｜ TR-Q：${trq.verdict || '未记录'}${trq.by ? ' · ' + trq.by : ''}${trq.at ? ' · ' + fmtTime(trq.at) : ''}`
       : '';
-    status.textContent = `五类材料 · 缺失 ${missingCount} 类（缺失不补造）${trqText}`;
+    status.textContent = `四类材料 · 缺失 ${missingCount} 类（缺失不补造）${trqText}`;
     const firstButton = list.querySelector('.owner-material');
     if (firstButton) {
       const item = itemsByKey.get(firstButton.dataset.ownerItem);
@@ -9554,7 +9529,7 @@ async function legacyActionModal(action, reqId) {
     dispatch: 'PM 派发开发任务',
     'task-claim': '认领任务',
     'task-done': '完成任务（必须带证据）',
-    'dev-submit': '开发提交提案（旧协议 propose）',
+    'dev-submit': '提交开发产出（内部走旧协议 propose）',
     'dev-review': `${terms.devReview}（旧协议 show + review）`,
     'dev-apply': 'PM 签字并 apply',
     'test-dispatch': 'PM 派测试',
@@ -9911,7 +9886,7 @@ function legacyReqActions(req) {
   } else if (status === 'dev') {
     const owner = dev.claimBy || (req.dispatch && req.dispatch.owner) || 'programmer1';
     if (!dev.claimBy) buttons.push(legacyReqButton('task-claim', '开发认领', req, owner, `task:claim（${roleById(owner).name}）`));
-    else if (!dev.proposal) buttons.push(legacyReqButton('dev-submit', '提交提案', req, owner, `dev:submit（${roleById(owner).name}）`));
+    else if (!dev.proposal) buttons.push(legacyReqButton('dev-submit', '提交开发产出', req, owner, `dev:submit（${roleById(owner).name}）`));
     else if (!dev.peerReview || dev.peerReview.status !== 'approved' || (isQuickTeam() && String(dev.peerReview.by || '') === 'pm')) {
       const author = String((dev.proposal && dev.proposal.author) || owner);
       // Fast 没有程序员B：由测试人员独立复核；PM 在签字 apply 时复核。
@@ -9977,7 +9952,7 @@ function legacyReqMeta(req) {
     ? `TR · ${terms.techReview} ${req.techReview.verdict || '未写'} · ${legacyActorText(req.techReview.by, 'actor ' + (req.techReview.actor || '未记录'))}${req.techReview.comment ? ' · ' + req.techReview.comment : ''}`
     : (isQuickTeam() ? `TR · ${terms.techReview} 未记录` : '');
   const dev = req.dev ? `开发 ${roleById(req.dev.claimBy || (req.dispatch && req.dispatch.owner) || 'programmer1').name}`
-    + `${req.dev.proposal ? ' · 提案 ' + req.dev.proposal.id : ' · 未提交提案'}`
+    + `${req.dev.proposal ? ' · 开发产出 ' + req.dev.proposal.id : ' · 未提交开发产出'}`
     + `${req.dev.peerReview ? ` · ${terms.devReview} ` + req.dev.peerReview.status + ' · ' + legacyActorText(req.dev.peerReview.by, 'actor ' + (req.dev.peerReview.actor || '未记录')) : ''}`
     + `${req.dev.applied ? ' · applied ' + (req.dev.commitId || '') : ''}` : '开发 未记录';
   const test = req.test ? `测试 ${req.test.taskId || '未写'}`
@@ -10173,19 +10148,8 @@ function renderLegacyTeamGate() {
       });
     }
   }
-  const reviews = [];
-  for (const proposal of Array.isArray(p.proposals) ? p.proposals : []) {
-    for (const review of Array.isArray(proposal.reviews) ? proposal.reviews : []) {
-      reviews.push({ proposal, review });
-    }
-  }
-  reviews.sort((a, b) => (Date.parse(b.review.at || 0) || 0) - (Date.parse(a.review.at || 0) || 0));
-  const localRows = reviews.map(({ proposal, review }) => ({
-    title: proposal.title || proposal.id || '未命名提案', at: review.at,
-    by: review.by || review.role, actor: review.actor || review.executor,
-    verdict: review.verdict || review.decision, note: review.comment
-  }));
-  const allRows = [...wfRows, ...localRows]
+  // 评审记录只取工作流需求侧的评审/验收（历史提案数据只走只读通道，不再并入本列表）。
+  const allRows = [...wfRows]
     .filter((row) => row.by || row.actor || row.verdict)
     .sort((a, b) => (Date.parse(b.at || 0) || 0) - (Date.parse(a.at || 0) || 0))
     .slice(0, 8);
@@ -10212,7 +10176,7 @@ function renderLegacyTeamGate() {
   } else {
     receiptLine = '<div class="actor-row"><p>回执尚未读取；在「最近回执」点刷新，只读 <code>回执.jsonl</code>。</p></div>';
   }
-  actorBox.innerHTML = (reviewRows || '<div class="actor-empty">还没有评审记录（工作流需求/本机提案都为空；不会补造 actor）。</div>') + receiptLine;
+  actorBox.innerHTML = (reviewRows || '<div class="actor-empty">还没有评审记录（工作流需求评审/验收为空；不会补造 actor）。</div>') + receiptLine;
   syncBootAllButtons();
 }
 
@@ -12517,334 +12481,6 @@ async function openMembersModal() {
   });
 }
 
-/* ── 提案 ─────────────────────────────────────────────── */
-
-const PROTOCOL_STEPS = ['propose', 'show', 'review', 'sign', 'apply'];
-
-function proposalIsLegacy(proposal) {
-  return Boolean(proposal && (proposal.protocol === 'legacy' || proposal.legacyId));
-}
-
-function legacyProposalOrder(proposal) {
-  const x = proposal || {};
-  const stage = String(x.stage || '').toLowerCase();
-  const legacyStatus = String(x.legacyStatus || '').toLowerCase();
-  const status = String(x.status || '').toLowerCase();
-  const rank = { proposed: 1, shown: 2, reviewed: 3, review: 3, signed: 4, approved: 4, applied: 5 };
-  let order = rank[stage] || 0;
-  order = Math.max(order, rank[legacyStatus] || 0, rank[status] || 0);
-  if (Array.isArray(x.reviews) && x.reviews.length) order = Math.max(order, 3);
-  if (x.signature) order = Math.max(order, 4);
-  if (x.applied) order = Math.max(order, 5);
-  return Math.max(1, Math.min(5, order));
-}
-
-function legacyProposalSteps(proposal) {
-  const order = legacyProposalOrder(proposal);
-  return PROTOCOL_STEPS.map((key, index) => {
-    const step = index + 1;
-    return {
-      key,
-      state: step <= order ? 'ok' : (step === order + 1 ? 'current' : 'unknown'),
-      text: step <= order ? '已执行' : (step === order + 1 ? '当前' : '待执行'),
-      title: `旧协议 ${key}：${step <= order ? '已执行' : (step === order + 1 ? '当前阶段' : '尚未执行')}；真相在 team.mjs，界面只读镜像`
-    };
-  });
-}
-
-function legacyProposalStageText(proposal) {
-  const x = proposal || {};
-  const legacyStatus = String(x.legacyStatus || '').toLowerCase();
-  const status = String(x.status || '').toLowerCase();
-  if (legacyStatus === 'rejected' || status === 'rejected') return '已拒绝';
-  const labels = ['已提案', '已展示', '已评审', '已签字', '已应用'];
-  return labels[legacyProposalOrder(x) - 1] || '状态未记录';
-}
-
-function proposalLocalSteps(proposal) {
-  const x = proposal || {};
-  const reviews = Array.isArray(x.reviews) ? x.reviews : [];
-  const signed = Boolean(x.signature);
-  return [
-    { key: 'propose', text: x.createdAt ? '已创建' : '未记录', state: x.createdAt ? 'ok' : 'unknown', title: '工作台 proposal:create 写入本地库；不是旧协议 propose' },
-    { key: 'show', text: '本地详情', state: 'local', title: '本页直接展示本地提案详情；没有调用旧协议 show' },
-    { key: 'review', text: reviews.length ? `${reviews.length} 条评审` : '待评审', state: reviews.length ? 'ok' : 'warn', title: '工作台 proposal:review 写本地 reviews；不是旧协议 review' },
-    { key: 'sign', text: signed ? (x.signature.decision === 'approved' ? '已签通过' : '已签拒绝') : '未签字', state: signed ? 'ok' : 'warn', title: '工作台 proposal:sign 写本地 signature；不是旧协议 sign' },
-    { key: 'apply', text: x.applied ? '已应用' : '未应用', state: x.applied ? 'ok' : 'muted', title: '工作台 proposal:apply 写文件并备份；不是旧协议 apply' }
-  ];
-}
-
-function renderProposalProtocol(proposals) {  const box = $('#proposal-protocol');
-  if (!box) return;
-  const items = Array.isArray(proposals) ? proposals : [];
-  const legacy = items.filter(proposalIsLegacy).length;
-  const local = items.length - legacy;
-  const head = legacy
-    ? `<b>旧协议镜像 ${legacy} 条 · 本地提案 ${local} 条。</b><span>标「旧协议」的卡片来自 team.mjs 的 propose→show→review→sign→apply；标「本地」的卡片不是旧协议。</span>`
-    : `<b>当前没有旧协议镜像；下面 ${local} 条是本地提案，不是旧协议 propose/show/review/sign/apply。</b><span>旧协议五步在本页未观测，不把本地评审/签字/应用回填成旧协议状态。</span>`;
-  box.innerHTML = `<div class="protocol-head">${head}</div>
-    <div class="protocol-steps">${PROTOCOL_STEPS.map((step) => `<span class="protocol-step" title="旧协议 ${step}：有「旧协议」镜像卡片时按卡片 stage 显示；没有镜像就标未观测"><i>${step}</i><b>${legacy ? '见卡片' : '未观测'}</b></span>`).join('<span class="local-arrow" aria-hidden="true">›</span>')}</div>
-    <p class="protocol-note">${legacy
-      ? '「旧协议」卡片的状态来自 team.mjs 提案文件的只读镜像（proposal:legacy），本地 <code>proposal:*</code> 不能改它们；点卡片里的「刷新旧协议状态」才会重新 show。'
-      : '旧协议状态没有只读接口，所以五个旧阶段统一标“未观测”，不把本地评审/签字/应用回填成旧协议回执。本地 proposal:* 会在应用前备份原文件。'}</p>`;
-}
-
-function legacyProposalView(item) {
-  const reviews = Object.entries(item.reviews || {}).map(([role, row]) => ({
-    role,
-    verdict: row && row.verdict ? row.verdict : 'unknown',
-    comment: String((row && (row.comments || row.comment)) || '').slice(0, 600)
-  }));
-  const signatures = Object.entries(item.signatures || {});
-  const pmSig = signatures.find(([role]) => role === 'pm');
-  const applied = Boolean(item.commitId);
-  const legacyStatus = String(item.status || '').toLowerCase();
-  const status = applied ? 'applied'
-    : legacyStatus === 'rejected' ? 'rejected'
-      : (signatures.length && signatures.every(([, row]) => row && row.decision === 'approve')) || legacyStatus === 'approved' ? 'approved'
-        : 'review';
-  const stage = applied ? 'applied'
-    : status === 'approved' ? 'signed'
-      : reviews.length ? 'reviewed' : 'proposed';
-  return {
-    id: item.id,
-    legacyId: item.id,
-    protocol: 'legacy',
-    legacyStatus,
-    status,
-    stage,
-    title: item.title || item.id,
-    author: item.author || 'pm',
-    hash: item.proposalHash || '',
-    fileRel: (item.files && item.files[0] && item.files[0].target) || '',
-    fileSize: (item.files && item.files[0] && item.files[0].size) || 0,
-    files: item.files || [],
-    reviews,
-    signature: pmSig ? { decision: pmSig[1].decision === 'approve' ? 'approved' : 'rejected', note: String(pmSig[1].note || '') } : null,
-    applied,
-    commitId: item.commitId || '',
-    createdAt: item.createdAt || '',
-    rationale: item.rationale || '',
-    risk: item.risk || 'normal'
-  };
-}
-
-/** 旧协议提案只读列表：打开提案页/切项目时自动拉一次，失败不影响本地提案。 */
-async function loadLegacyProposals(force = false) {
-  const p = activeProject();
-  if (!p || !window.workbench || typeof window.workbench.proposalList !== 'function') return;
-  if (legacyUi.proposalsLoading) return;
-  if (!force && legacyUi.proposalsProjectId === p.id && Date.now() - legacyUi.proposalsAt < 12000) return;
-  legacyUi.proposalsLoading = true;
-  try {
-    const r = await window.workbench.proposalList({ projectId: p.id });
-    if (!activeProject() || activeProject().id !== p.id) return;
-    legacyUi.proposalsProjectId = p.id;
-    legacyUi.proposalsAt = Date.now();
-    legacyUi.legacyProposals = (r && r.ok && Array.isArray(r.proposals))
-      ? r.proposals.map(legacyProposalView)
-      : [];
-    renderProposals();
-  } catch {
-    legacyUi.legacyProposals = [];
-  } finally {
-    legacyUi.proposalsLoading = false;
-  }
-}
-
-function renderProposals() {
-  const p = activeProject();
-  const box = $('#proposals-list');
-  const summary = $('#proposal-summary');
-  if (!box) return;
-  if (!p) {
-    renderProposalProtocol([]);
-    if (summary) summary.textContent = '';
-    box.innerHTML = emptyView({
-      mark: '✎',
-      title: '先选择一个项目',
-      text: '提案会绑定项目内真实文件，评审和 PM 签字后才允许应用。',
-      action: '<button class="primary small" type="button" data-open-new-project>＋ 新建项目</button>'
-    });
-    return;
-  }
-  const localItems = Array.isArray(p.proposals) ? p.proposals : [];
-  // 旧协议提案自动并入：不需要先点一次 show 才能看到；失败只影响这一块。
-  const legacyItems = (legacyUi.proposalsProjectId === p.id ? legacyUi.legacyProposals : [])
-    .filter((x) => !localItems.some((y) => y.id === x.id));
-  const items = [...legacyItems, ...localItems];
-  renderProposalProtocol(items);
-  const legacyCount = items.filter(proposalIsLegacy).length;
-  if (legacyUi.proposalsProjectId !== p.id || Date.now() - legacyUi.proposalsAt > 12000) loadLegacyProposals();
-  if (summary) {
-    summary.textContent = items.length
-      ? `${items.length} 个提案 · ${items.filter((x) => x.status === 'review').length} 个待处理`
-        + (legacyCount ? ` · ${legacyCount} 个旧协议镜像` : ' · 全部为本地提案')
-      : '';
-  }
-  if (!items.length) {
-    box.innerHTML = emptyView({
-      mark: '✎',
-      title: '还没有本地提案或旧协议镜像',
-      text: '本地提案绑定项目内真实文件，应用前会先备份；旧协议提案只有调用 proposal:legacy 后才会镜像到这里。',
-      action: '<button class="primary small" type="button" data-open-proposal>＋ 新提案</button>'
-    });
-    return;
-  }
-  const labels = { review: '评审中', approved: '已通过', rejected: '已拒绝' };
-  box.innerHTML = items.map((x) => {
-    const legacy = proposalIsLegacy(x);
-    const steps = legacy ? legacyProposalSteps(x) : proposalLocalSteps(x);
-    const stageText = legacy ? legacyProposalStageText(x) : (labels[x.status] || x.status);
-    return `
-    <article class="proposal-card${legacy ? ' is-legacy' : ''}" data-proposal-protocol="${legacy ? 'legacy' : 'local'}">
-      <div class="proposal-head"><h3>${esc(x.title)}</h3><span class="badge ${legacy ? 'legacy-badge' : ''}">${legacy ? '旧协议 · ' : ''}${esc(stageText)}</span></div>
-      <div class="proposal-meta">${legacy ? '旧协议镜像' : '本地提案'} · 作者：${esc(roleById(x.author).name)} · ${esc(x.id)} · ${esc(String(x.hash || '').slice(0, 10) || '—')}</div>
-      <div class="proposal-file">${esc(x.fileRel)} · ${x.fileSize} B</div>
-      <div class="proposal-reviews">${(x.reviews || []).map((r) => `${esc(roleById(r.role).name)}：${r.verdict === 'approve' ? '通过' : '拒绝'} · ${esc(r.comment)}`).join('<br>') || '暂无评审'}<br>${x.signature ? `PM 签字：${x.signature.decision === 'approved' ? '通过' : '拒绝'}${x.signature.note ? ' · ' + esc(x.signature.note) : ''}` : '未签字'}${x.applied ? `<br>已应用：${esc(x.commitId || '提交未记录')}` : ''}</div>
-      <div class="proposal-local-flow${legacy ? ' is-legacy' : ''}" title="${legacy ? '旧协议镜像：propose/show/review/sign/apply 状态来自 team.mjs' : '以下五步是工作台本地 proposal:* 状态，不是旧协议 propose/show/review/sign/apply'}">
-        <span class="local-flag${legacy ? ' legacy' : ''}">${legacy ? '旧协议' : '本地'}</span>
-        ${steps.map((step) => `<span class="local-step ${step.state}" title="${esc(step.title)}"><i>${step.key}</i>${esc(step.text)}</span>`).join('<span class="local-arrow" aria-hidden="true">›</span>')}
-      </div>
-      <div class="proposal-actions">
-        ${legacy
-          ? `<button class="ghost" type="button" data-proposal-legacy-show="${esc(x.legacyId || x.id)}" ${(p.sessions || {}).pm ? '' : 'disabled'} title="${(p.sessions || {}).pm ? '用 PM 会话调用 proposal:legacy show，重新读取 team.mjs 状态；失败会明说' : 'PM 没有 DSH 会话，不能调用旧协议 show'}">刷新旧协议状态</button><span class="proposal-note">只读镜像；评审/签字/应用必须走 team.mjs（proposal:legacy），本地 proposal:* 不能改</span>`
-          : `${x.status === 'review' ? '<button class="ghost" type="button" data-proposal-review="' + esc(x.id) + '">评审</button>' : ''}
-        ${!x.signature && x.status === 'review' && (x.reviews || []).some((r) => r.verdict === 'approve') ? '<button class="ghost" type="button" data-proposal-sign="' + esc(x.id) + '">PM 签字</button>' : ''}
-        ${x.status === 'approved' && x.stagedContent !== null && !x.applied ? '<button class="primary small" type="button" data-proposal-apply="' + esc(x.id) + '">应用提案</button>' : ''}
-        ${x.applied ? '<button class="ghost" type="button" data-proposal-rollback="' + esc(x.id) + '">回滚</button>' : ''}`}
-      </div>
-    </article>`;
-  }).join('');
-
-  box.querySelectorAll('[data-proposal-review]').forEach((b) => b.addEventListener('click', () => openReviewModal(b.dataset.proposalReview)));
-  box.querySelectorAll('[data-proposal-sign]').forEach((b) => b.addEventListener('click', () => openSignModal(b.dataset.proposalSign)));
-  box.querySelectorAll('[data-proposal-apply]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm('应用提案并写入文件？会先备份原文件。')) return;
-    try {
-      await applyState(await window.workbench.proposalApply({ projectId: p.id, proposalId: b.dataset.proposalApply }));
-      renderProposals();
-      toast('提案已应用', 'ok');
-    } catch (e) { toast('应用失败：' + e.message, 'bad'); }
-  }));
-  box.querySelectorAll('[data-proposal-rollback]').forEach((b) => b.addEventListener('click', async () => {
-    if (!confirm('回滚这次提交？')) return;
-    try {
-      await applyState(await window.workbench.proposalRollback({ projectId: p.id, proposalId: b.dataset.proposalRollback }));
-      renderProposals();
-      toast('已回滚', 'ok');
-    } catch (e) { toast('回滚失败：' + e.message, 'bad'); }
-  }));
-  box.querySelectorAll('[data-proposal-legacy-show]').forEach((b) => b.addEventListener('click', () => refreshLegacyProposal(b.dataset.proposalLegacyShow)));
-}
-
-/** 旧协议 show：只读刷新 team.mjs 状态并镜像；失败原样报错，不回退成本地成功。 */
-async function refreshLegacyProposal(proposalId) {
-  const p = activeProject();
-  if (!p) return;
-  const role = 'pm';
-  const sessionId = (p.sessions || {})[role] || '';
-  if (!sessionId) { toast('PM 没有 DSH 会话：不能调用旧协议 show', 'bad'); return; }
-  const api = window.workbench && (window.workbench.proposalLegacyShow || window.workbench.proposalLegacy);
-  if (typeof api !== 'function') { toast('preload 没有 proposal:legacy：读不到旧协议状态', 'bad'); return; }
-  try {
-    const r = await api({ projectId: p.id, action: 'show', role, sessionId, proposalId });
-    if (r && r.ok === false) throw new Error(r.message || r.code || '旧协议 show 失败');
-    if (r && r.state) { state = r.state; render(); } else { await refresh(); }
-    renderProposals();
-    const stage = String((r && (r.stage || (r.proposal && r.proposal.stage))) || '');
-    toast('旧协议状态已刷新' + (stage ? '：' + stage : ''), 'ok');
-  } catch (e) {
-    toast('旧协议状态刷新失败：' + humanError(e.message), 'bad');
-  }
-}
-
-function openProposalModal() {
-  const p = activeProject();
-  if (!p) { openNewProject(); return; }
-  const wrap = document.createElement('div');
-  wrap.innerHTML = `
-    <label class="field"><span><b>标题</b></span><input id="pr-title" class="input" placeholder="例如：首页信息架构提案"></label>
-    <div class="form-row">
-      <label class="field" style="flex:1"><span><b>作者角色</b></span><select id="pr-author" class="select">${teamRoles(p).map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('')}</select></label>
-      <label class="field" style="flex:1"><span><b>项目内文件</b></span><input id="pr-file" class="input" placeholder="例如 产品/方案.md"></label>
-    </div>
-    <label class="field"><span><b>新内容（可选）</b></span><textarea id="pr-content" class="textarea" placeholder="填写后会作为待应用内容；PM 签字后可 apply，原文件先备份"></textarea></label>
-    <p class="hint">文件可以已存在，也可以由新内容创建；只允许当前项目内路径。</p>
-    <div class="modal-error"></div>`;
-  openModal({
-    title: '新提案', subtitle: p.name, icon: '✎', body: wrap, width: 600,
-    actions: [
-      { label: '取消', kind: 'ghost', onClick: ({ close }) => close() },
-      { label: '创建提案', kind: 'primary', onClick: async ({ close, error }) => {
-        try {
-          const payload = { projectId: p.id, title: wrap.querySelector('#pr-title').value, author: wrap.querySelector('#pr-author').value, fileRel: wrap.querySelector('#pr-file').value };
-          const content = wrap.querySelector('#pr-content').value;
-          if (content) payload.content = content;
-          const r = await window.workbench.proposalCreate(payload);
-          await applyState(r);
-          close();
-          renderProposals();
-          toast('提案已创建', 'ok');
-        } catch (e) { error(e.message); }
-      } }
-    ]
-  });
-}
-
-function openReviewModal(proposalId) {
-  const p = activeProject();
-  const proposal = (p?.proposals || []).find((x) => x.id === proposalId);
-  if (!p || !proposal) return;
-  const wrap = document.createElement('div');
-  wrap.innerHTML = `
-    <label class="field"><span><b>评审角色</b></span><select id="rv-role" class="select">${teamRoles(p).filter((r) => r.id !== proposal.author).map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('')}</select></label>
-    <label class="field"><span><b>结论</b></span><select id="rv-verdict" class="select"><option value="approve">通过</option><option value="reject">拒绝</option></select></label>
-    <label class="field"><span><b>理由</b></span><textarea id="rv-comment" class="textarea" maxlength="600" placeholder="必须写具体理由"></textarea></label>
-    <div class="modal-error"></div>`;
-  openModal({
-    title: '评审提案', subtitle: proposal.title, icon: '◈', body: wrap, width: 570,
-    actions: [
-      { label: '取消', kind: 'ghost', onClick: ({ close }) => close() },
-      { label: '提交评审', kind: 'primary', onClick: async ({ close, error }) => {
-        try {
-          const r = await window.workbench.proposalReview({ projectId: p.id, proposalId, role: wrap.querySelector('#rv-role').value, verdict: wrap.querySelector('#rv-verdict').value, comment: wrap.querySelector('#rv-comment').value });
-          await applyState(r);
-          close();
-          renderProposals();
-          toast('评审已记录', 'ok');
-        } catch (e) { error(e.message); }
-      } }
-    ]
-  });
-}
-
-function openSignModal(proposalId) {
-  const p = activeProject();
-  const proposal = (p?.proposals || []).find((x) => x.id === proposalId);
-  if (!p || !proposal) return;
-  const wrap = document.createElement('div');
-  wrap.innerHTML = `
-    <label class="field"><span><b>签字决定</b></span><select id="sg-decision" class="select"><option value="approved">通过</option><option value="rejected">拒绝</option></select></label>
-    <label class="field"><span><b>备注</b></span><textarea id="sg-note" class="textarea" maxlength="500"></textarea></label>
-    <div class="modal-error"></div>`;
-  openModal({
-    title: 'PM 签字', subtitle: proposal.title, icon: '✎', body: wrap, width: 540,
-    actions: [
-      { label: '取消', kind: 'ghost', onClick: ({ close }) => close() },
-      { label: '签字', kind: 'primary', onClick: async ({ close, error }) => {
-        try {
-          const r = await window.workbench.proposalSign({ projectId: p.id, proposalId, decision: wrap.querySelector('#sg-decision').value, note: wrap.querySelector('#sg-note').value });
-          await applyState(r);
-          close();
-          renderProposals();
-          toast('签字已记录', 'ok');
-        } catch (e) { error(e.message); }
-      } }
-    ]
-  });
-}
-
 /* ── 文件树 ───────────────────────────────────────────── */
 
 const FILE_KIND = {
@@ -15014,8 +14650,7 @@ function bind() {
   $('#btn-team-members')?.addEventListener('click', openMembersModal);
   $('#btn-team-project')?.addEventListener('click', () => setDrawer('project'));
 
-  // 提案 / 文件
-  $('#btn-proposal-add')?.addEventListener('click', openProposalModal);
+  // 文件
   $('#btn-files-refresh')?.addEventListener('click', loadFiles);
   $('.file-toolbar')?.addEventListener('click', (e) => {
     const tool = e.target.closest('[data-file-tool]')?.dataset.fileTool;
@@ -15302,7 +14937,6 @@ function bind() {
     if (!(target instanceof Element)) return;
     if (target.closest('[data-open-new-project]')) { e.preventDefault(); setWorkspacePop(false); openNewProject(); return; }
     if (target.closest('[data-open-task]')) { e.preventDefault(); openTaskModal(); return; }
-    if (target.closest('[data-open-proposal]')) { e.preventDefault(); openProposalModal(); return; }
     if (target.closest('[data-open-restore]')) { e.preventDefault(); setWorkspacePop(false); openRestoreModal(); return; }
     if (target.closest('[data-open-project-folder]')) { e.preventDefault(); openProjectFolder(); }
   });
