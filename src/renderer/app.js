@@ -3063,20 +3063,15 @@ function decisionApplyCounts(counts) {
     box.dataset.unread = String(unread);
     box.dataset.open = String(open);
   }
-  const pillCount = $('#decision-box-count');
-  if (pillCount) {
-    pillCount.textContent = String(unread);
-    pillCount.setAttribute('data-unread', String(unread));
-    pillCount.className = 'decision-pill-count' + (unread ? '' : ' zero');
-  }
+  // R-5016 §二（PM 19:21 约束）：胶囊数字 = ownerPendingCounts().decisions，只由 refreshOwnerPendingCounts() 写；
+  // 这里不再把 decisionAckSend 的 unread 写进胶囊（回执瞬间会闪成另一个口径）。
   const unreadEl = $('#decision-box-unread');
   if (unreadEl) {
     unreadEl.textContent = `待决 ${unread}`;
     unreadEl.setAttribute('data-unread', String(unread));
     unreadEl.className = 'badge ' + (unread ? 'badge-pending' : 'muted-badge');
   }
-  const drawerCount = $('#decision-box-drawer-unread');
-  if (drawerCount) { drawerCount.textContent = `待决 ${unread}`; drawerCount.setAttribute('data-unread', String(unread)); }
+  // 抽屉顶部「待决」同理：只由 IPC decisions 写（tester 2026-11-15 19:25 复核发现的第二写者，已删）。
   const drawer = $('#decision-box-drawer');
   if (drawer) { drawer.dataset.unread = String(unread); drawer.dataset.open = String(open); }
 }
