@@ -1,4 +1,4 @@
-# R-eca0 F1/AC1/AC7：唯一原生入口——Win32 GDI 抓屏。
+﻿# R-eca0 F1/AC1/AC7：唯一原生入口——Win32 GDI 抓屏。
 # 只读：仅 GetDC/BitBlt 取像素；不产生任何输入事件、不改变窗口状态。
 # 参数（stdin JSON）：{op:'probe'|'focus'|'windowstate'|'ready'|'capture', mode:'fullscreen'|'window',
 #   out:'D:\\...png', window:'标题片段', format:'raw'|'png', rect:[x,y,w,h]}
