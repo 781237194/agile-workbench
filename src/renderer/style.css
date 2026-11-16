@@ -4776,15 +4776,47 @@ html[data-style="tech"][data-theme="dark"] body::before {
   z-index: 0;
   background-image:
     linear-gradient(rgba(79,209,255,.07) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(79,209,255,.07) 1px, transparent 1px);
-  background-size: 44px 44px;
-  animation: awbThemeGridDrift 20s linear infinite;
+    linear-gradient(90deg, rgba(79,209,255,.07) 1px, transparent 1px),
+    radial-gradient(900px 520px at 78% -10%, rgba(79, 209, 255, .16), transparent 70%),
+    radial-gradient(700px 420px at 8% 108%, rgba(120, 110, 255, .14), transparent 70%);
+  background-size: 46px 46px, 46px 46px, auto, auto;
+  animation: awbThemeGridDrift 26s linear infinite;
 }
 @keyframes awbThemeGridDrift {
-  from { background-position: 0 0, 0 0; }
-  to { background-position: 0 44px, 44px 0; }
+  from { background-position: 0 0, 0 0, 0 0, 0 0; }
+  to { background-position: 0 46px, 46px 0, 0 0, 0 0; }
 }
 /* 粒子画布：只在科技档且特效开启时由 app.js 插入并绘制 */
+
+/* R-fe90 P1 批（3052）：anime 点阵+光晕 / glass 彩色底光（原型 L247–276） */
+html[data-style="anime"][data-theme="dark"] body::before {
+  content: '';
+  position: fixed;
+  left: 0; right: 0; top: var(--titlebar-h); bottom: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    radial-gradient(rgba(255, 79, 163, .22) 1.2px, transparent 1.2px),
+    radial-gradient(rgba(255, 79, 163, .22) 1.2px, transparent 1.2px),
+    radial-gradient(760px 460px at 82% -8%, rgba(255, 79, 163, .22), transparent 70%),
+    radial-gradient(680px 400px at 6% 106%, rgba(169, 155, 255, .16), transparent 70%);
+  background-size: 16px 16px, 16px 16px, auto, auto;
+  background-position: 0 0, 8px 8px, 0 0, 0 0;
+}
+html[data-style="glass"][data-theme="dark"] body::before {
+  content: '';
+  position: fixed;
+  left: 0; right: 0; top: var(--titlebar-h); bottom: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    radial-gradient(900px 560px at 80% -12%, rgba(79, 209, 255, .55), transparent 62%),
+    radial-gradient(760px 480px at 12% 108%, rgba(255, 122, 200, .4), transparent 64%),
+    radial-gradient(700px 420px at 55% 55%, rgba(124, 240, 200, .32), transparent 66%);
+  background-size: auto, auto, auto;
+  filter: blur(34px) saturate(1.2);
+}
+
 html[data-style="tech"][data-theme="dark"] #awb-theme-particles {
   position: fixed;
   left: 0; right: 0; top: var(--titlebar-h); bottom: 0;

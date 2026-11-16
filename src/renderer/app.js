@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -951,17 +951,20 @@ function awbThemeFxSeed() {
   AWB_THEME_FX.parts = Array.from({ length: count }, () => ({
     x: Math.random() * w,
     y: Math.random() * h,
-    r: Math.random() * 1.6 + 0.6,
+    r: 0.9 + Math.random() * 2.1,          // P1：r ∈ [0.9, 3.0]（原型）
+    alpha: 0.16 + Math.random() * 0.40,    // P1：逐粒 alpha ∈ [0.16, 0.56]
     vx: (Math.random() - 0.5) * 0.22,
     vy: (Math.random() - 0.5) * 0.22
   }));
+  AWB_THEME_FX.composite = 'lighter';
 }
 
 function awbThemeFxDraw() {
   const { ctx, canvas } = AWB_THEME_FX;
   if (!ctx || !canvas) return;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = 'rgba(79,209,255,.85)';
+  ctx.globalCompositeOperation = 'lighter';   // P1：发光叠加（原型 lighter）
+  AWB_THEME_FX.composite = 'lighter';
   for (const p of AWB_THEME_FX.parts) {
     p.x += p.vx;
     p.y += p.vy;
@@ -971,6 +974,7 @@ function awbThemeFxDraw() {
     if (p.y > canvas.height + 4) p.y = -4;
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(79, 209, 255, ' + (p.alpha != null ? p.alpha : 0.3).toFixed(3) + ')';  // P1：逐粒 alpha
     ctx.fill();
   }
 }
@@ -16249,12 +16253,20 @@ window.__themeLook = function () {
     panelBackdrop: panel.backdropFilter || "none",
     brandBackground: (pick(".brand-mark") || {}).backgroundImage || "", brandHasGlow: String((pick(".brand-mark") || {}).boxShadow || "").includes("px"),
     primaryBackground: (pick(".primary") || {}).backgroundImage || "", glowCount,
+    bgLayers: (function () { try { var bg = String(getComputedStyle(document.body, "::before").backgroundImage || ""); if (!bg || bg === "none") return 0; var depth = 0, layers = 1; for (var i = 0; i < bg.length; i += 1) { var ch = bg.charAt(i); if (ch === "(") depth += 1; else if (ch === ")") depth -= 1; else if (ch === "," && depth === 0) layers += 1; } return layers; } catch (e) { return 0; } })(),
+    bgImage: (function () { try { return String(getComputedStyle(document.body, "::before").backgroundImage).slice(0, 240); } catch (e) { return ""; } })(),
+    bgSize: (function () { try { return String(getComputedStyle(document.body, "::before").backgroundSize); } catch (e) { return ""; } })(),
+    bgAnimation: (function () { try { return String(getComputedStyle(document.body, "::before").animationDuration || "none"); } catch (e) { return "none"; } })(),
+    bgFilter: (function () { try { return String(getComputedStyle(document.body, "::before").filter || "none"); } catch (e) { return "none"; } })(),
   };
 };
 window.__themeFx = function () {
   const parts = (typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.parts) ? AWB_THEME_FX.parts.length : 0;
   const st = typeof window.__themeState === "function" ? window.__themeState() : {};
-  return { particleCount: parts, canvas: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.canvas && document.body.contains(AWB_THEME_FX.canvas)), running: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.running), idle: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.idle), effectLevel: st.effectLevel || "", fx: st.fx || null };
+  const P = (typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.parts) ? AWB_THEME_FX.parts : [];
+  const rs = P.map((p) => p.r); const al = P.map((p) => p.alpha);
+  const composite = (typeof AWB_THEME_FX !== "undefined") ? String((AWB_THEME_FX.composite || (AWB_THEME_FX.ctx ? AWB_THEME_FX.ctx.globalCompositeOperation : ""))) : "";
+  return { particleCount: parts, rMin: rs.length ? Math.min.apply(null, rs) : 0, rMax: rs.length ? Math.max.apply(null, rs) : 0, alphaMin: al.length ? Math.min.apply(null, al) : 0, alphaMax: al.length ? Math.max.apply(null, al) : 0, composite, canvas: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.canvas && document.body.contains(AWB_THEME_FX.canvas)), running: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.running), idle: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.idle), effectLevel: st.effectLevel || "", fx: st.fx || null };
 };
 window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /* ignore */ }
   // R-fe90 F-7：手工降级档来自主进程 ui.effectLevel；读不到按 full（不阻断界面）。
