@@ -3284,6 +3284,7 @@ function renderDecisionFloat(data) {
 }
 
 function renderDecisionBox(data) {
+  try { const __db = document.querySelector("#decision-box"); if (__db) __db.setAttribute("data-decision-ready", "0"); } catch (e) {}
   const box = $('#decision-box-drawer');
   const unread = $('#decision-box-drawer-unread');
   if (!box) return;
@@ -16237,6 +16238,48 @@ function clampFlowPanel() {
   const bootResolved = themeResolve({ storageValue: themeReadStorage(), search: location.search });
   applyThemeState(bootResolved, { persist: bootResolved.source !== 'url' });
   try { /* P0 批（3052）：只读视觉探针——断言读数值而不是只比截图；不写任何状态。 */
+/* R-c72a F1：交互预算探针（只记录，不改业务）。mark/measure 用 performance.now，report 走 core 统一判定 + 落盘。 */
+const AWB_UI_PERF = { marks: new Map(), samples: { click: [], list: [], modal: [], scrollFrame: [] } };
+function awbUiPerfBucket(name) {
+  const raw = String(name || "");
+  const key = raw.split(":")[0];
+  if (AWB_UI_PERF.samples[key]) return key;
+  const alias = { modal: "modal", dialog: "modal", scroll: "scrollFrame", frame: "scrollFrame", list: "list", click: "click" };
+  return alias[key] || "click";
+}
+window.__uiPerf = {
+  mark(name) { try { AWB_UI_PERF.marks.set(String(name), performance.now()); } catch (e) {} return true; },
+  measure(name, startMark) {
+    try {
+      const key = String(startMark || name);
+      const t0 = AWB_UI_PERF.marks.has(key) ? AWB_UI_PERF.marks.get(key) : null;
+      if (t0 == null) return null;
+      const ms = Math.round((performance.now() - t0) * 1000) / 1000;
+      const bucket = awbUiPerfBucket(name);
+      AWB_UI_PERF.samples[bucket].push(ms);
+      return ms;
+    } catch (e) { return null; }
+  },
+  async report(caseName, opts) {
+    try {
+      if (!window.uiPerfCore) return { ok: false, code: "PROBE_UNAVAILABLE", case: String(caseName || "") };
+      const caseKey = awbUiPerfBucket(caseName);
+      const hintProject = opts && opts.project ? String(opts.project) : "";
+      const sum = window.uiPerfCore.summarize(caseKey, AWB_UI_PERF.samples[caseKey], opts || {});
+      const line = { at: new Date().toISOString(), project: "", case: sum.case, samples: sum.samples, p50: sum.p50, p95: sum.p95, p99: sum.p99, budget: sum.budget, verdict: sum.verdict };
+      let written = false;
+      try {
+        if (window.workbench && typeof window.workbench.uiPerfAppend === "function") {
+          const res = await window.workbench.uiPerfAppend({ ...line, project: hintProject });
+          written = Boolean(res && res.ok);
+          if (res && res.project) line.project = String(res.project);
+        }
+      } catch (e) { written = false; }
+      return { ok: true, written, line, verdict: sum.verdict, probe: "ok" };
+    } catch (e) { return { ok: false, code: "PROBE_UNAVAILABLE", case: String(caseName || "") }; }
+    try { const __db2 = document.querySelector("#decision-box"); if (__db2) __db2.setAttribute("data-decision-ready", "1"); } catch (e) {}
+  }
+};
 window.__themeLook = function () {
   const root = getComputedStyle(document.documentElement);
   const pick = (sel) => { const el = document.querySelector(sel); if (!el) return null; const s = getComputedStyle(el); return { background: s.backgroundColor, backgroundImage: s.backgroundImage, color: s.color, boxShadow: s.boxShadow, backdropFilter: s.backdropFilter || "none" }; };

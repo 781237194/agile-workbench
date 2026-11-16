@@ -4625,7 +4625,38 @@ function registerIpc() {
   });
   // R-fe90 F-6：主题探针用的真实进程内存 —— app.getAppMetrics() 全部进程（main/renderer/webview guest）
   // 的 workingSetSize 求和（KB→MB），渲染层拿不到 app，只能经这条只读通道取。
-  ipcMain.handle('theme:metrics', async () => {
+  // R-c72a F6：交互性能落盘（9 键固定）——只追加一行，不参与任何业务判定。
+ipcMain.handle('ui:perf-append', async (_e, payload) => {
+  try {
+    const store = readStore();
+    const project = store.projects.find((p) => p.id === store.activeProjectId) || store.projects[0] || null;
+    const payloadProject = String((payload && payload.project) || '').trim();
+    let dir = project ? teamProjectStateDir(project) : null;
+    if (!dir && payloadProject) {
+      const candidate = path.join(teamProjectsDir(), payloadProject);
+      if (fs.existsSync(candidate)) dir = candidate;
+    }
+    if (!dir) return { ok: false, code: "NO_PROJECT" };
+    const src = payload && typeof payload === "object" ? payload : {};
+    const line = {
+      at: String(src.at || new Date().toISOString()),
+      project: String((project && (project.teamName || project.name)) || payloadProject || ""),
+      case: String(src.case || ""),
+      samples: Number(src.samples || 0),
+      p50: src.p50 === null || src.p50 === undefined ? null : Number(src.p50),
+      p95: src.p95 === null || src.p95 === undefined ? null : Number(src.p95),
+      p99: src.p99 === null || src.p99 === undefined ? null : Number(src.p99),
+      budget: src.budget === null || src.budget === undefined ? null : Number(src.budget),
+      verdict: String(src.verdict || ""),
+    };
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, "交互性能.jsonl"), JSON.stringify(line) + "\n", "utf8");
+    return { ok: true, project: line.project, file: path.join(dir, "交互性能.jsonl") };
+  } catch (error) {
+    return { ok: false, code: "WRITE_FAILED", message: String((error && error.message) || error).slice(0, 200) };
+  }
+});
+ipcMain.handle('theme:metrics', async () => {
     try {
       const list = (app.getAppMetrics ? app.getAppMetrics() : []) || [];
       const processes = list.map((p) => ({
@@ -10491,6 +10522,45 @@ async function runThemeShots() {
   } catch (error) {
     menuProbe.error = String((error && error.message) || error).slice(0, 200);
   }
+
+  // R-c72a 第一批取证：真实窗口里跑一次 mark→点击→measure→report（写交互性能.jsonl），
+  // 并用 MutationObserver 记录 [data-owner-review-dialog] 的 data-review-ready 0→1 序列，
+  // 以及 PROBE_UNAVAILABLE（删掉 __uiPerf 后的真实返回）。
+  let uiPerfSmoke = null;
+  try {
+    const script = '(async function(){'
+      + 'var out={anchors:{}};'
+      + 'var dlg=document.querySelector("[data-owner-review-dialog]");'
+      + 'out.anchors.reviewExists=Boolean(dlg);'
+      + 'var seq=[];var origSet=Element.prototype.setAttribute;'
+      + 'if(dlg){mo=new MutationObserver(function(ms){ms.forEach(function(m){if(m.attributeName==="data-review-ready"){seq.push({t:Math.round(performance.now()*100)/100,v:dlg.getAttribute("data-review-ready")});}});});mo.observe(dlg,{attributes:true,attributeFilter:["data-review-ready"]});}'
+      + 'var entry=document.querySelector("[data-owner-review-entry]");'
+      + 'if(entry) entry.click();'
+      + 'await new Promise(function(r){setTimeout(r,400);});'
+      + 'Element.prototype.setAttribute=origSet;'
+      + 'var dlg2=document.querySelector("[data-owner-review-dialog]");'
+      + 'out.anchors.reviewReady=dlg2?dlg2.getAttribute("data-review-ready"):null;'
+      + 'out.anchors.reviewSeq=seq;'
+      + 'var db=document.querySelector("#decision-box");'
+      + 'out.anchors.decisionExists=Boolean(db);'
+      + 'out.anchors.decisionReady=db?db.getAttribute("data-decision-ready"):null;'
+      + 'out.anchors.statusRows=document.querySelectorAll("[data-status]").length;'
+      + 'if(!window.__uiPerf) return {ok:false,code:"PROBE_UNAVAILABLE"};'
+      + 'window.__uiPerf.mark("smoke");'
+      + 'var target=document.querySelector("#more-menu [data-theme-menu] [data-theme-id=\\"tech-dark\\"]");'
+      + 'if(target) target.click();'
+      + 'out.measuredMs=window.__uiPerf.measure("click:smoke","smoke");'
+      + 'out.report=await window.__uiPerf.report("click");'
+      + 'var keep=window.__uiPerf;delete window.__uiPerf;'
+      + 'out.probeMissing=(typeof window.__uiPerf==="undefined")?{ok:false,code:"PROBE_UNAVAILABLE"}:{ok:true};'
+      + 'window.__uiPerf=keep;'
+      + 'return {ok:true,out:out};'
+      + '})()';
+    const res = await safeExec(script, 'ui-perf-smoke');
+    uiPerfSmoke = res.ok ? res.value : { ok: false, why: String(res.why || '') };
+  } catch (error) {
+    uiPerfSmoke = { ok: false, why: String((error && error.message) || error).slice(0, 200) };
+  }
   const shoot = async (fileBase) => {
     const shot = await win.webContents.debugger.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
     const pngPath = path.join(outDir, fileBase + '.png');
@@ -10549,7 +10619,7 @@ async function runThemeShots() {
     && sizes.length === 1
     && results.every((r) => r.state && r.state.themeId === r.themeId && r.clicked === true)
     && effects.ok;
-  const report = { ok, outDir, requestedSize: shotWidth + 'x' + shotHeight, window: windowInfo, uniqueScreenshots: unique, sizes, expected: ids.length, effects, errors, menuProbe, shots, results, at: new Date().toISOString() };
+  const report = { ok, outDir, requestedSize: shotWidth + 'x' + shotHeight, window: windowInfo, uniqueScreenshots: unique, sizes, expected: ids.length, effects, errors, menuProbe, uiPerfSmoke, shots, results, at: new Date().toISOString() };
   fs.writeFileSync(path.join(outDir, 'theme-shots.json'), JSON.stringify(report, null, 2));
   console.log('THEME_SHOTS_REPORT ' + path.join(outDir, 'theme-shots.json'));
   console.log(JSON.stringify({ ok, sizes, unique, requested: report.requestedSize, effectsOk: effects.ok, outDir }, null, 2));

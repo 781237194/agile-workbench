@@ -2218,6 +2218,8 @@
   function renderDialog() {
     const dialog = dialogEl();
     if (!dialog) return;
+    // R-c72a F2b：弹窗「可交互」锚点——渲染开始 0、结束 1（加在既有 [data-owner-review-dialog] 上，不改 id）
+    dialog.setAttribute('data-review-ready', '0');
     const allRows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements.slice() : [];
     // R-5550：AC 结构分析（只解析正文 AC 块；旧正文 structured=false，按旧五要素降级）。
     if (ACP) for (const row of allRows) row.__ac = ACP.analyzeRequirement(row);
@@ -2420,6 +2422,7 @@
     hideBanner();
     renderSummary(req);
     loadMaterials(req);
+    dialog.setAttribute('data-review-ready', '1');
   }
 
   function selectRequirement(reqId) {

@@ -47,7 +47,8 @@ if (IS_BOARD_WINDOW) {
     // 主题联动：独立看板窗口按当前主题更新 data-theme。
     boardTheme: (payload) => ipcRenderer.invoke('team:board-theme', payload),
     // R-fe90 F-6/F-7：主题探针只读通道（真实进程内存）与手工降级档（ui.effectLevel）。
-    themeMetrics: () => ipcRenderer.invoke('theme:metrics'),
+    uiPerfAppend: (payload) => ipcRenderer.invoke('ui:perf-append', payload),
+  themeMetrics: () => ipcRenderer.invoke('theme:metrics'),
     themeEffectLevel: () => ipcRenderer.invoke('theme:effect-level'),
     createTask: (payload) => ipcRenderer.invoke('task:create', payload),
     updateTask: (payload) => ipcRenderer.invoke('task:update', payload),
