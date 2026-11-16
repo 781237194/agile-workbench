@@ -14788,9 +14788,12 @@ async function selectWorkspace(projectId) {
   if (poolUi.open) {
     const cached = poolUi.byProject[projectId];
     if (Array.isArray(cached)) {
+      // 先作废在飞的旧项目刷新（fetchSeq++），否则上一个项目的慢返回会把刚换上的列表又盖回去（实测 0.5s 级）。
+      poolUi.fetchSeq += 1;
       poolUi.rows = cached;
       poolUi.signature = '';
       renderPool();
+      void refreshPool(projectId); // 缓存先上屏，再用目标项目的最新数据覆盖（同一项目，不会闪回）
     } else {
       void refreshPool(projectId);
     }
@@ -14810,6 +14813,8 @@ async function selectWorkspace(projectId) {
       await loadDshTeamStatus({ force: true });
     }
   } catch (e) {
+    // R-c72a AC2（批3）：列表是按点击先换的，切换真失败时恢复到真实 active 项目，别让「列表已是 B、当前还是 A」留在界面上。
+    if (poolUi.open) void refreshPool();
     if (/项目目录不存在|PROJECT_DIR_MISSING|PROJECT_FOLDER_NOT_FOUND|目录已不存在/.test(String(e && e.message || ''))) {
       // 失效项目：点它不是“切换失败”死路，直接给“移除本机记录 / 重新定位”的出口。
       toast(`「${target.name}」目录不存在，已打开清理入口`, 'bad');
