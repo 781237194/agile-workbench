@@ -599,8 +599,7 @@
     node.setAttribute('data-badge-kind', badge.kind);
     // B-20261116-120118-2760：末条决定绑的是过期版本时，行上必须能看出「上一版批准已过期」，
     // 否则 Owner 只看到「不在等你决定」或旧态徽标，不知道要重新点一次。
-    if (OR_STATE && typeof OR_STATE.decidedOnlyOnStaleVersion === 'function' && OR_STATE.decidedOnlyOnStaleVersion(req)
-      && !(OR_STATE.CLOSED_REQ_STATUSES || []).includes(String((req && req.status) || ''))) {
+    if (OR_STATE && typeof OR_STATE.stalePendingOf === 'function' && OR_STATE.stalePendingOf(req)) {
       node.setAttribute('data-or-stale', '1');
       const stale = el('span', 'or-stale-badge', '上一版批准已过期·请重新确认');
       stale.setAttribute('data-or-stale-badge', '1');

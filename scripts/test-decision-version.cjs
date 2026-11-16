@@ -145,16 +145,23 @@ const rowDevCurrent = {
 };
 const rowDevNoDecision = { id: 'R-FIXTURE-dev-none', status: 'dev', ownerReview: { status: 'pending' } };
 const rowClosedStale = { ...rowDevStale, id: 'R-FIXTURE-closed-stale', status: 'accepted' };
-check('S10 dev 阶段 + 决定过期 → isPending=true（不再「界面判未决但不列」）；当前版本/无决定/终态均不列',
+// 范围收窄（PM 2026-11-16 12:02）：dev_done / test_done 之后活已干完，旧批准过期不再挡事，不浮出。
+const rowDevDoneStale = { ...rowDevStale, id: 'R-FIXTURE-dev-done-stale', status: 'dev_done' };
+const rowTestDoneStale = { ...rowDevStale, id: 'R-FIXTURE-test-done-stale', status: 'test_done' };
+check('S10 dev 阶段 + 决定过期 → isPending=true（不再「界面判未决但不列」）；当前版本/无决定/终态/干完阶段均不列',
   OR_STATE.isPending(rowDevStale) === true
   && OR_STATE.isPending(rowDevCurrent) === false
   && OR_STATE.isPending(rowDevNoDecision) === false
-  && OR_STATE.isPending(rowClosedStale) === false,
+  && OR_STATE.isPending(rowClosedStale) === false
+  && OR_STATE.isPending(rowDevDoneStale) === false
+  && OR_STATE.isPending(rowTestDoneStale) === false,
   {
     devStale: OR_STATE.isPending(rowDevStale),
     devCurrent: OR_STATE.isPending(rowDevCurrent),
     devNone: OR_STATE.isPending(rowDevNoDecision),
-    closedStale: OR_STATE.isPending(rowClosedStale)
+    closedStale: OR_STATE.isPending(rowClosedStale),
+    devDoneStale: OR_STATE.isPending(rowDevDoneStale),
+    testDoneStale: OR_STATE.isPending(rowTestDoneStale)
   });
 check('S11 行徽标依据：dev+过期 → decidedOnlyOnStaleVersion=true；当前版本=false',
   OR_STATE.decidedOnlyOnStaleVersion(rowDevStale) === true

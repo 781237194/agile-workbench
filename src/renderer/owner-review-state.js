@@ -202,14 +202,30 @@
    * Owner 门是否「等你决定」。与旧实现差别只有一处：
    * 上次打回、但已修改并重新提交的需求，重新算待评审（以前这里直接 false，等于永久隐藏）。
    */
+  /**
+   * 决定过期且**还没干完**的阶段——只在这些阶段浮出「等你决定」。
+   * 范围口径（PM 2026-11-16 12:02 收窄）：`dev_done/test_done` 之后活已干完，旧批准过期不再挡事，
+   * 浮出来只会让 Owner 白点；`accepted/terminated/rejected` 属终态，一律不浮。
+   */
+  const STALE_PENDING_STATUSES = ['ready', 'approved', 'owner_review', 'dispatched', 'dev', 'dev_review', 'iteration'];
+
+  /** 该行是否「决定绑的是过期版本、且阶段还没到 dev_done」——列表与徽标共用这一个判据。 */
+  function stalePendingOf(req) {
+    const status = textOf(req && req.status);
+    if (!STALE_PENDING_STATUSES.includes(status)) return false;
+    const latest = latestOwnerDecision(req);
+    if (!latest) return false;
+    return !isDecisionCurrent(latest, req);
+  }
+
   function isPending(req) {
     const status = textOf(req && req.status);
     if (CLOSED_REQ_STATUSES.includes(status)) return false;
-    // P1（2026-11-16，B-20261116-120118-2760）：决定绑的是**过期版本**、行又不是终态时，一律浮出
-    // 到「等你决定」——以前只在 status∈{approved,owner_review} 时才浮出，于是像 4657 这种
+    // P1（2026-11-16，B-20261116-120118-2760）：决定绑的是**过期版本**、且阶段还没到 dev_done 时，
+    // 一律浮出到「等你决定」——以前只在 status∈{approved,owner_review} 时才浮出，于是像 4657 这种
     // 已进 dev 的行会「界面判未决但不列」，Owner 根本点不到、返工轮任务也 claim 不动。
-    const latest = latestOwnerDecision(req);
-    if (latest && !isDecisionCurrent(latest, req)) return true;
+    // 范围按 PM 12:02 收窄：dev_done/test_done 之后不浮（活已干完，浮出来只会让 Owner 白点）。
+    if (stalePendingOf(req)) return true;
     const owner = decidedStatusOf(req);
     if (owner === 'rejected') return reworkInfo(req).isRework;
     if (owner === 'approved' || owner === 'skipped') return false;
@@ -249,6 +265,7 @@
     normalizeOwnerStatus,
     decidedStatusOf,
     currentDocHashOf,
+    stalePendingOf,
     isDecisionCurrent,
     decidedOnlyOnStaleVersion,
     rejectedAtOf,
