@@ -30,17 +30,27 @@ function check(id, name, ok, detail) {
 const ORS = require(ORS_PATH);
 const POOL = require(POOL_PATH);
 
-/** 5c19 同态：Owner 04:09 点过通过（decisions），产品 04:13 复审把 ownerReview 重置回 pending。 */
+/**
+ * 5c19 同态：Owner 04:09 点过通过（decisions），产品 04:13 复审把 ownerReview 重置回 pending。
+ *
+ * 2026-11-17 夹具补充（断言按现状为基准）：渲染侧 B-20261116-103007-56fe 起，决定必须**绑当前正文版本**
+ * 才算有效（`isDecisionCurrent`：无 basis 的旧决定判过期 → 行回到「等你决定」重新复审）。
+ * 所以这里给行与决定补一对**相同的版本凭据**，让这条夹具继续表达它原本要表达的语义
+ * ——「已决定的行不能落进等你决定」，而不是把「无凭据=过期」当成被测行为。
+ */
+const FIXTURE_SHA = 'a'.repeat(64);
 function row5c19(overrides) {
   return {
     id: 'R-20261115-120113-5c19',
     title: '前端 5 套原型',
     status: 'approved',
     round: 1,
+    requirementHash: FIXTURE_SHA,
     ownerReview: { status: 'pending', at: null, opinion: '' },
     decisions: [{
       status: 'approved', decision: 'approved', channel: 'ui', decidedBy: 'owner',
-      actor: 'owner', by: 'Owner', at: '2026-11-15T04:09:47.620Z', round: 1, opinion: ''
+      actor: 'owner', by: 'Owner', at: '2026-11-15T04:09:47.620Z', round: 1, opinion: '',
+      basis: { requirement: { sha256: FIXTURE_SHA, contentHash: '' } }
     }],
     ...(overrides || {})
   };
@@ -56,7 +66,7 @@ function row5c19(overrides) {
   const fallback = ORS.decisionOf({ status: 'approved', ownerReview: { status: 'skipped', at: '2026-11-15T05:00:00.000Z', channel: 'ui' }, decisions: [] });
   check('AC3-03', 'decisionOf：没有 decisions 时回退 ownerReview（source=ownerReview）',
     fallback.status === 'skipped' && fallback.source === 'ownerReview', fallback);
-  const legacyNested = ORS.decisionOf({ status: 'approved', ownerReview: { status: 'pending', decisions: [{ status: 'rejected', at: '2026-11-15T05:00:00.000Z' }] }, decisions: [] });
+  const legacyNested = ORS.decisionOf({ status: 'approved', requirementHash: FIXTURE_SHA, ownerReview: { status: 'pending', decisions: [{ status: 'rejected', at: '2026-11-15T05:00:00.000Z', basis: { requirement: { sha256: FIXTURE_SHA } } }] }, decisions: [] });
   check('AC3-04', 'decisionOf：旧数据 ownerReview.decisions[] 也认（末条 rejected 胜 pending）',
     legacyNested.status === 'rejected' && legacyNested.source === 'decisions', legacyNested);
   const empty = ORS.decisionOf({ status: 'review', ownerReview: { status: 'pending' } });
