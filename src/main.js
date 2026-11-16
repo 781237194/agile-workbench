@@ -10602,6 +10602,8 @@ async function runThemeShots() {
       + 'var dlg2=document.querySelector("[data-owner-review-dialog]");'
       + 'out.anchors.reviewReady=dlg2?dlg2.getAttribute("data-review-ready"):null;'
       + 'out.anchors.reviewSeq=seq;'
+      + 'var toggle=document.querySelector("#side-float-toggle");if(toggle) toggle.click();'
+      + 'await new Promise(function(r){setTimeout(r,600);});'
       + 'var db=document.querySelector("#decision-box");'
       + 'out.anchors.decisionExists=Boolean(db);'
       + 'out.anchors.decisionReady=db?db.getAttribute("data-decision-ready"):null;'

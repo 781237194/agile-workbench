@@ -3283,8 +3283,15 @@ function renderDecisionFloat(data) {
   decisionRestoreDrafts();
 }
 
+// R-c72a F2b：决策箱「可交互」锚点——渲染前 0、渲染结束（含所有 early return）1。
+// 2026-11-16 修：原先把置 1 塞进 __uiPerf.report 的 try/catch 之后（不可达），改 wrapper+finally 保证可达。
 function renderDecisionBox(data) {
-  try { const __db = document.querySelector("#decision-box"); if (__db) __db.setAttribute("data-decision-ready", "0"); } catch (e) {}
+  const __readyBox = document.querySelector("#decision-box");
+  try { if (__readyBox) __readyBox.setAttribute("data-decision-ready", "0"); return renderDecisionBoxInner(data); }
+  finally { if (__readyBox) __readyBox.setAttribute("data-decision-ready", "1"); }
+}
+
+function renderDecisionBoxInner(data) {
   const box = $('#decision-box-drawer');
   const unread = $('#decision-box-drawer-unread');
   if (!box) return;
@@ -16277,7 +16284,6 @@ window.__uiPerf = {
       } catch (e) { written = false; }
       return { ok: true, written, line, verdict: sum.verdict, probe: "ok" };
     } catch (e) { return { ok: false, code: "PROBE_UNAVAILABLE", case: String(caseName || "") }; }
-    try { const __db2 = document.querySelector("#decision-box"); if (__db2) __db2.setAttribute("data-decision-ready", "1"); } catch (e) {}
   }
 };
 window.__themeLook = function () {
