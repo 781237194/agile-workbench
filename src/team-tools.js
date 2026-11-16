@@ -4578,8 +4578,12 @@ function createTeamTools(options = {}) {
           role: roleId,
           project: name,
           at: String(cli.ts || ''),
-          round: Number(state.round || 1),
-          complete: true,
+          // B-20261116-135220-5887（B）：**不再伪造轮次**——用 CLI 记录的 round 与当前轮比，
+          // 缺失或不相等一律 BOOT_REQUIRED（换轮必须重 boot；回退只判轮次、判不了就拒绝，不放行）。
+          round: (cli.round === undefined || cli.round === null) ? null : Number(cli.round),
+          // complete 也不许假定：CLI 记录没有 completed=true 就按「未读全」处理（BOOT_INCOMPLETE），
+          // 不拿「有 docHashes」当读全的证据。
+          complete: cli.completed === true,
           docs: cli.docHashes,
           rulesHash: String(cli.baseHash || ''),
           requirementsHash: String(cli.requirementsHash || ''),

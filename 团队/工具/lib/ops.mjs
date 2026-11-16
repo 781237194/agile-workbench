@@ -2625,6 +2625,17 @@ export function cmdProject(args) {
 // B-20261116-134316-c31c：把一次 CLI boot 的阅读证据写进 工作流.json 的 state.boots[role]。
 // 字段与壳层 bootRole 同形：{complete, round, at, rulesHash, docs:{key:{hash,exists,rel}}, requirementsHash, source}。
 // 只改 boots 一项，其余字段原样写回（tmp+rename 由 core.writeJson 保证原子）。
+// B-20261116-135220-5887：读当前轮次（工作流.json → round），boot 记录要带上，回退分支才能判「换轮没重 boot」。
+function readWorkflowRound(projectName) {
+  try {
+    const state = readJson(path.join(projectStatePaths(projectName).dir, '工作流.json'), {}) || {};
+    const round = Number(state.round || 1);
+    return Number.isFinite(round) && round > 0 ? round : 1;
+  } catch {
+    return 1;
+  }
+}
+
 function writeWorkflowBootState(projectName, roleId, records, meta) {
   const file = path.join(projectStatePaths(projectName).dir, '工作流.json');
   const state = readJson(file, {}) || {};
@@ -2691,6 +2702,9 @@ export async function cmdBoot(args) {
     docs: docs.readOrder,
     // B-20261116-134316-c31c：逐文档哈希也留一份，壳层验收门在 state.boots 缺失时可回退比对（AC2）
     docHashes: Object.fromEntries(records.map((d) => [d.key, { hash: d.hash || '', exists: Boolean(d.exists), rel: d.rel || '' }])),
+    // B-20261116-135220-5887：回退路径必须能判轮次与完整度，不能靠壳层假定。
+    round: Number(readWorkflowRound(projectName) || 1),
+    completed: bootRead.complete === true,
     teamsmithBoot: true,
     requirementsHash: docs.requirements.hash,
     requirements: docs.requirements.count,

@@ -78,9 +78,38 @@ const fallback = probe('tester');
 check('AC2 state.boots 缺失时回退 阅读.jsonl 放行（不再永久 RULES_CHANGED）',
   fallback.ok === true, fallback);
 
-// 3) AC3：真改一份规则文档 → 必须拦
+// 3) 5887：换轮（round 1→2）且仅 CLI boot（记录 round=1）→ 必须拦 BOOT_REQUIRED
+const wf3 = JSON.parse(fs.readFileSync(WF, 'utf8'));
+wf3.round = 2;
+delete wf3.boots;
+fs.writeFileSync(WF, JSON.stringify(wf3, null, 2), 'utf8');
+const roundBlocked = probe('tester');
+check('5887 换轮未重 boot → BOOT_REQUIRED（回退不伪造轮次）',
+  roundBlocked.ok === false && String(roundBlocked.code).includes('BOOT_REQUIRED'), roundBlocked);
+
+// 3b) 5887：CLI 记录缺 round → 也必须拦（缺失即拒）
+const readsRaw = fs.readFileSync(READS, 'utf8');
+const lines = readsRaw.trim().split(/\r?\n/);
+lines[lines.length - 1] = JSON.stringify(Object.fromEntries(Object.entries(JSON.parse(lines[lines.length - 1])).filter(([k]) => k !== 'round')));
+fs.writeFileSync(READS, lines.join('\n') + '\n', 'utf8');
+const missingRound = probe('tester');
+check('5887 CLI 记录缺 round → BOOT_REQUIRED（缺失即拒，不假定当前轮）',
+  missingRound.ok === false && String(missingRound.code).includes('BOOT_REQUIRED'), missingRound);
+
+// 4) 同轮恢复（重新 boot 拿到带 round 的新记录）+ 真改文档 → 仍拦（RULES_CHANGED）
+const wf4 = JSON.parse(fs.readFileSync(WF, 'utf8'));
+wf4.round = 1;
+delete wf4.boots;
+fs.writeFileSync(WF, JSON.stringify(wf4, null, 2), 'utf8');
+const bootAgain = run(['boot', '--role', 'tester', '--project', PROJECT, '--session', 'session-c31c-e2e2']);
+check('4 重新 boot（带 round 的新记录）成功', bootAgain.code === 0, { code: bootAgain.code, tail: String(bootAgain.out).slice(-160) });
+const wf5 = JSON.parse(fs.readFileSync(WF, 'utf8'));
+delete wf5.boots; // 只走回退路径
+fs.writeFileSync(WF, JSON.stringify(wf5, null, 2), 'utf8');
+const okAfterReboot = probe('tester');
+check('4b 同轮 + 仅 CLI boot → 放行', okAfterReboot.ok === true, okAfterReboot);
 const constitution = path.join(TEAM, '团队宪法.md');
-fs.appendFileSync(constitution, '\n<!-- c31c fixture: 文档真变了 -->\n', 'utf8');
+fs.appendFileSync(constitution, '\n<!-- 5887 fixture: 文档真变了 -->\n', 'utf8');
 const blocked = probe('tester');
 check('AC3 真改文档仍拦（RULES_CHANGED）',
   blocked.ok === false && String(blocked.code).includes('RULES_CHANGED'), blocked);
