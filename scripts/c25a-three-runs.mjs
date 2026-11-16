@@ -45,8 +45,26 @@ const runs = [];
 // 2026-11-16 19:03 加固：今天 host 崩溃已三次把长跑整棵进程树带走（run80 只跑了 13.6 分钟，
 // 沙盘无退出审计=外部硬杀）。所以每档允许重跑一次：某次 <30 分钟（不多于一次）就换 run id 重跑，
 // 直到跑满 30 分钟或次数用尽；两轮结果都留在 runs[] 里，谁被作废一目了然。
+//
+// 2026-11-16 19:06 续跑（PM「长跑脱离父进程」建议的第一步）：重起时先扫 EVID 里已有的
+// longrun-<slot 的 run id>.json，凡是 pass30=true 的档直接跳过——host 崩了再拉起来能从断点继续，
+// 既不会静默重来，也不会把已跑满的 31 分钟浪费掉。
 const ATTEMPTS = 2;
+const readSummary = (run) => {
+  const file = path.join(EVID, `longrun-${run}.json`);
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+};
+const passedAlready = new Set();
+const skippedSlots = [];
 for (let i = 0; i < 3; i += 1) {
+  for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
+    const run = BASE + i * 10 + attempt;
+    const prev = readSummary(run);
+    if (prev && prev.pass30) { passedAlready.add(i + 1); break; }
+  }
+}
+for (let i = 0; i < 3; i += 1) {
+  if (passedAlready.has(i + 1)) { skippedSlots.push({ slot: i + 1, reason: '已跑满 30 分钟，续跑跳过' }); continue; }
   for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
     const run = BASE + i * 10 + attempt;
     const startedAt = new Date().toISOString();
@@ -56,9 +74,7 @@ for (let i = 0; i < 3; i += 1) {
     } catch (e) {
       error = String((e && e.message) || e).slice(0, 300);
     }
-    const file = path.join(EVID, `longrun-${run}.json`);
-    let summary = null;
-    try { summary = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { summary = null; }
+    const summary = readSummary(run);
     const pass30 = Boolean(summary && summary.pass30);
     runs.push({
       run, slot: i + 1, attempt: attempt + 1, startedAt, finishedAt: new Date().toISOString(), error,
@@ -90,15 +106,20 @@ const batchIsolation = {
   // AC4：清理后 Owner 界面不应再出现任何测试名（真实 store 的名字里 0 命中）
   ownerUiClean: !batchAfter.names.some((n) => TEST_NAME_RE.test(n)),
 };
-const passedSlots = [...new Set(runs.filter((r) => r.pass30).map((r) => r.slot))];
+// 续跑回来的档（本次没跑、但磁盘上已有 pass30 的 longrun-<id>.json）也要计入 passedSlots。
+const passedSlots = [...new Set([
+  ...runs.filter((r) => r.pass30).map((r) => r.slot),
+  ...passedAlready,
+])].sort((a, b) => a - b);
 const out = {
   at: new Date().toISOString(),
   minutes: Number(MINUTES),
   sequential: true,
   attemptsPerSlot: ATTEMPTS,
-  // 判据（2026-11-16 19:03）：三档各自至少有一次跑满 ≥30 分钟（被 host 崩溃打断的那次作废、可重跑），
-  // 且批级隔离未被破坏。voided 的尝试保留在 runs[] 里可核。
+  // 判据（2026-11-16 19:03，19:06 补续跑）：三档各自至少有一次跑满 ≥30 分钟（被 host 崩溃打断的那次
+  // 作废、可重跑；续跑时已满的档直接跳过），且批级隔离未被破坏。voided 的尝试保留在 runs[] 里可核。
   passedSlots,
+  skippedSlots,
   pass: passedSlots.length >= 3 && batchIsolation.ok,
   runs,
   batchIsolation,
