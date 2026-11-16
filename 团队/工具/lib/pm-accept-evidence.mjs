@@ -77,7 +77,29 @@ export function validateAcceptGates({ evidence = [], trqVerdict = '', requiremen
   return { ok: missing.length === 0, code: missing.length ? 'PM_ACCEPT_EVIDENCE_REQUIRED' : 'OK', missing };
 }
 
-/** CLI 解析：--evidence 支持 JSON 数组字符串，或 `path[:kind]` 单值（kind 缺省按文件名猜 report/screenshot）。 */export function parseEvidenceArg(value) {
+/**
+ * CLI 解析：--evidence 支持 JSON 数组字符串，或 `path[:kind]` 单值。
+ *
+ * B-20261116-201956-e616：kind 白名单补 `record`，并按后缀把「运行记录类」文件推断成 record。
+ *   改前只认 report|screenshot|file，且非图片一律推成 report —— 于是 `证据-xxx/run.log:record` 里的
+ *   `:record` 不被识别、整串被当成路径 → FILE_NOT_FOUND → 缺陷单验收只剩 1 件证据 → SECOND_EVIDENCE_REQUIRED。
+ * 推断口径（显式 kind 永远优先）：
+ *   - 图片（png/jpg/jpeg/webp/gif/bmp）→ screenshot
+ *   - 运行记录（log/json/jsonl/csv/xml/yaml/yml）→ record
+ *   - 其余（含 .md/.txt，保持历史口径）→ report
+ * 注意：需求级代验收（validatePmAcceptEvidence）仍要求 report+screenshot 两件；record 只放宽「第二件证据」，
+ * 不改那条更严的门（缺陷单验收用 ops.mjs acceptDefectTask 自己的规则：报告 + 任意第二件）。
+ */
+export const EVIDENCE_KINDS = Object.freeze(['report', 'screenshot', 'record', 'file']);
+
+export function inferEvidenceKind(relPath) {
+  const rel = String(relPath || '');
+  if (/\.(png|jpe?g|webp|gif|bmp)$/i.test(rel)) return 'screenshot';
+  if (/\.(log|json|jsonl|csv|xml|ya?ml)$/i.test(rel)) return 'record';
+  return 'report';
+}
+
+export function parseEvidenceArg(value) {
   const text = String(value == null ? '' : value).trim();
   if (!text) return [];
   if (text.startsWith('[')) {
@@ -89,10 +111,10 @@ export function validateAcceptGates({ evidence = [], trqVerdict = '', requiremen
     }
   }
   return text.split(/[\n,]/).map((part) => part.trim()).filter(Boolean).map((part) => {
-    const m = part.match(/^(.*?)(?::(report|screenshot|file))?$/);
+    const m = part.match(/^(.*?)(?::(report|screenshot|record|file))?$/);
     const rel = String((m && m[1]) || part).trim();
-    let kind = String((m && m[2]) || '').trim();
-    if (!kind) kind = /\.(png|jpe?g|webp)$/i.test(rel) ? 'screenshot' : 'report';
+    let kind = String((m && m[2]) || '').trim().toLowerCase();
+    if (!kind) kind = inferEvidenceKind(rel);
     return { path: rel, kind };
   });
 }
