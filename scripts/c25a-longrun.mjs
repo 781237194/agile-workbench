@@ -29,6 +29,16 @@ const STATE = path.join(TEAM, '状态', '项目', PROJ);
 const DATA = path.join(SB, 'data');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// AC3 长跑必须让壳里的 webview 有「能加载的页面」：真 DSH 在沙盘里不可达，webview 会一直
+// ERR_ABORTED 并触发渲染进程崩溃（c25a 现场正是这么来的）。这里起一个最小静态服务当 DSH 替身，
+// 把 DSH_WEB_URL 指过去，长跑才测的是「壳自身稳定性」而不是「DSH 不可达导致的崩溃」。
+const STUB_PORT = 9700 + RUN;
+const stubServer = http.createServer((_req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end('<!doctype html><meta charset="utf-8"><title>c25a-dsh-stub</title><body>stub</body>');
+});
+await new Promise((resolve) => stubServer.listen(STUB_PORT, '127.0.0.1', resolve));
+
 // ── 沙盘 ────────────────────────────────────────────────────────────────
 fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 fs.cpSync(path.join(ROOT, '团队'), TEAM, { recursive: true });
@@ -55,6 +65,7 @@ const readRows = () => (fs.existsSync(crashFile) ? fs.readFileSync(crashFile, 'u
 // ── 起实例 ──────────────────────────────────────────────────────────────
 const env = {
   ...process.env, AWB_DATA_DIR: DATA, AWB_STORE: workbench,
+  DSH_WEB_URL: `http://127.0.0.1:${STUB_PORT}/`,
   TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'), TEAM_WORKBENCH_JSON: workbench, TEAM_SELFTEST: '1',
 };
 const startedAt = new Date();
