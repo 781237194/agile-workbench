@@ -890,7 +890,10 @@ export function ackMessage(role, id, note) {
   // 被 ack 的是「完成回执」（type=receipt）时，原发送者以前收不到任何东西，这里补一条静默 notice
   // （含被 ack 的消息 id/主题、回执人、备注、时间）。notice 带 noEcho，ack 它时不再产生消息，
   // 保证"只扩散一层"，不会 回执↔通知 无限递归。
-  if (found.msg.from !== 'system' && !found.msg.noEcho) {
+  // B-20261116-190049-6d72 ②（Owner 定级 P0）：自环闸——被 ack 的消息若来自回执人自己，
+  // 一律不发回执、不发通知（否则 found.msg.from 串成自己时会出现「pm→pm」抄送自己）。
+  const selfLoop = String(found.msg.from || '') === String(role || '') && String(found.msg.from || '') !== '';
+  if (!selfLoop && found.msg.from !== 'system' && !found.msg.noEcho) {
     if (ackedType !== 'receipt') {
       receiptMessage = sendMessage({
         from: role,
