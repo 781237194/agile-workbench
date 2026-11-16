@@ -73,6 +73,7 @@ const projectDir = path.join(SB, '项目', PROJ);
 const workbench = path.join(SB, 'workbench.json');
 fs.writeFileSync(path.join(STATE, '项目.json'), JSON.stringify({ name: PROJ, mode: 'full', teamMode: 'full', path: projectDir }, null, 2), 'utf8');
 fs.writeFileSync(path.join(STATE, '工作流.json'), JSON.stringify({ requirements: {} }, null, 2), 'utf8');
+fs.mkdirSync(projectDir, { recursive: true });
 fs.writeFileSync(workbench, JSON.stringify({
   version: 1, activeProjectId: `p-${RUN}`,
   projects: [{ id: `p-${RUN}`, name: PROJ, teamName: PROJ, path: projectDir, workspace: { sessionIds: [] } }],
@@ -106,6 +107,8 @@ const env = {
   DSH_WEB_URL: `http://127.0.0.1:${STUB_PORT}/`,
   // 压测实例不许在 Owner 桌面上弹窗（main.js 读这个 env 决定是否 show 主窗）。
   AWB_START_HIDDEN: '1',
+  // 长跑保活：窗口被销毁也不退出（否则每 ~2 分钟自退，见 run311 aliveSec=121）
+  AWB_KEEP_ALIVE: '1',
   TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'), TEAM_WORKBENCH_JSON: workbench, TEAM_SELFTEST: '1',
 };
 const startedAt = new Date();

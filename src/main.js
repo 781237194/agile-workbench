@@ -10149,6 +10149,7 @@ function createWindow() {
     saveWindowPref(mainWindow);
   });
   mainWindow.on('closed', () => {
+    try { console.log('[win-closed] ' + JSON.stringify({ at: new Date().toISOString(), stack: String(new Error().stack || '').split('\n').slice(1, 7) })); } catch { /* ignore */ }
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     mainWindow = null;
     if (memSampler) { clearInterval(memSampler); memSampler = null; }
@@ -19704,6 +19705,14 @@ app.on('window-all-closed', () => {
   // B-20261116-105124-c25a：窗口全关导致的退出也要留一行审计——历史上「壳 2-8 分钟整体退出」
   // 无法区分「人关了窗」「窗口被意外销毁」「主进程异常」三种，这一行能把第一种钉死。
   recordShellAudit('shell-window-all-closed', {});
+  // c25a 保活（2026-11-16 19:15）：长跑实例隐藏窗口后，窗口被销毁会触发这里 → app.quit，
+  // 实测表现是「每 ~2 分钟自退、aliveSec=121、windows:0」。AWB_KEEP_ALIVE=1 只由长跑脚本注入：
+  // 不因窗口全关而退出（进程继续采样/写审计），收尾由长跑脚本侧负责。
+  if (process.env.AWB_KEEP_ALIVE === '1') {
+    recordShellAudit('shell-keep-alive', { reason: 'window-all-closed-but-keep-alive' });
+    console.log('[keep-alive] window-all-closed 但 AWB_KEEP_ALIVE=1，不退出');
+    return;
+  }
   if (process.platform !== 'darwin') app.quit();
 });
 
