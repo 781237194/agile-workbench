@@ -51,6 +51,21 @@
     const fromDecision = normalizeOwnerStatus(latest && (latest.status || latest.decision));
     if (fromDecision) {
       const row = latest || {};
+      // B-20261116-103007-56fe：末条决定若是**旧正文版本**的决定（无 basis 或 hash 不等于当前版本），
+      // 视为没有决定——否则正文改版、RR 重落、ownerReview 重置 pending 之后，Owner 永远看不到复审。
+      if (!isDecisionCurrent(latest, req)) {
+        const staleOwner = normalizeOwnerStatus(owner.status);
+        return {
+          status: staleOwner,
+          source: staleOwner ? 'ownerReview' : 'none',
+          latest: null,
+          staleDecision: row,
+          at: textOf(owner.at),
+          channel: textOf(owner.channel || row.channel),
+          recordedBy: textOf(owner.recordedBy || row.recordedBy),
+          opinion: textOf(owner.opinion)
+        };
+      }
       return {
         status: fromDecision,
         source: 'decisions',
@@ -74,6 +89,40 @@
       };
     }
     return { status: '', source: 'none', latest: null, at: '', channel: textOf(owner.channel), recordedBy: textOf(owner.recordedBy), opinion: textOf(owner.opinion) };
+  }
+
+  /**
+   * B-20261116-103007-56fe：Owner 决定的**版本口径**。
+   * 需求的 current 版本 hash：优先行上的 requirementHash/docHash，其次 RR 记录里的 requirementHash。
+   * （渲染层拿不到磁盘，RR 的 hash 就是「本行当前被评审的正文版本」；正文一改必重落 RR。）
+   */
+  function currentDocHashOf(req) {
+    const row = req || {};
+    const candidates = [row.requirementHash, row.docHash, row.requirementReview && row.requirementReview.requirementHash];
+    for (const candidate of candidates) {
+      const value = textOf(candidate);
+      if (value) return value;
+    }
+    return '';
+  }
+
+  /**
+   * 这笔决定是否针对**当前正文版本**：
+   * - 决定带 basis.requirement.sha256（或 contentHash）且等于当前版本 → current（有效）
+   * - 无 basis（旧决定）/ hash 不等 / 行上没有当前版本 → stale（旧决定，不得压过新的复审）
+   */
+  function isDecisionCurrent(latest, req) {
+    if (!latest) return false;
+    const basis = (latest && typeof latest.basis === 'object' && latest.basis) ? latest.basis : {};
+    const requirement = (basis && typeof basis.requirement === 'object' && basis.requirement) ? basis.requirement : {};
+    const decidedSha = textOf(requirement.sha256);
+    const decidedContent = textOf(requirement.contentHash);
+    const currentSha = currentDocHashOf(req);
+    const currentContent = textOf((req && req.requirementReview && req.requirementReview.contentHash) || (req && req.contentHash));
+    if (!decidedSha && !decidedContent) return false; // 旧决定（11-15 那批没有 basis）
+    if (decidedSha && currentSha && decidedSha === currentSha) return true;
+    if (decidedContent && currentContent && decidedContent === currentContent) return true;
+    return false;
   }
 
   /** 派生后的 Owner 状态快照（旧代码只读 ownerReview 的地方统一换成它）。 */
@@ -170,6 +219,8 @@
     decisionOf,
     normalizeOwnerStatus,
     decidedStatusOf,
+    currentDocHashOf,
+    isDecisionCurrent,
     rejectedAtOf,
     changedAtOf,
     reworkInfo,

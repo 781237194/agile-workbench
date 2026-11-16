@@ -61,9 +61,22 @@
     return list.length ? list[list.length - 1] : null;
   }
   function decidedStatusOf(req) {
+    // 唯一口径在 owner-review-state.js（含 B-20261116-103007-56fe 的「旧决定不压新版本」校验）；
+    // 这里只在脚本缺失时兜底，兜底也走同一套版本判断，避免两份口径分叉。
+    if (OR_STATE && typeof OR_STATE.decidedStatusOf === 'function') return OR_STATE.decidedStatusOf(req);
     const latest = latestOwnerDecision(req);
     const fromDecision = String((latest && (latest.status || latest.decision)) || '');
-    if (['approved', 'rejected', 'skipped'].includes(fromDecision)) return fromDecision;
+    if (['approved', 'rejected', 'skipped'].includes(fromDecision)) {
+      const basis = (latest && latest.basis && latest.basis.requirement) || {};
+      const decidedSha = String(basis.sha256 || basis.contentHash || '');
+      const currentSha = String(
+        (req && req.requirementHash) || (req && req.docHash)
+        || (req && req.requirementReview && req.requirementReview.requirementHash) || ''
+      );
+      if (decidedSha && currentSha && decidedSha === currentSha) return fromDecision;
+      // 旧决定/版本不符：不压 ownerReview.status（正文改版后必须重新请 Owner 复审）
+      return String((req && req.ownerReview && req.ownerReview.status) || '');
+    }
     return String((req && req.ownerReview && req.ownerReview.status) || '');
   }
   function statusOf(req) {

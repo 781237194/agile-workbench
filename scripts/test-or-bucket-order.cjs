@@ -75,8 +75,11 @@ if (!api) {
 }
 
 const bucket = (row) => api.listBucketOf(row);
-const row = (status, extra = {}) => ({ id: 'R-x', status, ...extra });
-const decided = (status) => ({ decisions: [{ status, at: '2026-11-16T00:00:00.000Z' }] });
+// B-20261116-103007-56fe 之后：「Owner 已通过」必须是**当前正文版本**的决定才算数，
+// 所以夹具统一带上与行同值的 requirementHash + basis.requirement.sha256（无 basis 的旧决定会被判 stale）。
+const CUR_HASH = 'c'.repeat(64);
+const row = (status, extra = {}) => ({ id: 'R-x', status, requirementHash: CUR_HASH, ...extra });
+const decided = (status) => ({ decisions: [{ status, at: '2026-11-16T00:00:00.000Z', basis: { requirement: { sha256: CUR_HASH } } }] });
 
 // ── U：夹具行 ─────────────────────────────────────────────────────────────
 ok('U1 【本 bug】status=accepted + Owner 已通过 → 已收口（不是进行中）', bucket(row('accepted', decided('approved'))) === 'closed', bucket(row('accepted', decided('approved'))));
