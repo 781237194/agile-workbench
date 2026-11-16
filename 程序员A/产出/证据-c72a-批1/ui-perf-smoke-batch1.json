@@ -1,0 +1,48 @@
+{
+  "anchors": {
+    "reviewExists": true,
+    "reviewReady": "1",
+    "reviewSeq": [
+      {
+        "n": "data-review-ready",
+        "v": "0",
+        "t": 6951.7
+      },
+      {
+        "n": "data-review-ready",
+        "v": "1",
+        "t": 6954.4
+      }
+    ],
+    "decisionExists": true,
+    "decisionReady": null,
+    "statusRows": 0
+  },
+  "measuredMs": 1.5,
+  "report": {
+    "ok": true,
+    "written": true,
+    "line": {
+      "at": "2026-11-16T10:56:44.885Z",
+      "project": "工作台改造修复",
+      "case": "click",
+      "samples": 1,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "budget": 100,
+      "verdict": "INSUFFICIENT_SAMPLES"
+    },
+    "verdict": "INSUFFICIENT_SAMPLES",
+    "probe": "ok"
+  },
+  "append": {
+    "ok": true,
+    "project": "工作台改造修复",
+    "file": "D:\\deepseek\\agile-workbench\\团队\\状态\\项目\\工作台改造修复\\交互性能.jsonl"
+  },
+  "probeMissing": {
+    "ok": false,
+    "code": "PROBE_UNAVAILABLE"
+  }
+}
