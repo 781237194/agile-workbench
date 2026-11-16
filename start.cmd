@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 setlocal EnableExtensions
 chcp 65001 >nul 2>&1
 cd /d "%~dp0"
@@ -32,8 +32,9 @@ if /i "%~1"=="--kill-orphans" goto :kill_orphans
 if "%START_KILL_ORPHANS%"=="1" goto :kill_orphans
 
 if "%GUARD_RC%"=="3" (
-  echo [提示] 本工作台已有 electron 主进程在运行（PID 见上）。
+  echo [提示] 本工作台已有「默认数据目录」的 electron 实例在运行（PID 见上）。
   echo   任务栏有窗口就切过去，不用重复启动。
+  echo   沙箱/长跑/自检实例（--no-wake / --remote-debugging-port / AWB_DATA_DIR=_tmp 等）不再算已有实例，不会挡启动。
   echo   没有窗口却起不来（黑屏/秒退）说明是残留进程占着单实例锁，执行： start.cmd --kill-orphans
   exit /b 2
 )
@@ -69,7 +70,7 @@ echo [检查] APP_DIR=%APP_DIR%
 echo [检查] electron=%ELECTRON_EXE%
 if exist "%ELECTRON_EXE%" (echo [检查] electron 存在) else (echo [检查] electron 缺失，请先 npm install)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%GUARD_PS1%" -AppDir "%APP_DIR%"
-if errorlevel 3 (echo [检查] 结论：有残留主进程，启动前建议 start.cmd --kill-orphans) else (echo [检查] 结论：没有残留主进程)
+if errorlevel 3 (echo [检查] 结论：有默认实例（会挡启动），要重启请先 start.cmd --kill-orphans) else (echo [检查] 结论：没有默认实例，启动不受阻（沙箱实例另行列出）)
 exit /b 0
 
 :missing

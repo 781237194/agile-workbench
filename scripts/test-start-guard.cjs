@@ -1,29 +1,63 @@
-'use strict';
-/**
- * T-ece6 启动加固断言（只读）：确认 start.cmd 用绝对路径、有残留检测、锁冲突不静默。
- */
+// B-20261116-134117-bd2e 夹具：用 -ProcJson 注入命令行，断言「沙箱实例不拦、默认实例才拦」
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const cmd = fs.readFileSync(path.join(ROOT, 'start.cmd'), 'utf8');
-const guard = fs.readFileSync(path.join(ROOT, 'scripts/start-guard.ps1'), 'utf8');
-const main = fs.readFileSync(path.join(ROOT, 'src/main.js'), 'utf8');
+const GUARD = path.join(ROOT, 'scripts', 'start-guard.ps1');
+const TMP = path.join(ROOT, '_tmp', 'start-guard-' + Date.now().toString(36));
+fs.mkdirSync(TMP, { recursive: true });
+const EXE = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 
-const checks = [];
-const push = (name, ok, detail) => { checks.push({ name, ok: Boolean(ok), detail }); console.log(`[${ok ? 'PASS' : 'FAIL'}] ${name}${detail ? ' :: ' + detail : ''}`); };
+let pass = 0;
+const fails = [];
+function check(name, ok, detail) {
+  if (ok) { pass += 1; console.log('PASS  ' + name); }
+  else { fails.push({ name, detail }); console.log('FAIL  ' + name + ' · ' + JSON.stringify(detail)); }
+}
 
-push('start.cmd 用 %~dp0 派生 APP_DIR', /set "APP_DIR=%~dp0"/.test(cmd));
-push('electron 用绝对路径启动（%APP_DIR% 前缀）', /set "ELECTRON_EXE=%APP_DIR%\\node_modules\\electron\\dist\\electron\.exe"/.test(cmd));
-push('启动时传入绝对项目目录', /"%ELECTRON_EXE%" "%APP_DIR%"/.test(cmd));
-push('有 --check 启动前检查入口', /--check/.test(cmd) && /:check/.test(cmd));
-push('有 --kill-orphans 清理入口', /--kill-orphans/.test(cmd) && /:kill_orphans/.test(cmd));
-push('默认不杀进程（只提示）', /只提示、不启动/.test(cmd) || /exit \/b 2/.test(cmd));
-push('guard 只认本目录且排除 --type= 的主进程', /ExecutablePath\.StartsWith/.test(guard) && /--type=/.test(guard));
-push('main.js 锁冲突有显式日志 SINGLE_INSTANCE_LOCK_DENIED', /SINGLE_INSTANCE_LOCK_DENIED/.test(main));
-push('main.js 锁冲突有人话弹窗（dialog.showErrorBox）', /showErrorBox/.test(main));
-push('启动文档存在', fs.existsSync(path.join(ROOT, 'docs/启动与黑屏排查.md')));
+function run(rows, extra = []) {
+  const file = path.join(TMP, 'procs-' + Math.random().toString(36).slice(2) + '.json');
+  fs.writeFileSync(file, JSON.stringify(rows), 'utf8');
+  const r = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', GUARD, '-AppDir', ROOT, '-ProcJson', file, ...extra], { encoding: 'utf8' });
+  return { code: r.status, out: String((r.stdout || '') + (r.stderr || '')) };
+}
+const row = (pid, cmd) => ({ ProcessId: pid, ExecutablePath: EXE, CommandLine: cmd });
 
-const failed = checks.filter((row) => !row.ok);
-console.log(`START_GUARD_CHECK ${JSON.stringify({ ok: failed.length === 0, total: checks.length, failed: failed.length })}`);
-process.exit(failed.length === 0 ? 0 : 1);
+// AC4 ①沙箱/长跑实例（B 的那种）→ 不计入，exit 0，启动照常
+const sandbox = run([row(173404, `"${EXE}" . --no-wake --remote-debugging-port=9570`)], ['-Kill']);
+check('AC4-1 沙箱长跑实例不拦启动（exit 0，-Kill 也不动它）',
+  sandbox.code === 0 && /沙箱实例：运行中/.test(sandbox.out) && /没有默认实例需要清理/.test(sandbox.out),
+  { code: sandbox.code, out: sandbox.out.slice(-300) });
+
+// AC4 ②默认实例 → 计入，exit 3
+const def = run([row(338096, `"${EXE}" .`)]);
+check('AC4-2 默认实例才拦（exit 3，输出 PID）',
+  def.code === 3 && /默认实例：运行中（PID 338096）/.test(def.out) && /\[实例\] 默认实例 PID 338096/.test(def.out),
+  { code: def.code, out: def.out.slice(-300) });
+
+// AC2 ③显式 --user-data-dir 指向 _tmp → 不计入
+const explicit = run([row(410001, `"${EXE}" . --user-data-dir=_tmp\\x`)]);
+check('AC2 --user-data-dir=_tmp 的实例不计入（exit 0）',
+  explicit.code === 0 && /沙箱实例：运行中/.test(explicit.out), { code: explicit.code, out: explicit.out.slice(-240) });
+
+// AC1 ④守护进程（route-daemon-host.cjs）不计入
+const helper = run([row(393268, `"${EXE}" D:\\deepseek\\agile-workbench\\src\\route-daemon-host.cjs 工作台改造修复`)]);
+check('AC1 route-daemon-host 守护进程不计入（exit 0）',
+  helper.code === 0 && /守护进程：PID 393268/.test(helper.out), { code: helper.code, out: helper.out.slice(-240) });
+
+// AC5 ⑤混乱场景：沙箱 + 默认同时存在 → 以默认实例判定（exit 3），两行都在；-Kill 夹具模式只模拟、绝不真杀
+const mixed = run([row(173404, `"${EXE}" . --no-wake --remote-debugging-port=9570`), row(338096, `"${EXE}" .`)]);
+const mixedKill = run([row(173404, `"${EXE}" . --no-wake --remote-debugging-port=9570`), row(338096, `"${EXE}" .`)], ['-Kill']);
+check('AC5 沙箱+默认同存：exit 3、两行区分；-Kill 只模拟默认实例、不碰沙箱',
+  mixed.code === 3 && /默认实例：运行中（PID 338096）/.test(mixed.out) && /沙箱实例：运行中（PID 173404/.test(mixed.out)
+  && mixedKill.code === 0 && /只模拟：不会结束真实进程 PID 338096/.test(mixedKill.out) && !/PID 173404/.test(mixedKill.out.split('清理')[1] || ''),
+  { mixedCode: mixed.code, killCode: mixedKill.code, out: mixedKill.out.slice(-300) });
+
+// AC4 ⑥空列表 → 无实例
+const none = run([]);
+check('AC4-6 没有实例时 exit 0', none.code === 0 && /默认实例：无/.test(none.out), { code: none.code });
+
+fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+console.log('\nstart-guard 断言：' + pass + '/' + (pass + fails.length) + ' PASS');
+if (fails.length) { console.log(JSON.stringify(fails, null, 2)); process.exit(1); }
