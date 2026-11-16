@@ -108,11 +108,19 @@ check('① req trq testable 落库成功', trq1.ok === true, trq1);
 check('② 工作流行 status 仍为 ready（B-2a46：不回退成 approved）', rowOf(reqId).status === 'ready', { status: rowOf(reqId).status, trq: trq1.trq && trq1.trq.verdict });
 check('③ 工作流行记录 trq=testable', Boolean(rowOf(reqId).trq) && rowOf(reqId).trq.verdict === 'testable', rowOf(reqId).trq);
 
-// 反向：镜像旧值比工作流行更靠后（dev_done）→ 允许向前（keepForwardStatus 语义）
+// 口径①：镜像值即使比工作流行更靠后（dev_done），TR-Q 也**不得**拿它推进/回退需求状态
 setRowAndMirror('ready', 'dev_done');
 const trq2 = run(['req', 'trq', '--boot', tester.token, '--project', PROJECT, '--id', reqId, '--verdict', 'testable', '--json'], true);
 check('④ 再次 req trq 成功', trq2.ok === true, trq2);
-check('⑤ 镜像更新值更靠后 → keepForwardStatus 向前推进到 dev_done（不是回退）', rowOf(reqId).status === 'dev_done', { status: rowOf(reqId).status });
+check('⑤ 镜像值更靠后（dev_done）也不推进 → 仍是 ready（TR-Q 不回写 requirementStatus）', rowOf(reqId).status === 'ready', { status: rowOf(reqId).status });
+// 审计：镜像值与工作流不一致时必须留痕（不静默丢弃镜像值）
+const eventsFile = path.join(TEAM_ROOT, '状态', '事件.jsonl');
+const events = fs.existsSync(eventsFile)
+  ? fs.readFileSync(eventsFile, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
+  : [];
+const ignored = events.filter((e) => e.action === 'trq_status_ignored' && String(e.target) === reqId);
+const ignoredDev = ignored.find((e) => String(e.data && e.data.mirrorStatus) === 'dev_done');
+check('⑤b 不一致时记 trq_status_ignored 审计（mirror=dev_done/current=ready）', Boolean(ignoredDev) && String(ignoredDev.data.currentRowStatus) === 'ready', ignoredDev || ignored[0] || null);
 
 // 边界：工作流行缺失时退回镜像值（create:true 建行，不报错）
 setRowAndMirror('test_done', 'review');

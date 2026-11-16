@@ -5750,14 +5750,25 @@ function cmdReqTrq(args) {
   task._action = 'trq';
   task._note = truncate(`TR-Q ${verdict} v${version}`, 100);
   saveTask(b.project, task);
-  // B-2a46：先读工作流行当前 status（读不到才退回镜像值），再用 keepForwardStatus 防回退。
+  // B-2a46（P1，PM 2026-11-17 01:36 修订口径①）：TR-Q 只写 trq 与 updatedAt，**不回写** requirementStatus。
+  // status 只取工作流行当前值；镜像任务上的 requirementStatus 是过期值，仅在没有工作流行（老数据）时兜底，
+  // 两者不一致时记一条 trq_status_ignored 审计（不静默、也绝不拿镜像值推进/回退需求）。
   let currentRowStatus = '';
   try {
     const readNow = readWorkflowState(b.project);
     const rowNow = readNow && readNow.state && readNow.state.requirements ? readNow.state.requirements[task.id] : null;
     currentRowStatus = String((rowNow && rowNow.status) || '');
-  } catch { /* 读不到工作流就按镜像值走原逻辑，不阻断 TR-Q 落库 */ }
-  const status = currentRowStatus ? keepForwardStatus(currentRowStatus, mirrorStatus) : mirrorStatus;
+  } catch { /* 读不到工作流就用镜像值兜底（原逻辑），不阻断 TR-Q 落库 */ }
+  const status = currentRowStatus || mirrorStatus;
+  if (currentRowStatus && mirrorStatus !== currentRowStatus) {
+    try {
+      appendEvent({
+        role: b.role, sessionId: b.sessionId, action: 'trq_status_ignored', project: b.project, target: task.id,
+        note: `TR-Q 不回写需求状态：镜像任务 requirementStatus=${mirrorStatus}，工作流行=${currentRowStatus}（以工作流行为准）`,
+        data: { mirrorStatus, currentRowStatus, trqVerdict: verdict },
+      });
+    } catch { /* 审计写不了不能阻断 TR-Q 落库 */ }
+  }
   const sync = syncWorkflowRow(b.project, task, status, { trq: record, teamMode: projectTeamMode(project) }, {
     create: true, action: 'trq', by: b.role, note: `TR-Q ${verdict} v${version}`,
   });
