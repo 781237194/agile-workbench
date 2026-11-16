@@ -5751,7 +5751,7 @@ function cmdReqTrq(args) {
   task._note = truncate(`TR-Q ${verdict} v${version}`, 100);
   saveTask(b.project, task);
   // B-2a46（P1，PM 2026-11-17 01:36 修订口径①）：TR-Q 只写 trq 与 updatedAt，**不回写** requirementStatus。
-  // B-6c08（P1，J1/J2/J3 三态分开；分析师 2026-11-17 01:55 判据补充）：
+  // B-20261117-015546-fe6d（P1，J1/J2/J3 三态分开；分析师 2026-11-17 01:55 判据补充；原单 B-6c08 已作废并入 fe6d）：
   //   J1 读到行 → 以 row.status 为准（镜像差异记 trq_status_ignored）；
   //   J2 读成功但行不存在 → 落 review（不得用 mirrorStatus 兜底）；
   //   J3 读抛错 → **不写工作流行**（保持原状态），只写 trq + trq_sync_skipped 审计，下次自然重试。
