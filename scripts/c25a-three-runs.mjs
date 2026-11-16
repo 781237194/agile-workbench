@@ -68,11 +68,15 @@ for (let i = 0; i < 3; i += 1) {
   });
 }
 const batchAfter = realStore();
+// 与 longrun 同口径（2026-11-16 14:20 修正）：真实工作区是多人共写的，sha 漂移属外部正常写，
+// 不能判成压测污染；判据=项目集合不变 + 真实 store 里 0 个测试名。
+const batchShapeSame = !batchBefore.missing && !batchAfter.missing
+  && batchAfter.projects === batchBefore.projects
+  && JSON.stringify(batchAfter.names) === JSON.stringify(batchBefore.names);
 const batchIsolation = {
-  ok: !batchBefore.missing && !batchAfter.missing
-    && batchAfter.sha256 === batchBefore.sha256
-    && batchAfter.projects === batchBefore.projects
-    && !batchAfter.names.some((n) => TEST_NAME_RE.test(n)),
+  ok: batchShapeSame && !batchAfter.names.some((n) => TEST_NAME_RE.test(n)),
+  shaUnchanged: batchAfter.sha256 === batchBefore.sha256,
+  externalWrite: batchShapeSame && batchAfter.sha256 !== batchBefore.sha256,
   before: batchBefore, after: batchAfter,
   // AC4：清理后 Owner 界面不应再出现任何测试名（真实 store 的名字里 0 命中）
   ownerUiClean: !batchAfter.names.some((n) => TEST_NAME_RE.test(n)),

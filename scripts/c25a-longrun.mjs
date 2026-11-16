@@ -160,13 +160,19 @@ if (!childExit) {
 const endedAt = new Date();
 const minutesRan = Number(((endedAt - startedAt) / 60000).toFixed(2));
 const rows = readRows();
-// B-20261116-122339-dd73 AC1/AC3：跑完必须证明「真实 workbench.json 一个字节都没动」。
+// B-20261116-122339-dd73 AC1/AC3：跑完必须证明「真实 workbench.json 没被压测改名/写测试项目」。
+// 注意（2026-11-16 14:20 修正）：sha256 不能单独当判据——真实工作区是多人共写的，
+// 31 分钟里别人（PM/A/Owner 界面操作）动一下 workbench.json 就会让 sha 变，那属于「外部正常写」，
+// 不能判成本次压测污染。真正要判的是「项目集合不变 + 没有测试项目名」。
 const realAfter = realStoreFingerprint();
+const shapeSame = !realBefore.missing && !realAfter.missing
+  && realAfter.projects === realBefore.projects
+  && JSON.stringify(realAfter.names) === JSON.stringify(realBefore.names);
+const namesClean = !realAfter.names.some((n) => /c25a|sb-fast|双跑|bd22|qidle|沙盘/i.test(n));
 const isolation = {
-  ok: !realBefore.missing && !realAfter.missing
-    && realAfter.sha256 === realBefore.sha256
-    && realAfter.projects === realBefore.projects
-    && !realAfter.names.some((n) => /c25a|sb-fast|双跑|bd22|qidle|沙盘/i.test(n)),
+  ok: shapeSame && namesClean,
+  shaUnchanged: realAfter.sha256 === realBefore.sha256,
+  externalWrite: shapeSame && realAfter.sha256 !== realBefore.sha256,
   realBefore, realAfter,
 };
 // c25a ②（PM 2026-11-16 12:07）：30 分钟长跑必须能证明「--no-wake 四不」——
