@@ -6086,9 +6086,11 @@ function acceptDefectTask(args, { project, projectName, task, decision, opinion,
     });
   }
   if (verdict.evidence.length < 2) {
+    // B-e616：把校验层的逐项原因（FILE_NOT_FOUND / EMPTY_PATH / HASH_MISMATCH / EVIDENCE_OUTSIDE_PROJECT）
+    // 一并带出，否则「文件缺失」只能看到笼统的 SECOND_EVIDENCE_REQUIRED，调用方无法定位是哪个文件。
     fail('PM_ACCEPT_EVIDENCE_REQUIRED', '缺陷单验收证据两件套：测试报告 + 至少一件其它证据（截图/记录）', {
       taskId: task.id,
-      missing: [{ kind: 'screenshot|record', path: '', reason: 'SECOND_EVIDENCE_REQUIRED' }],
+      missing: [{ kind: 'screenshot|record', path: '', reason: 'SECOND_EVIDENCE_REQUIRED' }].concat(verdict.missing),
       given: verdict.evidence.map((item) => `${item.path}#${item.kind}`),
     });
   }
@@ -9158,7 +9160,13 @@ function ownerGateBoot(args, projectName) {
 }
 
 export function lessonGateFor(b, extra = {}) {
-  if (lessons.isOwnerChannel(extra)) return { ok: true, exempt: true, reason: 'OWNER_CHANNEL' };
+  // B-20261116-2150：role==='owner' 也要豁免——ownerGateBoot 在「无 boot 令牌（Owner UI/终端）」
+  // 时把 role 兜底成 'owner'，而界面的验收路径并不一定带 --channel ui，
+  // 于是门禁拿 role='owner' 去查阅读记录（永不存在）→ 误报 LESSONS_UNREAD 挡住 Owner 验收。
+  // 豁免口径与 isOwnerChannel 一致：Owner 通道本就不查该门禁。
+  if (lessons.isOwnerChannel(extra) || String((b && b.role) || '').trim().toLowerCase() === 'owner') {
+    return { ok: true, exempt: true, reason: 'OWNER_CHANNEL' };
+  }
   let projectPath = '';
   try { projectPath = loadProject(b.project).path; } catch { projectPath = ''; }
   if (!projectPath) return { ok: true, exempt: true, reason: 'NO_PROJECT_PATH' };
