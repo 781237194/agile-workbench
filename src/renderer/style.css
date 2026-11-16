@@ -4738,6 +4738,81 @@ html[data-style="glass"][data-theme="dark"] {
 .mm-sub button[aria-checked="true"] { color: var(--gold-2); background: var(--gold-soft); border-color: var(--line); }
 .mm-sub button[aria-checked="true"] .mm-ico { color: var(--gold-2); }
 
+/* ==========================================================================
+   R-fe90 F-7 · 三套新主题的特效本体（默认 full；三层降级见文件末尾）
+   —— 科技=网格漂移 + 粒子（粒子层由 app.js 的 awbThemeFx 画，CSS 只管网格）
+      动漫=轻微弹跳（≤3 处）  玻璃=毛玻璃（≤6 处 backdrop-filter）
+   ========================================================================== */
+html[data-style="tech"][data-theme="dark"] body::before {
+  content: '';
+  position: fixed;
+  left: 0; right: 0; top: var(--titlebar-h); bottom: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(79,209,255,.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(79,209,255,.07) 1px, transparent 1px);
+  background-size: 44px 44px;
+  animation: awbThemeGridDrift 20s linear infinite;
+}
+@keyframes awbThemeGridDrift {
+  from { background-position: 0 0, 0 0; }
+  to { background-position: 0 44px, 44px 0; }
+}
+/* 粒子画布：只在科技档且特效开启时由 app.js 插入并绘制 */
+html[data-style="tech"][data-theme="dark"] #awb-theme-particles {
+  position: fixed;
+  left: 0; right: 0; top: var(--titlebar-h); bottom: 0;
+  width: 100%; height: calc(100% - var(--titlebar-h));
+  pointer-events: none;
+  z-index: 1;
+  opacity: .55;
+}
+html[data-style="glass"][data-theme="dark"] #titlebar,
+html[data-style="glass"][data-theme="dark"] .sidebar,
+html[data-style="glass"][data-theme="dark"] .more-menu,
+html[data-style="glass"][data-theme="dark"] .drawer,
+html[data-style="glass"][data-theme="dark"] .workspace-pop,
+html[data-style="glass"][data-theme="dark"] #flow-panel {
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+}
+html[data-style="anime"][data-theme="dark"] .brand-mark,
+html[data-style="anime"][data-theme="dark"] #titlebar .brand-mark,
+html[data-style="anime"][data-theme="dark"] .sidebar-foot {
+  animation: awbThemeBounce 3.4s ease-in-out infinite;
+}
+@keyframes awbThemeBounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2.5px); }
+}
+
+/* —— 三层降级：off > prefers-reduced-motion > full（reduced 关动画、保留配色）—— */
+html[data-effect-level="reduced"] body::before,
+html[data-effect-level="off"] body::before { animation: none; }
+html[data-effect-level="reduced"] .brand-mark,
+html[data-effect-level="reduced"] .sidebar-foot,
+html[data-effect-level="off"] .brand-mark,
+html[data-effect-level="off"] .sidebar-foot { animation: none; }
+html[data-effect-level="off"] #titlebar,
+html[data-effect-level="off"] .sidebar,
+html[data-effect-level="off"] .more-menu,
+html[data-effect-level="off"] .drawer,
+html[data-effect-level="off"] .workspace-pop,
+html[data-effect-level="off"] #flow-panel {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background-color: var(--panel);
+}
+html[data-effect-level="off"] #awb-theme-particles,
+html[data-effect-level="reduced"] #awb-theme-particles { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  html[data-style="tech"][data-theme="dark"] body::before,
+  html[data-style="anime"][data-theme="dark"] .brand-mark,
+  html[data-style="anime"][data-theme="dark"] .sidebar-foot { animation: none; }
+  #awb-theme-particles { display: none; }
+}
+
 /* ── R-c4c7（T-20261115-195024-5369）· 团队收件箱实时面板（零轮询，只读）──────────────── */
 .mailbox-entry { white-space: nowrap; }
 #mailbox-panel.mailbox-panel {

@@ -10363,12 +10363,49 @@ async function runThemeShots() {
   fs.mkdirSync(outDir, { recursive: true });
   createWindow();
   const win = mainWindow;
+  // AC12：窗口尺寸写死 1500×900（与证据文字一致），实际内容尺寸/zoom 记进每档 JSON。
+  try { win.setContentSize(1500, 900); } catch { /* 平台不支持则用默认尺寸，JSON 里记实际值 */ }
   await new Promise((resolve) => {
     if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
     else resolve();
   });
   await new Promise((r) => setTimeout(r, 2500)); // 等 app.js 的异步 boot 完
+  // AC1：5 张图必须内容一致、只差主题 —— 先把壳内 webview（DSH 页面）统一置空白，
+  // 否则各档会截到 DSH 的不同页面（壁纸页/聊天页），主题差异完全不可比。
+  // 先把所有非主窗 webContents 列出来（诊断用）：blanked=0 时要能看出为什么没置空。
+  const webContentsSeen = [];
+  let blankedWebviews = 0;
+  for (const wc of webContents.getAllWebContents()) {
+    if (wc === win.webContents) continue;
+    let type = 'unknown';
+    try { type = typeof wc.getType === 'function' ? String(wc.getType()) : 'no-getType'; } catch { type = 'getType-threw'; }
+    let url = '';
+    try { url = String(wc.getURL() || ''); } catch { url = ''; }
+    webContentsSeen.push({ type, url: url.slice(0, 80) });
+    // 只置空「嵌在壳里的页面」（webview / remote / 其它非主窗渲染进程），不看具体类型名，避免类型名变化导致漏置
+    try {
+      await wc.loadURL('about:blank');
+      blankedWebviews += 1;
+    } catch {
+      // webview guest 常常不允许主进程导航（Cannot load URL / ERR_ABORTED）→ 退化方案：
+      // 把它内容隐藏 + 统一深色底，目的只是「5 张图内容一致、只差主题」，不要求真换页。
+      try {
+        await wc.executeJavaScript("(function(){try{var d=document.documentElement;d.style.background='#101014';d.style.colorScheme='dark';if(document.body)document.body.style.visibility='hidden';}catch(e){}})()", true);
+        blankedWebviews += 1;
+      } catch { /* 两种都失败才放弃，报告里记 0 */ }
+    }
+  }
+  if (blankedWebviews) await new Promise((r) => setTimeout(r, 1200));
   try { win.webContents.debugger.attach('1.3'); } catch { /* 已附加 */ }
+  const viewport = await win.webContents.executeJavaScript('({w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio})', true);
+  const windowInfo = {
+    contentSize: win.getContentSize(),
+    bounds: win.getBounds(),
+    zoom: win.webContents.getZoomFactor(),
+    viewport,
+    webviewsBlanked: blankedWebviews,
+    webContentsSeen
+  };
   const ids = ['native-dark', 'native-light', 'tech-dark', 'anime-dark', 'glass-dark'];
   const shots = [];
   const results = [];
@@ -10383,16 +10420,21 @@ async function runThemeShots() {
     const shot = await win.webContents.debugger.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
     const pngPath = path.join(outDir, id + '.png');
     fs.writeFileSync(pngPath, Buffer.from(shot.data, 'base64'));
+    const pngBuf = fs.readFileSync(pngPath);
+    const pngSize = { width: pngBuf.readUInt32BE(16), height: pngBuf.readUInt32BE(20) }; // PNG IHDR 宽高
     const perfPath = path.join(outDir, 'perf-' + id + '.json');
-    fs.writeFileSync(perfPath, JSON.stringify({ themeId: id, clicked, state, probe, at: new Date().toISOString() }, null, 2));
-    shots.push({ id, png: pngPath, perf: perfPath, bytes: fs.statSync(pngPath).size });
-    results.push({ themeId: id, clicked, state, probe });
+    fs.writeFileSync(perfPath, JSON.stringify({ themeId: id, clicked, window: windowInfo, pngSize, pngBytes: pngBuf.length, state, probe, at: new Date().toISOString() }, null, 2));
+    shots.push({ id, png: pngPath, perf: perfPath, bytes: pngBuf.length, pngSize });
+    results.push({ themeId: id, clicked, state, probe, pngSize });
   }
   try { win.webContents.debugger.detach(); } catch { /* ignore */ }
   const hashes = shots.map((s) => crypto.createHash('sha256').update(fs.readFileSync(s.png)).digest('hex'));
   const unique = new Set(hashes).size;
-  const ok = unique === ids.length && results.every((r) => r.state && r.state.themeId === r.themeId && r.clicked === true);
-  const report = { ok, outDir, uniqueScreenshots: unique, expected: ids.length, shots, results, at: new Date().toISOString() };
+  const sizes = [...new Set(shots.map((s) => s.pngSize.width + 'x' + s.pngSize.height))];
+  const ok = unique === ids.length
+    && sizes.length === 1
+    && results.every((r) => r.state && r.state.themeId === r.themeId && r.clicked === true);
+  const report = { ok, outDir, window: windowInfo, uniqueScreenshots: unique, sizes, expected: ids.length, shots, results, at: new Date().toISOString() };
   fs.writeFileSync(path.join(outDir, 'theme-shots.json'), JSON.stringify(report, null, 2));
   console.log('THEME_SHOTS_REPORT ' + path.join(outDir, 'theme-shots.json'));
   console.log(JSON.stringify({ ok, unique, expected: ids.length, outDir }, null, 2));

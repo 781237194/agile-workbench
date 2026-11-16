@@ -893,11 +893,136 @@ function themeState() {
     style: document.documentElement.getAttribute('data-style') || parts.style || 'tech',
     theme: currentTheme(),
     source: LAST_THEME.source || 'default',
-    effects: themeEffects(id),
+    effects: Object.assign(themeEffects(id), {
+      idle: Boolean(AWB_THEME_FX && AWB_THEME_FX.idle),
+      particleCount: typeof awbThemeParticleCount === 'function' ? awbThemeParticleCount() : 0
+    }),
     reducedMotion: themeReducedMotion(),
     lowfx: themeLowFx(),
     effectLevel: themeEffectLevel(),
   };
+}
+
+/* ── R-fe90 F-7 特效：科技档粒子层（canvas）、无输入 3 秒降频、失焦暂停 ──────────
+ * 顶层标识符统一 AWB_THEME_FX / awbTheme* 前缀（P0 教训：渲染层多脚本共用全局作用域）。
+ * 粒子数默认 120、上限 160（?particles= 可覆盖，超限夹取）；非科技档或特效关闭时移除画布。
+ */
+const AWB_THEME_FX = {
+  canvas: null,
+  ctx: null,
+  parts: [],
+  raf: 0,
+  running: false,
+  idle: false,
+  lastInput: Date.now(),
+  lastFrame: 0,
+  bound: false
+};
+
+function awbThemeParticleCount() {
+  let n = 120;
+  try {
+    const raw = new URLSearchParams(location.search || '').get('particles');
+    if (raw != null && raw !== '') n = Number(raw);
+  } catch { /* ignore */ }
+  if (!Number.isFinite(n)) n = 120;
+  return Math.max(0, Math.min(160, Math.round(n)));
+}
+
+function awbThemeFxEnsureCanvas() {
+  if (AWB_THEME_FX.canvas && document.body.contains(AWB_THEME_FX.canvas)) return AWB_THEME_FX.canvas;
+  const c = document.createElement('canvas');
+  c.id = 'awb-theme-particles';
+  c.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(c);
+  AWB_THEME_FX.canvas = c;
+  AWB_THEME_FX.ctx = c.getContext('2d');
+  return c;
+}
+
+function awbThemeFxSeed() {
+  const c = AWB_THEME_FX.canvas;
+  if (!c) return;
+  const w = Math.max(1, window.innerWidth);
+  const h = Math.max(1, Math.max(1, window.innerHeight - 44));
+  c.width = w;
+  c.height = h;
+  const count = awbThemeParticleCount();
+  AWB_THEME_FX.parts = Array.from({ length: count }, () => ({
+    x: Math.random() * w,
+    y: Math.random() * h,
+    r: Math.random() * 1.6 + 0.6,
+    vx: (Math.random() - 0.5) * 0.22,
+    vy: (Math.random() - 0.5) * 0.22
+  }));
+}
+
+function awbThemeFxDraw() {
+  const { ctx, canvas } = AWB_THEME_FX;
+  if (!ctx || !canvas) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = 'rgba(79,209,255,.85)';
+  for (const p of AWB_THEME_FX.parts) {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.x < -4) p.x = canvas.width + 4;
+    if (p.x > canvas.width + 4) p.x = -4;
+    if (p.y < -4) p.y = canvas.height + 4;
+    if (p.y > canvas.height + 4) p.y = -4;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function awbThemeFxLoop(ts) {
+  if (!AWB_THEME_FX.running) return;
+  const idleNow = Date.now() - AWB_THEME_FX.lastInput > 3000;
+  AWB_THEME_FX.idle = idleNow;
+  const minGap = idleNow ? 1000 / 30 : 1000 / 60; // 无输入 3 秒后降到 ≤30fps（AC7）
+  if (!AWB_THEME_FX.lastFrame || ts - AWB_THEME_FX.lastFrame >= minGap) {
+    AWB_THEME_FX.lastFrame = ts;
+    awbThemeFxDraw();
+  }
+  AWB_THEME_FX.raf = requestAnimationFrame(awbThemeFxLoop);
+}
+
+function awbThemeFxBindInput() {
+  if (AWB_THEME_FX.bound) return;
+  AWB_THEME_FX.bound = true;
+  const touch = () => { AWB_THEME_FX.lastInput = Date.now(); };
+  for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) {
+    window.addEventListener(ev, touch, { passive: true });
+  }
+  // 失焦暂停、回来继续（AC7「window.blur 暂停粒子」）
+  window.addEventListener('blur', () => awbThemeFxStop());
+  window.addEventListener('focus', () => awbThemeFxSync());
+  window.addEventListener('resize', () => { if (AWB_THEME_FX.running) awbThemeFxSeed(); });
+}
+
+function awbThemeFxStop() {
+  if (AWB_THEME_FX.raf) cancelAnimationFrame(AWB_THEME_FX.raf);
+  AWB_THEME_FX.raf = 0;
+  AWB_THEME_FX.running = false;
+}
+
+function awbThemeFxSync() {
+  const want = Boolean(themeEffects().particles);
+  if (!want) {
+    awbThemeFxStop();
+    if (AWB_THEME_FX.canvas) AWB_THEME_FX.canvas.remove();
+    AWB_THEME_FX.canvas = null;
+    AWB_THEME_FX.ctx = null;
+    AWB_THEME_FX.parts = [];
+    return;
+  }
+  awbThemeFxBindInput();
+  awbThemeFxEnsureCanvas();
+  awbThemeFxSeed();
+  if (AWB_THEME_FX.running) return;
+  AWB_THEME_FX.running = true;
+  AWB_THEME_FX.lastFrame = 0;
+  AWB_THEME_FX.raf = requestAnimationFrame(awbThemeFxLoop);
 }
 
 /** R-fe90 F-6 性能探针：rAF 采样 + 主进程真实内存，返回 AC6 需要的四项（fps/p95/dropRate/memMB） */
@@ -956,6 +1081,8 @@ function applyThemeState(resolved, opts) {
   LAST_THEME.source = r.source || 'default';
   if (options.persist !== false) themeWriteStorage(r.themeId);
   syncThemeUi();
+  // F-7：按新档位增删/启停粒子层（科技档才有；非科技档会移除画布）
+  try { awbThemeFxSync(); } catch { /* 特效异常不影响换肤 */ }
   // 独立看板窗口与内嵌 iframe 不继承外壳变量：切主题时同步过去，避免“先黑后白”。
   // 5 档要看板窗同时同步 data-style + data-theme（增补卷-fe90-1 §四.1）。
   try {
