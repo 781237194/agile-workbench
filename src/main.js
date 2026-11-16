@@ -17785,6 +17785,17 @@ async function selftestPanelTruth(win, testRoot) {
     const pmSession = roster && Array.isArray(roster.members)
       ? String((roster.members.find((m) => m && m.role === 'pm') || {}).sessionId || '')
       : '';
+    // R-ad44 AC1① 负向用例：桩必须能拦住「沙盘外路径」——拿真实 团队/状态/团队.json 做样本，
+    // 只调桩、不写文件；期望抛 SELFTEST_STATE_PATH_ESCAPE，证明桩不是恒真。
+    {
+      let escapeBlocked = false;
+      try {
+        assertSandboxStatePath(testRoot, path.join(ROOT, '团队', '状态', '团队.json'), 'negative-outside-sandbox');
+      } catch (error) {
+        escapeBlocked = /SELFTEST_STATE_PATH_ESCAPE/.test(String((error && error.message) || error));
+      }
+      expect('AC1① 运行时桩负向用例：沙盘外路径被拦住（SELFTEST_STATE_PATH_ESCAPE）', escapeBlocked === true, { escapeBlocked });
+    }
     const writeToken = (token, sessionId, createdAt) => {
       const file = path.join(bootDir, token + '.json');
       fs.writeFileSync(file, JSON.stringify({
