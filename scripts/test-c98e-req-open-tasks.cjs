@@ -24,7 +24,10 @@ const SB = mkTempSandbox('c98e');
 const TEAM = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM, '工具', 'team.mjs');
-const STAGED = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '提案暂存-c98e', 'ops.mjs');
+// B-20261117-020736（PM 裁定①最小改动）：不再用「提案暂存-c98e/ops.mjs」整文件替换——
+// 那版是旧快照（缺 cmdClaim 等导出），会让 team.mjs import 直接失败。
+// 直接复制当前工作树 团队/工具/lib/ops.mjs 进沙盘；原暂存差异已并入 HEAD，无需再注入。
+const REAL_OPS = path.join(ROOT, '团队', '工具', 'lib', 'ops.mjs');
 const PROJECT = 'c98e验收门沙盘';
 const env = { ...process.env, TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: PROJECTS, TEAM_SELFTEST: '1' };
 
@@ -39,9 +42,9 @@ const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest
 fs.rmSync(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
-// 沙盘用提案暂存版 ops.mjs（不碰工作树）
-fs.copyFileSync(STAGED, path.join(TEAM, '工具', 'lib', 'ops.mjs'));
-check('沙盘使用暂存版 ops.mjs（sha 与暂存一致）', sha(path.join(TEAM, '工具', 'lib', 'ops.mjs')) === sha(STAGED), { staged: sha(STAGED).slice(0, 16) });
+// 沙盘里就是当前工作树 ops.mjs（不碰工作树；原暂存差异已并入 HEAD）
+fs.copyFileSync(REAL_OPS, path.join(TEAM, '工具', 'lib', 'ops.mjs'));
+check('沙盘使用当前工作树 ops.mjs（sha 与工作树一致）', sha(path.join(TEAM, '工具', 'lib', 'ops.mjs')) === sha(REAL_OPS), { real: sha(REAL_OPS).slice(0, 16) });
 
 const teamFile = path.join(TEAM, '状态', '团队.json');
 const team = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
@@ -79,7 +82,7 @@ process.env.TEAM_SELFTEST = '1';
 (async () => {
   const mod = await import(pathToFileURL(path.join(TEAM, '工具', 'lib', 'ops.mjs')).href);
   const gate = mod.ownerTestGate;
-  check('暂存版导出 ownerTestGate（可单测）', typeof gate === 'function', typeof gate);
+  check('ops.mjs 导出 ownerTestGate（可单测）', typeof gate === 'function', typeof gate);
 
   const tTest = 'T-20261115-190002-test';
   const tDev = 'T-20261115-190003-dev';
