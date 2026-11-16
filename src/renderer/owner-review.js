@@ -579,6 +579,9 @@
     if (!req) return null;
     // B-6155：未登记需求一律禁用；错误由界面当场说明，不再让 Owner 白点一次。
     if (isUnregisteredOf(req)) return { code: 'REQ_UNREGISTERED', text: '未登记·不可评审（工作流里没有这条需求；先让 PM 登记或作废）' };
+    // B-20261116-105609-2893：末条决定只绑旧版本（无 basis / hash 不等）时不得锁——那是上一版正文的决定，
+    // 当前版本仍等 Owner 重新决定（550f/0b77 就是被这里锁成「OWNER_ALREADY_DECIDED」）。
+    if (OR_STATE && typeof OR_STATE.decidedOnlyOnStaleVersion === 'function' && OR_STATE.decidedOnlyOnStaleVersion(req)) return null;
     if (isPending(req)) return null;
     const decided = ownerReviewStatusOf(req);
     if (!DECISION_BADGE[decided]) return null;
@@ -2925,9 +2928,17 @@
     const latest = currentReq ? latestOwnerDecision(currentReq) : null;
     const latestStatus = String((latest && (latest.status || latest.decision))
       || (currentReq && currentReq.ownerReview && currentReq.ownerReview.status) || '');
-    if (latest && latestStatus === status) {
+    // B-20261116-105609-2893：只有「决定绑的正文版本 == 当前版本」才算重复。
+    // 旧决定（无 basis / hash 不等，如 550f、0b77 那批 11-15 的决定）不得拦住对新版本的重新决定。
+    const latestIsCurrent = Boolean(latest && OR_STATE && typeof OR_STATE.isDecisionCurrent === 'function'
+      && OR_STATE.isDecisionCurrent(latest, currentReq));
+    if (latest && latestIsCurrent && latestStatus === status) {
       showBanner({ message: `这条已经决定了（${STATUS_TEXT[status] || status}），同一决定不重复落账。` });
       return;
+    }
+    // 选中的是旧版本决定：给 Owner 一句明确提示，避免以为点了没生效。
+    if (latest && !latestIsCurrent && latestStatus) {
+      showNotice(`上一版正文的「${STATUS_TEXT[latestStatus] || latestStatus}」已过期，本次是对当前正文重新决定`);
     }
     const opinionEl = dialog.querySelector('[data-or-opinion]');
     let opinion = String(opinionEl.value || '').trim();

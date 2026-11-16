@@ -7315,7 +7315,30 @@ function createTeamTools(options = {}) {
    * 不做产品评审/boot 闸门：弹窗只展示已过产品评审的待决需求，Owner 是最终决策人；
    * 打回理由必填在 owner:decide 入口校验，避免静默丢理由。
    */
-  async function applyOwnerDecisionToRequirement(input = {}) {
+  // B-20261116-105609-2893：需求「当前正文版本」（sha256 + contentHash，取到哪个算哪个）。
+function rowRequirementVersion(row) {
+  return {
+    sha256: String((row && (row.requirementHash || row.docHash))
+      || (row && row.requirementReview && row.requirementReview.requirementHash) || ''),
+    contentHash: String((row && row.requirementReview && row.requirementReview.contentHash)
+      || (row && row.contentHash) || ''),
+  };
+}
+
+// B-20261116-105609-2893：决定是否绑「当前正文版本」的判定（导出供自检脚本直接调用）。
+// 无 basis / hash 不等 → false（旧决定，不参与同轮同状态去重）。
+function decisionVersionMatches(decision, row) {
+  if (!decision) return false;
+  const basis = (decision.basis && decision.basis.requirement) || {};
+  const decSha = String(basis.sha256 || '');
+  const decContent = String(basis.contentHash || '');
+  const cur = rowRequirementVersion(row);
+  if (decSha && cur.sha256 && decSha === cur.sha256) return true;
+  if (decContent && cur.contentHash && decContent === cur.contentHash) return true;
+  return false;
+}
+
+async function applyOwnerDecisionToRequirement(input = {}) {
     const name = String((input.project && (input.project.teamName || input.project.name)) || input.projectName || '').trim();
     if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
     const requirementId = String(input.requirementId || '').trim();
@@ -7356,10 +7379,16 @@ function createTeamTools(options = {}) {
       if (!Number.isFinite(at) || !Number.isFinite(gateAtMs)) return true;
       return at >= gateAtMs;
     };
+    // B-20261116-105609-2893：把「同状态去重」收紧到「同一版本」——
+    // 旧决定（无 basis，或 basis 的 hash 与当前正文不等）不再拦住对新版本的重新决定
+    // （550f / 0b77 就是 11-15 那批无 basis 的决定，被这里当成「本轮已有相同决定」拒掉）。
+    // 落账时同时把当前版本写进 decision.basis，下一次点同一版本才会被正确判重。
+    const decisionMatchesCurrentVersion = decisionVersionMatches;
     if (existingDecisions.some((d) => d
       && String(d.status || d.decision || '') === status
       && Number(d.round || rowRound) === rowRound
-      && stillValid(d))) {
+      && stillValid(d)
+      && decisionMatchesCurrentVersion(d, rowObj))) {
       return failure('DUPLICATE_DECISION', `需求 ${requirementId} 本轮已有相同决定（${status}），不重复落账`, {
         requirementId, status, round: rowRound,
       });
@@ -7408,6 +7437,9 @@ function createTeamTools(options = {}) {
         round: Number(row.round || 1),
         roundKey,
         opinion,
+        // B-20261116-105609-2893：决定必须记下「当时评审的是哪一版正文」，
+        // 否则以后无法区分「同一版本的重复点击」与「改版后的重新决定」。
+        basis: { requirement: rowRequirementVersion(row) },
         ...(input.recordedBy ? { recordedBy: String(input.recordedBy) } : {}),
         ...(input.proxy ? { proxy: String(input.proxy) } : {}),
         ...(input.authorization ? { authorization: String(input.authorization) } : {}),
@@ -10149,6 +10181,9 @@ function createTeamTools(options = {}) {
     writeOwnerWorkflow,
     recordOwnerDecision,
     applyOwnerDecisionToRequirement,
+    // B-20261116-105609-2893：决定-版本绑定判定（自检脚本直接调用，避免测试另抄一份判据）
+    decisionVersionMatches,
+    rowRequirementVersion,
     // R-dba4（工具侧）：需求行大白话 copy 写入口（IPC requirement:copy-save / CLI req copy 共用一个判据）
     saveRequirementCopy,
     launchSessions,

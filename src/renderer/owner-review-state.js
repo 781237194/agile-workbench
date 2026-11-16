@@ -211,6 +211,17 @@
     });
   }
 
+  /**
+   * B-20261116-105609-2893：这条需求「已决定」是否只针对旧版本。
+   * - 有末条决定但该决定绑的不是当前正文版本（无 basis / hash 不等）→ true（旧决定，不得拦新决定）
+   * - 无决定，或决定绑的就是当前版本 → false
+   */
+  function decidedOnlyOnStaleVersion(req) {
+    const latest = latestOwnerDecision(req);
+    if (!latest) return false;
+    return !isDecisionCurrent(latest, req);
+  }
+
   const api = {
     CLOSED_REQ_STATUSES,
     REWORK_LABEL,
@@ -221,6 +232,7 @@
     decidedStatusOf,
     currentDocHashOf,
     isDecisionCurrent,
+    decidedOnlyOnStaleVersion,
     rejectedAtOf,
     changedAtOf,
     reworkInfo,
