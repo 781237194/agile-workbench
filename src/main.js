@@ -9683,7 +9683,23 @@ installShellAuditSensors();
     // T-c25a AC2 诊断：关闭窗口必须留「谁点的」堆栈——11:39 那次自动关窗的调用方是渲染层 IPC，
     // 没有这行只能看到 window-all-closed，分不清「人点 X」还是「崩溃后兜底误关」。
     if (action === 'close') {
-      try { console.log('[win-ctl] ' + JSON.stringify({ action: 'close', at: new Date().toISOString(), stack: String(new Error().stack || '').split('\n').slice(1, 6) })); } catch { /* ignore */ }
+      try {
+        const sender = _e && _e.sender;
+        console.log('[win-ctl] ' + JSON.stringify({
+          action: 'close', at: new Date().toISOString(),
+          senderId: sender && sender.id, senderType: sender && sender.getType ? sender.getType() : '',
+          senderUrl: sender && sender.getURL ? String(sender.getURL()).slice(0, 120) : '',
+          sinceCrashMs: lastRenderCrashAt ? Date.now() - lastRenderCrashAt : -1,
+          stack: String(new Error().stack || '').split('\n').slice(1, 6),
+        }));
+      } catch { /* ignore */ }
+      // T-c25a AC2 修复：崩溃后 10 秒内不许用「关窗」收场（实测崩溃 4 秒后就会发 close），
+      // 改为留窗 + 崩条（renderer 已由 app:render-crash 显示），这样「壳提前退出」不再发生。
+      if (lastRenderCrashAt && Date.now() - lastRenderCrashAt <= CRASH_CLOSE_GUARD_MS) {
+        try { recordShellAudit('shell-close-blocked-after-crash', {}); } catch { /* ignore */ }
+        console.log('[win-ctl] close blocked after crash ' + JSON.stringify({ sinceCrashMs: Date.now() - lastRenderCrashAt }));
+        return;
+      }
     }
     if (action === 'min') mainWindow.minimize();
     else if (action === 'max') mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
@@ -17640,8 +17656,14 @@ function currentRendererMemoryMB() {
   } catch { return null; }
 }
 
+const CRASH_CLOSE_GUARD_MS = 10 * 1000;
+let lastRenderCrashAt = 0;
+
 function recordRenderCrash(kind, details) {
   const info = details && typeof details === 'object' ? details : {};
+  // T-c25a：记下「最近一次崩溃时刻」——崩溃后 10 秒内禁止走 window:control('close') 收场，
+  // 否则表现就是「壳提前退出」（实测 11:39 那次：GPU 崩 → 4 秒后窗口被 IPC 关掉）。
+  lastRenderCrashAt = Date.now();
   const row = {
     at: now(),
     kind: String(kind || 'unknown'),
