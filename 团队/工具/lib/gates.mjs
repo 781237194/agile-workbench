@@ -702,6 +702,18 @@ export function gateConfig(project) {
 }
 
 /**
+ * 任务层终态集合（B-dd67）：done=已完成、accepted=已验收、cancelled=已取消。
+ * 这三种都不该再占角色名额——历史缺陷单验收后仍是 accepted，若不排除，G5 会让角色永久「忙」。
+ * 只把真在办的（open/working/…）算未闭环；判定按「不在终态集合里」= 未闭环，避免新增状态漏判。
+ */
+export const CLOSED_TASK_STATUSES = Object.freeze(['done', 'accepted', 'cancelled']);
+
+/** 任务是否已闭环（终态仍可扩展，但调用方只关心「还占不占角色」）。 */
+export function taskIsClosed(task) {
+  return CLOSED_TASK_STATUSES.includes(String((task && task.status) || ''));
+}
+
+/**
  * G5：目标角色是否忙——已有未闭环任务（TASK_OPEN）或活动锁（ROLE_BUSY）。
  * 派单前必须给出具体的任务 id / 锁，让 PM 先 done 或释放，而不是把第二个任务压上去。
  */
@@ -711,7 +723,8 @@ export function gateRoleBusy({ role, tasks = [], locks = [], excludeTaskIds = []
   const open = (tasks || []).filter((task) => {
     if (!task) return false;
     if (String(task.owner || '') !== String(role || '')) return false;
-    if (String(task.status || '') === 'done') return false;
+    // B-dd67：done/accepted/cancelled 都是终态，不再算未闭环（accepted 原先被算成忙，角色永久接不了新活）。
+    if (taskIsClosed(task)) return false;
     // R-75ec：被 Owner 门冻结（blocked）的任务不占角色——角色已被要求停手，不能再因此挡住新派单。
     if (String(task.status || '') === 'blocked') return false;
     if (skip.has(String(task.id || ''))) return false;
