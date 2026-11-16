@@ -273,7 +273,8 @@ $op = if ($req.op) { [string]$req.op } else { 'capture' }
 $stdout = [Console]::OpenStandardOutput()
 
 function Write-Line([string]$text) {
-  $bytes = [System.Text.Encoding]::ASCII.GetBytes($text + "`n")
+  # UTF-8（不带 BOM）：header 里可能含窗口标题（中文），不能用 ASCII 编码
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($text + "`n")
   $stdout.Write($bytes, 0, $bytes.Length)
   $stdout.Flush()
 }
