@@ -824,6 +824,11 @@
     if (isUnregisteredOf(req)) return 'running'; // 不混进「等你决定」，避免 Owner 以为可点
     const status = String((req && req.status) || '');
     if (isPending(req)) return 'pending';
+    // P0（2026-11-16，Owner 截图 77/14）：**已收口判定必须早于「有决定 → 进行中」**。
+    // 否则凡被 Owner 批过、随后验收通过/终止的需求（status=accepted/terminated…）都会因为
+    // decided=approved 先命中下一条，全被塞进「进行中」（现场 91 行里 77 行如此，正确应 ~80/8）。
+    // 注意顺序：未登记→进行中；待决→等你决定；**已收口→已收口**；已通过/已跳过（未收口）→进行中。
+    if (CLOSED_REQ_STATUSES.includes(status)) return 'closed';
     // B-20261116-061155-dfe6：Owner 已通过/已跳过（ownerReview.status 或 decisions 末条）的行
     // 不能再落「等你决定」组——这是数据层已 approve、渲染层没消费导致的假待决。
     const decided = decidedStatusOf(req);
