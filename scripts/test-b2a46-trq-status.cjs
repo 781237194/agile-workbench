@@ -144,6 +144,8 @@ check('⑤b 不一致时记 trq_status_ignored 审计（mirror=dev_done/current=
 
 // ── B-6c08 J3：读工作流**抛错** → 不写工作流行（状态保持原样），只落 trq + trq_sync_skipped 审计 ──
 {
+  // PM 01:55 判据明确要求：「桩注入读抛错后原 ready 仍 ready」——先把流行置回 ready，再制造读失败。
+  setRowAndMirror('ready', 'review');
   const beforeStatus = rowOf(reqId).status;
   const fileBackup = wfFile + '.j3-backup';
   fs.renameSync(wfFile, fileBackup);
