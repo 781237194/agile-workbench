@@ -10,6 +10,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
 const ROOT = process.cwd();
@@ -23,6 +24,22 @@ const MINUTES = String(argOf('minutes', '35'));
 const BASE = Number(argOf('base', '30'));
 const EVID = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '证据-c25a');
 fs.mkdirSync(EVID, { recursive: true });
+
+// B-20261116-122339-dd73 AC3：整批跑之前/之后都要证明真实 workbench.json 没动（含 projects 数与名字）。
+const REAL_STORE = path.join(ROOT, 'data', 'userdata', 'workbench.json');
+const realStore = () => {
+  try {
+    const buf = fs.readFileSync(REAL_STORE);
+    const json = JSON.parse(buf.toString('utf8'));
+    return {
+      sha256: crypto.createHash('sha256').update(buf).digest('hex'),
+      projects: Array.isArray(json.projects) ? json.projects.length : -1,
+      names: (Array.isArray(json.projects) ? json.projects : []).map((p) => String((p && p.name) || '')),
+    };
+  } catch { return { sha256: '', projects: -1, names: [], missing: true }; }
+};
+const TEST_NAME_RE = /c25a|sb-fast|双跑|bd22|qidle|沙盘|测试/i;
+const batchBefore = realStore();
 
 const runs = [];
 for (let i = 0; i < 3; i += 1) {
@@ -50,12 +67,23 @@ for (let i = 0; i < 3; i += 1) {
     pass30: Boolean(summary && summary.pass30),
   });
 }
+const batchAfter = realStore();
+const batchIsolation = {
+  ok: !batchBefore.missing && !batchAfter.missing
+    && batchAfter.sha256 === batchBefore.sha256
+    && batchAfter.projects === batchBefore.projects
+    && !batchAfter.names.some((n) => TEST_NAME_RE.test(n)),
+  before: batchBefore, after: batchAfter,
+  // AC4：清理后 Owner 界面不应再出现任何测试名（真实 store 的名字里 0 命中）
+  ownerUiClean: !batchAfter.names.some((n) => TEST_NAME_RE.test(n)),
+};
 const out = {
   at: new Date().toISOString(),
   minutes: Number(MINUTES),
   sequential: true,
-  pass: runs.every((r) => r.pass30),
+  pass: runs.every((r) => r.pass30) && batchIsolation.ok,
   runs,
+  batchIsolation,
   conclusions: runs.map((r) => {
     const mailboxOk = r.mailboxNew === 0;
     const wakeOk = r.wakeRows === 0 || r.wakeAllSuppressedNoWake === true;

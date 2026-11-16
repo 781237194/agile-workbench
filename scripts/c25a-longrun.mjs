@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 
 const ROOT = process.cwd();
@@ -38,6 +39,25 @@ const stubServer = http.createServer((_req, res) => {
   res.end('<!doctype html><meta charset="utf-8"><title>c25a-dsh-stub</title><body>stub</body>');
 });
 await new Promise((resolve) => stubServer.listen(STUB_PORT, '127.0.0.1', resolve));
+
+// ── 隔离护栏（B-20261116-122339-dd73 AC1/AC3）────────────────────────────
+// 压测绝不允许写真实 workbench.json：起跑前记「真实 store 的 sha256 + projects 数」，
+// 跑完再比一次，任何变化都判 ISOLATION_BROKEN 并把进程杀掉（不留后患）。
+const REAL_STORE = path.join(ROOT, 'data', 'userdata', 'workbench.json');
+const realStoreFingerprint = () => {
+  try {
+    const buf = fs.readFileSync(REAL_STORE);
+    const json = JSON.parse(buf.toString('utf8'));
+    return {
+      sha256: crypto.createHash('sha256').update(buf).digest('hex'),
+      projects: Array.isArray(json.projects) ? json.projects.length : -1,
+      names: (Array.isArray(json.projects) ? json.projects : []).map((p) => String((p && p.name) || '')),
+    };
+  } catch {
+    return { sha256: '', projects: -1, names: [], missing: true };
+  }
+};
+const realBefore = realStoreFingerprint();
 
 // ── 沙盘 ────────────────────────────────────────────────────────────────
 fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -138,6 +158,15 @@ if (!childExit) {
 const endedAt = new Date();
 const minutesRan = Number(((endedAt - startedAt) / 60000).toFixed(2));
 const rows = readRows();
+// B-20261116-122339-dd73 AC1/AC3：跑完必须证明「真实 workbench.json 一个字节都没动」。
+const realAfter = realStoreFingerprint();
+const isolation = {
+  ok: !realBefore.missing && !realAfter.missing
+    && realAfter.sha256 === realBefore.sha256
+    && realAfter.projects === realBefore.projects
+    && !realAfter.names.some((n) => /c25a|sb-fast|双跑|bd22|qidle|沙盘/i.test(n)),
+  realBefore, realAfter,
+};
 // c25a ②（PM 2026-11-16 12:07）：30 分钟长跑必须能证明「--no-wake 四不」——
 // 邮箱零新增 + 唤醒.jsonl 无新增（或全 suppressed=no-wake），所以把这两组数一起落进证据。
 // （countMailbox 已在起进程之前定义并取过基线 mailboxCountBefore）
@@ -161,6 +190,7 @@ const summary = {
   wakeAllSuppressedNoWake: wakeRows.length ? wakeSuppressedAll : true,
   logFile: runLogPath,
   pass30: minutesRan >= 30,
+  isolation,
 };
 const evidDir = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '证据-c25a');
 fs.mkdirSync(evidDir, { recursive: true });
