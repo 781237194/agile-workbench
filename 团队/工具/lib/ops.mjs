@@ -3451,7 +3451,14 @@ export async function cmdTask(args) {
     return;
   }
   if (sub === 'show') {
-    out(args, JSON.stringify(task, null, 2), { ok: true, task });
+    // B-20261116-092803-8181：本分支原来直接 JSON.stringify(task)，但该作用域里没有 task → 恒抛 INTERNAL。
+    // AC2：先按 id 加载；缺 id 给 BAD_ID，任务不存在由 loadTask 抛 TASK_NOT_FOUND（明确码，不是 INTERNAL）。
+    const taskId = String(args.id || args._[2] || '').trim();
+    if (!taskId) fail('BAD_ID', 'task show 需要 --id <任务id>（例：task show --project P --boot T --id T-2026...）', { usage: 'task show --id <任务id>' });
+    const task = loadTask(b.project, taskId);
+    // AC1：--json 时 stdout 恰好一行 JSON（不夹日志、不 pretty），与 req audit 同口径；非 json 走格式化文本。
+    if (args.json) process.stdout.write(JSON.stringify({ ok: true, task }) + '\n');
+    else textOut(JSON.stringify(task, null, 2));
     return;
   }
   // R-b645 回填（M-20261114-031603-947c03）：按现有任务重算需求应到 dev_done/test_done。
