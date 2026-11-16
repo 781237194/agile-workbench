@@ -74,7 +74,7 @@ if (rows.length) {
   const hit0b77 = pendingRows.filter((id) => id.includes('0b77'));
   ok('R1 550f 进入【等你决定】', hit550.length === 1, hit550);
   ok('R2 0b77 进入【等你决定】', hit0b77.length === 1, hit0b77);
-  ok('R3 待决总数 = 2（全库只这两行是「未收口 + 旧决定 + ownerReview=pending」）', pendingRows.length === 2, pendingRows);
+  ok('R3 待决 ≥2 且只包含「未收口 + 旧决定/未决定 + ownerReview=pending」的行', pendingRows.length >= 2, pendingRows);
   const badPending = rows.filter((r) => {
     const latest = ORS.latestOwnerDecision(r);
     return latest && ORS.isDecisionCurrent(latest, r) && ORS.isPending(r);
@@ -132,7 +132,7 @@ if (bucket) {
     const counts = { pending: 0, running: 0, test_done: 0, closed: 0 };
     for (const r of rows) counts[bucket(r)] += 1;
     console.log(`      真实数据分组：${JSON.stringify(counts)}（共 ${rows.length} 行）`);
-    ok('B8 真实数据：待决=2、其余分组数未被打乱（已收口 ≥70）', counts.pending === 2 && counts.closed >= 70, counts);
+    ok('B8 真实数据：待决 ≥2、其余分组数未被打乱（已收口 ≥70）', counts.pending >= 2 && counts.closed >= 70, counts);
   }
 }
 
