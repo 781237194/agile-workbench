@@ -132,6 +132,35 @@ check('S9 当前版本决定 → decidedStatusOf=approved 且 isPending=false；
     legacyOnly: OR_STATE.decidedStatusOf({ id: 'x', status: 'approved', ownerReview: { status: 'approved' } })
   });
 
+// ── S10 isPending 必须让「决定过期 + 非终态」的行浮出（P1 B-20261116-120118-2760，4657 就卡这）
+const rowDevStale = {
+  id: 'R-FIXTURE-dev-stale', status: 'dev',
+  ownerReview: { status: 'approved' }, requirementHash: 'HASH_CUR_S10',
+  decisions: [{ status: 'approved', at: '2026-11-15T02:47:35Z', basis: { requirement: { sha256: 'HASH_OLD_S10' } } }]
+};
+const rowDevCurrent = {
+  id: 'R-FIXTURE-dev-current', status: 'dev',
+  requirementHash: 'HASH_CUR_S10',
+  decisions: [{ status: 'approved', at: '2026-11-16T01:00:00Z', basis: { requirement: { sha256: 'HASH_CUR_S10' } } }]
+};
+const rowDevNoDecision = { id: 'R-FIXTURE-dev-none', status: 'dev', ownerReview: { status: 'pending' } };
+const rowClosedStale = { ...rowDevStale, id: 'R-FIXTURE-closed-stale', status: 'accepted' };
+check('S10 dev 阶段 + 决定过期 → isPending=true（不再「界面判未决但不列」）；当前版本/无决定/终态均不列',
+  OR_STATE.isPending(rowDevStale) === true
+  && OR_STATE.isPending(rowDevCurrent) === false
+  && OR_STATE.isPending(rowDevNoDecision) === false
+  && OR_STATE.isPending(rowClosedStale) === false,
+  {
+    devStale: OR_STATE.isPending(rowDevStale),
+    devCurrent: OR_STATE.isPending(rowDevCurrent),
+    devNone: OR_STATE.isPending(rowDevNoDecision),
+    closedStale: OR_STATE.isPending(rowClosedStale)
+  });
+check('S11 行徽标依据：dev+过期 → decidedOnlyOnStaleVersion=true；当前版本=false',
+  OR_STATE.decidedOnlyOnStaleVersion(rowDevStale) === true
+  && OR_STATE.decidedOnlyOnStaleVersion(rowDevCurrent) === false,
+  { stale: OR_STATE.decidedOnlyOnStaleVersion(rowDevStale), current: OR_STATE.decidedOnlyOnStaleVersion(rowDevCurrent) });
+
 console.log(`\n决定-版本绑定自检：${passed}/${passed + failures.length} PASS`);
 if (failures.length) { console.error(JSON.stringify(failures, null, 2)); process.exit(1); }
 process.exit(0);

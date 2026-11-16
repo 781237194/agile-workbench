@@ -205,6 +205,11 @@
   function isPending(req) {
     const status = textOf(req && req.status);
     if (CLOSED_REQ_STATUSES.includes(status)) return false;
+    // P1（2026-11-16，B-20261116-120118-2760）：决定绑的是**过期版本**、行又不是终态时，一律浮出
+    // 到「等你决定」——以前只在 status∈{approved,owner_review} 时才浮出，于是像 4657 这种
+    // 已进 dev 的行会「界面判未决但不列」，Owner 根本点不到、返工轮任务也 claim 不动。
+    const latest = latestOwnerDecision(req);
+    if (latest && !isDecisionCurrent(latest, req)) return true;
     const owner = decidedStatusOf(req);
     if (owner === 'rejected') return reworkInfo(req).isRework;
     if (owner === 'approved' || owner === 'skipped') return false;
