@@ -15,7 +15,9 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', 'b-155a');
+// B-20261116-055303-07b6：沙盘统一入口（唯一临时目录 + 退出清理）
+const { mkTempSandbox } = require(path.join(__dirname, 'lib', 'sandbox-dir.cjs'));
+const SB = mkTempSandbox('b-155a');
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');

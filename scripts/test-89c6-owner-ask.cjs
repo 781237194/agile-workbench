@@ -8,8 +8,10 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
+// B-20261116-055303-07b6：沙盘统一入口（唯一临时目录 + 退出清理）
+const { mkTempSandbox } = require(path.join(__dirname, 'lib', 'sandbox-dir.cjs'));
 const TEAM_MJS = path.join(ROOT, '团队', '工具', 'team.mjs');
-const SB = path.join(ROOT, '_tmp', '89c6');
+const SB = mkTempSandbox('89c6');
 const TEAM = path.join(SB, '团队');
 const PROJECT = '工作台改造修复';
 const STATE = path.join(TEAM, '状态', '项目', PROJECT);
