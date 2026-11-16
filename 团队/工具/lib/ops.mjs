@@ -1,6 +1,7 @@
 // 团队工作台 v2 · 业务命令（boot / 消息 / 任务 / 提案 / 评审 / 签字 / 应用 / 索引 / 对账）
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   PATHS, TeamError, fail, nowIso, sha256, hashFile, shortHash, exists, ensureDir, readText, readJson,
@@ -1794,6 +1795,8 @@ export async function pumpDispatchQueue(project, { role = '' } = {}) {
   if (!candidates.length) return { ok: true, pumped: false, reason: 'NO_ITEM_FOR_ROLE', remaining: queue.items.length };
   let firstBlocked = null;
   let item = null;
+  let idleBackfill = null;
+  const pumpNow = Date.now();
   for (const candidate of candidates) {
     const busy = gateRoleBusy({
       role: String(candidate.to || ''),
@@ -1803,6 +1806,22 @@ export async function pumpDispatchQueue(project, { role = '' } = {}) {
       staleWorkingMs: STALE_WORKING_MS,
     });
     if (busy) {
+      // B-20261116-104231-4c6f：滞留超阈值 + 目标角色确实空闲（无提交/无文件写入/无 ack/无近期 working）
+      // → 不再被「角色忙」无限挡住，直接补投（等价 send 唤醒），并留审计。
+      const atMs = Date.parse(String(candidate.at || ''));
+      const ageMs = Number.isFinite(atMs) ? pumpNow - atMs : -1;
+      if (DISPATCH_QUEUE_IDLE_BACKFILL_MS >= 0 && ageMs >= DISPATCH_QUEUE_IDLE_BACKFILL_MS) {
+        let evidence = null;
+        try { evidence = roleActivityEvidence(project, String(candidate.to || ''), { now: pumpNow }); } catch { evidence = null; }
+        if (evidence && evidence.idle) {
+          item = candidate;
+          idleBackfill = { evidence, ageMs, busyCode: String(busy.code || '') };
+          break;
+        }
+        if (!firstBlocked) firstBlocked = { busy, item: candidate, evidence };
+        if (roleKey) break;
+        continue;
+      }
       if (!firstBlocked) firstBlocked = { busy, item: candidate };
       // 指定角色：保持原语义，立刻返回 blocked；兜底模式：继续找下一个空闲角色。
       if (roleKey) break;
@@ -1846,7 +1865,27 @@ export async function pumpDispatchQueue(project, { role = '' } = {}) {
   const wake = await wakeSessionForMessage({ project, to: String(item.to || ''), msg, isDispatch: true });
   removeDispatchQueueItem(project, item.id);
   appendEvent({ role: 'system', action: 'dispatch_pump', project, target: msg.id, note: `queue=${item.id} to=${item.to} task=${item.task || ''}` });
-  return { ok: true, pumped: true, item, message: msg, wake, remaining: readDispatchQueue(project).items.length };
+  // B-4c6f：补投留审计（append-only，含活跃度证据；重复投递由「投递成功即移除队列项」天然避免）。
+  if (idleBackfill) {
+    const row = {
+      at: nowIso(),
+      queueId: String(item.id || ''),
+      to: String(item.to || ''),
+      reason: 'idle_backfill',
+      ageSec: Math.round(Number(idleBackfill.ageMs || 0) / 1000),
+      blockedBy: idleBackfill.busyCode,
+      messageId: String(msg.id || ''),
+      evidence: idleBackfill.evidence,
+    };
+    try { appendLine(dispatchQueueBackfillFile(project), JSON.stringify(row)); } catch { /* 审计失败不阻断投递 */ }
+    try {
+      appendEvent({
+        role: 'system', action: 'dispatch_queue_idle_backfill', project, target: String(item.id),
+        note: `to=${item.to} age=${row.ageSec}s blockedBy=${row.blockedBy} ${String(idleBackfill.evidence && idleBackfill.evidence.detail || '').slice(0, 160)}`,
+      });
+    } catch { /* ignore */ }
+  }
+  return { ok: true, pumped: true, item, message: msg, wake, remaining: readDispatchQueue(project).items.length, idleBackfill: Boolean(idleBackfill), evidence: idleBackfill ? idleBackfill.evidence : null };
 }
 
 /**
@@ -1970,11 +2009,17 @@ export function queueStaleCheck(project, { now = Date.now() } = {}) {
     const minutes = Math.round(age / 60000);
     const to = String(item.to || '');
     const roleName = ROLE_NAMES[to] || to || '（无目标角色）';
+    // B-4c6f：告警必须带「目标角色是否真在动」的证据（最近提交/文件 mtime/ack/working），只报分钟数不算。
+    let activity = null;
+    try { activity = roleActivityEvidence(name, to); } catch { activity = null; }
+    const activityLine = activity
+      ? `活跃度证据：${activity.detail}\n判定：${activity.idle ? `空闲（${Math.round(activity.windowMs / 60000)} 分钟内无任何动静）` : '仍在动（不应补投，先看它在做什么）'}`
+      : '活跃度证据：读取失败（按「不确定」处理，不自动补投）';
     try {
       const msg = sendMessage({
         from: 'system', to: 'pm', type: 'escalation', project: name,
         subject: `派单队列滞留 ${minutes} 分钟：发给${roleName}`,
-        body: `${item.id} 在队列里挂了 ${minutes} 分钟还没投出去。\n目标角色：${to || '-'}\n队列项创建时间：${item.at || '-'}\n主题：${String(item.subject || '').slice(0, 60)}\n可能原因：目标角色的派单锁未释放 / 角色名册无活会话 / 唤醒失败。\n请 PM 过问（可跑 team.mjs queue status 看现场，queue pump 手动泵一次）。`,
+        body: `${item.id} 在队列里挂了 ${minutes} 分钟还没投出去。\n目标角色：${to || '-'}\n队列项创建时间：${item.at || '-'}\n主题：${String(item.subject || '').slice(0, 60)}\n${activityLine}\n可能原因：目标角色的派单锁未释放 / 角色名册无活会话 / 唤醒失败 / 角色身上挂了未 done 任务。\n请 PM 过问（可跑 team.mjs queue status 看现场，queue pump 手动泵一次）。`,
         ackRequired: false,
       });
       alerted[item.id] = nowIso();
@@ -1991,6 +2036,129 @@ export function queueStaleCheck(project, { now = Date.now() } = {}) {
 function dispatchQueueArchiveFile(project) {
   return path.join(projectStatePaths(project).dir, '派单队列归档.jsonl');
 }
+
+/**
+ * B-20261116-104231-4c6f（P0）：派单队列滞留**自动补投**（最小版）。
+ * 判据：队列项滞留 ≥ 阈值（默认 5 分钟，TEAM_DISPATCH_QUEUE_IDLE_BACKFILL_MS 可注入）
+ *       + 目标角色在最近窗口内（默认 10 分钟，TEAM_ROLE_IDLE_WINDOW_MS）**无提交、无角色目录文件写入、无 ack、无近期 working**
+ *       → 视为空闲，允许绕开「角色忙」直接投递（等价 send 唤醒）。
+ * 每次补投写 append-only 审计 派单队列补投.jsonl（at/queueId/to/reason=idle_backfill/证据），
+ * 队列项在投递成功后由 pumpDispatchQueue 移除，天然不会重复投递。
+ */
+const DISPATCH_QUEUE_IDLE_BACKFILL_MS = (() => {
+  const raw = Number(process.env.TEAM_DISPATCH_QUEUE_IDLE_BACKFILL_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 5 * 60 * 1000;
+})();
+const ROLE_IDLE_WINDOW_MS = (() => {
+  const raw = Number(process.env.TEAM_ROLE_IDLE_WINDOW_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 10 * 60 * 1000;
+})();
+
+function dispatchQueueBackfillFile(project) {
+  return path.join(projectStatePaths(project).dir, '派单队列补投.jsonl');
+}
+
+/** 角色目录里最近一次文件写入（有界扫描：最多 4000 个文件，跳过 .git/node_modules/_backup）。 */
+function roleDirLastFileWrite(projectPath, role) {
+  const dirName = ROLE_DIRS[role] || role;
+  const base = path.join(String(projectPath || ''), dirName);
+  let latest = 0;
+  let scanned = 0;
+  const walk = (dir, depth) => {
+    if (!dir || depth > 4 || scanned > 4000) return;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (scanned > 4000) return;
+      const name = String(entry.name || '');
+      if (entry.isDirectory()) {
+        if (['.git', 'node_modules', '_backup', '_tmp'].includes(name)) continue;
+        walk(path.join(dir, name), depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      scanned += 1;
+      try {
+        const stat = fs.statSync(path.join(dir, name));
+        if (stat.mtimeMs > latest) latest = stat.mtimeMs;
+      } catch { /* 单个文件读不到不影响 */ }
+    }
+  };
+  walk(base, 0);
+  return latest ? new Date(latest).toISOString() : '';
+}
+
+/**
+ * 角色活跃度证据（只读）：最近提交（git log，有界 4s）/ 最近角色目录文件写入 / 最近 ack（回执.jsonl）/ 最近 working 任务更新。
+ * idle=true 仅当四项都早于窗口（缺失按「无活动」处理）。
+ */
+export function roleActivityEvidence(projectName, role, { now = Date.now() } = {}) {
+  const name = String(projectName || '');
+  const roleKey = String(role || '');
+  const evidence = {
+    role: roleKey,
+    project: name,
+    windowMs: ROLE_IDLE_WINDOW_MS,
+    lastCommitAt: '',
+    lastFileWriteAt: '',
+    lastAckAt: '',
+    lastWorkingAt: '',
+    idle: true,
+    detail: '',
+  };
+  let projectPath = '';
+  try { projectPath = String((loadProject(name) || {}).path || ''); } catch { projectPath = ''; }
+  // ① 最近提交（git 可读才算；沙盘/无仓库 → 空）。路径按仓库根算，避免 -C 项目目录时 pathspec 相对错位。
+  if (projectPath) {
+    try {
+      const rootProbe = spawnSync('git', ['-C', projectPath, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 4000 });
+      const root = String((rootProbe && rootProbe.stdout) || '').trim();
+      if (root) {
+        const rel = path.relative(root, path.join(projectPath, ROLE_DIRS[roleKey] || roleKey)).replace(/\\/g, '/') || '.';
+        const git = spawnSync('git', ['-C', root, 'log', '-1', '--format=%cI', '--', rel], { encoding: 'utf8', timeout: 4000 });
+        const out = String((git && git.stdout) || '').trim();
+        if (out && !git.error) evidence.lastCommitAt = out;
+      }
+    } catch { /* 视为无提交证据 */ }
+  }
+  // ② 最近角色目录文件写入
+  try { evidence.lastFileWriteAt = roleDirLastFileWrite(projectPath, roleKey); } catch { evidence.lastFileWriteAt = ''; }
+  // ③ 最近 ack（回执.jsonl 里 from=该角色 的最后一条 ts）
+  try {
+    const parsed = readJsonlTolerant(PATHS.receipts);
+    let last = '';
+    for (const row of (parsed && Array.isArray(parsed.items) ? parsed.items : [])) {
+      if (!row || String(row.from || '') !== roleKey) continue;
+      const ts = String(row.ts || '');
+      if (ts && ts > last) last = ts;
+    }
+    evidence.lastAckAt = last;
+  } catch { evidence.lastAckAt = ''; }
+  // ④ 最近 working 任务更新（有近期 working → 不算空闲）
+  try {
+    const working = listTasks(name).filter((task) => task && String(task.owner || '') === roleKey && String(task.status || '') === 'working');
+    let last = '';
+    for (const task of working) {
+      const ts = String(task.updatedAt || task.claimedAt || '');
+      if (ts && ts > last) last = ts;
+    }
+    evidence.lastWorkingAt = last;
+  } catch { evidence.lastWorkingAt = ''; }
+  const cutoff = now - ROLE_IDLE_WINDOW_MS;
+  const older = (iso) => {
+    const ms = Date.parse(String(iso || ''));
+    return !Number.isFinite(ms) || ms < cutoff; // 缺失＝无活动
+  };
+  evidence.idle = older(evidence.lastCommitAt) && older(evidence.lastFileWriteAt) && older(evidence.lastAckAt) && older(evidence.lastWorkingAt);
+  evidence.detail = [
+    `提交=${evidence.lastCommitAt || '无'}`,
+    `文件写入=${evidence.lastFileWriteAt || '无'}`,
+    `ack=${evidence.lastAckAt || '无'}`,
+    `working=${evidence.lastWorkingAt || '无'}`,
+  ].join('；');
+  return evidence;
+}
+
 
 /**
  * 队列项会话对齐（B-bbf6 ③）：换人/rotate 后旧 `sessionId` 的队列项不能永久悬挂。
