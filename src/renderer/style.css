@@ -4372,6 +4372,9 @@ html[data-theme="light"] #titlebar .titlebar-center .owner-review-proxy { color:
 .pool-col h4 { margin:0; padding:8px 12px; font-size:12.5px; border-bottom:1px solid var(--line); }
 .pool-n { color:var(--dim); font-weight:400; margin-left:4px; }
 .pool-list { overflow:auto; padding:6px; flex:1; min-width:0; }
+/* R-c72a F5：池需求列表虚拟化——行高单源 = 容器 data-row-height（--pool-row-h 同步）。 */
+.pool-list[data-row-height] .pool-row { height: var(--pool-row-h, 36px); box-sizing: border-box; }
+.pool-virtual-gap { pointer-events: none; }
 .pool-row { display:flex; align-items:center; gap:8px; padding:5px 7px; border-bottom:1px dashed var(--line); font-size:12px; }
 .pool-id { font-family:var(--mono, monospace); font-size:11px; }
 .pool-state { margin-left:auto; font-size:10.5px; color:var(--dim); }

@@ -11742,7 +11742,11 @@ const poolUi = {
   signature: '',
   detailId: '',
   lastFetch: 0,
-  loading: false
+  loading: false,
+  // R-c72a F5：虚拟化状态（virtualRows=当前筛选后的需求行，virtual=当前窗口信息）
+  virtual: null,
+  virtualRows: [],
+  virtualRaf: false
 };
 // 既有四个状态键：键名 / 标签 / 计数语义一字不改（R-30e2 §二、F-4）。
 const POOL_FILTERS = POOL_CORE ? POOL_CORE.POOL_FILTERS : [
@@ -12032,10 +12036,12 @@ function applyPoolFilters() {
   const state = { status: poolUi.filter, kind: poolUi.kindFilter, query: poolUi.query };
   const visible = POOL_CORE.poolVisibleRows(rows, state);
   const visibleIds = new Set(visible.map((row) => row.id));
-  mask.querySelectorAll('.pool-row').forEach((node) => {
+  // 缺陷池行数少，沿用 hidden 切换；需求池走虚拟化（按筛选结果重渲窗口）。
+  mask.querySelectorAll('#pool-def-list .pool-row').forEach((node) => {
     const on = visibleIds.has(node.dataset.id);
     if (node.hidden === on) node.hidden = !on;
   });
+  poolApplyReqVisible(visible.filter((row) => row && row.kind === 'requirement'));
   const counts = POOL_CORE.poolFilterCounts(rows, state);
   const statusBox = $('#pool-filters');
   if (statusBox) {
@@ -12093,6 +12099,77 @@ function renderPoolGhostBar(rows) {
   bar.dataset.count = String(ghosts.length);
 }
 /** 渲染池子：数据集合变化才重建行节点；筛选/搜索只切 hidden。 */
+/* R-c72a F5：需求池虚拟化——≥POOL_VIRTUAL_MIN_ROWS 行时只渲染可视区 ±POOL_VIRTUAL_BUFFER 行。
+ * 行高单源 = 容器 #pool-req-list 的 data-row-height（缺省 POOL_VIRTUAL_ROW_H），CSS 用 --pool-row-h 同步。
+ * 可视区 DOM 行数上限 = 可视行数 + 2 × 缓冲 + 2 个占位块（占位块 aria-hidden，无 .pool-row）。 */
+const POOL_VIRTUAL_ROW_H = 36;
+const POOL_VIRTUAL_MIN_ROWS = 200;
+const POOL_VIRTUAL_BUFFER = 10;
+
+function poolReqRows() {
+  return (Array.isArray(poolUi.rows) ? poolUi.rows : []).filter((row) => row && row.kind === 'requirement');
+}
+function poolRowHeightPx() {
+  const el = $('#pool-req-list');
+  const raw = el ? parseInt(el.getAttribute('data-row-height') || '', 10) : NaN;
+  return Number.isFinite(raw) && raw > 0 ? raw : POOL_VIRTUAL_ROW_H;
+}
+function poolVirtualBindScroll() {
+  const el = $('#pool-req-list');
+  if (!el || el.dataset.virtualBound === '1') return;
+  el.dataset.virtualBound = '1';
+  el.addEventListener('scroll', () => {
+    if (!poolUi.virtual || poolUi.virtualRaf) return;
+    poolUi.virtualRaf = true;
+    const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16));
+    raf(() => { poolUi.virtualRaf = false; poolVirtualPaint(); });
+  }, { passive: true });
+}
+function poolVirtualPaint() {
+  const el = $('#pool-req-list');
+  const rows = poolUi.virtualRows || [];
+  if (!el) return;
+  if (!rows.length) {
+    poolUi.virtual = null;
+    delete el.dataset.virtual;
+    el.innerHTML = '<p class="pool-empty">需求池暂无（评审通过后自动入池）</p>';
+    return;
+  }
+  const rowH = poolRowHeightPx();
+  // 只在行高真变化时写 CSS 变量：每次写都会让浏览器重算样式，滚动帧里是纯开销。
+  if (el.style.getPropertyValue('--pool-row-h') !== rowH + 'px') el.style.setProperty('--pool-row-h', rowH + 'px');
+  const viewport = Math.max(el.clientHeight || 0, rowH * 4);
+  const top = Math.max(0, el.scrollTop || 0);
+  const first = Math.max(0, Math.floor(top / rowH) - POOL_VIRTUAL_BUFFER);
+  const last = Math.min(rows.length, Math.ceil((top + viewport) / rowH) + POOL_VIRTUAL_BUFFER);
+  const lead = first * rowH;
+  const tail = Math.max(0, (rows.length - last) * rowH);
+  const leadHtml = lead > 0 ? '<div class="pool-virtual-gap" style="height:' + lead + 'px" aria-hidden="true"></div>' : '';
+  const tailHtml = tail > 0 ? '<div class="pool-virtual-gap" style="height:' + tail + 'px" aria-hidden="true"></div>' : '';
+  el.innerHTML = leadHtml + rows.slice(first, last).map(poolRowMarkup).join('') + tailHtml;
+  poolUi.virtual = { first, last, total: rows.length, rowH };
+  el.dataset.virtual = JSON.stringify(poolUi.virtual);
+  poolVirtualBindScroll();
+}
+/** 统一入口：≥ 阈值走虚拟化，否则整块渲染（保持小列表既有行为）。 */
+function poolApplyReqVisible(visibleReq) {
+  const el = $('#pool-req-list');
+  const rows = Array.isArray(visibleReq) ? visibleReq : [];
+  if (!el) return;
+  if (!el.getAttribute('data-row-height')) el.setAttribute('data-row-height', String(POOL_VIRTUAL_ROW_H));
+  if (rows.length >= POOL_VIRTUAL_MIN_ROWS) {
+    poolUi.virtualRows = rows;
+    poolVirtualPaint();
+    return;
+  }
+  poolUi.virtual = null;
+  poolUi.virtualRows = rows;
+  delete el.dataset.virtual;
+  el.innerHTML = rows.length ? rows.map(poolRowMarkup).join('') : '<p class="pool-empty">需求池暂无（评审通过后自动入池）</p>';
+}
+function renderPoolReqList() {
+  poolApplyReqVisible(poolReqRows());
+}
 function renderPool() {
   poolPanelEnsure();
   if (!POOL_CORE) {
@@ -12114,7 +12191,7 @@ function renderPool() {
   if (needsRebuild) {
     const req = rows.filter((row) => row.kind === 'requirement');
     const def = rows.filter((row) => row.kind !== 'requirement');
-    if (reqList) reqList.innerHTML = req.length ? req.map(poolRowMarkup).join('') : '<p class="pool-empty">需求池暂无（评审通过后自动入池）</p>';
+    if (reqList) renderPoolReqList();
     if (defList) defList.innerHTML = def.length ? def.map(poolRowMarkup).join('') : '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
     poolUi.signature = signature;
     // 详情打开时数据变了：按 data-id 重渲染，不继续显示旧数据（并发边界）。
