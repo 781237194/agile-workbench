@@ -8415,9 +8415,30 @@ export function cmdStatus(args) {
   const { text, data } = renderStatus(team);
   // T-20261116-124658-303e：固定一行汇总，可 grep（「认领门：待认领 N · 超时 N · 升级 N」）。
   const claimLine = claimLineForStatus();
-  writeText(PATHS.dashboard, text + '\n\n' + claimLine + '\n');
-  if (args.json) jsonOut({ ok: true, ...data, claimGate: claimLine, dashboard: PATHS.dashboard });
-  else textOut(text + '\n\n' + claimLine);
+  // a28a F9/AC6③：status 也要能看到各角色轮次（与 lessons turns 同一 readAllTurns 实现）
+  const turnsLine = turnsLineForStatus();
+  writeText(PATHS.dashboard, text + '\n\n' + claimLine + '\n' + turnsLine + '\n');
+  if (args.json) jsonOut({ ok: true, ...data, claimGate: claimLine, lessonsTurns: turnsLine, dashboard: PATHS.dashboard });
+  else textOut(text + '\n\n' + claimLine + '\n' + turnsLine);
+}
+
+/** a28a：`轮次：pm 3/20 · tester 0/20 …（阈值来源 project）`；无计数文件显示 — */
+function turnsLineForStatus() {
+  try {
+    const team = loadTeam();
+    const name = String(team.activeProject || '').trim();
+    if (!name) return '轮次：—（无活动项目）';
+    const st = projectStatePaths(name);
+    const project = loadProject(name);
+    const all = lessons.readAllTurns({ stateDir: st.dir, configPath: st.config, roleIds: projectRoleIds(project) });
+    const parts = Object.keys(all.roles).map((role) => {
+      const row = all.roles[role];
+      return `${role} ${row && row.turns != null ? `${row.turns}/${all.threshold}` : '—'}`;
+    });
+    return `轮次：${parts.join(' · ')}（阈值 ${all.threshold}，来源 ${all.source}）`;
+  } catch (e) {
+    return '轮次：—（读取失败：' + String((e && e.message) || e).slice(0, 60) + '）';
+  }
 }
 
 // 跨项目汇总（status 用）：只读，不打标。
@@ -9219,6 +9240,7 @@ export function cmdLessons(args) {
       `当前版本 sha12：${parsed.fileSha ? parsed.fileSha.slice(0, 12) : '—'}`,
       `我的最近阅读：${rec ? `${String(rec.at).slice(0, 19)} @ ${String(rec.fileSha).slice(0, 12)}` : '无记录'}`,
       `门禁：${gate.ok ? 'PASS' : gate.code}`,
+      statusTurnsLine(b.project, b.role),
     ].join('\n'), { ok: true, parsed: { totals: parsed.totals, fileSha: parsed.fileSha, broken: parsed.broken, missing: parsed.missing }, latest: rec, gate });
     return;
   }
@@ -9301,6 +9323,21 @@ export function cmdLessons(args) {
     return;
   }
   fail('BAD_SUB', 'lessons 支持 read / status [--deleted] / turns / append / fix / audit');
+}
+
+/** a28a F9：`lessons status` 末行轮次（只读，取自 轮次计数.json 与阈值来源） */
+function statusTurnsLine(projectName, role) {
+  try {
+    const st = projectStatePaths(projectName);
+    const project = loadProject(projectName);
+    const all = lessons.readAllTurns({ stateDir: st.dir, configPath: st.config, roleIds: projectRoleIds(project) });
+    const mine = all.roles[role];
+    const mineText = mine && mine.turns != null ? `${mine.turns}/${all.threshold}（距下次 ${mine.nextInTurns} 轮）` : '—';
+    const last = mine && mine.lastNotifiedAt ? String(mine.lastNotifiedAt).slice(0, 19).replace('T', ' ') : '—';
+    return `轮次：我 ${mineText}｜上次提醒 ${last}｜阈值 ${all.threshold}（${all.source}）`;
+  } catch {
+    return '轮次：—';
+  }
 }
 
 /** a28a 错误码 → 人话（零写入原因） */

@@ -515,6 +515,25 @@ export function bootDocSpecs(root, roleDirName) {
 
 // ---------- 结构检查 / 补齐 ----------
 
+/**
+ * a28a：经验教训登记册（新建项目默认继承）。
+ * 段名必须与 lessons.mjs 的 ROLE_BY_SECTION 一致，否则解析不进 → 门禁会判 PARSE_BROKEN。
+ */
+function lessonsRegister(name, mode = 'full') {
+  const head = [
+    '# 经验教训登记册',
+    '',
+    `> 项目：${name}｜追加式，只增不改历史；由 \`team.mjs lessons append/fix\` 维护（行尾带 \`<!-- id:L-YYYYMMDD-<seq> -->\`）。`,
+    '> 换人时新角色先 `team.mjs lessons read` 再开工（门禁 LESSONS_UNREAD）；达阈值由程序提醒，不需要人肉广播。',
+    '',
+  ];
+  for (const role of rolesForMode(normalizeTeamMode(mode))) {
+    const section = ROLE_DIRS[role] || role;
+    head.push(`## ${section}`, '', '| 日期 | 场景 | 教训 | 下次怎么做 |', '|---|---|---|---|', '');
+  }
+  return head.join('\n');
+}
+
 const ROOT_FILES = [
   ['README.md', (name, desc, mode) => rootReadme(name, desc, mode)],
   ['协作准则.md', (name, desc, mode) => collaborationRules(name, mode)],
@@ -595,6 +614,8 @@ export function ensureProjectStructure({ name, root, desc = '', overwrite = fals
 
   const teamIron = path.join(PATHS.teamRoot, '项目铁律.md');
   put(path.join(base, '项目铁律.md'), exists(teamIron) ? readText(teamIron, DEFAULT_IRON) : DEFAULT_IRON);
+  // a28a：新建项目默认带经验教训登记册（默认继承；已有文件不覆盖）
+  put(path.join(base, '经验教训登记册.md'), lessonsRegister(projectName, m));
 
   put(path.join(base, '需求', 'README.md'), reqPoolReadme(m));
   put(path.join(base, '需求', '00-需求总览.md'), reqOverview(projectName));
