@@ -26,7 +26,7 @@ import {
   loadProject, projectTeamMode, projectStatePaths, loadTeam, getMember, sendMessage, listTasks, createTask,
 } from './store.mjs';
 import {
-  gateRequirementReview, gateOwnerDecision, gateTestability, ownerDecisionsOf,
+  gateRequirementReview, gateOwnerDecision, gateTestability, ownerDecisionsOf, currentDecisionOf,
 } from './gates.mjs';
 import { requirementReviewer } from './roles.mjs';
 import { activeProxyFor } from './owner-proxy.mjs';
@@ -400,8 +400,8 @@ export function planForRow(row, ctx) {
     const verdict = String((row.trq && row.trq.verdict) || '');
     if (verdict === 'not_testable') return { skip: 'trq_not_testable' };
     if (verdict !== 'testable') return { role: 'tester', action: 'trq', gate: null };
-    const decisions = ownerDecisionsOf(row);
-    const latest = decisions.length ? decisions[decisions.length - 1] : null;
+    // B-20261116-105620：只认「绑当前正文版本」的 Owner 决定——旧决定不得让守护跳过 Owner 复审。
+    const latest = currentDecisionOf(row);
     if (!latest) {
       const gate = gateTestability({ projectPath, task: taskForRequirement(id, tasks), row });
       return gate ? { gateBlocked: gate } : { role: 'pm', action: 'decide', gate: 'G2.5', ownerGate: true };

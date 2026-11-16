@@ -21,7 +21,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { PATHS, readJson, writeJson } from './core.mjs';
 import { projectStatePaths, loadProject, projectTeamMode } from './store.mjs';
-import { ownerDecisionsOf } from './gates.mjs';
+import { ownerDecisionsOf, currentDecisionOf } from './gates.mjs';
 
 export const ROLE_QUEUE_SCHEMA = 1;
 export const ROLE_QUEUE_FILE = 'role_queues.json';
@@ -49,9 +49,9 @@ function actionForStatus(status, row) {
     const verdict = String((row && row.trq && row.trq.verdict) || '');
     if (verdict === 'not_testable') return { role: 'tester', action: 'trq' };
     if (verdict !== 'testable') return { role: 'tester', action: 'trq' };
-    const decisions = ownerDecisionsOf(row || {});
-    if (!decisions.length) return { role: 'owner', action: 'decide' };
-    const latest = decisions[decisions.length - 1];
+    // B-20261116-105620：只认「绑当前正文版本」的 Owner 决定——旧决定不得让队列跳过 Owner。
+    const latest = currentDecisionOf(row || {});
+    if (!latest) return { role: 'owner', action: 'decide' };
     const decided = String(latest.status || latest.decision || '');
     if (decided === 'rejected') return { role: 'carrier', action: 'rework' };
     return null;

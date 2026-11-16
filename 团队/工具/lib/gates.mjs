@@ -318,6 +318,55 @@ export function latestDecisionOf(row) {
 }
 
 /**
+ * B-20261116-105620-630a2e（全仓扫「旧决定当已决定」）：当前正文版本 hash。
+ * 取数顺序与渲染层 owner-review-state.currentDocHashOf 同源：RR 绑定 hash 优先，其次行上的 docHash。
+ */
+export function currentRequirementVersionOf(row) {
+  const r = row || {};
+  const candidates = [r.requirementHash, r.docHash, r.requirementReview && r.requirementReview.requirementHash];
+  for (const candidate of candidates) {
+    const value = candidate === undefined || candidate === null ? '' : String(candidate);
+    if (value) return value;
+  }
+  return '';
+}
+
+/**
+ * B-20261116-105620-630a2e：这笔 Owner 决定是否**针对当前正文版本**。
+ * 判据（与渲染层同一口径，但团队工具侧对「无 basis 的历史决定」保守兼容，避免误伤在途需求）：
+ *   ① 决定带 basis.requirement.sha256/contentHash 且与当前版本相等 → 有效；
+ *   ② 带 hash 但版本不等 → 旧决定（无效）；
+ *   ③ 无 hash（11-15 那批历史决定）→ 看 ownerReview 是否仍指向这笔决定：被重置成 pending 说明正文改版需重审 → 无效；
+ *      仍是 approved/skipped/rejected 且与决定同状态 → 视为有效（兼容历史，不改旧行为）；
+ *      两者都没有 → 无法判断，保持旧行为（true），不制造新的阻断。
+ */
+export function decisionIsCurrent(decision, row) {
+  if (!decision || typeof decision !== 'object') return false;
+  const basis = (decision.basis && typeof decision.basis === 'object') ? decision.basis : {};
+  const requirement = (basis.requirement && typeof basis.requirement === 'object') ? basis.requirement : {};
+  const decidedSha = String(requirement.sha256 || '');
+  const decidedContent = String(requirement.contentHash || '');
+  const currentSha = currentRequirementVersionOf(row);
+  const currentContent = String((row && row.requirementReview && row.requirementReview.contentHash) || (row && row.contentHash) || '');
+  if (decidedSha && currentSha) return decidedSha === currentSha;
+  if (decidedContent && currentContent) return decidedContent === currentContent;
+  if (decidedSha || decidedContent) return false; // 有 hash 但当前版本未知 → 不能证明是当前版本
+  const owner = (row && row.ownerReview && typeof row.ownerReview === 'object') ? row.ownerReview : null;
+  const ownerStatus = String((owner && owner.status) || '');
+  const decisionStatus = String(decision.status || decision.decision || '');
+  if (ownerStatus === 'pending') return false; // 门被重置：旧决定不得当已决定
+  if (['approved', 'skipped', 'rejected'].includes(ownerStatus)) return ownerStatus === decisionStatus;
+  return true;
+}
+
+/** 当前版本有效的最近一条 Owner 决定（旧决定返回 null）。 */
+export function currentDecisionOf(row) {
+  const latest = latestDecisionOf(row);
+  if (!latest) return null;
+  return decisionIsCurrent(latest, row) ? latest : null;
+}
+
+/**
  * R-75ec：任务层 Owner 门禁的**唯一判定入口**。
  *
  * 口径（主正文 §七 + 增补卷 §二）：
@@ -349,8 +398,8 @@ export function taskGateOf({ task, row = null, readFailed = false } = {}) {
       message: `任务 ${taskId} 绑的需求 ${requirementId} 在工作流里不存在；按纪律拒绝`,
     };
   }
-  const decisions = ownerDecisionsOf(row);
-  const latest = decisions.length ? decisions[decisions.length - 1] : null;
+  // B-20261116-105620：只认「绑当前正文版本」的决定——旧决定不得让新版本开工。
+  const latest = currentDecisionOf(row);
   const status = String((latest && (latest.status || latest.decision)) || '');
   const rowStatus = String(row.status || '');
   const closedBad = ['terminated', 'iteration', 'rejected'].includes(rowStatus);
@@ -366,8 +415,8 @@ export function taskGateOf({ task, row = null, readFailed = false } = {}) {
 }
 
 /** G3：Owner 已落账（approved/skipped），或明确拒绝（rejected）。 */export function gateOwnerDecision(row) {
-  const decisions = ownerDecisionsOf(row);
-  const latest = decisions.length ? decisions[decisions.length - 1] : null;
+  // B-20261116-105620：旧版本的决定不算已决定（详见 decisionIsCurrent）。
+  const latest = currentDecisionOf(row);
   if (!latest) {
     return {
       code: 'OWNER_REVIEW_REQUIRED', gate: 'G3', reason: 'missing', missing: ['Owner 决定未落账'],
