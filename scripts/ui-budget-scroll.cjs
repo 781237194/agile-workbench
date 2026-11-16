@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /* R-c72a AC4 · 批2 大列表滚动采帧（真窗口 + 隔离数据根）。
  * 做什么：播种 1200 行沙盘 → 起真实 Electron 窗口（AWB_DATA_DIR + TEAM_ROOT 双隔离）→ 打开需求池
- *        → 对 #pool-req-list 直接赋值 scrollTop（10 步 × 120px，步间等一个 rAF）→ 挂 rAF 链逐帧记间隔
- *        → 输出 {p95, max, dropRate, rows, ...} JSON。
+ *        → 对 #pool-req-list 直接赋值 scrollTop（默认 30 步 × 120px，步间等一个 rAF）→ 挂 rAF 链**连续采帧**
+ *        → 输出 {p95, max, dropRate, rows, cpuBaseline, ...} JSON。
+ * AC4（批3）：一次 run 必须连续采 ≥30 帧（滚动步数 ≥30、每步等一个 rAF）；帧数 <30 只判 INSUFFICIENT_SAMPLES，
+ *             且 p95 必须在记录了 CPU 占用/systemIdleTime 基线的窗口内测（cpuBaseline 字段）。
  * 用法：node scripts/ui-budget-scroll.cjs [--base <目录>] [--rows 1200] [--steps 10] [--step-px 120]
  *        [--out <json路径>] [--port 9433]
  * 不改业务逻辑、不写生产 jsonl；Browser.close 用 fire-and-forget（避免静默 exit 0 丢证据）。
@@ -11,6 +13,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
+const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { seedPool1200 } = require('./fixture-pool-1200.cjs');
 const { sandboxEnv, ROOT } = require('./lib/c72a-sandbox.cjs');
@@ -21,10 +24,28 @@ function argOf(name, dflt) {
 }
 const PORT = Number(argOf('--port', '9433'));
 const ROWS = Number(argOf('--rows', '1200'));
-const STEPS = Number(argOf('--steps', '10'));
+const STEPS = Number(argOf('--steps', '30'));
 const STEP_PX = Number(argOf('--step-px', '120'));
 const OUT = path.resolve(argOf('--out', path.join(ROOT, '程序员A', '产出', '证据-c72a-批2', 'scroll-frame-batch2.json')));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// CPU 基线：os.cpus() 的 times 累计值前后差 → idle 占比（AC4 要求记录 CPU 占用/systemIdleTime 基线）。
+function cpuSnapshot() {
+  const list = os.cpus() || [];
+  let idle = 0;
+  let total = 0;
+  for (const cpu of list) {
+    const t = (cpu && cpu.times) || {};
+    idle += Number(t.idle || 0);
+    total += Number(t.user || 0) + Number(t.nice || 0) + Number(t.sys || 0) + Number(t.idle || 0) + Number(t.irq || 0);
+  }
+  return { idleMs: idle, totalMs: total, cpus: list.length, loadavg: os.loadavg() };
+}
+function cpuBaselineOf(before, after) {
+  const idleMs = after.idleMs - before.idleMs;
+  const totalMs = after.totalMs - before.totalMs;
+  const usedPercent = totalMs > 0 ? Math.round((1 - idleMs / totalMs) * 1000) / 10 : null;
+  return { idleDeltaMs: idleMs, totalDeltaMs: totalMs, usedPercent, cpus: before.cpus, loadavg: before.loadavg, loadavgAfter: after.loadavg };
+}
 
 function httpJson(url) {
   return new Promise((resolve) => {
@@ -188,7 +209,10 @@ const MEASURE = (steps, stepPx, minFrames) => `(async () => {
       // 预热：等首屏布局/光栅稳定，避免把开面板的首次绘制算进帧预算（预热期不计入 frames）
       const warm = Number(argOf('--warmup-ms', '2000'));
       await sleep(warm);
+      const cpuBefore = cpuSnapshot();
       const res = await cdp.evaluate(MEASURE(STEPS, STEP_PX, 15), 120000);
+      const cpuAfter = cpuSnapshot();
+      out.cpuBaseline = cpuBaselineOf(cpuBefore, cpuAfter);
       out.measure = res;
       out.ok = Boolean(res && res.ok === true);
       if (res && res.__exception) out.code = 'PAGE_EXCEPTION';
@@ -224,12 +248,19 @@ const MEASURE = (steps, stepPx, minFrames) => `(async () => {
       }
       // 判定（AC4：p95 ≤20ms、掉帧率 <5%、可视区 DOM 行数 ≤60）
       if (res && res.ok === true) {
-        const bad = [];
-        if (!(res.p95 !== null && res.p95 <= 20)) bad.push('p95>20ms');
-        if (!(res.dropRate !== null && res.dropRate < 0.05)) bad.push('dropRate>=5%');
-        if (!(res.rows <= 60)) bad.push('rows>60');
-        out.verdict = bad.length ? 'BUDGET_EXCEEDED' : 'OK';
-        out.violations = bad;
+        // AC4（批3）：一次 run 连续采帧 <30 只能判 INSUFFICIENT_SAMPLES（样本不足不得判 OK）。
+        if (!(res.frames >= 30)) {
+          out.verdict = 'INSUFFICIENT_SAMPLES';
+          out.violations = ['frames<30'];
+          out.frames = res.frames;
+        } else {
+          const bad = [];
+          if (!(res.p95 !== null && res.p95 <= 20)) bad.push('p95>20ms');
+          if (!(res.dropRate !== null && res.dropRate < 0.05)) bad.push('dropRate>=5%');
+          if (!(res.rows <= 60)) bad.push('rows>60');
+          out.verdict = bad.length ? 'BUDGET_EXCEEDED' : 'OK';
+          out.violations = bad;
+        }
       }
       try { ws.close(); } catch { /* */ }
     }

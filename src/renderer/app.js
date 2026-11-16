@@ -2079,6 +2079,13 @@ async function applyState(next) {
   hydrateTeamModes();
   render();
   warnStore();
+  // R-c72a AC2（批3）：切换项目后需求池必须跟着换数据——池子开着就立即重取并强制重建。
+  // 原实现只在「打开池子」时取一次，切项目后 #pool-req-list 仍显示上一个项目的行（实测 50 行、首行仍是 A 项目）。
+  // 强制重建（清 signature）：两个项目的行签名可能相同，只靠 signature 差异判断会漏刷；池子关着不重取，打开时 togglePool 本来就会刷新。
+  if (poolUi.open) {
+    poolUi.signature = '';
+    void refreshPool();
+  }
 }
 
 /* ── 浮层抽屉：项目面板 / 团队台 ─────────────────────── */
@@ -3226,6 +3233,17 @@ function decisionHiddenNoteNode(total, shown, hidden) {
 
 /** 展开态列表（浮层）：与团队台抽屉共用同一份数据，回执控件只在这里给。 */
 function renderDecisionFloat(data) {
+  // R-c72a F2b/AC3（批3 重写）：#decision-box 的「首屏可交互」锚点由本函数独占——开始渲染置 "0"、
+  // 首屏渲染完成置 "1"、渲染抛错保持 "0"（不在 finally 里强行置 1）。关闭浮层不重置；
+  // 下次打开由 setDecisionExpanded(true) 重新调用本函数走「0 → 1」，重复打开必须重新计时。
+  const __readyBox = document.querySelector("#decision-box");
+  if (__readyBox) __readyBox.setAttribute("data-decision-ready", "0");
+  const __readyRet = renderDecisionFloatInner(data);
+  if (__readyBox) __readyBox.setAttribute("data-decision-ready", "1");
+  return __readyRet;
+}
+
+function renderDecisionFloatInner(data) {
   DECISION_FLOAT_STATE.data = data || null;
   renderDecisionPill(data || {});
   const list = $('#decision-box-list');
@@ -3283,15 +3301,7 @@ function renderDecisionFloat(data) {
   decisionRestoreDrafts();
 }
 
-// R-c72a F2b：决策箱「可交互」锚点——渲染前 0、渲染结束（含所有 early return）1。
-// 2026-11-16 修：原先把置 1 塞进 __uiPerf.report 的 try/catch 之后（不可达），改 wrapper+finally 保证可达。
 function renderDecisionBox(data) {
-  const __readyBox = document.querySelector("#decision-box");
-  try { if (__readyBox) __readyBox.setAttribute("data-decision-ready", "0"); return renderDecisionBoxInner(data); }
-  finally { if (__readyBox) __readyBox.setAttribute("data-decision-ready", "1"); }
-}
-
-function renderDecisionBoxInner(data) {
   const box = $('#decision-box-drawer');
   const unread = $('#decision-box-drawer-unread');
   if (!box) return;
@@ -3358,6 +3368,12 @@ function setDecisionExpanded(on) {
   panel.hidden = !on;
   box.dataset.state = on ? 'expanded' : 'collapsed';
   if (pill) pill.setAttribute('aria-expanded', on ? 'true' : 'false');
+  // R-c72a AC3（批3）：关闭浮层不重置 data-decision-ready；重新打开必须重新走「置 0 → 置 1」——
+  // 展开时用已加载的同一份数据重跑一次 renderDecisionFloat（数据新鲜度仍由 15s 轮询/fs.watch 保证，不在这里新增取数）。
+  if (on) {
+    if (DECISION_FLOAT_STATE.data) renderDecisionFloat(DECISION_FLOAT_STATE.data);
+    else void loadDecisionBox();
+  }
 }
 
 function decisionSetError(row, text) {
@@ -16322,34 +16338,75 @@ function clampFlowPanel() {
   const bootResolved = themeResolve({ storageValue: themeReadStorage(), search: location.search });
   applyThemeState(bootResolved, { persist: bootResolved.source !== 'url' });
   try { /* P0 批（3052）：只读视觉探针——断言读数值而不是只比截图；不写任何状态。 */
-/* R-c72a F1：交互预算探针（只记录，不改业务）。mark/measure 用 performance.now，report 走 core 统一判定 + 落盘。 */
+/* R-c72a F1：交互预算探针（只记录，不改业务）。mark/measure 用 performance.now，report 走 core 统一判定 + 落盘。
+ * 批3（T-20261116-221117-3f77）两条硬口径：
+ *  ① 已登记桶只有 click/list/modal/scrollFrame 四个；未登记 case 一律 {ok:false,code:"BAD_CASE"}——
+ *     不再有「前缀别名兜底成 click」，否则 list 样本会混进 AC1 的 click 桶并把 p95 带偏（正文 AC2）。
+ *  ③ measure 第三参 visibleChange{selector,from,to,atMs}（正文 AC1）；click 桶缺该字段的样本不计入有效样本。
+ *     时延一律取 visibleChange.atMs（毫秒整数）：调用方没给 atMs 时由 measure 用本次实测毫秒补上。 */
 const AWB_UI_PERF = { marks: new Map(), samples: { click: [], list: [], modal: [], scrollFrame: [] } };
+const AWB_UI_PERF_CASES = ["click", "list", "modal", "scrollFrame"];
 function awbUiPerfBucket(name) {
-  const raw = String(name || "");
-  const key = raw.split(":")[0];
-  if (AWB_UI_PERF.samples[key]) return key;
-  const alias = { modal: "modal", dialog: "modal", scroll: "scrollFrame", frame: "scrollFrame", list: "list", click: "click" };
-  return alias[key] || "click";
+  const key = String(name || "").split(":")[0];
+  return AWB_UI_PERF_CASES.indexOf(key) >= 0 ? key : null;
+}
+function awbUiPerfVisible(visibleChange) {
+  if (!visibleChange || typeof visibleChange !== "object") return null;
+  const selector = String(visibleChange.selector || "");
+  const from = visibleChange.from === undefined || visibleChange.from === null ? "" : String(visibleChange.from);
+  const to = visibleChange.to === undefined || visibleChange.to === null ? "" : String(visibleChange.to);
+  if (!selector || !from || !to) return null;
+  const at = Number(visibleChange.atMs);
+  return { selector, from, to, atMs: Number.isFinite(at) && at >= 0 ? Math.round(at) : null };
+}
+// 有效样本：click 桶必须带 visibleChange{selector,from,to,atMs}（AC1）；其余桶只要求是有限非负数值。
+function awbUiPerfSampleMs(caseKey, sample) {
+  if (!sample || typeof sample !== "object") return null;
+  const vc = sample.visibleChange;
+  if (caseKey === "click") {
+    if (!vc || !vc.selector || !vc.from || !vc.to || !Number.isFinite(Number(vc.atMs))) return null;
+    return Number(vc.atMs);
+  }
+  const ms = Number(sample.ms);
+  return Number.isFinite(ms) && ms >= 0 ? ms : null;
 }
 window.__uiPerf = {
   mark(name) { try { AWB_UI_PERF.marks.set(String(name), performance.now()); } catch (e) {} return true; },
+  // 第三参是可选的 visibleChange（不写进签名，保持既有测试锚点 measure(name, startMark) 不变）。
   measure(name, startMark) {
     try {
+      const caseKey = awbUiPerfBucket(name);
+      if (!caseKey) return null; // 未登记 case 不记样本：调用方必须使用 click/list/modal/scrollFrame
       const key = String(startMark || name);
-      const t0 = AWB_UI_PERF.marks.has(key) ? AWB_UI_PERF.marks.get(key) : null;
-      if (t0 == null) return null;
-      const ms = Math.round((performance.now() - t0) * 1000) / 1000;
-      const bucket = awbUiPerfBucket(name);
-      AWB_UI_PERF.samples[bucket].push(ms);
+      if (!AWB_UI_PERF.marks.has(key)) return null;
+      const ms = Math.round((performance.now() - AWB_UI_PERF.marks.get(key)) * 1000) / 1000;
+      let visibleChange = null;
+      if (arguments.length >= 3) {
+        visibleChange = awbUiPerfVisible(arguments[2]);
+        if (visibleChange && visibleChange.atMs === null) visibleChange.atMs = Math.round(ms);
+      }
+      AWB_UI_PERF.samples[caseKey].push(visibleChange ? { ms, visibleChange } : { ms });
       return ms;
     } catch (e) { return null; }
+  },
+  // 只读取数口（给自检/证据核对用，不写盘）：返回该桶样本副本；未登记 case 返回 null。
+  samples(caseName) {
+    const caseKey = awbUiPerfBucket(caseName);
+    return caseKey ? AWB_UI_PERF.samples[caseKey].slice() : null;
   },
   async report(caseName, opts) {
     try {
       if (!window.uiPerfCore) return { ok: false, code: "PROBE_UNAVAILABLE", case: String(caseName || "") };
       const caseKey = awbUiPerfBucket(caseName);
+      if (!caseKey) return { ok: false, code: "BAD_CASE", case: String(caseName || ""), allowed: AWB_UI_PERF_CASES.slice() };
       const hintProject = opts && opts.project ? String(opts.project) : "";
-      const sum = window.uiPerfCore.summarize(caseKey, AWB_UI_PERF.samples[caseKey], opts || {});
+      const raw = AWB_UI_PERF.samples[caseKey];
+      const valid = [];
+      for (const sample of raw) {
+        const ms = awbUiPerfSampleMs(caseKey, sample);
+        if (ms !== null) valid.push(ms);
+      }
+      const sum = window.uiPerfCore.summarize(caseKey, valid, opts || {});
       const line = { at: new Date().toISOString(), project: "", case: sum.case, samples: sum.samples, p50: sum.p50, p95: sum.p95, p99: sum.p99, budget: sum.budget, verdict: sum.verdict };
       let written = false;
       try {
@@ -16359,7 +16416,7 @@ window.__uiPerf = {
           if (res && res.project) line.project = String(res.project);
         }
       } catch (e) { written = false; }
-      return { ok: true, written, line, verdict: sum.verdict, probe: "ok" };
+      return { ok: true, written, line, verdict: sum.verdict, probe: "ok", validSamples: valid.length, invalidSamples: raw.length - valid.length };
     } catch (e) { return { ok: false, code: "PROBE_UNAVAILABLE", case: String(caseName || "") }; }
   }
 };

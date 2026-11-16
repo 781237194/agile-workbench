@@ -1,6 +1,7 @@
 // R-c72a 第一批自检：nearest-rank / 三档 verdict / 9 键样例 / PROBE_UNAVAILABLE（AC6 的已知样本复算）
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const CORE = require(path.resolve(__dirname, '..', 'src', 'renderer', 'ui-perf-core.js'));
 
 let pass = 0;
@@ -65,8 +66,20 @@ check('__uiPerf 三方法齐：mark/measure/report',
   /window\.__uiPerf\s*=\s*\{/.test(app) && /mark\(name\)/.test(app) && /measure\(name, startMark\)/.test(app) && /async report\(caseName/.test(app));
 check('锚点：既有 [data-owner-review-dialog] 上挂 data-review-ready 0→1（不新增 id）',
   /setAttribute\('data-review-ready', '0'\)/.test(orj) && /setAttribute\('data-review-ready', '1'\)/.test(orj) && !/id="owner-review-modal"/.test(orj));
-check('锚点：#decision-box 上挂 data-decision-ready 0→1',
-  /data-decision-ready/.test(app) && app.split('data-decision-ready').length === 3);
+// c72a 遗留项（PM M-20261116-201418-507e55 ②）：原先此处是「数源码里 data-decision-ready 出现次数」的静态断言，
+// 它当时正是假绿的来源（原缺陷＝出现 2 次但其中一次在 __uiPerf.report 的 catch 之后不可达）。
+// 批3（T-20261116-221117-3f77）正文 AC3 把语义写死为「开始渲染置 0 → 首屏完成置 1 → **抛错保持 0**，
+// 关闭不重置、下次打开重新 0→1」；旧探针（证据-c72a-批1核对/probe-decision-ready-fixed.cjs）验的是过渡期
+// 的「finally 一定置 1」，与该语义相反，故换用批3 探针（11 项：结构 + 单写者 + 抛错保持 0 + 重开重计时）。
+{
+  const probePath = path.join(__dirname, 'probe-decision-ready.cjs');
+  let probeOk = false; let probeOut = "";
+  try {
+    probeOut = execFileSync(process.execPath, [probePath], { cwd: path.join(__dirname, '..'), encoding: 'utf8', timeout: 60000 });
+    probeOk = /11\/11 PASS/.test(probeOut);
+  } catch (e) { probeOk = false; probeOut = String((e.stdout || "") + (e.stderr || "")); }
+  check('锚点：#decision-box 的 data-decision-ready 语义（0→1 / 抛错保持0 / 关闭不重置 / 重开重计时）', probeOk, probeOut.split(/\r?\n/).slice(-4));
+}
 check('落盘：IPC ui:perf-append + preload uiPerfAppend + 交互性能.jsonl',
   main.includes("ipcMain.handle('ui:perf-append'") && main.includes('交互性能.jsonl') && pre.includes('uiPerfAppend'));
 
