@@ -5688,6 +5688,130 @@ ipcMain.handle('theme:metrics', async () => {
       return { ok: false, code: 'LESSONS_READ_FAILED', message: String((e && e.message) || e).slice(0, 300) };
     }
   });
+  // a28a（F9/F10 + 增补卷-a28a-1 §六）：经验教训弹窗只读元数据——轮次条 + 已更正/已删除角标 + 已删除清单。
+  // 口径（写死，别改）：
+  //   · 每次调用**现读盘**、不缓存：轮次计数.json + 项目.json 阈值 + 审计 jsonl 都是现读；
+  //   · 阈值唯一权威 = 团队/状态/项目/<P>/项目.json → config.lessonsTurns（缺省 20）；
+  //     env 仅 TEAM_SELFTEST=1 或 AWB_LESSONS_TURNS_FORCE=1 时生效（由 lessons.mjs resolveLessonsTurns 统一判定）；
+  //     workbench.json.ui.lessonsTurnTick **不读**（负向断言：手改成 99 也不影响显示）；
+  //   · 行数 = 名册 active 角色（full 6 / fast 4），不写死 6；名册解析与收件箱面板同一实现；
+  //   · 计数文件缺失 / 无该 role 键 / 键损坏 → turns=null（界面显示「—」，绝不显示 0）；
+  //   · 「已更正/已删除 N 条」= 审计按 id 去重（auditStats）；已删除清单 5 键 = readDeletedEntries
+  //     （与 CLI `team.mjs lessons status --deleted` 同一实现，字段名固定 {id,date,deletedAt,by,text}）。
+  // 只读：本 handler 不写 轮次计数.json / 项目.json / 登记册 / 审计。
+  ipcMain.handle('lessons:turns', async (_e, payload) => {
+    const emptyAudit = { fixed: 0, deleted: 0, rows: 0 };
+    const fail = (code, message) => ({
+      ok: false, code, message: String(message || '').slice(0, 300),
+      threshold: 0, source: 'default', roles: [], sections: [], audit: { ...emptyAudit }, deleted: [],
+    });
+    try {
+      const { name, project } = teamProjectNameOf(payload || {});
+      if (!name) return fail('NO_PROJECT', '还没有当前项目');
+      const teamRoot = resolveTeamRoot();
+      const projectDir = (project && project.path) || path.join(ROOT, '项目', name);
+      // 团队状态目录：优先按项目登记（项目.json 的 path/name）反查，查不到再按 slug 拼——与团队工具同口径。
+      const stateDir = teamProjectStateDir(project) || path.join(teamProjectsDir(), teamTools.teamSlug(String(name), 60));
+      const configPath = path.join(stateDir, '项目.json');
+      const roleIds = MailboxWatch.roleIdsFromTeam(teamRoot);   // full 6 / fast 4；名册缺失才退回固定六角色
+      if (!lessonsBoardModule) {
+        lessonsBoardModule = import(pathToFileURL(path.join(teamRoot, '工具', 'lib', 'lessons.mjs')).href).catch((error) => {
+          lessonsBoardModule = null;
+          throw error;
+        });
+      }
+      const mod = await lessonsBoardModule;
+      if (!mod || typeof mod.readAllTurns !== 'function') {
+        return fail('LESSONS_TURNS_UNAVAILABLE', 'lessons.mjs 未提供 readAllTurns（数据层未就绪）');
+      }
+      const snap = mod.readAllTurns({ stateDir, configPath, roleIds }) || {};
+      const thresholdRaw = Number(snap.threshold);
+      const threshold = Number.isFinite(thresholdRaw) && thresholdRaw >= 1 ? Math.floor(thresholdRaw) : 0;
+      const source = ['env', 'project', 'default'].includes(String(snap.source)) ? String(snap.source) : 'default';
+      // 上次提醒时间：原始 ISO 走 lastNotifiedAt（便于断言），另给本地时间文本；从未提醒 -> 空串（界面显示「—」）。
+      const clockText = (iso) => {
+        const at = String(iso || '') ? new Date(String(iso)) : null;
+        if (!at || Number.isNaN(at.getTime())) return '';
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+      };
+      const roles = roleIds.map((role) => {
+        const entry = snap.roles && typeof snap.roles === 'object' ? snap.roles[role] : null;
+        // 关键取值规则：文件缺失 / 无该 role 键 / 键损坏 → null（界面「—」，不是 0）
+        const turns = entry && entry.turns != null && Number.isFinite(Number(entry.turns))
+          ? Math.max(0, Math.floor(Number(entry.turns)))
+          : null;
+        const lastNotifiedAt = entry && entry.lastNotifiedAt ? String(entry.lastNotifiedAt) : null;
+        return {
+          role,
+          turns,
+          lastAt: entry && entry.lastAt ? String(entry.lastAt) : null,
+          lastNotifiedAt,
+          lastNotifiedAtText: lastNotifiedAt ? clockText(lastNotifiedAt) : '',
+          nextInTurns: turns == null ? null : Math.max(0, threshold - turns),
+          sessionId: entry && entry.sessionId ? String(entry.sessionId) : '',
+        };
+      });
+      // 审计派生（只读）：角标按 id 去重；已删除清单与 CLI 同一实现（5 键）。
+      let audit = { ...emptyAudit };
+      try {
+        if (typeof mod.auditStats === 'function') {
+          const stats = mod.auditStats(teamRoot) || {};
+          audit = {
+            fixed: Math.max(0, Math.floor(Number(stats.fixed) || 0)),
+            deleted: Math.max(0, Math.floor(Number(stats.deleted) || 0)),
+            rows: Math.max(0, Math.floor(Number(stats.rows) || 0)),
+          };
+        }
+      } catch (error) {
+        console.warn('LESSONS_AUDIT_STATS_FAILED ' + JSON.stringify({ project: name, detail: String((error && error.message) || error).slice(0, 200) }));
+      }
+      let deleted = [];
+      try {
+        if (typeof mod.readDeletedEntries === 'function') {
+          deleted = (mod.readDeletedEntries(projectDir, teamRoot) || []).map((row) => ({
+            id: String((row && row.id) || ''),
+            date: String((row && row.date) || ''),
+            deletedAt: String((row && row.deletedAt) || ''),
+            by: String((row && row.by) || ''),
+            text: String((row && row.text) || ''),
+          }));
+        }
+      } catch (error) {
+        console.warn('LESSONS_DELETED_READ_FAILED ' + JSON.stringify({ project: name, detail: String((error && error.message) || error).slice(0, 200) }));
+      }
+      // 段落条数口径（F9）：data-lesson-count 按**未删**条目算——用现有 loadLessons 解析（不另写 Markdown 解析），
+      // 给每个名册角色的 active/deleted 计数，渲染层据此显示条数并隐藏软删行。
+      let sections = [];
+      try {
+        if (typeof mod.loadLessons === 'function') {
+          const parsed = mod.loadLessons(projectDir) || {};
+          sections = roleIds.map((role) => {
+            const sec = (parsed.sections || []).find((s) => s && s.role === role) || null;
+            const rows = sec && Array.isArray(sec.rows) ? sec.rows : [];
+            const deletedRows = rows.filter((r) => r && r.deleted).length;
+            return { role, count: rows.length, activeCount: rows.length - deletedRows, deletedCount: deletedRows };
+          });
+        }
+      } catch (error) {
+        console.warn('LESSONS_SECTIONS_FAILED ' + JSON.stringify({ project: name, detail: String((error && error.message) || error).slice(0, 200) }));
+      }
+      return {
+        ok: true, project: name,
+        file: path.join(stateDir, String(mod.TURNS_FILE || '轮次计数.json')),
+        configFile: configPath,
+        threshold, source,
+        missing: Boolean(snap.missing),
+        tickMs: Number.isFinite(Number(snap.tickMs)) ? Number(snap.tickMs) : 60000,
+        roles,
+        sections,
+        audit,
+        deleted,
+      };
+    } catch (e) {
+      return fail('LESSONS_TURNS_FAILED', (e && e.message) || e);
+    }
+  });
   // R-9db6 F-1：Owner 决策箱（只读）。数据真相是 团队/状态/项目/<项目>/决策箱.json，
   // 壳层只读不写；放入由 PM 走团队工具，回执等团队工具侧命令就绪后再接 IPC。
   ipcMain.handle('team:decision-box', async (_e, payload) => {

@@ -66,6 +66,9 @@ if (IS_BOARD_WINDOW) {
     teamDecisionBox: (payload) => ipcRenderer.invoke('team:decision-box', payload),
     // R-51de（T-410c）：经验教训看板只读取数（md 实时解析；无保存通道）。
     lessonsRead: (payload) => ipcRenderer.invoke('lessons:read', payload),
+    // a28a（F9/F10）+ 增补卷-a28a-1 §六：经验教训弹窗只读元数据——轮次条 + 已更正/已删除角标 + 已删除清单；
+    // 主进程每次现读盘（轮次计数.json / 项目.json 阈值 / 审计 jsonl），不缓存；界面只在打开弹窗与点刷新时各调一次。
+    lessonsTurns: (payload) => ipcRenderer.invoke('lessons:turns', payload),
     // R-5016 F-8/AC7：三入口数字同源（决策箱 / 评审待评估 / 验收），只读。
     ownerPendingCounts: (payload) => ipcRenderer.invoke('owner:pending-counts', payload),
     // R-c4c7（T-20261115-195024-5369）：团队收件箱实时面板——首屏一次性快照 + 文件事件推送（零轮询）。
