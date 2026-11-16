@@ -3367,6 +3367,21 @@ export async function cmdAck(args) {
     role: b.role, sessionId: b.sessionId, action: 'ack', project: r.msg.project, target: r.msg.id,
     note: r.already ? '重复回执' : truncate(String(args.note || '已收到'), 120), data: { ackId: r.ack.id, receiptMessageId: r.receiptMessage?.id || '', noticeMessageId: r.ack?.noticeMessageId || '' },
   });
+  // Owner 2026-11-16 18:50：回执必须唤醒发送方（尤其角色→PM 的回执）——此前 ack 只落盘不唤醒，PM 收不到。
+  let ackWake = null;
+  const ackWakeTarget = String((r.msg && r.msg.from) || '');
+  if (!r.already && ackWakeTarget && ackWakeTarget !== b.role && ackWakeTarget !== 'system' && !args['no-wake']) {
+    try {
+      ackWake = await wakeWithGuard({
+        project: r.msg.project, to: ackWakeTarget, msg: r.receiptMessage || r.msg,
+        isDispatch: false, reason: 'receipt', dedupeKey: `ack:${r.ack.id}`,
+      });
+      appendEvent({
+        role: b.role, sessionId: b.sessionId, action: 'ack_wake', project: r.msg.project, target: String(args.id),
+        note: `to=${ackWakeTarget} ok=${ackWake && ackWake.ok === true ? '1' : '0'} skipped=${String((ackWake && ackWake.skipped) || '')}`,
+      });
+    } catch (e) { ackWake = { ok: false, why: String((e && e.message) || e) }; }
+  }
   // B-a577：回执也触发一次兜底泵（收了回执说明 PM 锁已释放，队列该接着跑）。
   const ackPump = await pumpQueueSafe(r.msg.project, 'ack');
   const hint = '（仅表示已收到/已认领，不算完成；完成请执行正文任务并 task done --evidence）';
@@ -3377,7 +3392,10 @@ export async function cmdAck(args) {
   const pumpHint = ackPump && ackPump.pumped
     ? `\n队列自动续跑：已派 ${ackPump.message && ackPump.message.id} → ${ackPump.item && ackPump.item.to}（task ${(ackPump.item && ackPump.item.task) || '-'}）`
     : (ackPump && ackPump.ok === false ? `\n队列泵失败：${String(ackPump.why || ackPump.code || 'QUEUE_PUMP_FAILED').slice(0, 120)}（队列项已保留）` : '');
-  out(args, (r.already ? `已回执过 ${r.msg.id}（${r.ack.id}）${hint}` : `已回执 ${r.msg.id}（${r.ack.id}）${ackNotify}${hint}`) + pumpHint, { ok: true, ...r, dispatchQueue: ackPump });
+  const ackWakeHint = ackWake && ackWake.ok === true
+    ? ((ackWake.skipped === 'SELFTEST' || ackWake.skipped === 'sandbox_wake_skipped') ? '；已唤醒(沙盘)' : '；已唤醒')
+    : (ackWake ? `；唤醒失败(${String(ackWake.why || ackWake.code || ackWake.skipped || '').slice(0, 80)})` : '');
+  out(args, (r.already ? `已回执过 ${r.msg.id}（${r.ack.id}）${hint}` : `已回执 ${r.msg.id}（${r.ack.id}）${ackNotify}${ackWakeHint}${hint}`) + pumpHint, { ok: true, ...r, ackWake, dispatchQueue: ackPump });
 }
 
 /** R-c651 F-c651-4：每角色在场（只读）。工作台团队行/角色卡与测试脚本共用这一份口径。 */
