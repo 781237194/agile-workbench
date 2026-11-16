@@ -2223,6 +2223,53 @@ export function reconcileDispatchQueueSessions(projectName, { reason = '', by = 
   return { ok: true, rebased, discarded, kept, changed: Boolean(changed), dryRun, remaining: next.length };
 }
 
+/**
+ * B-20261116-104830-09117a ④：派单队列「清存量」。
+ * 滞留项真正投不出去的原因分三类，prune 只处理「已经不需要投」的那两类：
+ *   ① 绑定的任务已闭环（done/cancelled）→ 再投就是重复派单；② 业务已明确作废（PM 指定；本函数只认任务闭环）；
+ *   ③ 目标角色不在名册 → 永远投不出。
+ * 「角色忙且确实在动」的项**不能**清（那是队列在正常工作，等角色空闲/做完再投）。
+ * 默认 dry-run；--apply 才写盘：移除队列项 + 派单队列归档.jsonl 一行（可回滚）+ 事件。
+ */
+export function pruneDispatchQueue(projectName, { apply = false, reason = 'queue_prune', by = 'pm' } = {}) {
+  const name = String(projectName || '');
+  if (!name) return { ok: false, code: 'BAD_PROJECT', items: [], kept: [] };
+  const queue = readDispatchQueue(name);
+  const team = (() => { try { return loadTeam(); } catch { return { members: [] }; } })();
+  const roster = new Set((Array.isArray(team.members) ? team.members : []).map((m) => String((m && m.role) || '')));
+  const tasks = (() => { try { return new Map(listTasks(name).map((task) => [String(task.id), task])); } catch { return new Map(); } })();
+  const items = [];
+  const kept = [];
+  for (const item of queue.items) {
+    if (!item || typeof item !== 'object') continue;
+    const taskId = String(item.task || '');
+    let why = '';
+    if (taskId) {
+      const task = tasks.get(taskId);
+      if (!task) why = 'task_missing';
+      else if (['done', 'cancelled'].includes(String(task.status || ''))) why = 'task_closed';
+    }
+    if (!why && item.to && roster.size && !roster.has(String(item.to))) why = 'target_not_in_roster';
+    if (why) items.push({ id: String(item.id || ''), to: String(item.to || ''), task: taskId, why, subject: String(item.subject || '').slice(0, 60) });
+    else kept.push(item);
+  }
+  const applied = Boolean(apply) && items.length > 0;
+  if (applied) {
+    writeDispatchQueue(name, { items: kept });
+    const at = nowIso();
+    for (const row of items) {
+      try {
+        appendLine(dispatchQueueArchiveFile(name), JSON.stringify({
+          at, project: name, action: 'prune', reason, by,
+          item: queue.items.find((it) => String(it && it.id) === row.id) || row,
+        }));
+      } catch { /* 归档失败仍要写事件 */ }
+      appendEvent({ role: 'system', sessionId: '', action: 'dispatch_queue_pruned', project: name, target: row.id, note: `to=${row.to} why=${row.why} by=${by}` });
+    }
+  }
+  return { ok: true, project: name, dryRun: !applied, applied, reason, by, items, kept, remaining: applied ? kept.length : queue.items.length };
+}
+
 export async function cmdQueue(args) {
   const sub = String((args._ && args._[1]) || 'pump');
   const project = String(args.project || '');
@@ -2239,7 +2286,17 @@ export async function cmdQueue(args) {
       { ok: true, project, ...recon });
     return;
   }
-  if (sub !== 'pump') fail('BAD_ARGS', `未知的 queue 子命令：${sub}（用法：queue pump|status|reconcile --project P）`);
+  if (sub === 'prune') {
+    // B-20261116-104830-09117a ④：清存量口径——队列项绑的任务已 done/cancelled、或目标角色不在名册 → 作废并归档。
+    // 默认 dry-run；--apply 才真删。每次写 派单队列归档.jsonl 一行 + 事件，绝不静默删。
+    const prune = pruneDispatchQueue(project, {
+      apply: Boolean(args.apply), reason: String(args.reason || 'queue_prune'), by: String(args.by || 'pm'),
+    });
+    out(args, `队列清存量：可作废 ${prune.items.length} 条 ｜ 保留 ${prune.kept.length} 条${prune.applied ? '（已作废）' : '（dry-run，未改动）'}`,
+      { ok: true, project, ...prune });
+    return;
+  }
+  if (sub !== 'pump') fail('BAD_ARGS', `未知的 queue 子命令：${sub}（用法：queue pump|status|reconcile|prune --project P [--apply]）`);
   // B-bbf6：泵之前先对齐会话（换人后旧 sessionId 会让投递永远失败 → 队列静默悬挂）。
   let recon = null;
   try { recon = reconcileDispatchQueueSessions(project, { reason: 'pump', by: 'system' }); } catch (e) { recon = { ok: false, why: String((e && e.message) || e) }; }
