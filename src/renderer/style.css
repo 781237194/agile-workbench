@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   color-scheme: dark;
   --bg: #15171d;
   --bg-2: #191b22;
@@ -15,6 +15,11 @@
   --muted: #aaa8a2;
   --dim: #7b7e86;
   --gold: #c9a365;
+  /* R-fe90 P0 批（B-20261116-131827-3052）：主题强调色 / 发光 / 面板层级，native=暗金 */
+  --theme-accent: #e3c17c; --theme-accent-2: #c79a55;
+  --theme-glow: 0 0 18px rgba(201, 163, 101, .28);
+  --panel-inset: inset 0 1px 0 rgba(255, 236, 200, .10);
+  --panel-blur: 0px;
   --gold-2: #e7cd98;
   --gold-3: #a47a3b;
   --gold-soft: rgba(201, 163, 101, .10);
@@ -150,9 +155,10 @@ button:focus-visible, [tabindex]:focus-visible {
   display: grid;
   place-items: center;
   border-radius: 6px;
-  color: #21180b;
-  background: linear-gradient(145deg, #edcf93 0%, #cfa35f 52%, #9d7134 100%);
-  box-shadow: 0 0 0 1px rgba(255, 228, 174, .15), 0 2px 7px rgba(0, 0, 0, .38);
+  color: #0b0f14;
+  /* P0：强调色跟随主题（以前写死金色，是「切了主题还像暗金」的首要原因） */
+  background: linear-gradient(145deg, var(--theme-accent) 0%, var(--theme-accent-2) 100%);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .10), var(--theme-glow), 0 2px 7px rgba(0, 0, 0, .38);
   font: 800 10px/1 "Segoe UI", sans-serif;
   letter-spacing: -.02em;
 }
@@ -263,12 +269,13 @@ button:focus-visible, [tabindex]:focus-visible {
 }
 .ghost:hover { background: var(--gold-soft); border-color: var(--line-strong); }
 .primary {
-  color: #20170a;
+  color: #0b0f14;
   border-color: transparent;
-  background: linear-gradient(180deg, #e3c17c, #c79a55);
+  background: linear-gradient(180deg, var(--theme-accent), var(--theme-accent-2));
+  box-shadow: var(--theme-glow);
   font-weight: 650;
 }
-.primary:hover { filter: brightness(1.06); }
+.primary:hover { filter: brightness(1.06); box-shadow: var(--theme-glow), 0 6px 18px rgba(0, 0, 0, .35); }
 .small { height: 28px; padding: 0 10px; font-size: 11.5px; }
 .tb-btn {
   height: 28px;
@@ -1039,7 +1046,10 @@ html[data-theme="light"] .stage-actions .owner-review-proxy { color: #1f5f8b; bo
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 97%, white 3%), var(--panel));
+  /* P0：内描边高光（tech 青 / glass 白）+ anime 硬阴影，均由主题 token 给 */
+  box-shadow: var(--panel-inset), var(--panel-shadow, none);
 }
+html[data-style="tech"] .panel, html[data-style="glass"] .panel { backdrop-filter: blur(var(--panel-blur)); -webkit-backdrop-filter: blur(var(--panel-blur)); }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; padding-bottom: 7px; border-bottom: 1px solid var(--line); }
 .panel-head h3 { color: var(--text); font-size: 12px; font-weight: 650; letter-spacing: .01em; }
 .badge { padding: 1px 6px; border: 1px solid var(--gold-line); border-radius: 8px; background: var(--gold-soft); color: var(--gold-2); font-size: 8px; line-height: 1.5; white-space: nowrap; }
@@ -4704,6 +4714,11 @@ html[data-style="tech"][data-theme="dark"] {
   --text: #e6f3ff; --muted: #9fb6cc; --dim: #6f8aa6;
   --gold: #4fd1ff; --gold-2: #9fe8ff; --gold-3: #2aa3c9;
   --gold-soft: rgba(79,209,255,.12); --gold-line: rgba(79,209,255,.34);
+  --theme-accent: #4fd1ff; --theme-accent-2: #2aa3c9;
+  --theme-glow: 0 0 24px rgba(56, 232, 255, .35);
+  --panel: rgba(13, 23, 35, .88); --panel-2: rgba(16, 32, 47, .90);
+  --panel-inset: inset 0 1px 0 rgba(160, 235, 255, .18);
+  --panel-blur: 12px;
   --green: #4fe0b0; --red: #ff8a7a; --blue: #4fd1ff;
   --shadow: 0 20px 48px rgba(0,12,24,.58);
 }
@@ -4715,6 +4730,11 @@ html[data-style="anime"][data-theme="dark"] {
   --text: #ffeaf6; --muted: #c9a8cf; --dim: #9a7ea8;
   --gold: #ff7ac8; --gold-2: #ffb3e0; --gold-3: #d64fa4;
   --gold-soft: rgba(255,122,200,.13); --gold-line: rgba(255,122,200,.36);
+  --theme-accent: #ff7ac8; --theme-accent-2: #d64fa4;
+  --theme-glow: 0 0 26px rgba(255, 79, 163, .5);
+  --panel-inset: inset 0 1px 0 rgba(255, 205, 240, .16);
+  --panel-shadow: 7px 7px 0 rgba(0, 0, 0, .55);
+  --panel-blur: 0px;
   --green: #7cf0c8; --red: #ff8fa3; --blue: #a99bff;
   --shadow: 0 20px 48px rgba(20,4,30,.62);
 }
@@ -4726,6 +4746,11 @@ html[data-style="glass"][data-theme="dark"] {
   --text: #eaf4fb; --muted: #a9bfcf; --dim: #7c93a6;
   --gold: #b8d8f0; --gold-2: #dcf0ff; --gold-3: #86aecd;
   --gold-soft: rgba(184,216,240,.12); --gold-line: rgba(184,216,240,.34);
+  --theme-accent: #9fd8ff; --theme-accent-2: #5f9fd8;
+  --theme-glow: 0 0 30px rgba(159, 216, 255, .35);
+  --panel: rgba(255, 255, 255, .10); --panel-2: rgba(255, 255, 255, .14);
+  --panel-inset: inset 0 1px 0 rgba(255, 255, 255, .35);
+  --panel-blur: 18px;
   --green: #7fe0c4; --red: #ff9b8c; --blue: #9fd8ff;
   --shadow: 0 20px 48px rgba(2,10,18,.52);
 }
@@ -4735,7 +4760,7 @@ html[data-style="glass"][data-theme="dark"] {
 .mm-sub { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 4px 10px; padding: 4px; border-left: 1px solid var(--line-strong); }
 .mm-sub[hidden] { display: none; }
 .mm-sub button { font-size: 11px; }
-.mm-sub button[aria-checked="true"] { color: var(--gold-2); background: var(--gold-soft); border-color: var(--line); }
+.mm-sub button[aria-checked="true"] { color: var(--theme-accent); background: var(--gold-soft); border-color: var(--line-strong); box-shadow: var(--theme-glow); }
 .mm-sub button[aria-checked="true"] .mm-ico { color: var(--gold-2); }
 
 /* ==========================================================================

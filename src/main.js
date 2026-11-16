@@ -33,6 +33,9 @@ const ROUTE_DAEMON_STALE_BEATS = 3;
 // 守护状态界面自检（T-20261114-063256-b417）：真实窗口 + 沙盘守护状态文件，三态与两态截图。
 const IS_DAEMON_CHECK = process.argv.includes('--daemon-check');
 const IS_SELFTEST = process.argv.includes('--selftest');
+// T-c25a：压测/长跑实例不许弹窗——Owner 桌面上不该出现 c25a-runNN 这类沙盘窗口。
+// 只影响“是否显示窗口”，不影响渲染进程、定时器与 webview；仅测试脚本会设这个 env。
+const AWB_START_HIDDEN = process.env.AWB_START_HIDDEN === '1';
 // R-c1ed（卷2 §五）：压测长跑用 --no-wake 启动——不弹通知、不写邮箱、不唤醒，但**必须留审计**。
 // 这里把标记落到环境变量里，渲染进程（preload）据此决定 toast 只记审计还是显示并自增 data-toast-count。
 const IS_NO_WAKE = process.argv.includes('--no-wake') || String(process.env.AWB_NO_WAKE || '') === '1';
@@ -10099,7 +10102,7 @@ function createWindow() {
   // 重启恢复上次字号：等页面加载完再设置，避免 zoom 被导航重置。
   mainWindow.webContents.on('did-finish-load', () => applyZoomToWindow(mainWindow, readZoomPref()));
   startMemSampler();
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.once('ready-to-show', () => { if (!AWB_START_HIDDEN) mainWindow.show(); });
   // 拖动/缩放后防抖记住尺寸；关闭前补一次，避免最后一秒的变化丢掉。
   let saveTimer = null;
   const scheduleWindowSave = () => {
@@ -10499,13 +10502,15 @@ async function runThemeShots() {
     const clicked = await clickTheme(id);
     await new Promise((r) => setTimeout(r, 1600)); // 过渡动画结束再采样/截图
     const state = await win.webContents.executeJavaScript('window.__themeState ? window.__themeState() : null', true);
+    const look = await win.webContents.executeJavaScript('window.__themeLook ? window.__themeLook() : null', true);
+    const fx = await win.webContents.executeJavaScript('window.__themeFx ? window.__themeFx() : null', true);
     const probe = await win.webContents.executeJavaScript('window.__themeProbe ? window.__themeProbe(3000) : null', true);
     const { pngPath, pngBuf, pngSize } = await shoot(id);
-    const perfPayload = { themeId: id, clicked, window: windowInfo, pngSize, pngBytes: pngBuf.length, state, probe, at: new Date().toISOString() };
+    const perfPayload = { themeId: id, clicked, window: windowInfo, pngSize, pngBytes: pngBuf.length, state, look, fx, probe, at: new Date().toISOString() };
     const perfPath = path.join(outDir, 'perf-' + id + '.json');
     fs.writeFileSync(perfPath, JSON.stringify(perfPayload, null, 2));
     shots.push({ id, png: pngPath, perf: perfPath, bytes: pngBuf.length, pngSize });
-    results.push({ themeId: id, clicked, state, probe, pngSize });
+    results.push({ themeId: id, clicked, state, look, fx, pngSize });
   }
   // 特效开/关对比（只做 tech-dark）：证明网格+粒子真在跑、effectLevel=off 真关断。
   const fxProbe = "(function(){var d=document.documentElement;var b=getComputedStyle(document.body,'::before');var c=document.getElementById('awb-theme-particles');var tb=document.getElementById('titlebar');var blur=tb?String(getComputedStyle(tb).backdropFilter||getComputedStyle(tb).webkitBackdropFilter||'none'):'none';return {effectLevel:d.getAttribute('data-effect-level')||'full',gridAnimation:String(b.animationName||''),gridSize:String(b.backgroundSize||''),particles:!!c,particleCanvasSize:c?(c.width+'x'+c.height):'',titlebarBlur:blur};})()";

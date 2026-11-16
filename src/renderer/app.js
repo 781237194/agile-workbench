@@ -16232,7 +16232,31 @@ function clampFlowPanel() {
   // ?theme= 只影响本次加载、**不持久化**（增补卷-fe90-1 §一.3）；同值不重复写 storage。
   const bootResolved = themeResolve({ storageValue: themeReadStorage(), search: location.search });
   applyThemeState(bootResolved, { persist: bootResolved.source !== 'url' });
-  try { window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /* ignore */ }
+  try { /* P0 批（3052）：只读视觉探针——断言读数值而不是只比截图；不写任何状态。 */
+window.__themeLook = function () {
+  const root = getComputedStyle(document.documentElement);
+  const pick = (sel) => { const el = document.querySelector(sel); if (!el) return null; const s = getComputedStyle(el); return { background: s.backgroundColor, backgroundImage: s.backgroundImage, color: s.color, boxShadow: s.boxShadow, backdropFilter: s.backdropFilter || "none" }; };
+  const alphaOf = (v) => { const m = /rgba?\(([^)]+)\)/.exec(String(v || "")); if (!m) return 1; const parts = m[1].split(","); return parts.length === 4 ? Number(parts[3]) : 1; };
+  const panel = pick(".panel") || {};
+  const targets = [".brand-mark", ".primary", ".panel", ".tab.active", ".mm-sub button[aria-checked=\"true\"]"];
+  const glowCount = targets.filter((sel) => { const el = document.querySelector(sel); if (!el) return false; return getComputedStyle(el).boxShadow !== "none"; }).length;
+  const state = typeof window.__themeState === "function" ? window.__themeState() : {};
+  return {
+    themeId: state.themeId || "", style: state.style || "", theme: state.theme || "",
+    accent: root.getPropertyValue("--theme-accent").trim(), accent2: root.getPropertyValue("--theme-accent-2").trim(),
+    glow: root.getPropertyValue("--theme-glow").trim(),
+    panelAlpha: alphaOf(root.getPropertyValue("--panel").trim() || panel.background), panelToken: root.getPropertyValue("--panel").trim(), panelBackground: panel.background || "",
+    panelBackdrop: panel.backdropFilter || "none",
+    brandBackground: (pick(".brand-mark") || {}).backgroundImage || "", brandHasGlow: String((pick(".brand-mark") || {}).boxShadow || "").includes("px"),
+    primaryBackground: (pick(".primary") || {}).backgroundImage || "", glowCount,
+  };
+};
+window.__themeFx = function () {
+  const parts = (typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.parts) ? AWB_THEME_FX.parts.length : 0;
+  const st = typeof window.__themeState === "function" ? window.__themeState() : {};
+  return { particleCount: parts, canvas: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.canvas && document.body.contains(AWB_THEME_FX.canvas)), running: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.running), idle: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.idle), effectLevel: st.effectLevel || "", fx: st.fx || null };
+};
+window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /* ignore */ }
   // R-fe90 F-7：手工降级档来自主进程 ui.effectLevel；读不到按 full（不阻断界面）。
   try {
     const eff = (window.workbench && typeof window.workbench.themeEffectLevel === 'function')
