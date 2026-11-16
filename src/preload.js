@@ -62,6 +62,17 @@ if (IS_BOARD_WINDOW) {
     lessonsRead: (payload) => ipcRenderer.invoke('lessons:read', payload),
     // R-5016 F-8/AC7：三入口数字同源（决策箱 / 评审待评估 / 验收），只读。
     ownerPendingCounts: (payload) => ipcRenderer.invoke('owner:pending-counts', payload),
+    // R-c4c7（T-20261115-195024-5369）：团队收件箱实时面板——首屏一次性快照 + 文件事件推送（零轮询）。
+    mailboxSnapshot: (payload) => ipcRenderer.invoke('mailbox:snapshot', payload),
+    mailboxWatchStart: (payload) => ipcRenderer.invoke('mailbox:watch-start', payload),
+    mailboxState: () => ipcRenderer.invoke('mailbox:state'),
+    // R-c4c7：邮箱/任务队列变化推送（主进程 fs.watch 去抖 300ms 后 send；渲染层只订阅，不轮询）。
+    onMailboxChanged: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      const handler = (_event, payload) => { try { cb(payload || {}); } catch { /* 回调自身异常忽略 */ } };
+      ipcRenderer.on('mailbox:changed', handler);
+      return () => { try { ipcRenderer.off('mailbox:changed', handler); } catch { /* ignore */ } };
+    },
     // B-a1cf：评审代管.json 变化推送（标题栏「PM 代管中 N 条」实时刷新）。
     onProxyChanged: (cb) => {
       if (typeof cb !== 'function') return () => {};
