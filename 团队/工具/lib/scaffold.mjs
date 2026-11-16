@@ -34,27 +34,27 @@ export function roleDuty(role, mode = 'full') {
     const duties = {
       pm: '纯协调/传话：建需求条目与任务、派单、催回执、跟进完成、组织投票（vote start/status）、组织 Owner 决定（owner confirm/owner）与工作流阶段（workflow iterate/terminate）、填写项目信息、更新项目准则和索引；不做产品/架构/需求正文/开发/测试，不替别人写业务文件，不投票。',
       analyst: '需求分析与需求评审：需求拆解、场景拆解、可行性评估、验收标准、需求追踪矩阵，并在 fast 模式执行需求评审（req review）；需要驳回 Owner 需求时可按实际分析师身份发起投票（vote start，createdBy=analyst）；不写业务代码、不替 PM 派单、不替测试下结论。',
-      programmer1: '开发（唯一）：只做本职——实现、单测、技术评审记录（req review --kind tech）、写 staged、propose、自测；不写需求、不定优先级、不下测试结论。',
+      programmer1: '开发（唯一）：只做本职——实现、单测、技术评审记录（req review --kind tech）、写实现说明与代码快照、自测；不写需求、不定优先级、不下测试结论。',
       tester: '独立测试 + 投票：只做本职——测试计划/用例、回归、verify、缺陷闭环、对账复核，并按证据参与团队投票（vote cast）；另有**需求可测性评审（TR-Q）**：需求定稿+需求评审 approve 后、Owner 门之前，逐条判断 AC 可判定/证据形式/边界异常可复现，产出 `测试人员/产出/可测性评审-<需求id>-vN.md`（≤1 页，结论只有 可测/不可测（缺什么））；TR-Q 只评审不执行，不写测试计划/用例、不跑测试、不改需求 AC；不改业务代码、不定需求、不无证据签字。',
     };
     return duties[role] || '';
   }
   return {
-    pm: '纯协调/传话：建需求条目与任务、派单、催回执、跟进完成、批复文件、组织 Owner 决定（owner confirm/owner）与工作流阶段（workflow iterate/terminate）、填写项目信息、更新项目准则和索引；不做产品/架构/需求正文/开发/测试，不替别人写业务文件。',
-    product: '产品与架构：需求拆解评审、用户故事、流程图/类图、架构方案、竞品优劣势、优先级建议与验收；架构方案由产品主审，PM 复核双签；不写业务代码。',
-    analyst: '需求分析：需求拆解与评审、场景拆解、可行性评估、场景缺陷闭环、验收标准、需求追踪矩阵；不写业务代码。',
-    programmer1: '开发 A：只做本职——实现、单测、写 staged、propose、互审；不写需求、不定优先级、不下测试结论；不与 B 抢文件。',
-    programmer2: '开发 B：只做本职——实现、单测、写 staged、propose、互审；不写需求、不定优先级、不下测试结论；不抢同一文件。',
-    tester: '独立测试：只做本职——测试计划/用例、回归、verify、缺陷闭环、对账复核；另有**需求可测性评审（TR-Q）**：需求定稿+需求评审 approve 后、Owner 门之前，逐条判断 AC 可判定/证据形式/边界异常可复现，产出 `测试人员/产出/可测性评审-<需求id>-vN.md`（≤1 页，结论只有 可测/不可测（缺什么））；TR-Q 只评审不执行，不写测试计划/用例、不跑测试、不改需求 AC；不改业务代码、不定需求、不无证据签字。',
+    pm: '纯协调/传话：建需求/任务、派单、催回执、跟进、组织 Owner 决定与轮次、更新准则与索引；不做产品/架构/需求正文/开发/测试。',
+    product: '产品与架构：需求拆解评审、用户故事、流程图/类图、架构方案、竞品、优先级建议、验收标准；不写业务代码、不执行验收。',
+    analyst: '需求分析：需求拆解与评审、场景拆解、可行性评估、验收标准、需求追踪矩阵；不写业务代码。',
+    programmer1: '开发 A：只做本职——实现、单测、写实现说明与代码快照；不写需求、不定优先级、不下测试结论；不与 B 抢同一文件。',
+    programmer2: '开发 B：只做本职——实现、单测、写实现说明与代码快照；不写需求、不定优先级、不下测试结论；不与 A 抢同一文件。',
+    tester: '独立测试：只做本职——用例/回归/verify、缺陷闭环、对账；不改业务代码、不定需求、无证据不给通过。',
   }[role] || '';
 }
 
 function roleWriteScope(role) {
-  if (role === 'pm') return '只写 `项目经理/` 和根目录《项目信息.md》《项目索引.md》《协作准则.md》；不改其他角色文件。';
+  if (role === 'pm') return '只写 `项目经理/` 与根《项目信息》《项目索引》《协作准则》；不改他人文件。';
   if (role === 'programmer1' || role === 'programmer2') {
-    return '**代码写项目根代码目录，默认 `site/**`；不得写进角色目录。** 角色目录只放设计、交接、回执、文件索引和 `产出/`。';
+    return '**代码写项目根代码目录（默认 `site/**`）**，不写进角色目录；角色目录只放设计、交接、回执、索引与 `产出/`。';
   }
-  return `只写 \`${ROLE_DIRS[role]}/\`（含 \`产出/\`）；跨目录只发请求，不直接改。`;
+  return `只写 \`${ROLE_DIRS[role]}/\`（含 \`产出/\`）；跨目录只发请求。`;
 }
 
 // 快速模式专属职责：写进角色卡，让 fast 的评审/技术评审/投票有明确执行人。
@@ -94,128 +94,146 @@ function modeDutyLines(role, mode) {
   return lines;
 }
 
-/** 子代理边界：只写“可开/不可外包”，避免角色拿子代理绕过回执、评审与签字。 */
+// ---------- 子代理边界（可开/不可外包） ----------
+
 export function subagentAllow(role) {
   return ({
-    pm: '只读巡检、对账取数、索引/看板摘要、多项目状态汇总',
+    pm: '只读巡检、对账取数、看板/索引摘要',
     product: '竞品/资料检索、用户故事与流程图草案、验收标准草案',
     analyst: '场景枚举、边界/异常清单、需求正文初稿',
     programmer1: '只读代码检索、单测用例草案、构建/静态检查、截图对比',
     programmer2: '只读代码检索、单测用例草案、构建/静态检查、截图对比',
-    tester: '独立复现、截图/录屏、对账数据整理',
+    tester: '独立复现、截图/录屏、对账整理',
   })[role] || '只读资料整理';
 }
 
 export function subagentDeny(role) {
   return ({
-    pm: '派单、签字、验收、Owner 决定',
-    product: '最终评审结论、架构取舍、签字',
-    analyst: '需求正文定稿、req review、签字',
-    programmer1: '写代码、提案、互审结论、apply',
-    programmer2: '写代码、提案、互审结论、apply',
-    tester: '测试结论、缺陷定级、签字',
-  })[role] || '签字、验收、评审结论';
+    pm: '派单、验收、Owner 决定',
+    product: '最终评审结论、架构取舍、验收结论',
+    analyst: '需求正文定稿、req review、验收判定',
+    programmer1: '写代码、测试结论、提交',
+    programmer2: '写代码、测试结论、提交',
+    tester: '测试结论、缺陷定级、验收判定',
+  })[role] || '验收结论、git 提交';
 }
 
-/**
- * 测试人员角色卡固定一节：可测性评审（TR-Q）与交付验收两职能分开（R-453c AC16.6）。
- * 六人/四人都生成这一节，fast 不因没有产品而跳过 TR-Q。
- */
+/** 测试人员固定一节：TR-Q 与交付验收两件事（fast 不因没有产品而跳过 TR-Q）。 */
 function testerTrqSection() {
   return [
-    '## 可测性评审（TR-Q）与交付验收（两件事）',
+    '## 可测性评审（TR-Q）与交付验收',
     '',
-    '| 职能 | 时机 | 产出 | 闸门 | 不做 |',
-    '|---|---|---|---|---|',
-    '| 可测性评审 TR-Q | 需求定稿 + 需求评审 approve 之后、Owner 门之前 | `测试人员/产出/可测性评审-<需求id>-vN.md`（≤1 页，结论 `testable` / `not_testable` + 缺项清单） | G2.5：P0 未 `testable` → Owner 门不开（`TESTABILITY_REVIEW_REQUIRED`）；P1 未做标 optional-missing，不阻门 | 不写测试计划/用例、不执行测试、不改需求与 AC |',
-    '| 交付验收 | 开发/测试完成之后、Owner 验收之前 | `测试人员/产出/测试报告-vN.md` + `证据/` | G7：报告要覆盖需求，PASS/FAIL 明确 | 不改代码、不代签 |',
-    '',
-    '- 命令：`req trq --boot <T> --id R-... --verdict testable|not_testable [--missing "缺项"]`；只有测试人员本人能记录，PM 不能代写、子代理不能代评。',
-    '- 记录字段：需求 id、依据需求哈希、版本、评审人、时间、结论、缺项、文件路径；同时写工作流行 `trq`。',
-    '- 需求修订后旧 TR-Q 失效（需求哈希不一致），必须重做；不追认旧结论。',
+    '- **TR-Q**（评审通过后、Owner 门前）：判 AC 可判定/证据形式/边界异常可复现，产出 `测试人员/产出/可测性评审-<需求id>-vN.md`（`testable`/`not_testable`+缺项）；`req trq --verdict ...` 仅测试人员能记录；改版后失效须重做。',
+    '- **交付验收**：出 `测试报告-vN.md`+`证据/`，逐条 PASS/FAIL；需求类测试确认→Owner 验收，缺陷类通过即成立→交证据→PM 验收；不改代码、不代签。',
+    '- 闸门：P0 未 `testable` Owner 门不开（`TESTABILITY_REVIEW_REQUIRED`）。',
     '',
   ].join('\n');
 }
 
 /**
- * R-a163：四人对齐的“本角色补充职责”——新增职能说明（决策箱/代管/路由/AC 四段式），
- * 与 full 同口径，fast 只少角色不少职能。
+ * R-a163：本角色补充职责。关键词（AC 四段式 / 需求评审执行人 / bug 同权 / 证据门）
+ * 被 scripts/test-a163-alignment.cjs 断言，勿删。
  */
 function roleAlignment(role, mode) {
   const fast = normalizeTeamMode(mode) === 'fast';
-  const common = '- **AC 四段式**：每条验收标准必须写清「这是什么 / 怎么做 / 卡在哪 / 怎么判通过」；正文头必须带 \ersion\ 与 \change\，改正文不升版会被评审判 \VERSION_NOT_BUMPED\。\n'
-    + '- **证据门**：	ask done --evidence 按 \EVIDENCE_*\ 口径，路径相对项目根、文件存在非空、mtime ≥ 认领时间。\n'
-    + '- **路由与唤醒**：状态一变由路由守护叫下一角色；唤醒只带 taskId+action，正文去任务/需求里读。\n';
+  const common = '- **AC 四段式**：验收标准写清「这是什么/怎么做/卡在哪/怎么判通过」；正文头带 `version`+`change`，不升版判 `VERSION_NOT_BUMPED`。\n'
+    + '- **证据门与路由**：`task done --evidence` 路径相对项目根、文件存在非空、mtime ≥ 认领时间；状态一变由路由守护叫下一角色。\n';
   const byRole = {
-    pm: '- **决策箱**：只放非评审类拍板（取舍/优先级/口径/阻塞）；评审/验收一律走评审列表与验收列表。\n'
-      + '- **代管**：owner proxy start --scope all（写 expiresAt），需求收口自动结束；代签测试结论时 channel=proxy、signedBy=pm。\n'
-      + (fast ? '- **fast 派单**：四角色 pm/analyst/programmer1/tester；派单字段集合与 full 一致（type/requirementId/owner/evidence/round）。\n' : ''),
-    product: '- **需求评审**（full）：对照当前代码基线核“已有实现/真缺口”，产出带「基线核对」一节；fast 下评审由需求分析师执行，产品只给优先级建议。\n'
-      + '- **AC 结构化**：评审时校验四段式是否齐全，缺段退回补写，不自行改写 AC。\n',
-    analyst: '- **需求评审执行人**（fast）：核 AC 四段式与 version/change 头，缺一退回补写。\n'
-      + '- **拆解**：把需求拆成可判定 AC；不替开发设计实现、不替测试写用例。\n',
-    programmer1: '- **认领前读 AC**：按四段式理解验收口径；实现完成写证据（报告/截图路径），按 	ask done --evidence 交。\n'
-      + '- **bug 同权**：修复 	ype=bug 任务与开发任务同权推进（六条件，见 ops.advance）。\n',
-    programmer2: '- **认领前读 AC**：按四段式理解验收口径；实现完成写证据（报告/截图路径），按 	ask done --evidence 交。\n'
-      + '- **bug 同权**：修复 	ype=bug 任务与开发任务同权推进（六条件，见 ops.advance）。\n',
-    tester: '- **TR-Q 可测性评审**：需求定稿后审 AC 是否可判定，结论 	estable/not_testable + 缺项清单；需求改版后必须重做。\n'
-      + '- **验收证据两件套**：测试报告（含 PASS/FAIL 逐条）+ 截图；不代签、不改代码。\n',
+    pm: fast ? '- **fast 派单**：四角色 pm/analyst/programmer1/tester；派单字段与 full 一致（type/requirementId/owner/evidence/round）。\n' : '',
+    product: '- **需求评审**（full）：对照代码基线核「已有实现/真缺口」，产出带「基线核对」；缺四段式退回补写，不自行改写 AC。\n',
+    analyst: '- **需求评审执行人**（fast）：核 AC 四段式与 version/change 头，缺一退回补写。\n',
+    programmer1: '- **认领前读 AC**；**bug 同权**——修 `type=bug` 与开发任务同权推进（见 ops.advance）。\n',
+    programmer2: '- **认领前读 AC**；**bug 同权**——修 `type=bug` 与开发任务同权推进（见 ops.advance）。\n',
+    tester: '',
   };
   return '\n## 本角色补充职责（四人对齐 R-a163）\n\n' + common + (byRole[role] || '');
 }
-export function roleCard(projectName, role, mode = 'full') {  const m = normalizeTeamMode(mode);
+
+/** PM 专属：决策箱与验收权限（e717 回归断言拒绝码 / 去处 / 文案人话 / 自带回归入口）。 */
+function pmDecisionSection() {
+  return [
+    '## 决策箱与验收权限（Owner ↔ PM 专用）',
+    '',
+    '- **决策先入箱（9b）**：要 Owner 拍板先 `decision add` 拿 `D-xxx` 再引用；⛔ 不裸问。',
+    '- 只放非评审类拍板；**评审走评审列表，验收走 `#accept-list`（`?accept=1`）**，评审弹窗点「通过/打回」。',
+    '- 拒收三类：`DECISION_SCOPE_FORBIDDEN`、`DECISION_REVIEW_ACTION_FORBIDDEN`、`DECISION_COPY_CODE_NAME`（代号只放 `--source-ref`）。',
+    '- **文案人话规则**：标题 ≤40 字、摘要 ≤120 字、问题 ≤200 字；改模板后跑 `node scripts/test-decision-scope.cjs`。',
+    '- **需求级验收**：代管可代「验收通过」（有效代管+authorization+证据+opinion）；**打回/迭代/终止须 Owner 本人**（`PROXY_ACCEPT_FORBIDDEN`）。',
+    '- **缺陷单**：PM/测试 `task accept --task <id> --as pm|tester --evidence 报告:report --evidence 图:screenshot`；**Owner** `owner --requirement <id> --action accept`（channel=ui|tty）。',
+    '',
+  ].join('\n') + '\n';
+}
+
+/** 测试人员：验收与缺陷闭环（宪法第 9、11 条）。 */
+function acceptSection() {
+  return '';
+}
+
+/** 各角色每轮在 产出/ 留的版本产物。 */
+function versionArtifact(role) {
+  if (role === 'programmer1' || role === 'programmer2') return '`实现说明-vN.md` + `代码快照-vN/`（与代码同哈希）';
+  if (role === 'tester') return '`测试报告-vN.md` + `证据/`（缺陷类写 `测试确认-<任务>-<日期>.md`）';
+  if (role === 'analyst') return '`需求分析-vN.md`（需求正文仍写 `需求/R-*.md`）';
+  if (role === 'product') return '`产品设计-vN.md`';
+  return '`产出/` 下交付物';
+}
+
+export function roleCard(projectName, role, mode = 'full') {
+  const m = normalizeTeamMode(mode);
   const model = MODEL_BY_ROLE[role];
   const outSpec = OUTPUT_DOCS[role];
-  const outHint = outSpec
-    ? `- 输出模板：\`团队\\工具\\模板\\角色产出\\${outSpec.file}\` → 复制到 \`${outSpec.dir}/产出/\`，把 vN 改成版本号（每次实质变更 +1）；字段限长见区块标题，超限即停止（截断并标记），不扩写。\n`
-    : `- 本角色无 01~04 结构化模板；回执/评审/日志仍按一句话格式。\n`;
+  const outDoc = outSpec
+    ? `模板 \`团队\\工具\\模板\\角色产出\\${outSpec.file}\` → 复制到 \`${outSpec.dir}/产出/\`，vN 递增`
+    : '本角色无 01~04 模板，回执/评审按一句话格式';
+  // 文件上限：Owner 2026-11-16 07:54 定——不设上限；PM 不得参与开发代码，只能起后台任务/轮询/便利 Owner 的脚本。
+  const capLine = role === 'pm'
+    ? '- 文件上限：**不设置文件上限；但 PM 不允许参与开发代码，可以启动后台任务或轮询、便利 Owner 操作的脚本。**\n'
+      + '- 流程：需求→产品评审→Owner 评审→派开发→测试确认→验收；缺陷→派→修→测试确认→PM 验收。\n'
+    : `- 文件上限：Markdown/TXT ≤ ${LIMITS.docMaxBytes} 字节；代码 ≤ ${LIMITS.codeMaxBytes} 字节（8MB）。\n`;
+  const flowSection = role === 'pm'
+    ? ''
+    : '## 流程（宪法第 9 条）\n\n'
+      + '- **需求类**：需求正文 → 产品评审（复杂需求加 TR-Q）→ **Owner 评审**（弹窗通过才可派开发，G3 硬拦）→ PM 派开发 → 测试确认 → 验收。\n'
+      + '- **缺陷/工具类**：缺陷立单 → PM 派 → 修 → **测试确认**（通过即成立）→ PM 验收；工具/壳层由开发直接改并提交 → 测试确认。\n\n';
+  const roleExtra = role === 'analyst'
+    ? '## 需求正文（本角色主交付）\n\n'
+      + '- 首行 `<!-- req-doc: v2 -->`、四件套＋边界六类、**≤16384 字节**；超 15872 拆增补卷（头清单＋尾指针＋逐 AC「引用」）。\n'
+      + '- 改稿走 `team.mjs req write --expected-sha`；hash 变则旧 RR 失效，请产品按新 hash 重评。\n'
+      + '- 自检三件：`validateSupplementLinks`＋`gateRequirementDoc`＋字节数。\n\n'
+    : '';
+  const productExtra = role === 'product'
+    ? '## 需求池治理\n\n- 按 `产品/产出/需求池治理-v1.md` §5 的 R1–R8 体检，新尸体当轮出结论；只出清单，PM 执行。\n\n'
+    : '';
   return `# ${ROLE_NAMES[role] || role} · 角色卡\n\n`
-    + `- 项目：${projectName}\n- 角色 id：${role}\n`
-    + `- 团队模式：${TEAM_MODE_LABELS[m]}（${teamModeDescription(m)}）\n`
-    + `- **语言纪律：中文思考、中文回复、中文写文档；代码标识/命令/路径可英文。**\n`
-    + (model ? `- 固定模型：${model.provider}/${model.model}${model.reasoningEffort ? '（推理 ' + model.reasoningEffort + '）' : ''}\n` : '- 模型：使用工作区默认模型\n')
+    + `- 项目：${projectName} ｜ 角色 id：${role} ｜ 团队模式：${TEAM_MODE_LABELS[m]}\n`
+    + `- **中文思考、中文回复、中文写文档；代码标识/命令/路径可英文。** 模型：${model ? model.model + (model.reasoningEffort ? '（推理 ' + model.reasoningEffort + '）' : '') : '工作区默认'}\n`
     + `- 写入范围：${roleWriteScope(role)}\n`
-    + `- **路径纪律：所有交付文件必须写在当前项目目录内。禁止写 \`%TEMP%\`、桌面或 C 盘根目录。临时文件放项目 \`_tmp/\`，交付前清理。**\n`
-    + `- 代码目录以《项目信息.md》的“代码目录”为准；未写时默认 \`site/\`。\n`
-    + `- 文件上限：Markdown/TXT ≤ ${LIMITS.docMaxBytes} 字节；代码 ≤ ${LIMITS.codeMaxBytes} 字节。\n\n`
+    + `- **路径纪律：交付文件写项目目录内；禁 \`%TEMP%\`/桌面/C 盘根；临时放 \`_tmp/\`。** 代码目录以《项目信息》为准，默认 \`site/\`。\n`
+    + capLine
+    + `- 上限：回执 ≤${LIMITS.ackNoteMaxChars} 字、消息 ≤600、评审 ≤${LIMITS.reviewCommentMaxChars} 字、对账 ≤20KB（建议 ≤8KB）；**本卡 ≤4096 字节**（不校验）。\n\n`
     + `## 职责\n\n${roleDuty(role, m)}\n\n`
     + modeDutyLines(role, m).join('\n')
-    + (role === 'tester' ? testerTrqSection() : '')
-    + `## 结构化输出（豆包协议）\n\n`
-    + `- ${OUTPUT_DISCIPLINE}。\n`
-    + `- 输出即结果：本角色交付物就是一份结构化 MD，不写开场白、不总结感想；上游内容只写路径 + 版本号，不重复贴入。\n`
-    + outHint
-    + `- 他人产出一律用 \`team.mjs brief --role <角色> --project <项目> --section <区块>\` 提取指定区块，禁止全文通读。\n\n`
-    + `## 每次动作\n\n`
-    + `0. **每次第一件事：读根目录《项目铁律.md》（每次都读，不靠记忆）**；再判断是否有自己的任务。\n`
-    + `1. 只有被${role === 'pm' ? 'Owner' : 'PM 按任务'}叫到才启动；先读根《项目信息.md》《项目索引.md》，再读本目录《文件索引.md》《角色卡.md》和《协作准则.md》。\n`
-    + `2. 被叫到后先 boot，再回一条确认：角色 id、任务 id、交付物、边界/依赖；随后 **ack 回执（只算已回执，不算完成）**，不能只回确认。\n`
-    + `3. **执行消息正文中的任务**；产出写到本角色目录（开发代码写代码目录），不写别人目录；完成后发完成回执（结果+路径+证据）并 \`task done --evidence\`，这才算已完成。\n`
-    + `3.5 **每次在 \`产出/\` 留版本**：${role === 'programmer1' || role === 'programmer2' ? '开发写 `实现说明-vN.md` + `代码快照-vN/`（与 site 同哈希）' : role === 'tester' ? '测试写 `测试报告-vN.md` + `证据/`' : role === 'analyst' ? '需求写 `需求分析-vN.md`（需求正文仍写 需求/R-*.md）' : '产品写 `产品设计-vN.md`'}；版本递增，不覆盖历史。\n`
-    + `3.6 **每次写记忆（R-8514）**：收尾写 1 条 project 记忆（任务 id + 产出路径 + 1–2 行进展）；P0 任务必写，缺失时 task done 会被拒（MEMORY_MISSING）。\n`
-    + `3.7 **长期事实只走 key 建议**：约定/决策/踩坑提交 key 建议，待 Owner 在记忆面板确认后生效；密钥/隐私只记路径，不写值。\n`
-    + `4. 分析或实现后，先互评与回执；负责人确认后才更新本目录文件与索引。\n`
-    + `5. 回执 ≤ ${LIMITS.ackNoteMaxChars} 字，评审意见 ≤ ${LIMITS.reviewCommentMaxChars} 字，不写长文汇报。\n`
-    + `6. 所有回执、评审、签字和提交都要能被团队看板查到。\n`
-    + `7. 提交/回执只写一句 ≤160 字日志（对象+动作+单号/时间）。\n`
-    + `8. **子代理**：可开——${subagentAllow(role)}；不可外包——${subagentDeny(role)}。子代理只回结论 ≤300 字 + 产出路径，过程写文件；主角色复核后才算产出。\n`
-    + (role === 'pm'
-      ? `9. **决策箱（Owner ↔ PM 专用）**：**只放非评审类的拍板（取舍、优先级、口径、阻塞）；需求评审、缺陷评审、验收一律走评审列表/验收列表，禁止放进决策箱。** 需要 Owner 拍板的事一律用 \`decision add --project <P> --boot <T> --title "≤40字" --summary "≤120字" --question "≤200字" --options "A,B,C" --source-kind requirement|message|file --source-ref <R-…|M-…|路径>\` 放进决策箱，**不发消息催**；消息只发进展与已办结论。**每次收尾前自查：当前有没有该放决策箱而没放的事。** 其他角色不得往决策箱放任何东西（程序拒 \`DECISION_BOX_FORBIDDEN\`）。\n`
-        + `   **放不进去的两类（程序拒收，按码处理，不要绕过）**：\n`
-        + `   - \`DECISION_SCOPE_FORBIDDEN\`：需求不在 accepted/terminated/rejected，或标题不以「复盘」开头 → 这是评审/验收类，**去评审列表，或验收列表 \`#accept-list\`（\`?accept=1\`）**；\n`
-        + `   - \`DECISION_REVIEW_ACTION_FORBIDDEN\`：意图词（通过/打回/驳回/验收/批准/approve/reject/accept）或选项全是通过/打回 → **去评审弹窗直接点，不要用决策箱代替拍板**；\n`
-        + `   - \`DECISION_COPY_CODE_NAME\`：标题/摘要/问题里出现 \`R-…\`/\`B-…\`/\`T-…\`/\`D-…\` 等内部代号（放括号里也不行）→ **改用人话需求名**，代号只允许出现在 --source-ref。\n`
-        + `   **文案人话规则**：标题 ≤40 字、摘要 ≤120 字、问题 ≤200 字；写「谁要做什么、卡在什么」，不写内部代号、不写命令行；一条只问一个拍板点，选项给 2–4 个可执行动作。\n`
-        + `   **模板自带回归入口**：模板改动后跑 \`node scripts/test-decision-scope.cjs\`（范围/语义/文案断言）与 \`node 团队/工具/team.mjs selftest\`，全绿才算改完。\n`
-        + `10. **验收权限（Owner 11-15 定；增补卷-62b9-1 §四/§六；ops.mjs:3229/:6296）**：\n`
-        + `    - **需求级**：代管**可代「验收通过」**（\`owner proxy decide --decision accepted --action accept\`，须有效代管+authorization+证据+opinion）；**打回/迭代/终止须 Owner 本人**（\`PROXY_ACCEPT_FORBIDDEN\`）。\n`
-        + `    - **缺陷任务**：不走代管，PM 与测试**直接** \`task accept --task <id> --as pm|tester --evidence 报告:report --evidence 图:screenshot\`（仅 bug/scenario-bug；\`--as\` 须与令牌一致）。\n`
-        + `    - **Owner** 走 \`owner --requirement … --action accept\`。不许以「程序没做」为由绕流程改代码。\n`
-        + `    **为什么写进模板**：这条原本只活在需求增补卷里，换人时新 PM 读交接看不到（2026-11-15 实际发生）。\n`
-      : '')
-    + (role === 'pm'
-      ? `\n## 叫醒角色模板\n\n**先完成《项目信息.md》和任务分配，再叫角色；没写清不要叫。**\n\nPM 叫角色时只发这一段（替换占位）：\n\n> 任务 <任务id>；先读 项目信息.md、项目索引.md、你的 文件索引.md 和 角色卡.md；回“角色 id + 任务 id + 交付物 + 边界”确认，并 **ack 回执（只算已回执）**。随后执行本条正文任务，产出写 <本角色目录>；完成后发完成回执 + task done --evidence（才算已完成）。目标文件：<路径>。\n\n发送时带 --ack；**一次只发一个人，发完停，等回执再发下一个。**\n`
-      : '')
+    + `## 通则（程序已挡的事不写卡）\n\n`
+    + `- **被拒时把错误码原样贴出，去 \`团队/工具/lib\` 读该分支的条件与放行路径**。\n`
+    + (role === 'pm' ? '' : `- **决策先入箱（9b）**：要 Owner 拍板的事先拿 \`D-xxx\` 再引用，⛔ 不裸问；选项给 2–3 方案+代价。\n`)
+    + `- **发消息必须唤醒**（\`--no-wake\` 仅纯通知）；**提交带任务号/缺陷号+需求号**。\n`
+    + `- 铁律只记本项目避坑，按需读；优先级：宪法 > 流程 > 本卡 > 铁律。\n\n`
+    + flowSection
+    + `## 结构化输出\n\n`
+    + `- 只读需要区块、只写负责字段、输出即结果、超限即停；无开场白感想，上游只写路径+版本；${outDoc}；他人产出用 \`team.mjs brief --section <区块>\` 提取。\n\n`
+    + `## 每轮动作\n\n`
+    + `0. 判断任务；**不必每轮读铁律**；接手先读 \`${ROLE_DIRS[role] || role}/产出/交接-最新.md\`（换人前自写）。${role === 'pm' ? '**`open` ≠ 没在做**，看产出 mtime。' : ''}\n`
+    + `1. 被${role === 'pm' ? 'Owner' : 'PM 按任务'}叫到才启动；读项目信息/项目索引/文件索引/协作准则。\n`
+    + `2. 先 boot 再回确认（角色/任务 id、交付物、边界）→ **ack**（只算已回执）。\n`
+    + `3. 执行消息正文中的任务（\`task claim --id\`）；产出写本角色目录${role === 'pm' ? '' : '，代码写代码目录'}；完成后发完成回执（结果+路径+证据）+ \`task done --evidence\`。\n`
+    + `4. **每轮留版本**：${versionArtifact(role)}，不覆盖。\n`
+    + `5. 收尾写 1 条 project 记忆（任务 id+产出路径+进展；P0 必写，缺 \`MEMORY_MISSING\`）；密钥只记路径。\n`
+    + `6. **子代理**：可开——${subagentAllow(role)}；不可外包——${subagentDeny(role)}；只回结论 ≤300 字+路径。\n\n`
+    + (role === 'pm' ? pmDecisionSection() : '')
+    + (role === 'pm' ? acceptSection(role) : '')
+    + (role === 'tester' ? testerTrqSection() + '\n' : '')
+    + roleExtra
+    + productExtra
     + roleAlignment(role, m);
 }
 
