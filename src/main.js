@@ -39,6 +39,8 @@ const IS_NO_WAKE = process.argv.includes('--no-wake') || String(process.env.AWB_
 if (IS_NO_WAKE) process.env.AWB_NO_WAKE = '1';
 // 布局自检（T-846e）：在真实窗口里量 1280/1680/2560 三档并截图；只在显式参数下跑，不影响正常启动。
 const IS_LAYOUT_CHECK = process.argv.includes('--layout-check');
+// R-fe90 AC1/AC6/AC12：5 档主题截图 + 每档 perf JSON 自检（独立数据根、真实窗口、走「更多→外观」入口点击）。
+const IS_THEME_SHOTS = process.argv.includes('--theme-shots');
 // 评审弹窗真实点击自检（B-fe22）：真实窗口点“通过/打回”，抓 DOM 反馈与工作流落账；只在显式参数下跑。
 const IS_OWNER_CHECK = process.argv.includes('--owner-check');
 // 验收状态同源自检（B-20261114-010345-b55c）：真实窗口点【我的验收】确认，验证"列表与确认同一份
@@ -65,6 +67,8 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
 // 自测时 Chromium/状态也进沙盘根，避免两个自测实例抢同一份 userdata。
 // 布局自检同样用独立数据根（.layout-check-data），只读快照，不碰真实工作台状态。
 const LAYOUT_DATA = process.env.AWB_LAYOUT_DATA ? path.resolve(process.env.AWB_LAYOUT_DATA) : path.join(ROOT, '.layout-check-data');
+// 主题截图自检的数据根同样独立（不碰真实 workbench.json）。
+const THEME_SHOTS_DATA = process.env.AWB_THEME_DATA ? path.resolve(process.env.AWB_THEME_DATA) : path.join(ROOT, '.theme-shots-data');
 // b55c 验收同源自检同样独立数据根，跑完不影响真实工作台状态。
 const B55C_DATA = process.env.AWB_B55C_DATA ? path.resolve(process.env.AWB_B55C_DATA) : path.join(ROOT, '.b55c-check-data');
 // 工作区清理自检的数据根同样独立。
@@ -86,7 +90,8 @@ const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT
               : IS_DAEMON_CHECK ? DAEMON_CHECK_DATA
                 : IS_REVIEW_CHECK ? REVIEW_DATA
                   : IS_SUPPLEMENT_CHECK ? SUPPLEMENT_CHECK_DATA
-                    : LOCAL_DATA;
+                    : IS_THEME_SHOTS ? THEME_SHOTS_DATA
+                      : LOCAL_DATA;
 const USER_DATA = path.join(DATA_ROOT, 'userdata');
 const TEMP_ROOT = path.join(DATA_ROOT, 'tmp');
 // DSH 地址持久化在仓库数据目录（D 盘），不写 C 盘、不写项目目录。
@@ -10350,6 +10355,51 @@ function measureLayoutInPage() {
   };
 }
 
+// R-fe90 AC1/AC6/AC12：5 档截图 + 每档 perf JSON。真实窗口，走「更多 → 外观」的 5 项真实点击，
+// 不直接改 html 属性（否则测不到入口接线）。退出码 0=5 张截图两两不同且每档 state.themeId 对上。
+async function runThemeShots() {
+  const crypto = require('node:crypto');
+  const outDir = process.env.AWB_THEME_OUT ? path.resolve(process.env.AWB_THEME_OUT) : path.join(ROOT, '_tmp', 'theme-shots-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  createWindow();
+  const win = mainWindow;
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else resolve();
+  });
+  await new Promise((r) => setTimeout(r, 2500)); // 等 app.js 的异步 boot 完
+  try { win.webContents.debugger.attach('1.3'); } catch { /* 已附加 */ }
+  const ids = ['native-dark', 'native-light', 'tech-dark', 'anime-dark', 'glass-dark'];
+  const shots = [];
+  const results = [];
+  for (const id of ids) {
+    const clicked = await win.webContents.executeJavaScript(
+      `(function(){var el=document.querySelector('#more-menu [data-theme-menu] [data-theme-id="${id}"]');if(!el)return false;el.click();return true;})()`,
+      true
+    );
+    await new Promise((r) => setTimeout(r, 1600)); // 过渡动画结束再采样/截图
+    const state = await win.webContents.executeJavaScript('window.__themeState ? window.__themeState() : null', true);
+    const probe = await win.webContents.executeJavaScript('window.__themeProbe ? window.__themeProbe(3000) : null', true);
+    const shot = await win.webContents.debugger.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
+    const pngPath = path.join(outDir, id + '.png');
+    fs.writeFileSync(pngPath, Buffer.from(shot.data, 'base64'));
+    const perfPath = path.join(outDir, 'perf-' + id + '.json');
+    fs.writeFileSync(perfPath, JSON.stringify({ themeId: id, clicked, state, probe, at: new Date().toISOString() }, null, 2));
+    shots.push({ id, png: pngPath, perf: perfPath, bytes: fs.statSync(pngPath).size });
+    results.push({ themeId: id, clicked, state, probe });
+  }
+  try { win.webContents.debugger.detach(); } catch { /* ignore */ }
+  const hashes = shots.map((s) => crypto.createHash('sha256').update(fs.readFileSync(s.png)).digest('hex'));
+  const unique = new Set(hashes).size;
+  const ok = unique === ids.length && results.every((r) => r.state && r.state.themeId === r.themeId && r.clicked === true);
+  const report = { ok, outDir, uniqueScreenshots: unique, expected: ids.length, shots, results, at: new Date().toISOString() };
+  fs.writeFileSync(path.join(outDir, 'theme-shots.json'), JSON.stringify(report, null, 2));
+  console.log('THEME_SHOTS_REPORT ' + path.join(outDir, 'theme-shots.json'));
+  console.log(JSON.stringify({ ok, unique, expected: ids.length, outDir }, null, 2));
+  console.log(ok ? 'THEME_SHOTS_OK' : 'THEME_SHOTS_FAIL');
+  app.exit(ok ? 0 : 1);
+}
+
 // 布局自检（T-846e）：真实窗口 + CDP 视口模拟，量 1280 / 1680 / 2560 三档，
 // 每档截图一张；正常启动不进入这条分支。
 async function runLayoutCheck() {
@@ -18114,7 +18164,7 @@ async function installDshCookie() {
 }
 
 // 单实例：两个窗口同时写 workbench.json / 团队状态会丢更新。自测/布局自检用独立 userData，不参与锁。
-const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) ? true : app.requestSingleInstanceLock();
+const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) ? true : app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
   // T-ece6：锁冲突不许静默退出——2026-11-14 的黑屏就是「另一个实例（含僵尸进程）占着锁，
   // 新进程拿不到锁直接 app.quit()，用户只看到窗口没了/黑屏」。这里显式打日志 + 弹一次人话提示。
@@ -18128,7 +18178,7 @@ if (!singleInstanceLock) {
     if (dialog && typeof dialog.showErrorBox === 'function') dialog.showErrorBox('PM工作台：已有实例在运行', lockMsg);
   } catch { /* 无 GUI 环境只留日志 */ }
   app.quit();
-} else if (!IS_SELFTEST && !IS_LAYOUT_CHECK) {
+} else if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_THEME_SHOTS) {
   app.on('second-instance', () => {
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -18296,7 +18346,7 @@ function scheduleRouteSupervisorRetry(project) {
 /** 拉起守护（幂等）：本壳已在管同一个项目、或别人的守护心跳正常时不重复启动。 */
 function ensureRouteSupervisor(project) {
   if (routeSupervisor.quitting) return null;
-  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) return null;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) return null;
   if (process.env.AWB_ROUTE_DAEMON === 'off') return null;
   if (!project || !project.name) return null;
   const name = String(project.teamName || project.name || '');
@@ -19074,7 +19124,7 @@ app.whenReady().then(async () => {
   registerIpc();
   await installDshCookie();
   // R-c1ed F-1 接线：采样定时器 + 启动/24h 清理（自检/布局检查模式不采，避免污染证据目录与拖慢断言）。
-  if (!IS_SELFTEST && !IS_LAYOUT_CHECK) {
+  if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_THEME_SHOTS) {
     startRenderMemorySampler();
     scheduleRenderMemoryMaintenance();
   }
@@ -19092,6 +19142,15 @@ app.whenReady().then(async () => {
       await runLayoutCheck();
     } catch (error) {
       console.error('LAYOUT_FAIL ' + String(error && error.stack || error));
+      app.exit(1);
+    }
+    return;
+  }
+  if (IS_THEME_SHOTS) {
+    try {
+      await runThemeShots();
+    } catch (error) {
+      console.error('THEME_SHOTS_FAIL ' + String((error && error.stack) || error));
       app.exit(1);
     }
     return;
@@ -19237,7 +19296,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) return;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) return;
   if (process.platform !== 'darwin') app.quit();
 });
 
