@@ -86,7 +86,58 @@ class Cdp {
   }
 }
 
-/** 与 lessons.mjs 同口径的简易解析（测试独立复算，不 import 生产实现）。 */
+/**
+ * 取证截图（B-0d59 验收需要 kind=screenshot 的第二件证据）。
+ * 三个必做动作，缺一会截到黑底或让 captureScreenshot 挂住：
+ *   ① 先把壳内 webview（加载的是真实 DSH 页面）导航到 about:blank，避免它重绘干扰；
+ *   ② Page.bringToFront（后台窗口截图会挂）；
+ *   ③ 按元素矩形 clip，并把「可见 + 尺寸 > 阈值」当断言，避免空容器也当截图成功。
+ */
+async function neutralizeWebviews(port) {
+  const list = await httpJson(`http://127.0.0.1:${port}/json/list`);
+  const webviews = (Array.isArray(list) ? list : []).filter((t) => t && t.type === 'webview' && t.webSocketDebuggerUrl);
+  for (const t of webviews) {
+    try {
+      const ws = new WebSocket(t.webSocketDebuggerUrl);
+      await new Promise((res, rej) => { ws.addEventListener('open', res, { once: true }); ws.addEventListener('error', () => rej(new Error('ws 失败')), { once: true }); });
+      const c = new Cdp(ws);
+      await c.send('Page.enable').catch(() => {});
+      await c.send('Page.navigate', { url: 'about:blank' }).catch(() => {});
+      ws.close();
+    } catch { /* 单个 webview 处理失败不阻断取证 */ }
+  }
+  return webviews.length;
+}
+
+async function captureLessonsShot(cdp, outPath) {
+  // 让 pm 段进视口，并把浮层滚动到「段头 + 前几条 + 滚动条」都能看到的位置
+  const rect = await cdp.evaluate(`(function(){
+    const d=document.getElementById('lessons-dialog');
+    if(!d) return null;
+    const sec=d.querySelector('[data-lesson-section="pm"]');
+    if(sec) sec.scrollIntoView({block:'start'});
+    const body=d.querySelector('.lessons-body');
+    const r=d.getBoundingClientRect();
+    return { x:Math.round(r.left), y:Math.round(r.top), w:Math.round(r.width), h:Math.round(r.height),
+             bodyScroll: body?{ sh:body.scrollHeight, ch:body.clientHeight, oy:getComputedStyle(body).overflowY }:null };
+  })()`);
+  if (!rect || rect.w < 200 || rect.h < 200) return { ok: false, rect };
+  await cdp.send('Page.bringToFront').catch(() => {});
+  await sleep(600);
+  let lastErr = '';
+  for (let i = 0; i < 3; i += 1) {
+    try {
+      const out = await cdp.send('Page.captureScreenshot', { format: 'png', clip: { x: rect.x, y: rect.y, width: rect.w, height: rect.h, scale: 1 }, captureBeyondViewport: false }, 40000);
+      const buf = Buffer.from(out.data, 'base64');
+      if (buf.length < 10000) { lastErr = 'too-small:' + buf.length; await sleep(800); continue; }
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, buf);
+      return { ok: true, bytes: buf.length, rect };
+    } catch (e) { lastErr = String((e && e.message) || e); await sleep(1000); }
+  }
+  return { ok: false, rect, error: lastErr };
+}
+
 function parseMd() {
   const text = fs.readFileSync(MD, 'utf8');
   const lines = text.split(/\r?\n/);
@@ -172,8 +223,23 @@ async function launch(port) {
     check('⑤ 浮层内无编辑框/保存控件', Boolean(shell && shell.editors === 0), shell && shell.editors);
     check('⑥ 正常文件不显示错误条', Boolean(shell && !shell.error), shell && shell.error);
 
+    // 等浮层真正渲染出六段（低内存/冷启动时会比固定 sleep 慢，固定等待会偶发拿到空 DOM → 假红）
+    for (let i = 0; i < 40; i += 1) {
+      const n = await cdp.evaluate("document.querySelectorAll('#lessons-dialog [data-lesson-section]').length");
+      if (n === 6) break;
+      await sleep(500);
+    }
+
+    // 取证截图（仅验收取证时开：AWB_SHOT_OUT=<png 绝对路径>）
+    if (process.env.AWB_SHOT_OUT) {
+      const wv = await neutralizeWebviews(PORT);
+      const shot = await captureLessonsShot(cdp, process.env.AWB_SHOT_OUT);
+      console.log(`SHOT  webview=${wv}  ${JSON.stringify(shot).slice(0, 240)}`);
+      check('截图落盘（kind=screenshot 的第二件证据）', Boolean(shot && shot.ok && fs.existsSync(process.env.AWB_SHOT_OUT) && fs.statSync(process.env.AWB_SHOT_OUT).size > 10000), shot);
+    }
+
     for (const role of ROLES) {
-      const rows = md[role].rows;
+      const rows = (md[role] && md[role].rows) || [];
       const dom = await cdp.evaluate(`(function(){
         const d=document.getElementById('lessons-dialog');
         const sec=d.querySelector('[data-lesson-section="${role}"]');
