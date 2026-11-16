@@ -5,7 +5,9 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', 'b-37ea');
+// B-20261116-055303-07b6：沙盘统一入口（唯一临时目录 + 退出清理）
+const { mkTempSandbox } = require(path.join(__dirname, 'lib', 'sandbox-dir.cjs'));
+const SB = mkTempSandbox('b-37ea');
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');
@@ -34,6 +36,8 @@ fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'fast', '--json']);
 const pm = run(['boot', '--role', 'pm', '--project', PROJECT, '--session', 's-pm', '--json']);
+// 沙盘级联：pm 未读登记册会让 req create 撞 LESSONS_UNREAD（门禁按角色记）
+run(['lessons', 'read', '--boot', pm.token, '--project', PROJECT, '--json']);
 const reqId = run(['req', 'create', '--boot', pm.token, '--project', PROJECT, '--title', '迭代返工需求', '--priority', 'P0', '--acceptance', 'AC', '--json']).requirement.id;
 const stateDir = path.join(TEAM_ROOT, '状态', '项目', PROJECT);
 const wfFile = path.join(stateDir, '工作流.json');
