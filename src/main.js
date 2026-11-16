@@ -10415,6 +10415,67 @@ function measureLayoutInPage() {
 
 // R-fe90 AC1/AC6/AC12：5 档截图 + 每档 perf JSON。真实窗口，走「更多 → 外观」的 5 项真实点击，
 // 不直接改 html 属性（否则测不到入口接线）。退出码 0=5 张截图两两不同且每档 state.themeId 对上。
+// R-c72a 受控真窗口取证（PM 2026-11-16 授权）：非隔离数据根，只开「我的评审」+ 点一次主题项并立刻恢复，
+// 不写任何业务数据；前后指纹由调用方脚本比对。
+async function runUiPerfLive() {
+  const outDir = process.env.AWB_UI_PERF_OUT ? path.resolve(process.env.AWB_UI_PERF_OUT) : path.join(ROOT, '_tmp', 'ui-perf-live-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  createWindow();
+  const win = mainWindow;
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else resolve();
+  });
+  await new Promise((r) => setTimeout(r, 2500));
+  const script = '(async function(){'
+    + 'var out={anchors:{}};'
+    + 'var st=window.__themeState?window.__themeState():{};out.themeBefore=st.themeId||"";'
+    + 'var seq=[];var origSet=Element.prototype.setAttribute;'
+    + 'Element.prototype.setAttribute=function(nm,val){if(nm==="data-review-ready"||nm==="data-decision-ready"){seq.push({n:nm,v:String(val),t:Math.round(performance.now()*100)/100});}return origSet.apply(this,arguments);};'
+    + 'var entry=document.querySelector("[data-owner-review-entry]");out.anchors.entryFound=Boolean(entry);'
+    + 'if(entry) entry.click();'
+    + 'await new Promise(function(r){setTimeout(r,600);});'
+    + 'Element.prototype.setAttribute=origSet;'
+    + 'var dlg=document.querySelector("[data-owner-review-dialog]");'
+    + 'out.anchors.reviewExists=Boolean(dlg);out.anchors.reviewReady=dlg?dlg.getAttribute("data-review-ready"):null;'
+    + 'out.anchors.seq=seq;'
+    + 'var db=document.querySelector("#decision-box");out.anchors.decisionExists=Boolean(db);out.anchors.decisionReady=db?db.getAttribute("data-decision-ready"):null;'
+    + 'out.anchors.statusRows=document.querySelectorAll("[data-status]").length;'
+    + 'var rows=document.querySelectorAll("[data-owner-review-dialog] [data-status]").length;out.anchors.dialogStatusRows=rows;'
+    + 'if(!window.__uiPerf) return {ok:false,code:"PROBE_UNAVAILABLE"};'
+    + 'window.__uiPerf.mark("live");'
+    + 'var target=document.querySelector("[data-theme-id=\\"tech-dark\\"]");if(target) target.click();'
+    + 'out.measuredMs=window.__uiPerf.measure("click:live","live");'
+    + 'out.report=await window.__uiPerf.report("click",{project:"工作台改造修复"});'
+    + 'await new Promise(function(r){setTimeout(r,300);});'
+    + 'var back=document.querySelector("[data-theme-id=\\\\""+st.themeId+"\\\\"]");if(back) back.click();'
+    + 'await new Promise(function(r){setTimeout(r,400);});'
+    + 'var st2=window.__themeState?window.__themeState():{};out.themeAfter=st2.themeId||"";'
+    + 'return {ok:true,out:out};'
+    + '})()';
+  let result = null;
+  try {
+    result = await win.webContents.executeJavaScript(script, true);
+  } catch (error) {
+    result = { ok: false, why: String((error && error.message) || error).slice(0, 300) };
+  }
+  // 恢复原主题：脚本里 __BACK__ 占位替换成点击前的档位
+  if (result && result.ok && result.out && result.out.themeBefore) {
+    // 已在页面内点击回原档（占位替换在下面补一次，防止主题未恢复）
+    const before = String(result.out.themeBefore);
+    if (result.out.themeAfter && result.out.themeAfter !== before) {
+      try {
+        await win.webContents.executeJavaScript('(function(){var el=document.querySelector(\'[data-theme-id="' + before + '"]\');if(el){el.click();return true;}var m=/[?&]theme=([^&]+)/.exec(location.search);return false;})()', true);
+        result.out.themeRestoredByMain = true;
+      } catch { result.out.themeRestoredByMain = false; }
+    }
+  }
+  const file = path.join(outDir, 'ui-perf-live.json');
+  fs.writeFileSync(file, JSON.stringify({ result, at: new Date().toISOString(), pid: process.pid }, null, 2), 'utf8');
+  console.log('UI_PERF_LIVE ' + JSON.stringify({ ok: Boolean(result && result.ok), file, themeBefore: result && result.out && result.out.themeBefore, themeAfter: result && result.out && result.out.themeAfter }));
+  exitWithAudit(result && result.ok ? 0 : 1);
+}
+
 async function runThemeShots() {
   const crypto2 = crypto;
   const outDir = process.env.AWB_THEME_OUT ? path.resolve(process.env.AWB_THEME_OUT) : path.join(ROOT, '_tmp', 'theme-shots-' + Date.now());
@@ -19482,7 +19543,11 @@ app.whenReady().then(async () => {
     }
     return;
   }
-  if (IS_THEME_SHOTS) {
+  if (process.env.AWB_UI_PERF_LIVE === '1') {
+      await runUiPerfLive();
+      return;
+    }
+    if (IS_THEME_SHOTS) {
     try {
       await runThemeShots();
     } catch (error) {
