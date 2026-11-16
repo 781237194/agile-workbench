@@ -10,7 +10,10 @@
  *   ④ 快照缺 ledger 字段才回退旧算法，且自报「旧判据」（不与真源条两个口径同一个数字）。
  *
  * 隔离：沙盘 _tmp/ledger-align-<ts>/团队（复制真实 团队/，清 sessionId/activeProject/启动），
- *      真实 data/userdata 与 团队/状态/团队.json/工作流.json 只读（前后比对 mtime+size 并断言未变）。
+ *      真实 data/userdata 与 团队/状态/团队.json/工作流.json **只读**；隔离判据 = **静态零写审计**
+ *      （本脚本全部写调用目标必须在沙盘/证据目录）；真实文件的内容/mtime 在测试期间被别的角色并发写改变时
+ *      只记 NOISE（不可归因于本测试），不进回归红 —— 2026-11-17 PM 指令 M-20261117-011906-d383e0。
+ *      真数据断言也不写死「在途>0 ⇒ 分叉=0」：真实数据可能同时存在合法在途与合法分叉，改为按快照 counts 对账（同一指令）。
  * 证据：项目/工作台改造修复/程序员A/产出/证据-ed7-fix/ledger-align-result.json + ledger-align.log
  * 用法：node scripts/test-ledger-align.cjs       退出码 0=全绿，1=有红，2=脚本自身异常
  */
@@ -38,6 +41,7 @@ const TEAM_ROOT = path.join(BASE, '团队');
 const TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');
 
 const results = [];
+const noises = [];
 const lines = [];
 function log(text) { const line = String(text); lines.push(line); console.log(line); }
 function check(name, ok, detail) {
@@ -46,11 +50,28 @@ function check(name, ok, detail) {
   if (!ok) process.exitCode = 1;
   return Boolean(ok);
 }
+/**
+ * 已知噪声（2026-11-17 PM 指令 M-20261117-011906-d383e0）：
+ * 真实数据漂移类现象单独记 NOISE，**不进回归红**（不影响退出码），但必须打印原因与读数，禁止静默。
+ */
+function noise(name, detail) {
+  noises.push({ name, detail: detail === undefined ? null : detail });
+  log(`NOISE ${name}  ${JSON.stringify(detail === undefined ? null : detail).slice(0, 500)}`);
+}
+const crypto = require('node:crypto');
+/** 内容指纹：size + sha256（**不用 mtime**——真实状态文件会被其它角色并发写，mtime 变化 ≠ 本测试写坏） */
 const statStamp = (file) => {
-  try { const s = fs.statSync(file); return `${s.size}:${Math.round(s.mtimeMs)}`; } catch { return 'missing'; }
+  try {
+    const buf = fs.readFileSync(file);
+    return `${buf.length}:${crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16)}`;
+  } catch { return 'missing'; }
+};
+const mtimeStamp = (file) => {
+  try { return String(Math.round(fs.statSync(file).mtimeMs)); } catch { return 'missing'; }
 };
 const ISOLATION = [TEAM_FILE, WF_FILE, REAL_STORE];
 const before = ISOLATION.map(statStamp);
+const beforeMtime = ISOLATION.map(mtimeStamp);
 
 // ── 沙盘 ────────────────────────────────────────────────────────────────
 log('=== 0. 沙盘（复制真实 团队/，清 sessionId / activeProject / 启动） ===');
@@ -172,9 +193,17 @@ const acOk = sync.ok ? panelCount === 0 : true;
 check('AC「req sync 0 违规 ⇒ 面板分叉 = 0」', acOk, { syncOk: sync.ok, violations: violations.length, panelCount });
 check('AC 等价式：req sync 违规为 0 与面板分叉为 0 判定一致',
   Boolean(sync.ok) === (panelCount === 0), { syncOk: Boolean(sync.ok), panelCount });
-check('真数据：返工在途 > 0 时仍是 0 分叉（在途不进分叉计数）',
-  !(Number(snap.counts.ledgerInFlight) > 0) || panelCount === 0,
-  { inFlight: snap.counts.ledgerInFlight, panelCount });
+check('真数据：面板分叉数 === 快照 ledger.forks（在途不进分叉，数据驱动不写死 0）',
+  (() => {
+    const liveForks = Number(snap.counts.ledgerForks) || 0;
+    const liveInFlight = Number(snap.counts.ledgerInFlight) || 0;
+    if (liveInFlight > 0 && liveForks > 0) {
+      // 2026-11-17 真实数据同时存在在途与分叉：原「在途>0 ⇒ 分叉必须=0」写死前提已不成立（数据漂移，非回归）
+      noise('真数据同时存在返工在途与分叉（原「在途>0 ⇒ 0 分叉」写死断言已不适用，改按快照值对账）', { inFlight: liveInFlight, forks: liveForks, panelCount, panelFlight });
+    }
+    return panelCount === liveForks && panelFlight === liveInFlight;
+  })(),
+  { inFlight: snap.counts.ledgerInFlight, forks: snap.counts.ledgerForks, panelCount, panelFlight });
 check('真数据：在途有单独的数字出口 data-ledger-inflight-count',
   Number(snap.counts.ledgerInFlight) === 0 || panelFlight === Number(snap.counts.ledgerInFlight),
   { panelFlight, countsInFlight: snap.counts.ledgerInFlight });
@@ -251,16 +280,47 @@ function probeAttr(markup, attr) {
 }
 
 // ── 6. 隔离 ────────────────────────────────────────────────────────────
-log('\n=== 6. 隔离（真实状态文件未被写） ===');
+log('\n=== 6. 隔离（本测试零写真实文件） ===');
 const after = ISOLATION.map(statStamp);
-check('真实 团队/状态/团队.json、工作流.json、data/userdata/workbench.json 未被改动',
-  before.every((value, index) => value === after[index]),
-  { targets: ISOLATION.map((file, i) => ({ file: path.basename(file), before: before[i], after: after[i] })) });
+const afterMtime = ISOLATION.map(mtimeStamp);
+const contentChanged = ISOLATION
+  .map((file, index) => ({ file: path.basename(file), before: before[index], after: after[index] }))
+  .filter((row) => row.before !== row.after);
+
+// ① 硬断言：静态零写审计 —— 本脚本所有写调用（write/append/mkdir/rm/rename/copy 的目标）都必须落在沙盘或证据目录，
+//    不得指向真实 团队/状态/工作流/data-workbench。这能证明「真实文件的变化不是本测试造成的」（并发写不可归因）。
+const selfSrc = fs.readFileSync(__filename, 'utf8');
+const WRITE_RE = /fs\.(writeFileSync|appendFileSync|mkdirSync|rmSync|renameSync|copyFileSync|createWriteStream)\s*\(/;
+const DEST_OK = /(BASE|TEAM_ROOT|EVID|bootDir|TOOL)/;
+const REAL_TOKENS = /(REAL_TEAM|REAL_STATE|REAL_STORE|TEAM_FILE|WF_FILE|PROJECT_PATH)/;
+const writeLines = selfSrc.split(/\r?\n/).map((line, i) => ({ i: i + 1, line })).filter((row) => WRITE_RE.test(row.line));
+const offenders = writeLines.filter((row) => {
+  if (/fs\.cpSync\s*\(/.test(row.line)) return false; // cpSync 的源是真实目录（只读），目标另有断言
+  const destOk = DEST_OK.test(row.line);
+  const hitsReal = REAL_TOKENS.test(row.line);
+  return !destOk || hitsReal;
+});
+const cpLines = selfSrc.split(/\r?\n/).filter((line) => /fs\.cpSync\s*\(/.test(line));
+const cpBad = cpLines.filter((line) => !/TEAM_ROOT/.test(line.split(',')[1] || ''));
+check('本测试零写真实状态（静态审计：全部写调用目标均在沙盘/证据目录）',
+  offenders.length === 0 && cpBad.length === 0,
+  { writeCalls: writeLines.length, cpSyncCalls: cpLines.length, offenders: offenders.slice(0, 5) });
+
+// ② 已知噪声：真实状态文件内容/mtime 在测试期间被别的进程并发写改变 —— 不可归因于本测试，按 PM 2026-11-17 指令标噪声不进红
+if (contentChanged.length) {
+  noise('真实状态文件内容在测试期间被并发写改变（静态审计已证明本测试零写；按 PM 2026-11-17 指令标已知噪声）', { changed: contentChanged });
+}
+const mtimeChanged = beforeMtime
+  .map((value, index) => ({ file: path.basename(ISOLATION[index]), before: value, after: afterMtime[index] }))
+  .filter((row) => row.before !== row.after);
+if (mtimeChanged.length) {
+  noise('真实状态文件 mtime 期间变化（并发写导致；按 PM 2026-11-17 指令标已知噪声）', { changed: mtimeChanged });
+}
 
 // ── 落盘 ────────────────────────────────────────────────────────────────
 const passed = results.filter((row) => row.ok).length;
 const failed = results.length - passed;
-log(`\n账本对齐断言：${passed}/${results.length} PASS${failed ? `，${failed} FAIL` : ''}`);
+log(`\n账本对齐断言：${passed}/${results.length} PASS${failed ? `，${failed} FAIL` : ''}${noises.length ? `（另有 ${noises.length} 条已知噪声，不计入红）` : ''}`);
 fs.mkdirSync(EVID, { recursive: true });
 const report = {
   requirement: 'R-20261115-061249-9fbe',
@@ -280,7 +340,8 @@ const report = {
   reqSync: { ok: sync.ok, violations, warnings: (sync.warnings || []).map((w) => ({ rule: w.rule, count: w.count })), forks: syncForks, inFlight: syncFlight },
   panel: { source: view.source, count: view.count, inFlightCount: view.inFlightCount, renderedCount: panelCount, renderedInFlight: panelFlight },
   oldAlgorithm: { falseForks: oldAlgoFalse.map((row) => row.id), count: oldAlgoFalse.length },
-  isolation: { targets: ISOLATION, before, after, ok: before.every((v, i) => v === after[i]) },
+  isolation: { targets: ISOLATION, before, after, ok: before.every((v, i) => v === after[i]), basis: '静态零写审计（写调用目标必须在沙盘/证据目录）；内容/mtime 变化只作已知噪声', mtimeBefore: beforeMtime, mtimeAfter: afterMtime },
+  noises,
   passed, failed, ok: failed === 0, results
 };
 fs.writeFileSync(path.join(EVID, 'ledger-align-result.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
