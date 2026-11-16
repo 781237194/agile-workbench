@@ -638,7 +638,8 @@ function syncTeamRosterSessions(sessions, options = {}) {
       team.members.push({ role, name: roleInfo.name, status: 'active', joinedAt: now(), sessionId: String(current[role]) });
       changed = true;
     }
-    if (changed) fs.writeFileSync(teamFile, JSON.stringify(team, null, 2) + '\n', 'utf8');
+    // R-ad44 AC1①（批4b）：团队状态文件统一走 json-atomic.cjs（行为不变：仅有变化时才写，仍写整份 team）。
+    if (changed) jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'syncTeamRosterSessions' });
     return { ok: true, changed, activeProject: team.activeProject || null };
   } catch { /* 名册同步失败不阻断会话映射 */ }
 }
@@ -7230,7 +7231,8 @@ ipcMain.handle('theme:metrics', async () => {
             teamChanged = true;
           }
         }
-        if (teamChanged) fs.writeFileSync(teamFile, JSON.stringify(team, null, 2) + '\n', 'utf8');
+        // R-ad44 AC1①（批4b）：团队状态文件统一走 json-atomic.cjs（行为不变：仅 teamChanged 时写整份 team）。
+        if (teamChanged) jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'panelTeamSync' });
       }
       const currentFile = path.join(teamRoot, '状态', '当前工作区.json');
       if (fs.existsSync(currentFile)) {
@@ -13343,7 +13345,8 @@ function selftestTeamCleanup(testRoot, before) {
       const current = JSON.parse(fs.readFileSync(layout.currentWorkspaceFile, 'utf8').replace(/^\uFEFF/, ''));
       if (current && current.path && inside(testRoot, current.path)) {
         if (before && before.currentWorkspace) {
-          fs.writeFileSync(layout.currentWorkspaceFile, JSON.stringify(before.currentWorkspace, null, 2) + '\n', 'utf8');
+          // R-ad44 AC1①（批4b）：当前工作区状态文件统一走 json-atomic.cjs（行为不变：写回快照值）。
+          jsonAtomicCore.writeJsonAtomic(layout.currentWorkspaceFile, before.currentWorkspace, { case: 'cleanupRestoreCurrentWorkspace' });
         } else {
           fs.rmSync(layout.currentWorkspaceFile, { force: true });
         }
