@@ -10512,7 +10512,7 @@ async function runThemeShots() {
   console.log('THEME_SHOTS_REPORT ' + path.join(outDir, 'theme-shots.json'));
   console.log(JSON.stringify({ ok, sizes, unique, requested: report.requestedSize, effectsOk: effects.ok, outDir }, null, 2));
   console.log(ok ? 'THEME_SHOTS_OK' : 'THEME_SHOTS_FAIL');
-  app.exit(ok ? 0 : 1);
+  exitWithAudit(ok ? 0 : 1);
 }
 
 // 布局自检（T-846e）：真实窗口 + CDP 视口模拟，量 1280 / 1680 / 2560 三档，
@@ -10791,7 +10791,7 @@ async function runLayoutCheck() {
   console.log('LAYOUT_REPORT ' + reportPath);
   console.log(JSON.stringify(report));
   console.log(report.ok ? 'LAYOUT_OK' : 'LAYOUT_FAIL');
-  app.exit(report.ok ? 0 : 1);
+  exitWithAudit(report.ok ? 0 : 1);
 }
 
 // b55c-check（B-20261114-010345-b55c）：Owner 验收"列表与确认同源 + 同秒需求不串号"真实窗口自检。
@@ -10857,7 +10857,7 @@ async function runB55cCheck() {
     fs.writeFileSync(refusedPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
     console.log('B55C_REFUSED ' + refusedPath);
     console.log('B55C_FAIL');
-    app.exit(2);
+    exitWithAudit(2);
     return;
   }
   const created = JSON.parse(await js(`(async()=>{
@@ -11091,7 +11091,7 @@ async function runB55cCheck() {
   console.log('B55C_REPORT ' + reportPath);
   console.log(JSON.stringify(report));
   console.log(report.ok ? 'B55C_OK' : 'B55C_FAIL');
-  app.exit(report.ok ? 0 : 1);
+  exitWithAudit(report.ok ? 0 : 1);
 }
 
 /**
@@ -11534,7 +11534,7 @@ async function runE29fCheck() {
   console.log('E29F_REPORT ' + reportPath);
   console.log(JSON.stringify(report));
   console.log(report.ok ? 'E29F_OK' : 'E29F_FAIL');
-  app.exit(report.ok ? 0 : 1);
+  exitWithAudit(report.ok ? 0 : 1);
 }
 
 // B-20261114-012334-504a 评审界面自检（只做展示）：全部需求清单 + 三要素 + 点行展开 + 分组筛选 + 两档宽截图。
@@ -12187,7 +12187,7 @@ async function runReviewCheck() {
   console.log('REVIEW_REPORT ' + reportPath);
   console.log(JSON.stringify(report));
   console.log(report.ok ? 'REVIEW_OK' : 'REVIEW_FAIL');
-  app.exit(report.ok ? 0 : 1);
+  exitWithAudit(report.ok ? 0 : 1);
 }
 
 // 评审弹窗真实点击自检（B-fe22）：Owner 实测「写意见后点通过没效果、打回疑似不生效」。
@@ -12393,7 +12393,7 @@ async function runOwnerCheck() {
   console.log('OWNER_CHECK_REPORT ' + reportPath);
   console.log(JSON.stringify(report));
   console.log(report.ok ? 'OWNER_CHECK_OK' : 'OWNER_CHECK_FAIL');
-  app.exit(report.ok ? 0 : 1);
+  exitWithAudit(report.ok ? 0 : 1);
 }
 
 // 可重复的状态库隔离测试：只在系统临时目录里建库，绝不触碰真实 userData。
@@ -17067,7 +17067,7 @@ async function selftest() {
   const cleared = clearSelftestSandbox(testRoot);
   if (!cleared.ok) {
     console.error('SELFTEST_FAIL 无法清理上一轮自测目录（可能有遗留团队工具进程占用）：' + String(cleared.error && cleared.error.message || cleared.error));
-    app.exit(1);
+    exitWithAudit(1);
     return;
   }
   fs.mkdirSync(testRoot, { recursive: true });
@@ -17577,21 +17577,21 @@ async function selftest() {
     cleanupRoot();
     try { if (win) win.destroy(); } catch { /* ignore */ }
     await closeFlowMock();
-    app.exit(1);
+    exitWithAudit(1);
     return;
   }
   if (failures.length) {
     console.error('SELFTEST_FAIL ' + failures.join('；'));
     try { if (win) win.destroy(); } catch { /* ignore */ }
     await closeFlowMock();
-    app.exit(1);
+    exitWithAudit(1);
     return;
   }
   console.log('SELFTEST_OK');
   win.destroy();
   await closeFlowMock();
   await new Promise((r) => setTimeout(r, 250));
-  app.exit(0);
+  exitWithAudit(0);
 }
 
 function isLocalDshBaseUrl(raw) {
@@ -17696,6 +17696,13 @@ function recordRenderCrash(kind, details) {
  * 而是主进程异常或静默退出。这里补三类行：main-uncaught / main-rejection / shell-exit（含窗口数、存活秒数）。
  * fail-open：审计写不了只打日志，绝不因为审计失败再抛。
  */
+// T-c25a ②：统一退出入口——app.exit() 绕过 before-quit/will-quit，退出码会「零审计行」。
+// 所有 app.exit 调用改走 exitWithAudit()：先写一行 shell-exit-code（含退出码与来源），再 app.exit。
+function exitWithAudit(code, reason) {
+  const exitCode = Number.isFinite(Number(code)) ? Number(code) : 1;
+  try { recordShellAudit('shell-exit-code', { exitCode, reason: String(reason || 'app.exit') }); } catch { /* ignore */ }
+  app.exit(exitCode);
+}
 function recordShellAudit(kind, details) {
   const info = (details && typeof details === 'object') ? details : {};
   const err = info.error || info.reason || null;
@@ -18872,7 +18879,7 @@ async function runC651Check() {
   };
   fs.writeFileSync(path.join(outDir, 'c651-check.json'), JSON.stringify(report, null, 2), 'utf8');
   console.log('C651_CHECK ' + JSON.stringify({ ok: report.ok, total: report.total, failed: report.failed, outDir }));
-  app.exit(report.ok ? 0 : 1);
+  exitWithAudit(report.ok ? 0 : 1);
 }
 
 // R-f9b1 增补卷可读性界面自检（--supplement-check）：
@@ -19332,7 +19339,7 @@ async function runSupplementCheck() {
   writeJsonFile(path.join(outDir, 'supplement-check.json'), report);
   console.log('SUPPLEMENT_CHECK ' + JSON.stringify({ ok: report.ok, total: report.total, failed: report.failed, outDir }));
   console.log(report.ok ? 'SUPPLEMENT_OK' : 'SUPPLEMENT_FAIL');
-  app.exit(report.ok ? 0 : 1);
+  exitWithAudit(report.ok ? 0 : 1);
 }
 
 app.whenReady().then(async () => {
@@ -19350,7 +19357,7 @@ app.whenReady().then(async () => {
       await selftest();
     } catch (error) {
       console.error('SELFTEST_FAIL ' + String(error && error.stack || error));
-      app.exit(1);
+      exitWithAudit(1);
     }
     return;
   }
@@ -19359,7 +19366,7 @@ app.whenReady().then(async () => {
       await runLayoutCheck();
     } catch (error) {
       console.error('LAYOUT_FAIL ' + String(error && error.stack || error));
-      app.exit(1);
+      exitWithAudit(1);
     }
     return;
   }
@@ -19368,7 +19375,7 @@ app.whenReady().then(async () => {
       await runThemeShots();
     } catch (error) {
       console.error('THEME_SHOTS_FAIL ' + String((error && error.stack) || error));
-      app.exit(1);
+      exitWithAudit(1);
     }
     return;
   }
@@ -19377,7 +19384,7 @@ app.whenReady().then(async () => {
       await runOwnerCheck();
     } catch (error) {
       console.error('OWNER_CHECK_FATAL ' + String(error && error.stack || error));
-      app.exit(1);
+      exitWithAudit(1);
     }
     return;
   }
@@ -19386,7 +19393,7 @@ app.whenReady().then(async () => {
       await runB55cCheck();
     } catch (error) {
       console.error('B55C_FATAL ' + String(error && error.stack || error));
-      app.exit(1);
+      exitWithAudit(1);
     }
     return;
   }
@@ -19395,7 +19402,7 @@ app.whenReady().then(async () => {
       await runE29fCheck();
     } catch (error) {
       console.error('E29F_FATAL ' + String(error && error.stack || error));
-      app.exit(1);
+      exitWithAudit(1);
     }
     return;
   }
@@ -19404,7 +19411,7 @@ app.whenReady().then(async () => {
       await runSupplementCheck();
     } catch (error) {
       console.error('SUPPLEMENT_FATAL ' + String((error && error.stack) || error));
-      app.exit(1);
+      exitWithAudit(1);
     }
     return;
   }
@@ -19413,7 +19420,7 @@ app.whenReady().then(async () => {
       await runReviewCheck();
     } catch (error) {
       console.error('REVIEW_FATAL ' + String(error && error.stack || error));
-      app.exit(1);
+      exitWithAudit(1);
     }
     return;
   }
@@ -19445,7 +19452,7 @@ app.whenReady().then(async () => {
       return;
     } catch (error) {
       console.error('QUEUE_FATAL ' + String((error && error.stack) || error));
-      app.exit(1);
+      exitWithAudit(1);
       return;
     }
   }
@@ -19475,7 +19482,7 @@ app.whenReady().then(async () => {
       return;
     } catch (error) {
       console.error('DAEMON_FATAL ' + String((error && error.stack) || error));
-      app.exit(1);
+      exitWithAudit(1);
       return;
     }
   }
@@ -19489,7 +19496,7 @@ app.whenReady().then(async () => {
       return;
     } catch (error) {
       console.error('B2EBE_FATAL ' + String((error && error.stack) || error));
-      app.exit(1);
+      exitWithAudit(1);
       return;
     }
   }
@@ -19498,7 +19505,7 @@ app.whenReady().then(async () => {
       await runC651Check();
     } catch (error) {
       console.error('C651_FATAL ' + String(error && error.stack || error));
-      app.exit(1);
+      exitWithAudit(1);
     }
     return;
   }
