@@ -8,8 +8,8 @@
  * 归一后的 code 白名单（卷2 §四 + 卷3 §六 + 卷4③）：
  *   NO_SAMPLE_FILE | READ_FAILED | PARTIAL_SHARD | NO_PREV_SHARD | SAMPLING_DISABLED
  *   | SAMPLING_WINDOW_INSUFFICIENT | SAMPLE_CADENCE_BAD | OK
- * 优先级：readFailed > insufficient（卷2 §四）；密度不达标用 cadence.verdict='SAMPLE_CADENCE_BAD'，
- * 不抛异常（卷4③）。
+ * 优先级：readFailed > insufficient（卷2 §四）；密度判定走 cadence.verdict（5 分钟双边 15–25%、2 小时只判下限），
+ * 不抛异常（卷4③）；**ok 字段已于 M-20261115-165442-e543b4 移除**——判定以 fail + restorable 为准，不再造第二套判据。
  */
 
 import { createRequire } from 'node:module';
@@ -45,7 +45,7 @@ export function readRenderMemoryWindow(projectPath, options = {}) {
 
 /**
  * 卷3 §六 + 卷4③：R1/R2/R3、真点密度与 cadence 汇总。
- * 返回 {ok, code, lines, firstAt, lastAt, coverageSec, insufficient, readFailed, r1, r2, r3, restorable,
+ * 返回 {pass, fail, code, lines, firstAt, lastAt, coverageSec, insufficient, readFailed, r1, r2, r3, restorable,
  *       gaps, nullRatio, samplePoints, sampleCount, degradedLines, cadence:{realPoints,forced,hasForced,densityPct,verdict}}
  */
 export function summarizeWindow(win, options = {}) {
@@ -79,7 +79,6 @@ export function summarizeWindow(win, options = {}) {
   const cadenceBad = cadence.verdict === 'SAMPLE_CADENCE_BAD' && !noDataCodes.includes(code);
   const fail = code === 'READ_FAILED' || code === 'SAMPLING_DISABLED' || cadenceBad;
   return {
-    ok: !fail,
     pass: !fail,
     fail,
     code,
