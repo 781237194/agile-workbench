@@ -16257,6 +16257,9 @@ window.__themeLook = function () {
     bgImage: (function () { try { return String(getComputedStyle(document.body, "::before").backgroundImage).slice(0, 240); } catch (e) { return ""; } })(),
     bgSize: (function () { try { return String(getComputedStyle(document.body, "::before").backgroundSize); } catch (e) { return ""; } })(),
     bgAnimation: (function () { try { return String(getComputedStyle(document.body, "::before").animationDuration || "none"); } catch (e) { return "none"; } })(),
+    hoverTransition: (function () { try { const el = document.querySelector(".primary"); return el ? getComputedStyle(el).transitionDuration : ""; } catch (e) { return ""; } })(),
+    hoverTiming: (function () { try { const el = document.querySelector(".primary"); return el ? getComputedStyle(el).transitionTimingFunction : ""; } catch (e) { return ""; } })(),
+    activeScale: (function () { try { var out = null; var sheets = document.styleSheets; for (var i = 0; i < sheets.length; i += 1) { var rules; try { rules = sheets[i].cssRules; } catch (e) { continue; } for (var k = 0; k < rules.length; k += 1) { var sel = String(rules[k].selectorText || ""); if (/:active/.test(sel) && /scale\(/.test(String(rules[k].style && rules[k].style.transform || ""))) { var m = /scale\(([0-9.]+)\)/.exec(String(rules[k].style.transform)); if (m && String(sel).indexOf(".primary") >= 0) out = Number(m[1]); } } } return out; } catch (e) { return null; } })(),
     bgFilter: (function () { try { return String(getComputedStyle(document.body, "::before").filter || "none"); } catch (e) { return "none"; } })(),
   };
 };
