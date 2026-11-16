@@ -321,7 +321,12 @@ function evaluateRecoverable(win, options = {}) {
 
   const cadence = { realPoints, forced, forcedSamples, hasForced: forcedSamples > 0, densityPct, denseWarn, verdict: cadenceVerdict };
 
-  const enoughLines = lines.length >= Math.min(300, Math.max(1, Math.round(windowSec)));
+  // PM 2026-11-16 裁定（c1ed AC3）：行数判据改为**覆盖率归一**——不再固定 300 行，
+  // 而是「窗口覆盖 ≥290s 且行数 ≥ floor(coverageSec×0.98)」（平均行距 ≤1.0204s）。
+  // 语义：coverage 不足走 SAMPLING_WINDOW_INSUFFICIENT/R3、不判 AC3；达标但 ratio<0.98 判「采样丢拍 sample_gap」；
+  // 采样周期漂移由本条吸收，漏拍仍由 R1（缺口）判。
+  const enoughLines = Number(window.coverageSec) >= 290
+    && lines.length >= Math.floor(Number(window.coverageSec) * 0.98);
   const baseCode = (() => {
     if (!lines.length) return 'NO_SAMPLE_FILE';
     if (window.readFailed) return 'READ_FAILED';
