@@ -900,7 +900,52 @@ function themeState() {
   };
 }
 
-/** 落盘到 DOM + （可选）持久化 + 同步界面/看板窗；返回解析结果 */
+/** R-fe90 F-6 性能探针：rAF 采样 + 主进程真实内存，返回 AC6 需要的四项（fps/p95/dropRate/memMB） */
+function themeProbe(ms) {
+  const sampleMs = Math.max(300, Math.min(30000, Number(ms) || 5000));
+  return new Promise((resolve) => {
+    const themeId = currentThemeId();
+    const intervals = [];
+    let last = 0;
+    let raf = 0;
+    const start = performance.now();
+    const finish = (ts) => {
+      const dur = Math.max(1, ts - start);
+      const frames = intervals.length;
+      const sorted = intervals.slice().sort((a, b) => a - b);
+      const p95 = frames >= 20 ? sorted[Math.ceil(0.95 * frames) - 1] : null;
+      const drops = intervals.filter((v) => v > 25).length;
+      const out = {
+        themeId,
+        sampleMs,
+        frames,
+        fps: Math.round((frames / dur) * 1000 * 100) / 100,
+        p95FrameMs: p95 == null ? null : Math.round(p95 * 100) / 100,
+        dropRate: frames ? Math.round((drops / frames) * 10000) / 100 : 0,
+        memMB: null,
+        reducedMotion: themeReducedMotion(),
+        lowfx: themeLowFx(),
+        at: Date.now()
+      };
+      const metrics = (window.workbench && typeof window.workbench.themeMetrics === 'function')
+        ? window.workbench.themeMetrics()
+        : Promise.resolve(null);
+      Promise.resolve(metrics)
+        .then((mem) => { if (mem && Number.isFinite(mem.totalMB)) out.memMB = mem.totalMB; })
+        .catch(() => { /* 内存取不到就留 null，不伪造 */ })
+        .then(() => resolve(out));
+    };
+    const step = (ts) => {
+      if (last) intervals.push(ts - last);
+      last = ts;
+      if (ts - start < sampleMs) { raf = requestAnimationFrame(step); return; }
+      cancelAnimationFrame(raf);
+      finish(ts);
+    };
+    raf = requestAnimationFrame(step);
+  });
+}
+
 function applyThemeState(resolved, opts) {
   const options = opts && typeof opts === 'object' ? opts : {};
   const r = resolved || themeResolve({ storageValue: themeReadStorage(), search: location.search });
@@ -16057,7 +16102,16 @@ function clampFlowPanel() {
   // ?theme= 只影响本次加载、**不持久化**（增补卷-fe90-1 §一.3）；同值不重复写 storage。
   const bootResolved = themeResolve({ storageValue: themeReadStorage(), search: location.search });
   applyThemeState(bootResolved, { persist: bootResolved.source !== 'url' });
-  try { window.__themeState = themeState; } catch { /* ignore */ }
+  try { window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /* ignore */ }
+  // R-fe90 F-7：手工降级档来自主进程 ui.effectLevel；读不到按 full（不阻断界面）。
+  try {
+    const eff = (window.workbench && typeof window.workbench.themeEffectLevel === 'function')
+      ? await window.workbench.themeEffectLevel()
+      : null;
+    if (eff && (eff.level === 'reduced' || eff.level === 'off')) {
+      document.documentElement.setAttribute('data-effect-level', eff.level);
+    }
+  } catch { /* ignore */ }
   loadInboxSeen();
   bind();
   renderBridgeAlert();

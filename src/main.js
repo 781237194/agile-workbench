@@ -4615,6 +4615,33 @@ function registerIpc() {
       cpuSource: systemCpu === null ? 'app' : 'system'
     };
   });
+  // R-fe90 F-6：主题探针用的真实进程内存 —— app.getAppMetrics() 全部进程（main/renderer/webview guest）
+  // 的 workingSetSize 求和（KB→MB），渲染层拿不到 app，只能经这条只读通道取。
+  ipcMain.handle('theme:metrics', async () => {
+    try {
+      const list = (app.getAppMetrics ? app.getAppMetrics() : []) || [];
+      const processes = list.map((p) => ({
+        pid: p.pid,
+        type: String(p.type || ''),
+        workingSetMB: Math.round((((p.memory && p.memory.workingSetSize) || 0) / 1024) * 10) / 10
+      }));
+      const totalMB = Math.round(processes.reduce((sum, p) => sum + p.workingSetMB, 0) * 10) / 10;
+      return { ok: true, totalMB, processCount: processes.length, at: Date.now() };
+    } catch (error) {
+      return { ok: false, code: 'THEME_METRICS_FAILED', message: String((error && error.message) || error).slice(0, 200), totalMB: null };
+    }
+  });
+  // R-fe90 F-7：三层降级里的手工档（`ui.effectLevel=reduced|off`）；`?lowfx=1` 由渲染层自己判。
+  ipcMain.handle('theme:effect-level', async () => {
+    try {
+      const store = readStore();
+      const raw = String((store.ui && store.ui.effectLevel) || 'full');
+      const level = (raw === 'reduced' || raw === 'off') ? raw : 'full';
+      return { ok: true, level };
+    } catch (error) {
+      return { ok: false, code: 'THEME_EFFECT_LEVEL_FAILED', message: String((error && error.message) || error).slice(0, 200), level: 'full' };
+    }
+  });
   ipcMain.handle('app:choose-dir', async () => {
     const r = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] });
     return r.canceled ? null : r.filePaths[0];
