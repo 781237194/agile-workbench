@@ -25,6 +25,8 @@ import { cmdDecision } from './lib/decision-cli.mjs';
 import { cmdHandoff, cmdRuleException } from './lib/handoff-cli.mjs';
 // R-b5fc F-2/F-4b：看板驱动路由守护与角色队列（逻辑在 lib/route-daemon.mjs，CLI 入口在 lib/route-cli.mjs）。
 import { cmdRoute, cmdQueues } from './lib/route-cli.mjs';
+// R-20261116-191906-7aa8：证据导出包（export/verify，唯一实现 lib/evidence-pack.mjs）。
+import { cmdEvidence } from './lib/evidence-pack.mjs';
 
 const HELP = `团队工作台 v2 · 多会话敏捷团队
 
@@ -113,6 +115,16 @@ const HELP = `团队工作台 v2 · 多会话敏捷团队
   finalize status --project P [--json]          # 是否已终验、记录列表、记忆目录
   finalize restore --project P --snapshot <快照目录>   # 按快照恢复记忆（哈希一致）
        终验记录：团队/状态/项目/<P>/终验/FV-<ts>.json|.md；快照：<项目>/_archive/记忆-<ts>/（含 manifest）
+
+证据导出包（R-7aa8 · 换机/换用户也能核对）
+  evidence export --project P --out <zip> [--since 30|<YYYY-MM-DD>|0] [--only glob] [--all]
+        [--max-bytes 512MB] [--strict-size] [--skip-oversize] [--manifest 旧清单.json] [--json]
+       把证据（默认近 30 天）打成 zip + 包内 清单.json（每件 path/bytes/sha256/kind/mtime 五键）；
+       超上限按 mtime 倒序截断并写 truncated/truncatedFiles/truncatedBytes + 警告行；
+       高置信密钥拒包（EVIDENCE_SECRET_FOUND），宽词只进 warnings；bsdtar 唯一实现，不写目录条目
+  evidence verify --zip <zip> [--json]
+       读包内清单逐件比 bytes/sha256：{ok,total,okCount,missing[],mismatch[],extra[]}；
+       全过退出码 0，有不符 1，参数/环境错 2
 
 看板驱动自动流转（R-b5fc · 状态即路由）
   queues --project P --boot T --role R [--json]     # 本人读自己的角色队列（role_queues.json）
@@ -288,6 +300,7 @@ async function main() {
     case 'finalize': cmdFinalize(args); break;
     case 'route': await cmdRoute(args); break;
     case 'queues': cmdQueues(args); break;
+    case 'evidence': cmdEvidence(args); break;
     case 'decision': await cmdDecision(args); break;
     case 'handoff': await cmdHandoff(args); break;
     case 'rule-exception': await cmdRuleException(args); break;
