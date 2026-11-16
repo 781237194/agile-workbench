@@ -1,0 +1,7 @@
+﻿PASS  AC1 精确投递：tester 邮箱有该消息
+PASS  AC1 精确投递：pm 邮箱 0 命中该消息
+PASS  AC2 唤醒只给 to：唤醒行 to === tester（无 to=pm 行）
+PASS  AC3 自环闸：from===自身 被 ack 后不产生任何新消息
+PASS  AC4 静态禁令：全仓 0 处「遍历角色 + sendMessage」广播写法
+
+通知投递断言：5/5 PASS
