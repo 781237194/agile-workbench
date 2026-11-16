@@ -872,15 +872,23 @@ function themeLowFx() {
   return low || themeEffectLevel() !== 'full';
 }
 
-/** 当前档位的特效开关（4 项，供 __themeState() 与降级断言） */
+/** 当前档位的特效开关（4 项 + mode，供 __themeState() 与降级断言）
+ *  R-fe90 F7（卷-2 §一 / §六）：粒子、点击涟漪、移动光晕与降级判定**单点实现在 fx-layer.js**，
+ *  本函数只做「档位 → 开关」映射，不再维护第二套特效状态（避免重复渲染与两套真相）。
+ *  注：卷-2 §四.5 反例要求「5 档里任一档粒子不可见即不合格」，所以粒子不再只限科技档；
+ *      grid=科技、blur=玻璃、bounce=动漫 的主题专属装饰不变。 */
 function themeEffects(themeId) {
   const id = themeId || currentThemeId();
+  if (window.AWB_FX && typeof window.AWB_FX.effects === 'function') return window.AWB_FX.effects(id);
   const on = !themeLowFx() && !themeReducedMotion();
   return {
-    particles: Boolean(on && id === 'tech-dark'),
+    mode: on ? 'full' : 'reduced',
+    particles: Boolean(on),
     grid: Boolean(on && id === 'tech-dark'),
     blur: Boolean(on && id === 'glass-dark'),
     bounce: Boolean(on && id === 'anime-dark'),
+    idle: false,
+    particleCount: 0,
   };
 }
 
@@ -893,140 +901,32 @@ function themeState() {
     style: document.documentElement.getAttribute('data-style') || parts.style || 'tech',
     theme: currentTheme(),
     source: LAST_THEME.source || 'default',
-    effects: Object.assign(themeEffects(id), {
-      idle: Boolean(AWB_THEME_FX && AWB_THEME_FX.idle),
-      particleCount: typeof awbThemeParticleCount === 'function' ? awbThemeParticleCount() : 0
-    }),
+    effects: themeEffects(id),
+    // R-fe90 F7：AC13–AC16 的唯一取数口（同步；字段表见 fx-layer.js 文件头）。
+    fx: (window.AWB_FX && typeof window.AWB_FX.themeStateFx === 'function')
+      ? window.AWB_FX.themeStateFx()
+      : { sample: function () { return { ok: false, code: 'FX_LAYER_MISSING' }; } },
+    // 卷-2 §六.5：性能兜底自动降级必须能被读到（不静默）
+    fxDegraded: (window.AWB_FX && typeof window.AWB_FX.degraded === 'function') ? window.AWB_FX.degraded() : null,
     reducedMotion: themeReducedMotion(),
     lowfx: themeLowFx(),
     effectLevel: themeEffectLevel(),
   };
 }
 
-/* ── R-fe90 F-7 特效：科技档粒子层（canvas）、无输入 3 秒降频、失焦暂停 ──────────
- * 顶层标识符统一 AWB_THEME_FX / awbTheme* 前缀（P0 教训：渲染层多脚本共用全局作用域）。
- * 粒子数默认 120、上限 160（?particles= 可覆盖，超限夹取）；非科技档或特效关闭时移除画布。
+/* ── R-fe90 F7 特效层单点实现：fx-layer.js（#fx-layer = body 直接子元素） ──────────
+ * 粒子 / 点击涟漪 / 移动光晕 / 三层降级 / 唯一取数口 __themeState().fx.sample() 都在那边；
+ * 本段只留历史调用点的兼容薄壳（AWB_THEME_FX / awbThemeParticleCount / awbThemeFxSync），
+ * **不再自己建 canvas**：卷-2 §一.1 要求 #fx-layer 是粒子 canvas 的唯一挂载点。
  */
-const AWB_THEME_FX = {
-  canvas: null,
-  ctx: null,
-  parts: [],
-  raf: 0,
-  running: false,
-  idle: false,
-  lastInput: Date.now(),
-  lastFrame: 0,
-  bound: false
-};
+const AWB_THEME_FX = { canvas: null, ctx: null, parts: [], running: false, idle: false, composite: 'lighter' };
 
 function awbThemeParticleCount() {
-  let n = 120;
-  try {
-    const raw = new URLSearchParams(location.search || '').get('particles');
-    if (raw != null && raw !== '') n = Number(raw);
-  } catch { /* ignore */ }
-  if (!Number.isFinite(n)) n = 120;
-  return Math.max(0, Math.min(160, Math.round(n)));
-}
-
-function awbThemeFxEnsureCanvas() {
-  if (AWB_THEME_FX.canvas && document.body.contains(AWB_THEME_FX.canvas)) return AWB_THEME_FX.canvas;
-  const c = document.createElement('canvas');
-  c.id = 'awb-theme-particles';
-  c.setAttribute('aria-hidden', 'true');
-  document.body.appendChild(c);
-  AWB_THEME_FX.canvas = c;
-  AWB_THEME_FX.ctx = c.getContext('2d');
-  return c;
-}
-
-function awbThemeFxSeed() {
-  const c = AWB_THEME_FX.canvas;
-  if (!c) return;
-  const w = Math.max(1, window.innerWidth);
-  const h = Math.max(1, Math.max(1, window.innerHeight - 44));
-  c.width = w;
-  c.height = h;
-  const count = awbThemeParticleCount();
-  AWB_THEME_FX.parts = Array.from({ length: count }, () => ({
-    x: Math.random() * w,
-    y: Math.random() * h,
-    r: 0.9 + Math.random() * 2.1,          // P1：r ∈ [0.9, 3.0]（原型）
-    alpha: 0.16 + Math.random() * 0.40,    // P1：逐粒 alpha ∈ [0.16, 0.56]
-    vx: (Math.random() - 0.5) * 0.22,
-    vy: (Math.random() - 0.5) * 0.22
-  }));
-  AWB_THEME_FX.composite = 'lighter';
-}
-
-function awbThemeFxDraw() {
-  const { ctx, canvas } = AWB_THEME_FX;
-  if (!ctx || !canvas) return;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.globalCompositeOperation = 'lighter';   // P1：发光叠加（原型 lighter）
-  AWB_THEME_FX.composite = 'lighter';
-  for (const p of AWB_THEME_FX.parts) {
-    p.x += p.vx;
-    p.y += p.vy;
-    if (p.x < -4) p.x = canvas.width + 4;
-    if (p.x > canvas.width + 4) p.x = -4;
-    if (p.y < -4) p.y = canvas.height + 4;
-    if (p.y > canvas.height + 4) p.y = -4;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(79, 209, 255, ' + (p.alpha != null ? p.alpha : 0.3).toFixed(3) + ')';  // P1：逐粒 alpha
-    ctx.fill();
-  }
-}
-
-function awbThemeFxLoop(ts) {
-  if (!AWB_THEME_FX.running) return;
-  const idleNow = Date.now() - AWB_THEME_FX.lastInput > 3000;
-  AWB_THEME_FX.idle = idleNow;
-  const minGap = idleNow ? 1000 / 30 : 1000 / 60; // 无输入 3 秒后降到 ≤30fps（AC7）
-  if (!AWB_THEME_FX.lastFrame || ts - AWB_THEME_FX.lastFrame >= minGap) {
-    AWB_THEME_FX.lastFrame = ts;
-    awbThemeFxDraw();
-  }
-  AWB_THEME_FX.raf = requestAnimationFrame(awbThemeFxLoop);
-}
-
-function awbThemeFxBindInput() {
-  if (AWB_THEME_FX.bound) return;
-  AWB_THEME_FX.bound = true;
-  const touch = () => { AWB_THEME_FX.lastInput = Date.now(); };
-  for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) {
-    window.addEventListener(ev, touch, { passive: true });
-  }
-  // 失焦暂停、回来继续（AC7「window.blur 暂停粒子」）
-  window.addEventListener('blur', () => awbThemeFxStop());
-  window.addEventListener('focus', () => awbThemeFxSync());
-  window.addEventListener('resize', () => { if (AWB_THEME_FX.running) awbThemeFxSeed(); });
-}
-
-function awbThemeFxStop() {
-  if (AWB_THEME_FX.raf) cancelAnimationFrame(AWB_THEME_FX.raf);
-  AWB_THEME_FX.raf = 0;
-  AWB_THEME_FX.running = false;
+  return (window.AWB_FX && typeof window.AWB_FX.particleCount === 'function') ? window.AWB_FX.particleCount() : 0;
 }
 
 function awbThemeFxSync() {
-  const want = Boolean(themeEffects().particles);
-  if (!want) {
-    awbThemeFxStop();
-    if (AWB_THEME_FX.canvas) AWB_THEME_FX.canvas.remove();
-    AWB_THEME_FX.canvas = null;
-    AWB_THEME_FX.ctx = null;
-    AWB_THEME_FX.parts = [];
-    return;
-  }
-  awbThemeFxBindInput();
-  awbThemeFxEnsureCanvas();
-  awbThemeFxSeed();
-  if (AWB_THEME_FX.running) return;
-  AWB_THEME_FX.running = true;
-  AWB_THEME_FX.lastFrame = 0;
-  AWB_THEME_FX.raf = requestAnimationFrame(awbThemeFxLoop);
+  if (window.AWB_FX && typeof window.AWB_FX.sync === 'function') window.AWB_FX.sync();
 }
 
 /** R-fe90 F-6 性能探针：rAF 采样 + 主进程真实内存，返回 AC6 需要的四项（fps/p95/dropRate/memMB） */
@@ -1062,6 +962,9 @@ function themeProbe(ms) {
       Promise.resolve(metrics)
         .then((mem) => { if (mem && Number.isFinite(mem.totalMB)) out.memMB = mem.totalMB; })
         .catch(() => { /* 内存取不到就留 null，不伪造 */ })
+        // R-fe90 F7（卷-2 §六.5）：性能兜底自动降级看的是「连续 2 个采样窗口」，
+        // 所以每个 __themeProbe 结果都要交回特效层（同时缓存 AC6 四项数字给 fx.sample().perf）。
+        .then(() => { try { if (window.AWB_FX && typeof window.AWB_FX.observeProbe === 'function') window.AWB_FX.observeProbe(out); } catch (error) { /* 降级失败不影响探针结果 */ } })
         .then(() => resolve(out));
     };
     const step = (ts) => {
@@ -16506,12 +16409,8 @@ window.__themeLook = function () {
   };
 };
 window.__themeFx = function () {
-  const parts = (typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.parts) ? AWB_THEME_FX.parts.length : 0;
-  const st = typeof window.__themeState === "function" ? window.__themeState() : {};
-  const P = (typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.parts) ? AWB_THEME_FX.parts : [];
-  const rs = P.map((p) => p.r); const al = P.map((p) => p.alpha);
-  const composite = (typeof AWB_THEME_FX !== "undefined") ? String((AWB_THEME_FX.composite || (AWB_THEME_FX.ctx ? AWB_THEME_FX.ctx.globalCompositeOperation : ""))) : "";
-  return { particleCount: parts, rMin: rs.length ? Math.min.apply(null, rs) : 0, rMax: rs.length ? Math.max.apply(null, rs) : 0, alphaMin: al.length ? Math.min.apply(null, al) : 0, alphaMax: al.length ? Math.max.apply(null, al) : 0, composite, canvas: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.canvas && document.body.contains(AWB_THEME_FX.canvas)), running: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.running), idle: Boolean(typeof AWB_THEME_FX !== "undefined" && AWB_THEME_FX.idle), effectLevel: st.effectLevel || "", fx: st.fx || null };
+  if (window.AWB_FX && typeof window.AWB_FX.describe === 'function') return window.AWB_FX.describe();
+  return { particleCount: 0, rMin: 0, rMax: 0, alphaMin: 0, alphaMax: 0, composite: '', canvas: false, running: false, idle: false, effectLevel: '', fx: null };
 };
 window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /* ignore */ }
   // R-fe90 F-7：手工降级档来自主进程 ui.effectLevel；读不到按 full（不阻断界面）。
@@ -16523,6 +16422,8 @@ window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /*
       document.documentElement.setAttribute('data-effect-level', eff.level);
     }
   } catch { /* ignore */ }
+  // R-fe90 F7：手工档生效后立刻让特效层按新档位重排（否则要等下一次换主题才关粒子）。
+  try { awbThemeFxSync(); } catch { /* 特效异常不影响界面 */ }
   loadInboxSeen();
   bind();
   renderBridgeAlert();

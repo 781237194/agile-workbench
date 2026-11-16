@@ -802,11 +802,21 @@
 
   <div id="modal-root"></div>
   <div id="toast" class="toast" role="status" aria-live="polite" data-toast-count="0"></div>
+  <!-- R-fe90 F7（卷-2 §一.1）：特效层容器 —— document.body 的直接子元素，是全站粒子 canvas /
+       点击涟漪 / 移动光晕的唯一挂载点。pointer-events 常驻 none（见 style.css），
+       只有 __themeState().fx.sample() 的命中测试会临时置 auto 并在采样后复位。 -->
+  <div id="fx-layer" class="fx-layer" data-fx-layer="on" data-fx-mode="full" aria-hidden="true">
+    <canvas id="awb-theme-particles" data-fx-particles="0" aria-hidden="true"></canvas>
+  </div>
   <script src="flow-lanes.js"></script>
   <script src="flow-graph.js"></script>
   <script src="flow-v4.js"></script>
   <!-- R-30e2：需求/缺陷池纯逻辑（池行构建 / 筛选 / 行与详情 HTML），必须在 app.js 之前引入。 -->
   <script src="pool-core.js"></script>
+  <!-- R-fe90 F7：特效层（#fx-layer 粒子/点击涟漪/移动光晕 + __themeState().fx.sample() 唯一取数口）。
+       必须在 app.js 之前加载：app.js 的 themeEffects()/themeState() 按 window.AWB_FX 取实时档位。
+       顶层零声明（整份 IIFE），不参与 index.html 多脚本的全局词法作用域（B-20261116-101950-212b）。 -->
+  <script src="fx-layer.js"></script>
   <script src="app.js"></script>
   <!-- B-d100：打回后复审判定（owner-review.js 之前引入，Node 也可 require 做断言） -->
   <script src="ui-perf-core.js"></script>

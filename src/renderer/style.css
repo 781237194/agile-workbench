@@ -1,4 +1,4 @@
-﻿:root {
+﻿﻿﻿﻿:root {
   color-scheme: dark;
   --bg: #15171d;
   --bg-2: #191b22;
@@ -4796,7 +4796,7 @@ html[data-style="tech"][data-theme="dark"] body::before {
   from { background-position: 0 0, 0 0, 0 0, 0 0; }
   to { background-position: 0 46px, 46px 0, 0 0, 0 0; }
 }
-/* 粒子画布：只在科技档且特效开启时由 app.js 插入并绘制 */
+/* 粒子画布：#fx-layer 内唯一 canvas（fx-layer.js 绘制，5 档都可见——卷-2 §四.5 反例） */
 
 /* R-fe90 P1 批（3052）：anime 点阵+光晕 / glass 彩色底光（原型 L247–276） */
 html[data-style="anime"][data-theme="dark"] body::before {
@@ -4827,13 +4827,101 @@ html[data-style="glass"][data-theme="dark"] body::before {
   filter: blur(34px) saturate(1.2);
 }
 
-html[data-style="tech"][data-theme="dark"] #awb-theme-particles {
+/* —— R-fe90 F7 特效层（#fx-layer）：容器 / 粒子画布 / 点击涟漪 / 移动光晕 ——
+   容器常驻 pointer-events:none（不吃工作台任何点击）；z-index 取数值 9600
+   （#dsh-view 的计算值是 auto，按 0 计 —— 卷-2 §一.2）。
+   fx.sample() 的命中测试会临时把容器 pointerEvents 置 auto，采完立即复位，
+   并断言复位后计算值仍是 none（卷-2 §一.4）。 */
+#fx-layer {
   position: fixed;
-  left: 0; right: 0; top: var(--titlebar-h); bottom: 0;
-  width: 100%; height: calc(100% - var(--titlebar-h));
+  inset: 0;
+  z-index: 9600;
   pointer-events: none;
-  z-index: 1;
-  opacity: .55;
+  overflow: hidden;
+  background: transparent;
+}
+#fx-layer > #awb-theme-particles {
+  position: absolute;
+  left: 0; top: 0;
+  width: 100%; height: 100%;
+  display: block;
+  pointer-events: none;
+}
+/* AC13 点击涟漪（Owner：48–56px，默认 52；AC13 硬下限 48px —— 容器盒固定为该直径，
+   扩散动画放在子节点上，所以「首帧可见」时容器 rect 就已经 ≥48、opacity > 0）。 */
+#fx-layer [data-fx-click] {
+  position: absolute;
+  width: 52px; height: 52px;
+  width: var(--fx-click-size, 52px); height: var(--fx-click-size, 52px);
+  margin-left: -26px; margin-top: -26px;
+  margin-left: calc(var(--fx-click-size, 52px) / -2);
+  margin-top: calc(var(--fx-click-size, 52px) / -2);
+  opacity: 1;
+  pointer-events: none;
+}
+#fx-layer [data-fx-click] > i {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--theme-accent, #4fd1ff);
+  box-shadow: 0 0 6px var(--theme-accent, #4fd1ff), inset 0 0 4px var(--theme-accent, #4fd1ff);
+  animation: fxRippleOut var(--fx-click-fade, 620ms) cubic-bezier(.2, .7, .3, 1) forwards;
+}
+@keyframes fxRippleOut {
+  0% { transform: scale(.2); opacity: var(--fx-click-opacity-max, .9); }
+  60% { opacity: var(--fx-click-opacity-mid, .7); }
+  100% { transform: scale(1); opacity: 0; }
+}
+/* AC14 移动光晕（Owner：24–30px、透明度 0.15–0.25、颜色与粒子同源；
+   尺寸已经很小，不再用 blur / 大 box-shadow 扩散，避免又变成一坨大光斑）。
+   位置由 rAF 用 transform 跟随（中心与光标偏差 0），离开/失焦 120ms 内移除。 */
+#fx-layer [data-fx-move] {
+  position: absolute;
+  left: 0; top: 0;
+  width: 28px; height: 28px;
+  width: var(--fx-move-size, 28px); height: var(--fx-move-size, 28px);
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: var(--fx-move-opacity, .2);
+  background: radial-gradient(circle at 50% 50%, var(--fx-move-color, var(--theme-accent, #4fd1ff)) 0%, transparent 68%);
+  filter: none;
+  box-shadow: none;
+  transition: opacity 110ms linear;
+}
+#fx-layer [data-fx-move][data-fx-hidden="1"] { opacity: 0; }
+/* 降级态（off / reduced）：粒子画布不显示；值由 fx-layer.js 同步到 html[data-fx-level] */
+html[data-fx-level="off"] #fx-layer > #awb-theme-particles,
+html[data-fx-level="reduced"] #fx-layer > #awb-theme-particles { display: none; }
+/* 降级态玻璃拟态退化为不透明（任务口径：降级态必须 backdrop-filter:none） */
+html[data-fx-level="off"] #titlebar,
+html[data-fx-level="off"] .sidebar,
+html[data-fx-level="off"] .more-menu,
+html[data-fx-level="off"] .drawer,
+html[data-fx-level="off"] .workspace-pop,
+html[data-fx-level="off"] #flow-panel,
+html[data-fx-level="reduced"] #titlebar,
+html[data-fx-level="reduced"] .sidebar,
+html[data-fx-level="reduced"] .more-menu,
+html[data-fx-level="reduced"] .drawer,
+html[data-fx-level="reduced"] .workspace-pop,
+html[data-fx-level="reduced"] #flow-panel {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+/* 玻璃拟态的 --panel 是半透明白，关掉模糊后要给不透明底色，否则面板会「透」出来 */
+html[data-style="glass"][data-fx-level="off"] #titlebar,
+html[data-style="glass"][data-fx-level="off"] .sidebar,
+html[data-style="glass"][data-fx-level="off"] .more-menu,
+html[data-style="glass"][data-fx-level="off"] .drawer,
+html[data-style="glass"][data-fx-level="off"] .workspace-pop,
+html[data-style="glass"][data-fx-level="off"] #flow-panel,
+html[data-style="glass"][data-fx-level="reduced"] #titlebar,
+html[data-style="glass"][data-fx-level="reduced"] .sidebar,
+html[data-style="glass"][data-fx-level="reduced"] .more-menu,
+html[data-style="glass"][data-fx-level="reduced"] .drawer,
+html[data-style="glass"][data-fx-level="reduced"] .workspace-pop,
+html[data-style="glass"][data-fx-level="reduced"] #flow-panel {
+  background-color: var(--bg-2) !important;
 }
 html[data-style="glass"][data-theme="dark"] #titlebar,
 html[data-style="glass"][data-theme="dark"] .sidebar,

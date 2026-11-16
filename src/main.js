@@ -10829,6 +10829,235 @@ async function runThemeShots() {
     return res.ok ? Boolean(res.value) : false;
   };
   const clickTheme = clickThemeOnce;
+
+  // ── R-fe90 F7 / AC13–AC16：真窗口交互取数（唯一取数口 = __themeState().fx.sample()）──────
+  // 点击与移动都用 CDP Input.dispatchMouseEvent（真实鼠标事件，不是 el.click()）：
+  // 这样 AC13 的「点击事件 → 首次可见」与 AC14 的「mousemove → rAF 跟随」才是真实链路。
+  const fxSendMouse = async (type, x, y, extra) => {
+    const params = Object.assign({ type: type, x: x, y: y }, extra || {});
+    return win.webContents.debugger.sendCommand('Input.dispatchMouseEvent', params);
+  };
+  // 前置：把被测窗口放到前台并置顶。自检窗口从后台进程拉起时可能没有前台焦点，
+  // 真实 blur 会让 fx-layer 按规范暂停（粒子/rAF 停、光晕收掉），交互计数就会缺。
+  const ensureForeground = async (opts) => {
+    const options = opts && typeof opts === 'object' ? opts : {};
+    try { win.show(); } catch (error) { /* ignore */ }
+    try { if (options.alwaysOnTop !== false) win.setAlwaysOnTop(true); } catch (error) { /* ignore */ }
+    try { win.moveTop(); } catch (error) { /* ignore */ }
+    try { win.focus(); } catch (error) { /* ignore */ }
+    try { win.webContents.focus(); } catch (error) { /* ignore */ }
+    try { await win.webContents.debugger.sendCommand('Page.bringToFront'); } catch (error) { /* ignore */ }
+    try { await win.webContents.executeJavaScript('window.focus && window.focus()', true); } catch (error) { /* ignore */ }
+    if (options.wait !== false) await new Promise((r) => setTimeout(r, 320));
+  };
+  const releaseForeground = async () => {
+    try { win.setAlwaysOnTop(false); } catch (error) { /* ignore */ }
+  };
+  // 前台 + 强制恢复：自检窗口偶尔被环境抢焦点（真实 blur → fx 按规范暂停）。
+  // 合成 focus 走的是与用户点回窗口完全相同的 resume 监听器，不改变产品行为，只保证测量有输入。
+  const ensureFxActive = async (tag) => {
+    for (let pass = 0; pass < 4; pass += 1) {
+      await ensureForeground({ wait: pass > 0 });
+      const activeRes = await safeExec("(function(){var s=window.__themeState?window.__themeState():null;return s&&s.fx?{paused:s.fx.paused,mode:s.fx.mode,hasFocus:document.hasFocus(),visibility:document.visibilityState}:null;})()", 'fx-active:' + tag + ':' + pass);
+      const active = activeRes.ok ? activeRes.value : null;
+      if (active && active.paused === false) return active;
+      await safeExec("(function(){window.dispatchEvent(new Event('focus'));return true;})()", 'fx-force-resume:' + tag + ':' + pass);
+      await new Promise((r) => setTimeout(r, 220));
+    }
+    return null;
+  };
+  const readFxSample = async (note) => {
+    const res = await safeExec("(function(){var st=window.__themeState?window.__themeState():null;if(!st||!st.fx||typeof st.fx.sample!=='function')return null;return st.fx.sample();})()", note);
+    return res.ok ? res.value : null;
+  };
+  const resetFxStats = async (note) => {
+    const res = await safeExec("(function(){if(window.AWB_FX&&typeof window.AWB_FX.resetStats==='function'){window.AWB_FX.resetStats();return true;}return false;})()", note);
+    return res.ok ? res.value : false;
+  };
+  // 交互前先把浮层全部关掉：前面 uiPerfSmoke/menuProbe 打开的评审弹窗、抽屉、更多菜单、
+  // 侧浮标、流程面板会盖住侧栏，也会把 focus 带回 webview/控件 → 真实 blur → fx 暂停。
+  const closeOverlays = async () => {
+    const js = "(function(){var out={};function call(n,a){try{if(typeof window[n]!=='undefined'){var fn=window[n];if(typeof fn==='function'){fn.apply(null,a||[]);return true;}}}catch(e){return false;}return false;}out.modal=call('closeModal',[]);try{var rb=document.querySelector('[data-owner-review-dialog] [data-or-close]');if(rb){rb.click();out.reviewClose=true;}}catch(e){}try{var acb=document.querySelector('[data-accept-list] [data-accept-close]');if(acb){acb.click();out.acceptClose=true;}}catch(e){}try{var rdlg=document.querySelector('[data-owner-review-dialog]');if(rdlg){rdlg.remove();out.reviewRemoved=true;}}catch(e){}try{var pmask=document.querySelector('.proxy-mask');if(pmask&&!pmask.hidden){pmask.hidden=true;out.proxyMask=true;}}catch(e){}try{document.body.classList.remove('or-webview-hidden');}catch(e){}out.more=call('setMoreMenu',[false]);out.themeMenu=call('setThemeMenu',[false]);out.drawer=call('setDrawer',[null]);out.flow=call('setFlowPanel',[false]);out.wsPop=call('setWorkspacePop',[false]);out.float=call('setFloatExpanded',[false]);var vis=[];['#owner-review-dialog','#flow-panel','#project-drawer','#team-drawer','#workspace-pop','#more-menu','#side-float[data-float-expanded=\"1\"]','#pool-detail-host','[data-accept-list]'].forEach(function(sel){var el=document.querySelector(sel);if(!el)return;var cs=getComputedStyle(el);var r=el.getBoundingClientRect();if(cs.display!=='none'&&cs.visibility!=='hidden'&&r.width>0&&r.height>0)vis.push(sel);});out.visibleOverlays=vis;return out;})()";
+    const res = await safeExec(js, 'fx-close-overlays');
+    return res.ok ? res.value : null;
+  };
+  const runFxInteraction = async () => {
+    // 先关浮层，再重新扫安全点（浮层开着时 elementFromPoint 会落在弹窗上）
+    const overlays = await closeOverlays();
+    await new Promise((r) => setTimeout(r, 240));
+    // 点击/移动必须落在「壳自己拥有的事件区」：落在 #dsh-view（webview/DSH 页）上的 CDP 鼠标事件
+    // 会被路由给 guest，壳的 window 监听器收不到（实测：30 次点击只有 8 次到壳、30 次移动只有 2 次）。
+    // 所以先扫出壳区域内「非交互元素」的安全点（侧栏空白优先），在那里点 / 移。
+    const spotsRes = await safeExec("(function(){var out=[];function safe(el){if(!el)return false;if(!el.closest)return true;return !el.closest('button,a,input,textarea,select,label,summary,[role=button],[role=menuitem],[role=tab],[contenteditable],#titlebar,#dsh-view,webview,.more-menu,.drawer,#flow-panel,#side-float,.decision-float,.modal,.onboard');}function scan(rect,cols,rows,limit){if(!rect||rect.width<40||rect.height<40)return;for(var yi=0;yi<rows;yi++){for(var xi=0;xi<cols;xi++){var x=Math.round(rect.left+rect.width*(0.05+0.9*xi/Math.max(1,cols-1)));var y=Math.round(rect.top+rect.height*(0.05+0.9*yi/Math.max(1,rows-1)));var el=document.elementFromPoint(x,y);if(!safe(el))continue;out.push({x:x,y:y,node:el.id?('#'+el.id):String(el.className||el.tagName||'').slice(0,40)});if(out.length>=limit)return;}}}var sb=document.getElementById('sidebar');if(sb)scan(sb.getBoundingClientRect(),3,8,6);if(out.length<2)scan({left:0,top:0,width:window.innerWidth,height:window.innerHeight},10,7,6);var v=document.getElementById('dsh-view');var vr=v?v.getBoundingClientRect():null;return {spots:out,webview:vr?{left:Math.round(vr.left),top:Math.round(vr.top),width:Math.round(vr.width),height:Math.round(vr.height)}:{left:0,top:0,width:window.innerWidth,height:window.innerHeight}};})()", 'fx-spots');
+    const spotInfo = (spotsRes.ok && spotsRes.value) ? spotsRes.value : { spots: [], webview: { left: 0, top: 0, width: 0, height: 0 } };
+    let spots = Array.isArray(spotInfo.spots) ? spotInfo.spots.filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y)) : [];
+    const rect = spotInfo.webview || { left: 0, top: 0, width: 0, height: 0 };
+    let webviewNeutralized = false;
+    if (spots.length < 2) {
+      // 兜底：壳里找不到安全点（极端布局）时，临时让 webview 不接收指针事件，交互后立刻恢复。
+      const neutral = await safeExec("(function(){var v=document.getElementById('dsh-view');if(!v)return null;v.setAttribute('data-fx-pointer-backup',v.style.pointerEvents||'');v.style.pointerEvents='none';var r=v.getBoundingClientRect();return {left:Math.round(r.left),top:Math.round(r.top),width:Math.round(r.width),height:Math.round(r.height)};})()", 'fx-neutralize-webview');
+      webviewNeutralized = true;
+      const nr = (neutral.ok && neutral.value) ? neutral.value : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+      spots = [0.25, 0.5, 0.75].map((fxv, k) => ({
+        x: Math.round(nr.left + nr.width * fxv),
+        y: Math.round(nr.top + nr.height * (0.2 + 0.2 * k)),
+        node: '#dsh-view(neutralized)'
+      }));
+    }
+    const attemptsLog = [];
+    let sample = null;
+    let attempts = 0;
+    while (attempts < 2) {
+      attempts += 1;
+      const attemptStart = Date.now();
+      const preState = await ensureFxActive('attempt' + attempts);
+      const resetOk = await resetFxStats('fx-reset:' + attempts);
+      for (let i = 0; i < 30; i += 1) {
+        const spot = spots[i % spots.length];
+        try {
+          await fxSendMouse('mouseMoved', spot.x, spot.y, { button: 'none', buttons: 0 });
+          await fxSendMouse('mousePressed', spot.x, spot.y, { button: 'left', buttons: 1, clickCount: 1 });
+          await fxSendMouse('mouseReleased', spot.x, spot.y, { button: 'left', buttons: 0, clickCount: 1 });
+        } catch (error) {
+          errors.push({ note: 'fx-click:' + attempts + ':' + i, message: String((error && error.message) || error).slice(0, 160) });
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 45));
+      }
+      // 点击可能把焦点带到别的 frame（甚至 guest），移动前再恢复一次前台与 fx 活跃态
+      await ensureFxActive('move' + attempts);
+      const moveFrom = spots[0];
+      const moveTo = spots[spots.length - 1];
+      for (let i = 0; i < 30; i += 1) {
+        const t = (i % 10) / 9;   // 在两个安全点之间来回走，保证 30 次 move 都落在壳自己的区域
+        const x = Math.round(moveFrom.x + (moveTo.x - moveFrom.x) * t);
+        const y = Math.round(moveFrom.y + (moveTo.y - moveFrom.y) * t);
+        try { await fxSendMouse('mouseMoved', x, y, { button: 'none', buttons: 0 }); } catch (error) { break; }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      await new Promise((r) => setTimeout(r, 160));
+      sample = await readFxSample('fx-sample:' + attempts);
+      const focusRes = await safeExec("(function(){return {hasFocus:document.hasFocus(),hidden:document.hidden,visibility:document.visibilityState};})()", 'fx-focus:' + attempts);
+      attemptsLog.push({
+        attempt: attempts,
+        ms: Date.now() - attemptStart,
+        resetOk: Boolean(resetOk),
+        preState: preState || null,
+        focus: focusRes.ok ? focusRes.value : null,
+        clicks: sample ? sample.clicks.count : null,
+        moves: sample ? sample.move.count : null,
+        clickP95Ms: sample ? sample.clicks.p95Ms : null,
+        moveP95Ms: sample ? sample.move.p95Ms : null,
+        paused: sample ? sample.degrade.paused : null
+      });
+      if (sample && sample.clicks.count >= 30 && sample.move.count >= 30) break;
+    }
+    // AC14 起止：blur 后 200ms 内 [data-fx-move] 必须移除（走与真实失焦相同的监听器路径）
+    const blurRes = await safeExec("(async function(){window.dispatchEvent(new Event('blur'));await new Promise(function(r){setTimeout(r,180);});var n=document.querySelectorAll('#fx-layer [data-fx-move]').length;var el=document.querySelector('#fx-layer [data-fx-move]');var op=el?String(getComputedStyle(el).opacity):null;window.dispatchEvent(new Event('focus'));return {elements:n,opacity:op,hasFocus:document.hasFocus()};})()", 'fx-blur');
+    if (webviewNeutralized) {
+      await safeExec("(function(){var v=document.getElementById('dsh-view');if(!v)return false;var bak=v.getAttribute('data-fx-pointer-backup')||'';v.style.pointerEvents=bak;v.removeAttribute('data-fx-pointer-backup');return true;})()", 'fx-restore-webview');
+    }
+    const finalSample = await readFxSample('fx-sample-final');
+    if (finalSample) sample = finalSample;
+    await releaseForeground();
+    return {
+      clicks: sample ? sample.clicks.count : 0,
+      moves: sample ? sample.move.count : 0,
+      attempts: attempts,
+      attemptsLog: attemptsLog,
+      pauseLog: sample && sample.degrade ? (sample.degrade.pauseLog || []) : [],
+      overlays: overlays,
+      spots: spots.slice(0, 6),
+      rect: rect,
+      blur: blurRes.ok ? blurRes.value : null,
+      sample: sample,
+      sampleError: sample ? null : 'FX_SAMPLE_UNAVAILABLE'
+    };
+  };
+
+  // 逐条 AC 判据（阈值全部来自需求正文 AC13–AC16 与卷-2 §四/§六；这里不重算数值，只做比较）
+  const fxVerdict = (themeId, run) => {
+    const sample = run && run.sample;
+    if (!sample || sample.ok === false) return { ok: false, code: 'PROBE_UNAVAILABLE', themeId: themeId, sample: null };
+    const clicks = sample.clicks || {};
+    const move = sample.move || {};
+    const particles = sample.particles || {};
+    const hit = sample.hitTest || {};
+    const layer = hit.layer || {};
+    const perf = sample.perf || {};
+    const degrade = sample.degrade || {};
+    const level = String(degrade.level || 'full');
+    const degraded = Boolean(sample.fxDegraded && sample.fxDegraded.active);
+    // AC13/AC14 的「30 次」用**本次交互的计数增量**（run.clicks/run.moves），不用累计值
+    const ac13 = level === 'off' ? null : Boolean(
+      Number(run.clicks) >= 30 && clicks.p95Ms != null && clicks.p95Ms <= 120
+      && clicks.minDiameterPx != null && clicks.minDiameterPx >= 48
+      && clicks.maxBrightnessPct != null && clicks.maxBrightnessPct >= 10
+    );
+    const ac14 = level === 'full' ? Boolean(
+      Number(run.moves) >= 30 && move.p95Ms != null && move.p95Ms <= 80
+      && move.maxDistancePx != null && move.maxDistancePx <= 64
+      && run.blur && run.blur.elements === 0
+    ) : null;
+    // AC15（2026-11-17 Owner 追加口径，覆盖旧「大直径凑 3% 覆盖率」）：
+    //   数量按面积密度 150–190 颗/百万像素（1920×1080 ≈ 311–394 颗）、单颗直径 2–3px、
+    //   颜色与透明度要有区分（distinctColors>1、opacity∈[0.2,0.45]）、粒子与背景亮度差 ≥15。
+    //   旧「可见像素占比 ≥3%」由 PM 改卷 —— 本自检只报数（pixelRatioPct / centerCells）不判。
+    const density = particles.densityPerMpx == null ? null : Number(particles.densityPerMpx);
+    const opacity = Array.isArray(particles.opacityRange) ? particles.opacityRange : [null, null];
+    const densityOk = density != null && density >= 145 && density <= 195;
+    const ac15 = (level === 'full' && !degraded) ? Boolean(
+      particles.count >= 120
+      && particles.minDiameterPx >= 2 && particles.maxDiameterPx <= 3.2
+      && particles.distinctColors > 1
+      && opacity[0] >= 0.15 && opacity[1] <= 0.5
+      && particles.maxBrightnessDelta >= 15
+      && densityOk
+    ) : null;
+    const ac16 = Boolean(
+      layer.parentIsBody === true && layer.position === 'fixed'
+      && Number(layer.zIndexNumeric) === 9600 && Number(layer.zIndexNumeric) > Number(layer.dshViewZIndexNumeric)
+      && Array.isArray(layer.isolationChain) && layer.isolationChain.length === 0
+      && hit.hitCount >= 23 && hit.pointerEventsAfter === 'none'
+    );
+    const ac6Raw = Boolean(
+      perf.fps != null && perf.fps >= 55 && perf.p95FrameMs != null && perf.p95FrameMs <= 18
+      && perf.dropRate != null && perf.dropRate < 2 && perf.memMB != null && perf.memMB <= 2048
+    );
+    const ac6 = degraded ? null : ac6Raw;
+    // Owner 2026-11-17 第二轮追加口径：点击涟漪 48–56px 且实测 minDiameterPx ≥48；
+    // 移动光晕 24–30px、透明度 0.15–0.25（都不许靠 blur / box-shadow 撑视觉尺寸）。
+    const clickSize = Number(clicks.sizePx);
+    const moveSize = Number(move.sizePx);
+    const moveOpacity = Array.isArray(move.configuredOpacityRange) ? move.configuredOpacityRange : [null, null];
+    const clickOpacity = Array.isArray(clicks.opacityRange) ? clicks.opacityRange : [null, null];
+    const styleOk = level === 'off' ? null : Boolean(
+      clickSize >= 48 && clickSize <= 56
+      && clicks.minDiameterPx != null && clicks.minDiameterPx >= 48
+      && clickOpacity[0] >= 0.3 && clickOpacity[1] <= 0.95
+      && (level !== 'full' || (moveSize >= 24 && moveSize <= 30 && moveOpacity[0] >= 0.1 && moveOpacity[1] <= 0.3))
+    );
+    const ok = ac13 !== false && ac14 !== false && ac15 !== false && ac16 === true && ac6 !== false && styleOk !== false;
+    return {
+      ok: ok, code: ok ? 'OK' : 'AC_NOT_MET', themeId: themeId, level: level, degraded: degraded,
+      ac13: ac13, ac14: ac14, ac15: ac15, ac16: ac16, ac6: ac6, ac6Raw: ac6Raw, styleOk: styleOk,
+      numbers: {
+        clickCount: run.clicks, clickP95Ms: clicks.p95Ms, clickSizePx: clicks.sizePx, clickSizeRangePx: clicks.sizeRangePx, clickMinDiameterPx: clicks.minDiameterPx, clickOpacityRange: clicks.opacityRange, clickMaxBrightnessPct: clicks.maxBrightnessPct,
+        moveCount: run.moves, moveP95Ms: move.p95Ms, moveSizePx: move.sizePx, moveSizeRangePx: move.sizeRangePx, moveOpacityRange: move.configuredOpacityRange, moveMaxDistancePx: move.maxDistancePx,
+        particleCount: particles.count, particleMinDiameterPx: particles.minDiameterPx,
+        particleMaxDiameterPx: particles.maxDiameterPx, particleDensityPerMpx: particles.densityPerMpx,
+        particleDistinctColors: particles.distinctColors, particleOpacityRange: particles.opacityRange,
+        particleColorSource: particles.colorSource, particleMaxBrightnessDelta: particles.maxBrightnessDelta,
+        particlePixelRatioPct: particles.pixelRatioPct,
+        centerCells: particles.centerCells, hitCount: hit.hitCount, hitRatio: hit.ratio,
+        pointerEventsAfter: hit.pointerEventsAfter, fps: perf.fps, p95FrameMs: perf.p95FrameMs,
+        dropRate: perf.dropRate, memMB: perf.memMB
+      },
+      // 旧口径数字（卷改前的「可见像素占比 ≥3% / 中心 ≥8 格」）只报不判，供按新口径复算
+      legacy: { particlePixelRatioPct: particles.pixelRatioPct, centerCells: particles.centerCells },
+      sample: sample
+    };
+  };
   // dc6f 取证：真实点「更多 → 外观」，分步记录状态（先复位到关闭态，避免上一步残留）。
   const menuProbe = { tried: true, steps: [] };
   try {
@@ -10918,19 +11147,36 @@ async function runThemeShots() {
   for (const id of ids) {
     const clicked = await clickTheme(id);
     await new Promise((r) => setTimeout(r, 1600)); // 过渡动画结束再采样/截图
-    const state = await win.webContents.executeJavaScript('window.__themeState ? window.__themeState() : null', true);
-    const look = await win.webContents.executeJavaScript('window.__themeLook ? window.__themeLook() : null', true);
-    const fx = await win.webContents.executeJavaScript('window.__themeFx ? window.__themeFx() : null', true);
-    const probe = await win.webContents.executeJavaScript('window.__themeProbe ? window.__themeProbe(3000) : null', true);
+    // F7 起这几项都用 safeExec：渲染层返回不可序列化对象时，错误进 errors[] 而不是整轮自检中断。
+    const stateRes = await safeExec('window.__themeState ? window.__themeState() : null', 'state:' + id);
+    const state = stateRes.ok ? stateRes.value : null;
+    const lookRes = await safeExec('window.__themeLook ? window.__themeLook() : null', 'look:' + id);
+    const look = lookRes.ok ? lookRes.value : null;
+    const fxRes = await safeExec('window.__themeFx ? window.__themeFx() : null', 'fx:' + id);
+    const fx = fxRes.ok ? fxRes.value : null;
+    const probeRes = await safeExec('window.__themeProbe ? window.__themeProbe(3000) : null', 'probe:' + id);
+    const probe = probeRes.ok ? probeRes.value : null;
+    const fxRun = await runFxInteraction();
+    const fxResult = fxVerdict(id, fxRun);
+    try {
+      fs.writeFileSync(path.join(outDir, 'fx-' + id + '.json'), JSON.stringify({
+        themeId: id, verdict: fxResult, sample: fxRun.sample, blur: fxRun.blur,
+        clicks: fxRun.clicks, moves: fxRun.moves, attempts: fxRun.attempts,
+        attemptsLog: fxRun.attemptsLog, pauseLog: fxRun.pauseLog, spots: fxRun.spots, overlays: fxRun.overlays,
+        rect: fxRun.rect, at: new Date().toISOString()
+      }, null, 2));
+    } catch (error) {
+      errors.push({ note: 'fx-json:' + id, message: String((error && error.message) || error).slice(0, 160) });
+    }
     const { pngPath, pngBuf, pngSize } = await shoot(id);
-    const perfPayload = { themeId: id, clicked, window: windowInfo, pngSize, pngBytes: pngBuf.length, state, look, fx, probe, at: new Date().toISOString() };
+    const perfPayload = { themeId: id, clicked, window: windowInfo, pngSize, pngBytes: pngBuf.length, state, look, fx, probe, fxResult, fxRun: { clicks: fxRun.clicks, moves: fxRun.moves, blur: fxRun.blur }, at: new Date().toISOString() };
     const perfPath = path.join(outDir, 'perf-' + id + '.json');
     fs.writeFileSync(perfPath, JSON.stringify(perfPayload, null, 2));
     shots.push({ id, png: pngPath, perf: perfPath, bytes: pngBuf.length, pngSize });
-    results.push({ themeId: id, clicked, state, look, fx, pngSize });
+    results.push({ themeId: id, clicked, state, look, fx, pngSize, fxResult });
   }
   // 特效开/关对比（只做 tech-dark）：证明网格+粒子真在跑、effectLevel=off 真关断。
-  const fxProbe = "(function(){var d=document.documentElement;var b=getComputedStyle(document.body,'::before');var c=document.getElementById('awb-theme-particles');var tb=document.getElementById('titlebar');var blur=tb?String(getComputedStyle(tb).backdropFilter||getComputedStyle(tb).webkitBackdropFilter||'none'):'none';return {effectLevel:d.getAttribute('data-effect-level')||'full',gridAnimation:String(b.animationName||''),gridSize:String(b.backgroundSize||''),particles:!!c,particleCanvasSize:c?(c.width+'x'+c.height):'',titlebarBlur:blur};})()";
+  const fxProbe = "(function(){var d=document.documentElement;var b=getComputedStyle(document.body,'::before');var c=document.getElementById('awb-theme-particles');var cd=c?getComputedStyle(c).display:'none';var tb=document.getElementById('titlebar');var blur=tb?String(getComputedStyle(tb).backdropFilter||getComputedStyle(tb).webkitBackdropFilter||'none'):'none';return {effectLevel:d.getAttribute('data-effect-level')||'full',gridAnimation:String(b.animationName||''),gridSize:String(b.backgroundSize||''),particles:!!c&&cd!=='none',particleCanvasSize:c?(c.width+'x'+c.height):'',titlebarBlur:blur};})()";
   await clickTheme('tech-dark');
   await new Promise((r) => setTimeout(r, 1500));
   const fxOn = await win.webContents.executeJavaScript(fxProbe, true);
@@ -10958,18 +11204,86 @@ async function runThemeShots() {
     ok: fxOk
   };
   fs.writeFileSync(path.join(outDir, 'effects-compare.json'), JSON.stringify(effects, null, 2));
+
+  // ── R-fe90 F7 三层降级实测（卷-2 §六）：每档给 degrade.level / reasons + 主题名与可切性 +
+  //    玻璃拟态 backdrop-filter 计算值（降级态必须 none）。系统 reduced-motion 用 CDP 模拟媒体。
+  const degradeCases = [];
+  const setEffectLevel = async (level) => {
+    const lit = JSON.stringify(String(level));
+    await safeExec("(function(){var d=document.documentElement;var v=" + lit + ";if(v===''){d.removeAttribute('data-effect-level');}else{d.setAttribute('data-effect-level',v);}return d.getAttribute('data-effect-level');})()", 'fx-effect-level');
+    await clickTheme('glass-dark');
+    await new Promise((r) => setTimeout(r, 900));
+  };
+  const readDegrade = async (name) => {
+    const js = "(function(){var st=window.__themeState?window.__themeState():null;var s=st&&st.fx&&typeof st.fx.sample==='function'?st.fx.sample():null;var items=document.querySelectorAll('#more-menu [data-theme-menu] [data-theme-id]');var tb=document.getElementById('titlebar');var blur=tb?String(getComputedStyle(tb).backdropFilter||getComputedStyle(tb).webkitBackdropFilter||'none'):'none';var layer=document.getElementById('fx-layer');return {fx:s,menuItems:items.length,themeId:st?st.themeId:'',effectLevelAttr:st?st.effectLevel:'',fxModeAttr:layer?layer.getAttribute('data-fx-mode'):null,glassBackdrop:blur};})()";
+    const res = await safeExec(js, 'fx-degrade:' + name);
+    return res.ok ? res.value : { error: String(res.message || '') };
+  };
+  const switchAllThemes = async () => {
+    let switched = 0;
+    for (const id of ids) {
+      if (await clickTheme(id)) switched += 1;
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    const back = await clickTheme('glass-dark');
+    await new Promise((r) => setTimeout(r, 300));
+    return { switched: switched, back: back };
+  };
+  try {
+    await setEffectLevel('reduced');
+    degradeCases.push({ name: 'effectLevel=reduced', expect: 'reduced', state: await readDegrade('reduced'), switchability: await switchAllThemes() });
+    await setEffectLevel('off');
+    degradeCases.push({ name: 'effectLevel=off', expect: 'off', state: await readDegrade('off'), switchability: await switchAllThemes() });
+    try { await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] }); } catch (error) { errors.push({ note: 'fx-emulate-media', message: String((error && error.message) || error).slice(0, 160) }); }
+    await setEffectLevel('');
+    degradeCases.push({ name: 'prefers-reduced-motion=reduce', expect: 'reduced', state: await readDegrade('reduced-motion'), switchability: await switchAllThemes() });
+    try { await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] }); } catch (error) { errors.push({ note: 'fx-emulate-media-reset', message: String((error && error.message) || error).slice(0, 160) }); }
+    await clickTheme('tech-dark');
+    await new Promise((r) => setTimeout(r, 600));
+  } catch (error) {
+    errors.push({ note: 'fx-degrade', message: String((error && error.message) || error).slice(0, 200) });
+  }
+  const degradeVerdict = degradeCases.map((row) => {
+    const state = row.state || {};
+    const fx = state.fx || {};
+    const degrade = fx.degrade || {};
+    const clicks = fx.clicks || {};
+    const glassOpaque = String(state.glassBackdrop || 'none') === 'none';
+    const themeStillFive = state.menuItems === 5;
+    const switchOk = Boolean(row.switchability && row.switchability.switched === 5 && row.switchability.back === true);
+    return {
+      name: row.name,
+      expectLevel: row.expect,
+      level: degrade.level || null,
+      reasons: degrade.reasons || [],
+      fxModeAttr: state.fxModeAttr,
+      effectLevelAttr: state.effectLevelAttr,
+      glassBackdrop: state.glassBackdrop,
+      menuItems: state.menuItems,
+      themeId: state.themeId,
+      clickCount: clicks.count,
+      switchability: row.switchability,
+      ok: degrade.level === row.expect && Array.isArray(degrade.reasons) && degrade.reasons.length > 0
+        && glassOpaque && themeStillFive && switchOk
+    };
+  });
   try { win.webContents.debugger.detach(); } catch { /* ignore */ }
   const hashes = shots.map((s) => crypto2.createHash('sha256').update(fs.readFileSync(s.png)).digest('hex'));
   const unique = new Set(hashes).size;
   const sizes = [...new Set(shots.map((s) => s.pngSize.width + 'x' + s.pngSize.height))];
+  const fxVerdicts = results.map((r) => r.fxResult);
+  const fxAllOk = fxVerdicts.length === ids.length && fxVerdicts.every((v) => Boolean(v && v.ok === true));
+  const degradeOk = degradeVerdict.length === 3 && degradeVerdict.every((v) => v.ok === true);
   const ok = unique === ids.length
     && sizes.length === 1
     && results.every((r) => r.state && r.state.themeId === r.themeId && r.clicked === true)
-    && effects.ok;
-  const report = { ok, outDir, requestedSize: shotWidth + 'x' + shotHeight, window: windowInfo, uniqueScreenshots: unique, sizes, expected: ids.length, effects, errors, menuProbe, uiPerfSmoke, shots, results, at: new Date().toISOString() };
+    && effects.ok
+    && fxAllOk
+    && degradeOk;
+  const report = { ok, outDir, requestedSize: shotWidth + 'x' + shotHeight, window: windowInfo, uniqueScreenshots: unique, sizes, expected: ids.length, effects, fx: { ok: fxAllOk, degradeOk: degradeOk, verdicts: fxVerdicts, degradeCases: degradeVerdict }, errors, menuProbe, uiPerfSmoke, shots, results, at: new Date().toISOString() };
   fs.writeFileSync(path.join(outDir, 'theme-shots.json'), JSON.stringify(report, null, 2));
   console.log('THEME_SHOTS_REPORT ' + path.join(outDir, 'theme-shots.json'));
-  console.log(JSON.stringify({ ok, sizes, unique, requested: report.requestedSize, effectsOk: effects.ok, outDir }, null, 2));
+  console.log(JSON.stringify({ ok, sizes, unique, requested: report.requestedSize, effectsOk: effects.ok, fxAllOk: fxAllOk, degradeOk: degradeOk, outDir }, null, 2));
   console.log(ok ? 'THEME_SHOTS_OK' : 'THEME_SHOTS_FAIL');
   exitWithAudit(ok ? 0 : 1);
 }
