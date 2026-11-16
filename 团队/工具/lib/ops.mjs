@@ -6050,6 +6050,11 @@ export async function cmdOwner(args) {
     acceptDefectTask(args, { project, projectName, task, decision, opinion, proxyMode });
     return;
   }
+  // B-20261116-105213-bd22：需求验收只能 Owner 本人——代管通道（--proxy-recorded-by pm）一律拒，
+  // 这里是第二道保险：即使有别的调用点注入了 proxy 标记，也走不到写盘。
+  if (proxyMode && actionRaw === 'accept') {
+    fail('PROXY_ACCEPT_FORBIDDEN', '需求验收只能 Owner 本人：代管不得代需求验收（缺陷单验收走 task accept）', { requirementId });
+  }
   const read = readWorkflowState(projectName);
   let row = read.state.requirements[requirementId];
   if (row && OWNER_TERMINAL.has(String(row.status || ''))) {
@@ -6638,31 +6643,18 @@ export async function cmdOwnerProxyDecide(args) {
   if (!requirementId) fail('BAD_ARGS', '需要 --requirement R-...');
   const decision = String(args.decision || '').trim().toLowerCase();
   const actionRaw = String(args.action || '').trim().toLowerCase();
-  // T-3422：代管可以代「验收通过」（--action accept + decision=accepted），但打回/迭代/终止仍必须 Owner 本人。
-  // 证据校验不在这里做：统一交给 cmdOwner 的 proxyMode 分支（pm-accept-evidence.mjs，写盘前校验、缺项零副作用）。
+  // Owner 2026-11-16 10:52 裁定（B-20261116-105213-bd22）：**代管也不许代需求验收**，需求必须 Owner 本人验收。
+  // 代管仍可代记评审决定（approved/rejected/skipped）——见下方分支；缺陷单验收不受影响（走 task accept --as pm|tester）。
   if (actionRaw === 'accept' || decision === 'accepted') {
-    if (decision !== 'accepted') {
-      fail('PROXY_ACCEPT_FORBIDDEN', '代管只能代验收通过（accepted）；打回/迭代/终止必须 Owner 本人执行', { decision });
-    }
-    if (args.opinion === undefined || args.opinion === null) {
-      fail('OPINION_REQUIRED', '需要 --opinion "PM 代记依据/说明"（可以为空字符串，但必须显式给出）');
-    }
-    const acceptProxy = activeProxyFor(projectName, requirementId);
-    if (!acceptProxy) {
-      // R-7849 ⑤：结束代管（或过期）后再代验收 → PROXY_ACCEPT_FORBIDDEN（不是 UNAUTHORIZED）。
-      fail('PROXY_ACCEPT_FORBIDDEN', `需求 ${requirementId} 当前没有可用的代管授权（已结束或未开启），不能代验收；请 Owner 本人验收或重新开启代管`, { project: projectName, requirementId });
-    }
-    if (!String(acceptProxy.authorization || '').trim()) {
-      fail('PROXY_UNAUTHORIZED', '代管记录缺少 Owner 授权来源（authorization），不能代落账', { requirementId, proxy: acceptProxy });
-    }
-    await cmdOwner({ ...args, _: ['owner'], action: 'accept', 'proxy-recorded-by': 'pm' });
-    return;
+    fail('PROXY_ACCEPT_FORBIDDEN', '需求验收只能 Owner 本人：代管不得代需求验收（评审决定仍可代记；缺陷单验收走 task accept）', {
+      project: projectName, requirementId, decision,
+    });
   }
   if (actionRaw === 'iterate' || actionRaw === 'terminate' || decision === 'iterate' || decision === 'terminated') {
-    fail('PROXY_ACCEPT_FORBIDDEN', '代管只能代记评审决定（approved/rejected/skipped）与验收通过（accepted）；打回/迭代/终止必须 Owner 本人执行');
+    fail('PROXY_ACCEPT_FORBIDDEN', '代管只能代记评审决定（approved/rejected/skipped）；打回/迭代/终止/验收必须 Owner 本人执行');
   }
   if (!['approved', 'rejected', 'skipped'].includes(decision)) {
-    fail('OWNER_DECISION_INVALID', 'PM 代管落账支持 approved / rejected / skipped，以及验收 accepted（配 --action accept + --evidence）', { decision });
+    fail('OWNER_DECISION_INVALID', 'PM 代管落账只支持 approved / rejected / skipped（需求验收与打回/迭代/终止必须 Owner 本人）', { decision });
   }
   if (args.opinion === undefined || args.opinion === null) {
     fail('OPINION_REQUIRED', '需要 --opinion "PM 代记依据/说明"（可以为空字符串，但必须显式给出）');

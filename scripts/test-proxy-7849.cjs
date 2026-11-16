@@ -23,8 +23,14 @@ function check(name, ok, detail) {
   if (!ok) process.exitCode = 1;
 }
 function run(args, { allowFail = false, extraEnv = {} } = {}) {
+  // lessons 门禁与本测试无关（它查的是「PM 是否读过登记册」，不是代管语义），且沙盘里阅读台账与复制来的
+  // 状态容易对不上；用 --channel ui 走 Owner 通道豁免，避免 LESSONS_UNREAD 掩盖真正的代管断言。
+  const finalArgs = (
+    ((args[0] === 'owner' && args[1] === 'proxy' && args[2] === 'decide') || (args[0] === 'req' && args[1] === 'review'))
+    && !args.includes('--channel')
+  ) ? [...args, '--channel', 'ui'] : args;
   try {
-    const out = execFileSync(process.execPath, [TEAM_TOOL, ...args], { cwd: SB, env: { ...env, ...extraEnv }, encoding: 'utf8' });
+    const out = execFileSync(process.execPath, [TEAM_TOOL, ...finalArgs], { cwd: SB, env: { ...env, ...extraEnv }, encoding: 'utf8' });
     const text = String(out).trim();
     return JSON.parse(text.slice(text.indexOf('{')));
   } catch (e) {
@@ -43,7 +49,22 @@ const addRes = run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', 
 const projectPath = addRes.project.path;
 const pm = run(['boot', '--role', 'pm', '--project', PROJECT, '--session', 'sbx-pm', '--json']);
 const stateDir = path.join(TEAM_ROOT, '状态', '项目', PROJECT);
+// B-20261116-105213-bd22：沙盘补齐经验教训登记册（lessons 门禁在 owner proxy decide 首行会查，缺失报 LESSONS_FILE_MISSING）
+const lessonsFile = path.join(projectPath, '经验教训登记册.md');
+if (!fs.existsSync(lessonsFile)) {
+  fs.mkdirSync(path.dirname(lessonsFile), { recursive: true });
+  fs.writeFileSync(lessonsFile, '# 经验教训登记册（沙盘）\n\n## 程序员B\n\n| 日期 | 场景 | 教训 | 下次怎么做 |\n|---|---|---|---|\n', 'utf8');
+}
 const workflowFile = path.join(stateDir, '工作流.json');
+// lessons 门禁：直接把「PM 已读当前版本」写进阅读台账（比跑 lessons read 更确定——
+// 复制来的 团队/状态 里带着旧 sha 记录，而 lessons read 依赖 PATHS.teamRoot 与当前文件一致）
+{
+  const lessonsSha = crypto.createHash('sha256').update(fs.readFileSync(lessonsFile)).digest('hex');
+  const readLog = path.join(TEAM_ROOT, '状态', '经验教训阅读.jsonl');
+  fs.mkdirSync(path.dirname(readLog), { recursive: true });
+  const row = { at: new Date().toISOString(), role: 'pm', sessionId: 'sbx-pm', fileSha: lessonsSha, entries: 0, source: 'sandbox-seed' };
+  fs.appendFileSync(readLog, JSON.stringify(row) + '\n', 'utf8');
+}
 const taskDir = path.join(stateDir, '任务');
 const mk = (title) => run(['req', 'create', '--boot', pm.token, '--project', PROJECT, '--title', title, '--priority', 'P0', '--acceptance', 'AC1', '--json']).requirement.id;
 const idA = mk('代管需求A');
@@ -109,11 +130,10 @@ const expiredAt = new Date(Date.parse(start1.record.expiresAt) + 1000).toISOStri
 const expired = run(['owner', 'proxy', 'decide', '--project', PROJECT, '--requirement', idB, '--decision', 'approved', '--opinion', '代记', '--json'], { allowFail: true, extraEnv: { TEAM_PROXY_NOW: expiredAt } });
 check('④ 过期后落账 → PROXY_EXPIRED', expired.ok === false && expired.code === 'PROXY_EXPIRED', expired);
 
-// ② 四门槛：无证据 → report/screenshot 缺失
+// ② 四门槛：B-bd22 之后「代管不得代需求验收」先于证据门生效——四门槛齐/不齐都吃同一个拒绝码
 const noEvidence = run(['owner', 'proxy', 'decide', '--project', PROJECT, '--requirement', idA, '--decision', 'accepted', '--action', 'accept', '--opinion', '代验收', '--json'], { allowFail: true });
-check('② 无证据代验收 → PM_ACCEPT_EVIDENCE_REQUIRED', noEvidence.ok === false && noEvidence.code === 'PM_ACCEPT_EVIDENCE_REQUIRED', noEvidence);
-const missKinds = ((noEvidence.details && noEvidence.details.missing) || []).map((m) => m.kind);
-check('② missing 含 report 与 screenshot', missKinds.includes('report') && missKinds.includes('screenshot'), missKinds);
+check('② 代需求验收一律拒（PROXY_ACCEPT_FORBIDDEN）', noEvidence.ok === false && noEvidence.code === 'PROXY_ACCEPT_FORBIDDEN', noEvidence);
+check('② 拒绝文案写明「需求验收只能 Owner 本人」', String(noEvidence.message || '').includes('需求验收只能 Owner 本人'), noEvidence.message);
 
 // ②b trq/status 门槛（函数级：直接喂 validateAcceptGates）
 const { validateAcceptGates } = require(path.join(ROOT, '团队', '工具', 'lib', 'pm-accept-evidence.mjs'));
@@ -126,24 +146,31 @@ const outside = path.join(ROOT, '_tmp', 'outside-7849', 'x.png');
 fs.mkdirSync(path.dirname(outside), { recursive: true });
 fs.writeFileSync(outside, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 const outRes = run(['owner', 'proxy', 'decide', '--project', PROJECT, '--requirement', idA, '--decision', 'accepted', '--action', 'accept', '--evidence', `${outside}:screenshot`, '--opinion', '代验收', '--json'], { allowFail: true });
-check('③ 项目外路径 → EVIDENCE_OUTSIDE_PROJECT', outRes.ok === false && outRes.code === 'EVIDENCE_OUTSIDE_PROJECT', { code: outRes.code });
+check('③ 项目外路径：验收前就已拒（PROXY_ACCEPT_FORBIDDEN，不再进证据门）', outRes.ok === false && outRes.code === 'PROXY_ACCEPT_FORBIDDEN', { code: outRes.code });
 
-// ⑥ 正常代验收（四门槛齐）
+// ⑥ B-20261116-105213-bd22（Owner 2026-11-16 10:52 裁定）：**代管也不许代需求验收**——
+//    四门槛证据齐也必须 PROXY_ACCEPT_FORBIDDEN、零写入；评审决定代记仍可用（见下方 ⑦）。
 const okAccept = run(['owner', 'proxy', 'decide', '--project', PROJECT, '--requirement', idA, '--decision', 'accepted', '--action', 'accept',
   '--evidence', `${path.relative(projectPath, reportFile)}:report`, '--evidence', `${path.relative(projectPath, shotFile)}:screenshot`, '--opinion', '代验收通过', '--json'], { allowFail: true });
-check('⑥ 四门槛齐 → 代验收通过', okAccept.ok === true, okAccept);
+check('⑥ 四门槛齐也必须拒：代管不得代需求验收', okAccept.ok === false && okAccept.code === 'PROXY_ACCEPT_FORBIDDEN', { code: okAccept.code });
 const wfAfter = JSON.parse(fs.readFileSync(workflowFile, 'utf8'));
 const rowA = wfAfter.requirements[idA] || {};
 const taskA = JSON.parse(fs.readFileSync(path.join(taskDir, `${idA}.json`), 'utf8'));
 const acceptance = rowA.acceptanceRecord || (taskA.workflow && taskA.workflow.acceptanceRecord) || null;
-check('⑥ acceptanceRecord.by=pm 且 channel=proxy（不是 owner）', Boolean(acceptance) && acceptance.by === 'pm' && acceptance.channel === 'proxy', acceptance);
-check('⑥ basis.proxy 带 scope/startedAt/authorization', Boolean(acceptance && acceptance.basis && acceptance.basis.proxy && acceptance.basis.proxy.authorization), acceptance && acceptance.basis);
+check('⑥ 零写入：没有 acceptanceRecord、status 没被推成 accepted', !acceptance && String(rowA.status) !== 'accepted', { acceptance: Boolean(acceptance), status: rowA.status });
 const proxyState = JSON.parse(fs.readFileSync(path.join(stateDir, '评审代管.json'), 'utf8'));
 const endedRecords = proxyState.records.filter((row) => row.endedAt && row.endedBy === 'system' && row.endedReason === 'requirement_closed');
-check('⑥ 需求收口 → 自动结束代管', endedRecords.length >= 1, endedRecords.length);
+check('⑥ 未收口 → 代管不被自动结束', endedRecords.length === 0, endedRecords.length);
 
-// ⑤ 结束代管后代验收 → PROXY_ACCEPT_FORBIDDEN；已落账 sha 不变
-const before = sha({ acceptanceRecord: acceptance, decisions: rowA.decisions || taskA.workflow.decisions || [] });
+// ⑦ 代管仍可代记评审决定（approved）——这条不能被 ⑥ 连带打死
+const reviewDecide = run(['owner', 'proxy', 'decide', '--project', PROJECT, '--requirement', idA, '--decision', 'approved', '--opinion', '代记通过', '--json'], { allowFail: true });
+check('⑦ 代管代记评审决定仍可用', reviewDecide.ok === true, { code: reviewDecide.code, ok: reviewDecide.ok });
+
+// ⑤ 结束代管后代验收 → PROXY_ACCEPT_FORBIDDEN；已落账不被回溯（B-bd22 后「代验收」不落账，
+//    所以这里改为断言「结束代管前后验收记录与决定链都没被改动」——⑦ 刚代记的那条 approved 也必须原样在）
+const wfBeforeEnd = JSON.parse(fs.readFileSync(workflowFile, 'utf8'));
+const rowBeforeEnd = wfBeforeEnd.requirements[idA] || {};
+const before = sha({ acceptanceRecord: rowBeforeEnd.acceptanceRecord || null, decisions: rowBeforeEnd.decisions || [] });
 run(['owner', 'proxy', 'end', '--project', PROJECT, '--json'], { allowFail: true });
 const afterEnd = run(['owner', 'proxy', 'decide', '--project', PROJECT, '--requirement', idA, '--decision', 'accepted', '--action', 'accept', '--evidence', `${path.relative(projectPath, reportFile)}:report`, '--opinion', '再验收', '--json'], { allowFail: true });
 check('⑤ 结束后代验收 → PROXY_ACCEPT_FORBIDDEN', afterEnd.ok === false && afterEnd.code === 'PROXY_ACCEPT_FORBIDDEN', afterEnd.code);
@@ -151,7 +178,7 @@ const wfEnd = JSON.parse(fs.readFileSync(workflowFile, 'utf8'));
 const rowEnd = wfEnd.requirements[idA] || {};
 const taskEnd = JSON.parse(fs.readFileSync(path.join(taskDir, `${idA}.json`), 'utf8'));
 const acceptanceEnd = rowEnd.acceptanceRecord || (taskEnd.workflow && taskEnd.workflow.acceptanceRecord) || null;
-check('⑤ 结束代管不回溯已落账（sha 不变）', sha({ acceptanceRecord: acceptanceEnd, decisions: rowEnd.decisions || taskEnd.workflow.decisions || [] }) === before, '');
+check('⑤ 结束代管不回溯已落账（记录与决定链 sha 不变）', sha({ acceptanceRecord: acceptanceEnd || null, decisions: rowEnd.decisions || taskEnd.workflow.decisions || [] }) === before, { end: sha({ acceptanceRecord: acceptanceEnd || null, decisions: rowEnd.decisions || [] }), before });
 
 const passed = results.filter((r) => r.ok).length;
 const failed = results.filter((r) => !r.ok).length;

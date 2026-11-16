@@ -2717,23 +2717,27 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       if (!String(t3422Miss.stdout + t3422Miss.stderr).includes('PM_ACCEPT_EVIDENCE_REQUIRED')) failStep('T-3422 缺证据未被拒', String(t3422Miss.stdout + t3422Miss.stderr).slice(0, 240));
       const after3422 = JSON.parse(read(wfFile3422)).requirements[t3422Id];
       if (String(after3422.status) !== String(before3422.status) || JSON.stringify(after3422.ownerReview || null) !== JSON.stringify(before3422.ownerReview || null)) failStep('T-3422 缺证据被拒却有副作用', JSON.stringify({ before: before3422.status, after: after3422.status }).slice(0, 200));
-      // ③ 全证据（报告 + 截图）→ accepted，落 channel=proxy/actor=pm/evidence 2
+      // ③ B-20261116-105213-bd22（Owner 2026-11-16 10:52 裁定）：**代管也不许代需求验收**——
+      //    即使四门槛证据齐全，也一律 PROXY_ACCEPT_FORBIDDEN 且零写入（需求验收只能 Owner 本人）。
       const evDir3422 = path.join(projectsRoot, '试点', '测试人员', '产出');
       fs.mkdirSync(evDir3422, { recursive: true });
       write(path.join(evDir3422, 'T-3422-测试报告.md'), '# T-3422 测试报告\n\n- 结果：PASS\n- 日期：2026-11-14\n');
       fs.writeFileSync(path.join(evDir3422, 'T-3422-截图.png'), Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('t3422-png-body')]));
       const ev3422 = JSON.stringify([{ path: '测试人员/产出/T-3422-测试报告.md', kind: 'report' }, { path: '测试人员/产出/T-3422-截图.png', kind: 'screenshot' }]);
-      const t3422Ok = json(['owner', 'proxy', 'decide', '--project', '试点', '--requirement', t3422Id, '--decision', 'accepted', '--action', 'accept', '--evidence', ev3422, '--opinion', 'T-3422 代验收', '--json']);
-      if (!t3422Ok.ok) failStep('T-3422 代验收正例失败', JSON.stringify(t3422Ok).slice(0, 240));
+      const t3422Accept = run(['owner', 'proxy', 'decide', '--project', '试点', '--requirement', t3422Id, '--decision', 'accepted', '--action', 'accept', '--evidence', ev3422, '--opinion', 'T-3422 代验收', '--json'], { expectFail: true });
+      const t3422AcceptText = String(t3422Accept.stdout + t3422Accept.stderr);
+      if (!t3422AcceptText.includes('PROXY_ACCEPT_FORBIDDEN') || !t3422AcceptText.includes('需求验收只能 Owner 本人')) {
+        failStep('T-3422 代管需求验收未被拒（或码/文案不对）', t3422AcceptText.slice(0, 240));
+      }
       const row3422 = JSON.parse(read(wfFile3422)).requirements[t3422Id];
-      const last3422 = (row3422.decisions || []).slice(-1)[0] || {};
-      if (String(row3422.status) !== 'accepted' || last3422.channel !== 'proxy' || last3422.actor !== 'pm') failStep('T-3422 代验收落账不对', JSON.stringify({ status: row3422.status, last: last3422 }).slice(0, 240));
-      if (!Array.isArray(last3422.evidence) || last3422.evidence.length !== 2) failStep('T-3422 证据未落账', JSON.stringify(last3422.evidence).slice(0, 200));
+      if (String(row3422.status) === 'accepted' || (row3422.decisions || []).some((row) => String(row.channel || '') === 'proxy')) {
+        failStep('T-3422 代管理应零写入（却落了验收）', JSON.stringify({ status: row3422.status, decisions: (row3422.decisions || []).length }).slice(0, 200));
+      }
       // ④ 打回仍必须 Owner 本人（代管只能代“验收通过”）
       const t3422Reject = run(['owner', 'proxy', 'decide', '--project', '试点', '--requirement', t3422Id, '--decision', 'rejected', '--action', 'accept', '--opinion', 'T-3422 打回', '--json'], { expectFail: true });
       if (!String(t3422Reject.stdout + t3422Reject.stderr).includes('PROXY_ACCEPT_FORBIDDEN')) failStep('T-3422 代管打回未被拒', String(t3422Reject.stdout + t3422Reject.stderr).slice(0, 240));
       json(['owner', 'proxy', 'end', '--project', '试点', '--json']);
-      pass('T-3422：CLI 代验收入口（无代管拒 / 缺证据零副作用拒 / 全证据 accepted / 打回仍 Owner）');
+      pass('T-3422：需求验收只能 Owner 本人（无代管拒 / 缺证据拒 / 全证据也拒且零写入 / 打回仍拒）');
     }
 
     // ===== R-9db6：Owner 决策箱（工具侧，AC1-AC9 可测部分）=====

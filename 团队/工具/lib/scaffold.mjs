@@ -158,7 +158,7 @@ function pmDecisionSection() {
     '- 只放非评审类拍板；**评审走评审列表，验收走 `#accept-list`（`?accept=1`）**，评审弹窗点「通过/打回」。',
     '- 拒收三类：`DECISION_SCOPE_FORBIDDEN`、`DECISION_REVIEW_ACTION_FORBIDDEN`、`DECISION_COPY_CODE_NAME`（代号只放 `--source-ref`）。',
     '- **文案人话规则**：标题 ≤40 字、摘要 ≤120 字、问题 ≤200 字；改模板后跑 `node scripts/test-decision-scope.cjs`。',
-    '- **需求级验收**：代管可代「验收通过」（有效代管+authorization+证据+opinion）；**打回/迭代/终止须 Owner 本人**（`PROXY_ACCEPT_FORBIDDEN`）。',
+    '- **需求级验收只能 Owner 本人**（Owner 2026-11-16 裁定：代管也不得代需求验收，`PROXY_ACCEPT_FORBIDDEN`）；代管只代记评审决定（approved/rejected/skipped），打回/迭代/终止也须 Owner 本人。',
     '- **缺陷单**：PM/测试 `task accept --task <id> --as pm|tester --evidence 报告:report --evidence 图:screenshot`；**Owner** `owner --requirement <id> --action accept`（channel=ui|tty）。',
     '',
   ].join('\n') + '\n';
