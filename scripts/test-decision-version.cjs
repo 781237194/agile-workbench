@@ -35,17 +35,19 @@ if (fs.existsSync(STATE)) {
   for (const [key, row] of Object.entries(reqs)) rowsById[String((row && row.id) || key)] = row;
 }
 
-// ── S1 真实两条：旧决定必须判 stale（否则 Owner 仍被拦）
+// ── S1 真实两条：渲染层与后端对「同一笔决定是否绑当前版本」必须给出**同一结论**
+//     （方向会随真实数据漂移：Owner 重落一笔后它就变 current，所以这里只断言一致性与版本可取，
+//      具体 stale/current 的方向由 S2/S3/S4 的夹具覆盖）
 for (const id of ['R-20261114-144138-550f', 'R-20261115-132235-0b77']) {
   const row = rowsById[id];
   if (!row) { check(`S1 ${id} 存在于工作流`, false, '缺行'); continue; }
   const latest = OR_STATE.latestOwnerDecision(row);
-  const stale = OR_STATE.isDecisionCurrent(latest, row);
+  const rendererCurrent = OR_STATE.isDecisionCurrent(latest, row);
   const rowVersion = TT.rowRequirementVersion(row);
-  const backendMatch = TT.decisionVersionMatches(latest, row);
-  check(`S1 ${id}：末条旧决定判 stale（renderer+backend 一致）、且行版本可从 RR hash 回退取得`,
-    stale === false && backendMatch === false && Boolean(rowVersion.sha256 || rowVersion.contentHash),
-    { stale, backendMatch, rowVersion, decidedStatus: latest && (latest.status || latest.decision) });
+  const backendCurrent = TT.decisionVersionMatches(latest, row);
+  check(`S1 ${id}：渲染层与后端对末条决定判 current/stale 结论一致、且行版本可从 requirementReview.requirementHash 回退取得`,
+    rendererCurrent === backendCurrent && Boolean(rowVersion.sha256 || rowVersion.contentHash),
+    { rendererCurrent, backendCurrent, rowVersion, decidedStatus: latest && (latest.status || latest.decision) });
 }
 
 // ── S2 合成夹具：决定绑当前版本 → 两处都判 current（二次点击必须被拦）
@@ -84,12 +86,11 @@ function duplicateByBackend(row, status) {
     && Number(d.round || round) === round
     && TT.decisionVersionMatches(d, row));
 }
-check('S6 去重复算：550f 旧决定放行；当前版本同状态决定拦住',
-  duplicateByBackend(rowsById['R-20261114-144138-550f'] || { decisions: [] }, 'approved') === false
-  && duplicateByBackend(rowsById['R-20261115-132235-0b77'] || { decisions: [] }, 'approved') === false
-  && duplicateByBackend(rowCurrent, 'approved') === true
-  && duplicateByBackend(rowMoved, 'approved') === false,
-  { legacy550f: duplicateByBackend(rowsById['R-20261114-144138-550f'] || { decisions: [] }, 'approved'), current: duplicateByBackend(rowCurrent, 'approved') });
+check('S6 去重复算：旧版本决定放行、当前版本同状态决定拦住',
+  duplicateByBackend(rowLegacy, 'approved') === false
+  && duplicateByBackend(rowMoved, 'approved') === false
+  && duplicateByBackend(rowCurrent, 'approved') === true,
+  { legacy: duplicateByBackend(rowLegacy, 'approved'), moved: duplicateByBackend(rowMoved, 'approved'), current: duplicateByBackend(rowCurrent, 'approved') });
 
 // ── S7 renderer 判重条件（submit 的判据）：只有「current 且同状态」才拦
 function submitBlocks(row, status) {
@@ -97,11 +98,10 @@ function submitBlocks(row, status) {
   const latestStatus = String((latest && (latest.status || latest.decision)) || ((row.ownerReview || {}).status) || '');
   return Boolean(latest && OR_STATE.isDecisionCurrent(latest, row) && latestStatus === status);
 }
-check('S7 submit 判据：旧决定不拦（550f/0b77），当前版本同状态拦，改版后不拦',
-  submitBlocks(rowsById['R-20261114-144138-550f'] || { decisions: [] }, 'approved') === false
-  && submitBlocks(rowsById['R-20261115-132235-0b77'] || { decisions: [] }, 'approved') === false
-  && submitBlocks(rowCurrent, 'approved') === true
-  && submitBlocks(rowMoved, 'approved') === false,
+check('S7 submit 判据：旧决定不拦、当前版本同状态拦、改版后不拦',
+  submitBlocks(rowLegacy, 'approved') === false
+  && submitBlocks(rowMoved, 'approved') === false
+  && submitBlocks(rowCurrent, 'approved') === true,
   null);
 
 // ── S8 decidedStatusOf 必须带版本校验（P0 B-20261116-115903，与后端 gates.mjs 的
@@ -167,6 +167,22 @@ check('S11 行徽标依据：dev+过期 → decidedOnlyOnStaleVersion=true；当
   OR_STATE.decidedOnlyOnStaleVersion(rowDevStale) === true
   && OR_STATE.decidedOnlyOnStaleVersion(rowDevCurrent) === false,
   { stale: OR_STATE.decidedOnlyOnStaleVersion(rowDevStale), current: OR_STATE.decidedOnlyOnStaleVersion(rowDevCurrent) });
+
+// ── S12 行上没有版本信息时不得判「过期」（P0 B-20261116-122422-8487：视图未导出版本字段时，
+//      刚落账的决定会被判旧版本 → 行永远留在「等你决定」、再点报 DUPLICATE_DECISION）
+const rowNoVersionInfo = {
+  id: 'R-FIXTURE-no-version', status: 'approved',
+  decisions: [{ status: 'approved', at: '2026-11-16T04:17:24.000Z', basis: { requirement: { sha256: 'HASH_ONLY_ON_DECISION' } } }]
+};
+check('S12 行无版本信息 → isDecisionCurrent=true（无法证明是旧版本时按当前处理），不再把刚落账的决定判过期',
+  OR_STATE.isDecisionCurrent(rowNoVersionInfo.decisions[0], rowNoVersionInfo) === true
+  && OR_STATE.decidedStatusOf(rowNoVersionInfo) === 'approved'
+  && OR_STATE.isPending(rowNoVersionInfo) === false,
+  {
+    current: OR_STATE.isDecisionCurrent(rowNoVersionInfo.decisions[0], rowNoVersionInfo),
+    decided: OR_STATE.decidedStatusOf(rowNoVersionInfo),
+    pending: OR_STATE.isPending(rowNoVersionInfo)
+  });
 
 console.log(`\n决定-版本绑定自检：${passed}/${passed + failures.length} PASS`);
 if (failures.length) { console.error(JSON.stringify(failures, null, 2)); process.exit(1); }

@@ -120,6 +120,10 @@
     const currentSha = currentDocHashOf(req);
     const currentContent = textOf((req && req.requirementReview && req.requirementReview.contentHash) || (req && req.contentHash));
     if (!decidedSha && !decidedContent) return false; // 旧决定（11-15 那批没有 basis）
+    // B-20261116-122422-8487：行上完全没有版本信息时（视图未导出 / 老快照），**不能**判成旧版本——
+    // 以前这里走「有 hash 但当前版本未知 → 不能证明是当前版本 → false」，导致刚落账的决定被判过期、
+    // 行永远留在「等你决定」。无法证明是旧版本时按「当前」处理，宁可少拦一次，也不让 Owner 点不动。
+    if (!currentSha && !currentContent) return true;
     if (decidedSha && currentSha && decidedSha === currentSha) return true;
     if (decidedContent && currentContent && decidedContent === currentContent) return true;
     return false;

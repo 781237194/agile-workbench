@@ -5558,6 +5558,12 @@ function createTeamTools(options = {}) {
       voteRejection: row.voteRejection || null,
       ownerReview: row.ownerReview || null,
       decisions: Array.isArray(row.decisions) ? row.decisions : [],
+      // B-20261116-122422-8487（Owner 亲报）：渲染层用 isDecisionCurrent() 判断「决定是否绑当前正文版本」，
+      // 但视图以前**不导出**版本字段 → 渲染层永远拿不到当前版本，把刚落账的决定判成「旧版本」，
+      // 于是行一直留在「等你决定」、再点还报 DUPLICATE_DECISION。这里把版本三元组原样带出去。
+      requirementHash: String(row.requirementHash || ''),
+      contentHash: String(row.contentHash || ''),
+      requirementReview: row.requirementReview || null,
       dispatch: row.dispatch || null,
       dev: row.dev || null,
       test: row.test || null,

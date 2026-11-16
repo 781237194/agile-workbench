@@ -1203,6 +1203,18 @@
     REQUIREMENT_AMBIGUOUS: '这个需求号同时命中多条需求：请用完整需求 id 再操作。',
     TEST_NOT_DONE: '这条需求还没到"测试完成"（test_done），现在不能验收。',
   };
+  function latestDecisionAtText() {
+    try {
+      const row = ((state.data && state.data.requirements) || []).find((r) => String(r.id) === String(state.selected));
+      const latest = row ? latestOwnerDecision(row) : null;
+      const at = String((latest && latest.at) || '');
+      if (!at) return '';
+      const d = new Date(at);
+      if (Number.isNaN(d.getTime())) return at;
+      return d.toLocaleTimeString('zh-CN', { hour12: false });
+    } catch { return ''; }
+  }
+
   function humanizeError(err) {
     const raw = String((err && err.message) || err || '');
     const codeMatch = /\[([A-Z][A-Z0-9_]{2,})\]/.exec(raw) || /^([A-Z][A-Z0-9_]{2,})\b/.exec(raw);
@@ -1218,6 +1230,18 @@
     const box = dialog.querySelector('[data-or-banner]') || dialog.querySelector('[data-or-error]');
     if (!box) return;
     const info = humanizeError(err);
+    // B-20261116-122422-8487：DUPLICATE_DECISION 不是「失败」，是「刚才那次其实已经落账了」。
+    // 以前统一显示「现在还不能提交」，Owner 会以为点不动；这里改成「已在 HH:MM:SS 落账，正在刷新」并强制重读。
+    if (info.code === 'DUPLICATE_DECISION' || /DUPLICATE_DECISION/.test(String((err && err.message) || err || ''))) {
+      const at = latestDecisionAtText();
+      box.innerHTML = '';
+      box.appendChild(el('div', 'or-banner-title', '✓ 这个决定已经落账了，正在刷新'));
+      box.appendChild(el('div', 'or-banner-reason', `该决定已在 ${at || '刚才'} 落账，列表马上更新；不需要再点一次。`));
+      box.appendChild(el('div', 'or-banner-code', '（错误码 DUPLICATE_DECISION）'));
+      box.hidden = false;
+      loadData().catch(() => {});
+      return;
+    }
     box.innerHTML = '';
     const head = el('div', 'or-banner-title', '⚠ 现在还不能提交');
     box.appendChild(head);
