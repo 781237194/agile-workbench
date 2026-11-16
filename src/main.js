@@ -10385,12 +10385,14 @@ async function runThemeShots() {
     let url = '';
     try { url = String(wc.getURL() || ''); } catch { url = ''; }
     webContentsSeen.push({ type, url: url.slice(0, 80) });
+    // 优先用「隐藏内容 + 统一底色」：不触发导航，不会在 stderr 留 ERR_ABORTED
+    // （PM 2026-11-16：自检 ok=true 却被 CI 的 stderr 判失败，这类噪声要清掉）。
     try {
-      await wc.loadURL('about:blank');
+      await wc.executeJavaScript("(function(){try{var d=document.documentElement;d.style.background='#101014';d.style.colorScheme='dark';if(document.body)document.body.style.visibility='hidden';}catch(e){}})()", true);
       blankedWebviews += 1;
     } catch {
       try {
-        await wc.executeJavaScript("(function(){try{var d=document.documentElement;d.style.background='#101014';d.style.colorScheme='dark';if(document.body)document.body.style.visibility='hidden';}catch(e){}})()", true);
+        await wc.loadURL('about:blank');
         blankedWebviews += 1;
       } catch { /* 两种都失败才放弃，报告里记 0 */ }
     }

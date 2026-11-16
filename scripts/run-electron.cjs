@@ -134,8 +134,11 @@ if (!looksLikeFile(resolved.bin)) {
 }
 
 // 明确告诉用户“这次继承的值被清掉了”，避免以后又把它当成产品崩溃。
+// 注意：这是「已处理」的提示、不是错误，必须写 stdout——写 stderr 会让
+// `--layout-check` / `--theme-shots` 这类「ok=true」的自检被 CI 判成失败
+// （PM 2026-11-16 反馈：报 ok=true 但退出码被记成 1）。
 if (inheritedRunAsNode) {
-  console.error(`[环境] 检测到继承的 ${ENV_KEY}=${inheritedRunAsNodeValue || '(空)'}，已在启动 Electron 前清除。`);
+  console.log(`[环境] 检测到继承的 ${ENV_KEY}=${inheritedRunAsNodeValue || '(空)'}，已在启动 Electron 前清除。`);
 }
 
 const args = argv.length ? argv : ['.'];

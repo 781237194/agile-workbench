@@ -14,7 +14,15 @@ const checks = [];
 const push = (name, ok, detail) => { checks.push({ name, ok: Boolean(ok), detail }); console.log(`[${ok ? 'PASS' : 'FAIL'}] ${name}${detail ? ' :: ' + detail : ''}`); };
 
 push('更多菜单里有「外观 / 主题」项（data-more=theme）', /data-more="theme"/.test(html));
-push('外观项文案写明当前态与下一态（点击切 X）', /外观：\$\{THEME_NAME\[theme\]\}（点击切\$\{THEME_NAME\[next\]\}）/.test(app));
+// R-fe90 起入口从「一次点击切下一档」改为「更多 → 外观」展开 5 项子菜单（点即切），
+// 旧断言（外观：X（点击切Y））已随实现下线，会恒红；这里改成核真实结构三件：
+// ①5 项子菜单容器在菜单内；②点即切走 [data-theme-id]；③当前项用 aria-checked 标记。
+push('外观入口是「5 项子菜单 + 点即切 + aria-checked 唯一」',
+  /data-theme-menu/.test(html)
+  && /#more-menu \[data-theme-menu\] \[data-theme-id\]/.test(app)
+  && /closest\('\[data-theme-id\]'\)/.test(app)
+  && /aria-checked/.test(app)
+  && /applyThemeId\(/.test(app));
 push('主题应用函数存在（setTheme / applyTheme）', /function setTheme\(|function applyTheme\(/.test(app));
 push('主题值会被记住（localStorage 或 store）', /awb\.theme|ui\.theme|THEME_KEY/.test(app) || /awb\.theme/.test(html));
 push('标题栏没有独立主题图标（B-0538 约束未破）', !/id="btn-theme"/.test(html) && !/class="[^"]*theme-icon/.test(html));
