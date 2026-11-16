@@ -9680,6 +9680,11 @@ installShellAuditSensors();
   });
   ipcMain.handle('window:control', (_e, action) => {
     if (!mainWindow) return;
+    // T-c25a AC2 诊断：关闭窗口必须留「谁点的」堆栈——11:39 那次自动关窗的调用方是渲染层 IPC，
+    // 没有这行只能看到 window-all-closed，分不清「人点 X」还是「崩溃后兜底误关」。
+    if (action === 'close') {
+      try { console.log('[win-ctl] ' + JSON.stringify({ action: 'close', at: new Date().toISOString(), stack: String(new Error().stack || '').split('\n').slice(1, 6) })); } catch { /* ignore */ }
+    }
     if (action === 'min') mainWindow.minimize();
     else if (action === 'max') mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
     else if (action === 'close') mainWindow.close();
@@ -10088,6 +10093,8 @@ function createWindow() {
   mainWindow.on('resize', scheduleWindowSave);
   mainWindow.on('move', scheduleWindowSave);
   mainWindow.on('close', () => {
+    // T-c25a 诊断：记录「谁在关窗」——window-all-closed 之前必有一次 close，堆栈能指出调用方。
+    try { console.log('[win-close] ' + JSON.stringify({ at: new Date().toISOString(), stack: String(new Error().stack || '').split('\n').slice(1, 6) })); } catch { /* ignore */ }
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     saveWindowPref(mainWindow);
   });
