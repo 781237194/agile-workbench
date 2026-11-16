@@ -65,7 +65,12 @@ function check(name, ok, detail) {
   fs.cpSync(path.join(ROOT, '团队'), path.join(SB, '团队'), { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
   const TEAM_TOOL = path.join(SB, '团队', '工具', 'team.mjs');
   const env = { ...process.env, TEAM_ROOT: path.join(SB, '团队'), TEAM_PROJECTS_ROOT: path.join(SB, '项目'), TEAM_SELFTEST: '1' };
-  const run = (args) => JSON.parse(String(execFileSync(process.execPath, [TEAM_TOOL, ...args], { cwd: SB, env, encoding: 'utf8' })).trim().slice(String(execFileSync(process.execPath, [TEAM_TOOL, ...args], { cwd: SB, env, encoding: 'utf8' })).trim().indexOf('{')));
+  // 每条命令只执行一次（2026-11-17 修：旧写法把同一个 execFileSync 调了两次——用第二次的输出算 index、
+  // 却 parse 第一次的输出，导致沙盘里每个命令跑两遍、req/task 各被创建两条；PM M-20261117-014153-c06ae3 批准顺手修）。
+  const run = (args) => {
+    const out = String(execFileSync(process.execPath, [TEAM_TOOL, ...args], { cwd: SB, env, encoding: 'utf8' })).trim();
+    return JSON.parse(out.slice(out.indexOf('{')));
+  };
   const mk = (name, mode) => {
     run(['project', 'add', '--name', name, '--team-mode', mode, '--json']);
     const pm = run(['boot', '--role', 'pm', '--project', name, '--session', `s-${mode}`, '--json']);
