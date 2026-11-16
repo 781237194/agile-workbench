@@ -2917,7 +2917,9 @@ function restoreTeamActiveProject(snapshot) {
     const team = readTeamFileSafe();
     if (!team) return;
     team.activeProject = snapshot.teamActiveProject;
-    fs.writeFileSync(teamTools.layout.teamFile, JSON.stringify(team, null, 2) + '\n', 'utf8');
+    // R-ad44 AC1①：状态文件（团队/状态/团队.json）唯一写入口＝json-atomic.cjs，不再直接 fs.writeFileSync。
+    // 行为不变：仍是「回滚时把 activeProject 写回快照值」，失败由外层 catch 吞掉不阻断原始错误。
+    jsonAtomicCore.writeJsonAtomic(teamTools.layout.teamFile, team, { case: 'restoreTeamActiveProject' });
   } catch { /* 回滚不阻断原始错误 */ }
 }
 
@@ -13331,7 +13333,8 @@ function selftestTeamCleanup(testRoot, before) {
       if (team.activeProject && !remaining.has(team.activeProject)) {
         const previous = before && before.team && before.team.activeProject;
         team.activeProject = previous && remaining.has(previous) ? previous : null;
-        fs.writeFileSync(layout.teamFile, JSON.stringify(team, null, 2) + '\n', 'utf8');
+        // R-ad44 AC1①：团队状态文件唯一写入口＝json-atomic.cjs（同 restoreTeamActiveProject 的收编）。
+        jsonAtomicCore.writeJsonAtomic(layout.teamFile, team, { case: 'cleanupRestoreTeamActiveProject' });
       }
     }
   } catch { /* ignore */ }
