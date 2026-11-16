@@ -75,6 +75,9 @@ export function isMirrorTask(task) {
 export function needsClaim(task) {
   if (!task || !task.id) return false;
   if (isMirrorTask(task)) return false;
+  // 只认「本功能上线后由 PM 真派过的单」：必须有 dispatchedAt（或显式 claimRequired），
+  // 否则历史任务（只有 createdAt）会在首扫时被整批判成超时，把硬门误伤到同角色全部派单。
+  if (!task.dispatchedAt && task.claimRequired !== true) return false;
   const status = String(task.status || 'open');
   if (!OPEN_STATES.has(status)) return false;
   if (!String(task.owner || '').trim()) return false;

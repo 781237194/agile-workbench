@@ -22,7 +22,7 @@ import {
   projectTeamMode, projectRoleIds, persistProjectTeamMode, projectModeState,
   DEFAULT_BOOT_TTL_MINUTES,
 } from './store.mjs';
-import { dispatchGateFor, scanClaims, claimSummary, CLAIM_OVERDUE_MIN, CLAIM_STALLED_MIN } from './claim-watch.mjs';
+import { dispatchGateFor, scanClaims, claimSummary, clearClaimFlags, CLAIM_OVERDUE_MIN, CLAIM_STALLED_MIN } from './claim-watch.mjs';
 import { DshClient } from './dsh-session.mjs';
 import { renderBoardHtml as renderBoardHtmlV2, renderBoardMd as renderBoardMdV2 } from './board.mjs';
 import {
@@ -8296,7 +8296,17 @@ export function cmdBoard(args) {
 
 export function cmdClaim(args) {
   const sub = String((args._ && args._[1]) || 'scan').toLowerCase();
-  if (sub !== 'scan' && sub !== 'status') fail('CLAIM_SUB_UNKNOWN', 'claim 只支持 scan / status');
+  if (sub !== 'scan' && sub !== 'status' && sub !== 'clear') fail('CLAIM_SUB_UNKNOWN', 'claim 只支持 scan / status / clear');
+  // PM 主动清标（认领门唯一的手工解除路径）：只清打标字段并写 cleared 审计，不改任务状态。
+  if (sub === 'clear') {
+    const id = String(args.id || '').trim();
+    if (!id) fail('BAD_ID', 'claim clear 需要 --id <任务id>');
+    const r = clearClaimFlags(String(args.project || ''), id, String(args.reason || 'manual_pm'));
+    if (r.ok === false) fail(r.code || 'TASK_NOT_FOUND', `任务 ${id} 不存在`);
+    if (args.json) { process.stdout.write(JSON.stringify({ ok: true, sub, id, changed: Boolean(r.changed), level: r.level || '' }) + '\n'); return; }
+    textOut(`认领清标：${id} ${r.changed ? '已清（原级别 ' + (r.level || '—') + '）' : '本来就干净'}`);
+    return;
+  }
   const names = args.project
     ? [String(args.project)]
     : (listProjects() || []).map((p) => p.name || p.id).filter(Boolean);

@@ -27,6 +27,8 @@ for (const rel of ['团队宪法.md', '项目铁律.md', '项目经理/角色卡
     fs.copyFileSync(from, to);
   }
 }
+// 沙盘要带 工具/ 子树：send 的 auto-boot 会拼 <teamRoot>/工具/team.mjs，缺了会 MODULE_NOT_FOUND（e2e-4 曾因此成弱断言）
+fs.cpSync(path.join(realTeam, '工具'), path.join(TEAM, '工具'), { recursive: true });
 const srcProj = path.join(realTeam, '状态', '项目', PROJECT);
 const dstProj = path.join(TEAM, '状态', '项目', PROJECT);
 fs.cpSync(srcProj, dstProj, { recursive: true });
@@ -100,9 +102,19 @@ claimed.status = 'working';
 fs.writeFileSync(path.join(taskDir, overdue.id + '.json'), JSON.stringify(claimed, null, 2), 'utf8');
 const send2 = run(['send', '--role', 'pm', '--project', PROJECT, '--boot', token, '--to', 'programmer2',
   '--subject', '端到端派单2', '--body', '认领后应放行', '--ack', '--task', fresh.id, '--no-wake']);
-check('e2e-4 认领后放行：不再报 DISPATCH_CLAIM_OVERDUE',
-  !/DISPATCH_CLAIM_OVERDUE/.test(send2.out),
+check('e2e-4 认领后放行：不再报 DISPATCH_CLAIM_OVERDUE，且派单链路本身没坏（无 MODULE_NOT_FOUND）',
+  !/DISPATCH_CLAIM_OVERDUE/.test(send2.out) && !/MODULE_NOT_FOUND/.test(send2.out),
   { code: send2.code, tail: String(send2.out).slice(-200) });
+
+// 5) PM 手工清标（claim clear）：把超时单重新打标后清掉，任务行不再带 claim* 字段、且写 cleared 审计
+const reFlag = JSON.parse(fs.readFileSync(path.join(taskDir, overdue.id + '.json'), 'utf8'));
+reFlag.claimOverdue = true; reFlag.claimLevel = 'overdue'; reFlag.claimOverdueMin = 45;
+fs.writeFileSync(path.join(taskDir, overdue.id + '.json'), JSON.stringify(reFlag, null, 2), 'utf8');
+const clear = run(['claim', 'clear', '--role', 'pm', '--project', PROJECT, '--boot', token, '--id', overdue.id, '--reason', 'e2e_manual']);
+const afterClear = JSON.parse(fs.readFileSync(path.join(taskDir, overdue.id + '.json'), 'utf8'));
+check('e2e-5 claim clear 手工清标：任务行 claimOverdue/claimLevel 已清、输出可解析',
+  clear.code === 0 && !('claimOverdue' in afterClear) && !('claimLevel' in afterClear) && /已清|本来就干净/.test(clear.out),
+  { code: clear.code, tail: String(clear.out).slice(-160), keys: Object.keys(afterClear).filter((k) => k.startsWith('claim')) });
 
 fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 console.log('\n认领门端到端：' + pass + '/' + (pass + fails.length) + ' PASS');
