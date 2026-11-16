@@ -66,10 +66,9 @@ function check(name, ok, detail) {
   // ④ 派单/需求行字段同构：task create 在 fast/full 产生同一批键
   // B-20261117-011347-07b6（并入）：沙盘改**唯一临时目录**，不再用固定 `_tmp/a163-parity`——
   // 旧写法两个进程同时跑会互相 rm/重建（PM 与测试并发实跑就撞到 MODULE_NOT_FOUND）。
-  fs.mkdirSync(path.join(ROOT, '_tmp'), { recursive: true });
-  const SB = fs.mkdtempSync(path.join(ROOT, '_tmp', 'a163-parity-'));
-  const cleanupSandbox = () => { try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ } };
-  process.on('exit', cleanupSandbox);
+  const { mkTempSandbox } = require(path.join(__dirname, 'lib', 'sandbox-dir.cjs'));
+  const SB = mkTempSandbox('a163-parity');
+  // 退出清理由 mkTempSandbox 注册，不再手写 cleanupSandbox/process.on('exit')。
   fs.mkdirSync(path.join(SB, '项目'), { recursive: true });
   fs.cpSync(path.join(ROOT, '团队'), path.join(SB, '团队'), { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
   const TEAM_TOOL = path.join(SB, '团队', '工具', 'team.mjs');

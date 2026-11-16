@@ -16,11 +16,11 @@ const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 
 const ROOT = path.resolve(__dirname, '..');
+// B-20261116-055303-07b6：沙盘统一入口（唯一临时目录 + 退出清理）
+const { mkTempSandbox } = require(path.join(__dirname, 'lib', 'sandbox-dir.cjs'));
 // B-20261116-055303-07b6：沙盘改**唯一临时目录**（固定 _tmp/ 目录并发跑会互相 rm/重建 → EPERM/ENOTEMPTY/MODULE_NOT_FOUND）。
 // 每次运行一个新目录 + 退出清理；报告件路径不动。
-fs.mkdirSync(path.join(ROOT, '_tmp'), { recursive: true });
-const SB = fs.mkdtempSync(path.join(ROOT, '_tmp', 'c98e-'));
-process.on('exit', () => { try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ } });
+const SB = mkTempSandbox('c98e');
 const TEAM = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM, '工具', 'team.mjs');
