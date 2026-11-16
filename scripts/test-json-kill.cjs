@@ -75,6 +75,7 @@ child.on('exit', () => {
 });
 
 function finish() {
+  clearTimeout(watchdog);
   check('子进程写盘期间出现 <file>.tmp 并被 SIGKILL', sawTmp === true && killed === true, { sawTmp, killed });
   // ① 杀进程后目标文件仍是写前值（原子 rename 之前不会截断）
   check('① 目标文件 sha256 等于写前值（未被半截内容覆盖）', fs.existsSync(TARGET) && sha(TARGET) === shaBefore, { now: fs.existsSync(TARGET) ? sha(TARGET).slice(0, 12) : null, before: shaBefore.slice(0, 12) });
@@ -114,5 +115,7 @@ function finish() {
   if (passed !== results.length) process.exitCode = 1;
 }
 
-// 兜底：若子进程提前失败（比如 payload 内存不足），60 秒后仍会走 finish（通过 deadline 后 kill 触发 exit）
-setTimeout(() => { if (!sawTmp) { try { child.kill('SIGKILL'); } catch { /* ignore */ } clearInterval(poll); } }, 55000);
+// 兜底：若子进程提前失败（比如 payload 内存不足），55 秒后仍会 kill 子进程；
+// 正常 finish 后必须 clearTimeout，否则进程会白等 55 秒（PM 2026-11-17 02:48：注意别留孤儿/长尾）。
+const watchdog = setTimeout(() => { if (!sawTmp) { try { child.kill('SIGKILL'); } catch { /* ignore */ } clearInterval(poll); } }, 55000);
+watchdog.unref();
