@@ -402,9 +402,11 @@ export function taskGateOf({ task, row = null, readFailed = false } = {}) {
   const latest = currentDecisionOf(row);
   const status = String((latest && (latest.status || latest.decision)) || '');
   const rowStatus = String(row.status || '');
-  const closedBad = ['terminated', 'iteration', 'rejected'].includes(rowStatus);
+  // B-4226：iteration（返工轮）不是终态——它对任务的拦截只由「最新 Owner 决定是否绑当前正文」决定，
+  // 否则产品重评通过、Owner 重批后任务仍被 TASK_GATE_NOT_APPROVED 挡死。terminated/rejected 仍按收口拦。
+  const closedBad = ['terminated', 'rejected'].includes(rowStatus);
   if (!closedBad && ['approved', 'skipped', 'accepted'].includes(status)) return null;
-  const cause = (status === 'rejected' || closedBad || status === 'terminated' || status === 'iteration')
+  const cause = (status === 'rejected' || closedBad || status === 'terminated')
     ? 'rejected' : (status ? 'pending' : 'missing');
   return {
     ...base, code: 'TASK_GATE_NOT_APPROVED', cause,

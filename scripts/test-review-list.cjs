@@ -20,7 +20,12 @@ const row = (id, status, extra) => ({ id, status, title: `需求 ${id}`, ...(ext
   check('G-02', 'ready/dev_dispatched → 进行中', RL.groupOf(row('b', 'ready')).group === 'running' && RL.groupOf(row('c', 'dispatched')).group === 'running');
   check('G-03', 'dev_done/test → 进行中', RL.groupOf(row('d', 'dev_done')).group === 'running' && RL.groupOf(row('e', 'test')).group === 'running');
   check('G-04', 'test_done → 待验收', RL.groupOf(row('f', 'test_done')).group === 'test_done');
-  check('G-05', 'accepted/terminated/iteration/rejected → 已收口', ['accepted', 'terminated', 'iteration', 'rejected'].every((s) => RL.groupOf(row('g', s)).group === 'closed'));
+  // B-4226：iteration 是「返工轮进行中」，不再归已收口（否则重评通过后仍被当收口，派单/评审都死结）。
+  check('G-05', 'accepted/terminated/rejected → 已收口；iteration → 进行中',
+    ['accepted', 'terminated', 'rejected'].every((s) => RL.groupOf(row('g', s)).group === 'closed')
+    && RL.groupOf(row('g2', 'iteration')).group === 'running');
+  check('G-05b', 'iteration 不落已收口（回归判据：closed 集合不含 iteration）',
+    !Array.from(RL.STATUS_GROUP.closed).includes('iteration') && Array.from(RL.STATUS_GROUP.running).includes('iteration'), Array.from(RL.STATUS_GROUP.closed));
   check('G-06', '未列状态落待决定并标 statusUnknown', (() => { const r = RL.groupOf(row('h', 'some_new_state')); return r.group === 'pending' && r.statusUnknown === true; })());
   check('G-07', '空状态也落待决定并标 statusUnknown（不许丢行）', (() => { const r = RL.groupOf(row('i', '')); return r.group === 'pending' && r.statusUnknown === true; })());
   check('G-08', '四组恒定存在（空组也给，count=0）', (() => { const g = RL.groupRows([row('j', 'accepted')]); return g.groups.length === 4 && g.groups.find((x) => x.key === 'pending').count === 0; })());

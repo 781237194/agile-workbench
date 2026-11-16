@@ -5543,10 +5543,15 @@ function cmdReqReview(args) {
     nextStatus = 'rejected';
   } else {
     if (isTech) {
-      nextStatus = keepForwardStatus(currentStatus === 'rejected' ? 'approved' : currentStatus, 'ready');
+      nextStatus = keepForwardStatus(['rejected', 'iteration'].includes(currentStatus) ? 'approved' : currentStatus, 'ready');
     } else {
       // 已有同 basis 的 Owner 批准/跳过：保持/恢复 ready，不把 Owner 决定打回 pending。
-      nextStatus = keepForwardStatus(currentStatus, decisionFresh ? 'ready' : 'approved');
+      // B-4226：iteration（返工轮）在 REQUIREMENT_STATUS_RANK 里是 rank=10 的高位「终态」，直接 keepForwardStatus
+      // 会永远停在 iteration——产品按新正文重评 approve 也回不到 approved，派单/任务门全被挡死。
+      // 返工轮按「重做轮起点 approved」计位次（与 advanceRequirementAfterTaskDone 的 currentRankForAdvance 同口径）：
+      // 重评通过后落 approved（Owner 未重批）/ ready（Owner 已按同一正文批过）。
+      const reviewBase = currentStatus === 'iteration' ? 'approved' : currentStatus;
+      nextStatus = keepForwardStatus(reviewBase, decisionFresh ? 'ready' : 'approved');
       ownerPending = !decisionFresh && statusRank(nextStatus) < statusRank('ready');
     }
     task.workflow.requirementStatus = nextStatus;

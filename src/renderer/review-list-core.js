@@ -20,9 +20,11 @@ const GROUPS = [
 /** 已收口/进行中/待验收的**全部**状态映射（不在表里的状态 → 待决定 + unknown 标记，不许丢行）。 */
 const STATUS_GROUP = {
   pending: ['pending', 'owner_review', 'approved', 'review', 'requirement_review', 'tech_review', 'product_review'],
-  running: ['ready', 'dispatched', 'dev', 'dev_review', 'dev_done', 'test', 'iteration_open'],
+  running: ['ready', 'dispatched', 'dev', 'dev_review', 'dev_done', 'test', 'iteration_open', 'iteration'],
   test_done: ['test_done'],
-  closed: ['accepted', 'done', 'terminated', 'iteration', 'rejected']
+  // B-4226：iteration 是「返工轮进行中」，不是已收口——放 closed 会让 Owner 在「等你决定」看不到它，
+  // 重评通过、Owner 重批后也仍被当收口态。
+  closed: ['accepted', 'done', 'terminated', 'rejected']
 };
 const CLOSED = new Set(STATUS_GROUP.closed);
 const FIELD_LABEL = { what: '这是什么', how: '怎么做', impact: '影响谁', advice: '建议你拍板' };
