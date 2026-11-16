@@ -122,6 +122,45 @@ const ignored = events.filter((e) => e.action === 'trq_status_ignored' && String
 const ignoredDev = ignored.find((e) => String(e.data && e.data.mirrorStatus) === 'dev_done');
 check('⑤b 不一致时记 trq_status_ignored 审计（mirror=dev_done/current=ready）', Boolean(ignoredDev) && String(ignoredDev.data.currentRowStatus) === 'ready', ignoredDev || ignored[0] || null);
 
+// ── B-6c08 J2：读成功但**行不存在** → 落 review（不得用 mirrorStatus 兜底）──
+{
+  const wf = readWf();
+  delete wf.requirements[reqId];
+  fs.writeFileSync(wfFile, JSON.stringify(wf, null, 2) + '\n', 'utf8');
+  // 镜像故意设成明显不同的值，若实现用 mirror 兜底会被断言抓到
+  const tf = path.join(taskDir, `${reqId}.json`);
+  const task2 = JSON.parse(fs.readFileSync(tf, 'utf8'));
+  task2.workflow = task2.workflow && typeof task2.workflow === 'object' ? task2.workflow : {};
+  task2.workflow.requirementStatus = 'dev_done';
+  fs.writeFileSync(tf, JSON.stringify(task2, null, 2) + '\n', 'utf8');
+  const trqJ2 = run(['req', 'trq', '--boot', tester.token, '--project', PROJECT, '--id', reqId, '--verdict', 'testable', '--json'], true);
+  check('J2 行不存在时 req trq 仍成功', trqJ2.ok === true, trqJ2);
+  check('J2 行不存在 → 建行落 review（不用镜像 dev_done 兜底）', rowOf(reqId).status === 'review', { status: rowOf(reqId).status });
+}
+
+// ── B-6c08 J3：读工作流**抛错** → 不写工作流行（状态保持原样），只落 trq + trq_sync_skipped 审计 ──
+{
+  const beforeStatus = rowOf(reqId).status;
+  const fileBackup = wfFile + '.j3-backup';
+  fs.renameSync(wfFile, fileBackup);
+  fs.mkdirSync(wfFile, { recursive: true }); // 同名目录 → 读抛错（EISDIR / 解析失败）
+  let trqJ3 = null;
+  try {
+    trqJ3 = run(['req', 'trq', '--boot', tester.token, '--project', PROJECT, '--id', reqId, '--verdict', 'testable', '--json'], true);
+  } finally {
+    fs.rmdirSync(wfFile);
+    fs.renameSync(fileBackup, wfFile);
+  }
+  check('J3 读工作流抛错时 req trq 仍成功（不阻断 TR-Q 落库）', trqJ3 && trqJ3.ok === true, trqJ3);
+  check('J3 读失败 → 工作流行状态逐位不变（不回退/不覆盖）', rowOf(reqId).status === beforeStatus, { before: beforeStatus, after: rowOf(reqId).status });
+  check('J3 读失败 → 返回 readFailed=true 且 workflowFile 为空', Boolean(trqJ3 && trqJ3.readFailed === true && trqJ3.workflowFile === ''), trqJ3 && { readFailed: trqJ3.readFailed, workflowFile: trqJ3.workflowFile });
+  const eventsNow = fs.existsSync(eventsFile)
+    ? fs.readFileSync(eventsFile, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
+    : [];
+  const skipped = eventsNow.filter((e) => e.action === 'trq_sync_skipped' && String(e.target) === reqId);
+  check('J3 读失败 → 记 trq_sync_skipped{reason:read_failed}', skipped.length >= 1 && String(skipped[0].data && skipped[0].data.reason) === 'read_failed', skipped[0] || null);
+}
+
 // 边界：工作流行缺失时退回镜像值（create:true 建行，不报错）
 setRowAndMirror('test_done', 'review');
 const trq3 = run(['req', 'trq', '--boot', tester.token, '--project', PROJECT, '--id', reqId, '--verdict', 'not_testable', '--missing', 'AC2 无落点', '--json'], true);
@@ -129,7 +168,9 @@ check('⑥ 第三次 req trq 仍成功', trq3.ok === true, trq3);
 check('⑦ not_testable 落库但不改需求状态（仍 test_done）', rowOf(reqId).status === 'test_done' && Boolean(rowOf(reqId).trq) && rowOf(reqId).trq.verdict === 'not_testable', { status: rowOf(reqId).status, trq: rowOf(reqId).trq && rowOf(reqId).trq.verdict });
 
 const summary = { at: new Date().toISOString(), total: results.length, failed: results.filter((r) => !r.ok).length, results };
-const evDir = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '证据-2a46');
+// B-20261117-015546-fe6d：J2/J3 结果落独立证据目录，不覆盖已验收的 证据-2a46/run-2a46.json
+// （PM 2026-11-17 01:46 证据覆盖警告：已验收件不得原地重写）。
+const evDir = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '证据-fe6d');
 fs.mkdirSync(evDir, { recursive: true });
-fs.writeFileSync(path.join(evDir, 'run-2a46.json'), JSON.stringify(summary, null, 2) + '\n', 'utf8');
+fs.writeFileSync(path.join(evDir, 'run-j2j3.json'), JSON.stringify(summary, null, 2) + '\n', 'utf8');
 console.log(`\nB-2a46 断言：${summary.total - summary.failed}/${summary.total} PASS`);

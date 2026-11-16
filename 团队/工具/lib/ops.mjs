@@ -5751,30 +5751,54 @@ function cmdReqTrq(args) {
   task._note = truncate(`TR-Q ${verdict} v${version}`, 100);
   saveTask(b.project, task);
   // B-2a46（P1，PM 2026-11-17 01:36 修订口径①）：TR-Q 只写 trq 与 updatedAt，**不回写** requirementStatus。
-  // status 只取工作流行当前值；镜像任务上的 requirementStatus 是过期值，仅在没有工作流行（老数据）时兜底，
-  // 两者不一致时记一条 trq_status_ignored 审计（不静默、也绝不拿镜像值推进/回退需求）。
+  // B-6c08（P1，J1/J2/J3 三态分开；分析师 2026-11-17 01:55 判据补充）：
+  //   J1 读到行 → 以 row.status 为准（镜像差异记 trq_status_ignored）；
+  //   J2 读成功但行不存在 → 落 review（不得用 mirrorStatus 兜底）；
+  //   J3 读抛错 → **不写工作流行**（保持原状态），只写 trq + trq_sync_skipped 审计，下次自然重试。
+  let readOutcome = null; // 'ok' | 'missing' | 'failed'
   let currentRowStatus = '';
+  let readErrorSummary = '';
   try {
     const readNow = readWorkflowState(b.project);
     const rowNow = readNow && readNow.state && readNow.state.requirements ? readNow.state.requirements[task.id] : null;
-    currentRowStatus = String((rowNow && rowNow.status) || '');
-  } catch { /* 读不到工作流就用镜像值兜底（原逻辑），不阻断 TR-Q 落库 */ }
-  const status = currentRowStatus || mirrorStatus;
-  if (currentRowStatus && mirrorStatus !== currentRowStatus) {
+    if (rowNow && typeof rowNow === 'object') {
+      readOutcome = 'ok';
+      currentRowStatus = String(rowNow.status || '');
+    } else {
+      readOutcome = 'missing';
+    }
+  } catch (error) {
+    readOutcome = 'failed';
+    readErrorSummary = String((error && (error.code || error.message)) || error).slice(0, 200);
+  }
+  let sync = null;
+  if (readOutcome === 'failed') {
+    // J3：读失败时不碰工作流行（保持原状态不动），只落 trq + 审计；下次 req trq/推进时自然重试。
     try {
       appendEvent({
-        role: b.role, sessionId: b.sessionId, action: 'trq_status_ignored', project: b.project, target: task.id,
-        note: `TR-Q 不回写需求状态：镜像任务 requirementStatus=${mirrorStatus}，工作流行=${currentRowStatus}（以工作流行为准）`,
-        data: { mirrorStatus, currentRowStatus, trqVerdict: verdict },
+        role: b.role, sessionId: b.sessionId, action: 'trq_sync_skipped', project: b.project, target: task.id,
+        note: `TR-Q 已落任务但未写工作流行（读工作流失败：${readErrorSummary}）；状态保持原样，下次重试`,
+        data: { reason: 'read_failed', error: readErrorSummary, trqVerdict: verdict },
       });
     } catch { /* 审计写不了不能阻断 TR-Q 落库 */ }
+  } else {
+    const status = readOutcome === 'missing' ? 'review' : currentRowStatus;
+    if (readOutcome === 'ok' && currentRowStatus && mirrorStatus !== currentRowStatus) {
+      try {
+        appendEvent({
+          role: b.role, sessionId: b.sessionId, action: 'trq_status_ignored', project: b.project, target: task.id,
+          note: `TR-Q 不回写需求状态：镜像任务 requirementStatus=${mirrorStatus}，工作流行=${currentRowStatus}（以工作流行为准）`,
+          data: { mirrorStatus, currentRowStatus, trqVerdict: verdict },
+        });
+      } catch { /* 审计写不了不能阻断 TR-Q 落库 */ }
+    }
+    sync = syncWorkflowRow(b.project, task, status, { trq: record, teamMode: projectTeamMode(project) }, {
+      create: true, action: 'trq', by: b.role, note: `TR-Q ${verdict} v${version}`,
+    });
   }
-  const sync = syncWorkflowRow(b.project, task, status, { trq: record, teamMode: projectTeamMode(project) }, {
-    create: true, action: 'trq', by: b.role, note: `TR-Q ${verdict} v${version}`,
-  });
   appendEvent({ role: b.role, sessionId: b.sessionId, action: 'trq', project: b.project, target: task.id, note: `${verdict} v${version}`, data: { trq: record } });
   out(args, `已记录可测性评审：${task.id} → ${verdict}（v${version}）\n文件：${path.join(project.path, rel)}\n结论：${verdict}${missing.length ? ' ｜ 缺项：' + missing.join('；') : ''}`, {
-    ok: true, requirementId: task.id, trq: record, file: rel, workflowFile: sync.file,
+    ok: true, requirementId: task.id, trq: record, file: rel, workflowFile: sync ? sync.file : '', readFailed: readOutcome === 'failed',
   });
 }
 
