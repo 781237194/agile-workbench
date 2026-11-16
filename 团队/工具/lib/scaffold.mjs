@@ -507,6 +507,9 @@ export function bootDocSpecs(root, roleDirName) {
     { key: 'projectIndex', label: '项目索引', path: path.join(base, '项目索引.md'), rel: '项目索引.md', required: true },
     { key: 'requirementOverview', label: '需求总览', path: path.join(base, '需求', '00-需求总览.md'), rel: '需求/00-需求总览.md', required: true },
     { key: 'collaboration', label: '协作准则', path: path.join(base, '协作准则.md'), rel: '协作准则.md', required: false },
+    // R-5b14（每角色默认交接文档）：optional 发现项，只提示不阻断、**不进 rulesHash**
+    // （rulesHash 只取 constitution/iron/roleCard/teamConfig，见 store.readDocSet）。
+    { key: 'handover', label: '交接文档', path: role ? path.join(base, role, '产出', '交接-最新.md') : '', rel: role ? `${role}/产出/交接-最新.md` : '', required: false, core: false },
   ];
 }
 

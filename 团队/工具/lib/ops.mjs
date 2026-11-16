@@ -46,6 +46,8 @@ import { validatePmAcceptEvidence, parseEvidenceArg, validateAcceptGates } from 
 import { detectOptionalPlugins, optionalPluginMarks, pluginStatusLines } from './plugins.mjs';
 import { auditHardcodedPaths, pathAuditLines } from './path-audit.mjs';
 import { memoryCheck } from './memory-check.mjs';
+// R-5b14：每角色默认交接文档（<角色>/产出/交接-最新.md）的只读发现 + 「最新」判定（固定名优先）。
+import { handoverBriefLine } from './handover.mjs';
 import { checkEvidenceGate } from './evidence.mjs';
 import { bumpRound, archiveSession, confirmArchive, ROUNDS_MAX } from './session-archive.mjs';
 import {
@@ -2473,7 +2475,7 @@ export async function cmdBoot(args) {
   const coreDocs = records.filter((d) => d.core);
   const coreRead = coreDocs.filter((d) => d.exists);
   const coreMissing = coreDocs.filter((d) => !d.exists);
-  const optionalDocs = records.filter((d) => !d.core);
+  const optionalDocs = records.filter((d) => !d.core && d.key !== 'handover');
   const optionalRead = optionalDocs.filter((d) => d.exists);
   const optionalMissing = optionalDocs.filter((d) => !d.exists);
   lines.push(`=== 启动简报 · ${ROLE_NAMES[role] || role} · ${projectName} ===`);
@@ -2497,6 +2499,16 @@ export async function cmdBoot(args) {
   // 必读分层：核心 4 份 → 按需文档 → 任务相关；已读/未读都列，核心 4 份永远排在最前、不被截断。
   lines.push(`必读-核心已读 ${coreRead.length}/${coreDocs.length}: ${coreRead.map((d) => d.rel || d.path).join(' ')}`);
   if (coreMissing.length) lines.push(`必读-核心未读（缺文件，先 project ensure）: ${coreMissing.map((d) => d.rel || d.label).join(' ')}`);
+  // R-5b14 F-2/F-3：交接文档发现行，位置固定在「必读-按需已读」之前。
+  // 有 交接-最新.md → 提示先读；只有历史命名（交接-/接任-/开工交接-/换人交接-）→ 中性提示并给最新一份；
+  // 都没有 → 不出任何行（AC3）。handover 本身不列进按需已读/未读两行（同上）。
+  try {
+    const handoverHint = handoverBriefLine({ projectRoot: project.path, roleDirName: ROLE_DIRS[role] || '' });
+    if (handoverHint && handoverHint.line) lines.push(handoverHint.line);
+  } catch (e) {
+    // 只读发现失败不阻断 boot（边界「异常」行）
+    console.warn('[handover] brief line failed:', String((e && e.message) || e));
+  }
   lines.push(`必读-按需已读: ${optionalRead.length ? optionalRead.map((d) => d.rel || d.path).join(' ') : '（无）'}`);
   if (optionalMissing.length) lines.push(`必读-未读: ${optionalMissing.map((d) => d.rel || d.label).join(' ')}`);
   if (taskDocs.length) {
