@@ -396,9 +396,11 @@ export async function probeRoleSession(projectName, role) {
 
 /** 冷启动提示词：一句话说清“先 boot 再干活”，避免新会话空转、派单没人接。 */
 export function buildBootNudgePrompt({ role, project, teamTool }) {
+  const roleDir = ROLE_DIRS[role] || role;
   return `【会话启动】你是 ${ROLE_NAMES[role] || role} 的新会话（项目：${project}），还没有 boot。\n`
     + `先执行：node "${teamTool}" boot --role ${role} --project "${project}"，再按启动简报读 inbox/任务。\n`
-    + `这是一条系统启动提示，不是新派单；boot 之后照常处理派单。只回一行：已上线 + 会话 id。`;
+    + `然后**必须读前任交接**：项目/${project}/${roleDir}/产出/交接-最新.md（存在就必读，读完在回执里说一句「已读交接」；不存在就在回执里写「无前任交接」）。\n`
+    + `这是一条系统启动提示，不是新派单；boot 之后照常处理派单。只回一行：已上线 + 会话 id + 是否读到交接。`;
 }
 
 /**
