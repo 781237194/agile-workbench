@@ -907,7 +907,9 @@ export function ackMessage(role, id, note) {
       receiptMessage = sendMessage({
         from: role,
         to: found.msg.from,
-        subject: `回执确认: ${found.msg.subject}`,
+        // PM 2026-11-16 19:08 批准（B-20261116-190049-6d72 ③）：标题不得层层拼「回执: 回执: …」。
+        // 被 ack 的消息本身已是回执类标题则不加前缀，否则用「回执确认(<消息 id 后8位>)」只加一层。
+        subject: /回执/.test(String(found.msg.subject || '')) ? String(found.msg.subject || '') : `回执确认(${String(found.msg.id || '').slice(-8)})`,
         body: `已回执 ${id}：${truncate(ack.note, 240)}\n回执人 ${role}｜${ack.ts}\n（本条仅确认收到，不需要再回执）`,
         project: found.msg.project,
         task: found.msg.task,
