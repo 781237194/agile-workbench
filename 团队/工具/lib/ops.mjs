@@ -2622,6 +2622,32 @@ export function cmdProject(args) {
 
 // ========== boot ==========
 
+// B-20261116-134316-c31c：把一次 CLI boot 的阅读证据写进 工作流.json 的 state.boots[role]。
+// 字段与壳层 bootRole 同形：{complete, round, at, rulesHash, docs:{key:{hash,exists,rel}}, requirementsHash, source}。
+// 只改 boots 一项，其余字段原样写回（tmp+rename 由 core.writeJson 保证原子）。
+function writeWorkflowBootState(projectName, roleId, records, meta) {
+  const file = path.join(projectStatePaths(projectName).dir, '工作流.json');
+  const state = readJson(file, {}) || {};
+  const next = state && typeof state === 'object' ? state : {};
+  next.boots = next.boots && typeof next.boots === 'object' ? next.boots : {};
+  const docsMap = {};
+  for (const r of records) docsMap[r.key] = { hash: r.hash || '', exists: Boolean(r.exists), rel: r.rel || '' };
+  next.boots[roleId] = {
+    role: roleId,
+    project: projectName,
+    at: meta.at,
+    round: Number(next.round || 1),
+    complete: meta.complete === true,
+    docs: docsMap,
+    rulesHash: String(meta.rulesHash || ''),
+    requirementsHash: String(meta.requirementsHash || ''),
+    requirementsContentHash: String(meta.requirementsContentHash || ''),
+    source: 'team.mjs boot',
+  };
+  writeJson(file, next);
+  return { ok: true, file, docs: Object.keys(docsMap).length, complete: next.boots[roleId].complete };
+}
+
 export async function cmdBoot(args) {
   const team = loadTeam();
   const role = String(args.role || '');
@@ -2652,6 +2678,7 @@ export async function cmdBoot(args) {
     unread: records.filter((d) => !d.exists).map((d) => d.rel || d.label),
     requirements: docs.requirements.list,
     requirementsHash: docs.requirements.hash,
+    requirementsContentHash: (docs.requirements && (docs.requirements.contentHash || docs.requirements.hash)) || '',
     taskDocs,
     peers: docs.peers,
     missing: records.filter((d) => !d.exists && d.required).map((d) => d.label),
@@ -2662,11 +2689,30 @@ export async function cmdBoot(args) {
     role, sessionId, kind: 'boot', project: projectName, proposalId: '', proposalHash: '',
     baseHash: docs.rulesHash,
     docs: docs.readOrder,
+    // B-20261116-134316-c31c：逐文档哈希也留一份，壳层验收门在 state.boots 缺失时可回退比对（AC2）
+    docHashes: Object.fromEntries(records.map((d) => [d.key, { hash: d.hash || '', exists: Boolean(d.exists), rel: d.rel || '' }])),
+    teamsmithBoot: true,
     requirementsHash: docs.requirements.hash,
     requirements: docs.requirements.count,
     taskDocs: taskDocs.map((d) => d.rel),
     peers: docs.peers.map((p) => p.rel),
   });
+  // B-20261116-134316-c31c：CLI boot 必须同步写 工作流.json 的 state.boots——
+  // 壳层验收门（src/team-tools.js requireWorkflowBoot）只读 state.boots，而 team.mjs boot 以前只写 阅读.jsonl，
+  // 导致 CLI boot 的角色在验收时被永久判「boot 后必读文件已变化」（owner 被卡住）。
+  let workflowBootSync = null;
+  try {
+    workflowBootSync = writeWorkflowBootState(projectName, role, records, {
+      at: bootRead.at,
+      complete: bootRead.complete,
+      rulesHash: docs.rulesHash,
+      requirementsHash: bootRead.requirementsHash,
+      requirementsContentHash: (docs.requirements && (docs.requirements.contentHash || docs.requirements.hash)) || '',
+    });
+  } catch (error) {
+    workflowBootSync = { ok: false, why: String((error && error.message) || error) };
+  }
+
   // B-405f ③：角色 boot 即消费 rotate 留下的待启动项（闭环：谁被拉起，谁自己销账）。
   let bootQueue = null;
   try { bootQueue = consumeBootQueue(projectName, role, sessionId); } catch (e) { bootQueue = { consumed: 0, why: String((e && e.message) || e) }; }

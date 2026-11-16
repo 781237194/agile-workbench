@@ -4525,6 +4525,27 @@ function createTeamTools(options = {}) {
     }
   }
 
+  // B-20261116-134316-c31c（AC2）：state.boots 缺失或没有 docs 时，用最近一次 CLI boot 的阅读记录兜底。
+  // 阅读.jsonl 的 kind=boot 行带 docHashes（team.mjs boot 新写；老记录没有该字段则不兜底）。
+  function latestCliBootOf(projectName, roleId) {
+    try {
+      const file = path.join(layout.state, '阅读.jsonl');
+      if (!fs.existsSync(file)) return null;
+      const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean);
+      let hit = null;
+      for (const line of lines) {
+        let row = null;
+        try { row = JSON.parse(line); } catch { continue; }
+        if (!row || String(row.kind || '') !== 'boot') continue;
+        if (String(row.role || '') !== roleId) continue;
+        if (String(row.project || '') !== projectName) continue;
+        if (!row.docHashes || typeof row.docHashes !== 'object') continue;
+        if (!hit || String(row.ts || '') > String(hit.ts || '')) hit = row;
+      }
+      return hit;
+    } catch { return null; }
+  }
+
   function requireWorkflowBoot(projectName, projectPath, role, options = {}) {
     const name = String(projectName || '').trim();
     const roleId = String(role || '').trim();
@@ -4547,7 +4568,30 @@ function createTeamTools(options = {}) {
     const read = readWorkflowState(name);
     if (!read.ok) return read;
     const state = read.state;
-    const boot = state.boots && typeof state.boots === 'object' ? state.boots[roleId] : null;
+    let boot = state.boots && typeof state.boots === 'object' ? state.boots[roleId] : null;
+    let bootSource = 'state.boots';
+    // AC2：壳层没写过 boots（纯 CLI boot 的角色），或 boots 里没有 docs 明细 → 回退 CLI boot 阅读记录。
+    if (!boot || !boot.docs || !Object.keys(boot.docs).length) {
+      const cli = latestCliBootOf(name, roleId);
+      if (cli) {
+        boot = {
+          role: roleId,
+          project: name,
+          at: String(cli.ts || ''),
+          round: Number(state.round || 1),
+          complete: true,
+          docs: cli.docHashes,
+          rulesHash: String(cli.baseHash || ''),
+          requirementsHash: String(cli.requirementsHash || ''),
+          requirementsContentHash: String(cli.requirementsContentHash || cli.requirementsHash || ''),
+          source: '阅读.jsonl boot（CLI）',
+          // CLI 与壳层算「本轮相关需求」的算法不同（壳层 readBootDocs vs CLI readDocSet），
+          // 回退路径上这一项不可比，只比较规则文档逐字节哈希（AC2 口径）。
+          poolComparable: false,
+        };
+        bootSource = '阅读.jsonl boot';
+      }
+    }
     if (!boot) {
       return failure('BOOT_REQUIRED', `角色「${ROLE_NAMES[roleId] || roleId}」本轮尚未 boot；先读项目铁律/项目信息/角色卡/项目索引/相关需求再执行`, {
         role: roleId, project: name, protocol: 'legacy', required: ['boot']
@@ -4571,6 +4615,7 @@ function createTeamTools(options = {}) {
       });
     }
     const requirementId = String(options.requirementId || '').trim();
+    void bootSource; // 来源仅用于排障：state.boots / 阅读.jsonl boot
     const live = readBootDocs(projectPath, roleId);
     const stale = [];
     // 生成型索引（项目索引/需求总览）由工具在每次需求变化后重写，属于导航物，不是规则。
@@ -4588,7 +4633,7 @@ function createTeamTools(options = {}) {
     // 没有具体需求时才要求“本轮相关需求”整体仍然一致（迭代/终止用）。
     // 比对内容哈希：需求正文里的「- 状态：」和「## 状态记录」是程序自己写的，
     // 只改这些不该让角色的阅读证据作废；新增需求或改正文内容仍然作废。
-    if (!requirementId) {
+    if (!requirementId && boot.poolComparable !== false) {
       const beforePool = String(boot.requirementsContentHash || boot.requirementsHash || '');
       const nowPool = String(live.requirements.contentHash || live.requirements.hash || '');
       if (beforePool !== nowPool) stale.push('本轮相关需求');
