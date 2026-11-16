@@ -109,6 +109,10 @@ function finish() {
   check('⑦ 审计出现 result=stale / code=LOCK_STALE 行（且 8 键）', staleRows.length >= 1 && Object.keys(staleRows[0]).length === 8, { stale: staleRows.length, keys: staleRows[0] ? Object.keys(staleRows[0]).length : 0 });
   const okRows = auditRows.filter((r) => r.result === 'ok');
   check('⑧ 审计有 result=ok 行（接管后写入留痕）', okRows.length >= 2, { ok: okRows.length });
+  // ⑨ 无孤儿：SIGKILL 后子进程 PID 必须已消失（否则会污染后续测试/真实环境）
+  let orphanAlive = false;
+  try { process.kill(child.pid, 0); orphanAlive = true; } catch { orphanAlive = false; }
+  check('⑨ 无孤儿进程：写子进程 PID 已回收', orphanAlive === false, { pid: child.pid, orphanAlive });
 
   const passed = results.filter((r) => r.ok).length;
   console.log(`\nAC1② 杀进程注入断言：${passed}/${results.length} PASS`);
