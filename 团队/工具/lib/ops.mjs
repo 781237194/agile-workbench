@@ -1,4 +1,4 @@
-// 团队工作台 v2 · 业务命令（boot / 消息 / 任务 / 提案 / 评审 / 签字 / 应用 / 索引 / 对账）
+﻿// 团队工作台 v2 · 业务命令（boot / 消息 / 任务 / 提案 / 评审 / 签字 / 应用 / 索引 / 对账）
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -22,6 +22,7 @@ import {
   projectTeamMode, projectRoleIds, persistProjectTeamMode, projectModeState,
   DEFAULT_BOOT_TTL_MINUTES,
 } from './store.mjs';
+import { dispatchGateFor, scanClaims, claimSummary, CLAIM_OVERDUE_MIN, CLAIM_STALLED_MIN } from './claim-watch.mjs';
 import { DshClient } from './dsh-session.mjs';
 import { renderBoardHtml as renderBoardHtmlV2, renderBoardMd as renderBoardMdV2 } from './board.mjs';
 import {
@@ -3143,11 +3144,18 @@ export async function cmdSend(args) {
   }
   // 派单时顺手把任务 owner 定为目标角色，避免任务 owner 为空、角色不知归属。
   if (pmDispatch && args.task) {
+    // T-20261116-124658-303e：认领硬门——同角色名下有未清的「派单超时未认领」时，新单一律拒派（零写入）。
+    const claimGate = dispatchGateFor(b.project, to);
+    if (!claimGate.ok) fail(claimGate.code, claimGate.message, { taskId: claimGate.taskId, owner: claimGate.owner, ageMin: claimGate.ageMin, level: claimGate.level });
     try {
       const task = loadTask(b.project, String(args.task));
       if (task && !task.owner) {
         task.owner = to;
         task.status = task.status || 'open';
+        // 派单即记派单时间 + 必须认领标记；10/30 分钟由 scanClaims 打 claimOverdue / claimStalled。
+        task.dispatchedAt = nowIso();
+        task.dispatchedBy = b.role;
+        task.claimRequired = true;
         saveTask(b.project, task);
       } else if (task && task.owner && task.owner !== to) {
         fail('TASK_OWNED', `任务 ${task.id} 已归 ${task.owner}，不能派给 ${to}`);
