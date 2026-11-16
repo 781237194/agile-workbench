@@ -15,13 +15,14 @@
  *      - lockCalls       \.lock\b            （文件锁/锁字段，含 `.lock` 字面）
  *      - debounceTimers  debounce             （**大小写不敏感**：WINDOW_SAVE_DEBOUNCE_MS 之类不许漏）
  *   3) **已知答案对账**（采信前提）：`src/main.js` 的 directWrites = 93、stateWrites = 69。
- *      - 基线时点：2026-11-17 01:20 定 92/69（PM `M-20261117-011906-d383e0`，按 Owner「现状为基准」原则）；
- *        2026-11-17 01:30 重锚为 93/69（01:19–01:30 之间其它角色又新增 1 处 `fs.writeFileSync` 写点）。
- *      - 变更原因：原基线 89/68（2026-11-16 定）；此后其它角色持续新增写点，属正常演进 —— **不回改实现代码**，只把已知答案更新到现值。
+ *      - **重锚留痕（PM `M-20261117-013504-608b0c` 要求）**：每次改 KNOWN 必须写「基线时点 + 原因 + 是谁的提交带来的增量」，并在回执里给出实测值。
+ *        累计重锚批次：**2**（记录见下，达到 3 批须在回执里提报 PM，由他决定是否收口成固定快照）。
+ *        · 第 1 批 2026-11-17 01:20：89/68 → 92/69（PM `M-20261117-011906-d383e0`，按 Owner「现状为基准」原则；此前其它角色新增 3 处 `fs.writeFileSync` + 1 处 `writeStore`，b7dd 批2 `2cbd0fb` 前后）。
+ *        · 第 2 批 2026-11-17 01:30：92/69 → 93/69（增量来源＝提交 `1683d92`「R-ad44 批3：src/main.js writeStore 内部改走 json-atomic」新增 1 处 `fs.writeFileSync`）。
  *      - **漂移容差（2026-11-17 加）**：`src/main.js` 是高频改动文件，他人新增/删写点会让绝对值漂移；
- *        |实测−期望| ≤ 10 判 **NOISE（漂移，不判红，提示重锚）**；> 10 才判 FAIL（这种量级通常是剥注释/正则口径出错）。
- *        这样既不再追着别人的提交改数字，又保留「计数脚本自证」这一防线。
- *      - 维护口径：数字只随「工作树现状」更新；每次重锚必须同时记录时点 + 原因，并在回执里给出实测值。
+ *        |实测−期望| ≤ 10 判 **NOISE（不判红）**，但**必须打印「实测 X / 期望 Y（Δ±D），建议重锚 KNOWN」并写进 JSON 审计行**（`knownAnswer.drift[].advice`）；
+ *        > 10 才判 FAIL（这种量级通常是剥注释/正则口径出错）。
+ *        这样既不再追着别人的提交改数字，又保留「计数脚本自证」这一防线，且漂移不会被容差静默掩盖。
  *      对不上即判**脚本自身错**（先查剥注释/字符串与正则），不是需求不达标；仍对不上则报 PM「基线本身错」。
  *
  * 用法：
@@ -262,7 +263,11 @@ function main() {
       const delta = Number.isFinite(actual) ? actual - v : null;
       const ok = actual === v;
       const drift = !ok && delta !== null && Math.abs(delta) <= KNOWN_DRIFT_TOLERANCE;
-      checks.push({ file: rel, metric: k, expect: v, actual, raw: got[k + 'Raw'], delta, ok, drift });
+      checks.push({
+        file: rel, metric: k, expect: v, actual, raw: got[k + 'Raw'], delta, ok, drift,
+        // 审计行必带「实测/期望/建议重锚」，避免容差静默掩盖真回归（PM M-20261117-013504-608b0c）
+        advice: ok ? '' : (drift ? `实测 ${actual} / 期望 ${v}（Δ${delta > 0 ? '+' : ''}${delta}），建议重锚 KNOWN（容差 ≤${KNOWN_DRIFT_TOLERANCE}）` : `实测 ${actual} / 期望 ${v}（Δ${delta > 0 ? '+' : ''}${delta}）超出容差 ≤${KNOWN_DRIFT_TOLERANCE}：先查剥注释/正则口径`),
+      });
     }
   }
   const metricChecks = checks.filter((c) => c.metric);
@@ -270,7 +275,7 @@ function main() {
   const knownHardFail = metricChecks.some((c) => !c.ok && !c.drift);
   const knownExact = metricChecks.length > 0 && metricChecks.every((c) => c.ok);
   const driftRows = metricChecks.filter((c) => c.drift);
-  const out = { at: new Date().toISOString(), root: ROOT, targets, files, totals, knownAnswer: { rules: KNOWN, tolerance: KNOWN_DRIFT_TOLERANCE, checks, ok: knownOk, exact: knownExact, hardFail: knownHardFail, drift: driftRows } };
+  const out = { at: new Date().toISOString(), root: ROOT, targets, files, totals, knownAnswer: { rules: KNOWN, tolerance: KNOWN_DRIFT_TOLERANCE, reanchorBatches: 2, reanchorPolicy: '重锚须留痕（时点+原因+谁的提交带来增量）；累计 ≥3 批在回执里提报 PM，由他决定是否收口成固定快照', checks, ok: knownOk, exact: knownExact, hardFail: knownHardFail, drift: driftRows } };
 
   // AC1①：白名单内状态写判定（默认只报数；带 --check-state-writes 时输出明细）
   let stateCheck = null;
@@ -304,8 +309,8 @@ function main() {
     for (const c of checks) {
       if (c.skipped) { console.log(`    SKIP  ${c.file}（不在本次目标里）`); continue; }
       const tag = c.ok ? 'PASS ' : (c.drift ? 'NOISE' : 'FAIL ');
-      const driftNote = c.ok ? '' : `（Δ${c.delta > 0 ? '+' : ''}${c.delta}，疑似他人新增/删写点 → 建议按现状重锚 KNOWN）`;
-      console.log(`    ${tag} ${c.file} ${c.metric} 期望 ${c.expect} / 剥后 ${c.actual} / 原始 ${c.raw}${driftNote}`);
+      const advice = c.ok ? '' : `  ${c.advice || ''}`;
+      console.log(`    ${tag} ${c.file} ${c.metric} 期望 ${c.expect} / 剥后 ${c.actual} / 原始 ${c.raw}${advice}`);
     }
     console.log(`  → ${knownExact ? '对账通过（与基线逐位一致），计数可采信'
       : (knownHardFail ? '对账未通过：偏差超出容差，先查剥注释/字符串与正则口径，仍不符则报 PM「基线本身错」'
