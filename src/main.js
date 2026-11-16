@@ -9153,6 +9153,7 @@ function registerIpc() {
     } catch (error) { return { ok: false, code: 'CRASH_AUDIT_READ_FAILED', message: String((error && error.message) || error).slice(0, 160) }; }
   });
   installCrashSensors();
+installShellAuditSensors();
   ipcMain.handle('dsh:status', async () => {    // DSH 更新后端口会变：检测失败时先尝试从 DSH 进程/监听端口自动发现，
     // 发现成功则持久化并重载 WebView；失败保留原地址，把原因写进 status.message。
     const canDiscover = dshAutoDiscoveryAllowed();
@@ -10358,21 +10359,23 @@ function measureLayoutInPage() {
 // R-fe90 AC1/AC6/AC12：5 档截图 + 每档 perf JSON。真实窗口，走「更多 → 外观」的 5 项真实点击，
 // 不直接改 html 属性（否则测不到入口接线）。退出码 0=5 张截图两两不同且每档 state.themeId 对上。
 async function runThemeShots() {
-  const crypto = require('node:crypto');
+  const crypto2 = crypto;
   const outDir = process.env.AWB_THEME_OUT ? path.resolve(process.env.AWB_THEME_OUT) : path.join(ROOT, '_tmp', 'theme-shots-' + Date.now());
   fs.mkdirSync(outDir, { recursive: true });
+  // 尺寸口径写死可配：AWB_THEME_SIZE=1500x900（默认）或 2560x1400（AC12 第二轮）。
+  const sizeRaw = String(process.env.AWB_THEME_SIZE || '1500x900').toLowerCase();
+  const sizeMatch = /^(\d{3,4})x(\d{3,4})$/.exec(sizeRaw);
+  const shotWidth = sizeMatch ? Number(sizeMatch[1]) : 1500;
+  const shotHeight = sizeMatch ? Number(sizeMatch[2]) : 900;
   createWindow();
   const win = mainWindow;
-  // AC12：窗口尺寸写死 1500×900（与证据文字一致），实际内容尺寸/zoom 记进每档 JSON。
-  try { win.setContentSize(1500, 900); } catch { /* 平台不支持则用默认尺寸，JSON 里记实际值 */ }
+  try { win.setContentSize(shotWidth, shotHeight); } catch { /* 平台不支持则用默认尺寸，JSON 里记实际值 */ }
   await new Promise((resolve) => {
     if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
     else resolve();
   });
   await new Promise((r) => setTimeout(r, 2500)); // 等 app.js 的异步 boot 完
   // AC1：5 张图必须内容一致、只差主题 —— 先把壳内 webview（DSH 页面）统一置空白，
-  // 否则各档会截到 DSH 的不同页面（壁纸页/聊天页），主题差异完全不可比。
-  // 先把所有非主窗 webContents 列出来（诊断用）：blanked=0 时要能看出为什么没置空。
   const webContentsSeen = [];
   let blankedWebviews = 0;
   for (const wc of webContents.getAllWebContents()) {
@@ -10382,13 +10385,10 @@ async function runThemeShots() {
     let url = '';
     try { url = String(wc.getURL() || ''); } catch { url = ''; }
     webContentsSeen.push({ type, url: url.slice(0, 80) });
-    // 只置空「嵌在壳里的页面」（webview / remote / 其它非主窗渲染进程），不看具体类型名，避免类型名变化导致漏置
     try {
       await wc.loadURL('about:blank');
       blankedWebviews += 1;
     } catch {
-      // webview guest 常常不允许主进程导航（Cannot load URL / ERR_ABORTED）→ 退化方案：
-      // 把它内容隐藏 + 统一深色底，目的只是「5 张图内容一致、只差主题」，不要求真换页。
       try {
         await wc.executeJavaScript("(function(){try{var d=document.documentElement;d.style.background='#101014';d.style.colorScheme='dark';if(document.body)document.body.style.visibility='hidden';}catch(e){}})()", true);
         blankedWebviews += 1;
@@ -10397,7 +10397,18 @@ async function runThemeShots() {
   }
   if (blankedWebviews) await new Promise((r) => setTimeout(r, 1200));
   try { win.webContents.debugger.attach('1.3'); } catch { /* 已附加 */ }
-  const viewport = await win.webContents.executeJavaScript('({w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio})', true);
+  // 安全求值：渲染层脚本抛错不让整个自检崩，把错误记进 errors[] 便于定位。
+  const errors = [];
+  const safeExec = async (js, note) => {
+    try { return { ok: true, value: await win.webContents.executeJavaScript(js, true) }; }
+    catch (error) {
+      const msg = String((error && error.message) || error).slice(0, 200);
+      errors.push({ note, message: msg });
+      return { ok: false, value: null, message: msg };
+    }
+  };
+  const viewportRes = await safeExec('({w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio})', 'viewport');
+  const viewport = viewportRes.value || { w: null, h: null, dpr: null };
   const windowInfo = {
     contentSize: win.getContentSize(),
     bounds: win.getBounds(),
@@ -10409,35 +10420,72 @@ async function runThemeShots() {
   const ids = ['native-dark', 'native-light', 'tech-dark', 'anime-dark', 'glass-dark'];
   const shots = [];
   const results = [];
+  const clickThemeOnce = async (id) => {
+    const js = '(function(){var el=document.querySelector(' + JSON.stringify('#more-menu [data-theme-menu] [data-theme-id="' + id + '"]') + ');if(!el)return false;el.click();return true;})()';
+    const res = await safeExec(js, 'click:' + id);
+    return res.ok ? Boolean(res.value) : false;
+  };
+  const clickTheme = clickThemeOnce;
+  const shoot = async (fileBase) => {
+    const shot = await win.webContents.debugger.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
+    const pngPath = path.join(outDir, fileBase + '.png');
+    fs.writeFileSync(pngPath, Buffer.from(shot.data, 'base64'));
+    const pngBuf = fs.readFileSync(pngPath);
+    return { pngPath, pngBuf, pngSize: { width: pngBuf.readUInt32BE(16), height: pngBuf.readUInt32BE(20) } };
+  };
   for (const id of ids) {
-    const clicked = await win.webContents.executeJavaScript(
-      `(function(){var el=document.querySelector('#more-menu [data-theme-menu] [data-theme-id="${id}"]');if(!el)return false;el.click();return true;})()`,
-      true
-    );
+    const clicked = await clickTheme(id);
     await new Promise((r) => setTimeout(r, 1600)); // 过渡动画结束再采样/截图
     const state = await win.webContents.executeJavaScript('window.__themeState ? window.__themeState() : null', true);
     const probe = await win.webContents.executeJavaScript('window.__themeProbe ? window.__themeProbe(3000) : null', true);
-    const shot = await win.webContents.debugger.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
-    const pngPath = path.join(outDir, id + '.png');
-    fs.writeFileSync(pngPath, Buffer.from(shot.data, 'base64'));
-    const pngBuf = fs.readFileSync(pngPath);
-    const pngSize = { width: pngBuf.readUInt32BE(16), height: pngBuf.readUInt32BE(20) }; // PNG IHDR 宽高
+    const { pngPath, pngBuf, pngSize } = await shoot(id);
+    const perfPayload = { themeId: id, clicked, window: windowInfo, pngSize, pngBytes: pngBuf.length, state, probe, at: new Date().toISOString() };
     const perfPath = path.join(outDir, 'perf-' + id + '.json');
-    fs.writeFileSync(perfPath, JSON.stringify({ themeId: id, clicked, window: windowInfo, pngSize, pngBytes: pngBuf.length, state, probe, at: new Date().toISOString() }, null, 2));
+    fs.writeFileSync(perfPath, JSON.stringify(perfPayload, null, 2));
     shots.push({ id, png: pngPath, perf: perfPath, bytes: pngBuf.length, pngSize });
     results.push({ themeId: id, clicked, state, probe, pngSize });
   }
+  // 特效开/关对比（只做 tech-dark）：证明网格+粒子真在跑、effectLevel=off 真关断。
+  const fxProbe = "(function(){var d=document.documentElement;var b=getComputedStyle(document.body,'::before');var c=document.getElementById('awb-theme-particles');var tb=document.getElementById('titlebar');var blur=tb?String(getComputedStyle(tb).backdropFilter||getComputedStyle(tb).webkitBackdropFilter||'none'):'none';return {effectLevel:d.getAttribute('data-effect-level')||'full',gridAnimation:String(b.animationName||''),gridSize:String(b.backgroundSize||''),particles:!!c,particleCanvasSize:c?(c.width+'x'+c.height):'',titlebarBlur:blur};})()";
+  await clickTheme('tech-dark');
+  await new Promise((r) => setTimeout(r, 1500));
+  const fxOn = await win.webContents.executeJavaScript(fxProbe, true);
+  const onShot = await shoot('tech-dark-effects-on');
+  await win.webContents.executeJavaScript("document.documentElement.setAttribute('data-effect-level','off')", true);
+  await clickTheme('tech-dark'); // 走真实入口重应用，触发特效层按 off 关断
+  await new Promise((r) => setTimeout(r, 1500));
+  const fxOff = await win.webContents.executeJavaScript(fxProbe, true);
+  const offShot = await shoot('tech-dark-effects-off');
+  await win.webContents.executeJavaScript("document.documentElement.removeAttribute('data-effect-level')", true);
+  const fxOk = fxOn.particles === true
+    && fxOn.gridAnimation.indexOf('awbThemeGridDrift') >= 0
+    && (fxOff.particles === false)
+    && fxOff.gridAnimation === 'none'
+    && onShot.pngBuf.length !== offShot.pngBuf.length;
+  const effects = {
+    on: fxOn,
+    off: fxOff,
+    onPng: onShot.pngPath,
+    offPng: offShot.pngPath,
+    onPngSize: onShot.pngSize,
+    offPngSize: offShot.pngSize,
+    onBytes: onShot.pngBuf.length,
+    offBytes: offShot.pngBuf.length,
+    ok: fxOk
+  };
+  fs.writeFileSync(path.join(outDir, 'effects-compare.json'), JSON.stringify(effects, null, 2));
   try { win.webContents.debugger.detach(); } catch { /* ignore */ }
-  const hashes = shots.map((s) => crypto.createHash('sha256').update(fs.readFileSync(s.png)).digest('hex'));
+  const hashes = shots.map((s) => crypto2.createHash('sha256').update(fs.readFileSync(s.png)).digest('hex'));
   const unique = new Set(hashes).size;
   const sizes = [...new Set(shots.map((s) => s.pngSize.width + 'x' + s.pngSize.height))];
   const ok = unique === ids.length
     && sizes.length === 1
-    && results.every((r) => r.state && r.state.themeId === r.themeId && r.clicked === true);
-  const report = { ok, outDir, window: windowInfo, uniqueScreenshots: unique, sizes, expected: ids.length, shots, results, at: new Date().toISOString() };
+    && results.every((r) => r.state && r.state.themeId === r.themeId && r.clicked === true)
+    && effects.ok;
+  const report = { ok, outDir, requestedSize: shotWidth + 'x' + shotHeight, window: windowInfo, uniqueScreenshots: unique, sizes, expected: ids.length, effects, errors, shots, results, at: new Date().toISOString() };
   fs.writeFileSync(path.join(outDir, 'theme-shots.json'), JSON.stringify(report, null, 2));
   console.log('THEME_SHOTS_REPORT ' + path.join(outDir, 'theme-shots.json'));
-  console.log(JSON.stringify({ ok, unique, expected: ids.length, outDir }, null, 2));
+  console.log(JSON.stringify({ ok, sizes, unique, requested: report.requestedSize, effectsOk: effects.ok, outDir }, null, 2));
   console.log(ok ? 'THEME_SHOTS_OK' : 'THEME_SHOTS_FAIL');
   app.exit(ok ? 0 : 1);
 }
@@ -17611,6 +17659,53 @@ function recordRenderCrash(kind, details) {
   return row;
 }
 
+/**
+ * B-20261116-105124-c25a：主进程级异常/退出审计（并入同一条崩溃审计 渲染崩溃.jsonl）。
+ * 背景：壳实例 8.3/2.3 分钟「整体退出」且渲染崩溃.jsonl 无新增行——说明退出不是渲染进程崩溃，
+ * 而是主进程异常或静默退出。这里补三类行：main-uncaught / main-rejection / shell-exit（含窗口数、存活秒数）。
+ * fail-open：审计写不了只打日志，绝不因为审计失败再抛。
+ */
+function recordShellAudit(kind, details) {
+  const info = (details && typeof details === 'object') ? details : {};
+  const err = info.error || info.reason || null;
+  const row = {
+    at: now(),
+    kind: String(kind || 'shell-event'),
+    processType: 'main',
+    reason: String((err && (err.message || err)) || info.reason || '').slice(0, 600),
+    exitCode: info.exitCode === undefined || info.exitCode === null ? null : Number(info.exitCode),
+    memoryMB: currentRendererMemoryMB(),
+    stack: String((err && err.stack) || '').slice(0, 2000),
+    windows: (() => { try { return BrowserWindow.getAllWindows().length; } catch { return -1; } })(),
+    aliveSec: Math.round(process.uptime()),
+    project: (() => { try { const s = readStore(); const p = (s.projects || []).find((x) => x && x.id === s.activeProjectId); return p ? String(p.name || '') : ''; } catch { return ''; } })(),
+  };
+  const file = crashAuditFile();
+  if (file) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, JSON.stringify(row) + '\n', 'utf8');
+    } catch { /* fail-open：审计写不了也不能影响退出路径 */ }
+  }
+  console.log('[shell-audit]', JSON.stringify({ kind: row.kind, reason: row.reason.slice(0, 120), windows: row.windows, aliveSec: row.aliveSec }));
+  return row;
+}
+
+/** 主进程级监听（幂等）：未捕获异常、未处理拒绝、退出。 */
+function installShellAuditSensors() {
+  if (installShellAuditSensors.done) return;
+  installShellAuditSensors.done = true;
+  process.on('uncaughtException', (error) => {
+    recordShellAudit('main-uncaught', { error });
+    console.error('[main-uncaught]', String((error && error.stack) || error).slice(0, 800));
+  });
+  process.on('unhandledRejection', (reason) => {
+    recordShellAudit('main-rejection', { error: reason });
+    console.error('[main-rejection]', String((reason && (reason.stack || reason.message)) || reason).slice(0, 800));
+  });
+  app.on('will-quit', () => { recordShellAudit('shell-exit', {}); });
+}
+
 function installCrashSensors() {
   if (installCrashSensors.done) return;
   installCrashSensors.done = true;
@@ -18237,6 +18332,9 @@ const QUEUE_PUMP_INTERVAL_MS = 60 * 1000;
 const queuePumpState = { timer: null, running: false, lastAt: 0, last: null };
 function queuePumpTick() {
   if (queuePumpState.running) return;
+  // B-20261116-105124-c5413：--no-wake 下壳不得驱动任何会写邮箱/改团队状态的链路。
+  // 定时泵会把派单队列里的项真的投出去（写邮箱 new/ + 派单锁），压测口径要求「不写邮箱」。
+  if (IS_NO_WAKE) { queuePumpState.last = { ok: true, skipped: true, reason: 'NO_WAKE' }; return; }
   let store = null;
   let project = null;
   try {
@@ -18386,8 +18484,18 @@ function scheduleRouteSupervisorRetry(project) {
 }
 
 /** 拉起守护（幂等）：本壳已在管同一个项目、或别人的守护心跳正常时不重复启动。 */
+// B-20261116-105124-c5413：--no-wake 只允许壳「看」，不允许它动团队状态。
+// 压测/长跑口径是四不（不唤醒/不写邮箱/不弹通知/不触发路由守护）；守护一旦拉起就会写守护状态、
+// 并驱动派单/唤醒链路改邮箱，所以 no-wake 下整个守护直接不启动（只读也不做，避免半条状态）。
 function ensureRouteSupervisor(project) {
   if (routeSupervisor.quitting) return null;
+  if (IS_NO_WAKE) {
+    if (!ensureRouteSupervisor.noWakeLogged) {
+      ensureRouteSupervisor.noWakeLogged = true;
+      console.log('ROUTE_DAEMON_SKIP ' + JSON.stringify({ why: 'NO_WAKE', project: String((project && (project.teamName || project.name)) || '') }));
+    }
+    return null;
+  }
   if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) return null;
   if (process.env.AWB_ROUTE_DAEMON === 'off') return null;
   if (!project || !project.name) return null;
@@ -19339,6 +19447,9 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) return;
+  // B-20261116-105124-c25a：窗口全关导致的退出也要留一行审计——历史上「壳 2-8 分钟整体退出」
+  // 无法区分「人关了窗」「窗口被意外销毁」「主进程异常」三种，这一行能把第一种钉死。
+  recordShellAudit('shell-window-all-closed', {});
   if (process.platform !== 'darwin') app.quit();
 });
 
