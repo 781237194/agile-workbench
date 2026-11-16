@@ -9,7 +9,49 @@ import {
   cmdVerify, cmdLog, cmdLock, cmdOwnerApprove, cmdOwner, cmdRoster, cmdPilot, cmdDoctor,
   cmdReq, cmdFind, cmdBoard, cmdVote, cmdWorkflow, cmdOwnerProxyDecide, cmdQueue,
   cmdAsk, cmdAnswer, cmdPresence, cmdMarkRead, cmdWake, cmdLessons, failLessonGate, lessonGateFor,
+  cmdProjectConfig, sendLessonsProgramNotice, flushLessonsProgramWakes,
 } from './lib/ops.mjs';
+import { noteActionAfterWrite } from './lib/store.mjs';
+
+/**
+ * a28a：命令成功返回后按白名单自增轮次。
+ * 判据 = 「命令名 + 子命令」，映射表写死在增补卷-a28a-1 §一；表外一律不计（不按前缀猜）。
+ */
+function countedActionOf(args) {
+  const cmd = String((args._ && args._[0]) || '');
+  const sub = String((args._ && args._[1]) || '').toLowerCase();
+  if (cmd === 'send') return 'send';
+  if (cmd === 'ack') return 'ack';
+  if (cmd === 'task' && sub === 'done') return 'task done';
+  if (cmd === 'req' && sub === 'review') return 'req review';
+  if (cmd === 'decision' && sub === 'answer') return 'decision answer';
+  if (cmd === 'owner' && sub === 'proxy') {
+    const action = String(args.action || args.decision || '').toLowerCase();
+    return action === 'accept' || action === 'accepted' ? 'proxy accept' : null;
+  }
+  if (cmd === 'lessons' && sub === 'append') return 'lessons append';
+  return null;
+}
+
+/** 成功返回后调一次；失败绝不影响主命令（返回码不变） */
+async function bumpTurnsAfterSuccess(args) {
+  try {
+    if (args['dry-run'] || args.dryRun) return;
+    const actionType = countedActionOf(args);
+    if (!actionType) return;
+    const r = noteActionAfterWrite({
+      token: args.boot,
+      actionType,
+      sendNotice: sendLessonsProgramNotice,
+    });
+    await flushLessonsProgramWakes();
+    if (r && r.prompt && r.prompt.action === 'prompt' && !args.json) {
+      process.stderr.write(`[lessons] 已发送经验教训提醒（${r.role}，${r.turns} 轮达阈值 ${r.threshold}）\n`);
+    }
+  } catch (e) {
+    console.log('[lessons] turns_bump_failed: ' + String((e && e.message) || e));
+  }
+}
 import { cmdBrief } from './lib/brief.mjs';
 import { cmdOwnerProxy } from './lib/owner-proxy.mjs';
 import { cmdAutoBoot } from './lib/auto-boot.mjs';
@@ -258,7 +300,12 @@ async function main() {
 
   switch (cmd) {
     case 'init': cmdInit(args); break;
-    case 'project': cmdProject(args); break;
+    case 'project': {
+      const projectSub = String((args._ && args._[1]) || '').toLowerCase();
+      if (projectSub === 'config') cmdProjectConfig(args);
+      else cmdProject(args);
+      break;
+    }
     case 'boot': await cmdBoot(args); break;
     case 'auto-boot': cmdAutoBoot(args); break;
     case 'send': await cmdSend(args); break;
@@ -331,6 +378,8 @@ async function main() {
       textOut(`未知命令：${cmd}\n\n${HELP}`);
       return 2;
   }
+  // a28a：写盘成功后按白名单自增轮次（唯一自增点）。place 在 switch 之后 = 只有成功返回才计。
+  await bumpTurnsAfterSuccess(args);
   return 0;
 }
 

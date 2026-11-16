@@ -9201,6 +9201,15 @@ export function cmdLessons(args) {
     });
     return;
   }
+  if (sub === 'status' && args.deleted) {
+    // F10 / 卷 §七：已删除条目恰好 5 键（与界面同一实现）
+    const rows = lessons.readDeletedEntries(projectPath, PATHS.teamRoot);
+    const lines = rows.length
+      ? rows.map((r) => `${r.id || '（无 id）'}｜${r.date}｜删除于 ${String(r.deletedAt).slice(0, 19).replace('T', ' ') || '—'}｜${r.by || '—'}｜${r.text}`)
+      : ['没有已删除条目'];
+    out(args, lines.join('\n'), { ok: true, total: rows.length, deleted: rows });
+    return;
+  }
   if (sub === 'status') {
     const parsed = lessons.loadLessons(projectPath);
     const rec = lessons.latestReadRecord(PATHS.teamRoot, b.role);
@@ -9213,5 +9222,189 @@ export function cmdLessons(args) {
     ].join('\n'), { ok: true, parsed: { totals: parsed.totals, fileSha: parsed.fileSha, broken: parsed.broken, missing: parsed.missing }, latest: rec, gate });
     return;
   }
-  fail('BAD_SUB', 'lessons 支持 read / status');
+  if (sub === 'turns') {
+    // a28a F9：轮次可视（只读；sessionId 不符名册时按 F5 清 0 并写审计 reset）
+    const st = projectStatePaths(b.project);
+    const roleIds = projectRoleIds(project);
+    const team = loadTeam();
+    const me = getMember(team, b.role);
+    const mine = lessons.readRoleTurns({
+      stateDir: st.dir, teamRoot: PATHS.teamRoot, role: b.role,
+      sessionId: (me && me.sessionId) || b.sessionId || '',
+      configPath: st.config, applyReset: true,
+    });
+    const all = lessons.readAllTurns({ stateDir: st.dir, configPath: st.config, roleIds });
+    const lines = [];
+    for (const role of roleIds) {
+      const row = all.roles[role];
+      const turns = row && row.turns != null ? `${row.turns}/${all.threshold}` : '—';
+      const last = row && row.lastNotifiedAt ? String(row.lastNotifiedAt).slice(0, 19).replace('T', ' ') : '—';
+      const next = row && row.nextInTurns != null ? `${row.nextInTurns} 轮` : '—';
+      lines.push(`${role}: ${turns}｜上次提醒 ${last}｜距下次 ${next}`);
+    }
+    lines.push(`阈值：${all.threshold}（来源 ${all.source}）｜tick ${all.tickMs}ms｜计数文件${all.missing ? '缺失（按 0 起始）' : '就绪'}`);
+    out(args, lines.join('\n'), {
+      ok: true, role: b.role, threshold: all.threshold, source: all.source, tickMs: all.tickMs,
+      missing: all.missing, roles: all.roles,
+      mine: {
+        role: b.role,
+        turns: mine.ok && mine.entry ? mine.entry.turns : null,
+        lastAt: mine.ok && mine.entry ? mine.entry.lastAt : null,
+        lastNotifiedAt: mine.ok && mine.entry ? mine.entry.lastNotifiedAt : null,
+        lastNoticeSha: mine.ok && mine.entry ? mine.entry.lastNoticeSha : null,
+        lastSeenAuditSeq: mine.ok && mine.entry ? mine.entry.lastSeenAuditSeq : null,
+        lastSelfWriteAt: mine.ok && mine.entry ? mine.entry.lastSelfWriteAt : null,
+        sessionReset: !!(mine.ok && mine.reset),
+      },
+    });
+    return;
+  }
+  if (sub === 'append') {
+    // F6：只写自己段；三字段必填；编号 L-YYYYMMDD-<seq>
+    const st = projectStatePaths(b.project);
+    const team = loadTeam();
+    const me = getMember(team, b.role);
+    const r = lessons.appendLesson({
+      projectDir: projectPath, teamRoot: PATHS.teamRoot, role: b.role,
+      scene: args.scene, lesson: args.lesson, next: args.next,
+    });
+    if (!r.ok) fail(r.code, lessonsFailText(r.code), { wrote: false, code: r.code });
+    // 卷 §二.5：自写后刷新基线（lastNoticeSha / lastSelfWriteAt）
+    lessons.markSelfWrite({
+      stateDir: st.dir, projectDir: projectPath, role: b.role, fileSha: r.fileSha,
+      sessionId: (me && me.sessionId) || b.sessionId || '',
+    });
+    out(args, `已追加经验教训 ${r.id}（${b.role}）`, { ok: true, id: r.id, before: r.before, after: r.after, fileSha: r.fileSha, wrote: true });
+    return;
+  }
+  if (sub === 'fix') {
+    // F7：更正 / 软删（只能动自己段）
+    const st = projectStatePaths(b.project);
+    const team = loadTeam();
+    const me = getMember(team, b.role);
+    const r = lessons.fixLesson({
+      projectDir: projectPath, teamRoot: PATHS.teamRoot, role: b.role,
+      id: args.id, text: args.text, scene: args.scene, next: args.next,
+      delete: Boolean(args.delete), reason: args.reason,
+    });
+    if (!r.ok) fail(r.code, lessonsFailText(r.code), { wrote: false, code: r.code });
+    lessons.markSelfWrite({
+      stateDir: st.dir, projectDir: projectPath, role: b.role, fileSha: r.fileSha,
+      sessionId: (me && me.sessionId) || b.sessionId || '',
+    });
+    out(args, `${args.delete ? '已软删' : '已更正'} ${r.id}`, { ok: true, id: r.id, before: r.before, after: r.after, fileSha: r.fileSha, wrote: true });
+    return;
+  }
+  if (sub === 'audit') {
+    const stats = lessons.auditStats(PATHS.teamRoot);
+    out(args, `已更正 ${stats.fixed} 条 / 已删除 ${stats.deleted} 条（审计 ${stats.rows} 行）`, { ok: true, ...stats });
+    return;
+  }
+  fail('BAD_SUB', 'lessons 支持 read / status [--deleted] / turns / append / fix / audit');
+}
+
+/** a28a 错误码 → 人话（零写入原因） */
+function lessonsFailText(code) {
+  const map = {
+    LESSONS_FIELD_REQUIRED: '场景/教训/下次怎么做 三字段必填',
+    LESSONS_ID_REQUIRED: '需要 --id L-YYYYMMDD-<seq>',
+    LESSONS_ID_INVALID: '--id 格式非法（应形如 L-20261116-1）',
+    LESSONS_ID_NOT_FOUND: '该 id 不存在（只认带行内 id 注释的条目，历史无 id 行不认）',
+    LESSONS_ID_DUPLICATE: '该 id 重复',
+    LESSONS_ROLE_FORBIDDEN: '只能改自己段的条目（Owner 也不得跨角色改）',
+    LESSONS_SECTION_MISSING: '登记册缺该角色段',
+    LESSONS_FILE_MISSING: '经验教训登记册缺失',
+    LESSONS_PARSE_BROKEN: '经验教训登记册无法解析',
+    LESSONS_WRITE_FAILED: '写盘失败（不落半条）',
+    LESSONS_AUDIT_FAILED: '审计写失败，已回滚本次改动',
+    LESSONS_CONFLICT: '并发冲突（另一角色正在写），请稍后重试',
+    LESSONS_REASON_REQUIRED: '软删必须给 --reason',
+    LESSONS_ALREADY_DELETED: '该条目已软删',
+  };
+  return map[code] || code;
+}
+
+/* ==========================================================================
+ * a28a：程序提示（from=pm / senderKind=program / type=notice / ackRequired=false）
+ * 先落箱（sendMessage），再试唤醒；失败只记 wakeError，不重复发。
+ * ========================================================================== */
+const LESSONS_WAKE_QUEUE = [];
+
+/** promptIfDue 的 sendNotice 回调（同步落箱 + 入队唤醒） */
+export function sendLessonsProgramNotice({ project, to, subject, body, wake, senderKind, type, ackRequired }) {
+  try {
+    const msg = sendMessage({
+      from: 'pm', to, subject, body, project,
+      type: type || 'notice',
+      ackRequired: Boolean(ackRequired),
+      noEcho: true,
+    });
+    if (wake) LESSONS_WAKE_QUEUE.push({ project, to, msg });
+    return { ok: true, messageId: msg.id, delivered: true, senderKind: senderKind || 'program' };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+/** 执行排队的唤醒（team.mjs 在 bump 之后 await；失败不抛） */
+export async function flushLessonsProgramWakes() {
+  const pending = LESSONS_WAKE_QUEUE.splice(0, LESSONS_WAKE_QUEUE.length);
+  const results = [];
+  for (const item of pending) {
+    try {
+      const r = await wakeSessionForMessage({ project: item.project, to: item.to, msg: item.msg, isDispatch: false });
+      results.push({ to: item.to, messageId: item.msg.id, ok: !!(r && r.ok !== false), wakeError: r && r.error ? String(r.error) : '' });
+    } catch (e) {
+      results.push({ to: item.to, messageId: item.msg.id, ok: false, wakeError: String((e && e.message) || e) });
+    }
+  }
+  return { ok: true, results };
+}
+
+/**
+ * a28a：`team.mjs project config --lessons-turns N`
+ * 阈值唯一写入口（PM/Owner）；tmp+rename + `.project-config.lock`（O_EXCL，stale 30s）；
+ * 写入必须 merge 保留未知键（gates / dshWorkspaceId / roleIds 逐字不变）。
+ */
+export function cmdProjectConfig(args) {
+  const b = bootFor(args, 'project');
+  if (!['pm', 'owner'].includes(b.role)) {
+    fail('PERMISSION_DENIED', '改阈值只允许 PM/Owner；角色令牌不足', { wrote: false });
+  }
+  const rawTurns = args['lessons-turns'];
+  if (rawTurns == null || String(rawTurns).trim() === '') {
+    fail('BAD_ARGS', '需要 --lessons-turns <正整数>', { wrote: false });
+  }
+  const n = Math.floor(Number(rawTurns));
+  if (!Number.isFinite(n) || n < 1) fail('BAD_ARGS', `--lessons-turns 必须是 ≥1 的整数（收到 ${rawTurns}）`, { wrote: false });
+
+  const st = projectStatePaths(b.project);
+  const abs = st.config;
+  const beforeCfg = readJson(abs, {}) || {};
+  const lockRes = lessons.withFileLock(abs, () => {
+    // 锁内重读，merge 保留未知键
+    const cur = readJson(abs, {}) || {};
+    const next = { ...cur, config: { ...((cur && cur.config) || {}), lessonsTurns: n } };
+    const tmp = abs + '.tmp-' + process.pid + '-' + Date.now();
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
+      fs.renameSync(tmp, abs);
+      return { ok: true };
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+      return { ok: false, code: 'LESSONS_WRITE_FAILED', error: String((e && e.message) || e) };
+    }
+  });
+  if (!lockRes || !lockRes.ok) {
+    const code = (lockRes && lockRes.code) || 'LESSONS_CONFLICT';
+    fail(code, lessonsFailText(code), { wrote: false });
+  }
+  const afterCfg = readJson(abs, {}) || {};
+  const resolved = lessons.resolveLessonsTurns(abs);
+  out(args, `已设置 lessonsTurns=${n}（项目 ${b.project}）；生效阈值 ${resolved.value}（来源 ${resolved.source}）`, {
+    ok: true, wrote: true, project: b.project, lessonsTurns: n,
+    before: beforeCfg && beforeCfg.config ? beforeCfg.config.lessonsTurns : null,
+    after: afterCfg && afterCfg.config ? afterCfg.config.lessonsTurns : null,
+    threshold: resolved.value, source: resolved.source, configPath: abs,
+  });
 }

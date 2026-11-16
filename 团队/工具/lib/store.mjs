@@ -684,6 +684,44 @@ export function createBootToken({ role, project, sessionId, docs }) {
   return data;
 }
 
+/**
+ * a28a：命令**写盘成功之后**的唯一计数自增入口（命令层不得各自加）。
+ * 白名单见 lessons.CLI_ACTIONS / SHELL_ACTIONS；失败/幂等/dry-run/只读一律不计。
+ * 计数失败绝不影响主命令结果（只记日志 turns_bump_failed / lessons_mark_failed）。
+ */
+export function noteActionAfterWrite({ token, actionType, commitId, sendNotice } = {}) {
+  try {
+    const tk = String(token || '');
+    if (!tk || tk === 'true') return { ok: false, skipped: true, reason: 'no_token' };
+    if (!lessons.isCountedAction(actionType)) return { ok: true, skipped: true, reason: 'not_counted', actionType };
+    const data = readJson(bootTokenPath(tk), null);
+    if (!data || !data.role || !data.project) return { ok: false, skipped: true, reason: 'no_boot' };
+    const st = projectStatePaths(data.project);
+    const team = loadTeam();
+    const member = getMember(team, data.role);
+    let projectDir = '';
+    try { projectDir = loadProject(data.project).path; } catch { projectDir = ''; }
+    const r = lessons.bumpTurns({
+      stateDir: st.dir,
+      teamRoot: PATHS.teamRoot,
+      projectName: data.project,
+      projectDir,
+      role: data.role,
+      sessionId: data.sessionId || (member && member.sessionId) || '',
+      actionType,
+      commitId,
+      configPath: st.config,
+      sendNotice,
+    });
+    return r;
+  } catch (e) {
+    console.log('[lessons] turns_bump_failed: ' + String((e && e.message) || e));
+    return { ok: false, softFail: true, code: 'TURNS_BUMP_FAILED' };
+  }
+}
+
+import * as lessons from './lessons.mjs';
+
 export function requireBoot(token, { role, project } = {}) {
   if (!token || token === true) fail('BOOT_REQUIRED', '需要 --boot <启动令牌>；先运行 boot');
   const data = readJson(bootTokenPath(String(token)), null);
