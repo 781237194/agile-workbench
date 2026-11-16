@@ -15,6 +15,13 @@ const SamplerDecide = require('./mem-sampler-decide.js');
 const RenderMemDir = require('./render-mem-dir.js');
 
 const ROOT = path.join(__dirname, '..');
+// B-20261116-071224-9300：团队根唯一解析器——隔离优先（AWB_TEAM_ROOT > TEAM_ROOT > layout > 仓库团队），
+// 22 处读取点必须共用本函数；未设 env 时行为与原「layout.teamRoot || TEAM_ROOT || ROOT/团队」完全一致。
+function resolveTeamRoot() {
+  const envRoot = String(process.env.AWB_TEAM_ROOT || process.env.TEAM_ROOT || '').trim();
+  if (envRoot) return envRoot;
+  return (teamTools && teamTools.layout && (teamTools.layout.teamRoot || teamTools.layout.root)) || path.join(ROOT, '团队');
+}
 const APP_ICON = path.join(ROOT, 'assets', 'pm-workbench.ico');
 const APP_NAME = 'PM工作台';
 // R-b5fc F-4b：角色队列派生文件（由 团队/工具/lib/route-queues.mjs 生成，工作台只读）。
@@ -383,7 +390,7 @@ function roleIdsForProject(project) {
 function projectRoleIds(project) {
   const fallback = roleIdsForProject(project);
   try {
-    const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+    const teamRoot = resolveTeamRoot();
     const slug = teamTools.teamSlug(String((project && (project.teamName || project.name)) || ''));
     const file = path.join(teamRoot, '状态', '项目', slug, '项目.json');
     if (!fs.existsSync(file)) return fallback;
@@ -578,7 +585,7 @@ async function setProjectTeamMode(projectId, teamMode) {
 
 function syncTeamRosterSessions(sessions, options = {}) {
   try {
-    const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+    const teamRoot = resolveTeamRoot();
     const teamFile = path.join(teamRoot, '状态', '团队.json');
     if (!fs.existsSync(teamFile) || !sessions) return;
     const team = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
@@ -3823,7 +3830,7 @@ const OWNER_MATERIAL_MAX_BYTES = 1024 * 1024;
 const OWNER_ACK_MAX_COMMITS = 5;
 
 function teamProjectsDir() {
-  const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+  const teamRoot = resolveTeamRoot();
   return path.join(teamRoot, '状态', '项目');
 }
 
@@ -3885,7 +3892,7 @@ function autoAcceptProjectContext(payload) {
     projectName: teamName,
     projectPath,
     stateDir,
-    teamRoot: (teamTools.layout && teamTools.layout.root) || process.env.TEAM_ROOT || path.join(ROOT, '团队'),
+    teamRoot: resolveTeamRoot(),
     projectsRoot: process.env.TEAM_PROJECTS_ROOT || path.join(ROOT, '项目'),
     storeFile: storeFile(),
     // IPC plan 与主进程 tick 同口径（v6 双开关 AND）：全局 true 且项目级显式 true 才开；
@@ -3942,7 +3949,7 @@ function startAutoAcceptAuto() {
         projectName: String(project.teamName || project.name || ''),
         projectPath: path.resolve(String(project.path || '')),
         stateDir,
-        teamRoot: (teamTools.layout && teamTools.layout.root) || process.env.TEAM_ROOT || path.join(ROOT, '团队'),
+        teamRoot: resolveTeamRoot(),
         projectsRoot: process.env.TEAM_PROJECTS_ROOT || path.join(ROOT, '项目'),
         storeFile: storeFile(),
         // 开关必须在每轮实时解析（配置改动实时生效），不能只在启动时读一次。
@@ -4737,9 +4744,8 @@ function registerIpc() {
   const LEDGER_AUDIT_NAME = '账本处置.jsonl';
 
   function ledgerTeamRoot() {
-    return (teamTools && teamTools.layout && teamTools.layout.teamRoot)
-      || process.env.TEAM_ROOT
-      || path.join(ROOT, '团队');
+    // B-9300：与全进程统一解析器同源（隔离优先）。
+    return resolveTeamRoot();
   }
   /** 处置用的 team.mjs：优先团队沙盘里的那份（TEAM_ROOT 被换掉时与状态同源），否则用仓库内的。 */
   function ledgerTeamMjsPath() {
@@ -5453,8 +5459,7 @@ function registerIpc() {
     try {
       const { name } = teamProjectNameOf(payload || {});
       if (!name) return { ok: false, code: 'NO_PROJECT', decisions: 0, reviews: 0, accepts: 0, message: '还没有当前项目' };
-      const teamRoot = (teamTools && teamTools.layout && (teamTools.layout.teamRoot || teamTools.layout.root))
-        || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+      const teamRoot = resolveTeamRoot();
       if (!ownerPendingCountsModule) {
         const routeFile = path.join(teamRoot, '工具', 'lib', 'decision-route.mjs');
         ownerPendingCountsModule = import(pathToFileURL(routeFile).href).catch((error) => {
@@ -5477,8 +5482,7 @@ function registerIpc() {
       const { name, project } = teamProjectNameOf(payload || {});
       if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
       const projectDir = (project && project.path) || path.join(ROOT, '项目', name);
-      const teamRoot = (teamTools && teamTools.layout && (teamTools.layout.teamRoot || teamTools.layout.root))
-        || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+      const teamRoot = resolveTeamRoot();
       if (!lessonsBoardModule) {
         lessonsBoardModule = import(pathToFileURL(path.join(teamRoot, '工具', 'lib', 'lessons.mjs')).href).catch((error) => {
           lessonsBoardModule = null;
@@ -6874,7 +6878,7 @@ function registerIpc() {
     // 默认只摘本机记录，绝不动旧团队账本/任务/提案/回执。purgeTeam 仅供显式迁移工具使用。
     if (p.purgeTeam === true || p.archiveTeam !== false) {
     try {
-      const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+      const teamRoot = resolveTeamRoot();
       const projectsDir = path.join(teamRoot, '状态', '项目');
       if (fs.existsSync(projectsDir)) {
         for (const entry of fs.readdirSync(projectsDir, { withFileTypes: true })) {
@@ -7227,7 +7231,7 @@ function registerIpc() {
     const issuerSession = String(p.sessionId || p.issuerSessionId || '').trim();
     if (issuerSession) {
       try {
-        const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+        const teamRoot = resolveTeamRoot();
         const teamFile = path.join(teamRoot, '状态', '团队.json');
         const team = JSON.parse(fs.readFileSync(teamFile, 'utf8').replace(/^\uFEFF/, ''));
         const pmMember = (Array.isArray(team.members) ? team.members : []).find((m) => m && m.role === 'pm');
@@ -9184,7 +9188,7 @@ function registerIpc() {
   //   异常方向 = R \ B（缺角色会话，界面给"一键绑定缺失会话"，本条不做清理动作）
   // 只解绑不删会话；清理写 团队/状态/项目/<项目>/工作区清理.jsonl（append-only，幂等）。
   function teamRosterSessionMap() {
-    const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+    const teamRoot = resolveTeamRoot();
     const file = path.join(teamRoot, '状态', '团队.json');
     const out = { ok: false, code: 'TEAM_ROSTER_MISSING', file, map: {}, activeProject: '', at: now() };
     try {
@@ -9263,7 +9267,7 @@ function registerIpc() {
   }
 
   function workspaceCleanHistoryFile(project) {
-    const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+    const teamRoot = resolveTeamRoot();
     const slug = teamTools.teamSlug(String(project.teamName || project.name || ''));
     return path.join(teamRoot, '状态', '项目', slug, '工作区清理.jsonl');
   }
@@ -9298,7 +9302,7 @@ function registerIpc() {
     const p = payload || {};
     const project = requireProject(readStore(), p.projectId);
     const name = String(project.teamName || project.name || '');
-    const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+    const teamRoot = resolveTeamRoot();
     const slug = teamTools.teamSlug(name);
     const file = path.join(teamRoot, '状态', '项目', slug, '会话用量.json');
     const warnThreshold = Number(p.warn) > 0 ? Number(p.warn) : 300000;
@@ -10562,7 +10566,7 @@ async function runB55cCheck() {
   report.teamName = String(created.teamName || projectName);
   if (!created.ok) throw new Error('沙盘项目创建失败：' + JSON.stringify(created));
 
-  const teamRoot = String((teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || '');
+  const teamRoot = String(resolveTeamRoot());
   const stateDir = path.join(teamRoot, '状态', '项目', teamTools.teamSlug(report.teamName));
   const workflowFile = path.join(stateDir, '工作流.json');
   report.workflowFile = workflowFile;
@@ -10935,7 +10939,7 @@ async function runE29fCheck() {
   const otherId = String(created.otherId);
 
   report.storeFile = storeFile();
-  const teamRoot = String((teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || '');
+  const teamRoot = String(resolveTeamRoot());
   report.rosterFile = path.join(teamRoot, '状态', '团队.json');
 
   const extrasSeed = extrasSeedEarly;
@@ -11292,7 +11296,7 @@ async function runReviewCheck() {
   const projectId = String(created.id);
   const projectPath = String(created.path);
   const teamName = String(created.teamName || projectName);
-  const teamRoot = String((teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || '');
+  const teamRoot = String(resolveTeamRoot());
   const stateDir = path.join(teamRoot, '状态', '项目', teamTools.teamSlug(teamName));
   const workflowFile = path.join(stateDir, '工作流.json');
   const at = now();
@@ -11887,7 +11891,7 @@ async function runOwnerCheck() {
   const outDir = process.env.AWB_OWNER_OUT ? path.resolve(process.env.AWB_OWNER_OUT) : path.join(ROOT, '_tmp', 'owner-check-' + Date.now());
   fs.mkdirSync(outDir, { recursive: true });
   const teamName = String(process.env.AWB_OWNER_TEAM || '工作台改造修复');
-  const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+  const teamRoot = resolveTeamRoot();
   const workflowFile = path.join(teamRoot, '状态', '项目', teamName, '工作流.json');
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const pageConsole = [];
@@ -12811,7 +12815,7 @@ async function selftestMapping(win, testRoot) {
     let wsMeta = null;
     try { wsMeta = JSON.parse(fs.readFileSync(path.join(projectA.path, 'workspace.json'), 'utf8')); } catch { /* ignore */ }
     const lockFile = projectA ? path.join(teamTools.layout.projectsDir, teamTools.teamSlug(report.projectAName, 60), '派单锁.json') : '';
-    const receiptsFile = path.join(teamTools.layout.root, '状态', '回执.jsonl');
+    const receiptsFile = path.join(resolveTeamRoot(), '状态', '回执.jsonl');
     const mockWs = projectA ? mock.workspaceFor(projectA.path) : null;
     const roleTitles = mock.sessions.filter((s) => String((s.projections.values.title || '')).startsWith('团队·'));
     let currentWorkspace = null;
@@ -12947,7 +12951,7 @@ async function selftestRound5(win, testRoot, mock) {
       return {};
     }
   };
-  const teamRoot = teamTools.layout.root;
+  const teamRoot = resolveTeamRoot();
   const projectStateDirFor = (name) => path.join(teamTools.layout.projectsDir, teamTools.teamSlug(name, 60));
   const readJsonFile = (file) => {
     try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; }
@@ -13378,7 +13382,7 @@ async function selftestRound6(win, testRoot, mock) {
       return {};
     }
   };
-  const teamRoot = teamTools.layout.root;
+  const teamRoot = resolveTeamRoot();
   const projectStateDirFor = (name) => path.join(teamTools.layout.projectsDir, teamTools.teamSlug(name, 60));
   const lockFileFor = (name) => path.join(projectStateDirFor(name), '派单锁.json');
   const receiptsFile = path.join(teamRoot, '状态', '回执.jsonl');
@@ -13740,7 +13744,7 @@ async function selftestRound9(win, testRoot, mock) {
       return {};
     }
   };
-  const teamRoot = teamTools.layout.root;
+  const teamRoot = resolveTeamRoot();
   const receiptsFile = path.join(teamRoot, '状态', '回执.jsonl');
   const readReceipts = () => {
     try {
@@ -14619,7 +14623,7 @@ async function selftestRound10(win, testRoot, mock) {
   const realTeamTools = teamTools;
   const protocolMock = createWorkflowProtocolMock(realTeamTools);
   teamTools = realTeamTools.create({ teamRoot: realTeamTools.layout.root, legacyMock: protocolMock });
-  const teamRoot = teamTools.layout.root;
+  const teamRoot = resolveTeamRoot();
   // 旧项目 4 位需求号：真实仓库里的 微光作品集 是只读回归样本。
   const legacyProofProject = path.join(ROOT, '项目', '微光作品集');
   if (fs.existsSync(legacyProofProject)) {
@@ -16283,7 +16287,7 @@ async function selftestRound14(win, testRoot) {
   };
   const report = {};
   const storeFile = process.env.AWB_STORE || path.join(SELFTEST_ROOT, 'workbench.json');
-  const rosterFile = path.join(teamTools.layout.root, '状态', '团队.json');
+  const rosterFile = path.join(resolveTeamRoot(), '状态', '团队.json');
   try {
     // 1) team:restore / team:open-project 的 dryRun 必须在 setProjectTeamMode 之前返回：
     //    用 full 项目请求 fast dry-run，磁盘上不能有任何字节变化（状态库/名册/项目.json/workspace.json）。
@@ -18161,7 +18165,7 @@ function ensureRouteSupervisor(project) {
     routeSupervisor.lastError = '';
     return before;
   }
-  const teamRoot = (teamTools && teamTools.layout && teamTools.layout.teamRoot) || process.env.TEAM_ROOT || path.join(ROOT, '团队');
+  const teamRoot = resolveTeamRoot();
   const daemonModule = path.join(teamRoot, '工具', 'lib', 'route-daemon.mjs');
   if (!fs.existsSync(daemonModule)) {
     routeSupervisor.lastError = `团队工具里没有守护模块：${daemonModule}`;
