@@ -5740,13 +5740,24 @@ function cmdReqTrq(args) {
   };
   task.workflow = task.workflow && typeof task.workflow === 'object' ? task.workflow : {};
   task.workflow.trq = record;
-  task.workflow.requirementStatus = task.workflow.requirementStatus || 'review';
+  // B-20261117-013308-2a46：镜像任务上的 requirementStatus 是**旧值**（req trq 不改需求状态），
+  // 以前直接拿它传给 syncWorkflowRow 会把工作流行从 ready 回退成 approved/review。
+  // 这里保存镜像值，但最终落盘只允许「向前」：以工作流行当前 status 为准做 keepForwardStatus。
+  const mirrorStatus = String(task.workflow.requirementStatus || 'review');
+  task.workflow.requirementStatus = mirrorStatus;
   task.updatedAt = at;
   task._by = b.role;
   task._action = 'trq';
   task._note = truncate(`TR-Q ${verdict} v${version}`, 100);
   saveTask(b.project, task);
-  const status = String((task.workflow && task.workflow.requirementStatus) || 'review');
+  // B-2a46：先读工作流行当前 status（读不到才退回镜像值），再用 keepForwardStatus 防回退。
+  let currentRowStatus = '';
+  try {
+    const readNow = readWorkflowState(b.project);
+    const rowNow = readNow && readNow.state && readNow.state.requirements ? readNow.state.requirements[task.id] : null;
+    currentRowStatus = String((rowNow && rowNow.status) || '');
+  } catch { /* 读不到工作流就按镜像值走原逻辑，不阻断 TR-Q 落库 */ }
+  const status = currentRowStatus ? keepForwardStatus(currentRowStatus, mirrorStatus) : mirrorStatus;
   const sync = syncWorkflowRow(b.project, task, status, { trq: record, teamMode: projectTeamMode(project) }, {
     create: true, action: 'trq', by: b.role, note: `TR-Q ${verdict} v${version}`,
   });
