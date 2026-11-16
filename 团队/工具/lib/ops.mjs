@@ -3361,7 +3361,7 @@ export async function cmdAck(args) {
   let ackWakeRetry = null;
   try { ackWakeRetry = await processWakeRetries(b.project, { source: 'ack' }); } catch { ackWakeRetry = null; }
   const r = ackMessage(b.role, String(args.id), args.note || '已收到');
-  // Owner 2026-11-14 09:10：纯回执（ack/已认领）不唤醒，只落已读存档。
+  // Owner 2026-11-16 18:50（取代 11-14 的「纯回执不唤醒」）：回执落盘后必须唤醒原消息发送方，--no-wake 才静默。
   clearDispatchLock(r.msg.project, String(args.id));
   appendEvent({
     role: b.role, sessionId: b.sessionId, action: 'ack', project: r.msg.project, target: r.msg.id,
@@ -3394,7 +3394,7 @@ export async function cmdAck(args) {
     : (ackPump && ackPump.ok === false ? `\n队列泵失败：${String(ackPump.why || ackPump.code || 'QUEUE_PUMP_FAILED').slice(0, 120)}（队列项已保留）` : '');
   const ackWakeHint = ackWake && ackWake.ok === true
     ? ((ackWake.skipped === 'SELFTEST' || ackWake.skipped === 'sandbox_wake_skipped') ? '；已唤醒(沙盘)' : '；已唤醒')
-    : (ackWake ? `；唤醒失败(${String(ackWake.why || ackWake.code || ackWake.skipped || '').slice(0, 80)})` : '');
+    : (ackWake ? `；唤醒失败[${String(ackWake.code || ackWake.skipped || 'UNKNOWN')}] ${String(ackWake.why || '').slice(0, 120)}` : '');
   out(args, (r.already ? `已回执过 ${r.msg.id}（${r.ack.id}）${hint}` : `已回执 ${r.msg.id}（${r.ack.id}）${ackNotify}${ackWakeHint}${hint}`) + pumpHint, { ok: true, ...r, ackWake, dispatchQueue: ackPump });
 }
 
