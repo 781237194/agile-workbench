@@ -39,9 +39,19 @@ const r3 = T.resolveTheme({ storageValue: '', search: '' });
 check('S3 无值 → tech-dark / source=default / fallback=false',
   r3.themeId === 'tech-dark' && r3.source === 'default' && r3.fallback === false, r3);
 
-// S4 老用户 dark → native-dark（暗金保持）
-const r4 = T.resolveTheme({ storageValue: 'dark' });
-check('S4 storage=dark → native-dark（暗金保持）', r4.themeId === 'native-dark' && r4.source === 'storage' && r4.fallback === false, r4);
+// S4 Owner 2026-11-16 拍板：老用户 dark 也迁到 tech-dark（打开默认科技风），并打一条 [theme] migrate 日志
+const migrateLogs = [];
+const r4 = T.resolveTheme({ storageValue: 'dark' }, { onMigrate: (m, d) => migrateLogs.push({ m, d }) });
+check('S4 storage=dark → tech-dark（旧值迁移到科技风）+ migrate 日志含旧值/新值',
+  r4.themeId === 'tech-dark' && r4.source === 'storage' && r4.fallback === false
+  && migrateLogs.length === 1 && /\[theme\] migrate/.test(migrateLogs[0].m)
+  && migrateLogs[0].d.from === 'dark' && migrateLogs[0].d.to === 'tech-dark',
+  { r4, migrateLogs });
+
+// S4b URL 旧值同样迁移：?theme=dark → tech-dark（且 source=url，能区分「参数被忽略」）
+const r4b = T.resolveTheme({ search: '?theme=dark' }, { onMigrate: () => {} });
+check('S4b ?theme=dark → tech-dark（source=url）',
+  r4b.themeId === 'tech-dark' && r4b.source === 'url' && r4b.fallback === false, r4b);
 
 // S5 老用户 light → native-light（暖白保持）
 const r5 = T.resolveTheme({ storageValue: 'light' });

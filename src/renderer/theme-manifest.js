@@ -49,7 +49,9 @@ const TMF_NAMES = Object.freeze(TMF_THEMES.reduce((acc, t) => {
 }, {}));
 
 /** 老用户旧值迁移（保持原观感：dark=暗金、light=暖白） */
-const TMF_LEGACY_IDS = Object.freeze({ dark: 'native-dark', light: 'native-light' });
+// B-20261116-122745-c4cf：Owner 2026-11-16 拍板「打开默认科技风」——旧值 dark 也迁到 tech-dark；
+// light 仍迁 native-light（暖白保持）。手动切回暗金的入口（菜单 5 项）不动。
+const TMF_LEGACY_IDS = Object.freeze({ dark: 'tech-dark', light: 'native-light' });
 
 function tmfIsLegal(id) {
   return typeof id === 'string' && TMF_LEGAL_IDS.indexOf(id) >= 0;
@@ -100,6 +102,17 @@ function tmfResolveTheme(input, opts) {
     : (input && typeof input === 'object' ? input : {});
   const options = opts && typeof opts === 'object' ? opts : {};
   const warn = typeof options.onWarn === 'function' ? options.onWarn : null;
+  // c4cf：旧值迁移要留一条可查日志（含旧值/新值），只打一次，避免每次解析刷屏。
+  const migrateLog = options.onMigrate || null;
+  const migratedSeen = new Set();
+  const noteMigrate = (from, to, source) => {
+    const key = String(from) + '>' + String(to) + '@' + source;
+    if (migratedSeen.has(key)) return;
+    migratedSeen.add(key);
+    const message = `[theme] migrate: 旧值「${from}」→ 新值「${to}」（来源 ${source}）`;
+    if (typeof migrateLog === 'function') migrateLog(message, { from, to, source });
+    else if (typeof console !== 'undefined' && console && typeof console.info === 'function') console.info(message);
+  };
 
   const storageRaw = src.storageValue == null ? '' : String(src.storageValue).trim();
   const urlRaw = tmfFromSearch(src.search);
@@ -121,7 +134,7 @@ function tmfResolveTheme(input, opts) {
   if (urlRaw != null) {
     if (tmfIsLegal(urlRaw)) return adopt(urlRaw, 'url', false, urlRaw);
     const migrated = TMF_LEGACY_IDS[urlRaw];
-    if (migrated) return adopt(migrated, 'url', false, urlRaw); // ?theme=light 也当合法旧值
+    if (migrated) { noteMigrate(urlRaw, migrated, 'url'); return adopt(migrated, 'url', false, urlRaw); } // ?theme=light 也当合法旧值
     return adopt(TMF_DEFAULT_THEME_ID, 'url', true, urlRaw);
   }
 
@@ -129,7 +142,7 @@ function tmfResolveTheme(input, opts) {
   if (storageRaw) {
     if (tmfIsLegal(storageRaw)) return adopt(storageRaw, 'storage', false, storageRaw);
     const migrated = TMF_LEGACY_IDS[storageRaw];
-    if (migrated) return adopt(migrated, 'storage', false, storageRaw);
+    if (migrated) { noteMigrate(storageRaw, migrated, 'storage'); return adopt(migrated, 'storage', false, storageRaw); }
     return adopt(TMF_DEFAULT_THEME_ID, 'storage', true, storageRaw);
   }
 
