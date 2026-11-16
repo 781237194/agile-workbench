@@ -64,6 +64,8 @@ function isAllowedPath(file, opts) {
   if (extraRoots.some((root) => abs === root || abs.startsWith(root + path.sep))) return true;
   const base = path.basename(abs);
   if (base === 'workbench.json') return true;
+  // 显式例外：项目根 项目索引.json（team-tools 的索引同步落点；它不是团队状态目录，但确属状态性写入）
+  if (base === '项目索引.json') return true;
   const norm = abs.replace(/\\/g, '/');
   return norm.includes('/团队/状态/') || norm.includes('/状态/项目/');
 }

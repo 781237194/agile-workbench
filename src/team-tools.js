@@ -16,6 +16,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+// R-ad44（T-b7dd）：JSON 状态写的唯一实现已收编到 团队/工具/lib/json-atomic.cjs（F1：Node20 不支持 require(ESM)，故实现是 CJS）。
+const jsonAtomicCore = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'json-atomic.cjs'));
 const { execFile } = require('node:child_process');
 
 const ROLE_IDS = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
@@ -862,15 +864,10 @@ function createTeamTools(options = {}) {
     return roleIdsForTeamMode(normalizeTeamMode(cfg && cfg.teamMode));
   }
 
-  function writeJsonAtomic(file, data) {    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = file + '.awb-tmp-' + process.pid + '-' + crypto.randomUUID().slice(0, 8);
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
-    try {
-      fs.renameSync(tmp, file);
-    } catch {
-      fs.copyFileSync(tmp, file);
-      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    }
+  /** @deprecated R-ad44（T-b7dd）：唯一实现已收编到 团队/工具/lib/json-atomic.cjs（tmp→fsync→bak→rename + 锁 + prevSha + 审计 8 键）。
+   *  旧名只作薄别名，既有 12 处调用不改；新代码请直接 require 那个 CJS。 */
+  function writeJsonAtomic(file, data, opts) {
+    return jsonAtomicCore.writeJsonAtomic(file, data, opts);
   }
 
   function writeTextAtomic(file, text) {
