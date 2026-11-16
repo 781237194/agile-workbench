@@ -69,6 +69,9 @@ function check(name, ok, detail) {
   const mk = (name, mode) => {
     run(['project', 'add', '--name', name, '--team-mode', mode, '--json']);
     const pm = run(['boot', '--role', 'pm', '--project', name, '--session', `s-${mode}`, '--json']);
+    // 沙盘补一条 lessons read：否则 req create 会撞 LESSONS_UNREAD（经验教训门禁），后续断言不可达。
+    // 这是**级联规避**（沙盘角色从未读过登记册），不是放宽断言——真实环境该门禁仍然生效。
+    run(['lessons', 'read', '--boot', pm.token, '--project', name, '--json']);
     const req = run(['req', 'create', '--boot', pm.token, '--project', name, '--title', `${mode} 需求`, '--priority', 'P0', '--acceptance', 'AC1', '--json']).requirement;
     const task = run(['task', 'create', '--boot', pm.token, '--project', name, '--title', `${mode} 任务`, '--priority', 'P0', '--type', 'task', '--owner', 'programmer1', '--requirement', req.id, '--json']).task;
     return { req, task };
