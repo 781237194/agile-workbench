@@ -17,6 +17,9 @@ function check(name, ok, detail) {
 (async () => {
   const scaffold = await import(pathToFileURL(path.join(LIB, 'scaffold.mjs')).href);
   const daemon = await import(pathToFileURL(path.join(LIB, 'route-daemon.mjs')).href);
+  // B-69b9：模板必须真能过 G1 v2 硬门（gates.gateRequirementDoc）与卷链接门（doc-split.validateSupplementLinks）。
+  const gates = await import(pathToFileURL(path.join(LIB, 'gates.mjs')).href);
+  const docSplit = await import(pathToFileURL(path.join(LIB, 'doc-split.mjs')).href);
 
   // ① 四角色卡都有「补充职责」，且关键词到位
   const roles = ['pm', 'product', 'analyst', 'programmer1'];
@@ -30,6 +33,8 @@ function check(name, ok, detail) {
   const tpl = scaffold.reqTemplate('沙盘');
   check('② 需求模板带 version 与 change 头', /version: v1/.test(tpl) && /change:/.test(tpl), '');
   check('② 需求模板 AC 为四段式', /这是什么/.test(tpl) && /怎么做/.test(tpl) && /卡在哪/.test(tpl) && /怎么判通过/.test(tpl), '');
+  // B-69b9：G1 v2 的 strict 分支由 `<!-- req-doc: v2 -->` 触发（gates.mjs:170）；不带标记会走宽松分支，只断 ok 会假绿。
+  check('②b 需求模板带 <!-- req-doc: v2 --> 标记（G1 strict 前提）', /<!--\s*req-doc:\s*v2\s*-->/.test(tpl), '');
 
   // ③ fast 六状态矩阵：每个状态都能给出 role+action 或明确 gateBlocked（不许空转 undefined）
   const appr = [{ status: 'approved', channel: 'ui', at: '2026-11-15T00:00:00.000Z' }];
@@ -83,6 +88,17 @@ function check(name, ok, detail) {
   };
   const f = mk('fast同构', 'fast');
   const u = mk('full同构', 'full');
+  // B-69b9：把新模板当真实需求正文写进沙盘项目，喂 G1 v2 硬门与卷链接门（只认 ok 不够，必须 strict）。
+  const tplProject = path.join(SB, '项目', 'fast同构');
+  const tplReqDir = path.join(tplProject, '需求');
+  fs.mkdirSync(tplReqDir, { recursive: true });
+  const tplReqFile = path.join(tplReqDir, `${f.req.id}-模板校验.md`);
+  fs.writeFileSync(tplReqFile, tpl, 'utf8');
+  const tplGate = gates.gateRequirementDoc({ id: f.req.id, type: 'requirement' }, tplProject);
+  check('②c 需求模板过 G1 v2 硬门（ok===true && strict===true）', Boolean(tplGate && tplGate.ok === true && tplGate.strict === true), tplGate);
+  const tplLink = docSplit.validateSupplementLinks(tplProject, f.req.id);
+  const rawPointerLines = tpl.split(/\r?\n/).filter((line) => /^>\s*增补卷/.test(line));
+  check('②d 模板无裸「> 增补卷」行且 validateSupplementLinks.ok', rawPointerLines.length === 0 && Boolean(tplLink && tplLink.ok === true), { rawPointerLines, tplLink });
   const taskKeys = (t) => Object.keys(t).filter((k) => !['id', 'project', 'createdAt', 'claimedAt', 'owner', 'title', 'detail'].includes(k)).sort();
   check('④ fast/full 任务字段集合一致', JSON.stringify(taskKeys(f.task)) === JSON.stringify(taskKeys(u.task)), { fast: taskKeys(f.task), full: taskKeys(u.task) });
   const wfRowKeys = (name, id) => {
