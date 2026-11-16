@@ -11762,7 +11762,11 @@ const poolUi = {
   // R-c72a F5：虚拟化状态（virtualRows=当前筛选后的需求行，virtual=当前窗口信息）
   virtual: null,
   virtualRows: [],
-  virtualRaf: false
+  virtualRaf: false,
+  // R-c72a AC2（批3）：按项目预取的需求行缓存——切项目时先同步换列表，不被 selectProject 的工作区激活拖住。
+  byProject: {},
+  // 取数序号：并发 refresh 时只让最后一次写回，避免 A/B 两个项目的返回交错覆盖。
+  fetchSeq: 0
 };
 // 既有四个状态键：键名 / 标签 / 计数语义一字不改（R-30e2 §二、F-4）。
 const POOL_FILTERS = POOL_CORE ? POOL_CORE.POOL_FILTERS : [
@@ -11821,11 +11825,12 @@ function poolStatusLabel(row) {
 }
 /** 一次性加载池数据：**单次** workflowState → 需求行 + bug/scenario-bug 任务（F-30e2-1 / F-8）。
  *  之后渲染与搜索只用返回的数组，不再发 IPC、不再读文件。 */
-async function poolFetchRows() {
-  const p = activeProject();
-  if (!p || !POOL_CORE || !window.workbench || typeof window.workbench.workflowState !== 'function') return null;
+async function poolFetchRows(projectId) {
+  // projectId 显式传入时按它取（切项目首帧用目标项目取数，不等 activeProject 切换完成）。
+  const pid = String(projectId || ((activeProject() || {}).id) || '');
+  if (!pid || !POOL_CORE || !window.workbench || typeof window.workbench.workflowState !== 'function') return null;
   try {
-    const wf = await window.workbench.workflowState({ projectId: p.id });
+    const wf = await window.workbench.workflowState({ projectId: pid });
     if (!wf || wf.ok === false) return null;
     return POOL_CORE.preparePoolRows(wf);
   } catch { return null; }
@@ -12348,14 +12353,24 @@ function resetPoolFilters() {
   if (poolUi.detailId) closePoolDetail(false);
   applyPoolFilters();
 }
-async function refreshPool() {
-  if (poolUi.loading) return;
+async function refreshPool(projectId) {
+  const pid = String(projectId || ((activeProject() || {}).id) || '');
+  // R-c72a AC2（批3）：不再用 loading 做硬闸（旧闸一旦卡住就永久不再刷新）；改序号，只让最后一次请求写回。
+  poolUi.fetchSeq += 1;
+  const seq = poolUi.fetchSeq;
   poolUi.loading = true;
   try {
-    const rows = await poolFetchRows();
-    if (rows) { poolUi.rows = rows; poolUi.lastFetch = Date.now(); }
+    const rows = await poolFetchRows(pid);
+    if (seq !== poolUi.fetchSeq) return;
+    if (rows) {
+      poolUi.rows = rows;
+      poolUi.lastFetch = Date.now();
+      if (pid) poolUi.byProject[pid] = rows;
+    }
     if (poolUi.open) renderPool();
-  } finally { poolUi.loading = false; }
+  } finally {
+    if (seq === poolUi.fetchSeq) poolUi.loading = false;
+  }
 }
 async function togglePool(force) {
   const mask = poolPanelEnsure();
@@ -12367,6 +12382,16 @@ async function togglePool(force) {
     return;
   }
   await refreshPool();
+  void prefetchPoolRows(); // R-c72a AC2：预取各项目需求行，切项目时先同步换列表
+}
+/** 预取所有项目的需求行（只读、串行，失败跳过；缓存由每次 refreshPool 覆盖刷新）。 */
+async function prefetchPoolRows() {
+  const projects = Array.isArray(state && state.projects) ? state.projects : [];
+  for (const p of projects) {
+    if (!p || !p.id || poolUi.byProject[p.id]) continue;
+    const rows = await poolFetchRows(p.id);
+    if (Array.isArray(rows)) poolUi.byProject[p.id] = rows;
+  }
 }
 function closePool() {
   const mask = $('#pool-mask');
@@ -14757,6 +14782,18 @@ async function selectWorkspace(projectId) {
     await focusDshWorkspace(target, { notify: true });
     await loadDshTeamStatus({ force: true });
     return;
+  }
+  // R-c72a AC2/F4（批3）：点击即先换列表——selectProject 内部 activateWorkspace 实测 0.5–0.8s，
+  // 等它返回再刷新的话「点了列表还是旧项目」。先用预取缓存同步渲染，没有缓存就按目标项目 id 异步取数，两者都不等 selectProject。
+  if (poolUi.open) {
+    const cached = poolUi.byProject[projectId];
+    if (Array.isArray(cached)) {
+      poolUi.rows = cached;
+      poolUi.signature = '';
+      renderPool();
+    } else {
+      void refreshPool(projectId);
+    }
   }
   try {
     const r = await window.workbench.selectProject(projectId);

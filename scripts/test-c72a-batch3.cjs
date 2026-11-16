@@ -148,14 +148,21 @@ const vcAt = (sample) => {
     }
   }
 
-  // ── ② 切项目刷新池列表：applyState 里池子开着就强制重建
+  // ── ② 切项目刷新池列表：点击即换（缓存同步渲染/按目标 id 取数），applyState 后再刷新最新数据
   {
-    const start = app.indexOf('async function applyState(next) {');
+    const start = app.indexOf('async function selectWorkspace(projectId) {');
     const seg = start >= 0 ? app.slice(start, app.indexOf('\n}\r\n', start) + 2) : '';
-    check('② applyState 在池子打开时清 signature 并重取（切项目后列表必须换数据）',
-      seg.includes('if (poolUi.open)') && seg.includes("poolUi.signature = ''") && seg.includes('void refreshPool()'), { seg: seg.slice(0, 240) });
-    check('② refreshPool 仍会在池子打开时重绘（只是把触发点补到 applyState）',
-      /async function refreshPool\(\)[\s\S]{0,260}if \(poolUi\.open\) renderPool\(\);/.test(app));
+    check('② selectWorkspace 点击即换列表：优先用 byProject 缓存同步渲染、无缓存按目标 id 取数（都不等 selectProject）',
+      seg.includes('poolUi.byProject[projectId]') && seg.includes('renderPool()') && seg.includes('refreshPool(projectId)'),
+      { seg: seg.slice(0, 300) });
+    const aStart = app.indexOf('async function applyState(next) {');
+    const aSeg = aStart >= 0 ? app.slice(aStart, app.indexOf('\n}\r\n', aStart) + 2) : '';
+    check('② applyState 在池子打开时清 signature 并重取（切项目后列表必须换最新数据）',
+      aSeg.includes('if (poolUi.open)') && aSeg.includes("poolUi.signature = ''") && aSeg.includes('void refreshPool()'), { seg: aSeg.slice(0, 240) });
+    check('② refreshPool 支持显式 projectId + 取数序号（并发只让最后一次写回）+ 按项目缓存',
+      /async function refreshPool\(projectId\)/.test(app) && /poolUi\.fetchSeq \+= 1/.test(app) && /poolUi\.byProject\[pid\] = rows/.test(app));
+    check('② 打开池子时预取各项目（prefetchPoolRows）',
+      /async function prefetchPoolRows\(\)/.test(app) && /void prefetchPoolRows\(\)/.test(app));
   }
 
   // ── AC4 采帧口径：连续 rAF ≥30 帧 + CPU 基线 + 帧数不足判 INSUFFICIENT_SAMPLES
