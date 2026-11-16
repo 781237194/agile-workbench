@@ -185,6 +185,13 @@ check('S18 manifest 顶层不读 document/window/localStorage（可 node import�
   !/document\./.test(read(MANIFEST)) && !/window\./.test(read(MANIFEST)) && !/localStorage/.test(read(MANIFEST)),
   { doc: /document\./.test(read(MANIFEST)), win: /window\./.test(read(MANIFEST)) });
 
+// S19 全局作用域纪律（P0 教训）：顶层 const/let/class 一律 TMF_/tmf/themeManifest 前缀
+const manifestSrc = read(MANIFEST);
+const topDecls = [...manifestSrc.matchAll(/^(?:const|let|class)\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
+const badDecls = topDecls.filter((n) => !/^(TMF_|tmf|themeManifest)/.test(n));
+check('S19 manifest 顶层声明全带 TMF_/tmf/themeManifest 前缀（不污染全局作用域）',
+  badDecls.length === 0, { topDecls, badDecls });
+
 console.log(`\ntheme-manifest 断言：${passed}/${passed + failures.length} PASS`);
 if (failures.length) { console.error(JSON.stringify(failures, null, 2)); process.exit(1); }
 process.exit(0);
