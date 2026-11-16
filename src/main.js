@@ -237,6 +237,8 @@ const autoAccept = require(path.join(ROOT, 'scripts', 'auto-accept.cjs'));
 // B-9b05（AC1/AC2/AC5）：验收前置两档判定与渲染层共用同一份实现——
 // 主进程直接 require src/renderer/accept-prereq.js，不再另写一套（原因串也取它的常量）。
 const acceptPrereq = require(path.join(__dirname, 'renderer', 'accept-prereq.js'));
+// R-ad44（T-b7dd）：JSON 状态写的唯一实现（团队/工具/lib/json-atomic.cjs）；writeStore 内部改走它，签名/返回/失败语义不变。
+const jsonAtomicCore = require(path.join(ROOT, '团队', '工具', 'lib', 'json-atomic.cjs'));
 const APP_VERSION = require(path.join(ROOT, 'package.json')).version;
 // 2a69 发版：菜单里的「版本 x.y.z · <commit 短号>」用真实 git 短号，取不到就留空（界面只显示版本）。
 // 只在启动时读一次；git 缺失 / 不是仓库 / 超时都吞掉，不影响启动。
@@ -2157,22 +2159,16 @@ function writeStore(store) {
   storeCache = { file: '', key: '', value: null };
   if (storeFatal) throw new Error('状态文件损坏且没有可用备份，已阻止写入；请先处理 workbench.json.corrupt-*');
   const file = storeFile();
-  const body = JSON.stringify(store, null, 2) + '\n';
-  const tmp = file + '.tmp';
-  writeDurableFile(file, body, tmp);
+  // R-ad44（T-b7dd）：状态写收敛到唯一实现 json-atomic.cjs（<file>.tmp → fsync → <file>.bak → rename + 文件锁）。
+  // AC9：本函数名/入参/返回/失败码与落盘字段不变；新增的 .lock 是瞬时文件、.bak 语义与原来一致（保留上一版）。
   try {
-    // 保留上一版完整备份：复制当前正式文件，复制/落盘失败则中止本次写入，避免无备份覆盖。
-    if (fs.existsSync(file)) atomicCopyFile(file, file + '.bak');
-    commitDurableFile(tmp, file);
-  } catch (error) {
-    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-    throw error;
+    jsonAtomicCore.writeJsonAtomic(file, store, { case: 'writeStore' });
+  } finally {
+    // 写后失效缓存：同一毫秒内 mtime 可能不变，不能靠 mtime 自动识别；失败也要失效，避免下次读脏缓存。
+    storeCache = { file: '', key: '', value: null };
   }
   storeWarning = null;
-  // 写后失效缓存：同一毫秒内 mtime 可能不变，不能靠 mtime 自动识别。
-  storeCache = { file: '', key: '', value: null };
 }
-
 function fmtTokens(value) {
   const n = Number(value) || 0;
   if (n >= 10000) return (Math.round(n / 1000) / 10) + ' 万';
