@@ -160,6 +160,16 @@ ok('1.1 audit --json stdout 恰好一行 JSON', audit1.code === 1 && audit1.json
 ok('1.1 未登记文件 → state=untracked + DOC_UNTRACKED_WRITE', (audit1.json.requirements || []).some((r) => r.state === 'untracked' && (r.codes || []).includes('DOC_UNTRACKED_WRITE')), JSON.stringify((audit1.json.requirements || []).map((r) => [r.requirementId, r.state])));
 ok('1.1 退出码 1 且 ok=false', audit1.code === 1 && audit1.json.ok === false);
 ok('1.1 state 五值枚举内', (audit1.json.requirements || []).every((r) => ['ok', 'untracked', 'mismatch', 'missing', 'registry_broken'].includes(r.state)), 'bad state');
+// B-d548（缺陷单 2026-11-16）：req audit 的**文本路径**曾崩 [INTERNAL] String(...).join is not a function
+// （ops.mjs 把已经是数组的 result.codes 先 String() 再 .join()）。此断言守住文本路径不崩且逐条列出。
+const auditText = run(['req', 'audit', '--project', PROJECT]);
+ok('1.1（B-d548）audit 文本路径不崩：含「需求正文审计」且 stderr 无 INTERNAL',
+  auditText.code === 1 && /需求正文审计/.test(String(auditText.stdout || ''))
+  && !/\[INTERNAL\]/.test(String(auditText.stderr || '')) && !/is not a function/.test(String(auditText.stderr || '')),
+  JSON.stringify({ code: auditText.code, out: String(auditText.stdout || '').slice(0, 120), err: String(auditText.stderr || '').slice(0, 160) }));
+ok('1.1（B-d548）audit 文本路径逐条列需求（state/sha 行不吞）',
+  String(auditText.stdout || '').split(/\r?\n/).some((l) => /^-\s+R-\d{8}-\d{6}-[0-9a-f]{4}\s+状态\s+\S+\s+sha\s+\S+/.test(l)),
+  JSON.stringify(String(auditText.stdout || '').split(/\r?\n/).slice(0, 4)));
 // 把 legacy 文件也写一遍（补 baseline+write）后应全部 ok
 const legacyReg = runJson(['req', 'write', '--boot', analystToken, '--project', PROJECT, '--requirement', REQ2, '--file', v2File, '--expected-sha', shaFile(legacyFile).slice(0, 12)]);
 const audit2 = runJson(['req', 'audit', '--project', PROJECT]);

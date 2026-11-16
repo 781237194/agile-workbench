@@ -5187,7 +5187,7 @@ function cmdReqAudit(args) {
     // 增补卷 §二：--json 时 stdout **恰好一行 JSON**（不得夹日志），故这里不用 pretty jsonOut。
     process.stdout.write(JSON.stringify(result) + '\n');
   } else {
-    const lines = [`需求正文审计（${projectName}）：${result.summary.total} 条 ｜ ${String(result.codes || []).join(' ') || '无问题'}`];
+    const lines = [`需求正文审计（${projectName}）：${result.summary.total} 条 ｜ ${(result.codes || []).join(' ') || '无问题'}`];
     for (const row of result.requirements) {
       lines.push(`- ${row.requirementId}  状态 ${row.state}  sha ${String(row.diskSha || '(缺)').slice(0, 12)}  ${(row.codes || []).join(' ') || 'ok'}`);
       for (const sup of row.supplements || []) {
