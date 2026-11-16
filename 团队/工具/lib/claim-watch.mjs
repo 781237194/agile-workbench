@@ -31,6 +31,10 @@ function projectStateDir(project) {
 // 任务是否还在「等认领」的窗口里：有 owner（已派给谁）、没 claimedAt（从没认领过）、状态未终态。
 export function needsClaim(task) {
   if (!task || !task.id) return false;
+  // 需求镜像行（type=requirement / id 以 R- 开头）不是派单：它是需求行的投影，天然没有 claimedAt，
+  // 不参与认领门，否则每条在途需求都会被误判成「派单超时」。
+  if (String(task.type || '') === 'requirement') return false;
+  if (/^R-\d{8}-/.test(String(task.id))) return false;
   const status = String(task.status || 'open');
   if (!OPEN_STATES.has(status)) return false;
   if (!String(task.owner || '').trim()) return false;

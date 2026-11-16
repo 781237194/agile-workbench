@@ -5,7 +5,7 @@ import path from 'node:path';
 import { parseArgs, TeamError, jsonOut, textOut } from './lib/core.mjs';
 import {
   cmdInit, cmdProject, cmdBoot, cmdSend, cmdInbox, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
-  cmdShow, cmdReview, cmdSign, cmdApply, cmdGrant, cmdIndex, cmdStatus, cmdReconcile,
+  cmdShow, cmdReview, cmdSign, cmdApply, cmdGrant, cmdIndex, cmdStatus, cmdClaim, cmdReconcile,
   cmdVerify, cmdLog, cmdLock, cmdOwnerApprove, cmdOwner, cmdRoster, cmdPilot, cmdDoctor,
   cmdReq, cmdFind, cmdBoard, cmdVote, cmdWorkflow, cmdOwnerProxyDecide, cmdQueue,
   cmdAsk, cmdAnswer, cmdPresence, cmdMarkRead, cmdWake, cmdLessons, failLessonGate, lessonGateFor,
@@ -299,6 +299,7 @@ async function main() {
     case 'grant': cmdGrant(args); break;
     case 'index': cmdIndex(args); break;
     case 'status': cmdStatus(args); break;
+    case 'claim': cmdClaim(args); break;
     case 'reconcile': cmdReconcile(args); break;
     case 'verify': cmdVerify(args); break;
     case 'log': cmdLog(args); break;

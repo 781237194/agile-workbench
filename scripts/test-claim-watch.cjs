@@ -1,4 +1,4 @@
-// 认领门自检（T-20261116-124658-303e）—— 五组夹具：边界 / 升级 / 幂等 / 硬门零写 / 认领后不误拦
+﻿// 认领门自检（T-20261116-124658-303e）—— 五组夹具：边界 / 升级 / 幂等 / 硬门零写 / 认领后不误拦
 // 全部在沙盘跑（TEAM_ROOT 指向 _tmp），不碰真实团队状态。
 const fs = require('node:fs');
 const path = require('node:path');
@@ -86,6 +86,13 @@ check('组5 认领后不误拦：gate.ok=true，且 status 汇总行格式固定
   gateAfterClaim.ok === true && /^认领门：待认领 \d+ · 超时 \d+ · 升级 \d+$/.test(summary),
   { gateAfterClaim, summary });
 
+
+// ── 组 6 需求镜像行不算派单：type=requirement / id 以 R- 开头的行天然没有 claimedAt，必须跳过
+const mirror = { id: 'R-20261116-101010-abcd', type: 'requirement', status: 'approved', owner: 'analyst', dispatchedAt: at(600), claimRequired: true };
+const mirror2 = { id: 'T-20261116-101011-abce', type: 'task', status: 'open', owner: 'analyst', dispatchedAt: at(600), claimRequired: true };
+check('组6 镜像行豁免：type=requirement 与 R- 前缀不参与认领门（真数据 3 条需求行曾被误打标），普通 task 仍判 stalled',
+  CW.needsClaim(mirror) === false && CW.needsClaim(mirror2) === true && CW.claimStateOf(mirror, T0).state === 'none',
+  { mirror: CW.needsClaim(mirror), task: CW.needsClaim(mirror2) });
 fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 console.log('\n认领门自检：' + pass + '/' + (pass + fails.length) + ' PASS');
 if (fails.length) { console.log(JSON.stringify(fails, null, 2)); process.exit(1); }

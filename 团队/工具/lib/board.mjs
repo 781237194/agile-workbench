@@ -175,9 +175,17 @@ export function renderBoardMd(d) {
   return lines.join('\n');
 }
 
+function claimBadge(t) {
+  if (!t) return '';
+  // T-20261116-124658-303e：认领门红标——任务行带 claimOverdue/claimStalled 就渲染，缺字段时静默。
+  if (t.claimStalled === true) return ' <span class="tag bad" title="派单超过 30 分钟未认领，已升级">未认领·已升级</span>';
+  if (t.claimOverdue === true) return ' <span class="tag bad" title="派单超过 10 分钟未认领">未认领·超时</span>';
+  return '';
+}
+
 export function renderBoardHtml(d) {
   const reqRows = d.requirements.map((r) => `<tr><td><span class="pill p-${esc(r.priority)}">${esc(r.priority)}</span></td><td><b>${esc(r.id)}</b><br><span class="sub" title="${titleAttr(r.title)}">${esc(clip(r.title, 60))}</span></td><td>${esc(status(r.derivedStatus || r.status))}${esc(proxyTag(r))}</td><td>${esc(owner(r.owner))}</td><td>${r.kidsDone ?? 0}/${r.kidsTotal ?? 0}</td><td class="muted" title="${titleAttr(r.acceptance)}">${esc(clip(r.acceptance, 90))}</td></tr>`).join('');
-  const taskRows = d.childTasks.filter((t) => t.status !== 'done').map((t) => `<tr><td><span class="pill p-${esc(t.priority)}">${esc(t.priority)}</span></td><td><b>${esc(t.id)}</b> <span class="sub" title="${titleAttr(t.title)}">${esc(clip(t.title, 70))}</span></td><td>${esc(status(t.status))}</td><td>${esc(owner(t.owner))}</td><td>${esc(t.requirementId || '—')}</td></tr>`).join('');
+  const taskRows = d.childTasks.filter((t) => t.status !== 'done').map((t) => `<tr><td><span class="pill p-${esc(t.priority)}">${esc(t.priority)}</span></td><td><b>${esc(t.id)}</b> <span class="sub" title="${titleAttr(t.title)}">${esc(clip(t.title, 70))}</span></td><td>${esc(status(t.status))}${claimBadge(t)}</td><td>${esc(owner(t.owner))}</td><td>${esc(t.requirementId || '—')}</td></tr>`).join('');
   const propRows = d.proposals.slice().reverse().map((p) => {
     const rv = Object.entries(d.reviews[p.id] || {}).map(([r, v]) => `<span class="tag ${v.verdict === 'approve' ? 'ok' : 'bad'}">${esc(role(r))}：${esc(verdict(v.verdict))}</span>`).join(' ') || '<span class="muted">—</span>';
     const sg = Object.entries(d.signatures[p.id] || {}).map(([r, v]) => `<span class="tag ${v.decision === 'approve' ? 'ok' : 'bad'}">${esc(role(r))}：${esc(decision(v.decision))}</span>`).join(' ') || '<span class="muted">—</span>';
@@ -479,7 +487,7 @@ ${dbHtml}
   }
   function view(kind) {
     if (kind === 'requirements') return open('需求明细', table(['优先级','需求','状态','负责人','子任务','验收标准'], (D.requirements || []).map((r) => '<tr><td>' + E(r.priority) + '</td><td><b>' + E(r.id) + '</b><br>' + E(r.title) + '</td><td>' + E(st(r.derivedStatus || r.status)) + E(proxyTag(r)) + '</td><td>' + E(rl(r.owner)) + '</td><td>' + (r.kidsDone ?? 0) + '/' + (r.kidsTotal ?? 0) + '</td><td>' + E(r.acceptance || '—') + '</td></tr>'), '暂无需求'));
-    if (kind === 'tasks') return open('任务明细', table(['优先级','任务','状态','负责人','需求'], (D.childTasks || []).map((x) => '<tr><td>' + E(x.priority) + '</td><td><b>' + E(x.id) + '</b> ' + E(x.title) + '</td><td>' + E(st(x.status)) + '</td><td>' + E(rl(x.owner)) + '</td><td>' + E(x.requirementId || '—') + '</td></tr>'), '暂无任务'));
+    if (kind === 'tasks') return open('任务明细', table(['优先级','任务','状态','负责人','需求'], (D.childTasks || []).map((x) => '<tr><td>' + E(x.priority) + '</td><td><b>' + E(x.id) + '</b> ' + E(x.title) + '</td><td>' + E(st(x.status)) + (x.claimStalled ? ' <span class="tag bad" title="派单超过 30 分钟未认领，已升级">未认领·已升级</span>' : (x.claimOverdue ? ' <span class="tag bad" title="派单超过 10 分钟未认领">未认领·超时</span>' : '')) + '</td><td>' + E(rl(x.owner)) + '</td><td>' + E(x.requirementId || '—') + '</td></tr>'), '暂无任务'));
     if (kind === 'proposals') return open('提案明细', table(['提案','风险','状态','作者','评审','签字','提交'], (D.proposals || []).map((p) => {
       const rv = Object.entries(D.reviews[p.id] || {}).map(([r,v]) => rl(r) + '：' + vd(v.verdict)).join('；') || '—';
       const sg = Object.entries(D.signatures[p.id] || {}).map(([r,v]) => rl(r) + '：' + dg(v.decision)).join('；') || '—';

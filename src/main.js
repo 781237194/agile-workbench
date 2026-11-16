@@ -18366,6 +18366,34 @@ if (!singleInstanceLock) {
 // 失败写事件留痕；队列项只在真正派发成功后才移除（工具侧保证），失败/角色忙都原样保留。
 const QUEUE_PUMP_INTERVAL_MS = 60 * 1000;
 const queuePumpState = { timer: null, running: false, lastAt: 0, last: null };
+let claimScanLastAt = 0;
+// T-20261116-124658-303e：认领扫描挂到既有 60 秒 tick（不新起定时器）。
+// 走 CLI（team.mjs claim scan --json）而不是再实现一遍：壳与手动跑同一条命令、同一份实现。
+function runClaimScanTick(projectName) {
+  try {
+    const args = [ledgerTeamMjsPath(), 'claim', 'scan', '--project', String(projectName || ''), '--json'];
+    const run = spawnSync(process.execPath, args, {
+      cwd: path.join(__dirname, '..'),
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      encoding: 'utf8', timeout: 20000, windowsHide: true,
+    });
+    claimScanLastAt = Date.now();
+    if (run.status !== 0) {
+      console.warn('CLAIM_SCAN_FAILED ' + JSON.stringify({ project: projectName, code: run.status, why: String((run.stderr || run.error && run.error.message || '')).slice(0, 200) }));
+      return;
+    }
+    const line = String(run.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
+    let parsed = null;
+    try { parsed = JSON.parse(line); } catch { parsed = null; }
+    if (!parsed) { console.warn('CLAIM_SCAN_BAD_OUTPUT ' + JSON.stringify({ project: projectName, line: line.slice(0, 120) })); return; }
+    if (parsed.written > 0 || parsed.overdue > 0 || parsed.stalled > 0) {
+      console.log('CLAIM_SCAN ' + JSON.stringify({ project: projectName, at: claimScanLastAt, scanned: parsed.scanned, written: parsed.written, pending: parsed.pending, overdue: parsed.overdue, stalled: parsed.stalled }));
+    }
+  } catch (error) {
+    // 失败只记日志：认领扫描绝不能拖住派单泵。
+    console.warn('CLAIM_SCAN_FAILED ' + JSON.stringify({ project: projectName, why: String((error && error.message) || error).slice(0, 200) }));
+  }
+}
 function queuePumpTick() {
   if (queuePumpState.running) return;
   // B-20261116-105124-c5413：--no-wake 下壳不得驱动任何会写邮箱/改团队状态的链路。
@@ -18380,6 +18408,9 @@ function queuePumpTick() {
   if (!project || !project.name) return;
   // 守护跟随当前项目：切工作区后 60 秒内自动换到新项目（已由本壳管着同一项目时幂等返回）。
   if (!routeSupervisor.quitting) ensureRouteSupervisor(project);
+  // T-20261116-124658-303e：同一 tick 里跑认领扫描（10 分钟标超时、30 分钟升级），不新起定时器；
+  // 扫描失败只记日志，不阻塞队列泵。CLI 手动跑同一条命令结果一致（幂等）。
+  runClaimScanTick(project.name);
   queuePumpState.running = true;
   Promise.resolve()
     .then(() => teamTools.pumpDispatchQueue(project.name))

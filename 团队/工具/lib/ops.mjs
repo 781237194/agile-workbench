@@ -1,4 +1,4 @@
-﻿// 团队工作台 v2 · 业务命令（boot / 消息 / 任务 / 提案 / 评审 / 签字 / 应用 / 索引 / 对账）
+// 团队工作台 v2 · 业务命令（boot / 消息 / 任务 / 提案 / 评审 / 签字 / 应用 / 索引 / 对账）
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -8294,12 +8294,54 @@ export function cmdBoard(args) {
   else textOut(`看板已生成：\n- ${path.join(outDir, '看板.md')}\n- ${path.join(outDir, '看板.html')}\n需求 ${d.requirements.length} ｜ 任务 ${d.childTasks.length} ｜ 提案 ${d.proposals.length} ｜ 回执 ${d.receipts.filter((x) => !x.update).length} ｜ 文件 ${d.files.length}`);
 }
 
+export function cmdClaim(args) {
+  const sub = String((args._ && args._[1]) || 'scan').toLowerCase();
+  if (sub !== 'scan' && sub !== 'status') fail('CLAIM_SUB_UNKNOWN', 'claim 只支持 scan / status');
+  const names = args.project
+    ? [String(args.project)]
+    : (listProjects() || []).map((p) => p.name || p.id).filter(Boolean);
+  const projects = [];
+  let scanned = 0; let written = 0; let pending = 0; let overdue = 0; let stalled = 0;
+  for (const name of names) {
+    const s = scanClaims(name, { write: sub === 'scan' && !args['dry-run'] });
+    scanned += s.scanned; written += s.written.length; pending += s.pending;
+    overdue += s.overdue.length; stalled += s.stalled.length;
+    projects.push({
+      project: name, scanned: s.scanned, pending: s.pending,
+      overdue: s.overdue, stalled: s.stalled, written: s.written.length, audit: s.audit,
+    });
+  }
+  const summary = `认领门：待认领 ${pending} · 超时 ${overdue} · 升级 ${stalled}`;
+  if (args.json) {
+    // 验收要求「--json 一行」：这里不走 jsonOut（它 pretty-print 多行），固定单行便于管道/grep。
+    process.stdout.write(JSON.stringify({ ok: true, sub, projects: projects.length, scanned, written, pending, overdue, stalled, summary, rows: projects }) + '\n');
+    return;
+  }
+  textOut([`认领扫描：项目 ${projects.length} · 扫描 ${scanned} · 待认领 ${pending} · 超时 ${overdue} · 升级 ${stalled} · 本轮打标 ${written}`, summary].join('\n'));
+}
+
 export function cmdStatus(args) {
   const team = loadTeam();
   const { text, data } = renderStatus(team);
-  writeText(PATHS.dashboard, text);
-  if (args.json) jsonOut({ ok: true, ...data, dashboard: PATHS.dashboard });
-  else textOut(text);
+  // T-20261116-124658-303e：固定一行汇总，可 grep（「认领门：待认领 N · 超时 N · 升级 N」）。
+  const claimLine = claimLineForStatus();
+  writeText(PATHS.dashboard, text + '\n\n' + claimLine + '\n');
+  if (args.json) jsonOut({ ok: true, ...data, claimGate: claimLine, dashboard: PATHS.dashboard });
+  else textOut(text + '\n\n' + claimLine);
+}
+
+// 跨项目汇总（status 用）：只读，不打标。
+function claimLineForStatus() {
+  let pending = 0; let overdue = 0; let stalled = 0;
+  for (const p of (listProjects() || [])) {
+    const name = p.name || p.id;
+    if (!name) continue;
+    try {
+      const s = scanClaims(name, { write: false });
+      pending += s.pending; overdue += s.overdue.length; stalled += s.stalled.length;
+    } catch { /* 单个项目读失败不影响汇总 */ }
+  }
+  return `认领门：待认领 ${pending} · 超时 ${overdue} · 升级 ${stalled}`;
 }
 
 export function cmdReconcile(args) {
