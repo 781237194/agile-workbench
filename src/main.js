@@ -5309,6 +5309,78 @@ function registerIpc() {
     const name = (project && (project.teamName || project.name)) || wanted || '';
     return { name: String(name || ''), project };
   };
+  // ── R-c4c7（T-20261115-195024-5369）：团队收件箱实时面板（零轮询，fs.watch 推送）──────────
+  // 口径（增补卷 §二）：只算 邮箱/<role>/new 条数 + role_queues.json 的 pending 条数；
+  // 不含 DSH 运行时队列（二期）。只读：唯一写入是 项目状态/收件箱监听.jsonl 的 degraded/recovered 审计。
+  const MailboxWatch = require('./queue-watch.js');
+  let mailboxWatcher = null;
+  let mailboxWatcherKey = '';
+  const mailboxActiveProject = () => {
+    try {
+      const store = readStore();
+      const row = (store.projects || []).find((item) => item.id === store.activeProjectId) || null;
+      return row || null;
+    } catch { return null; }
+  };
+  const mailboxPush = (snapshot) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      try { win.webContents.send('mailbox:changed', snapshot); } catch { /* 窗口在销毁中 */ }
+    }
+  };
+  /** 幂等：项目/团队根没变就复用；变了就重建（切工作区时不会串数据） */
+  const ensureMailboxWatcher = (payload) => {
+    const { name: wanted } = teamProjectNameOf(payload || {});
+    const row = mailboxActiveProject();
+    const projectName = String(wanted || (row && (row.teamName || row.name)) || '').trim();
+    if (!projectName) return null;
+    const teamRoot = resolveTeamRoot();
+    const stateDir = path.join(teamTools.layout.projectsDir, teamTools.teamSlug(projectName, 60));
+    const key = `${teamRoot}|${stateDir}`;
+    if (mailboxWatcher && mailboxWatcherKey === key) return mailboxWatcher;
+    if (mailboxWatcher) { try { mailboxWatcher.stop(); } catch { /* ignore */ } mailboxWatcher = null; }
+    const roleIds = MailboxWatch.roleIdsFromTeam(teamRoot);
+    mailboxWatcher = MailboxWatch.createMailboxWatcher({
+      teamRoot,
+      stateDir,
+      projectName,
+      roleIds,
+      auditFile: path.join(stateDir, '收件箱监听.jsonl'),
+      logger: console,
+    });
+    mailboxWatcher.subscribe(mailboxPush);
+    mailboxWatcher.start();
+    mailboxWatcherKey = key;
+    return mailboxWatcher;
+  };
+  ipcMain.handle('mailbox:snapshot', async (_e, payload) => {
+    try {
+      const watcher = ensureMailboxWatcher(payload);
+      if (!watcher) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
+      const snapshot = watcher.getSnapshot() || watcher.recompute('initial');
+      return { ok: true, snapshot };
+    } catch (error) {
+      return { ok: false, code: 'MAILBOX_FAILED', message: String((error && error.message) || error).slice(0, 200) };
+    }
+  });
+  // 面板打开时调一次：确保 watcher 在跑（只 attach watch，不额外读文件——首屏快照仍走 mailbox:snapshot）
+  ipcMain.handle('mailbox:watch-start', async (_e, payload) => {
+    try {
+      const watcher = ensureMailboxWatcher(payload);
+      if (!watcher) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
+      return { ok: true, state: watcher.state() };
+    } catch (error) {
+      return { ok: false, code: 'MAILBOX_FAILED', message: String((error && error.message) || error).slice(0, 200) };
+    }
+  });
+  // 自检/排障用：只读降级计数与 watch 列表（不新建 watcher）
+  ipcMain.handle('mailbox:state', async () => {
+    try {
+      if (!mailboxWatcher) return { ok: true, state: null, message: '面板还没打开过，watcher 未启动' };
+      return { ok: true, state: mailboxWatcher.state() };
+    } catch (error) {
+      return { ok: false, code: 'MAILBOX_FAILED', message: String((error && error.message) || error).slice(0, 200) };
+    }
+  });
   // 在场/唤醒留痕失败不能把主流程带崩：找不到对应工作区就只打日志，不造假记录。
   const addEventSafeForProject = (teamName, text) => {
     try {
@@ -6777,6 +6849,11 @@ function registerIpc() {
   });
   ipcMain.handle('team:board-old', async (_e, payload) => {
     const projectId = typeof payload === 'string' ? payload : String((payload && (payload.projectId || payload.id)) || '');
+    const payloadThemeId = (payload && typeof payload.themeId === 'string') ? payload.themeId : '';
+    // R-fe90：5 档后看板窗要同时同步 data-style 与 data-theme（只同步 theme 会停在「暗金」）
+    const boardStyle = (payload && /^(native|tech|anime|glass)$/.test(String(payload.style || '')))
+      ? String(payload.style)
+      : (payloadThemeId.split('-')[0] || 'native');
     const theme = (payload && payload.theme === 'light') ? 'light' : 'dark';
     const store = readStore();
     const project = store.projects.find((p) => p.id === projectId);
@@ -6789,12 +6866,12 @@ function registerIpc() {
     if (boardWindowAlive()) {
       // 复用窗口也必须重新加载：generateBoard 每次都会重写 看板.html，
       // 只 show/focus 会让切项目后的窗口继续显示上一个项目。
-      await teamBoardWindow.loadFile(result.boardPath, { query: { theme } });
+      await teamBoardWindow.loadFile(result.boardPath, { query: { theme, style: boardStyle } });
       // B-4e18：复用窗重载后同样跟当前字号。
       applyZoomToAllWindows(readZoomPref());
       teamBoardWindow.show();
       teamBoardWindow.focus();
-      return { ok: true, path: result.boardPath, projectId: project.id, reused: true, reloaded: true, theme };
+      return { ok: true, path: result.boardPath, projectId: project.id, reused: true, reloaded: true, theme, style: boardStyle, themeId: payloadThemeId };
     }
     teamBoardWindow = new BrowserWindow({
       width: 1120, height: 780, minWidth: 440, minHeight: 320,
@@ -6814,11 +6891,11 @@ function registerIpc() {
       teamBoardProjectPath = null;
       teamBoardExpandedBounds = null;
     });
-    await teamBoardWindow.loadFile(result.boardPath, { query: { theme } });
+    await teamBoardWindow.loadFile(result.boardPath, { query: { theme, style: boardStyle } });
     // B-4e18：看板窗是独立 BrowserWindow，创建/重载后要跟主窗同一字号。
     applyZoomToAllWindows(readZoomPref());
     teamBoardWindow.show();
-    return { ok: true, path: result.boardPath, projectId: project.id, reused: false, reloaded: true, theme };
+    return { ok: true, path: result.boardPath, projectId: project.id, reused: false, reloaded: true, theme, style: boardStyle, themeId: payloadThemeId };
   });
   ipcMain.handle('team:board-control', (event, action) => {
     assertBoardSender(event);
@@ -7526,19 +7603,25 @@ function registerIpc() {
     writeStore(fresh);
     return { ok: true, needsAdopt: false, recordRestored: true, missingDir: true, name, path: projectPath, restoredDir: targetDir, project: publicProject(record), state: statePayload() };
   });
-  // 主题联动：独立看板窗口不会继承外壳 CSS 变量，切主题时通过 IPC 改它的 data-theme。
+  // 主题联动：独立看板窗口不会继承外壳 CSS 变量，切主题时通过 IPC 改它的 data-style + data-theme。
+  // R-fe90：5 档后必须两个属性都同步（只同步 data-theme 会让看板窗停在「暗金」而主窗是科技）。
   ipcMain.handle('team:board-theme', async (_e, payload) => {
-    const theme = (payload && payload.theme === 'light') ? 'light' : 'dark';
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const themeId = typeof p.themeId === 'string' ? p.themeId : '';
+    const style = /^(native|tech|anime|glass)$/.test(String(p.style || ''))
+      ? String(p.style)
+      : (themeId.split('-')[0] || 'native');
+    const theme = (p.theme === 'light' || themeId === 'native-light') ? 'light' : 'dark';
     teamBoardTheme = theme;
-    if (!boardWindowAlive()) return { ok: true, applied: false, theme };
+    if (!boardWindowAlive()) return { ok: true, applied: false, theme, style, themeId };
     try {
       await teamBoardWindow.webContents.executeJavaScript(
-        `(function(){try{document.documentElement.dataset.theme=${JSON.stringify(theme)};localStorage.setItem('awb.boardTheme',${JSON.stringify(theme)});}catch(e){}})();`,
+        `(function(){try{var e=document.documentElement;e.dataset.theme=${JSON.stringify(theme)};e.dataset.style=${JSON.stringify(style)};localStorage.setItem('awb.boardTheme',${JSON.stringify(theme)});}catch(err){}})();`,
         true
       );
-      return { ok: true, applied: true, theme };
+      return { ok: true, applied: true, theme, style, themeId };
     } catch (error) {
-      return { ok: false, code: 'BOARD_THEME_FAILED', message: String((error && error.message) || error).slice(0, 200), theme };
+      return { ok: false, code: 'BOARD_THEME_FAILED', message: String((error && error.message) || error).slice(0, 200), theme, style, themeId };
     }
   });
   ipcMain.handle('task:create', (_e, payload) => {

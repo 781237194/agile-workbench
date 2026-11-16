@@ -103,7 +103,13 @@ function ensurePresence(callback) {
 // 一次 DSH 核验结果的有效期；过期后界面退回“本地映射/待核验”，不把旧结果当现在。
 const LIVE_TTL_MS = 10 * 60 * 1000;
 
-const THEME_NAME = { dark: '暗金', light: '暖白' };
+// R-fe90 主题系统 5 档：清单唯一来源 = src/renderer/theme-manifest.js（index.html 在首帧前同步加载）。
+// 这里不复制 5 项表格（F-2「入口/持久化/探针/断言全从这里取，禁止各处写死」）；
+// 清单异常时只降级到旧两档行为，不另立第二份真值。
+const THEME_MANIFEST = (typeof window !== 'undefined' && window.ThemeManifest) || null;
+const THEME_STORAGE_KEY = 'awb.theme';
+const THEME_ORDER = (THEME_MANIFEST && Array.isArray(THEME_MANIFEST.THEME_ORDER)) ? THEME_MANIFEST.THEME_ORDER : [];
+const THEME_NAME = (THEME_MANIFEST && THEME_MANIFEST.THEME_NAMES) || { dark: '暗金', light: '暖白' };
 const TASK_STATUS = { todo: '待办', doing: '进行中', review: '待评审', done: '已完成' };
 const OWNER_STATUS = { optional: '未选择', approved: '已通过', skipped: '已跳过', rejected: '已打回', pending: '待审' };
 // Owner 是本机外部角色，没有 DSH 会话身份。只有用户点下 Owner（我）按钮后，
@@ -784,43 +790,183 @@ function toast(message, kind = '') {
   }, kind === 'bad' || kind === 'warn' ? 4200 : 2600);
 }
 
+/* ── 主题：双维度 5 档（R-fe90 F-1~F-5）────────────────────────────
+ * data-style(native|tech|anime|glass) × data-theme(dark|light)，合法组合 5 个；
+ * 旧 html[data-theme="light"] 仍由 style.css 负责（暖白），新样式只挂 data-style。
+ * 解析/迁移全走 theme-manifest.js；本段只做「读 DOM / 写 DOM / 持久化 / 同步界面」。
+ */
+
+const LAST_THEME = { source: 'default' };
+
+function themeReadStorage() {
+  try { return localStorage.getItem(THEME_STORAGE_KEY) || ''; } catch { return ''; }
+}
+
+function themeWriteStorage(themeId) {
+  try { localStorage.setItem(THEME_STORAGE_KEY, themeId); } catch { /* 隐私模式忽略 */ }
+}
+
+function themeResolve(input) {
+  if (THEME_MANIFEST && typeof THEME_MANIFEST.resolveTheme === 'function') return THEME_MANIFEST.resolveTheme(input);
+  const raw = typeof input === 'string' ? input : ((input && input.storageValue) || '');
+  return { themeId: raw || 'tech-dark', style: 'tech', theme: 'dark', source: 'default', fallback: false, reason: 'manifest-missing' };
+}
+
+/** 旧口径（light|dark）：看板窗/iframe 只认这两个值，保持兼容（AC4「旧调用点行为不变」） */
 function currentTheme() {
   return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
 }
 
-function applyTheme(mode) {
-  const theme = mode === 'light' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', theme);
-  try { localStorage.setItem('awb.theme', theme); } catch { /* ignore */ }
+/** 新口径：完整 themeId（形如 native-dark / tech-dark，5 个值由清单给出，这里不重复列举） */
+function currentThemeId() {
+  const el = document.documentElement;
+  const id = el.getAttribute('data-theme-id');
+  if (id && THEME_ORDER.indexOf(id) >= 0) return id;
+  const joined = `${el.getAttribute('data-style') || 'tech'}-${currentTheme()}`;
+  return THEME_ORDER.indexOf(joined) >= 0 ? joined : (THEME_ORDER[0] || 'tech-dark');
+}
+
+function themeLabel(themeId) {
+  const key = themeId || currentThemeId();
+  return THEME_NAME[key] || THEME_NAME[currentTheme()] || key;
+}
+
+function nextThemeId(themeId) {
+  const id = themeId || currentThemeId();
+  if (THEME_MANIFEST && typeof THEME_MANIFEST.nextThemeId === 'function') return THEME_MANIFEST.nextThemeId(id);
+  return id === 'native-dark' ? 'native-light' : 'native-dark';
+}
+
+/* 三层降级的读数口径（F-7；优先级 off > prefers-reduced-motion > full） */
+function themeEffectLevel() {
+  const raw = document.documentElement.getAttribute('data-effect-level');
+  return raw === 'reduced' || raw === 'off' ? raw : 'full';
+}
+
+function themeReducedMotion() {
+  try { return Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch { return false; }
+}
+
+function themeLowFx() {
+  let low = false;
+  try { low = new URLSearchParams(location.search || '').get('lowfx') === '1'; } catch { /* ignore */ }
+  return low || themeEffectLevel() !== 'full';
+}
+
+/** 当前档位的特效开关（4 项，供 __themeState() 与降级断言） */
+function themeEffects(themeId) {
+  const id = themeId || currentThemeId();
+  const on = !themeLowFx() && !themeReducedMotion();
+  return {
+    particles: Boolean(on && id === 'tech-dark'),
+    grid: Boolean(on && id === 'tech-dark'),
+    blur: Boolean(on && id === 'glass-dark'),
+    bounce: Boolean(on && id === 'anime-dark'),
+  };
+}
+
+/** 主题状态（F-6 的一部分 + 增补卷-fe90-1 §一.5：source 区分「URL 真生效」与「碰巧等于默认」） */
+function themeState() {
+  const id = currentThemeId();
+  const parts = (THEME_MANIFEST && typeof THEME_MANIFEST.splitThemeId === 'function' && THEME_MANIFEST.splitThemeId(id)) || {};
+  return {
+    themeId: id,
+    style: document.documentElement.getAttribute('data-style') || parts.style || 'tech',
+    theme: currentTheme(),
+    source: LAST_THEME.source || 'default',
+    effects: themeEffects(id),
+    reducedMotion: themeReducedMotion(),
+    lowfx: themeLowFx(),
+    effectLevel: themeEffectLevel(),
+  };
+}
+
+/** 落盘到 DOM + （可选）持久化 + 同步界面/看板窗；返回解析结果 */
+function applyThemeState(resolved, opts) {
+  const options = opts && typeof opts === 'object' ? opts : {};
+  const r = resolved || themeResolve({ storageValue: themeReadStorage(), search: location.search });
+  const el = document.documentElement;
+  el.setAttribute('data-style', r.style);
+  el.setAttribute('data-theme', r.theme);
+  el.setAttribute('data-theme-id', r.themeId);
+  LAST_THEME.source = r.source || 'default';
+  if (options.persist !== false) themeWriteStorage(r.themeId);
   syncThemeUi();
   // 独立看板窗口与内嵌 iframe 不继承外壳变量：切主题时同步过去，避免“先黑后白”。
+  // 5 档要看板窗同时同步 data-style + data-theme（增补卷-fe90-1 §四.1）。
   try {
     if (window.workbench && typeof window.workbench.boardTheme === 'function') {
-      window.workbench.boardTheme({ theme }).catch(() => {});
+      window.workbench.boardTheme({ theme: r.theme, style: r.style, themeId: r.themeId }).catch(() => {});
     }
   } catch { /* 看板未打开时忽略 */ }
   if (typeof boardUi !== 'undefined' && boardUi && boardUi.framePath) loadBoardFrame(boardUi.framePath);
+  return r;
+}
+
+/** 旧调用兼容：applyTheme('dark'|'light'|完整 id)。显式选择，不读 URL 参数 */
+function applyTheme(mode) {
+  const input = (typeof mode === 'string' && mode) ? mode : themeReadStorage();
+  return applyThemeState(themeResolve({ storageValue: input, search: '' }), { persist: true });
+}
+
+/** 入口 5 项点击 / 探针调用：按 themeId 显式切换 */
+function applyThemeId(themeId) {
+  const applied = applyThemeState(themeResolve({ storageValue: themeId, search: '' }), { persist: true });
+  toast(`已切换为「${themeLabel(applied.themeId)}」主题`, 'ok');
+  return applied;
 }
 
 function syncThemeUi() {
-  const theme = currentTheme();
-  const next = theme === 'dark' ? 'light' : 'dark';
-  const btn = $('#btn-theme');
-  if (btn) {
-    btn.innerHTML = theme === 'dark' ? ICON_SUN : ICON_MOON;
-    btn.title = `当前：${THEME_NAME[theme]}，点击切换为${THEME_NAME[next]}`;
-    btn.setAttribute('aria-label', btn.title);
-    btn.setAttribute('aria-pressed', String(theme === 'light'));
+  const id = currentThemeId();
+  const items = $$('#more-menu [data-theme-id]');
+  let checked = 0;
+  for (const item of items) {
+    const on = item.dataset.themeId === id;
+    item.setAttribute('aria-checked', String(on));
+    item.classList.toggle('on', on);
+    if (on) checked += 1;
   }
   const label = $('#more-menu [data-more="theme"] .mm-text');
-  if (label) label.textContent = `外观：${THEME_NAME[theme]}（点击切${THEME_NAME[next]}）`;
+  if (label) label.textContent = `外观：${themeLabel(id)}`;
+  // 标题栏主题按钮已按 B-0538 移除；保留兼容分支（元素不存在时整段跳过）
+  const btn = $('#btn-theme');
+  if (btn) {
+    const next = nextThemeId(id);
+    btn.innerHTML = currentTheme() === 'dark' ? ICON_SUN : ICON_MOON;
+    btn.title = `当前：${themeLabel(id)}，点击切换为${themeLabel(next)}`;
+    btn.setAttribute('aria-label', btn.title);
+    btn.setAttribute('aria-pressed', String(currentTheme() === 'light'));
+  }
+  return checked;
 }
 
+/** 5 档循环切换（菜单点当前项之后也走这里；旧按钮/快捷键同源） */
 function toggleTheme() {
-  const next = currentTheme() === 'dark' ? 'light' : 'dark';
-  applyTheme(next);
-  toast(`已切换为「${THEME_NAME[next]}」主题`, 'ok');
+  const next = nextThemeId(currentThemeId());
+  applyThemeId(next);
+  return next;
 }
+
+function setThemeMenu(open) {
+  const box = $('#more-menu [data-theme-menu]');
+  const btn = $('#more-menu [data-more="theme"]');
+  if (!box) return;
+  box.hidden = !open;
+  if (btn) btn.setAttribute('aria-expanded', String(Boolean(open)));
+}
+
+function themeMenuItems() {
+  return $$('#more-menu [data-theme-menu] [data-theme-id]');
+}
+
+function themeMenuFocus(step) {
+  const items = themeMenuItems();
+  if (!items.length) return;
+  const current = items.indexOf(document.activeElement);
+  const next = current < 0 ? 0 : (current + step + items.length) % items.length;
+  items[next].focus();
+}
+
 
 function activeProject() {
   if (!state) return null;
@@ -4025,7 +4171,7 @@ function loadBoardFrame(boardPath) {
     frame.removeAttribute('src');
     return;
   }
-  const url = absFileUrl(boardPath) + '?v=' + Date.now() + '&theme=' + currentTheme();
+  const url = absFileUrl(boardPath) + '?v=' + Date.now() + '&theme=' + currentTheme() + '&style=' + String(currentThemeId()).split('-')[0];
   boardUi.embedError = null;
   frame.hidden = false;
   frame.dataset.boardUrl = url;
@@ -14503,7 +14649,7 @@ async function runMoreAction(act) {
   if (act === 'project') setDrawer('project');
   else if (act === 'team') setDrawer('team');
   else if (act === 'inbox') openInboxFor(inboxUi.roleId || 'pm');
-  else if (act === 'theme') toggleTheme();
+  else if (act === 'theme') { setThemeMenu(true); themeMenuFocus(1); }
   else if (act === 'refresh') {
     await refreshAll({ toast: true });
   } else if (act === 'workspaces') {
@@ -14910,7 +15056,7 @@ async function openTeamBoardOld(projectId) {
     return;
   }
   try {
-    const r = await window.workbench.teamBoardOld({ projectId: p.id, theme: currentTheme() });
+    const r = await window.workbench.teamBoardOld({ projectId: p.id, theme: currentTheme(), style: String(currentThemeId()).split('-')[0], themeId: currentThemeId() });
     if (r && r.ok) {
       toast(r.reused ? '团队看板浮窗已置顶（复用已有窗口）' : '已打开旧版团队看板浮窗（置顶）', 'ok');
       loadTeamStatus({ force: true });
@@ -15167,10 +15313,41 @@ function bind() {
     setWorkspacePop(false);
   });
   $('#more-menu')?.addEventListener('click', (e) => {
+    // 外观子菜单的 5 项：点即切（R-fe90 AC1/AC3；当前项 aria-checked 唯一）
+    const themeItem = e.target.closest('[data-theme-id]');
+    if (themeItem) {
+      e.stopPropagation();
+      const id = themeItem.dataset.themeId;
+      setThemeMenu(false);
+      setMoreMenu(false);
+      applyThemeId(id);
+      return;
+    }
     const btn = e.target.closest('[data-more]');
     if (!btn || btn.disabled) return;
     e.stopPropagation();
+    // data-more="theme" 是「外观」根锚点（layout-check 的 themeInMoreMenu 依赖它）：点它展开 5 项
+    if (btn.dataset.more === 'theme') {
+      const box = $('#more-menu [data-theme-menu]');
+      const willOpen = Boolean(box && box.hidden);
+      setThemeMenu(willOpen);
+      if (willOpen) themeMenuFocus(1);
+      return;
+    }
     runMoreAction(btn.dataset.more);
+  });
+  // 外观子菜单键盘：↑↓ 移动、Esc 收起并回到根锚点（AC5「5 项键盘可全选」）
+  $('#more-menu')?.addEventListener('keydown', (e) => {
+    const box = $('#more-menu [data-theme-menu]');
+    if (!box || box.hidden) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); themeMenuFocus(1); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); themeMenuFocus(-1); return; }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      setThemeMenu(false);
+      $('#more-menu [data-more="theme"]')?.focus();
+    }
   });
   document.addEventListener('click', (e) => {
     const menu = $('#more-menu');
@@ -15857,9 +16034,11 @@ function clampFlowPanel() {
 /* ── 启动 ─────────────────────────────────────────────── */
 
 (async function boot() {
-  let savedTheme = 'dark';
-  try { savedTheme = localStorage.getItem('awb.theme') || 'dark'; } catch { /* ignore */ }
-  applyTheme(savedTheme);
+  // R-fe90：URL(?theme=) > localStorage['awb.theme'] > 默认 tech-dark；
+  // ?theme= 只影响本次加载、**不持久化**（增补卷-fe90-1 §一.3）；同值不重复写 storage。
+  const bootResolved = themeResolve({ storageValue: themeReadStorage(), search: location.search });
+  applyThemeState(bootResolved, { persist: bootResolved.source !== 'url' });
+  try { window.__themeState = themeState; } catch { /* ignore */ }
   loadInboxSeen();
   bind();
   renderBridgeAlert();

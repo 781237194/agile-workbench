@@ -4689,3 +4689,123 @@ html[data-theme="light"] #titlebar .titlebar-center .owner-review-proxy { color:
 .lessons-item-title { display: block; font-size: 13px; }
 .lessons-detail { margin-top: 6px; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.55; opacity: .92; border-top: 1px dashed rgba(255,255,255,.14); padding-top: 6px; }
 .lessons-detail[hidden] { display: none; }
+
+/* ==========================================================================
+   R-fe90 · 主题系统 5 档（双维度 data-style × data-theme）
+   —— 只新增叠加块：不改 :root、不删 html[data-theme="light"]（暖白继续走旧块）。
+      合法组合仅 5 个：native-dark（= :root 原值，无需覆盖）/ native-light（= 上面旧 light 块）/
+      tech-dark / anime-dark / glass-dark。三套新主题只做深色，不写浅色变体（Owner 选 A）。
+   ========================================================================== */
+html[data-style="tech"][data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #070d15; --bg-2: #0a121c; --chrome: #050a10; --chrome-2: #081019;
+  --panel: #0d1723; --panel-2: #10202f; --panel-3: #152c3d; --hover: #16304a; --input: #07101a;
+  --line: rgba(160,210,255,.10); --line-strong: rgba(160,210,255,.20);
+  --text: #e6f3ff; --muted: #9fb6cc; --dim: #6f8aa6;
+  --gold: #4fd1ff; --gold-2: #9fe8ff; --gold-3: #2aa3c9;
+  --gold-soft: rgba(79,209,255,.12); --gold-line: rgba(79,209,255,.34);
+  --green: #4fe0b0; --red: #ff8a7a; --blue: #4fd1ff;
+  --shadow: 0 20px 48px rgba(0,12,24,.58);
+}
+html[data-style="anime"][data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #14091a; --bg-2: #190c21; --chrome: #0f0614; --chrome-2: #150a1b;
+  --panel: #1e1028; --panel-2: #261434; --panel-3: #322044; --hover: #2c1840; --input: #140b1d;
+  --line: rgba(255,190,235,.10); --line-strong: rgba(255,190,235,.20);
+  --text: #ffeaf6; --muted: #c9a8cf; --dim: #9a7ea8;
+  --gold: #ff7ac8; --gold-2: #ffb3e0; --gold-3: #d64fa4;
+  --gold-soft: rgba(255,122,200,.13); --gold-line: rgba(255,122,200,.36);
+  --green: #7cf0c8; --red: #ff8fa3; --blue: #a99bff;
+  --shadow: 0 20px 48px rgba(20,4,30,.62);
+}
+html[data-style="glass"][data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0b1016; --bg-2: #101820; --chrome: #070b10; --chrome-2: #0a1015;
+  --panel: #16222c; --panel-2: #1b2a36; --panel-3: #24384a; --hover: #22323f; --input: #0c141c;
+  --line: rgba(200,225,245,.12); --line-strong: rgba(200,225,245,.22);
+  --text: #eaf4fb; --muted: #a9bfcf; --dim: #7c93a6;
+  --gold: #b8d8f0; --gold-2: #dcf0ff; --gold-3: #86aecd;
+  --gold-soft: rgba(184,216,240,.12); --gold-line: rgba(184,216,240,.34);
+  --green: #7fe0c4; --red: #ff9b8c; --blue: #9fd8ff;
+  --shadow: 0 20px 48px rgba(2,10,18,.52);
+}
+
+/* R-fe90 F-3：外观展开的 5 项（根锚点仍是 button[data-more="theme"]，不另起入口，B-0538） */
+.mm-more-caret { flex: 0 0 auto; margin-left: 2px; color: var(--dim); font-size: 11px; }
+.mm-sub { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 4px 10px; padding: 4px; border-left: 1px solid var(--line-strong); }
+.mm-sub[hidden] { display: none; }
+.mm-sub button { font-size: 11px; }
+.mm-sub button[aria-checked="true"] { color: var(--gold-2); background: var(--gold-soft); border-color: var(--line); }
+.mm-sub button[aria-checked="true"] .mm-ico { color: var(--gold-2); }
+
+/* ── R-c4c7（T-20261115-195024-5369）· 团队收件箱实时面板（零轮询，只读）──────────────── */
+.mailbox-entry { white-space: nowrap; }
+#mailbox-panel.mailbox-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 54px;
+  z-index: 9620;
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(620px, calc(100vh - 110px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--gold-line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 96%, white 4%), var(--panel));
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+#mailbox-panel[hidden] { display: none; }
+.mailbox-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--gold-line);
+}
+.mailbox-panel-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.mailbox-panel-title b { font-size: 13px; }
+.mailbox-updated { color: var(--muted); font-size: 11px; }
+.mailbox-panel-tools { display: flex; align-items: center; gap: 6px; }
+.mailbox-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 8px 12px;
+  font-size: 12px;
+  border-bottom: 1px dashed var(--gold-line);
+}
+.mailbox-summary b { font-variant-numeric: tabular-nums; }
+.mailbox-refocus { color: var(--muted); font-size: 11px; }
+.mailbox-scope {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--gold-line);
+}
+.mailbox-degraded {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #1b1400;
+  background: #f0c24a;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.2);
+}
+.mailbox-degraded[hidden] { display: none; }
+.mailbox-error {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #fff;
+  background: #b3342b;
+}
+.mailbox-error[hidden] { display: none; }
+.mailbox-rows { overflow: auto; padding: 6px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.mailbox-row { border: 1px solid var(--gold-line); border-radius: 8px; padding: 6px 8px; }
+.mailbox-row[data-mailbox-dir-missing="1"] { opacity: 0.75; }
+.mailbox-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.mailbox-role { font-size: 12px; }
+.mailbox-counts { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.mailbox-latest { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+.mailbox-latest-item { font-size: 11px; color: var(--text); opacity: 0.86; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mailbox-latest-queue { color: var(--muted); }
+.mailbox-latest-empty { font-size: 11px; color: var(--muted); }

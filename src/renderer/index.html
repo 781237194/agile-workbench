@@ -1,15 +1,30 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-style="tech" data-theme="dark" data-theme-id="tech-dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PM工作台 · DSH 壳</title>
+  <!-- R-fe90 F-2：主题清单唯一来源（渲染层 <script> 与 node import 共用这一份） -->
+  <script src="theme-manifest.js"></script>
   <script>
-    // 首帧前恢复上次主题，避免重开时“先暗后亮”闪一下；主题只挂 html[data-theme]。
-    try {
-      var savedTheme = localStorage.getItem('awb.theme');
-      if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.setAttribute('data-theme', savedTheme);
-    } catch (e) { /* 隐私模式忽略 */ }
+    // 首帧前恢复上次主题，避免重开时「先暗后亮」闪一下。
+    // 双维度：data-style（native|tech|anime|glass）× data-theme（dark|light），合法组合 5 个。
+    // 解析顺序 URL(?theme=) > localStorage['awb.theme'] > 默认 tech-dark（增补卷-fe90-1 §一）。
+    // 清单加载失败时保持 <html> 上已写的默认（tech-dark），不在这里复制第二份清单。
+    (function () {
+      var el = document.documentElement;
+      try {
+        var M = window.ThemeManifest;
+        if (!M || typeof M.resolveTheme !== 'function') return;
+        var picked = M.resolveTheme({
+          storageValue: localStorage.getItem('awb.theme') || '',
+          search: location.search || ''
+        });
+        el.setAttribute('data-style', picked.style);
+        el.setAttribute('data-theme', picked.theme);
+        el.setAttribute('data-theme-id', picked.themeId);
+      } catch (e) { /* 隐私模式 / 清单缺失：保持默认，不闪 */ }
+    })();
   </script>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -101,7 +116,15 @@
     <button type="button" role="menuitem" data-more="project"><span class="mm-ico" aria-hidden="true">▤</span><span class="mm-text">项目面板（浮层）</span></button>
     <button type="button" role="menuitem" data-more="team"><span class="mm-ico" aria-hidden="true">◉</span><span class="mm-text">团队台 / 消息回执</span></button>
     <button type="button" role="menuitem" data-more="workspaces"><span class="mm-ico" aria-hidden="true">❖</span><span class="mm-text">工作区清单（本机 / 团队 / DSH）</span></button>
-    <button type="button" role="menuitem" data-more="theme"><span class="mm-ico" aria-hidden="true">◐</span><span class="mm-text">外观：暗金（点击切暖白）</span></button>
+    <button type="button" role="menuitem" data-more="theme" aria-haspopup="menu" aria-expanded="false"><span class="mm-ico" aria-hidden="true">◐</span><span class="mm-text">外观：科技暗</span><span class="mm-more-caret" aria-hidden="true">›</span></button>
+    <!-- R-fe90 F-3：外观展开 5 项（外观根锚点必须仍是 data-more=theme 的那个按钮，B-0538 / layout-check 三条断言依赖它） -->
+    <div class="mm-sub" data-theme-menu role="menu" aria-label="外观主题" hidden>
+      <button type="button" role="menuitemradio" data-theme-id="native-dark" aria-checked="false"><span class="mm-ico" aria-hidden="true">◆</span><span class="mm-text">暗金</span></button>
+      <button type="button" role="menuitemradio" data-theme-id="native-light" aria-checked="false"><span class="mm-ico" aria-hidden="true">◇</span><span class="mm-text">暖白</span></button>
+      <button type="button" role="menuitemradio" data-theme-id="tech-dark" aria-checked="false"><span class="mm-ico" aria-hidden="true">◈</span><span class="mm-text">科技暗</span></button>
+      <button type="button" role="menuitemradio" data-theme-id="anime-dark" aria-checked="false"><span class="mm-ico" aria-hidden="true">❋</span><span class="mm-text">二次元暗</span></button>
+      <button type="button" role="menuitemradio" data-theme-id="glass-dark" aria-checked="false"><span class="mm-ico" aria-hidden="true">◍</span><span class="mm-text">玻璃拟态暗</span></button>
+    </div>
     <button type="button" role="menuitem" data-more="refresh"><span class="mm-ico" aria-hidden="true">⟳</span><span class="mm-text">刷新工作区 / DSH 状态</span></button>
     <div class="more-sep"></div>
     <button type="button" role="menuitem" data-more="index"><span class="mm-ico" aria-hidden="true">◈</span><span class="mm-text">打开项目索引</span></button>
@@ -172,6 +195,8 @@
         <div class="sidebar-foot">
           <button id="metrics" class="metrics-mini" type="button" title="本机占用（2 秒刷新，点击立即刷新）">CPU — · 内存 — · GPU —</button>
           <button id="daemon-pill" class="metrics-mini daemon-pill" type="button" data-daemon-state="unknown" title="路由守护状态：只看 守护状态.json 的心跳与进程，点一下刷新">守护 —</button>
+          <!-- R-c4c7（T-20261115-195024-5369）：团队收件箱实时面板入口（侧栏底部，同 #metrics 一族；不进标题栏） -->
+          <button id="btn-mailbox" class="metrics-mini mailbox-entry" type="button" data-mailbox-entry="1" aria-expanded="false" title="团队收件箱实时面板：团队邮箱 new + 任务队列 pending；不含 DSH 运行时队列（二期）">收件箱 —</button>
           <div class="dsh-box">
             <div class="dsh-row"><span class="dot" id="dsh-dot"></span><b id="dsh-label">DSH 未检测</b></div>
             <p id="dsh-detail">外部会话引擎</p>
@@ -726,6 +751,33 @@
     <footer class="board-panel-foot"><span id="board-panel-note">内嵌只读看板；切项目只切换看板查看，不改工作台当前工作区；独立窗口用其自身按钮关闭/折叠。</span></footer>
   </section>
 
+  <!-- R-c4c7（T-20261115-195024-5369）：团队收件箱实时面板（零轮询；只读；PM/Owner 同源）。
+       口径写死：一期只含「团队邮箱 new」+「任务队列 pending」，不含 DSH 运行时队列（二期）。
+       锚点：data-mailbox-total / busiest / updated-at / scope / degraded / row / mail-count / queue-count / latest -->
+  <section id="mailbox-panel" class="mailbox-panel" hidden aria-label="团队收件箱（PM 派单/回执）">
+    <header class="mailbox-panel-head">
+      <div class="mailbox-panel-title">
+        <b data-mailbox-title>团队收件箱（PM 派单/回执）</b>
+        <span class="mailbox-updated">更新 <b data-mailbox-updated-at>—</b></span>
+      </div>
+      <div class="mailbox-panel-tools">
+        <button id="mailbox-refresh" class="flow-tool" type="button" title="手动刷新一次（用户显式动作，不是轮询）">刷新</button>
+        <button id="mailbox-close" class="flow-close" type="button" aria-label="关闭团队收件箱面板" title="关闭">×</button>
+      </div>
+    </header>
+    <div data-mailbox-degraded class="mailbox-degraded" hidden></div>
+    <div data-mailbox-error class="mailbox-error" hidden></div>
+    <div class="mailbox-summary">
+      <span>全队积压 <b data-mailbox-total>—</b></span>
+      <span>最堵 <b data-mailbox-busiest>—</b></span>
+      <span class="mailbox-refocus" data-mailbox-refocus-note hidden></span>
+    </div>
+    <div class="mailbox-scope" data-mailbox-scope>数据口径：团队收件箱 new + 任务队列 pending；不含 DSH 运行时队列（二期）</div>
+    <div id="mailbox-rows" class="mailbox-rows" data-mailbox-rows="1">
+      <div class="empty-row">还没读取收件箱快照。</div>
+    </div>
+  </section>
+
   <div id="onboard" class="onboard-mask" hidden>
     <div class="ob-blocker"></div>
     <div id="ob-ring" class="ob-ring" hidden></div>
@@ -769,5 +821,7 @@
 <script src="lessons-board.js"></script>
 <!-- R-20261114-001014-e29f：工作区残留（额外会话）单一展示 + 清理 + 清理历史 -->
 <script src="workspace-clean.js"></script>
+<!-- R-c4c7：团队收件箱实时面板（零轮询；只订阅 mailbox:changed，只在首屏/重聚焦各读一次快照） -->
+<script src="mailbox-panel.js"></script>
 </body>
 </html>
