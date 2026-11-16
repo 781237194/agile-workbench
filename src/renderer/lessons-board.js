@@ -102,7 +102,20 @@
       head.appendChild(updated);
       box.appendChild(head);
 
-      const items = Array.isArray(section.latest) ? section.latest.slice(0, 3) : [];
+      // B-20261116-211329-0d59：每段最多渲染 10 条（原写死 3 条）；
+      // 后端 src/main.js 的 rows.slice(-3) 是另一处写死，两处必须同改。
+      const total = Number(section.count) || 0;
+      const items = Array.isArray(section.latest) ? section.latest.slice(0, 10) : [];
+      const shown = items.length;
+      const truncated = total > shown ? 1 : 0;
+      box.setAttribute('data-lesson-shown', String(shown));
+      box.setAttribute('data-lesson-total', String(total));
+      box.setAttribute('data-lesson-truncated', String(truncated));
+      // 段头明确提示，禁止静默截断（R-5016 已定口径）
+      const trunc = el('span', 'lessons-trunc', truncated ? `已展示 ${shown} / 共 ${total}（另有 ${total - shown} 条）` : `已展示 ${shown} / 共 ${total}`);
+      trunc.setAttribute('data-lesson-more', String(Math.max(0, total - shown)));
+      head.appendChild(trunc);
+
       if (!items.length) {
         const empty = el('div', 'lessons-empty', section.count ? '本段条目读取异常（按 0 展示，见日志）' : '本段暂无记录');
         empty.setAttribute('data-lesson-empty', role);

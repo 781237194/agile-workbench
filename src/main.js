@@ -5664,7 +5664,9 @@ ipcMain.handle('theme:metrics', async () => {
       const sections = roles.map((role) => {
         const sec = (parsed.sections || []).find((s) => s.role === role) || null;
         const rows = sec && Array.isArray(sec.rows) ? sec.rows : [];
-        const latest = rows.slice(-3).reverse().map((row) => ({
+        // B-20261116-211329-0d59：每段最多给 10 条（原写死 3 条 → Owner 只能看到 3 条）；
+        // 前端 src/renderer/lessons-board.js 的 slice(0,3) 是第二处写死，两处必须同改。
+        const latest = rows.slice(-10).reverse().map((row) => ({
           date: String(row.date || ''), scene: String(row.scene || ''),
           lesson: String(row.lesson || ''), next: String(row.next || ''),
         }));

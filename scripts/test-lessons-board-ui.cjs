@@ -4,7 +4,8 @@
  *   ① 侧栏入口存在、可见、点开浮层（B-0538：不在标题栏）；
  *   ② 六页签 data-lesson-tab 六个值各 1；默认一个 aria-selected=true；
  *   ③ 每段 data-lesson-count = 本次打开时点 md 实测条数（不写死）、data-lesson-updated-at = 最后一条日期；
- *   ④ 最新 3 条 = 文件行序最后 3 个数据行（倒序），首条文本与 md 对应行一致；
+ *   ④ 最新最多 10 条 = 文件行序最后 10 个数据行（倒序），首条文本与 md 对应行一致；
+ *      另：data-lesson-shown/total/truncated 与段头「已展示 N / 共 M（另有 K 条）」、容器可滚动（B-0d59）；
  *   ⑤ 点首条 → data-lesson-detail 含完整四列（逐字相等）；无 editor/save/textarea；
  *   ⑥ 临时改名 md → data-lessons-error="MISSING"（不显示 0 条当正常）；恢复后重新打开正常。
  *
@@ -30,7 +31,8 @@ const TITLES = { 项目经理: 'pm', 产品: 'product', 需求分析师: 'analys
 const results = [];
 function check(name, ok, detail) {
   results.push({ name, ok: Boolean(ok), detail: ok ? '' : detail });
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '  ' + JSON.stringify(detail).slice(0, 300)}`);
+  // detail 可能是 undefined（如 dom.count 取不到），JSON.stringify(undefined) 返回 undefined → 直接 .slice 会抛，断言脚本自己崩掉。
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '  ' + String(JSON.stringify(detail ?? null) ?? 'null').slice(0, 300)}`);
   if (!ok) process.exitCode = 1;
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -179,12 +181,40 @@ async function launch(port) {
         const count=sec.querySelector('[data-lesson-count="${role}"]');
         const updated=sec.querySelector('[data-lesson-updated-at="${role}"]');
         const items=[...sec.querySelectorAll('[data-lesson-item="${role}"]')].map(it=>({title: it.querySelector('.lessons-item-title') ? it.querySelector('.lessons-item-title').textContent : '', date: it.getAttribute('data-lesson-date'), open: it.getAttribute('data-lesson-expanded')}));
-        return { count: count?count.textContent.replace(/[^0-9]/g,''):'', updated: updated?updated.textContent:'', items };
+        const trunc=sec.querySelector('.lessons-trunc');
+        return { count: count?count.textContent.replace(/[^0-9]/g,''):'', updated: updated?updated.textContent:'', items,
+          shown: sec.getAttribute('data-lesson-shown'), total: sec.getAttribute('data-lesson-total'), truncated: sec.getAttribute('data-lesson-truncated'),
+          more: trunc?trunc.getAttribute('data-lesson-more'):'', truncText: trunc?trunc.textContent:'' };
       })()`);
       check(`③ [${role}] 条数=md 实测 ${rows.length}`, Boolean(dom && String(dom.count) === String(rows.length)), dom && dom.count);
       check(`③ [${role}] 最近更新=最后一条日期`, Boolean(dom && String(dom.updated || '').includes(rows.length ? rows[rows.length - 1].date : '')), dom && dom.updated);
-      const expectLatest = rows.slice(-3).reverse();
-      check(`④ [${role}] 最新条目数 = min(3,${rows.length})`, Boolean(dom && dom.items.length === Math.min(3, rows.length)), dom && dom.items.length);
+      const expectLatest = rows.slice(-10).reverse();
+      check(`④ [${role}] 最新条目数 = min(10,${rows.length})`, Boolean(dom && dom.items.length === Math.min(10, rows.length)), dom && dom.items.length);
+      // B-0d59：三锚点 + 段头提示（禁止静默截断）
+      const expectShown = Math.min(10, rows.length);
+      const expectTruncated = rows.length > expectShown ? '1' : '0';
+      check(`④ [${role}] data-lesson-shown=${expectShown}`, Boolean(dom && String(dom.shown) === String(expectShown)), dom && dom.shown);
+      check(`④ [${role}] data-lesson-total=${rows.length}`, Boolean(dom && String(dom.total) === String(rows.length)), dom && dom.total);
+      check(`④ [${role}] data-lesson-truncated=${expectTruncated}`, Boolean(dom && String(dom.truncated) === expectTruncated), dom && dom.truncated);
+      check(`④ [${role}] 段头提示「另有 K 条」K=${rows.length - expectShown}`, Boolean(dom && String(dom.more) === String(rows.length - expectShown) && (expectTruncated === '1' ? /另有 \d+ 条/.test(dom.truncText || '') : /已展示 \d+ \/ 共 \d+/.test(dom.truncText || ''))), dom && { more: dom.more, text: dom.truncText });
+      if (expectTruncated === '1') {
+        // B-0d59：容器必须可纵向滚动。分两步验，避免「10 条短行恰好装得下」造成假红：
+        //   a) 静态能力：.lessons-body 的 overflow-y ∈ {auto, scroll}；
+        //   b) 运行时可滚：把该段条目全部展开（内容自然溢出）后 scrollHeight > clientHeight。
+        const scroll = await cdp.evaluate(`(function(){
+          const b=document.querySelector('#lessons-dialog .lessons-body') || document.querySelector('.lessons-body');
+          if(!b) return {missing:true};
+          const oy=(getComputedStyle(b).overflowY||'').toLowerCase();
+          const sec=document.querySelector('[data-lesson-section="${role}"]');
+          const items=sec?[...sec.querySelectorAll('[data-lesson-item="${role}"]')]:[];
+          for(const it of items) it.click();          // 全部展开 → 内容溢出
+          const sh=b.scrollHeight, ch=b.clientHeight;
+          for(const it of items) it.click();          // 还原为收起态，避免影响后续「点首条」用例
+          return {oy, scrollHeight:sh, clientHeight:ch, expandedItems:items.length, overflowOk: oy==='auto'||oy==='scroll', scrollable: sh>ch};
+        })()`);
+        check(`④ [${role}] 截断段容器 overflow-y 可滚（auto/scroll）`, Boolean(scroll && scroll.overflowOk), scroll);
+        check(`④ [${role}] 展开后内容溢出可滚动（scrollHeight>clientHeight）`, Boolean(scroll && scroll.scrollable), scroll);
+      }
       if (expectLatest.length) {
         check(`④ [${role}] 首条=文件最后一行（行序倒序）`, Boolean(dom && dom.items[0] && dom.items[0].date === expectLatest[0].date && dom.items[0].title.includes(expectLatest[0].scene.slice(0, 20))), dom && dom.items[0]);
         const detail = await cdp.evaluate(`(function(){
