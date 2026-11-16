@@ -26,16 +26,22 @@ function check(name, ok, detail) {
   console.log((ok ? 'PASS ' : 'FAIL ') + name + (detail === undefined ? '' : ' · ' + JSON.stringify(detail)));
 }
 
+// B-4b9e 夹具同步：decisionOf 现在按「决定版本 vs 当前正文版本」判有效（B-20261116-103007-56fe / 122422-8487），
+// 旧夹具的 decisions 没有 basis，会被判成旧版本决定 → decidedStatusOf 为空 → 复审判定全部落空。
+// 这里给夹具行补 requirementHash，并让每笔决定带相同 basis.requirement.sha256（=「针对当前正文的决定」）。
+const DOC = 'c'.repeat(64);
+const basisOf = () => ({ requirement: { path: '需求/R-20261114-000001-aaaa.md', sha256: DOC } });
 const T = (iso) => iso;
 function reworkCase(extra) {
   return {
     id: 'R-20261114-000001-aaaa',
     status: 'approved',
     updatedAt: '2026-11-14T14:00:00Z',
+    requirementHash: DOC,
     ownerReview: { status: 'rejected', at: '2026-11-14T13:00:00Z' },
     decisions: [
-      { status: 'approved', decision: 'approved', channel: 'ui', at: '2026-11-14T10:00:00Z' },
-      { status: 'rejected', decision: 'rejected', channel: 'ui', at: '2026-11-14T13:00:00Z', opinion: '新手引导不通过' }
+      { status: 'approved', decision: 'approved', channel: 'ui', at: '2026-11-14T10:00:00Z', basis: basisOf() },
+      { status: 'rejected', decision: 'rejected', channel: 'ui', at: '2026-11-14T13:00:00Z', opinion: '新手引导不通过', basis: basisOf() }
     ],
     ...extra
   };
@@ -61,9 +67,9 @@ for (const status of ['accepted', 'terminated', 'iteration']) {
 /* ── 四、首次评审 / 已通过 / 已跳过 / 待决定 的既有口径不回归 ────────────────── */
 const firstReview = { id: 'R-1', status: 'approved', updatedAt: T('2026-11-14T10:00:00Z') };
 check('首次评审（无任何决定）→ 待评审，且不是复审', S.isPending(firstReview) === true && S.reworkInfo(firstReview).isRework === false, S.reworkInfo(firstReview).reason);
-const approved = { id: 'R-2', status: 'approved', ownerReview: { status: 'approved', at: '2026-11-14T10:00:00Z' }, decisions: [{ status: 'approved', at: '2026-11-14T10:00:00Z' }] };
+const approved = { id: 'R-2', status: 'approved', requirementHash: DOC, ownerReview: { status: 'approved', at: '2026-11-14T10:00:00Z' }, decisions: [{ status: 'approved', at: '2026-11-14T10:00:00Z', basis: basisOf() }] };
 check('Owner 已通过 → 不进待评审', S.isPending(approved) === false);
-const skipped = { id: 'R-3', status: 'approved', decisions: [{ status: 'skipped', at: '2026-11-14T10:00:00Z' }] };
+const skipped = { id: 'R-3', status: 'approved', requirementHash: DOC, decisions: [{ status: 'skipped', at: '2026-11-14T10:00:00Z', basis: basisOf() }] };
 check('Owner 已先跳过 → 不进待评审', S.isPending(skipped) === false);
 const ownerReviewStatus = { id: 'R-4', status: 'owner_review' };
 check('状态 owner_review → 待评审', S.isPending(ownerReviewStatus) === true && S.reworkInfo(ownerReviewStatus).isRework === false);
@@ -84,8 +90,8 @@ check('旧数据完全没有时间 → 按「已重新提交」算复审（不�
 /* ── 六、决定取最后一笔：打回后又被通过 → 不再算待评审 ──────────────────────── */
 const reapproved = reworkCase({
   decisions: [
-    { status: 'rejected', at: '2026-11-14T13:00:00Z' },
-    { status: 'approved', at: '2026-11-14T16:00:00Z' }
+    { status: 'rejected', at: '2026-11-14T13:00:00Z', basis: basisOf() },
+    { status: 'approved', at: '2026-11-14T16:00:00Z', basis: basisOf() }
   ]
 });
 check('最后一笔决定是「通过」→ 不进待评审（不被旧打回卡住）', S.isPending(reapproved) === false && S.reworkInfo(reapproved).isRework === false);

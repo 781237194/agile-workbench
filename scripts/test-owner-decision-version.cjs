@@ -70,11 +70,16 @@ const rows = wf ? Object.values(wf.requirements || {}) : [];
 ok('R0 读到真实工作流需求行', rows.length > 50, { rows: rows.length });
 if (rows.length) {
   const pendingRows = rows.filter((r) => ORS.isPending(r)).map((r) => String(r.id));
-  const hit550 = pendingRows.filter((id) => id.includes('550f'));
-  const hit0b77 = pendingRows.filter((id) => id.includes('0b77'));
-  ok('R1 550f 进入【等你决定】', hit550.length === 1, hit550);
-  ok('R2 0b77 进入【等你决定】', hit0b77.length === 1, hit0b77);
-  ok('R3 待决 ≥2 且只包含「未收口 + 旧决定/未决定 + ownerReview=pending」的行', pendingRows.length >= 2, pendingRows);
+  // B-4b9e 断言对齐（现状为基准）：11-15 快照里 550f/0b77 待决；11-16 04:14/04:17 Owner 已按当前正文重落决定，
+  // 现状是「已决定、不进待决」。这里不再要求它们进待决，而是锁「重落后必须被认作当前版本、不再待决」。
+  const row550 = rows.find((r) => String(r.id).includes('550f'));
+  const row0b77 = rows.find((r) => String(r.id).includes('0b77'));
+  const d550 = row550 ? ORS.latestOwnerDecision(row550) : null;
+  const d0b77 = row0b77 ? ORS.latestOwnerDecision(row0b77) : null;
+  ok('R1 550f 已按当前正文重落决定 → 不进【等你决定】', Boolean(row550) && !ORS.isPending(row550) && ORS.isDecisionCurrent(d550, row550), { pending: ORS.isPending(row550), current: ORS.isDecisionCurrent(d550, row550), status: row550 && row550.status });
+  ok('R2 0b77 已按当前正文重落决定 → 不进【等你决定】', Boolean(row0b77) && !ORS.isPending(row0b77) && ORS.isDecisionCurrent(d0b77, row0b77), { pending: ORS.isPending(row0b77), current: ORS.isDecisionCurrent(d0b77, row0b77), status: row0b77 && row0b77.status });
+  const pendingLegit = pendingRows.every((id) => { const r = rows.find((x) => String(x.id) === id); const d = r ? ORS.latestOwnerDecision(r) : null; return !d || !ORS.isDecisionCurrent(d, r); });
+  ok('R3 待决行只含「未决定 / 旧版本决定」（现网 ' + pendingRows.length + ' 行）', pendingLegit, pendingRows);
   const badPending = rows.filter((r) => {
     const latest = ORS.latestOwnerDecision(r);
     return latest && ORS.isDecisionCurrent(latest, r) && ORS.isPending(r);
@@ -127,12 +132,13 @@ if (bucket) {
     for (const r of rows) byId[String(r.id)] = r;
     const id550 = Object.keys(byId).find((id) => id.includes('550f'));
     const id0b77 = Object.keys(byId).find((id) => id.includes('0b77'));
-    ok('B6 真实数据：550f 落「等你决定」组', bucket(byId[id550]) === 'pending', { id: id550, bucket: bucket(byId[id550]) });
-    ok('B7 真实数据：0b77 落「等你决定」组', bucket(byId[id0b77]) === 'pending', { id: id0b77, bucket: bucket(byId[id0b77]) });
+    ok('B6 真实数据：550f 已重落当前版本 → 分组=进行中（不再等你决定）', bucket(byId[id550]) === 'running', { id: id550, bucket: bucket(byId[id550]) });
+    ok('B7 真实数据：0b77 已重落当前版本 → 分组=进行中（不再等你决定）', bucket(byId[id0b77]) === 'running', { id: id0b77, bucket: bucket(byId[id0b77]) });
     const counts = { pending: 0, running: 0, test_done: 0, closed: 0 };
     for (const r of rows) counts[bucket(r)] += 1;
     console.log(`      真实数据分组：${JSON.stringify(counts)}（共 ${rows.length} 行）`);
-    ok('B8 真实数据：待决 ≥2、其余分组数未被打乱（已收口 ≥70）', counts.pending >= 2 && counts.closed >= 70, counts);
+    const grouped = counts.pending + counts.running + counts.test_done + counts.closed;
+    ok('B8 真实数据：四组分组完备（各计数之和=总行数）且已收口 ≥70', grouped === rows.length && counts.closed >= 70, { ...counts, grouped, rows: rows.length });
   }
 }
 
