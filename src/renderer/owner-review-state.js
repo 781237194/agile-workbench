@@ -125,8 +125,21 @@
     return false;
   }
 
-  /** 派生后的 Owner 状态快照（旧代码只读 ownerReview 的地方统一换成它）。 */
+  /**
+   * 派生后的 Owner 状态快照（旧代码只读 ownerReview 的地方统一换成它）。
+   *
+   * P0（2026-11-16，PM 报「decidedStatusOf 补版本校验」，B-20261116-115903）：
+   * 有决定、但该决定绑的是**过期版本**（无 basis / hash 不等于当前版本）时返回空——
+   * 与后端门禁同源（`团队/工具/lib/gates.mjs` 的 `decisionIsCurrent` / `currentDecisionOf`）。
+   * 以前这里直接返回 `decisionOf().status`，而 `decisionOf` 在旧决定时会回落到
+   * `ownerReview.status`（那正是同一条旧决定留下的残影）→ 界面判「已通过」、不出现在
+   * 「等你决定」，但派单门禁按版本判定旧决定拒绝 → 双向死锁，Owner 无法重落。
+   * 无 decisions[] 的旧数据（只有 ownerReview.status）仍沿用兜底，行为不变。
+   */
   function decidedStatusOf(req) {
+    const latest = latestOwnerDecision(req);
+    if (!latest) return decisionOf(req).status;
+    if (!isDecisionCurrent(latest, req)) return '';
     return decisionOf(req).status;
   }
 

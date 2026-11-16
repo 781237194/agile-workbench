@@ -104,6 +104,34 @@ check('S7 submit 判据：旧决定不拦（550f/0b77），当前版本同状态
   && submitBlocks(rowMoved, 'approved') === false,
   null);
 
+// ── S8 decidedStatusOf 必须带版本校验（P0 B-20261116-115903，与后端 gates.mjs 的
+//      decisionIsCurrent 同源）：旧版本决定 → 空 + isPending=true；当前版本 → approved。
+const rowStaleApproved = {
+  id: 'R-FIXTURE-stale-approved', status: 'approved',
+  ownerReview: { status: 'approved' },
+  requirementHash: 'HASH_CUR_S8',
+  decisions: [{ status: 'approved', at: '2026-11-15T02:47:35Z', basis: { requirement: { sha256: 'HASH_OLD_S8' } } }]
+};
+const rowCurrentApproved = {
+  id: 'R-FIXTURE-current-approved', status: 'approved',
+  ownerReview: { status: 'pending' },
+  requirementHash: 'HASH_CUR_S8',
+  decisions: [{ status: 'approved', at: '2026-11-16T01:00:00Z', basis: { requirement: { sha256: 'HASH_CUR_S8' } } }]
+};
+check('S8 旧版本决定 → decidedStatusOf 为空 且 isPending=true（不再被当已决定）',
+  OR_STATE.decidedStatusOf(rowStaleApproved) === ''
+  && OR_STATE.isPending(rowStaleApproved) === true,
+  { decided: OR_STATE.decidedStatusOf(rowStaleApproved), pending: OR_STATE.isPending(rowStaleApproved) });
+check('S9 当前版本决定 → decidedStatusOf=approved 且 isPending=false；无决定旧数据仍回退 ownerReview',
+  OR_STATE.decidedStatusOf(rowCurrentApproved) === 'approved'
+  && OR_STATE.isPending(rowCurrentApproved) === false
+  && OR_STATE.decidedStatusOf({ id: 'R-FIXTURE-legacy-only', status: 'approved', ownerReview: { status: 'approved' } }) === 'approved',
+  {
+    current: OR_STATE.decidedStatusOf(rowCurrentApproved),
+    currentPending: OR_STATE.isPending(rowCurrentApproved),
+    legacyOnly: OR_STATE.decidedStatusOf({ id: 'x', status: 'approved', ownerReview: { status: 'approved' } })
+  });
+
 console.log(`\n决定-版本绑定自检：${passed}/${passed + failures.length} PASS`);
 if (failures.length) { console.error(JSON.stringify(failures, null, 2)); process.exit(1); }
 process.exit(0);
