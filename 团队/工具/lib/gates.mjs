@@ -9,6 +9,8 @@ import { fail, nowIso, sha256, readText } from './core.mjs';
 import { projectStatePaths } from './store.mjs';
 import { readRequirementDocs } from './scaffold.mjs';
 import { readRequirementDocVersion, versionGate } from './req-version.mjs';
+// B-20261115-123038-2e24：ownerReview 投影单源（旧版决定 → pending + stale:true + staleSha12）。
+import { ownerReviewView, ownerReviewStaleOf } from './owner-review-projection.mjs';
 
 export const GATE_ACTIONS = ['requirement_review', 'owner_decision', 'dispatch_dev', 'dispatch_test', 'dev_exec', 'test_exec', 'owner_accept', 'iterate'];
 
@@ -408,22 +410,36 @@ export function taskGateOf({ task, row = null, readFailed = false } = {}) {
   if (!closedBad && ['approved', 'skipped', 'accepted'].includes(status)) return null;
   const cause = (status === 'rejected' || closedBad || status === 'terminated')
     ? 'rejected' : (status ? 'pending' : 'missing');
+  // B-20261115-123038-2e24：拒绝时把「ownerReview 的上次决定是否绑旧版」一并透出——
+  // 否则只报「未落账/未通过」，看不出其实是「上一版批准已过期，需重新评审」（界面 stale 徽标同口径）。
+  const ownerReviewStale = ownerReviewStaleOf(row);
+  const staleHint = ownerReviewStale
+    ? `；ownerReview 上次决定绑旧版正文（${ownerReviewStale.staleSha12 || '无版本凭据'}），需重新评审`
+    : '';
   return {
     ...base, code: 'TASK_GATE_NOT_APPROVED', cause,
     missing: [cause === 'missing' ? 'Owner 决定未落账' : 'Owner 未通过（' + (status || rowStatus) + '）'],
     next: '先让需求过 Owner 门（owner confirm / 代管落账），未通过不许开工',
-    message: `需求 ${requirementId} 未过 Owner 门（${cause}）；任务 ${taskId} 不许开工/收工`,
+    ...(ownerReviewStale ? { ownerReviewStale } : {}),
+    message: `需求 ${requirementId} 未过 Owner 门（${cause}）${staleHint}；任务 ${taskId} 不许开工/收工`,
   };
 }
 
 /** G3：Owner 已落账（approved/skipped），或明确拒绝（rejected）。 */export function gateOwnerDecision(row) {
+  // B-20261115-123038-2e24：ownerReview 投影（旧版决定 → pending + stale），随拒绝结果透出。
+  const ownerReviewStale = ownerReviewStaleOf(row);
+  const staleFields = ownerReviewStale ? { ownerReviewStale } : {};
+  const staleHint = ownerReviewStale
+    ? `；ownerReview 上次决定绑旧版正文（${ownerReviewStale.staleSha12 || '无版本凭据'}），需重新评审`
+    : '';
   // B-20261116-105620：旧版本的决定不算已决定（详见 decisionIsCurrent）。
   const latest = currentDecisionOf(row);
   if (!latest) {
     return {
       code: 'OWNER_REVIEW_REQUIRED', gate: 'G3', reason: 'missing', missing: ['Owner 决定未落账'],
       next: '让 Owner 在界面/终端确认（owner confirm → owner）',
-      message: '需求还没有 Owner 决定（decisions 为空）；先让 Owner 在界面或终端确认',
+      ...staleFields,
+      message: `需求还没有 Owner 决定（decisions 为空）${staleHint}；先让 Owner 在界面或终端确认`,
     };
   }
   const status = String(latest.status || latest.decision || '');
@@ -431,14 +447,16 @@ export function taskGateOf({ task, row = null, readFailed = false } = {}) {
     return {
       code: 'OWNER_REVIEW_REQUIRED', gate: 'G3', reason: 'rejected', missing: ['Owner 已打回'],
       next: '打回的需求不能派单；先重走需求评审',
-      message: 'Owner 已打回该需求，禁止派单；须重走评审并产生新的 Owner 决定',
+      ...staleFields,
+      message: `Owner 已打回该需求${staleHint}，禁止派单；须重走评审并产生新的 Owner 决定`,
     };
   }
   if (!['approved', 'skipped', 'accepted'].includes(status)) {
     return {
       code: 'OWNER_REVIEW_REQUIRED', gate: 'G3', reason: 'pending', missing: [`最新 Owner 决定是 ${status || 'pending'}`],
       next: '等 Owner 决定通过/跳过',
-      message: `最新 Owner 决定是 ${status || 'pending'}；先等 Owner 决定`,
+      ...staleFields,
+      message: `最新 Owner 决定是 ${status || 'pending'}${staleHint}；先等 Owner 决定`,
     };
   }
   return null;
@@ -454,6 +472,16 @@ export function ownerDecisionsOf(row) {
   }
   return [];
 }
+
+/**
+ * B-20261115-123038-2e24：ownerReview **投影**（只读，不参与 G3 判定，供展示/审计/写路径统一口径）。
+ * 真值仍是 decisions[]：currentDecisionOf/taskGateOf 的判定不变；这里只把「ownerReview 应该长什么样」算出来，
+ * 避免各处再各写一套（旧版决定 → pending + stale:true + staleSha12，不许静默显示成「从未评审」）。
+ */
+export function ownerReviewViewOf(row, currentVersion) {
+  return ownerReviewView(row, currentVersion);
+}
+
 
 /** AC-O5：旧记录识别——四条件同时满足才是“历史（未落账）”。 */
 export function isLegacyUnrecorded(row) {

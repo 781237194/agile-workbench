@@ -84,6 +84,10 @@ import {
   readSplitAudit, splitAuditPath, requirementShortKey, requirementDocFile, isWhitelisted,
   SUPPLEMENT_RE, supplementIndexOf,
 } from './doc-split.mjs';
+// B-20261115-123038-2e24：ownerReview 只是 decisions[] 的投影——派生口径单源（ops/闸门/渲染层同判据）。
+import {
+  ownerReviewView, ownerReviewRecord, ownerReviewDriftOf, ownerReviewStaleOf,
+} from './owner-review-projection.mjs';
 
 const RISK_RANK = { normal: 1, sensitive: 2, critical: 3 };
 const PRIORITY_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -5536,6 +5540,15 @@ function cmdReqReview(args) {
     (decisionBasisHash && (decisionBasisHash === requirementHash || decisionBasisHash === requirementContentHash))
     || (decisionBasisContentHash && requirementContentHash && decisionBasisContentHash === requirementContentHash)
   );
+  // B-20261115-123038-2e24：ownerReview 是 decisions[] 的投影，重落 RR（正文改 hash）时**不得**无条件写回
+  // pending —— 旧实现把它写成 {"status":"pending","at":null,"opinion":""}，把「上次决定绑旧版」抹掉，
+  // 界面/门禁看起来像「从未评审」。这里统一走 owner-review-projection：
+  //   · 有绑当前正文的评审决定 → ownerReview = 该决定（status/at 对齐，修 fe90 那类反向不一致）；
+  //   · 只有旧版/无版本凭据的决定 → pending 但带 stale:true + staleSha12 + 上次决定状态（不许静默）；
+  //   · 没有任何评审决定 → pending（旧行为，只多 stale:false）。
+  const reviewProjectionRow = { ...(beforeRow || {}), decisions: ownerDecisionList(beforeRow, task) };
+  const reviewProjectionVersion = { sha256: requirementHash, contentHash: requirementContentHash };
+  const ownerProjection = isTech ? null : ownerReviewView(reviewProjectionRow, reviewProjectionVersion);
   let nextStatus;
   let ownerPending = false;
   if (verdict === 'reject') {
@@ -5559,6 +5572,23 @@ function cmdReqReview(args) {
     delete task.workflow.rejectedBy;
     delete task.workflow.rejectionSource;
   }
+  // B-20261115-123038-2e24：ownerReview 是 decisions[] 的投影，重落 RR（正文改 hash）时**不得**无条件写回
+  // pending —— 旧实现把它写成 {"status":"pending","at":null,"opinion":""}，把「上次决定绑旧版」抹掉，
+  // 界面/门禁看起来像「从未评审」。这里统一走 owner-review-projection：
+  //   · 有绑当前正文的评审决定 → ownerReview = 该决定（status/at 对齐，修 fe90 那类反向不一致）；
+  //   · 只有旧版/无版本凭据的决定 → pending 但带 stale:true + staleSha12 + 上次决定状态（不许静默）；
+  //   · 没有任何评审决定 → pending（旧行为，只多 stale:false）。
+  const ownerReviewWrite = (() => {
+    if (isTech) return undefined;
+    if (ownerPending) return ownerReviewRecord(reviewProjectionRow, reviewProjectionVersion);
+    // 状态仍在 ready/开发/测试：只有「评审决定已绑当前正文、但 ownerReview 被历史写坏」时才自愈回写；
+    // 旧版决定不在这里改 ownerReview.status——避免把已过 ready 的行新推进 G3 拦截（是否收紧需产品口径另定）。
+    if (ownerProjection && ownerProjection.source === 'decisions' && !ownerProjection.stale) {
+      const drift = ownerReviewDriftOf(reviewProjectionRow, reviewProjectionVersion);
+      if (drift.drifted) return ownerReviewRecord(reviewProjectionRow, reviewProjectionVersion);
+    }
+    return undefined;
+  })();
   task.updatedAt = ts;
   task._by = b.role;
   task._action = isTech ? 'tech_review' : 'req_review';
@@ -5576,7 +5606,8 @@ function cmdReqReview(args) {
     productReview: task.workflow.productReview,
     requirementReview: task.workflow.requirementReview,
     techReview: task.workflow.techReview,
-    ownerReview: ownerPending ? { status: 'pending', at: null, opinion: '' } : undefined,
+    // B-2e24：不再无条件 { status:'pending' }——写 decisions[] 派生出的投影（旧版决定 → pending+stale）。
+    ownerReview: ownerReviewWrite,
     rejectedAt: task.workflow.rejectedAt,
     rejectedBy: task.workflow.rejectedBy,
     rejectionSource: task.workflow.rejectionSource,
@@ -5589,8 +5620,8 @@ function cmdReqReview(args) {
     // 通过时也建档：Owner 决定/验收与工作台快照都要读 工作流.json 的同一需求行，
     // 不能等驳回才创建，否则首次评审通过后 owner 会报 REQUIREMENT_NOT_FOUND。
     create: true,
-    statePatch: ownerPending
-      ? { ownerReview: { required: true, status: 'pending', kind: 'requirement', at: null, opinion: '' } }
+    statePatch: ownerReviewWrite
+      ? { ownerReview: ownerReviewWrite }
       : null,
   });
   // R-f9b1 AC12：评审入口触发过拆分时，等工作流行建好再把卷挂回需求行/池记录（此前行还不存在）。
@@ -6661,6 +6692,9 @@ export async function cmdOwner(args) {
       opinion,
       channel,
       confirmation: confirmationMeta,
+      // B-2e24：验收落账不产生「评审过期」——显式清掉可能残留的 stale 标记。
+      stale: false,
+      derivedFrom: 'acceptance',
     }
     : {
       required: true,
@@ -6672,12 +6706,26 @@ export async function cmdOwner(args) {
       opinion,
       channel,
       confirmation: confirmationMeta,
+      // B-2e24：新决定落账即代表当前版本已评审，清掉上一版留下的 stale 标记。
+      stale: false,
+      derivedFrom: 'decisions',
       ...(proxyMode ? {
         recordedBy: 'pm',
         ownerAuthorized: true,
         proxy: record.proxy,
       } : {}),
     };
+  // B-2e24：验收路径旧实现只写项目级 ownerReview，需求行仍留着过期的 approved/pending（fe90 反向不一致）。
+  // 这里按 decisions[] 的**评审类**决定派生行级 ownerReview（验收决定 accepted/--action accept 不写进 ownerReview）。
+  const ownerReviewForRow = actionRaw === 'accept'
+    ? ownerReviewRecord(
+      { ...(row || {}), decisions },
+      {
+        sha256: String((basis && basis.requirement && basis.requirement.sha256) || ''),
+        contentHash: String((basis && basis.requirement && basis.requirement.contentHash) || ''),
+      },
+    )
+    : null;
   // note 必须与工作台壳层 pushWorkflowEventOnce 的写法完全一致，否则同一次 Owner
   // 决定会被记成两条事件（壳层已兼容旧命令写过的记录）。
   const eventNote = actionRaw === 'accept'
@@ -6686,7 +6734,7 @@ export async function cmdOwner(args) {
   const sync = syncWorkflowRow(projectName, task, nextStatus, {
     teamMode,
     decisions,
-    ...(ownerReview ? { ownerReview } : {}),
+    ...(ownerReview ? { ownerReview: { ...ownerReview, stale: false } } : (ownerReviewForRow ? { ownerReview: ownerReviewForRow } : {})),
     ...(acceptance ? { acceptance, ownerAcceptance: acceptance } : {}),
   }, {
     create: true,

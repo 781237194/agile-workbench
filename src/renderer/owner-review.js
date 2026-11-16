@@ -571,6 +571,61 @@
     };
     return map[String((req && req.status) || '')] || '';
   }
+  // ── B-20261115-123038-2e24：ownerReview 是 decisions[] 的投影 ─────────────────────────
+  // 背景：正文改 hash → 重落 RR 时旧实现把 ownerReview 写成 pending（at:null/opinion:''），看起来像
+  // 「从未评审」。现在写路径会落 `stale:true + staleSha12 + 上次决定状态`；界面必须把「上次决定绑旧版、
+  // 需重新评审」显式画出来（禁止静默）。口径与后端 owner-review-projection 同判据：
+  //   ① 优先读需求行上由 ops 落盘的投影字段（ownerReview.stale）；
+  //   ② 没有落盘投影时，按 decisions 真值 + 当前正文 hash 现算（OR_STATE.stalePendingOf，与三界面同源）。
+  const STALE_BADGE_TEXT = '待重评·绑旧版';
+  function staleInfoOf(req) {
+    const owner = (req && req.ownerReview && typeof req.ownerReview === 'object') ? req.ownerReview : {};
+    const currentHash = String(
+      (req && (req.requirementHash || req.docHash))
+      || (req && req.requirementReview && req.requirementReview.requirementHash)
+      || ''
+    );
+    const currentSha12 = currentHash.slice(0, 12);
+    if (owner.stale === true) {
+      return {
+        stale: true,
+        source: 'ownerReview.stale（写路径投影）',
+        staleSha12: String(owner.staleSha12 || '').slice(0, 12),
+        staleStatus: String(owner.staleStatus || ''),
+        staleAt: String(owner.staleAt || ''),
+        staleReason: String(owner.staleReason || 'version-mismatch'),
+        currentSha12,
+      };
+    }
+    if (OR_STATE && typeof OR_STATE.stalePendingOf === 'function' && OR_STATE.stalePendingOf(req)) {
+      const latest = (typeof OR_STATE.latestOwnerDecision === 'function' ? OR_STATE.latestOwnerDecision(req) : null) || {};
+      const basis = (latest && latest.basis && latest.basis.requirement) || {};
+      const decidedHash = String(basis.sha256 || basis.contentHash || '');
+      return {
+        stale: true,
+        source: 'decisions（版本不符）',
+        staleSha12: decidedHash.slice(0, 12),
+        staleStatus: String(latest.status || latest.decision || ''),
+        staleAt: String(latest.at || ''),
+        staleReason: decidedHash ? 'version-mismatch' : 'no-basis',
+        currentSha12,
+      };
+    }
+    return null;
+  }
+  function staleBadgeLabel(info) {
+    if (!info) return '';
+    return info.staleSha12 ? `${STALE_BADGE_TEXT}（${info.staleSha12}）` : `${STALE_BADGE_TEXT}（版本未记）`;
+  }
+  const STALE_STATUS_LABEL = { approved: '已通过', rejected: '已打回', skipped: '已跳过' };
+  function staleTitleOf(info) {
+    if (!info) return '';
+    const last = info.staleStatus ? (STALE_STATUS_LABEL[info.staleStatus] || info.staleStatus) : '上次决定';
+    const when = info.staleAt ? ` @ ${info.staleAt}` : '';
+    const bound = info.staleSha12 ? `绑旧版正文 ${info.staleSha12}` : '旧记录没有版本凭据（无 basis）';
+    const now = info.currentSha12 ? `；当前正文 ${info.currentSha12}` : '';
+    return `上一版批准已过期·请重新确认：${last}${when} ${bound}${now}；需重新评审后才算当前版本已通过`;
+  }
   /**
    * AC2：这条还能不能点 Owner 决定。null=可点；否则 {code,text} 说明为什么禁用。
    * 打回后已修改（复审）仍算等你决定；已通过/已跳过/已越门的一律锁定。
@@ -597,14 +652,22 @@
     const node = el('span', 'or-status-badge', badge.text);
     node.setAttribute('data-or-status-badge', '1');
     node.setAttribute('data-badge-kind', badge.kind);
-    // B-20261116-120118-2760：末条决定绑的是过期版本时，行上必须能看出「上一版批准已过期」，
-    // 否则 Owner 只看到「不在等你决定」或旧态徽标，不知道要重新点一次。
-    if (OR_STATE && typeof OR_STATE.stalePendingOf === 'function' && OR_STATE.stalePendingOf(req)) {
+    // B-20261115-123038-2e24：上次 Owner 决定绑的是旧版正文 → 行上必须能看出「待重评·绑旧版」，
+    // 不许静默显示成「从未评审」或旧状态（写路径 stale 字段优先，其次 decisions 版本比对）。
+    const stale = staleInfoOf(req);
+    if (stale) {
       node.setAttribute('data-or-stale', '1');
-      const stale = el('span', 'or-stale-badge', '上一版批准已过期·请重新确认');
-      stale.setAttribute('data-or-stale-badge', '1');
-      node.appendChild(stale);
-      node.title = '上一版批准已过期·请重新确认';
+      node.setAttribute('data-or-stale-source', stale.source);
+      node.setAttribute('data-or-stale-reason', stale.staleReason);
+      if (stale.staleSha12) node.setAttribute('data-or-stale-sha12', stale.staleSha12);
+      if (stale.staleStatus) node.setAttribute('data-or-stale-last-status', stale.staleStatus);
+      const chip = el('span', 'or-stale-badge', staleBadgeLabel(stale));
+      chip.setAttribute('data-or-stale-badge', '1');
+      chip.setAttribute('data-or-stale-badge-text', STALE_BADGE_TEXT);
+      const title = staleTitleOf(stale);
+      chip.title = title;
+      node.title = title;
+      node.appendChild(chip);
     }
     return node;
   }
@@ -1053,6 +1116,15 @@
     item.setAttribute('data-or-req', id);
     item.setAttribute('data-or-status', String(req.status || ''));
     item.setAttribute('data-or-bucket', listBucketOf(req));
+    // B-20261115-123038-2e24：行上直接标「上次 Owner 决定绑旧版」（与状态徽标/title 同口径，可断言）。
+    const rowStale = staleInfoOf(req);
+    if (rowStale) {
+      item.setAttribute('data-or-stale', '1');
+      item.setAttribute('data-or-stale-reason', rowStale.staleReason);
+      if (rowStale.staleSha12) item.setAttribute('data-or-stale-sha12', rowStale.staleSha12);
+      if (rowStale.staleStatus) item.setAttribute('data-or-stale-last-status', rowStale.staleStatus);
+      item.setAttribute('data-or-stale-text', staleBadgeLabel(rowStale));
+    }
     // R-dba4（T-3957）：状态不在四组白名单里 → 明确标出来（以前这种行会整条消失，谁也不知道）。
     if (statusUnknownOf(req)) item.setAttribute('data-status-unknown', '1');
     // R-dba4：四块大白话 + 缺块标记（持久化 copy 优先，缺哪块标哪块，整块永不消失）。
@@ -2530,6 +2602,18 @@
     statusText.setAttribute('data-or-summary-status-text', '1');
     statusRow.appendChild(statusText);
     box.appendChild(statusRow);
+    // B-20261115-123038-2e24：详情右侧必须显式写出「待重评·绑旧版」，不许静默（禁止只靠鼠标悬停）。
+    const summaryStale = staleInfoOf(req);
+    if (summaryStale) {
+      const staleRow = el('div', 'or-summary-row or-stale-row');
+      staleRow.setAttribute('data-or-summary-stale', '1');
+      staleRow.setAttribute('data-or-stale-reason', summaryStale.staleReason);
+      staleRow.appendChild(el('b', '', '请注意'));
+      const staleText = el('span', '', staleTitleOf(summaryStale));
+      staleText.setAttribute('data-or-stale-summary', '1');
+      staleRow.appendChild(staleText);
+      box.appendChild(staleRow);
+    }
     const acceptance = typeof req.acceptance === 'string' && req.acceptance ? req.acceptance : '未记录';
     const fullDetail = String(req.detail || req.story || '').trim();
     // R-1cee F-R3/AC3：摘要 ≤60 字；全文另起一块（[data-or-detail]），不裁切。
