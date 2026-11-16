@@ -15505,7 +15505,10 @@ function bind() {
   });
   $('#more-menu')?.addEventListener('click', (e) => {
     // 外观子菜单的 5 项：点即切（R-fe90 AC1/AC3；当前项 aria-checked 唯一）
-    const themeItem = e.target.closest('[data-theme-id]');
+    // B-20261116-122745-dc6f：**必须限定在子菜单里**！applyThemeState 会给 <html> 打
+    // data-theme-id（当前档），所以裸写 e.target.closest('[data-theme-id]') 时点「外观」根锚点会
+    // 沿祖先链命中 <html>，走进「点主题项」分支：菜单被收起 + 重应用当前档 → 看起来「点不开/没反应」。
+    const themeItem = e.target.closest('#more-menu [data-theme-menu] [data-theme-id]');
     if (themeItem) {
       e.stopPropagation();
       const id = themeItem.dataset.themeId;

@@ -10451,6 +10451,43 @@ async function runThemeShots() {
     return res.ok ? Boolean(res.value) : false;
   };
   const clickTheme = clickThemeOnce;
+  // dc6f 取证：真实点「更多 → 外观」，分步记录状态（先复位到关闭态，避免上一步残留）。
+  const menuProbe = { tried: true, steps: [] };
+  try {
+    const readMenuState = async (note) => {
+      const js = "(function(){var menu=document.querySelector('#more-menu');var box=document.querySelector('#more-menu [data-theme-menu]');"
+        + "var items=box?box.querySelectorAll('[data-theme-id]'):[];var r=box?box.getBoundingClientRect():null;"
+        + "return {menuHidden:menu?menu.hidden:null,menuH:menu?menu.offsetHeight:0,boxHidden:box?box.hidden:null,boxH:r?Math.round(r.height):0,"
+        + "items:items.length,visibleItems:Array.prototype.filter.call(items,function(b){var q=b.getBoundingClientRect();return q.height>0&&q.width>0;}).length,"
+        + "rootAria:(function(){var t=menu&&menu.querySelector('[data-more=\"theme\"]');return t?String(t.getAttribute('aria-expanded')||''):'';})()};})()";
+      const res = await safeExec(js, "menu-probe:" + note);
+      const value = res.ok ? res.value : { got: false };
+      menuProbe.steps.push({ step: note, state: value });
+      return value;
+    };
+    const clickSel = async (sel, note) => {
+      const js = "(function(){var el=document.querySelector(" + JSON.stringify(sel) + ");if(!el)return {found:false};el.click();return {found:true};})()";
+      const res = await safeExec(js, "menu-probe:" + note);
+      return res.ok ? res.value : { found: false };
+    };
+    // 复位：确保菜单与子菜单都是关闭态（避免上一次探测留下展开态，导致下一次点击变成「收起」）
+    await safeExec("(function(){try{setMoreMenu(false);setThemeMenu(false);}catch(e){}return true;})()", "menu-probe:reset");
+    await new Promise((r) => setTimeout(r, 200));
+    menuProbe.before = await readMenuState("before");
+    menuProbe.btnMoreFound = Boolean((await clickSel("#btn-more", "click-btn-more")).found);
+    menuProbe.afterBtnMore = await readMenuState("after-btn-more");
+    menuProbe.themeRootFound = Boolean((await clickSel("#more-menu [data-more=\"theme\"]", "click-theme-root")).found);
+    menuProbe.afterThemeRoot = await readMenuState("after-theme-root");
+    await new Promise((r) => setTimeout(r, 500));
+    menuProbe.stableAfter500ms = await readMenuState("stable-after-500ms");
+    try {
+      const shot = await win.webContents.debugger.sendCommand("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });
+      fs.writeFileSync(path.join(outDir, "menu-expand.png"), Buffer.from(shot.data, "base64"));
+      menuProbe.png = path.join(outDir, "menu-expand.png");
+    } catch { menuProbe.png = ""; }
+  } catch (error) {
+    menuProbe.error = String((error && error.message) || error).slice(0, 200);
+  }
   const shoot = async (fileBase) => {
     const shot = await win.webContents.debugger.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
     const pngPath = path.join(outDir, fileBase + '.png');
@@ -10507,7 +10544,7 @@ async function runThemeShots() {
     && sizes.length === 1
     && results.every((r) => r.state && r.state.themeId === r.themeId && r.clicked === true)
     && effects.ok;
-  const report = { ok, outDir, requestedSize: shotWidth + 'x' + shotHeight, window: windowInfo, uniqueScreenshots: unique, sizes, expected: ids.length, effects, errors, shots, results, at: new Date().toISOString() };
+  const report = { ok, outDir, requestedSize: shotWidth + 'x' + shotHeight, window: windowInfo, uniqueScreenshots: unique, sizes, expected: ids.length, effects, errors, menuProbe, shots, results, at: new Date().toISOString() };
   fs.writeFileSync(path.join(outDir, 'theme-shots.json'), JSON.stringify(report, null, 2));
   console.log('THEME_SHOTS_REPORT ' + path.join(outDir, 'theme-shots.json'));
   console.log(JSON.stringify({ ok, sizes, unique, requested: report.requestedSize, effectsOk: effects.ok, outDir }, null, 2));
