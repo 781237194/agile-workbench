@@ -155,7 +155,10 @@ const missMinutes = 30;
 // 造一条 PM 发出的 owner_ask 消息（PM 2026-11-15 有条件确认①：漏箱只认登记类型 owner_ask，不看标题），再改成 2 小时前
 const sent = run(['send', '--boot', pmToken, '--to', 'programmer1', '--subject', '拍板：这批要不要回滚', '--body', '要不要现在回滚，还是观察一天？请你拍板', '--type', 'owner_ask']);
 ok('造 1 条 PM owner_ask 消息（类型已登记）', sent.code === 0, (sent.stderr || sent.stdout).slice(0, 120));
-// 反例：标题写「拍板」但类型是 notice → 不得计入（不再靠标题猜）
+// 反例：标题写「拍板」但类型是 notice → 不得计入漏箱候选（不再靠标题猜）
+// B-4b9e 夹具同步：观察清单改为「只列近期 + 必须像问句（含问号）」后，send 的 R-ASK-TYPE 门会把
+// 「PM 无 task + 带问号 + 命中拍板词」的消息直接拒（OWNER_ASK_REQUIRES_TYPE），所以这里先按原样发出去，
+// 发完直接把落盘消息文件补上问号（模拟历史上那批未标类型、像问句的 PM 消息），用于观察清单断言。
 const decoy = run(['send', '--boot', pmToken, '--to', 'programmer1', '--subject', '拍板：仅标题有拍板字样的通知', '--body', '要不要都不重要，这只是个通知', '--type', 'notice']);
 ok('造 1 条标题含「拍板」但 type=notice 的反例', decoy.code === 0, (decoy.stderr || decoy.stdout).slice(0, 120));
 const mailDirs = ['new', 'cur'].map((box) => path.join(TEAM_ROOT, '状态', '邮箱', 'programmer1', box));
@@ -167,6 +170,17 @@ if (msgFile) {
   const m = readJson(msgFile, {});
   m.ts = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
   writeJson(msgFile, m);
+}
+// B-4b9e：反例消息落盘后补问号 + 时间戳用 now 相对值（1 小时前，落在 24h 观察窗口内），
+// 让它成为「未标类型但像拍板问句」——进观察清单、仍不进漏箱候选（漏箱只认 type=owner_ask）。
+let decoyFile = null;
+for (const f of mailFiles) { const m = readJson(f, {}); if (m && String(m.subject || '').includes('仅标题有拍板字样')) { decoyFile = f; break; } }
+ok('找到反例消息文件（type=notice）', Boolean(decoyFile), `候选 ${mailFiles.length} 个`);
+if (decoyFile) {
+  const m = readJson(decoyFile, {});
+  m.body = String(m.body || '') + '？';
+  m.ts = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  writeJson(decoyFile, m);
 }
 const missRes = runJson(['decision', 'miss', '--project', PROJECT, '--now', new Date().toISOString(), '--minutes', String(missMinutes)]);
 ok('AC6/P0① 漏箱判据写明（criterion=message.type=owner_ask）', Boolean(missRes.json && /owner_ask/.test(String(missRes.json.criterion))), JSON.stringify(missRes.json && missRes.json.criterion));

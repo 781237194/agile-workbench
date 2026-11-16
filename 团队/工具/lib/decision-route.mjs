@@ -273,10 +273,11 @@ export function collectPmAsks(projectName, { roles = [], types = OWNER_ASK_MESSA
  * 只列出来给人看（messageId + 标题前 40 字），不补 MISS、不计入漏箱、不参与任何判定。
  * 目的是让 PM 能人工发现自己漏标类型，而不是让程序去猜标题。
  */
-export function collectUntypedOwnerAskCandidates(projectName, { roles = [], types = OWNER_ASK_MESSAGE_TYPES } = {}) {
+export function collectUntypedOwnerAskCandidates(projectName, { roles = [], types = OWNER_ASK_MESSAGE_TYPES, now = Date.now(), hours = 24 } = {}) {
   const name = String(projectName || '');
   const roleList = roles.length ? roles : Object.keys(ROLE_NAMES);
   const typeSet = new Set((types || OWNER_ASK_MESSAGE_TYPES).map((t) => String(t || '').toLowerCase()));
+  const windowMs = Math.max(1, Number(hours) || 24) * 3600 * 1000;
   const out = [];
   const seen = new Set();
   for (const role of roleList) {
@@ -289,7 +290,13 @@ export function collectUntypedOwnerAskCandidates(projectName, { roles = [], type
       if (seen.has(msg.id)) continue;
       const type = String(msg.type || '').toLowerCase();
       if (typeSet.has(type)) continue; // 已正确标类型的不进观察清单
-      const hits = looksLikeOwnerAsk(`${msg.subject || ''} ${msg.body || ''}`);
+      const ts = Date.parse(String(msg.ts || msg.deliveredAt || ''));
+      // 只观察近期（默认 24h）：全量历史会有几百条，PM 看不完也就发现不了漏标
+      if (!Number.isFinite(ts) || now - ts > windowMs) continue;
+      const text = `${msg.subject || ''} ${msg.body || ''}`;
+      // 必须同时"像问句"（含问号）才列——实测只按拍板词会有 300+ 条噪声（"已拍板/拍板正文"全是陈述）
+      if (!/[？?]/.test(text)) continue;
+      const hits = looksLikeOwnerAsk(text);
       if (!hits.length) continue;
       seen.add(msg.id);
       out.push({
@@ -362,7 +369,8 @@ export function detectMissedAsks(projectName, { now = Date.now(), minutes = deci
       .filter((row) => row && row.missBox === true);
   const reportFile = missReportPath(name, dateText);
   // PM 15:35 裁决条件①：观察清单（未标类型但像拍板问句的 PM 消息）——只列出，不计漏箱、不补录
-  const untyped = collectUntypedOwnerAskCandidates(name);
+  const observeHours = Number(process.env.AWB_OBSERVE_HOURS) || 24;
+  const untyped = collectUntypedOwnerAskCandidates(name, { now, hours: observeHours });
   const untypedShown = untyped.slice(0, 20);
   const lines = [
     `# 漏箱报告 ${dateText}`,
