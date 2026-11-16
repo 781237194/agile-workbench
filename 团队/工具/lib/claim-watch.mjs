@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { PATHS, nowIso } from './core.mjs';
-import { listTasks, saveTask } from './store.mjs';
+import { listTasks, loadTask, saveTask } from './store.mjs';
 
 export const CLAIM_OVERDUE_MIN = Number(process.env.TEAM_CLAIM_OVERDUE_MIN || 10);
 export const CLAIM_STALLED_MIN = Number(process.env.TEAM_CLAIM_STALLED_MIN || 30);
@@ -28,13 +28,53 @@ function projectStateDir(project) {
   return path.join(PATHS.state, '项目', String(project || ''));
 }
 
+function appendAudit(project, rows) {
+  if (!rows || !rows.length) return;
+  try {
+    fs.mkdirSync(projectStateDir(project), { recursive: true });
+    fs.appendFileSync(path.join(projectStateDir(project), CLAIM_AUDIT_FILE), rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+  } catch { /* 审计失败不阻断任务行落盘 */ }
+}
+
+const CLAIM_FIELDS = ['claimLevel', 'claimOverdue', 'claimOverdueAt', 'claimOverdueMin', 'claimStalled', 'claimStalledAt', 'claimClearedAt'];
+
+function dropClaimFlags(task) {
+  for (const key of CLAIM_FIELDS) delete task[key];
+}
+
+// 认领后红标必须消（PM 必修②）：清掉任务行上的认领打标字段，并写 cleared 审计行。
+// 幂等：本来就干净的任务不写、不落盘。
+export function clearClaimFlags(project, taskId, reason = 'manual') {
+  let task = null;
+  try { task = loadTaskSafe(project, String(taskId)); } catch { return { ok: false, code: 'TASK_NOT_FOUND' }; }
+  if (!task) return { ok: false, code: 'TASK_NOT_FOUND' };
+  const had = CLAIM_FIELDS.some((k) => k in task);
+  if (!had) return { ok: true, changed: false };
+  const level = String(task.claimLevel || '');
+  dropClaimFlags(task);
+  task.claimClearedAt = nowIso();
+  saveTask(project, task);
+  appendAudit(project, [{
+    at: nowIso(), taskId: String(task.id), owner: String(task.owner || ''), level,
+    rule: '', action: 'cleared', reason: String(reason || 'manual'),
+  }]);
+  return { ok: true, changed: true, level };
+}
+
 // 任务是否还在「等认领」的窗口里：有 owner（已派给谁）、没 claimedAt（从没认领过）、状态未终态。
+// 需求镜像行（type=requirement / id 以 R- 开头）不是派单：它是需求行的投影，天然没有 claimedAt，
+// 不参与认领门，否则每条在途需求都会被误判成「派单超时」，也会误拦 PM 派单。
+const loadTaskSafe = (project, id) => loadTask(project, id);
+
+export function isMirrorTask(task) {
+  if (!task) return true;
+  if (String(task.type || '') === 'requirement') return true;
+  return /^R-\d{8}-/.test(String(task.id || ''));
+}
+
 export function needsClaim(task) {
   if (!task || !task.id) return false;
-  // 需求镜像行（type=requirement / id 以 R- 开头）不是派单：它是需求行的投影，天然没有 claimedAt，
-  // 不参与认领门，否则每条在途需求都会被误判成「派单超时」。
-  if (String(task.type || '') === 'requirement') return false;
-  if (/^R-\d{8}-/.test(String(task.id))) return false;
+  if (isMirrorTask(task)) return false;
   const status = String(task.status || 'open');
   if (!OPEN_STATES.has(status)) return false;
   if (!String(task.owner || '').trim()) return false;
@@ -63,10 +103,22 @@ export function claimStateOf(task, now) {
 // 扫一遍（可写）：超时/升级就地打标并写审计行；同级重复扫不重复写（幂等）。
 export function scanClaims(project, { now = Date.now(), write = true } = {}) {
   const at = nowIso();
-  const out = { at, scanned: 0, pending: 0, overdue: [], stalled: [], written: [], audit: path.join(projectStateDir(project), CLAIM_AUDIT_FILE) };
+  const out = { at, scanned: 0, pending: 0, overdue: [], stalled: [], cleared: [], written: [], audit: path.join(projectStateDir(project), CLAIM_AUDIT_FILE) };
   let tasks = [];
   try { tasks = listTasks(project) || []; } catch { tasks = []; }
   for (const task of tasks) {
+    if (isMirrorTask(task)) continue; // 镜像行不打标、不清理
+    // 已认领 → 红标必须消（PM 必修②）：任务行清字段 + cleared 审计；不落盘视为幂等。
+    if (task.claimedAt && (task.claimOverdue || task.claimStalled || task.claimLevel)) {
+      const level = String(task.claimLevel || (task.claimStalled ? 'stalled' : 'overdue'));
+      out.cleared.push({ id: String(task.id), owner: String(task.owner || ''), level });
+      if (write) {
+        dropClaimFlags(task);
+        task.claimClearedAt = at;
+        saveTask(project, task);
+      }
+      continue;
+    }
     const st = claimStateOf(task, now);
     if (st.state === 'none' || st.state === 'claimed') continue;
     out.scanned += 1;
@@ -83,6 +135,11 @@ export function scanClaims(project, { now = Date.now(), write = true } = {}) {
     if (level === 'stalled') { task.claimStalled = true; task.claimStalledAt = at; }
     saveTask(project, task);
     out.written.push(row);
+  }
+  if (write && out.cleared.length) {
+    appendAudit(project, out.cleared.map((c) => ({
+      at, taskId: c.id, owner: c.owner, level: c.level, rule: '', action: 'cleared', reason: 'claimedAt',
+    })));
   }
   if (write && out.written.length) {
     try {
@@ -105,6 +162,8 @@ export function dispatchGateFor(project, role, now = Date.now()) {
   try { tasks = listTasks(project) || []; } catch { tasks = []; }
   for (const task of tasks) {
     if (String(task.owner || '') !== target) continue;
+    // 镜像行（type=requirement / R- 前缀）不是派单，不能拿它的残留标记拦 PM 派新单（PM 必修③）。
+    if (isMirrorTask(task)) continue;
     // 已认领（claimedAt 落了）就一律放行：历史打标不再拦新单，避免认领后还被追着罚。
     if (task.claimedAt) continue;
     const st = claimStateOf(task, now);

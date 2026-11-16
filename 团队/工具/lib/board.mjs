@@ -177,6 +177,7 @@ export function renderBoardMd(d) {
 
 function claimBadge(t) {
   if (!t) return '';
+  if (t.claimedAt) return ''; // 已认领：红标一律不显示（扫描也会清字段，这里是双保险）
   // T-20261116-124658-303e：认领门红标——任务行带 claimOverdue/claimStalled 就渲染，缺字段时静默。
   if (t.claimStalled === true) return ' <span class="tag bad" title="派单超过 30 分钟未认领，已升级">未认领·已升级</span>';
   if (t.claimOverdue === true) return ' <span class="tag bad" title="派单超过 10 分钟未认领">未认领·超时</span>';

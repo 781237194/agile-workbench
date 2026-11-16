@@ -93,6 +93,28 @@ const mirror2 = { id: 'T-20261116-101011-abce', type: 'task', status: 'open', ow
 check('组6 镜像行豁免：type=requirement 与 R- 前缀不参与认领门（真数据 3 条需求行曾被误打标），普通 task 仍判 stalled',
   CW.needsClaim(mirror) === false && CW.needsClaim(mirror2) === true && CW.claimStateOf(mirror, T0).state === 'none',
   { mirror: CW.needsClaim(mirror), task: CW.needsClaim(mirror2) });
+
+// ── 组 7 红标会消：认领后（claimedAt 落了）扫描要清字段 + 写 cleared 审计
+const t7 = JSON.parse(fs.readFileSync(path.join(TASKS, 'T-EDGE-09.json'), 'utf8'));
+t7.claimLevel = 'overdue'; t7.claimOverdue = true; t7.claimOverdueMin = 12;
+t7.claimedAt = new Date(T0).toISOString(); t7.status = 'working';
+fs.writeFileSync(path.join(TASKS, 'T-EDGE-09.json'), JSON.stringify(t7, null, 2), 'utf8');
+const clearedAuditBefore = fs.readFileSync(path.join(TEAM, '状态', '项目', PROJECT, '认领升级.jsonl'), 'utf8').trim().split('\n').length;
+const scan7 = CW.scanClaims(PROJECT, { now: T0, write: true });
+const t7after = JSON.parse(fs.readFileSync(path.join(TASKS, 'T-EDGE-09.json'), 'utf8'));
+const clearedLines = fs.readFileSync(path.join(TEAM, '状态', '项目', PROJECT, '认领升级.jsonl'), 'utf8').trim().split('\n');
+const hasCleared = clearedLines.some((l) => { try { const r = JSON.parse(l); return r.action === 'cleared' && r.taskId === 'T-EDGE-09'; } catch { return false; } });
+check('组7 红标会消：认领后清 claimLevel/claimOverdue 并写 cleared 审计行',
+  scan7.cleared.some((c) => c.id === 'T-EDGE-09') && !('claimLevel' in t7after) && !('claimOverdue' in t7after) && hasCleared,
+  { cleared: scan7.cleared, hasCleared, auditGrew: clearedLines.length - clearedAuditBefore });
+
+// ── 组 8 硬门复用镜像豁免：镜像行即使带着 claimOverdue 残留也不许拦 PM 派单
+const mirrorFlagged = { id: 'R-20261116-121212-flg', type: 'requirement', status: 'open', owner: 'programmer2', dispatchedAt: at(99), claimRequired: true, claimOverdue: true, claimLevel: 'stalled' };
+fs.writeFileSync(path.join(TASKS, mirrorFlagged.id + '.json'), JSON.stringify(mirrorFlagged, null, 2), 'utf8');
+const gate8 = CW.dispatchGateFor(PROJECT, 'programmer2', T0);
+check('组8 硬门镜像豁免：镜像行残留标记不拦派单（isMirrorTask 同一判据）',
+  gate8.ok === true && CW.isMirrorTask(mirrorFlagged) === true,
+  { gate8 });
 fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 console.log('\n认领门自检：' + pass + '/' + (pass + fails.length) + ' PASS');
 if (fails.length) { console.log(JSON.stringify(fails, null, 2)); process.exit(1); }
