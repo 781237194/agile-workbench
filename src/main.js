@@ -9838,8 +9838,36 @@ installShellAuditSensors();
       warnings
     };
   });
+  // B-2d19：把 IPC sender 反查成「它自己所属的 BrowserWindow」；查不到就返回 null（=拒绝）。
+  // 只认真实存在的窗口对象，不按 URL/标题猜，也不允许跨窗控制。
+  function windowOfSender(sender) {
+    if (!sender) return null;
+    try {
+      const wins = BrowserWindow.getAllWindows();
+      for (const w of wins) {
+        if (!w) continue;
+        try {
+          if (typeof w.isDestroyed === 'function' && w.isDestroyed()) continue;
+          if (w.webContents === sender) return w;
+        } catch { /* 单个窗口读失败不影响其它窗口 */ }
+      }
+    } catch { /* BrowserWindow 不可用（单测桩）→ 视为未知 sender */ }
+    return null;
+  }
+
   ipcMain.handle('window:control', (_e, action) => {
-    if (!mainWindow) return;
+    // B-2d19：window:control 必须校验 sender——通道对全部非看板窗暴露，不校验等于
+    // 「任意渲染进程都能关掉主窗」。规则写死：只允许「某个真实 BrowserWindow 的 webContents」
+    // 且只能控制**它自己那个窗**（main 窗发的仍是主窗语义；别的窗发 close 只能关自己，
+    // 不许把主窗带走）。拒绝时留审计行 win-ctl-denied，不静默。
+    const senderWin = windowOfSender(_e && _e.sender);
+    if (!senderWin) {
+      try { recordShellAudit('win-ctl-denied', { reason: 'unknown-sender', action: String(action || '') }); } catch { /* ignore */ }
+      console.log('[win-ctl] denied ' + JSON.stringify({ action: String(action || ''), reason: 'unknown-sender' }));
+      return;
+    }
+    const target = senderWin;
+    if (!target || target.isDestroyed()) return;
     // T-c25a AC2 诊断：关闭窗口必须留「谁点的」堆栈——11:39 那次自动关窗的调用方是渲染层 IPC，
     // 没有这行只能看到 window-all-closed，分不清「人点 X」还是「崩溃后兜底误关」。
     if (action === 'close') {
@@ -9849,6 +9877,7 @@ installShellAuditSensors();
           action: 'close', at: new Date().toISOString(),
           senderId: sender && sender.id, senderType: sender && sender.getType ? sender.getType() : '',
           senderUrl: sender && sender.getURL ? String(sender.getURL()).slice(0, 120) : '',
+          isMain: !!(mainWindow && target === mainWindow),
           sinceCrashMs: lastRenderCrashAt ? Date.now() - lastRenderCrashAt : -1,
           stack: String(new Error().stack || '').split('\n').slice(1, 6),
         }));
@@ -9861,9 +9890,9 @@ installShellAuditSensors();
         return;
       }
     }
-    if (action === 'min') mainWindow.minimize();
-    else if (action === 'max') mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
-    else if (action === 'close') mainWindow.close();
+    if (action === 'min') target.minimize();
+    else if (action === 'max') target.isMaximized() ? target.unmaximize() : target.maximize();
+    else if (action === 'close') target.close();
   });
 }
 
