@@ -84,6 +84,28 @@ function ensureDirSync(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 读 PNG 的 IHDR 宽高（AC7 证据：磁盘上的图像真实像素尺寸，不只信 header 声明）。 */
+function readPngIhdr(file) {
+  try {
+    const buf = Buffer.alloc(24);
+    const fd = fs.openSync(file, 'r');
+    try {
+      if (fs.readSync(fd, buf, 0, 24, 0) < 24) return null;
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (buf.readUInt32BE(0) !== 0x89504e47) return null;
+    if (buf.toString('latin1', 12, 16) !== 'IHDR') return null;
+    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+  } catch {
+    return null;
+  }
+}
+
 function appendAudit(auditPath, row) {
   // 审计固定 6 键，顺序稳定，append-only
   const line = JSON.stringify({
@@ -179,6 +201,7 @@ function parseArgs(argv) {
     clean: false,
     help: false,
     rect: null,
+    dpiCheck: false,
   };
   const needValue = new Set(['boot', 'project', 'mode', 'reason', 'window', 'rect']);
   for (let i = 0; i < argv.length; i += 1) {
@@ -208,6 +231,7 @@ function parseArgs(argv) {
       case 'keep': opts.keep = true; break;
       case 'json': opts.json = true; break;
       case 'clean': opts.clean = true; break;
+      case 'dpi-check': opts.dpiCheck = true; break;
       case 'help': case 'h': opts.help = true; break;
       default: return { error: `无法识别的参数：--${key}` };
     }
@@ -224,6 +248,8 @@ function usage() {
     '       [--window <标题片段>] [--keep] [--json] [--rect x,y,w,h]',
     '清理（>7 天）：',
     '  node scripts/capture-desktop.cjs --boot <令牌> --project <项目> --clean [--json]',
+    'DPI 自洽自检（AC7，当前缩放档）：',
+    '  node scripts/capture-desktop.cjs --boot <令牌> --project <项目> --dpi-check [--json]',
     '',
     '退出码：0 成功 / 1 判据不满足 / 2 环境或参数错误',
     '证据目录：默认 D:\\awb-evidence\\desktop-capture（AWB_CAPTURE_DIR 覆盖，必须以 D:\\ 开头）',
@@ -404,6 +430,11 @@ async function doCapture(opts, ctx) {
     result.sha256 = res.sha256;
     result.w = res.w;
     result.h = res.h;
+    // AC7：逐显示器 DPI 报告与图像尺寸来自同一次进程枚举；PNG 真实宽高从磁盘 IHDR 复核
+    result.dpi = res.dpi || null;
+    const pngHdr = readPngIhdr(outPath);
+    result.pngW = pngHdr ? pngHdr.w : 0;
+    result.pngH = pngHdr ? pngHdr.h : 0;
     const label = windowLabel(res, opts);
 
     // 预热审计行（成功/失败都记，AC4 统计不含它）
@@ -493,6 +524,195 @@ async function doClean(opts, ctx) {
   return result;
 }
 
+// ---------------- AC7 DPI 自洽自检 ----------------
+// 全屏图宽 = 各屏物理像素之和；图像尺寸与逐显示器 GetDpiForMonitor 返回值同源自洽。
+// 100%/125%/150% 三档的手验由 Owner 做（本自检只测当前档，见需求 AC7）。
+const DPI_CHECK_ROLES_HINT = '仅 PM / 测试人员可运行（与抓屏同一鉴权）';
+
+/** 在限频窗口内重试一次抓屏（自检需要连续两次成功抓屏）。 */
+async function captureOnce(opts, ctx, job) {
+  const local = {
+    ...opts,
+    mode: job.mode,
+    window: '',
+    rect: job.rect || null,
+    reason: job.reason,
+    keep: false,
+  };
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const res = await doCapture(local, ctx);
+    if (res.ok) return res;
+    if (res.code !== 'CAPTURE_RATE_LIMITED') return res;
+    await sleep(300); // 跨进程锁 1 次/秒：等过窗口再试
+  }
+  return { ok: false, code: 'CAPTURE_RATE_LIMITED' };
+}
+
+async function doDpiCheck(opts, ctx) {
+  const t0 = Date.now();
+  const checks = [];
+  const push = (id, pass, got, want, note) => {
+    checks.push({ id, pass: Boolean(pass), got, want, ...(note ? { note } : {}) });
+  };
+  const out = {
+    ok: false,
+    mode: 'dpi-check',
+    code: 'OK',
+    checks,
+    dpi: null,
+    screens: [],
+    image: null,
+    singleScreen: null,
+    ms: 0,
+  };
+
+  const probe = await captureLib.probe();
+  if (!probe.ok || !probe.dpi || !Array.isArray(probe.dpi.monitors)) {
+    out.code = (probe && probe.code) || 'CAPTURE_UNAVAILABLE';
+    return out;
+  }
+  const dpi = probe.dpi;
+  const screens = dpi.monitors;
+
+  out.dpi = {
+    awareness: dpi.awareness,
+    mode: dpi.mode,
+    perMonitor: dpi.perMonitor,
+    count: dpi.count,
+    physical: dpi.physical,
+  };
+  out.screens = screens.map((s) => ({
+    dev: s.dev,
+    primary: s.primary,
+    rect: s.rect,
+    dpiX: s.dpiX,
+    dpiY: s.dpiY,
+    scalePct: s.scalePct,
+    physicalX: s.physicalX,
+    physicalY: s.physicalY,
+    physicalW: s.physicalW,
+    physicalH: s.physicalH,
+  }));
+
+  push('screens-detected', screens.length >= 1 && screens.some((s) => s.primary), screens.length, '>=1 with primary');
+  push('dpi-per-monitor-aware', dpi.perMonitor === true && dpi.awareness === 2, dpi.mode, 'per-monitor');
+  push(
+    'dpi-per-monitor-query',
+    screens.every((s) => Number.isFinite(s.dpiX) && s.dpiX > 0 && Number.isFinite(s.dpiY) && s.dpiY > 0),
+    screens.map((s) => s.dpiX),
+    'all > 0 (GetDpiForMonitor)',
+  );
+  push(
+    'scale-pct-matches-dpi',
+    screens.every((s) => s.scalePct === Math.round((s.dpiX * 100) / 96)),
+    screens.map((s) => s.scalePct),
+    screens.map((s) => Math.round((s.dpiX * 100) / 96)),
+  );
+  push(
+    'physical-rect-nonzero',
+    screens.every((s) => s.physicalW > 0 && s.physicalH > 0),
+    screens.map((s) => `${s.physicalW}x${s.physicalH}`),
+    'all > 0',
+  );
+
+  const physSumW = screens.reduce((a, s) => a + s.physicalW, 0);
+  const union = dpi.physical || {};
+  const unionW = Number(union.unionW) || 0;
+  const unionH = Number(union.unionH) || 0;
+
+  // 1) 全屏抓屏
+  const full = await captureOnce(opts, ctx, { mode: 'fullscreen', reason: 'dpi-check' });
+  if (!full.ok) {
+    out.code = full.code || 'CAPTURE_UNAVAILABLE';
+    return out;
+  }
+  const capDpi = full.dpi || null;
+  out.image = {
+    w: full.w,
+    h: full.h,
+    pngW: full.pngW || 0,
+    pngH: full.pngH || 0,
+    bytes: full.bytes,
+    sha256: full.sha256,
+    ms: full.ms,
+    dpi: capDpi ? { awareness: capDpi.awareness, mode: capDpi.mode, perMonitor: capDpi.perMonitor } : null,
+  };
+
+  push('image-width-equals-physical-sum', full.w === physSumW, full.w, physSumW,
+    `AC7: 全屏图宽度=各屏物理像素之和（本布局 unionW=${unionW}）`);
+  push('image-size-equals-physical-union', full.w === unionW && full.h === unionH,
+    `${full.w}x${full.h}`, `${unionW}x${unionH}`, '虚拟屏 = 各屏物理矩形并集');
+  push('image-ihdr-matches-header', full.pngW === full.w && full.pngH === full.h,
+    `${full.pngW}x${full.pngH}`, `${full.w}x${full.h}`, '磁盘 PNG 的 IHDR 真实像素尺寸');
+  push('capture-dpi-matches-probe',
+    Boolean(capDpi) && capDpi.perMonitor === dpi.perMonitor
+      && Array.isArray(capDpi.monitors) && capDpi.monitors.length === screens.length,
+    capDpi ? `${capDpi.mode}/${(capDpi.monitors || []).length}` : 'missing',
+    `${dpi.mode}/${screens.length}`, '图像与监视器数据来自同一次进程枚举');
+
+  // 2) 单屏抓屏（AC7：单屏模式 = 该屏物理像素）
+  const mon = screens.find((s) => s.primary) || screens[0];
+  const single = await captureOnce(opts, ctx, {
+    mode: 'fullscreen',
+    rect: [mon.physicalX, mon.physicalY, mon.physicalW, mon.physicalH],
+    reason: 'dpi-check-single',
+  });
+  if (!single.ok) {
+    out.code = single.code || 'CAPTURE_UNAVAILABLE';
+    return out;
+  }
+  out.singleScreen = {
+    monitor: mon.dev,
+    w: single.w,
+    h: single.h,
+    pngW: single.pngW || 0,
+    pngH: single.pngH || 0,
+    bytes: single.bytes,
+    sha256: single.sha256,
+  };
+  push('single-screen-equals-monitor-physical',
+    single.w === mon.physicalW && single.h === mon.physicalH,
+    `${single.w}x${single.h}`, `${mon.physicalW}x${mon.physicalH}`,
+    'AC7: 单屏模式=该屏物理像素');
+
+  out.ms = Date.now() - t0;
+  out.ok = checks.every((c) => c.pass);
+  out.code = out.ok ? 'OK' : 'CAPTURE_DPI_CHECK_FAILED';
+  return out;
+}
+
+function printDpiCheck(result, opts) {
+  if (opts.json) {
+    process.stdout.write(JSON.stringify(result) + '\n');
+    return;
+  }
+  const lines = [
+    `ok=${result.ok} code=${result.code} mode=dpi-check screens=${result.screens.length}`
+      + ` awareness=${result.dpi ? result.dpi.mode : '-'} ms=${result.ms}`,
+  ];
+  if (result.dpi && result.dpi.physical) {
+    lines.push(`  physical sum=${result.dpi.physical.sumW}x${result.dpi.physical.sumH}`
+      + ` union=${result.dpi.physical.unionW}x${result.dpi.physical.unionH}`);
+  }
+  for (const s of result.screens) {
+    lines.push(`  screen ${s.dev} primary=${s.primary} rect=${s.rect.join(',')}`
+      + ` dpi=${s.dpiX}/${s.dpiY} scale=${s.scalePct}% physical=${s.physicalW}x${s.physicalH}@${s.physicalX},${s.physicalY}`);
+  }
+  if (result.image) {
+    lines.push(`  image ${result.image.w}x${result.image.h} png=${result.image.pngW}x${result.image.pngH}`
+      + ` bytes=${result.image.bytes} sha256=${result.image.sha256} ms=${result.image.ms}`);
+  }
+  if (result.singleScreen) {
+    lines.push(`  single ${result.singleScreen.monitor} ${result.singleScreen.w}x${result.singleScreen.h}`
+      + ` png=${result.singleScreen.pngW}x${result.singleScreen.pngH}`);
+  }
+  for (const c of result.checks) {
+    lines.push(`  ${c.pass ? 'PASS' : 'FAIL'} ${c.id} got=${JSON.stringify(c.got)} want=${JSON.stringify(c.want)}`);
+  }
+  if (!result.ok) lines.push(`  提示：${DPI_CHECK_ROLES_HINT}`);
+  process.stdout.write(lines.join('\n') + '\n');
+}
+
 // ---------------- main ----------------
 async function main(argv) {
   const opts = parseArgs(argv);
@@ -515,7 +735,7 @@ async function main(argv) {
     return EXIT_ENV;
   }
   if (!PROJECT_RE.test(opts.project)) return failFast('CAPTURE_ARGS_INVALID', opts);
-  if (!opts.clean) {
+  if (!opts.clean && !opts.dpiCheck) {
     if (!opts.mode) return failFast('CAPTURE_MODE_REQUIRED', opts);
     if (!['fullscreen', 'window'].includes(opts.mode)) return failFast('CAPTURE_MODE_INVALID', opts);
     if (opts.mode === 'window' && !opts.window) return failFast('CAPTURE_WINDOW_REQUIRED', opts);
@@ -556,6 +776,14 @@ async function main(argv) {
     return exitCodeFor(result.code);
   }
 
+  // AC7 DPI 自洽自检（不动 --json 抓屏 9 键契约：这里是独立模式）
+  if (opts.dpiCheck) {
+    const result = await doDpiCheck(opts, ctx);
+    printDpiCheck(result, opts);
+    if (!result.ok) process.stderr.write(`DPI 自检未通过：${result.code}\n`);
+    return exitCodeFor(result.ok ? 'OK' : (result.code || 'CAPTURE_DPI_CHECK_FAILED'));
+  }
+
   const result = await doCapture(opts, ctx);
   printResult(result, opts);
   if (!result.ok) process.stderr.write(`抓屏失败：${result.code}\n`);
@@ -576,4 +804,4 @@ main(process.argv.slice(2))
     process.exitCode = EXIT_ENV;
   });
 
-module.exports = { stampName, stampMsOf, resolveCaptureDir, readBootToken, parseArgs };
+module.exports = { stampName, stampMsOf, resolveCaptureDir, readBootToken, parseArgs, readPngIhdr };

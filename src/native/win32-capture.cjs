@@ -95,6 +95,11 @@ async function ready() {
   return runJson({ op: 'ready' });
 }
 
+/** AC7：逐显示器 DPI 报告（GetDpiForMonitor + EnumDisplayMonitors/GetMonitorInfo）。 */
+async function dpi() {
+  return runJson({ op: 'dpi' });
+}
+
 function pngChunk(type, data) {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length, 0);
@@ -170,6 +175,7 @@ async function capture({ mode = 'fullscreen', out, window: title = '', rect = nu
         ms: header ? Math.max(0, Math.round(nowMs() - t0)) : 0,
         warmupMs: header ? Math.round(t0 - tStart) : 0,
         w: header ? header.w : 0, h: header ? header.h : 0,
+        dpi: header && header.dpi ? header.dpi : null,
       });
     };
 
@@ -286,6 +292,8 @@ async function capture({ mode = 'fullscreen', out, window: title = '', rect = nu
             w: header.w,
             h: header.h,
             title: header.title || '',
+            // AC7: 与本次图像同一次进程枚举的逐显示器 DPI 报告
+            dpi: header.dpi || null,
           });
         } catch (e) {
           fail(/ENOSPC/.test(String(e && e.message)) ? 'CAPTURE_DISK_FULL' : 'CAPTURE_ENCODE_FAILED');
@@ -301,4 +309,4 @@ async function capture({ mode = 'fullscreen', out, window: title = '', rect = nu
   });
 }
 
-module.exports = { capture, probe, focusSnapshot, windowState, ready, buildPng, PS1, PNG_ZLIB_OPTIONS };
+module.exports = { capture, probe, dpi, focusSnapshot, windowState, ready, buildPng, PS1, PNG_ZLIB_OPTIONS };

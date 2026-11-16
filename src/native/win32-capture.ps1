@@ -36,6 +36,15 @@ public static class AwbCaptureNative {
   [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
   [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr hdc);
 
+  // ---- user32 monitor / shcore dpi (AC7: multi-monitor + per-monitor DPI) ---
+  [DllImport("user32.dll")] public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clipRc, MonitorEnumProc proc, IntPtr data);
+  public delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdc, ref RECT rect, IntPtr data);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFOEX info);
+  [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr hmon, int dpiType, out uint dpiX, out uint dpiY);
+  [DllImport("shcore.dll")] public static extern int GetProcessDpiAwareness(IntPtr hProcess, out int value);
+  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
+  [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
+
   // ---- gdiplus (PNG encoder, legacy format=png path) --------------------
   [DllImport("gdiplus.dll")] public static extern int GdiplusStartup(out IntPtr token, ref GdiplusStartupInput input, out IntPtr output);
   [DllImport("gdiplus.dll")] public static extern void GdiplusShutdown(IntPtr token);
@@ -48,6 +57,10 @@ public static class AwbCaptureNative {
     public int cbSize; public int flags;
     public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
     public RECT rcCaret;
+  }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct MONITORINFOEX {
+    public int cbSize; public RECT rcMonitor; public RECT rcWork; public int dwFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szDevice;
   }
   [StructLayout(LayoutKind.Sequential)] public struct GdiplusStartupInput {
     public int GdiplusVersion; public IntPtr DebugEventCallback; public int SuppressBackgroundThread; public int SuppressExternalCodecs;
@@ -117,10 +130,116 @@ public static class AwbCaptureNative {
     return IntPtr.Zero;
   }
 
-  // 已定位窗口的标题（找不到返回空串），用于审计 window 字段
+  // Resolved window title for the audit row (empty string when not found).
   public static string TitleOf(string frag) {
     IntPtr h = FindByTitle(frag);
     return h == IntPtr.Zero ? "" : Esc(Title(h));
+  }
+
+  // ---- AC7: per-monitor DPI --------------------------------------------
+  const int MDT_EFFECTIVE_DPI = 0;
+  static bool dpiInitDone = false;
+  static int dpiSetHr = int.MinValue;
+
+  // Switch this process to per-monitor DPI awareness (Windows 8.1+).
+  // An unaware process gets 96-dpi virtualized screen metrics, so at 125%/150% system scaling the
+  // captured image would be smaller than the monitor physical pixels; AC7 forbids that shrink.
+  public static int EnsurePerMonitorDpi() {
+    if (dpiInitDone) return dpiSetHr;
+    dpiInitDone = true;
+    try { dpiSetHr = SetProcessDpiAwareness(2); } catch { dpiSetHr = -1; }
+    return dpiSetHr;
+  }
+
+  public static int AwarenessCode() {
+    int pa = -1;
+    try { GetProcessDpiAwareness(GetCurrentProcess(), out pa); } catch { pa = -1; }
+    return pa;
+  }
+
+  class MonInfo {
+    public string dev = "";
+    public int px, py, pw, ph;
+    public int dpiX, dpiY;
+    public bool primary;
+  }
+
+  static System.Collections.Generic.List<MonInfo> EnumerateMonitors() {
+    var list = new System.Collections.Generic.List<MonInfo>();
+    MonitorEnumProc cb = delegate(IntPtr hm, IntPtr hdc, ref RECT r, IntPtr data) {
+      var mi = new MONITORINFOEX();
+      mi.cbSize = Marshal.SizeOf(typeof(MONITORINFOEX));
+      if (!GetMonitorInfoW(hm, ref mi)) return true;
+      MonInfo m = new MonInfo();
+      m.dev = mi.szDevice == null ? "" : mi.szDevice;
+      m.px = mi.rcMonitor.Left; m.py = mi.rcMonitor.Top;
+      m.pw = mi.rcMonitor.Right - mi.rcMonitor.Left;
+      m.ph = mi.rcMonitor.Bottom - mi.rcMonitor.Top;
+      m.primary = (mi.dwFlags & 1) != 0;
+      uint dx = 0, dy = 0;
+      try { m.dpiX = GetDpiForMonitor(hm, MDT_EFFECTIVE_DPI, out dx, out dy) == 0 ? (int)dx : 96; }
+      catch { m.dpiX = 96; }
+      try { m.dpiY = (int)dy; } catch { m.dpiY = m.dpiX; }
+      if (m.dpiX <= 0) m.dpiX = 96;
+      if (m.dpiY <= 0) m.dpiY = m.dpiX;
+      list.Add(m);
+      return true;
+    };
+    EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, cb, IntPtr.Zero);
+    return list;
+  }
+
+  // AC7 report: per-monitor rect + per-monitor DPI + physical pixels + physical union.
+  // physical = rect * dpi / spaceDpi, where spaceDpi is the dpi of the process coordinate space:
+  //   per-monitor aware (2) => monitor dpi (factor 1, rect is already physical)
+  //   system aware (1)      => system dpi (primary monitor dpi)
+  //   unaware (0)           => 96 (rect is virtualized by the OS)
+  public static string DpiReport() {
+    int awareness = AwarenessCode();
+    var ms = EnumerateMonitors();
+    int systemDpi = 96;
+    foreach (MonInfo m in ms) { if (m.primary) { systemDpi = m.dpiX; break; } }
+    if (systemDpi <= 0) systemDpi = 96;
+    int minX = int.MaxValue, minY = int.MaxValue, maxX = int.MinValue, maxY = int.MinValue;
+    int sumW = 0, sumH = 0;
+    var sb = new StringBuilder();
+    sb.Append("{\"awareness\":").Append(awareness);
+    sb.Append(",\"mode\":\"").Append(awareness == 2 ? "per-monitor" : (awareness == 1 ? "system" : "unaware")).Append("\"");
+    sb.Append(",\"perMonitor\":").Append(awareness == 2 ? "true" : "false");
+    sb.Append(",\"count\":").Append(ms.Count);
+    sb.Append(",\"monitors\":[");
+    for (int i = 0; i < ms.Count; i++) {
+      MonInfo m = ms[i];
+      int spaceDpi = awareness == 2 ? m.dpiX : (awareness == 1 ? systemDpi : 96);
+      if (spaceDpi <= 0) spaceDpi = 96;
+      int physX = (int)Math.Round((double)m.px * m.dpiX / spaceDpi);
+      int physY = (int)Math.Round((double)m.py * m.dpiX / spaceDpi);
+      int physW = (int)Math.Round((double)m.pw * m.dpiX / spaceDpi);
+      int physH = (int)Math.Round((double)m.ph * m.dpiY / spaceDpi);
+      int scalePct = (int)Math.Round(m.dpiX * 100.0 / 96.0);
+      if (i > 0) sb.Append(",");
+      sb.Append("{\"dev\":\"").Append(Esc(m.dev)).Append("\"");
+      sb.Append(",\"primary\":").Append(m.primary ? "true" : "false");
+      sb.Append(",\"rect\":[").Append(m.px).Append(",").Append(m.py).Append(",").Append(m.pw).Append(",").Append(m.ph).Append("]");
+      sb.Append(",\"dpiX\":").Append(m.dpiX).Append(",\"dpiY\":").Append(m.dpiY);
+      sb.Append(",\"scalePct\":").Append(scalePct);
+      sb.Append(",\"physicalX\":").Append(physX).Append(",\"physicalY\":").Append(physY);
+      sb.Append(",\"physicalW\":").Append(physW).Append(",\"physicalH\":").Append(physH).Append("}");
+      if (physX < minX) minX = physX;
+      if (physY < minY) minY = physY;
+      if (physX + physW > maxX) maxX = physX + physW;
+      if (physY + physH > maxY) maxY = physY + physH;
+      sumW += physW;
+      sumH += physH;
+    }
+    sb.Append("]");
+    if (ms.Count == 0) { minX = 0; minY = 0; maxX = 0; maxY = 0; }
+    sb.Append(",\"physical\":{\"sumW\":").Append(sumW).Append(",\"sumH\":").Append(sumH);
+    sb.Append(",\"unionX\":").Append(minX).Append(",\"unionY\":").Append(minY);
+    sb.Append(",\"unionW\":").Append(maxX - minX).Append(",\"unionH\":").Append(maxY - minY).Append("}");
+    sb.Append(",\"dpiSetHr\":").Append(dpiSetHr);
+    sb.Append("}");
+    return sb.ToString();
   }
 
   static BITMAPINFO MakeInfo(int w, int h, short bits) {
@@ -260,12 +379,35 @@ try {
   [Console]::Error.WriteLine('compile failed: ' + $compileErr)
 }
 
+# ---- AC7: per-monitor DPI awareness (must precede any screen metric / capture) ----
+$dpiSetHr = [int]::MinValue
+if ($compileOk) { $dpiSetHr = [AwbCaptureNative]::EnsurePerMonitorDpi() }
+
 # ---- read request ---------------------------------------------------------
 $req = $null
 if ($ArgsJson) { $req = $ArgsJson | ConvertFrom-Json }
 else {
-  $stdin = [Console]::In.ReadToEnd()
-  if ($stdin) { $req = $stdin | ConvertFrom-Json }
+  # stdin 必须显式按 UTF-8 解码：[Console]::In 走控制台代码页（本机 GBK），
+  # 中文窗口标题会变成乱码导致 JSON 解析失败（window 模式 CAPTURE_UNAVAILABLE）。
+  $stdinBytes = $null
+  try {
+    $inStream = [Console]::OpenStandardInput()
+    $ms = New-Object System.IO.MemoryStream
+    $inStream.CopyTo($ms)
+    $stdinBytes = $ms.ToArray()
+  } catch { $stdinBytes = $null }
+  $stdin = ''
+  if ($stdinBytes -and $stdinBytes.Length -gt 0) {
+    $stdin = [System.Text.Encoding]::UTF8.GetString($stdinBytes)
+  }
+  if ($stdin.Trim()) {
+    try { $req = $stdin | ConvertFrom-Json }
+    catch {
+      [Console]::Error.WriteLine('stdin JSON decode failed')
+      Write-Output '{"ok":false,"code":"CAPTURE_ARGS_INVALID"}'
+      exit 2
+    }
+  }
 }
 if (-not $req) { $req = [pscustomobject]@{ op = 'probe' } }
 
@@ -283,7 +425,14 @@ if ($op -eq 'probe') {
   if (-not $compileOk) { Write-Output '{"ok":false,"code":"CAPTURE_NOT_READY"}'; exit 1 }
   $info = [AwbCaptureNative]::ScreenInfo()
   $fg = [AwbCaptureNative]::FocusSnapshot()
-  Write-Output ("{""ok"":true,""screen"":" + $info + ",""focus"":" + $fg + "}")
+  $dpiJson = [AwbCaptureNative]::DpiReport()
+  Write-Output ("{""ok"":true,""screen"":" + $info + ",""dpi"":" + $dpiJson + ",""focus"":" + $fg + "}")
+  exit 0
+}
+
+if ($op -eq 'dpi') {
+  if (-not $compileOk) { Write-Output '{"ok":false,"code":"CAPTURE_NOT_READY"}'; exit 1 }
+  Write-Output ("{""ok"":true,""dpi"":" + [AwbCaptureNative]::DpiReport() + "}")
   exit 0
 }
 
@@ -355,7 +504,9 @@ if ($format -eq 'raw') {
     if (-not $capTitle) { $capTitle = 'window' }
   }
 
-  Write-Line ("{""ok"":true,""w"":" + $capW + ",""h"":" + $capH + ",""stride"":" + ([AwbCaptureNative]::StrideOf($capW)) + ",""bpp"":24,""title"":""" + $capTitle + """,""warmupMs"":" + $warmupMs + "}")
+  # AC7: image size and monitor/DPI data must come from the same process run
+  $dpiJson = [AwbCaptureNative]::DpiReport()
+  Write-Line ("{""ok"":true,""w"":" + $capW + ",""h"":" + $capH + ",""stride"":" + ([AwbCaptureNative]::StrideOf($capW)) + ",""bpp"":24,""title"":""" + $capTitle + """,""warmupMs"":" + $warmupMs + ",""dpi"":" + $dpiJson + "}")
 
   $capErr = $null
   if (-not [AwbCaptureNative]::CaptureRaw($capX, $capY, $capW, $capH, $stdout, [ref]$capErr)) {
