@@ -2170,8 +2170,22 @@ function writeStore(store) {
   }
   storeWarning = null;
 }
-function fmtTokens(value) {
-  const n = Number(value) || 0;
+/**
+ * R-ad44 AC1① 运行时桩：selftest 沙盘里直接写状态文件前，断言落点必须在沙盘 testRoot 内——
+ * 证明这些「夹具直写」不会碰真实 团队/状态（真实产品写一律走 json-atomic.cjs）。
+ * 不是产品路径，只服务于 selftest 夹具的可证性（PM 2026-11-17 02:34：不确定的留 unknown + 桩证据）。
+ */
+function assertSandboxStatePath(testRoot, file, caseName) {
+  const root = path.resolve(String(testRoot || ''));
+  const abs = path.resolve(String(file || ''));
+  const rel = path.relative(root, abs);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`SELFTEST_STATE_PATH_ESCAPE:${caseName}:${abs}`);
+  }
+  return abs;
+}
+
+function fmtTokens(value) {  const n = Number(value) || 0;
   if (n >= 10000) return (Math.round(n / 1000) / 10) + ' 万';
   return String(n);
 }
@@ -14258,10 +14272,12 @@ async function selftestRound5(win, testRoot, mock) {
       title: 'G2.5 打回用例',
       priority: 'P0',
     };
+    assertSandboxStatePath(testRoot, dialogWorkflowFile, 'round5-dialog-workflow');
     fs.writeFileSync(dialogWorkflowFile, JSON.stringify(dialogSeed, null, 2) + '\n', 'utf8');
     // G2.5 的 hard 判定看任务 priority：给 g25 需求补一条 P0 任务，才能验证“通过被拦、打回不被拦”。
     const g25TaskFile = path.join(projectStateDirFor(teamNameA), '任务', `${g25ReqId}.json`);
     fs.mkdirSync(path.dirname(g25TaskFile), { recursive: true });
+    assertSandboxStatePath(testRoot, g25TaskFile, 'round5-g25-task');
     fs.writeFileSync(g25TaskFile, JSON.stringify({
       id: g25ReqId, type: 'requirement', title: 'G2.5 打回用例', priority: 'P0', status: 'approved',
       owner: 'pm', createdBy: 'pm', createdAt: now(), updatedAt: now(),
@@ -17762,6 +17778,7 @@ async function selftestPanelTruth(win, testRoot) {
       const pmMember = roster.members.find((m) => m && m.role === 'pm') || null;
       if (pmMember) {
         pmMember.sessionId = sandboxPmSession;
+        assertSandboxStatePath(testRoot, rosterFile, 'panel-roster-bind');
         fs.writeFileSync(rosterFile, JSON.stringify(roster, null, 2) + '\n', 'utf8');
       }
     }
@@ -17784,6 +17801,7 @@ async function selftestPanelTruth(win, testRoot) {
       Boolean(pmEvidence) && pmEvidence.state === 'booted' && pmEvidence.matchesCurrent === true
       && pmEvidence.evidenceSource === '启动令牌', pmEvidence);
 
+    assertSandboxStatePath(testRoot, tokenOk, 'panel-token-expired');
     fs.writeFileSync(tokenOk, JSON.stringify({
       token: 'sha256panel0a46ok0000000001', role: 'pm', project: projectName,
       sessionId: pmSession || 'session-sandbox-pm',
@@ -17831,6 +17849,7 @@ async function selftestPanelTruth(win, testRoot) {
       // 名册复原：测试前 pm 可能没有会话绑定，别把沙箱名册留在“绑定沙箱会话”的状态。
       try {
         const rosterFile = path.join(testRoot, '团队', '状态', '团队.json');
+        if (rosterOriginal) assertSandboxStatePath(testRoot, rosterFile, 'panel-roster-restore');
         if (rosterOriginal) fs.writeFileSync(rosterFile, rosterOriginal, 'utf8');
       } catch { /* ignore */ }
       // 测试期间打开的抽屉要关掉，别把后续截图/布局状态留在浮层里。
