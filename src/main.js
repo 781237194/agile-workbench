@@ -65,6 +65,8 @@ const SELFTEST_ROOT = process.env.AWB_SELFTEST_ROOT
   : path.join(ROOT, '.selftest-data');
 // R-f9b1 增补卷可读性界面自检：真实窗口 + 沙盘项目，断言池详情/评审材料/面板三处可见卷并可打开。
 const IS_SUPPLEMENT_CHECK = process.argv.includes('--supplement-check');
+// B-20261115-134716-2dd3（P0）：内存阈值告警 + 崩溃归因自检（隔离数据根 + 真实采样；不碰真实工作台/团队状态）。
+const IS_B2DD3_CHECK = process.argv.includes('--b2dd3-check');
 const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_DIR) : path.join(ROOT, 'data');
 // 默认数据与 Chromium 缓存都放在仓库内，不再落到 C:\Users\...\AppData。
 // 自测时 Chromium/状态也进沙盘根，避免两个自测实例抢同一份 userdata。
@@ -83,6 +85,8 @@ const C651_DATA = process.env.AWB_C651_DATA ? path.resolve(process.env.AWB_C651_
 const QUEUE_CHECK_DATA = process.env.AWB_QUEUE_DATA ? path.resolve(process.env.AWB_QUEUE_DATA) : path.join(ROOT, '.queue-check-data');
 const DAEMON_CHECK_DATA = process.env.AWB_DAEMON_DATA ? path.resolve(process.env.AWB_DAEMON_DATA) : path.join(ROOT, '.daemon-check-data');
 const SUPPLEMENT_CHECK_DATA = process.env.AWB_SUPPLEMENT_DATA ? path.resolve(process.env.AWB_SUPPLEMENT_DATA) : path.join(ROOT, '.supplement-check-data');
+// B-2dd3 自检数据根同样独立（告警/崩溃归因审计只写沙盘）。
+const B2DD3_DATA = process.env.AWB_B2DD3_DATA ? path.resolve(process.env.AWB_B2DD3_DATA) : path.join(ROOT, '.b2dd3-check-data');
 const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT
   : IS_LAYOUT_CHECK ? LAYOUT_DATA
     : IS_B55C_CHECK ? B55C_DATA
@@ -94,7 +98,8 @@ const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT
                 : IS_REVIEW_CHECK ? REVIEW_DATA
                   : IS_SUPPLEMENT_CHECK ? SUPPLEMENT_CHECK_DATA
                     : IS_THEME_SHOTS ? THEME_SHOTS_DATA
-                      : LOCAL_DATA;
+                      : IS_B2DD3_CHECK ? B2DD3_DATA
+                        : LOCAL_DATA;
 const USER_DATA = path.join(DATA_ROOT, 'userdata');
 const TEMP_ROOT = path.join(DATA_ROOT, 'tmp');
 // DSH 地址持久化在仓库数据目录（D 盘），不写 C 盘、不写项目目录。
@@ -217,6 +222,11 @@ if (IS_DAEMON_CHECK) {
 if (IS_SUPPLEMENT_CHECK) {
   process.env.AWB_STORE = path.join(SUPPLEMENT_CHECK_DATA, 'workbench.json');
   process.env.TEAM_ROOT = path.join(SUPPLEMENT_CHECK_DATA, '团队');
+}
+// B-2dd3 自检：状态库与团队状态都落在独立沙盘（内存告警/崩溃归因审计只能写沙盘）。
+if (IS_B2DD3_CHECK) {
+  process.env.AWB_STORE = path.join(B2DD3_DATA, 'workbench.json');
+  process.env.TEAM_ROOT = path.join(B2DD3_DATA, '团队');
 }
 
 const { DshAdapter, discoverDshWeb } = require('./dsh-adapter');
@@ -10006,11 +10016,128 @@ const memState = {
   baselineAt: null,
   lastAutoAt: null,            // 上次自动回收开始时间（10 分钟冷却）
   lastRecycleFinishedAt: null, // 上次回收完成时间（60 秒防抖）
+  recycleFinishedAtMs: [],     // B-2dd3：本进程最近几次回收完成时刻（崩溃归因「最近 10 分钟回收几次」用，只读内存）
 };
 function memThresholdMB() {
   if (MEM_FIXED_MB > 0) return MEM_FIXED_MB;
   if (Number.isFinite(memState.baselineMB) && memState.baselineMB > 0) return memPolicy.adaptiveThresholdMB(memState.baselineMB);
   return memPolicy.MIN_THRESHOLD_MB;
+}
+
+/* ── B-20261115-134716-2dd3（P0）：内存阈值告警（一次性 + 带去抖）────────────────
+ * 缺口：原来只有「超阈值才自动回收」，没有任何阈值告警/审计（本文件改前 0 实现）。
+ * 口径（先读再改）：
+ *   ①阈值只读 src/mem-policy.js —— 经 memThresholdMB()（自适应阈值 / AWB_MEM_RECYCLE_MB 固定阈值
+ *     测试模式），硬上限也取 memPolicy.MAX_THRESHOLD_MB；本文件不另写一套阈值常量。
+ *   ②同一次超限只写一行审计（kind=threshold|hard-cap）；回落到阈值以下写一行 recovered；
+ *     持续超限期间不重复刷行 —— 唯一判据是 alertActive 布尔状态机，不新增 setInterval。
+ *   ③审计 append-only 写 团队/状态/项目/<项目>/内存告警.jsonl（与采样同源目录，隔离实例自动进沙盘），
+ *     字段至少 {at,kind,totalMB,thresholdMB,top:[{pid,type,workingSetMB}],source:'sampler'}。
+ *   ④界面提示复用既有崩溃横幅通道 app:render-crash（不新增样式体系），文案必须带
+ *     「当前 MB / 阈值 MB / 建议动作」，禁止「内存高」这类无数字文案。
+ * fail-open：写盘/推送失败只打日志，绝不打断采样与回收主流程。
+ */
+const memAlertState = {
+  alertActive: false,      // 是否已告警且尚未回落（去抖唯一判据）
+  activeSinceAt: '',       // 本轮超限开始时刻
+  activeKind: '',          // threshold | hard-cap
+  peakTotalMB: 0,          // 本轮峰值（写进 recovered 行，便于复盘）
+  thresholdMB: 0,          // 本轮告警用的阈值（来自 mem-policy）
+  writes: 0,               // 本进程写过的告警行数（threshold/recovered 合计）
+};
+function memAlertFile() {
+  const dir = renderMemoryProjectDir();
+  return dir ? path.join(dir, '内存告警.jsonl') : '';
+}
+function memAlertKindOf(totalMB) {
+  // 硬上限复用 mem-policy 的 MAX_THRESHOLD_MB（3GB），不另写常量。
+  return Number(totalMB) >= memPolicy.MAX_THRESHOLD_MB ? 'hard-cap' : 'threshold';
+}
+function memAlertTop(rows, limit) {
+  const list = Array.isArray(rows) ? rows : [];
+  return list
+    .filter((row) => row && Number.isFinite(Number(row.workingSetMB)))
+    .map((row) => ({ pid: row.pid === undefined ? null : row.pid, type: String(row.type || 'renderer'), workingSetMB: Number(row.workingSetMB) }))
+    .sort((a, b) => b.workingSetMB - a.workingSetMB)
+    .slice(0, Number.isFinite(Number(limit)) ? Number(limit) : 5);
+}
+function appendMemAlertLine(record) {
+  const file = memAlertFile();
+  if (!file) return { ok: false, code: 'STATE_DIR_UNAVAILABLE' };
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, JSON.stringify(record) + '\n', 'utf8');
+    memAlertState.writes += 1;
+    return { ok: true, file };
+  } catch (error) {
+    console.error('[mem-alert] 审计写盘失败：', String((error && error.message) || error).slice(0, 200));
+    return { ok: false, code: 'ALERT_AUDIT_WRITE_FAILED' };
+  }
+}
+/**
+ * 阈值告警唯一入口：渲染内存采样每拍调一次（复用该拍已采到的 total，不新增采样/定时器）。
+ * 返回 { action: 'none'|'threshold'|'hard-cap'|'recovered'|'skip', ... }，自检与单测可直接调。
+ */
+function evaluateMemAlert(input) {
+  const it = input && typeof input === 'object' ? input : {};
+  const at = String(it.at || now());
+  const totalMB = Number(it.totalMB);
+  if (!Number.isFinite(totalMB) || totalMB <= 0) return { action: 'skip', why: 'no-sample' };
+  const thresholdMB = memThresholdMB();
+  if (!Number.isFinite(thresholdMB) || thresholdMB <= 0) return { action: 'skip', why: 'no-threshold' };
+  if (totalMB < thresholdMB) {
+    if (!memAlertState.alertActive) return { action: 'none', why: 'below-threshold' };
+    // 回落：一次超限只写这一行 recovered，然后清状态（下次超限重新计一次）。
+    const row = {
+      at, kind: 'recovered', totalMB, thresholdMB, source: 'sampler',
+      peakMB: memAlertState.peakTotalMB || totalMB,
+      activeSinceAt: memAlertState.activeSinceAt || '',
+      activeMs: memAlertState.activeSinceAt ? Math.max(0, Date.parse(at) - Date.parse(memAlertState.activeSinceAt)) : null,
+    };
+    const wrote = appendMemAlertLine(row);
+    memAlertState.alertActive = false;
+    memAlertState.activeSinceAt = '';
+    memAlertState.activeKind = '';
+    memAlertState.peakTotalMB = 0;
+    console.log(`[mem-alert] 回落 recovered total=${totalMB}MB threshold=${thresholdMB}MB wrote=${wrote.ok}`);
+    return { action: 'recovered', row, wrote: wrote.ok };
+  }
+  // 仍在超限：already-alerted 不重复刷行，只更新峰值。
+  if (memAlertState.alertActive) {
+    memAlertState.peakTotalMB = Math.max(memAlertState.peakTotalMB || 0, totalMB);
+    return { action: 'none', why: 'already-alerted' };
+  }
+  // 超限开始：写一行（kind=threshold|hard-cap），并复用崩溃横幅通道给人话提示。
+  const kind = memAlertKindOf(totalMB);
+  const row = { at, kind, totalMB, thresholdMB, top: memAlertTop(it.rows), source: 'sampler' };
+  const wrote = appendMemAlertLine(row);
+  memAlertState.alertActive = true;
+  memAlertState.activeSinceAt = at;
+  memAlertState.activeKind = kind;
+  memAlertState.peakTotalMB = totalMB;
+  memAlertState.thresholdMB = thresholdMB;
+  // 人话文案必须带数字与建议动作（禁止「内存高」这种无数字文案）。
+  const thresholdLabel = MEM_FIXED_MB > 0 ? '固定阈值（测试模式）' : '自适应阈值';
+  const banner = {
+    at,
+    kind: 'memory-threshold',
+    processType: 'renderer',
+    reason: `渲染进程总内存 ${totalMB}MB 已达阈值 ${thresholdMB}MB（${kind === 'hard-cap' ? '超过 3GB 硬上限' : thresholdLabel}），建议立即回收或减少会话`,
+    exitCode: null,
+    memoryMB: totalMB,
+    thresholdMB,
+    advice: '立即回收 / 减少会话',
+    source: 'sampler',
+  };
+  let bannerSent = false;
+  try {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+      mainWindow.webContents.send('app:render-crash', banner);
+      bannerSent = true;
+    }
+  } catch { /* 窗口不可达：审计已落盘，界面提示降级 */ }
+  console.log(`[mem-alert] 超限告警 kind=${kind} total=${totalMB}MB threshold=${thresholdMB}MB top=${row.top.length} wrote=${wrote.ok} banner=${bannerSent}`);
+  return { action: kind, row, banner, bannerSent, wrote: wrote.ok };
 }
 let memSampler = null;
 let memRecycling = false;
@@ -10114,6 +10241,10 @@ async function recycleRenderer(reason, trigger, projectNameHint, extra) {
         snapshotRestored: Boolean(snapshot),
       });
       memState.lastRecycleFinishedAt = Date.now();
+      // B-2dd3：崩溃归因要回答「崩溃前 10 分钟回收过几次」，这里留本进程内存时长（不采样、不写盘）。
+      if (!Array.isArray(memState.recycleFinishedAtMs)) memState.recycleFinishedAtMs = [];
+      memState.recycleFinishedAtMs.push(memState.lastRecycleFinishedAt);
+      if (memState.recycleFinishedAtMs.length > 50) memState.recycleFinishedAtMs = memState.recycleFinishedAtMs.slice(-50);
       console.log(`[mem] 回收完成 trigger=${trigger} before=${before}MB after=${after}MB threshold=${thresholdMB}MB`);
       try { mainWindow.webContents.send('mem:recycle-done', { before, after, reason, trigger, at, thresholdMB, baselineMB: memState.baselineMB }); } catch { /* ignore */ }
       memRecycling = false;
@@ -17969,6 +18100,8 @@ function dshDiscoverySummary(result) {
  *   ①三类事件全监听；②落 append-only 审计 团队/状态/项目/<项目>/渲染崩溃.jsonl
  *     （at/kind/processType/reason/exitCode/memoryMB/project）；③界面顶部人话横幅 + 一键重载；
  *   ④不碰内存回收策略、不改 DSH asar。
+ * B-20261115-134716-2dd3 增强：同一行追加 attribution（当时总内存/阈值/top 占用进程/近 10 分钟回收次数/
+ *   近 5 分钟采样行数/最近采样时刻），只读内存里已有采样与回收记录，取不到写 null + attributionUnavailable。
  * 写盘失败只打日志不抛（fail-open：内存/崩溃观测不能拖垮主流程）。
  */
 function crashAuditFile() {
@@ -17991,11 +18124,56 @@ function currentRendererMemoryMB() {
 const CRASH_CLOSE_GUARD_MS = 10 * 1000;
 let lastRenderCrashAt = 0;
 
+/**
+ * B-20261115-134716-2dd3：崩溃归因（只读内存里已有的最近采样值 / 最近回收记录，绝不新起采样）。
+ * 口径：
+ *   - totalMB / topConsumers / samplerLastAt 取渲染内存采样器**最近一次真采样**（renderMemoryState.lastWorkingSetMB /
+ *     lastRows / lastRealAt），不在这里调 app.getAppMetrics()、不摸 webContents.getProcessMemoryInfo()；
+ *   - samplerLinesLast5Min 取采样行时刻环形缓冲（近 5 分钟行数），取不到（采样器从未跑过）写 null；
+ *   - recycleCountLast10Min / lastRecycleAt 取 memState 的本进程回收完成记录；
+ *   - 取不到就写 null，并标 attributionUnavailable=true（不许编数字）。
+ *   阈值同样只读 mem-policy（memThresholdMB()）。
+ */
+function buildCrashAttribution(crashAtMs) {
+  const atMs = Number.isFinite(Number(crashAtMs)) ? Number(crashAtMs) : Date.now();
+  const thresholdMB = memThresholdMB();
+  const samplerLastAt = renderMemoryState.lastRealAt || null;
+  const lastMB = Number.isFinite(renderMemoryState.lastWorkingSetMB) ? renderMemoryState.lastWorkingSetMB : null;
+  const topConsumers = memAlertTop(renderMemoryState.lastRows);
+  const recycleTimes = Array.isArray(memState.recycleFinishedAtMs) ? memState.recycleFinishedAtMs : [];
+  const recycleRecent = recycleTimes.filter((t) => Number.isFinite(t) && t <= atMs + 1000 && atMs - t <= 10 * 60 * 1000);
+  const lineTimes = Array.isArray(renderMemoryState.lineAtMs) ? renderMemoryState.lineAtMs : [];
+  const samplerEverSampled = (Number(renderMemoryState.samples) || 0) > 0 && Boolean(samplerLastAt);
+  const attribution = {
+    totalMB: lastMB,
+    thresholdMB: Number.isFinite(thresholdMB) ? thresholdMB : null,
+    exceededThreshold: (lastMB === null || !Number.isFinite(thresholdMB)) ? null : lastMB >= thresholdMB,
+    topConsumers,
+    recycleCountLast10Min: recycleRecent.length,
+    lastRecycleAt: Number.isFinite(memState.lastRecycleFinishedAt) ? new Date(memState.lastRecycleFinishedAt).toISOString() : null,
+    samplerLinesLast5Min: samplerEverSampled
+      ? lineTimes.filter((t) => Number.isFinite(t) && t <= atMs + 1000 && atMs - t <= 5 * 60 * 1000).length
+      : null,
+    samplerLastAt,
+  };
+  const attributionUnavailable = lastMB === null || !samplerLastAt;
+  return { attribution, attributionUnavailable };
+}
+
 function recordRenderCrash(kind, details) {
   const info = details && typeof details === 'object' ? details : {};
   // T-c25a：记下「最近一次崩溃时刻」——崩溃后 10 秒内禁止走 window:control('close') 收场，
   // 否则表现就是「壳提前退出」（实测 11:39 那次：GPU 崩 → 4 秒后窗口被 IPC 关掉）。
-  lastRenderCrashAt = Date.now();
+  const crashAtMs = Date.now();
+  lastRenderCrashAt = crashAtMs;
+  // B-2dd3：崩溃归因（只读已有采样/回收记录，取不到写 null 并标 attributionUnavailable）。
+  // fail-open：归因算不出来也不能阻断崩溃审计本身（写失败只打日志）。
+  let attribution = { attribution: null, attributionUnavailable: true };
+  try {
+    attribution = buildCrashAttribution(crashAtMs);
+  } catch (error) {
+    console.error('[crash] 归因计算失败：', String((error && error.message) || error).slice(0, 200));
+  }
   const row = {
     at: now(),
     kind: String(kind || 'unknown'),
@@ -18003,6 +18181,8 @@ function recordRenderCrash(kind, details) {
     reason: String(info.reason || ''),
     exitCode: info.exitCode === undefined || info.exitCode === null ? null : Number(info.exitCode),
     memoryMB: currentRendererMemoryMB(),
+    attribution: attribution.attribution,
+    attributionUnavailable: attribution.attributionUnavailable,
     project: (() => { try { const s = readStore(); const p = (s.projects || []).find((x) => x && x.id === s.activeProjectId); return p ? String(p.name || '') : ''; } catch { return ''; } })()
   };
   const file = crashAuditFile();
@@ -18128,6 +18308,11 @@ const renderMemoryState = {
   samplesNull: 0,
   lastAt: '',
   lastError: '',
+  // B-2dd3：崩溃归因只读这些「最近一次真采样」的内存投影，不新起采样。
+  lastRealAt: '',          // 最近一次真采样时刻（与 lastWorkingSetMB 同一拍 → 归因 samplerLastAt）
+  lastWorkingSetMB: null,  // 最近一次真采样得到的总 working set（renderer 进程合计）
+  lastRows: [],            // 最近一次真采样的逐进程行（归因 topConsumers）
+  lineAtMs: [],            // 最近写成功的采样行时刻（归因 samplerLinesLast5Min，环形裁剪）
 };
 
 function rendererWorkingSetRows() {
@@ -18222,6 +18407,10 @@ function startRenderMemorySampler() {
       const forced = Boolean(lastReal && pidSignatureChanged);
       lastReal = { at, workingSetMB: totalMB, pid: first.pid === undefined ? null : first.pid };
       lastMetricsOkAt = at;
+      // B-2dd3：把「最近一次真采样」投影到模块状态，崩溃归因只读这里（不在崩溃时新采样）。
+      renderMemoryState.lastRealAt = at;
+      renderMemoryState.lastWorkingSetMB = totalMB;
+      renderMemoryState.lastRows = rows;
       if (totalMB === null) renderMemoryState.samplesNull += 1;
       row = { at, pid: lastReal.pid, type: 'renderer', guestUrl: null, workingSetMB: totalMB, cause: 'sample', sampledFrom: at };
       if (forced) { row.forced = true; reconcile.forced += 1; }
@@ -18238,7 +18427,21 @@ function startRenderMemorySampler() {
     }
     try {
       const dir = renderMemoryProjectDir();
-      if (dir) { RenderMemory.appendSample(dir, row); reconcile.lines += 1; }
+      if (dir) {
+        RenderMemory.appendSample(dir, row);
+        reconcile.lines += 1;
+        // B-2dd3：记录本行写入时刻（近 5 分钟行数 → 崩溃归因 samplerLinesLast5Min）
+        if (!Array.isArray(renderMemoryState.lineAtMs)) renderMemoryState.lineAtMs = [];
+        const lineMs = Date.parse(at);
+        if (Number.isFinite(lineMs)) {
+          renderMemoryState.lineAtMs.push(lineMs);
+          if (renderMemoryState.lineAtMs.length > 1500) renderMemoryState.lineAtMs = renderMemoryState.lineAtMs.slice(-1500);
+        }
+      }
+    } catch (error) { renderMemoryState.lastError = String((error && error.message) || error).slice(0, 160); }
+    // B-2dd3：阈值告警评估——复用本拍已采到的 total（不新增采样/定时器），采样行先落盘再评估。
+    try {
+      evaluateMemAlert({ totalMB: row.workingSetMB, rows: renderMemoryState.lastRows, at });
     } catch (error) { renderMemoryState.lastError = String((error && error.message) || error).slice(0, 160); }
     const costMs = Number(process.hrtime.bigint() - started) / 1e6;
     renderMemoryState.samples += 1;
@@ -19674,6 +19877,277 @@ async function runSupplementCheck() {
   exitWithAudit(report.ok ? 0 : 1);
 }
 
+/**
+ * B-20261115-134716-2dd3 自检（隔离沙盘 + 真实窗口/真实采样器；不碰真实工作台与团队状态）：
+ *   mode=real（需 AWB_MEM_RECYCLE_MB 低固定阈值，整数 MB）：
+ *     - 真实采样跨阈值 → 内存告警.jsonl 恰好一行 threshold/hard-cap，字段齐全（含 top 占用进程）；
+ *     - 继续真采样 ≥2 拍 → 不重复刷行（alertActive 去抖）；
+ *     - 打开 mem 采样器 → 低固定阈值下自动回收真的会触发（任务②的行为证据）；再手动回收一次；
+ *     - 写一行崩溃归因审计 → attribution 字段齐全、值来自已有采样、回收次数与实际一致（不新采样）。
+ *   mode=synthetic（默认，不设固定阈值）：
+ *     - 用 mem-policy 当前阈值驱动同一个 evaluateMemAlert：超限 1 行 / 持续超限不刷行 /
+ *       回落 1 行 recovered / 再次超限重新 1 行 / 超过 mem-policy 硬上限 kind=hard-cap；
+ *     - 归因：有真实采样时值非空；把内存投影清空后必须写 null + attributionUnavailable=true（不编数字）。
+ * 跑法：AWB_MEM_RECYCLE_MB=1 AWB_B2DD3_MODE=real node scripts/run-electron.cjs . --b2dd3-check
+ */
+async function runB2dd3Check() {
+  const outDir = process.env.AWB_B2DD3_OUT ? path.resolve(process.env.AWB_B2DD3_OUT) : path.join(ROOT, '_tmp', 'b2dd3-check-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const mode = String(process.env.AWB_B2DD3_MODE || '').toLowerCase() === 'real' ? 'real' : 'synthetic';
+  const report = {
+    ok: false, mode, outDir, dataRoot: DATA_ROOT, teamRoot: String(process.env.TEAM_ROOT || ''),
+    thresholdMB: memThresholdMB(), fixedThresholdMB: MEM_FIXED_MB,
+    alertFile: '', crashFile: '', alertRows: 0, alertLines: [], crashRows: 0,
+    checks: [], failures: [], pageConsole: [],
+  };
+  const check = (name, pass, detail) => {
+    const row = { name, pass: Boolean(pass), detail: detail === undefined ? null : detail };
+    report.checks.push(row);
+    if (!row.pass) report.failures.push(row);
+    console.log(`${row.pass ? 'B2DD3_PASS' : 'B2DD3_FAIL'} ${name}${row.pass ? '' : ' ' + JSON.stringify(detail === undefined ? null : detail).slice(0, 700)}`);
+    return row.pass;
+  };
+  const readJsonl = (file) => {
+    try {
+      return fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean)
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
+    } catch { return []; }
+  };
+  const writeJsonFile = (file, data) => fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8');
+  const waitFor = async (fn, timeoutMs, stepMs) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      try { if (fn()) return true; } catch { /* 等条件期间异常当未满足 */ }
+      await sleep(stepMs || 250);
+    }
+    return false;
+  };
+  const finish = () => {
+    const alertRows = readJsonl(report.alertFile);
+    const crashRows = readJsonl(report.crashFile);
+    report.alertRows = alertRows.length;
+    report.alertLines = alertRows;
+    report.alertWrites = memAlertState.writes;
+    report.crashRows = crashRows.length;
+    const failed = report.checks.filter((row) => !row.pass);
+    report.ok = failed.length === 0;
+    report.total = report.checks.length;
+    report.failed = failed.length;
+    writeJsonFile(path.join(outDir, 'b2dd3-check.json'), report);
+    console.log('B2DD3_CHECK ' + JSON.stringify({ ok: report.ok, mode, total: report.total, failed: report.failed, outDir, alertRows: report.alertRows, crashRows: report.crashRows }));
+    console.log(report.ok ? 'B2DD3_OK' : 'B2DD3_FAIL');
+    exitWithAudit(report.ok ? 0 : 1);
+  };
+
+  // ② 阈值必须来自 mem-policy（本自检只核对，不另写常量）
+  const thresholdMB = memThresholdMB();
+  check('阈值取自 mem-policy（memThresholdMB；固定阈值测试模式同源）',
+    Number.isFinite(thresholdMB) && thresholdMB > 0
+    && (MEM_FIXED_MB > 0 ? thresholdMB === MEM_FIXED_MB : thresholdMB === memPolicy.MIN_THRESHOLD_MB),
+    { thresholdMB, fixed: MEM_FIXED_MB, min: memPolicy.MIN_THRESHOLD_MB, max: memPolicy.MAX_THRESHOLD_MB });
+  if (mode === 'real' && !(MEM_FIXED_MB > 0)) {
+    check('real 模式要求 AWB_MEM_RECYCLE_MB>0（否则真实采样不会跨阈值）', false, { fixed: MEM_FIXED_MB });
+    finish();
+    return;
+  }
+
+  // ① 沙盘项目 + 隔离目录（告警/归因只能写沙盘；不碰真实 团队/ 与真实 workbench.json）
+  const projectName = 'b2dd3-mem-alert';
+  const projectPath = path.join(DATA_ROOT, 'workspace', projectName);
+  const stateDir = path.join(String(process.env.TEAM_ROOT || ''), '状态', '项目', projectName);
+  fs.mkdirSync(path.join(stateDir, '任务'), { recursive: true });
+  fs.writeFileSync(path.join(stateDir, '项目.json'), JSON.stringify({ name: projectName, mode: 'fast', teamMode: 'fast', path: projectPath }, null, 2) + '\n', 'utf8');
+  fs.mkdirSync(projectPath, { recursive: true });
+  const store = readStore();
+  store.projects = [{ id: 'b2dd3-check', name: projectName, teamName: projectName, path: projectPath, teamMode: 'fast', sessions: {}, workspace: { sessionIds: [] } }];
+  store.activeProjectId = 'b2dd3-check';
+  writeStore(store);
+  report.alertFile = memAlertFile();
+  report.crashFile = crashAuditFile();
+  check('告警/崩溃审计落在隔离数据根（不写真实 团队/）',
+    Boolean(report.alertFile) && Boolean(report.crashFile)
+    && report.alertFile.startsWith(DATA_ROOT) && report.crashFile.startsWith(DATA_ROOT),
+    { alertFile: report.alertFile, crashFile: report.crashFile, dataRoot: DATA_ROOT });
+
+  // ③ 隐藏窗口：只为一个真实 renderer 进程（不加载 index.html，避免连真实 DSH）；采样器由 whenReady 已启动
+  mainWindow = new BrowserWindow({
+    width: 900, height: 600, show: false,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false },
+  });
+  await mainWindow.loadURL('about:blank');
+  report.windowCreated = true;
+  const samplerReady = await waitFor(() => (Number(renderMemoryState.samples) || 0) > 0
+    && Number.isFinite(renderMemoryState.lastWorkingSetMB) && renderMemoryState.lastWorkingSetMB > 0, 25000);
+  check('渲染内存采样器在跑且有真实采样值（app.getAppMetrics 真采样）', samplerReady, {
+    samples: renderMemoryState.samples, lastAt: renderMemoryState.lastAt,
+    lastRealAt: renderMemoryState.lastRealAt, lastWorkingSetMB: renderMemoryState.lastWorkingSetMB,
+  });
+  if (!samplerReady) { finish(); return; }
+
+  const crashKeys = ['totalMB', 'thresholdMB', 'exceededThreshold', 'topConsumers', 'recycleCountLast10Min', 'lastRecycleAt', 'samplerLinesLast5Min', 'samplerLastAt'];
+
+  if (mode === 'real') {
+    /* ── 4A) 真实采样跨阈值：一次超限只写一行 + 界面提示数字文案 ── */
+    const crossed = await waitFor(() => readJsonl(report.alertFile).some((row) => row.kind === 'threshold' || row.kind === 'hard-cap'), 30000);
+    let alertRows = readJsonl(report.alertFile);
+    const first = alertRows.find((row) => row.kind === 'threshold' || row.kind === 'hard-cap');
+    check('真实采样跨阈值 → 内存告警.jsonl 写入 1 行 threshold/hard-cap', crossed && Boolean(first), { rows: alertRows.length, kinds: alertRows.map((row) => row.kind) });
+    check('告警行字段齐全（at/kind/totalMB/thresholdMB/top/source）',
+      Boolean(first) && typeof first.at === 'string' && !Number.isNaN(Date.parse(first.at))
+      && ['threshold', 'hard-cap'].includes(String(first.kind))
+      && Number(first.totalMB) > 0 && Number(first.thresholdMB) === thresholdMB
+      && Array.isArray(first.top) && first.top.length >= 1
+      && first.top.every((item) => item && 'pid' in item && 'type' in item && Number.isFinite(Number(item.workingSetMB)))
+      && String(first.source) === 'sampler', first);
+    check('告警状态机 alertActive=true（去抖判据）', memAlertState.alertActive === true, { alertActive: memAlertState.alertActive });
+    const realBase = Number(renderMemoryState.realSamples) || 0;
+    const beforeCount = alertRows.filter((row) => row.kind === 'threshold' || row.kind === 'hard-cap').length;
+    await waitFor(() => (Number(renderMemoryState.realSamples) || 0) >= realBase + 2, 25000);
+    alertRows = readJsonl(report.alertFile);
+    const afterCount = alertRows.filter((row) => row.kind === 'threshold' || row.kind === 'hard-cap').length;
+    check('持续超限期间不重复刷行（真实采样再采 ≥2 拍仍 1 行）', afterCount === beforeCount && afterCount === 1,
+      { beforeCount, afterCount, realSamples: renderMemoryState.realSamples });
+    check('真实模式超限期间没有 recovered 行（仍在阈值上）', !alertRows.some((row) => row.kind === 'recovered'), { kinds: alertRows.map((row) => row.kind) });
+
+    /* ── 4B0) 自动回收真的会被触发：打开 mem 采样器，低固定阈值下走「超阈值 → 判定 → recycleRenderer」── */
+    startMemSampler();
+    const autoRecycleDone = await waitFor(() => (Array.isArray(memState.recycleFinishedAtMs) ? memState.recycleFinishedAtMs.length : 0) >= 1, 45000);
+    check('自动回收真的会触发（固定阈值测试模式：超阈值 → mem 采样判定 → recycleRenderer）', autoRecycleDone,
+      { recycles: (memState.recycleFinishedAtMs || []).length, lastAutoAt: memState.lastAutoAt, lastRecycleFinishedAt: memState.lastRecycleFinishedAt });
+
+    /* ── 4B) 手动回收一次 → 归因要能回答「之前回收过几次」 ── */
+    const beforeRecycles = (memState.recycleFinishedAtMs || []).length;
+    const manualAt = Date.now();
+    const rec = await recycleRenderer('b2dd3-check 自检：手动回收一次（为归因造真实回收记录）', 'manual', undefined, { cause: '自检' });
+    const recycled = await waitFor(() => (Array.isArray(memState.recycleFinishedAtMs) ? memState.recycleFinishedAtMs.length : 0) > beforeRecycles
+      && Number(memState.lastRecycleFinishedAt) >= manualAt, 30000);
+    check('手动回收完成（归因可读最近回收记录）', Boolean(rec) && rec.ok === true && recycled,
+      { rec, recycles: (memState.recycleFinishedAtMs || []).length, lastRecycleFinishedAt: memState.lastRecycleFinishedAt });
+    await waitFor(() => Number.isFinite(renderMemoryState.lastWorkingSetMB) && renderMemoryState.lastWorkingSetMB > 0, 15000);
+
+    /* ── 4C) 崩溃归因落盘（只读已有采样/回收记录） ── */
+    const crashRow = recordRenderCrash('b2dd3-attribution', { type: 'renderer', reason: 'b2dd3-attribution-selftest', exitCode: 0 });
+    const attr = crashRow && crashRow.attribution;
+    check('崩溃行含 attribution 对象且 8 键齐全', Boolean(attr) && crashKeys.every((key) => key in attr), attr);
+    check('归因值是当时内存（totalMB>0、exceededThreshold=true、topConsumers≥1）',
+      Boolean(attr) && Number(attr.totalMB) > 0 && attr.exceededThreshold === true
+      && Number(attr.thresholdMB) === thresholdMB
+      && Array.isArray(attr.topConsumers) && attr.topConsumers.length >= 1
+      && attr.topConsumers.every((item) => item && 'pid' in item && 'type' in item && Number.isFinite(Number(item.workingSetMB))), attr);
+    check('归因记录近 10 分钟回收次数与实际一致（自动+手动 ≥2）与 lastRecycleAt',
+      Boolean(attr) && Number(attr.recycleCountLast10Min) === (memState.recycleFinishedAtMs || []).length
+      && Number(attr.recycleCountLast10Min) >= 2
+      && typeof attr.lastRecycleAt === 'string' && !Number.isNaN(Date.parse(attr.lastRecycleAt)), attr);
+    check('归因记录近 5 分钟采样行数≥1 与最近采样时刻',
+      Boolean(attr) && Number(attr.samplerLinesLast5Min) >= 1
+      && typeof attr.samplerLastAt === 'string' && !Number.isNaN(Date.parse(attr.samplerLastAt)), attr);
+    check('归因可用标记 attributionUnavailable=false', crashRow && crashRow.attributionUnavailable === false, crashRow && crashRow.attributionUnavailable);
+    check('崩溃行原有字段仍在（append-only 增强，不删旧字段）',
+      Boolean(crashRow) && typeof crashRow.at === 'string' && Number(crashRow.memoryMB) > 0
+      && String(crashRow.kind) === 'b2dd3-attribution', crashRow && { at: crashRow.at, memoryMB: crashRow.memoryMB, kind: crashRow.kind });
+  } else {
+    /* ── 4D) 合成阈值（同一 evaluateMemAlert）：超限 1 行 / 不刷行 / 回落 1 行 / 再超限重新 1 行 / hard-cap ── */
+    stopRenderMemorySampler();
+    const t = memThresholdMB();
+    const above = t + 137;
+    const below = Math.max(1, t - 137);
+    let rows = readJsonl(report.alertFile);
+    const count = (kind) => rows.filter((row) => row.kind === kind).length;
+    const baseThreshold = count('threshold');
+    const baseRecovered = count('recovered');
+    const baseHardcap = count('hard-cap');
+    const step = (totalMB) => {
+      const res = evaluateMemAlert({ totalMB, rows: [{ pid: 4242, type: 'renderer', workingSetMB: totalMB }], at: now() });
+      rows = readJsonl(report.alertFile);
+      return res;
+    };
+    const s1 = step(above);
+    check('超限 → 写入 1 行 threshold', s1.action === 'threshold' && count('threshold') === baseThreshold + 1,
+      { action: s1.action, threshold: count('threshold'), baseThreshold });
+    check('告警行带数字与 top（界面提示文案来源）',
+      Boolean(s1.row) && s1.row.totalMB === above && s1.row.thresholdMB === t
+      && Array.isArray(s1.row.top) && s1.row.top.length === 1
+      && String(s1.row.source) === 'sampler', s1.row);
+    check('界面提示文案含 当前MB/阈值MB/建议动作（禁止无数字文案）',
+      Boolean(s1.banner) && String(s1.banner.reason).includes(`${above}MB`) && String(s1.banner.reason).includes(`${t}MB`)
+      && /立即回收|减少会话/.test(String(s1.banner.advice || '') + String(s1.banner.reason || '')), s1.banner);
+    check('界面提示复用 app:render-crash 通道且已推送',
+      s1.bannerSent === true && s1.banner && s1.banner.kind === 'memory-threshold', { bannerSent: s1.bannerSent, kind: s1.banner && s1.banner.kind });
+    const s2 = step(above + 30);
+    check('持续超限不重复刷行（already-alerted）',
+      s2.action === 'none' && s2.why === 'already-alerted' && count('threshold') === baseThreshold + 1,
+      { action: s2.action, why: s2.why, threshold: count('threshold') });
+    const s3 = step(below);
+    check('回落到阈值以下 → 写入 1 行 recovered',
+      s3.action === 'recovered' && count('recovered') === baseRecovered + 1,
+      { action: s3.action, recovered: count('recovered'), baseRecovered });
+    check('recovered 行字段（kind/totalMB/thresholdMB/source）',
+      Boolean(s3.row) && s3.row.kind === 'recovered' && s3.row.totalMB === below
+      && s3.row.thresholdMB === t && String(s3.row.source) === 'sampler', s3.row);
+    const s4 = step(below);
+    check('回落期间不重复刷行', s4.action === 'none' && count('recovered') === baseRecovered + 1,
+      { action: s4.action, why: s4.why, recovered: count('recovered') });
+    const s5 = step(above);
+    check('再次超限重新写 1 行（新一次超限）',
+      s5.action === 'threshold' && count('threshold') === baseThreshold + 2,
+      { action: s5.action, threshold: count('threshold') });
+    step(below); // 收尾回落，让 hard-cap 成为独立一次超限
+    const hardTotal = memPolicy.MAX_THRESHOLD_MB + 100;
+    const s7 = step(hardTotal);
+    check('超过 mem-policy 硬上限 → kind=hard-cap',
+      s7.action === 'hard-cap' && count('hard-cap') === baseHardcap + 1 && s7.row && s7.row.kind === 'hard-cap',
+      { action: s7.action, kind: s7.row && s7.row.kind, hardTotal, hardcap: count('hard-cap') });
+    const s8 = step(hardTotal + 200);
+    check('硬上限持续超限也不重复刷行',
+      s8.action === 'none' && count('hard-cap') === baseHardcap + 1,
+      { action: s8.action, why: s8.why, hardcap: count('hard-cap') });
+    step(below);
+    check('一轮完整周期后 alertActive=false（状态机归位）', memAlertState.alertActive === false, { alertActive: memAlertState.alertActive });
+
+    /* ── 4E) 归因：有采样时非空；清空内存投影后必须 null + attributionUnavailable=true ── */
+    const crashRow = recordRenderCrash('b2dd3-attribution', { type: 'renderer', reason: 'b2dd3-attribution-selftest', exitCode: 0 });
+    const attr = crashRow && crashRow.attribution;
+    check('崩溃行含 attribution 对象且 8 键齐全', Boolean(attr) && crashKeys.every((key) => key in attr), attr);
+    check('归因 totalMB 来自真实采样且与阈值比较正确（未超限）',
+      Boolean(attr) && Number(attr.totalMB) > 0 && attr.thresholdMB === t
+      && attr.exceededThreshold === false && attr.samplerLastAt === renderMemoryState.lastRealAt,
+      { attribution: attr, lastRealAt: renderMemoryState.lastRealAt });
+    check('归因 topConsumers 来自最近真采样（≥1 项 pid/type/workingSetMB）',
+      Boolean(attr) && Array.isArray(attr.topConsumers) && attr.topConsumers.length >= 1
+      && attr.topConsumers.every((item) => item && 'pid' in item && 'type' in item && Number.isFinite(Number(item.workingSetMB))), attr && attr.topConsumers);
+    check('归因采样行数/最近采样时刻（近 5 分钟）',
+      Boolean(attr) && Number(attr.samplerLinesLast5Min) >= 1
+      && typeof attr.samplerLastAt === 'string' && !Number.isNaN(Date.parse(attr.samplerLastAt)), attr);
+    check('归因可用标记 attributionUnavailable=false', crashRow && crashRow.attributionUnavailable === false, crashRow && crashRow.attributionUnavailable);
+    const saved = {
+      workingSetMB: renderMemoryState.lastWorkingSetMB, lastRealAt: renderMemoryState.lastRealAt,
+      lastAt: renderMemoryState.lastAt, samples: renderMemoryState.samples,
+      lineAtMs: renderMemoryState.lineAtMs, lastRows: renderMemoryState.lastRows,
+    };
+    renderMemoryState.lastWorkingSetMB = null;
+    renderMemoryState.lastRealAt = '';
+    renderMemoryState.lastAt = '';
+    renderMemoryState.samples = 0;
+    renderMemoryState.lineAtMs = [];
+    renderMemoryState.lastRows = [];
+    const missing = buildCrashAttribution(Date.now());
+    renderMemoryState.lastWorkingSetMB = saved.workingSetMB;
+    renderMemoryState.lastRealAt = saved.lastRealAt;
+    renderMemoryState.lastAt = saved.lastAt;
+    renderMemoryState.samples = saved.samples;
+    renderMemoryState.lineAtMs = saved.lineAtMs;
+    renderMemoryState.lastRows = saved.lastRows;
+    check('无采样时归因写 null 且 attributionUnavailable=true（不编数字）',
+      missing.attributionUnavailable === true
+      && missing.attribution.totalMB === null
+      && missing.attribution.exceededThreshold === null
+      && missing.attribution.samplerLastAt === null
+      && missing.attribution.samplerLinesLast5Min === null, missing);
+  }
+  finish();
+}
+
 app.whenReady().then(async () => {
   if (!singleInstanceLock) return;
   app.setName(APP_NAME);
@@ -19683,6 +20157,16 @@ app.whenReady().then(async () => {
   if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_THEME_SHOTS) {
     startRenderMemorySampler();
     scheduleRenderMemoryMaintenance();
+  }
+  // B-2dd3 自检：内存阈值告警去抖 + 崩溃归因（隔离数据根；采样器必须真跑，所以放在上面启动之后）。
+  if (IS_B2DD3_CHECK) {
+    try {
+      await runB2dd3Check();
+    } catch (error) {
+      console.error('B2DD3_FATAL ' + String((error && error.stack) || error));
+      exitWithAudit(1);
+    }
+    return;
   }
   if (IS_SELFTEST) {
     try {
@@ -19856,7 +20340,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) return;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_B2DD3_CHECK) return;
   // B-20261116-105124-c25a：窗口全关导致的退出也要留一行审计——历史上「壳 2-8 分钟整体退出」
   // 无法区分「人关了窗」「窗口被意外销毁」「主进程异常」三种，这一行能把第一种钉死。
   recordShellAudit('shell-window-all-closed', {});

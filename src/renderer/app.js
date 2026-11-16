@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -3093,16 +3093,28 @@ function initCrashBanner() {
     else document.body.appendChild(node);
     node.querySelector('[data-crash-reload]').addEventListener('click', async () => {
       const btn = node.querySelector('[data-crash-reload]');
+      // B-2dd3：同一横幅两种用途——内存告警时按钮是「立即回收」，不重载聊天区。
+      const memKind = /memory/.test(String(node.getAttribute('data-crash-kind') || ''));
       btn.disabled = true;
-      btn.textContent = '重载中…';
+      btn.textContent = memKind ? '回收中…' : '重载中…';
       let result = { ok: false };
       try {
-        result = typeof wb.reloadDshView === 'function' ? await wb.reloadDshView() : { ok: false, code: 'IPC_MISSING' };
+        if (memKind) {
+          result = typeof wb.memRecycle === 'function' ? await wb.memRecycle() : { ok: false, code: 'IPC_MISSING' };
+        } else {
+          result = typeof wb.reloadDshView === 'function' ? await wb.reloadDshView() : { ok: false, code: 'IPC_MISSING' };
+        }
       } catch { result = { ok: false }; }
       btn.disabled = false;
-      btn.textContent = result && result.ok ? '已重载' : '重载失败，点重试';
-      node.setAttribute('data-crash-last-reload', result && result.ok ? 'ok' : 'failed');
-      if (result && result.ok) setTimeout(() => { node.hidden = true; }, 1200);
+      if (memKind) {
+        btn.textContent = result && result.ok ? '已回收' : '回收失败，点重试';
+        node.setAttribute('data-crash-last-reload', result && result.ok ? 'ok' : 'failed');
+        if (result && result.ok) setTimeout(() => { node.hidden = true; }, 1600);
+      } else {
+        btn.textContent = result && result.ok ? '已重载' : '重载失败，点重试';
+        node.setAttribute('data-crash-last-reload', result && result.ok ? 'ok' : 'failed');
+        if (result && result.ok) setTimeout(() => { node.hidden = true; }, 1200);
+      }
     });
     node.querySelector('[data-crash-dismiss]').addEventListener('click', () => { node.hidden = true; });
     return node;
@@ -3115,8 +3127,13 @@ function initCrashBanner() {
       info.reason ? `原因 ${info.reason}` : '',
       (info.exitCode === null || info.exitCode === undefined) ? '' : `退出码 ${info.exitCode}`
     ].filter(Boolean);
+    // B-2dd3：内存阈值告警复用同一横幅，但标题/按钮必须说实话（不能显示「已崩溃」）。
+    const memKind = /memory/.test(String(info.kind || ''));
+    node.querySelector('[data-crash-title]').textContent = memKind ? '渲染进程内存接近上限' : 'DSH 渲染进程已崩溃';
+    node.querySelector('[data-crash-reload]').textContent = memKind ? '立即回收' : '重载聊天区';
     node.querySelector('[data-crash-detail]').textContent = [when, parts.join(' · ')].filter(Boolean).join(' · ') || '（详情已写入审计）';
     node.setAttribute('data-crash-kind', String(info.kind || ''));
+    node.setAttribute('data-crash-mem-alert', memKind ? '1' : '0');
     node.hidden = false;
   };
   if (typeof wb.onRenderCrash === 'function') wb.onRenderCrash(show);
