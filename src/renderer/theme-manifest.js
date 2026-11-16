@@ -150,7 +150,7 @@ function themeMenuItems() {
   return THEMES.map((t) => ({ id: t.id, label: t.label, desc: t.desc }));
 }
 
-const api = {
+const themeManifestApi = {
   STYLES,
   THEME_MODES,
   THEMES,
@@ -174,7 +174,7 @@ const api = {
 //    走的是同一个函数，返回值逐字段相等（含 reason/source/fallback）。
 //    这里只用 globalThis，顶层不读 document / window，node 直接 import 不会报错。
 if (typeof globalThis !== 'undefined' && globalThis) {
-  globalThis.ThemeManifest = api;
+  globalThis.ThemeManifest = themeManifestApi;
   globalThis.__themeResolve = resolveTheme;
 }
 

@@ -5,6 +5,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 // 看板浮窗复用同一个 preload，但只暴露旧版看板脚本认识的 window.boardWin。
 // main.js 创建看板 BrowserWindow 时通过 additionalArguments 传入 --awb-board。
 const IS_BOARD_WINDOW = process.argv.includes('--awb-board');
+// R-c1ed（卷2 §五）：压测长跑用 --no-wake 启动 → toast 只落审计、不自增计数（主进程会置 AWB_NO_WAKE=1 传下来）。
+const IS_NO_WAKE = process.argv.includes('--no-wake') || String(process.env.AWB_NO_WAKE || '') === '1';
 
 if (IS_BOARD_WINDOW) {
   contextBridge.exposeInMainWorld('boardWin', {
@@ -66,6 +68,11 @@ if (IS_BOARD_WINDOW) {
     mailboxSnapshot: (payload) => ipcRenderer.invoke('mailbox:snapshot', payload),
     mailboxWatchStart: (payload) => ipcRenderer.invoke('mailbox:watch-start', payload),
     mailboxState: () => ipcRenderer.invoke('mailbox:state'),
+    // R-c1ed（卷2 §五）：通知审计 + no-wake 压制。noWake 同步取自启动参数（--no-wake / AWB_NO_WAKE=1），
+    // 渲染层 toast() 据此决定「显示并自增计数」还是「只写一行 suppressed=no-wake 审计」。
+    noWake: IS_NO_WAKE,
+    notifyState: () => ipcRenderer.invoke('notify:state'),
+    notifyAudit: (payload) => ipcRenderer.invoke('notify:audit', payload),
     // R-c4c7：邮箱/任务队列变化推送（主进程 fs.watch 去抖 300ms 后 send；渲染层只订阅，不轮询）。
     onMailboxChanged: (cb) => {
       if (typeof cb !== 'function') return () => {};

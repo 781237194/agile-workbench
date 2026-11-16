@@ -7,6 +7,8 @@
  *   node scripts/oom-stress.cjs --window --project <项目名> --at <ISO> [--window-sec 300] [--json]
  *   node scripts/oom-stress.cjs --clean  --project <项目名> [--json]
  *   node scripts/oom-stress.cjs --summary --project <项目名> [--json]   （AC2 斜率，尚未实现）
+ *   node scripts/oom-stress.cjs --stress --turns 300 --tool-output-bytes 20480 [--load-dir <目录>] [--dry-run] [--json]
+ *        └ 卷2 §2.5 的 script 等价口径：真生成 300 轮 × 20KB 工具输出（≥6e6B）并实测回读字节数
  *
  * 口径（PM 裁 M-20261115-155719-f90c04 / M-20261115-161017-febd02）：
  *   · 退出码按 `fail` 映射，**不再用旧的 ok**：0 = fail=false；1 = fail=true；2 = 参数/IO 错误。
@@ -136,9 +138,82 @@ function cmdSummary() {
   failExit('SUMMARY_NOT_IMPLEMENTED', 'AC2 斜率（口径A+OLS+双校验）尚未实现，等取数入口 apply 后补；本命令目前不产出假数据');
 }
 
+/**
+ * R-c1ed 卷2 §2.5「等价 ≥300 轮」的 script 口径：
+ *   --turns 300 --tool-output-bytes 20480  → 真生成等价负载（每轮一个固定字节的工具输出块），
+ *   自报 equivalentTurns / toolOutputBytes（默认 300×20480 = 6,144,000B ≥ 6e6），并**实测回读**字节数。
+ * 输出（--json 时恰好一行）：{ok, mode, equivalentBy:'script', equivalentTurns, toolOutputBytes,
+ *   toolOutputBytesPerTurn, files, dir, measuredBytes, equivalent}
+ */
+function cmdStress() {
+  const num = (name, fallback) => {
+    const raw = argValue(name);
+    if (!raw) return fallback;
+    const value = Number(raw);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+  };
+  const turns = num('turns', 300);
+  const bytesPerTurn = num('tool-output-bytes', 20480);
+  const dryRun = has('dry-run');
+  const dirArg = argValue('load-dir');
+  const loadDir = dirArg ? path.resolve(dirArg) : path.join(ROOT, '_tmp', 'oom-stress-load');
+  const total = turns * bytesPerTurn;
+  let measuredBytes = 0;
+  if (!dryRun) {
+    try {
+      fs.rmSync(loadDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      fs.mkdirSync(path.join(loadDir, 'turns'), { recursive: true });
+      // 每轮 1 个工具输出块：内容可读、字节数精确到 --tool-output-bytes
+      const unit = 'TOOL_OUTPUT turn payload ';
+      const line = unit + 'x'.repeat(100) + '\n';
+      const block = Buffer.from(line.repeat(Math.max(1, Math.ceil(bytesPerTurn / line.length))).slice(0, bytesPerTurn), 'utf8');
+      for (let i = 1; i <= turns; i += 1) {
+        const file = path.join(loadDir, 'turns', `turn-${String(i).padStart(4, '0')}.txt`);
+        fs.writeFileSync(file, block);
+        measuredBytes += fs.statSync(file).size;
+      }
+      fs.writeFileSync(path.join(loadDir, 'manifest.json'), JSON.stringify({
+        at: new Date().toISOString(),
+        equivalentBy: 'script',
+        equivalentTurns: turns,
+        toolOutputBytes: total,
+        toolOutputBytesPerTurn: bytesPerTurn,
+        files: turns,
+        measuredBytes,
+      }, null, 2) + '\n', 'utf8');
+    } catch (error) {
+      failExit('LOAD_GEN_FAILED', String((error && error.message) || error).slice(0, 300), { dir: loadDir });
+    }
+  }
+  const equivalent = turns >= 300 && total >= 6e6 && (dryRun || measuredBytes === total);
+  const out = {
+    ok: !dryRun ? measuredBytes === total : true,
+    mode: 'stress',
+    equivalentBy: 'script',
+    equivalentTurns: turns,
+    toolOutputBytes: total,
+    toolOutputBytesPerTurn: bytesPerTurn,
+    files: dryRun ? 0 : turns,
+    dir: dryRun ? '' : loadDir,
+    measuredBytes: dryRun ? 0 : measuredBytes,
+    dryRun,
+    equivalent,
+  };
+  if (has('json')) process.stdout.write(JSON.stringify(out) + '\n');
+  else {
+    process.stdout.write([
+      `等价负载已生成：turns=${turns} bytes/turn=${bytesPerTurn} 合计 ${total}B（实测 ${measuredBytes}B）`,
+      `equivalentBy=script｜equivalentTurns=${turns}｜toolOutputBytes=${total}｜equivalent=${equivalent}`,
+      `目录：${out.dir || '(dry-run 未落盘)'}`,
+    ].join('\n') + '\n');
+  }
+  process.exit(equivalent ? 0 : 1);
+}
+
 (async () => {
   if (has('window')) return cmdWindow();
   if (has('clean')) return cmdClean();
   if (has('summary')) return cmdSummary();
-  failExit('BAD_ARGS', '需要 --window / --clean / --summary 之一');
+  if (has('stress')) return cmdStress();
+  failExit('BAD_ARGS', '需要 --window / --clean / --summary / --stress 之一');
 })().catch((error) => failExit('CLI_CRASHED', String((error && error.stack) || error).slice(0, 400)));

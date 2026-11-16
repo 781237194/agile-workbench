@@ -33,6 +33,10 @@ const ROUTE_DAEMON_STALE_BEATS = 3;
 // 守护状态界面自检（T-20261114-063256-b417）：真实窗口 + 沙盘守护状态文件，三态与两态截图。
 const IS_DAEMON_CHECK = process.argv.includes('--daemon-check');
 const IS_SELFTEST = process.argv.includes('--selftest');
+// R-c1ed（卷2 §五）：压测长跑用 --no-wake 启动——不弹通知、不写邮箱、不唤醒，但**必须留审计**。
+// 这里把标记落到环境变量里，渲染进程（preload）据此决定 toast 只记审计还是显示并自增 data-toast-count。
+const IS_NO_WAKE = process.argv.includes('--no-wake') || String(process.env.AWB_NO_WAKE || '') === '1';
+if (IS_NO_WAKE) process.env.AWB_NO_WAKE = '1';
 // 布局自检（T-846e）：在真实窗口里量 1280/1680/2560 三档并截图；只在显式参数下跑，不影响正常启动。
 const IS_LAYOUT_CHECK = process.argv.includes('--layout-check');
 // 评审弹窗真实点击自检（B-fe22）：真实窗口点“通过/打回”，抓 DOM 反馈与工作流落账；只在显式参数下跑。
@@ -5379,6 +5383,33 @@ function registerIpc() {
       return { ok: true, state: mailboxWatcher.state() };
     } catch (error) {
       return { ok: false, code: 'MAILBOX_FAILED', message: String((error && error.message) || error).slice(0, 200) };
+    }
+  });
+  // ── R-c1ed（卷2 §五 / T-20261116-100355-9bda）：通知审计 ───────────────────────────────
+  // 每行固定 {at, level, text, source, suppressed}；被 --no-wake 压制掉的 toast **也写一行**
+  // （suppressed='no-wake'），否则「没发」与「没记」分不清。落点：团队/状态/项目/<项目>/通知审计.jsonl。
+  ipcMain.handle('notify:state', async () => ({ ok: true, noWake: Boolean(IS_NO_WAKE) }));
+  ipcMain.handle('notify:audit', async (_e, payload) => {
+    const p = payload || {};
+    try {
+      const { name } = teamProjectNameOf(p);
+      // 渲染层只带 {level,text,source,suppressed}（不带 projectId），项目取当前活动工作区兜底
+      const activeRow = mailboxActiveProject();
+      const projectName = String(name || (activeRow && (activeRow.teamName || activeRow.name)) || '').trim();
+      if (!projectName) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目' };
+      const dir = path.join(teamTools.layout.projectsDir, teamTools.teamSlug(projectName, 60));
+      const row = {
+        at: new Date().toISOString(),
+        level: String(p.level || 'info').slice(0, 20),
+        text: String(p.text || '').replace(/\s+/g, ' ').trim().slice(0, 300),
+        source: String(p.source || 'toast').slice(0, 40),
+        suppressed: String(p.suppressed || '').slice(0, 40),
+      };
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, '通知审计.jsonl'), JSON.stringify(row) + '\n', 'utf8');
+      return { ok: true, row, file: path.join(dir, '通知审计.jsonl') };
+    } catch (error) {
+      return { ok: false, code: 'NOTIFY_AUDIT_FAILED', message: String((error && error.message) || error).slice(0, 200) };
     }
   });
   // 在场/唤醒留痕失败不能把主流程带崩：找不到对应工作区就只打日志，不造假记录。

@@ -108,7 +108,7 @@ const LIVE_TTL_MS = 10 * 60 * 1000;
 // 清单异常时只降级到旧两档行为，不另立第二份真值。
 const THEME_MANIFEST = (typeof window !== 'undefined' && window.ThemeManifest) || null;
 const THEME_STORAGE_KEY = 'awb.theme';
-const THEME_ORDER = (THEME_MANIFEST && Array.isArray(THEME_MANIFEST.THEME_ORDER)) ? THEME_MANIFEST.THEME_ORDER : [];
+const THEME_ORDER_APP = (THEME_MANIFEST && Array.isArray(THEME_MANIFEST.THEME_ORDER)) ? THEME_MANIFEST.THEME_ORDER : [];
 const THEME_NAME = (THEME_MANIFEST && THEME_MANIFEST.THEME_NAMES) || { dark: '暗金', light: '暖白' };
 const TASK_STATUS = { todo: '待办', doing: '进行中', review: '待评审', done: '已完成' };
 const OWNER_STATUS = { optional: '未选择', approved: '已通过', skipped: '已跳过', rejected: '已打回', pending: '待审' };
@@ -779,16 +779,35 @@ function humanError(value) {
     .trim();
 }
 
-function toast(message, kind = '') {
+// R-c1ed（卷2 §五）注：这里用 `const` 而不是 `function` 声明——页面里有 `<div id="toast">`，
+// 全局函数声明会被同名具名元素盖住（`typeof toast === 'object'`），导致本文件里的 toast() 调用
+// 与外部脚本/自动化都调不动。全局词法绑定（const/let）优先于 window 具名属性，故改用 const。
+const toast = function toast(message, kind = '') {
   const el = $('#toast');
   if (!el) return;
-  el.textContent = modeCopyText(humanError(message));
+  const text = modeCopyText(humanError(message));
+  // R-c1ed（卷2 §五）：toast 是唯一通知入口——每次自增 [data-toast-count]（压测前后差=0 的载体），
+  // 并落 通知审计.jsonl：被 --no-wake 压制掉的 toast **也必须写一行** suppressed='no-wake'，
+  // 否则「没发」与「没记」分不清。
+  const api = (typeof window !== 'undefined' && window.workbench) ? window.workbench : {};
+  const audit = (suppressed) => {
+    try {
+      if (typeof api.notifyAudit === 'function') {
+        api.notifyAudit({ level: kind || 'info', text, source: 'toast', suppressed });
+      }
+    } catch { /* 审计失败不影响 toast 本身 */ }
+  };
+  if (api.noWake) { audit('no-wake'); return; }
+  const nextCount = Number(el.getAttribute('data-toast-count') || 0) + 1;
+  el.setAttribute('data-toast-count', String(nextCount));
+  el.textContent = text;
   el.className = 'toast show' + (kind ? ' ' + kind : '');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     el.className = 'toast' + (kind ? ' ' + kind : '');
   }, kind === 'bad' || kind === 'warn' ? 4200 : 2600);
-}
+  audit('');
+};
 
 /* ── 主题：双维度 5 档（R-fe90 F-1~F-5）────────────────────────────
  * data-style(native|tech|anime|glass) × data-theme(dark|light)，合法组合 5 个；
@@ -821,9 +840,9 @@ function currentTheme() {
 function currentThemeId() {
   const el = document.documentElement;
   const id = el.getAttribute('data-theme-id');
-  if (id && THEME_ORDER.indexOf(id) >= 0) return id;
+  if (id && THEME_ORDER_APP.indexOf(id) >= 0) return id;
   const joined = `${el.getAttribute('data-style') || 'tech'}-${currentTheme()}`;
-  return THEME_ORDER.indexOf(joined) >= 0 ? joined : (THEME_ORDER[0] || 'tech-dark');
+  return THEME_ORDER_APP.indexOf(joined) >= 0 ? joined : (THEME_ORDER_APP[0] || 'tech-dark');
 }
 
 function themeLabel(themeId) {
