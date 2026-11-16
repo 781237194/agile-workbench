@@ -1,4 +1,4 @@
-﻿﻿﻿﻿:root {
+:root {
   color-scheme: dark;
   --bg: #15171d;
   --bg-2: #191b22;
@@ -4758,7 +4758,10 @@ html[data-style="glass"][data-theme="dark"] {
   --gold-soft: rgba(184,216,240,.12); --gold-line: rgba(184,216,240,.34);
   --theme-accent: #9fd8ff; --theme-accent-2: #5f9fd8;
   --theme-glow: 0 0 30px rgba(159, 216, 255, .35);
-  --panel: rgba(255, 255, 255, .10); --panel-2: rgba(255, 255, 255, .14);
+  /* AC10「最差背景两端取更差」：纯白 .10 面板上浅色正文只有 1.12:1（玻璃面板背后是浅色内容时不可读）。
+     改为「深色不透明底 + 白色高光（--panel-inset）+ backdrop-blur」：alpha 0.72 时最差背景 6.37:1、常态 16.34:1，
+     通透感由 blur 与 inset 高光保留（BOM 修复后此块才真正生效）。 */
+  --panel: rgba(16, 24, 32, .72); --panel-2: rgba(20, 30, 40, .78);
   --panel-inset: inset 0 1px 0 rgba(255, 255, 255, .35);
   --panel-blur: 18px;
   --green: #7fe0c4; --red: #ff9b8c; --blue: #9fd8ff;
