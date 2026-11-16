@@ -19,7 +19,9 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', '75ec-gate');
+// B-20261116-055303-07b6：沙盘统一入口（唯一临时目录 + 退出清理）
+const { mkTempSandbox } = require(path.join(__dirname, 'lib', 'sandbox-dir.cjs'));
+const SB = mkTempSandbox('75ec-gate');
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');
@@ -81,6 +83,12 @@ run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);
 const pm = run(['boot', '--role', 'pm', '--project', PROJECT, '--session', 's-gate-pm', '--json']).json.token;
 const product = run(['boot', '--role', 'product', '--project', PROJECT, '--session', 's-gate-pd', '--json']).json.token;
 const p1 = run(['boot', '--role', 'programmer1', '--project', PROJECT, '--session', 's-gate-p1', '--json']).json.token;
+// B-20261117（沙盘级联）：沙盘角色从未读过经验教训登记册，req create/review 会撞 LESSONS_UNREAD；
+// 按**实际执行者角色**各读一次（门禁是按角色记的，只读 pm 不够），让后续门禁用例可达；
+// 真实环境该门禁仍生效，属夹具级联规避（同 test-a163 做法）。
+run(['lessons', 'read', '--boot', pm, '--project', PROJECT, '--json']);
+run(['lessons', 'read', '--boot', product, '--project', PROJECT, '--json']);
+run(['lessons', 'read', '--boot', p1, '--project', PROJECT, '--json']);
 
 // 需求（行由 req review 建立；G1 在沙盘无正文时软放行）
 const reqA = run(['req', 'create', '--boot', product, '--project', PROJECT, '--title', '门禁夹具需求', '--priority', 'P1', '--acceptance', 'AC', '--json']).json.requirement.id;
