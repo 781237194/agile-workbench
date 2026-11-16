@@ -17402,6 +17402,8 @@ function renderMemoryProjectDir() {
     const store = readStore();
     const project = (store.projects || []).find((item) => item && item.id === store.activeProjectId);
     // 缺陷 B-20261115-171218-3fb8（P1）：优先尊重隔离根，否则测量实例会与真实实例共写同一分片
+    // B-9300 初核 a：本函数**故意独立解析 env**（只隔离「渲染采样目录」，不改团队状态/工作流/任务路径）；
+    // 勿并入 resolveTeamRoot()——并进去会把工作流/任务也切到沙盘，违背 3fb8 的「半隔离」设计。
     const envRoot = String(process.env.AWB_TEAM_ROOT || process.env.TEAM_ROOT || '').trim();
     if (envRoot) {
       const name = String((project && (project.teamName || project.name)) || store.activeProjectId || '').trim();
