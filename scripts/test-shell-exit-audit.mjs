@@ -116,6 +116,11 @@ ok('E5 两行都带 processType=main 与 aliveSec>0（可用于定位退出时�
   && Boolean(exitRow && exitRow.processType === 'main' && Number(exitRow.aliveSec) >= 0),
   { windowRow, exitRow });
 ok('E6 结论：正常退出路径必有审计行（本用例 aliveSec≈' + aliveSec + 's）', Boolean(windowRow && exitRow), { aliveSec });
+// T-c25a ③（PM 2026-11-16 12:07 打回要求）：退出审计必须带「退出码 / 原因 / 时间」，且 shell-quit 行要有数字 exitCode。
+const quitRow = rows.find((r) => String(r.kind || '') === 'shell-quit');
+ok('E7 审计里有 shell-quit 行且 exitCode 是数字（0=正常）', Boolean(quitRow) && typeof quitRow.exitCode === 'number', { quitRow, kinds: rows.map((r) => r.kind) });
+ok('E8 退出三行都带 at + reason 字段（时间/原因可判）',
+  [windowRow, exitRow, quitRow].every((r) => r && String(r.at || '') && r.reason !== undefined), { windowRow: Boolean(windowRow), exitRow: Boolean(exitRow), quitRow: Boolean(quitRow) });
 const abnormal = rows.filter((r) => /^main-/.test(String(r.kind || '')));
 if (abnormal.length) console.log(`      本轮另有主进程异常行 ${abnormal.length} 条：${JSON.stringify(abnormal.slice(0, 3)).slice(0, 300)}`);
 

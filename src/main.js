@@ -17735,6 +17735,11 @@ function installShellAuditSensors() {
     console.error('[main-rejection]', String((reason && (reason.stack || reason.message)) || reason).slice(0, 800));
   });
   app.on('will-quit', () => { recordShellAudit('shell-exit', {}); });
+  // T-c25a ③：退出码要落审计——'quit' 事件带真实 exitCode（0=正常、崩溃/失败为正或负）。
+  app.on('quit', (_event, exitCode) => {
+    const code = Number.isFinite(Number(exitCode)) ? Number(exitCode) : null;
+    recordShellAudit('shell-quit', { exitCode: code, reason: code === 0 ? 'normal-quit' : 'abnormal-quit' });
+  });
 }
 
 function installCrashSensors() {

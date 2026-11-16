@@ -61,6 +61,24 @@ fs.writeFileSync(workbench, JSON.stringify({
 
 const crashFile = path.join(STATE, '渲染崩溃.jsonl');
 const readRows = () => (fs.existsSync(crashFile) ? fs.readFileSync(crashFile, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : []);
+// c25a ②：--no-wake 的「不写邮箱」要能量化——统计沙盘邮箱里的消息 json 数（跑前基线 → 跑后）
+const countMailbox = () => {
+  let n = 0;
+  const mailRoot = path.join(TEAM, '状态', '邮箱');
+  const walk = (dir) => {
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const ent of entries) {
+      if (ent.isDirectory()) walk(path.join(dir, ent.name));
+      else if (ent.name.endsWith('.json')) n += 1;
+    }
+  };
+  let roles = [];
+  try { roles = fs.readdirSync(mailRoot, { withFileTypes: true }).filter((e) => e.isDirectory()); } catch { roles = []; }
+  for (const role of roles) walk(path.join(mailRoot, role.name));
+  return n;
+};
+const mailboxCountBefore = countMailbox();
 
 // ── 起实例 ──────────────────────────────────────────────────────────────
 const env = {
@@ -69,7 +87,10 @@ const env = {
   TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'), TEAM_WORKBENCH_JSON: workbench, TEAM_SELFTEST: '1',
 };
 const startedAt = new Date();
-const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--no-wake', '--remote-debugging-port=' + PORT], { cwd: ROOT, env, stdio: 'ignore', windowsHide: false });
+// 把壳的 stdout/stderr 落本地日志：AC2 要「哪个定时器/事件退的」，必须看 [win-ctl]/[win-close]/[shell-audit] 原文。
+const runLogPath = path.join(SB, 'run.log');
+const runLog = fs.openSync(runLogPath, 'a');
+const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--no-wake', '--remote-debugging-port=' + PORT], { cwd: ROOT, env, stdio: ['ignore', runLog, runLog], windowsHide: false });
 let childExit = null;
 child.on('exit', (code, signal) => { childExit = { code, signal, at: new Date() }; });
 
@@ -117,6 +138,16 @@ if (!childExit) {
 const endedAt = new Date();
 const minutesRan = Number(((endedAt - startedAt) / 60000).toFixed(2));
 const rows = readRows();
+// c25a ②（PM 2026-11-16 12:07）：30 分钟长跑必须能证明「--no-wake 四不」——
+// 邮箱零新增 + 唤醒.jsonl 无新增（或全 suppressed=no-wake），所以把这两组数一起落进证据。
+// （countMailbox 已在起进程之前定义并取过基线 mailboxCountBefore）
+const wakeFile = path.join(STATE, '唤醒.jsonl');
+const wakeRows = (() => {
+  try {
+    return fs.readFileSync(wakeFile, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
+  } catch { return []; }
+})();
+const wakeSuppressedAll = wakeRows.every((row) => String(row && row.suppressed || '') === 'no-wake');
 const summary = {
   run: RUN, project: PROJ, startedAt: startedAt.toISOString(), cdpUpAt: upAt ? upAt.toISOString() : '',
   endedAt: endedAt.toISOString(), minutesRan, graceful,
@@ -124,6 +155,11 @@ const summary = {
   auditRowsBeforeClose: beforeCloseRows.map((r) => r.kind),
   auditRowsAfterClose: rows.map((r) => r.kind),
   crashKinds: rows.map((r) => ({ kind: r.kind, reason: String(r.reason || '').slice(0, 120), stack: String(r.stack || '').slice(0, 300), aliveSec: r.aliveSec })),
+  mailboxCount: countMailbox(),
+  mailboxNew: countMailbox() - mailboxCountBefore,
+  wakeRows: wakeRows.length,
+  wakeAllSuppressedNoWake: wakeRows.length ? wakeSuppressedAll : true,
+  logFile: runLogPath,
   pass30: minutesRan >= 30,
 };
 const evidDir = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '证据-c25a');
