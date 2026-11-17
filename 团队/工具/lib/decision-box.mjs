@@ -84,7 +84,13 @@ export function writeDecisionBox(projectName, box, opts = {}) {
   }
   const next = { schema: 1, project: String(projectName || ''), items: box.items || [], meta: box.meta || {}, updatedAt: nowIso() };
   const caseName = (opts && opts.case) || currentWriteCase;
-  writeJsonAtomic(file, next, caseName ? { case: caseName } : undefined);
+  try {
+    writeJsonAtomic(file, next, caseName ? { case: caseName } : undefined);
+  } catch (error) {
+    // R-ad44 AC5：写盘失败不静默——留事件审计后原样抛出（调用方语义不变）。
+    try { appendEvent({ role: 'system', action: 'decision_box_write_failed', project: String(projectName || ''), target: file, note: String((error && (error.code || error.message)) || error).slice(0, 200) }); } catch { /* 审计失败不掩盖原始错误 */ }
+    throw error;
+  }
   return { file, box: next };
 }
 
