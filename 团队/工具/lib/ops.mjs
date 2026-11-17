@@ -1853,11 +1853,108 @@ async function wakeSessionForMessage({ project, to, msg, isDispatch = true, engi
   }
 }
 
+/** 已唤醒的 messageId 集合（读 唤醒.jsonl 的 messageId / messageIds；坏行跳过不抛）。 */
+function wokenMessageIdsOf(project) {
+  const set = new Set();
+  try {
+    const file = path.join(projectStatePaths(project).dir, '唤醒.jsonl');
+    if (!fs.existsSync(file)) return set;
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let row = null;
+      try { row = JSON.parse(line); } catch { continue; }
+      if (!row) continue;
+      if (row.messageId) set.add(String(row.messageId));
+      if (Array.isArray(row.messageIds)) for (const id of row.messageIds) if (id) set.add(String(id));
+    }
+  } catch { /* 读不到就当没有已唤醒记录（宁可多唤醒一次也不漏） */ }
+  return set;
+}
+
+/**
+ * B-20261117-201316-1441：PM 邮箱补唤醒（mailbox_digest）。
+ *
+ * 根因：各模块直接 sendMessage({to:'pm', type:'escalation'|'wake_failed'|'req_review'}) 只写邮箱、不唤醒 PM
+ * （今日实测 504 条无对应唤醒）。这里在队列泵每拍兜底：扫 pm/new 里 **age<15 分钟且 messageId 不在唤醒日志** 的消息，
+ * 合并成 **1 条** to=pm 唤醒（reason=mailbox_digest，含条数 / 类型分布 / 前 3 条摘要），
+ * dedupeKey = `mailbox_digest:<id 列表哈希>`；同 messageId 不重复（第二次调用因已进唤醒日志而不再发）。
+ * 只读邮箱 + 写唤醒日志/队列，不发消息、不改邮箱状态。
+ */
+export async function pmMailboxDigest(project, { now = Date.now(), maxAgeMs = 15 * 60 * 1000, limit = 60, engineUrl = '' } = {}) {
+  const name = String(project || '');
+  if (!name) return { ok: false, code: 'PROJECT_REQUIRED', message: '需要项目名' };
+  let inbox = [];
+  try { inbox = listInbox('pm', { project: '' }); } catch { inbox = []; }
+  const woken = wokenMessageIdsOf(name);
+  const fresh = [];
+  for (const msg of inbox) {
+    if (!msg || !msg.id) continue;
+    const id = String(msg.id);
+    if (woken.has(id)) continue;
+    const atMs = Date.parse(String(msg.ts || msg.deliveredAt || ''));
+    if (!Number.isFinite(atMs) || now - atMs > maxAgeMs) continue;
+    fresh.push(msg);
+  }
+  if (!fresh.length) return { ok: true, project: name, pending: 0, woken: 0, reason: 'mailbox_digest' };
+  fresh.sort((a, b) => Date.parse(String(a.ts || '')) - Date.parse(String(b.ts || '')));
+  const picked = fresh.slice(0, limit);
+  const byType = {};
+  for (const msg of picked) {
+    const type = String(msg.type || msg.kind || 'note');
+    byType[type] = (byType[type] || 0) + 1;
+  }
+  const typeText = Object.entries(byType).sort((a, b) => b[1] - a[1]).map(([t, n]) => `${t} ${n}`).join(' / ');
+  const head3 = picked.slice(0, 3).map((msg) => `· ${roleCnName(String(msg.from || 'system'))}·${String(msg.type || 'note')}：${truncate(String(msg.subject || '(无主题)'), 60)}`);
+  const ids = picked.map((msg) => String(msg.id));
+  const body = [
+    `PM 邮箱有 ${picked.length} 条未唤醒的消息（窗口 15 分钟）${fresh.length > picked.length ? `，另有 ${fresh.length - picked.length} 条排队下一拍` : ''}。`,
+    `类型分布：${typeText || '未知'}`,
+    '前几条：',
+    ...head3,
+    '（这是队列泵的兜底唤醒，避免系统/升级/评审消息只落邮箱不叫人；逐条正文用 team.mjs inbox --all 或 read --id 看。）',
+  ].join('\n');
+  const wake = await wakeWithGuard({
+    project: name,
+    to: 'pm',
+    isDispatch: false,
+    engineUrl,
+    reason: 'mailbox_digest',
+    dedupeKey: `mailbox_digest:${ids.join(',')}`,
+    msg: {
+      // 唤醒日志的 messageIds 取自 msg.id：单条直接用原消息 id（可直接回查），多条把 id 列表写进 id。
+      id: ids.length === 1 ? ids[0] : `WAKE-DIGEST-${ids.length}:${ids.join(',')}`,
+      from: 'system',
+      to: 'pm',
+      type: 'notice',
+      subject: `PM 邮箱未唤醒消息 ${picked.length} 条（${typeText || '未知'}）`,
+      body,
+      project: name,
+    },
+  });
+  return { ok: true, project: name, pending: fresh.length, woken: picked.length, messageIds: ids.slice(0, 5), byType, wake };
+}
+
+/**
+ * 统一入口：给 PM 发消息并立刻唤醒（新代码禁止裸 sendMessage({to:'pm'})）。
+ * 迁移期：老调用点未改也能被 pmMailboxDigest 兜底（≤60 秒一次合并唤醒）。
+ */
+export async function sendToPmWithWake(project, { subject = '', body = '', type = 'notice', engineUrl = '', reason = '' } = {}) {
+  const name = String(project || '');
+  if (!name) return { ok: false, code: 'PROJECT_REQUIRED' };
+  const msg = sendMessage({ from: 'system', to: 'pm', project: name, type, subject, body });
+  const wake = await wakeWithGuard({ project: name, to: 'pm', msg, isDispatch: false, engineUrl, reason: reason || `send_to_pm:${type}` });
+  return { ok: true, messageId: msg.id, type, wake };
+}
+
 /**
  * 队列续跑：角色完成后自动取该角色下一条排队派单（send --ack --queue 入队）。
  * 目标角色仍忙（G5）则保留队列并返回 blocked；working 幽灵满 30 分钟不占名额。
  */
 export async function pumpDispatchQueue(project, { role = '', source = 'tick' } = {}) {
+  // B-20261117-201316-1441：每拍先兜底补唤醒 PM 邮箱（系统/升级/评审消息只写邮箱不唤醒 → 504 条漏讯）。
+  // 失败只记 warning，绝不阻断派单泵。
+  let mailboxDigest = null;
+  try { mailboxDigest = await pmMailboxDigest(project); } catch (e) { mailboxDigest = { ok: false, why: String((e && e.message) || e).slice(0, 200) }; }
   // R-1dfb：审计第 12 键 source ∈ {deadline,tick}（deadline=到期定时器，tick=60 秒兜底）；非法值按 tick 记。
   const pumpSource = source === 'deadline' ? 'deadline' : 'tick';
   // B-384e：队列泵不受已过期派单锁影响——先释放过期锁再判角色忙闲。
