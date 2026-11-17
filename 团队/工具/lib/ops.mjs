@@ -11953,6 +11953,12 @@ export function cmdLessons(args) {
       scene: args.scene, lesson: args.lesson, next: args.next,
     });
     if (!r.ok) fail(r.code, lessonsFailText(r.code), { wrote: false, code: r.code });
+    // B-20261117-082019-db25：同内容重复 append → noop（不写行、不写审计、文件 sha 不变），只回 skipped 计数
+    if (r.noop === true) {
+      out(args, `经验教训未重复入册：与本段已有条目同内容（${r.id || '无新 id'}），已跳过（skipped=1）`,
+        { ok: true, id: r.id || '', noop: true, skipped: 1, wrote: false, fileSha: r.fileSha, after: r.after || null });
+      return;
+    }
     // 卷 §二.5：自写后刷新基线（lastNoticeSha / lastSelfWriteAt）
     lessons.markSelfWrite({
       stateDir: st.dir, projectDir: projectPath, role: b.role, fileSha: r.fileSha,

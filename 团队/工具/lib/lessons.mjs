@@ -784,6 +784,10 @@ function commitLessonsChange(projectDir, teamRoot, role, action, mutate) {
     const plan = mutate({ lines, parsed });
     if (!plan || plan.ok === false) return plan || { ok: false, code: 'LESSONS_WRITE_FAILED' };
     const atIso = (plan.at instanceof Date ? plan.at : parseAwbNow().at).toISOString();
+    // B-20261117-082019-db25：同内容不重复入册——不写审计、不改文件（文件 sha 自然不变），只返回 skipped 计数。
+    if (plan.noop === true) {
+      return { ok: true, id: plan.id || '', noop: true, skipped: true, at: atIso, fileSha: sha256(cur.text), before: null, after: plan.after || null };
+    }
     // 1) 审计先行
     const audit = writeAudit(teamRoot, { at: atIso, role, action, id: plan.id || '', before: plan.before == null ? null : plan.before, after: plan.after == null ? null : plan.after, reason: plan.reason || '' });
     if (!audit.ok) return { ok: false, code: 'LESSONS_AUDIT_FAILED' };
@@ -816,6 +820,28 @@ function appendLesson(opts) {
     if (!range) return { ok: false, code: 'LESSONS_SECTION_MISSING' };
     const now = parseAwbNow();
     const dateStr = formatDateOnly(now.at);
+    // B-20261117-082019-db25：append 前按「规范化文本」去重（同一角色段内 scene/lesson/next 三格规范化后相同即视为重复）。
+    // 规范化＝去首尾空白 + 连续空白折叠 + 去掉单元格里转义出来的 \\|，避免「多一个空格就重复入册」。
+    const norm = (v) => String(v == null ? '' : v).replace(/\\\|/g, '|').replace(/\s+/g, ' ').trim();
+    const wanted = [norm(scene), norm(lessonText), norm(nextText)].join('\u0001');
+    for (let i = range.start + 1; i < range.end; i += 1) {
+      const line = String(lines[i] || '');
+      if (!/^\s*\|/.test(line)) continue;
+      const cells = line.split('|').map((c) => c.trim());
+      // 表格行：'' | 日期 | 场景 | 教训 | 下一步 | <!-- id:... --> | ''
+      if (cells.length < 6) continue;
+      const body = cells.slice(2, 5);
+      if (body.some((c) => /^-+$/.test(c))) continue; // 表头分隔行
+      const existing = body.map(norm).join('\u0001');
+      if (existing === wanted) {
+        const idMatch = /<!--\s*id:(L-\d{8}-\d+)\s*-->/.exec(line);
+        return {
+          ok: true, noop: true, id: idMatch ? idMatch[1] : '',
+          after: { date: cells[1] || '', scene, lesson: lessonText, next: nextText },
+          lines, at: now.at,
+        };
+      }
+    }
     const seq = maxSeqForToday(lines, dateStr) + 1;
     const id = `L-${dateStr.replace(/-/g, '')}-${seq}`;
     const row = `| ${dateStr} | ${scene} | ${lessonText} | ${nextText} | <!-- id:${id} -->`;
