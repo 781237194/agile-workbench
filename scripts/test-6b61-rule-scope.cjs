@@ -147,6 +147,25 @@ const norm = (t) => String(t)
     return '4/4 放行';
   });
 
+  // B-20261117-094141-66f8（三处文案/注释与实现相反）：三条静态 grep 断言，防止旧口径回来。
+  check('S6 B-66f8 文案一致性：help 不列代管代验收 / G2.5 注释写真实范围 / boot 纪律行教「铁律按需」', () => {
+    const ops = read(path.join(ROOT, '团队', '工具', 'lib', 'ops.mjs'));
+    // ① team.mjs help：代管示例只列 approved|rejected|skipped，不再把 accepted/--action accept 当可用写法
+    const help = read(path.join(ROOT, '团队', '工具', 'team.mjs'));
+    assert.ok(!/--decision accepted --action accept/.test(help), 'help 仍把代管代验收（--decision accepted --action accept）列为可用示例');
+    assert.ok(/--decision approved\|rejected\|skipped/.test(help), 'help 代管示例未列 approved|rejected|skipped');
+    assert.ok(/代管代验收一律 PROXY_ACCEPT_FORBIDDEN/.test(help), 'help 未写明代管代验收会被 PROXY_ACCEPT_FORBIDDEN');
+    assert.ok(!/owner proxy decide[\s\S]{0,300}--decision accepted --action accept/.test(ops), 'cmdOwnerProxyDecide 文档注释仍把代验收当可用用法');
+    // ② ops.mjs G2.5 注释：写明真正生效范围，不再说「开发派单仍由 G2.5 拦」
+    assert.ok(!/开发派单仍由 G2\.5 拦/.test(ops), 'G2.5 注释仍是旧口径「开发派单仍由 G2.5 拦」');
+    assert.ok(/不调用 gateTestability/.test(ops), 'G2.5 注释未写明 runDispatchGates 不调用 gateTestability');
+    // ③ boot 简报纪律行：先读宪法（唯一最高优先级）、铁律按需；不再教「每次先读项目铁律」
+    assert.ok(!/每次先读项目铁律/.test(ops), 'boot 简报仍含「每次先读项目铁律」旧口径');
+    assert.ok(/项目铁律按需（开工\/接手读一次即可）/.test(ops), 'boot 纪律行未写「项目铁律按需（开工/接手读一次即可）」');
+    assert.ok(/每轮先读《团队宪法》（唯一最高优先级）/.test(ops), 'boot 纪律行缺「每轮先读《团队宪法》（唯一最高优先级）」');
+    return '三处均为现行口径';
+  });
+
   fs.rmSync(SB, { recursive: true, force: true });
   const pass = results.filter((r) => r.ok).length;
   console.log(`\nR6B61C_RULE_SCOPE ${JSON.stringify({ total: results.length, pass, red: results.length - pass })}`);

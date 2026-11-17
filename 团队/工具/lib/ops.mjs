@@ -830,7 +830,8 @@ function runDispatchGates({ projectName, requirementId, role, targetRole = '', a
   }
   // B-29b2 门禁互锁修复：可测性评审（TR-Q）属**需求阶段**，必须在 Owner 决定之前能跑；
   // 派 TR-Q 任务时 G3（Owner 落账）豁免，否则「TR-Q 不可测 → 落不了 Owner 决定」与「无 Owner 决定 → 派不了 TR-Q」互锁。
-  // 注意：G2.5（Owner 决定时的可测性门）不动，开发派单仍由 G2.5 拦。
+  // 注意：G2.5 只在 Owner 决定（本文件 cmdOwner 的 approved 分支）与 route-daemon 的派单闸门生效；
+  // 本函数（runDispatchGates）不调用 gateTestability —— 所以「开发派单」不由 G2.5 拦（旧注释写反了，B-66f8 更正）。
   const targetTask = (() => { try { return taskId ? loadTask(projectName, String(taskId)) : null; } catch { return null; } })();
   const isTrqTask = Boolean(targetTask) && (/TR-Q|可测性评审/i.test(String(targetTask.title || '')) || String(targetTask.type || '').toLowerCase() === 'trq');
   if (isTrqTask) {
@@ -4677,7 +4678,7 @@ export async function cmdBoot(args) {
     ? '快速模式: 需求评审=需求分析师 ｜ 技术评审记录=程序员A ｜ 投票=vote start/cast/status'
     : '完整模式: 需求评审=产品设计师 ｜ 技术评审记录=产品/程序员A ｜ 投票=vote start/cast/status');
   lines.push(`阶段: ${team.phase} ｜ 活跃成员: ${activeRoles(team).filter((r) => rolesForMode(teamMode).includes(r)).join(', ')} ｜ 当前锁: ${locks.length ? locks.map((l) => l.key + '@' + l.role).slice(0, 6).join(', ') : '无'}`);
-  lines.push(`纪律: 中文思考、中文回复、中文写文档 ｜ 每轮先读《团队宪法》（唯一最高优先级；项目铁律按需避坑） ｜ 消息≤${team.config.messageMaxChars}字 ｜ 回执≤${team.config.ackNoteMaxChars}字 ｜ 先读索引再找文件`);
+  lines.push(`纪律: 中文思考、中文回复、中文写文档 ｜ 每轮先读《团队宪法》（唯一最高优先级）；项目铁律按需（开工/接手读一次即可） ｜ 消息≤${team.config.messageMaxChars}字 ｜ 回执≤${team.config.ackNoteMaxChars}字 ｜ 先读索引再找文件`);
   lines.push('派单闭环: ack=已回执（收到/认领）≠ 已完成；执行正文任务 → 产出写本角色目录（开发代码写 site/**）→ 完成回执 + task done --evidence');
   lines.push(`结构化输出: ${OUTPUT_DISCIPLINE}`);
   const outSpec = OUTPUT_DOCS[role];
@@ -9292,9 +9293,8 @@ export async function cmdOwner(args) {
  * PM 代管落账（T-a01d）：Owner 已授权代管时，PM 代记 Owner 的评审决定。
  * 校验：当前存在未结束的代管记录 + 有 Owner 授权来源；落账固定 channel=proxy、recordedBy=pm、basis 带代管授权。
  * 用法：team.mjs owner proxy decide --project P --requirement R-... --decision approved|rejected|skipped --opinion "..."
- *      team.mjs owner proxy decide --project P --requirement R-... --decision accepted --action accept \
- *        --evidence '路径:report' --evidence '图片.png:screenshot' --opinion "..."   # T-3422：代验收（证据缺一即拒）
- * 代管可代记评审决定与「验收通过」；打回/迭代/终止必须 Owner 本人。
+ * 代管**只能代记评审决定**；需求验收只能 Owner 本人（action=accept 或 decision=accepted → PROXY_ACCEPT_FORBIDDEN），
+ * 缺陷单验收走 task accept --as pm|tester（B-9400 / B-20261116-105213-bd22 口径）。
  */
 export async function cmdOwnerProxyDecide(args) {
   // R-51de F-5⑤（proxy）：PM 代验收前必须读过当前版本经验教训登记册（改用 PM 的阅读记录）

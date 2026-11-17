@@ -134,9 +134,7 @@ const HELP = `团队工作台 v2 · 多会话敏捷团队
   owner proxy decide --project P --requirement R-... --decision approved|rejected|skipped --opinion "PM 代记依据"
         PM 代管落账（T-a01d）：必须存在未结束代管 + Owner 授权来源；写 channel=proxy、recordedBy=pm、basis.proxy；
         只代记评审决定，验收必须 Owner 本人；看板/弹窗显示【PM通过】/【PM打回】/【待 PM 评审】
-  owner proxy decide --project P --requirement R-... --decision accepted --action accept --evidence '路径:report' [--evidence '图.png:screenshot'] --opinion "..."
-        PM 代验收（T-3422）：有效代管 + 测试报告≥1 + 截图≥1（文件存在、sha256 核对）才落账；缺项 PM_ACCEPT_EVIDENCE_REQUIRED 且零副作用；
-        打回/迭代/终止仍必须 Owner 本人；evidence 可写成 JSON 数组或多次 --evidence 路径:kind
+        代管代验收一律 PROXY_ACCEPT_FORBIDDEN（B-9400 口径，需求验收只能 Owner 本人）；缺陷单验收走 task accept --as pm|tester
   find --boot T --q 关键词            # 只从项目索引里找；索引变了先重新 boot
   board [--project 项目名] [--json]      # 生成 看板.md / 看板.html / 看板.json
   broadcast emit --boot T --project P --role R --task T2 --path <相对路径> [--type analysis] [--summary "..."] [--fail-inject]
