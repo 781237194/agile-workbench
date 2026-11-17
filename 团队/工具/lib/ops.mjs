@@ -9582,8 +9582,13 @@ function lessonsFailText(code) {
 }
 
 /* ==========================================================================
- * a28a：程序提示（from=pm / senderKind=program / type=notice / ackRequired=false）
+ * a28a：程序提示（**from=system** / senderKind=program / type=notice / ackRequired=false）
  * 先落箱（sendMessage），再试唤醒；失败只记 wakeError，不重复发。
+ * BUG-FIX 2026-11-17（PM 实测）：原写 from='pm'，而消息实际投给**当事人**（to=role）。
+ *   当事人 ack 时，ack 唤醒会把「原消息正文」发给 from（本文件 ackWakeTarget = r.msg.from），
+ *   于是提醒正文被投进 **PM 会话**却无 PM 邮箱记录（PM 去 ack 会撞 MESSAGE_NOT_FOUND）。
+ *   改 from='system'：ack 唤醒的既有守卫 `ackWakeTarget !== 'system'` 直接跳过，源头止血；
+ *   语义也更准（程序提醒不是 PM 发的）。to 仍是当事人，唤醒当事人不受影响。
  * ========================================================================== */
 const LESSONS_WAKE_QUEUE = [];
 
@@ -9591,7 +9596,7 @@ const LESSONS_WAKE_QUEUE = [];
 export function sendLessonsProgramNotice({ project, to, subject, body, wake, senderKind, type, ackRequired }) {
   try {
     const msg = sendMessage({
-      from: 'pm', to, subject, body, project,
+      from: 'system', to, subject, body, project,
       type: type || 'notice',
       ackRequired: Boolean(ackRequired),
       noEcho: true,

@@ -49,7 +49,24 @@ const envBase = {
   AWB_DATA_DIR: path.join(BASE, 'data'), TEAM_WORKBENCH_JSON: WB,
 };
 sh(['project', 'add', '--name', PROJ, '--team-mode', 'full'], envBase);
-fs.copyFileSync(path.join(REPO, '项目', '工作台改造修复', '经验教训登记册.md'), path.join(PROJECT_DIR, '经验教训登记册.md'));
+// 自足化（2026-11-17 修）：原实现把**真实** 登记册/广播/审计/阅读/轮次计数 带进沙盘，
+// 真实数据一涨（如真实登记册已有 L-20261117-1..3、真实广播已有 prompt 行）断言就红——典型的「基线漂移」。
+// 现在：①登记册换成**合成最小版**（六段 + 表头，零数据行）；②清掉从真实团队带过来的全部经验教训状态文件。
+function syntheticRegister() {
+  const lines = ['# 经验教训登记册', '', '> 合成沙盘登记册（测试自足，不依赖真实数据）', ''];
+  for (const sec of ['项目经理', '产品', '需求分析师', '程序员A', '程序员B', '测试']) {
+    lines.push(`## ${sec}`, '', '| 日期 | 场景 | 教训 | 下次怎么做 |', '|---|---|---|---|', '');
+  }
+  return lines.join('\n');
+}
+fs.writeFileSync(path.join(PROJECT_DIR, '经验教训登记册.md'), syntheticRegister());
+for (const rel of [
+  ['状态', '经验教训广播.jsonl'],
+  ['状态', '经验教训审计.jsonl'],
+  ['状态', '经验教训阅读.jsonl'],
+  ['状态', '项目', PROJ, '轮次计数.json'],
+  ['状态', '项目', PROJ, '经验教训审计.jsonl'],
+]) { try { rm(path.join(ROOT, ...rel)); } catch { /* 不存在即跳过 */ } }
 const bootRaw = sh(['boot', '--role', 'pm', '--project', PROJ, '--session', 'sb-pm'], envBase);
 const TOKEN = (/令牌:\s*([0-9a-f]+)/.exec(bootRaw.out) || [])[1] || '';
 if (!TOKEN) console.log('BOOT_DEBUG code=' + bootRaw.code + ' out=' + bootRaw.out.slice(0, 500));
