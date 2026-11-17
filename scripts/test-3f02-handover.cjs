@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** B-3f02 回归：接任包结构化四段（我是谁/遗留/未闭环/卡点/下一步/必读含 hash），且 ≤2KB。 */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -22,7 +23,7 @@ function run(args) {
   const t = String(out).trim();
   return JSON.parse(t.slice(t.indexOf('{')));
 }
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'fast', '--json']);

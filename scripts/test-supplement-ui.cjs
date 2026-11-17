@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 
 /**
  * R-f9b1 增补卷（16KB 拆分产物）可读性 · 界面侧断言脚本
@@ -225,7 +226,7 @@ function runElectronChecks() {
   if (!fs.existsSync(electronPath)) {
     return { ok: false, reason: 'ELECTRON_MISSING', checks: [] };
   }
-  fs.rmSync(SANDBOX_DIR, { recursive: true, force: true });
+  rmSandbox(SANDBOX_DIR, { recursive: true, force: true });
   fs.mkdirSync(SHOT_DIR, { recursive: true });
   const env = {
     ...process.env,

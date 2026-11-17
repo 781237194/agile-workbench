@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-75ec 断言：任务层 Owner 门禁（claim/finish/派单同源 + 打回冻结 + 落账即生效）。
  *
@@ -70,7 +71,7 @@ function inboxOf(role) {
   return out;
 }
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 const teamFile = path.join(TEAM_ROOT, '状态', '团队.json');

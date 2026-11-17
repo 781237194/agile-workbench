@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261116-105213-bd22 自检：需求验收只能 Owner 本人（代管不得代需求验收）。
  *
@@ -42,7 +43,7 @@ function run(args, { allowFail = false } = {}) {
 }
 
 // ── 沙盘 ────────────────────────────────────────────────────────────────
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 const addRes = run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);

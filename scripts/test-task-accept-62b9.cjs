@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-62b9 AC6/AC7 · task accept 沙盘断言（T-3999/E2 工具侧，维修模式·PM 授权范围内）
  *
@@ -68,7 +69,7 @@ function readTask(taskId) {
 }
 
 /* ── 沙盘准备 ─────────────────────────────────────────────────────────── */
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(SB_PROJECTS, { recursive: true });
 copyDir(REAL_TEAM, SB_TEAM);
 const teamFile = path.join(SB_TEAM, '状态', '团队.json');

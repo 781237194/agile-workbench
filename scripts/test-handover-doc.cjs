@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-5b14（每角色默认交接文档）自检：AC1–AC12。
  *
@@ -39,7 +40,7 @@ function ok(name, cond, detail = '') {
 const sha = (file) => { try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); } catch { return ''; } };
 
 // ── 沙盘 ────────────────────────────────────────────────────────────────
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
 fs.mkdirSync(SB, { recursive: true });
 // 团队：去掉锁/邮箱，避免碰到真实投递面
 fs.cpSync(path.join(ROOT, '团队'), TEAM, {

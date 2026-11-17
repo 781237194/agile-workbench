@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * D-20261116-062141-06ec（Owner 选 B：只认带数字的「失败 N 项」）断言。
  *
@@ -24,7 +25,7 @@ function check(name, ok, detail) {
 }
 const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
 fs.mkdirSync(TEAM, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) && !/[\\/]邮箱[\\/]/.test(src) });
 const realOps = path.join(ROOT, '团队', '工具', 'lib', 'ops.mjs');
@@ -77,6 +78,6 @@ process.env.TEAM_SELFTEST = '1';
   fs.writeFileSync(path.join(evid, 'run-d06ec.json'), JSON.stringify({ passed, failed, results }, null, 2) + '\n', 'utf8');
   fs.writeFileSync(path.join(evid, 'run-d06ec.log'), results.map((r) => `${r.ok ? 'PASS' : 'FAIL'}  ${r.name}`).join('\n') + '\n', 'utf8');
   if (!process.env.AWB_KEEP_SANDBOX) {
-    try { fs.rmSync(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 }); } catch { /* ignore */ }
+    try { rmSandbox(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 }); } catch { /* ignore */ }
   }
 })().catch((e) => { console.error('RUN_FAILED', (e && e.stack) || e); process.exitCode = 1; });

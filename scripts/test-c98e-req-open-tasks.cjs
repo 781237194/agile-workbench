@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261115-184535-c98e 沙盘断言：ownerTestGate 增加「名下遗留任务」门。
  *
@@ -39,7 +40,7 @@ function check(name, ok, detail) {
 }
 const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
 // 沙盘里就是当前工作树 ops.mjs（不碰工作树；原暂存差异已并入 HEAD）
@@ -122,7 +123,7 @@ process.env.TEAM_SELFTEST = '1';
   fs.writeFileSync(path.join(evidDir, 'run-c98e.json'), JSON.stringify({ passed, failed, results }, null, 2) + '\n', 'utf8');
   // 沙盘默认清理（tester 反映残留 EPERM 无法复跑）；要保留设 AWB_KEEP_SANDBOX=1。
   if (!process.env.AWB_KEEP_SANDBOX) {
-    try { fs.rmSync(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 }); } catch { /* 清理失败不改变断言结论 */ }
+    try { rmSandbox(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 }); } catch { /* 清理失败不改变断言结论 */ }
   }
 })().catch((error) => {
   console.error('RUN_FAILED', (error && error.stack) || error);

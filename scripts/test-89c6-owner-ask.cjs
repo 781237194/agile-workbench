@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261116-062204-89c6 断言：PM 问 Owner 必须走 owner_ask（消息通道强制）+ 审计 + 反向不误拦。
  * 沙盘：复制真实 团队 -> _tmp/89c6/团队（清 sessionId、去锁/邮箱），TEAM_SELFTEST=1。
@@ -34,7 +35,7 @@ function inboxCount() {
 }
 function auditRows() { try { return fs.readFileSync(AUDIT, 'utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse); } catch { return []; } }
 
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
 fs.cpSync(path.join(ROOT, '团队'), TEAM, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) && !/[\\/]邮箱[\\/]/.test(src) });
 const team = JSON.parse(fs.readFileSync(path.join(TEAM, '状态', '团队.json'), 'utf8'));
 for (const m of team.members || []) m.sessionId = '';

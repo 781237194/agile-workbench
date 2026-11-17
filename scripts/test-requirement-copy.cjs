@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-dba4（工具侧，T-20261115-142650-acfe）断言：需求行大白话 copy 写入口
  *   白名单 / 非法字段拒 / 幂等 / append-only / 并发零副作用 / 重启仍在 / 纯函数兜底标记 / 两条通道同判据
@@ -45,7 +46,7 @@ function runJson(args) {
 }
 
 // ---------- 沙盘 ----------
-fs.rmSync(SANDBOX, { recursive: true, force: true });
+rmSandbox(SANDBOX, { recursive: true, force: true });
 fs.mkdirSync(path.join(SANDBOX, '团队'), { recursive: true });
 fs.mkdirSync(path.join(SANDBOX, '项目'), { recursive: true });
 const init = run(['init']);

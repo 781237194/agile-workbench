@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-1623 回归：bug 同权推进（AC1/AC1b/owner_gate/四组保护/legacy 默认不计入/AC6）。
  * 跑法：node scripts/test-bug-advance-1623.cjs
@@ -32,7 +33,7 @@ function run(args, allowFail = false) {
   }
 }
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 // 沙盘从“无 advanceRule”起步（真实 团队.json 已被 PM 配了 legacyBugBefore，会改变初始行为）

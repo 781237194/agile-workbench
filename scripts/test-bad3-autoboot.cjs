@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** R-bad3 回归：boot 自动化（单飞 / 复用 / 审计字段 / 失败告警去重）。 */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -50,7 +51,7 @@ const pmMessages = () => {
   return out;
 };
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);

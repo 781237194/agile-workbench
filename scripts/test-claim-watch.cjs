@@ -1,3 +1,4 @@
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 // 认领门自检（T-20261116-124658-303e）—— 五组夹具：边界 / 升级 / 幂等 / 硬门零写 / 认领后不误拦
 // 全部在沙盘跑（TEAM_ROOT 指向 _tmp），不碰真实团队状态。
 const fs = require('node:fs');
@@ -115,6 +116,6 @@ const gate8 = CW.dispatchGateFor(PROJECT, 'programmer2', T0);
 check('组8 硬门镜像豁免：镜像行残留标记不拦派单（isMirrorTask 同一判据）',
   gate8.ok === true && CW.isMirrorTask(mirrorFlagged) === true,
   { gate8 });
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 console.log('\n认领门自检：' + pass + '/' + (pass + fails.length) + ' PASS');
 if (fails.length) { console.log(JSON.stringify(fails, null, 2)); process.exit(1); }

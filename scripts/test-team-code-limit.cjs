@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * 提案暂存上限回归（B-20261115-152338-9c49）：代码类单文件 64KB → 8MB（默认 8MB，env TEAM_CODE_MAX_BYTES 可覆盖）。
  *
@@ -77,7 +78,7 @@ function reviewShowSign(proposalId, prog1Token, pmToken, label) {
 }
 
 // ---------- 沙盘 ----------
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 copy(REAL_TEAM, TEAM);
 const teamFile = path.join(TEAM, '状态', '团队.json');

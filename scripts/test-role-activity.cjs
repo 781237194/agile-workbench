@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-20261116-104535-1dfb（P0）自检：真实活跃度看板取数 —— 三源取值 / 未知态 / 生成物排除 / 5 分钟缓存
  *
@@ -65,7 +66,7 @@ const touchAt = (f, ms) => { fs.mkdirSync(path.dirname(f), { recursive: true });
 const statIso = (f) => new Date(fs.statSync(f).mtimeMs).toISOString();
 
 // ── 沙盘 seed ─────────────────────────────────────────────────────────────
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 fs.mkdirSync(path.join(STATE, '任务'), { recursive: true });
 fs.mkdirSync(path.join(STATE, '提交'), { recursive: true });
 for (const role of ROLES) {

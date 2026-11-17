@@ -1,3 +1,4 @@
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 // B-20261116-134316-c31c 夹具：仅 CLI boot 应放行（AC2）；真改文档仍拦（AC3）；CLI boot 写 state.boots（AC1）
 const fs = require('node:fs');
 const path = require('node:path');
@@ -114,6 +115,6 @@ const blocked = probe('tester');
 check('AC3 真改文档仍拦（RULES_CHANGED）',
   blocked.ok === false && String(blocked.code).includes('RULES_CHANGED'), blocked);
 
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 console.log('\nc31c 断言：' + pass + '/' + (pass + fails.length) + ' PASS');
 if (fails.length) { console.log(JSON.stringify(fails, null, 2)); process.exit(1); }

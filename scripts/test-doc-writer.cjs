@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-c6dc（T-20261115-145649-732e）断言：需求正文唯一写入口 / 并发检测 / 登记链 / req audit
  *
@@ -54,7 +55,7 @@ function run(args, extra = {}) {
 function runJson(args, extra = {}) { const r = run([...args, '--json'], extra); let j = null; try { j = JSON.parse(r.stdout); } catch { j = null; } return { ...r, json: j }; }
 
 // ---------- 沙盘 ----------
-fs.rmSync(SANDBOX, { recursive: true, force: true });
+rmSandbox(SANDBOX, { recursive: true, force: true });
 fs.mkdirSync(path.join(SANDBOX, '团队'), { recursive: true });
 fs.mkdirSync(path.join(SANDBOX, '项目'), { recursive: true });
 ok('沙盘 init', /团队已初始化/.test(run(['init']).stdout));

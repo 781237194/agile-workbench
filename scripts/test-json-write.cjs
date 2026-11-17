@@ -1,3 +1,4 @@
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 // R-ad44（T-20261116-184335-b7dd）自检 · 批1：唯一实现体 json-atomic.cjs/.mjs
 // 覆盖：AC1② 原子写顺序与薄包装静态判据 · AC2 50 子进程并发 0 丢失 · AC3 确定性冲突 · AC7 注入时钟锁超时 · AC8 审计 8 键
 // 另含 AC4 事件合并（同文件 20 连写 ≤1 次回调；3 个不同文件各 1 次回调）
@@ -28,7 +29,7 @@ const check = (name, ok, detail) => {
 };
 
 (async () => {
-  fs.rmSync(SB, { recursive: true, force: true });
+  rmSandbox(SB, { recursive: true, force: true });
   fs.mkdirSync(STATE, { recursive: true });
   const atomic = require(IMPL);
 
@@ -148,7 +149,7 @@ const check = (name, ok, detail) => {
 
   console.log('\nad44 写入口批1 断言：' + pass + '/' + (pass + fails.length) + ' PASS');
   if (!fails.length) {
-    fs.rmSync(SB, { recursive: true, force: true });
+    rmSandbox(SB, { recursive: true, force: true });
     console.log('沙盘已清理：' + SB);
   } else {
     console.log('沙盘保留：' + SB);

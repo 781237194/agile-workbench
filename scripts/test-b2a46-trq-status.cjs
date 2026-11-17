@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261117-013308-2a46 回归：req trq 落库不得用镜像任务的旧 requirementStatus 把工作流行回退
  *
@@ -42,7 +43,7 @@ function run(args, allowFail = false) {
   }
 }
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 // 沙盘团队名册清 sessionId，避免误唤醒真实角色

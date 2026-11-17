@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** B-f5c8 回归：read/events 锁目录被并发清理时不再 ENOENT 中断（acquireLock/readJson/appendLine 容错）。 */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -37,7 +38,7 @@ function runAsync(args) {
   });
 }
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 // 真实 状态/锁 里可能有在途锁，复制时会与并发进程抢文件（ENOENT cp）；沙盘不需要它，直接跳过。
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => !/[\\\\/]锁([\\\\/]|$)/.test(src) });

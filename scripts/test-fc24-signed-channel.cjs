@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** T-fc24 回归：PM 代签（无 tester）测试结论时 channel 必须写 proxy，其余验收保持真实通道。 */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -27,7 +28,7 @@ function run(args, allowFail = false) {
     throw e;
   }
 }
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 

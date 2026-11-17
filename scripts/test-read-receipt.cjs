@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261114-152128-44f5 回归：read 对已自动已读/已在 cur 的消息也要落 kind=read 阅读行。
  * 跑法：node scripts/test-read-receipt.cjs
@@ -34,7 +35,7 @@ const rows = () => {
 const readRows = (messageId) => rows().filter((row) => row.kind === 'read' && String(row.messageId) === String(messageId));
 
 // ---------- 沙盘 ----------
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);

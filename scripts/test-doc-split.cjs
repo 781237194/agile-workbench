@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-f9b1 工具侧断言：正文上限治理（三入口 / 拆卷 / 13 键审计 / 幂等 / 回滚 / 可读性 / 断链）
  *
@@ -113,7 +114,7 @@ function writeDoc(name, text) {
 }
 
 function reset() {
-  fs.rmSync(SANDBOX, { recursive: true, force: true });
+  rmSandbox(SANDBOX, { recursive: true, force: true });
   fs.mkdirSync(path.join(SANDBOX, '团队'), { recursive: true });
   fs.mkdirSync(path.join(SANDBOX, '项目'), { recursive: true });
   const init = run(['init']);

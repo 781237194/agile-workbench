@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-c42e（P0）回归：消息移档到 cur 后 ack 不能报 INTERNAL ENOENT。
  *
@@ -51,7 +52,7 @@ const receiptsFor = (msgId) => {
 };
 
 // ---------- 沙盘 ----------
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);

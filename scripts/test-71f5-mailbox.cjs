@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** B-71f5 回归：read 与 ack/自动已读并发时不再出现 INTERNAL ENOENT（消息搬移竞态）。 */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -37,7 +38,7 @@ function runAsync(args) {
   });
 }
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'fast', '--json']);

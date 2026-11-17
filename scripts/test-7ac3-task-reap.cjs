@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * T-20261115-110400-7ac3 沙盘断言：task reap（僵尸任务逻辑删除 + 审计 + NOOP + purge 护栏）。
  *
@@ -39,7 +40,7 @@ function run(args, allowFail = false) {
   }
 }
 
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
 fs.copyFileSync(STAGED, path.join(TEAM, '工具', 'lib', 'ops.mjs'));
@@ -116,5 +117,5 @@ const evid = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '�
 fs.mkdirSync(evid, { recursive: true });
 fs.writeFileSync(path.join(evid, 'run-7ac3.json'), JSON.stringify({ passed, failed, results }, null, 2) + '\n', 'utf8');
 if (!process.env.AWB_KEEP_SANDBOX) {
-  try { fs.rmSync(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 }); } catch { /* 清理失败不影响结论 */ }
+  try { rmSandbox(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 }); } catch { /* 清理失败不影响结论 */ }
 }

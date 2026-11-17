@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-9fbe F-9fbe-5 / T-20261115-071322-0ed7（T-ed7）断言：账本分叉的两个处置入口。
  *
@@ -77,7 +78,7 @@ const beforeMtime = ISOLATION_TARGETS.map(mtimeOf);
 // ── 0. 沙盘（不碰真实数据） ───────────────────────────────────────────────
 // 只复制工具/角色/模板/协议/宪法与名册；状态里的项目数据（真实数据）不复制。
 const SKIP_STATE = /[\\/]状态[\\/](项目|启动|锁|邮箱|备份|日志)([\\/]|$)|[\\/]日志([\\/]|$)/;
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, {
   recursive: true,

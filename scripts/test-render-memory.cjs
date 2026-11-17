@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * T-20261115-152105-7afb · R-c1ed F-1（采样分片 / 保留 / 取数通道 / 可复原判据）断言
  * 依据：增补卷-c1ed-1 §2.1/§2.2/§2.4/§3.1/§3.2/§3.3 + §5 AC-c1ed-1.1~1.4
@@ -21,7 +22,7 @@ function check(id, name, ok, detail) {
   failures.push({ id, name, detail });
   console.log(`FAIL  ${id}  ${name}${detail === undefined ? '' : ' · ' + JSON.stringify(detail).slice(0, 360)}`);
 }
-const reset = () => { fs.rmSync(SB, { recursive: true, force: true }); fs.mkdirSync(SB, { recursive: true }); return SB; };
+const reset = () => { rmSandbox(SB, { recursive: true, force: true }); fs.mkdirSync(SB, { recursive: true }); return SB; };
 const sampleAt = (iso, mb, extra) => ({ at: iso, pid: 100, type: 'renderer', guestUrl: 'http://x', workingSetMB: mb, cause: 'sample', ...(extra || {}) });
 
 /* ── S1 分片：单分片 ≤5242880B、超出切 -2、单行不跨分片 ───────────────── */
@@ -347,6 +348,47 @@ const sampleAt = (iso, mb, extra) => ({ at: iso, pid: 100, type: 'renderer', gue
   check('S7-04 24h 内无任何分片（目录 mtime 26h 前）→ code=SAMPLING_DISABLED 且 fail=true',
     winDisabled.code === 'SAMPLING_DISABLED' && winDisabled.fail === true,
     { code: winDisabled.code, fail: winDisabled.fail, samplingDisabled: winDisabled.samplingDisabled });
+}
+
+/* ── S8 缺陷 B-cb78 + 密度 forced 分子分母都剔（M-20261115-164553-b59b04）────── */
+{
+  const mkGapWin = (gaps) => {
+    const rows = [];
+    let t = Date.parse('2026-11-15T00:00:00.000Z');
+    rows.push({ at: new Date(t).toISOString(), cause: 'sample', sampledFrom: new Date(t).toISOString(), workingSetMB: 500 });
+    for (const gap of gaps) {
+      t += gap * 1000;
+      const at = new Date(t).toISOString();
+      rows.push({ at, cause: 'sample', sampledFrom: at, workingSetMB: 500 });
+    }
+    return { lines: rows, firstAt: rows[0].at, lastAt: rows[rows.length - 1].at, coverageSec: (t - Date.parse('2026-11-15T00:00:00.000Z')) / 1000 };
+  };
+  // 四个 9s 缺口：累计 36s > 30s → R1 必须判假（旧实现只加 >10s，会假绿）
+  const rec4x9 = RM.evaluateRecoverable(mkGapWin([9, 9, 9, 9]), { windowSec: 300 });
+  check('S8-01 4×9s 缺口累计 36s → R1 假（缺陷 cb78：累计按全部缺口求和）',
+    rec4x9.R1 === false && rec4x9.cumulativeGapSec === 36,
+    { R1: rec4x9.R1, cumulativeGapSec: rec4x9.cumulativeGapSec, gaps: rec4x9.gaps.length });
+  // 单缺口 11s：单缺口超 10s → 假
+  const rec11 = RM.evaluateRecoverable(mkGapWin([11]), { windowSec: 300 });
+  check('S8-02 单缺口 11s → R1 假（单缺口阈值 10s）', rec11.R1 === false, { R1: rec11.R1, gaps: rec11.gaps });
+  // 三个 9s（27s ≤30s）→ 累计不超，但单缺口 9s ≤10s → 真（边界正确）
+  const rec3x9 = RM.evaluateRecoverable(mkGapWin([9, 9, 9]), { windowSec: 300 });
+  check('S8-03 3×9s 缺口累计 27s → R1 仍真（边界不被误伤）', rec3x9.R1 === true && rec3x9.cumulativeGapSec === 27, { R1: rec3x9.R1, cumulativeGapSec: rec3x9.cumulativeGapSec });
+
+  // 密度：forced 行分子分母都剔 —— 20 行里 5 行 forced 真采样 + 5 行普通真采样 + 10 行 reused
+  const rows = [];
+  const base8 = Date.parse('2026-11-15T01:00:00.000Z');
+  for (let i = 0; i < 20; i += 1) {
+    const at = new Date(base8 + i * 1000).toISOString();
+    if (i < 5) rows.push({ at, cause: 'sample', sampledFrom: at, workingSetMB: 5, forced: true });
+    else if (i % 2 === 0) rows.push({ at, cause: 'sample', sampledFrom: at, workingSetMB: 5 });
+    else rows.push({ at, cause: 'reused', sampledFrom: new Date(base8 + (i - 1) * 1000).toISOString(), staleSec: 1, workingSetMB: 5 });
+  }
+  const recDensity = RM.evaluateRecoverable({ lines: rows, firstAt: rows[0].at, lastAt: rows[19].at, coverageSec: 19 }, { windowSec: 300 });
+  // 非 forced 15 行里真点 = i%2===0 且 i>=5 → 8 行；密度 = 8/15 ≈ 53.3%
+  check('S8-04 密度 forced 分子分母都剔（8/15 ≈53.3%）',
+    recDensity.cadence.realPoints === 8 && Math.abs(recDensity.cadence.densityPct - 53.3) < 0.15,
+    recDensity.cadence);
 }
 
 console.log(`\nR-c1ed F-1 断言：${passed}/${passed + failures.length} PASS`);

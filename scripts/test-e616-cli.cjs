@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261116-201956-e616 端到端：缺陷单验收（CLI `task accept --as pm`）第二件证据用 .log/.json 的 record。
  *
@@ -43,7 +44,7 @@ function run(args, allowFail = false) {
   }
 }
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 // 沙盘名册清空 sessionId，避免任何唤醒/投递落到真实角色（B-3c03 教训）
@@ -122,4 +123,4 @@ check('⑤ 需求级代验收仍要求截图（report+record → SCREENSHOT_REQU
   strict.includes('SCREENSHOT_REQUIRED'), strict);
 
 console.log('\n===== ' + (results.every((r) => r.ok) ? 'ALL PASS' : 'FAILED') + ' pass=' + results.filter((r) => r.ok).length + ' fail=' + results.filter((r) => !r.ok).length + ' =====');
-try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
+try { rmSandbox(SB, { recursive: true, force: true }); } catch { /* ignore */ }

@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** B-37ea 回归：req iterate 后与 reopen 同口径（写 gateInvalidatedAt + 推进 deliveryRound，旧 rejected 不挡验收/不判重复）。 */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -31,7 +32,7 @@ function run(args, allowFail = false) {
   }
 }
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'fast', '--json']);

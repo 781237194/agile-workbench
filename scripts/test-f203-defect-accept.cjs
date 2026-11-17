@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * T-20261115-014633 → T-f203 断言：R-43ad 三处已知缺口（tools 侧）。
  *   ① 缺陷单验收入口（AC2/AC3）：owner accept 缺陷单 → 任务行 acceptanceRecord（报告+第二件证据），
@@ -43,7 +44,7 @@ function run(args, allowFail = false) {
   }
 }
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
 const teamFile = path.join(TEAM_ROOT, '状态', '团队.json');

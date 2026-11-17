@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-20261115-121354-5016（P0，工具侧 T-c984）断言：
  *   ① routeOwnerAsk 四规则分流 + ruleId 可复算（AC1/AC2）
@@ -44,7 +45,7 @@ function run(args, extra = {}) {
 function runJson(args, extra = {}) { const r = run([...args, '--json'], extra); let j = null; try { j = JSON.parse(r.stdout); } catch { j = null; } return { ...r, json: j }; }
 
 // ---------- 沙盘 ----------
-fs.rmSync(SANDBOX, { recursive: true, force: true });
+rmSandbox(SANDBOX, { recursive: true, force: true });
 fs.mkdirSync(path.join(SANDBOX, '团队'), { recursive: true });
 fs.mkdirSync(path.join(SANDBOX, '项目'), { recursive: true });
 ok('沙盘 init', /团队已初始化/.test(run(['init']).stdout));

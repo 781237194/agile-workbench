@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-7849 一键代管 · 团队工具侧回归（7 条）。
  * 跑法：node scripts/test-proxy-7849.cjs
@@ -42,7 +43,7 @@ function run(args, { allowFail = false, extraEnv = {} } = {}) {
 const sha = (v) => crypto.createHash('sha256').update(JSON.stringify(v)).digest('hex');
 
 // ---------- 沙盘 ----------
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 const addRes = run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);

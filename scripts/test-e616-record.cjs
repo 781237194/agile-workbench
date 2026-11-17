@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261116-201956-e616 自检：缺陷单验收「第二件证据」接受 record（.log/.json/.txt 等运行记录）。
  *
@@ -120,7 +121,7 @@ function ok(name, cond, detail) {
     const strict = defectVerdict(['证据/测试确认-x.md', '证据/run.log:record']);
     ok('② 需求级严门未被放宽（report+record 仍缺 screenshot）', strict.v.ok === false && strict.v.missing.some((m) => m.reason === 'SCREENSHOT_REQUIRED'), strict.v.missing);
   } finally {
-    try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { rmSandbox(SB, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
   console.log('\n===== ' + (fail === 0 ? 'ALL PASS' : 'FAILED') + ' pass=' + pass + ' fail=' + fail + ' =====');

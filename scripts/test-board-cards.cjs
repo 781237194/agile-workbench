@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * T-20261117-081947-6ea6（团队看板移除【提案】【提交】【文件】三张数字卡片）真窗口取证。
  *
@@ -64,7 +65,7 @@ function copyDir(src, dst, filter) {
 }
 
 function seedSandbox() {
-  fs.rmSync(SB, { recursive: true, force: true });
+  rmSandbox(SB, { recursive: true, force: true });
   fs.mkdirSync(path.join(DATA, 'userdata'), { recursive: true });
   const store = JSON.parse(fs.readFileSync(REAL_STORE, 'utf8'));
   const project = (store.projects || []).find((p) => p && String(p.teamName || p.name || '') === PROJECT);

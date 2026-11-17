@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-0dbb「评审材料可读性」真窗口渲染断言（CDP，T-20261117-011142-d2a1）。
  *
@@ -112,7 +113,7 @@ function inlineCount(text) {
 
 /* ── 沙盘：团队骨架 + 项目正文副本 + workbench store ───────────────────── */
 function seed() {
-  fs.rmSync(SB, { recursive: true, force: true });
+  rmSandbox(SB, { recursive: true, force: true });
   fs.mkdirSync(DATA, { recursive: true });
   const projectState = path.join(TEAM, '状态', '项目', PNAME);
   copyFile(path.join(ROOT, '团队', '团队宪法.md'), path.join(TEAM, '团队宪法.md'));

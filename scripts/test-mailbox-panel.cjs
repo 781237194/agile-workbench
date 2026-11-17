@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-c4c7（T-20261115-195024-5369）· 团队收件箱实时面板自检（纯 Node，不启动 Electron）
  *
@@ -25,7 +26,7 @@ function ok(name, cond, detail = '') {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const shaList = (names) => JSON.stringify(names.slice().sort());
 
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 const TEAM = path.join(SB, '团队');
 const STATE = path.join(TEAM, '状态', '项目', 'demo');
 const AUDIT = path.join(STATE, '收件箱监听.jsonl');

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * test-ack-wake.cjs — 回执必须唤醒（Owner 2026-11-16 18:50 要求）
  *
@@ -135,7 +136,7 @@ if (msgId2) {
 }
 
 
-try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }
+try { rmSandbox(SB, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }
 
 console.log('\nack-wake 断言：' + pass + '/' + (pass + fails.length) + (fails.length ? '（失败 ' + fails.length + '）' : ' PASS'));
 process.exit(fails.length ? 1 : 0);

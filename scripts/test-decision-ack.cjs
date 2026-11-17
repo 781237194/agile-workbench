@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-9db6 AC4（T-20261114-130838-5dfc）决策箱「回执 PM」后端断言。
  *
@@ -67,7 +68,7 @@ const pmMessages = () => {
 };
 
 // ---------- 沙盘 ----------
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(TEAM_SRC, TEAM_ROOT, { recursive: true });
 

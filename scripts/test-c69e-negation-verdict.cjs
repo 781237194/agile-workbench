@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261115-171015-c69e 沙盘断言：报告结论门识别否定句/零值短语。
  *
@@ -37,7 +38,7 @@ function check(name, ok, detail) {
 }
 const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
 fs.copyFileSync(STAGED, path.join(TEAM, '工具', 'lib', 'ops.mjs'));
@@ -91,7 +92,7 @@ process.env.TEAM_SELFTEST = '1';
   fs.mkdirSync(evid, { recursive: true });
   fs.writeFileSync(path.join(evid, 'run-c69e.json'), JSON.stringify({ passed, failed, results }, null, 2) + '\n', 'utf8');
   if (!process.env.AWB_KEEP_SANDBOX) {
-    try { fs.rmSync(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 }); } catch { /* 清理失败不影响结论 */ }
+    try { rmSandbox(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 }); } catch { /* 清理失败不影响结论 */ }
   }
 })().catch((error) => {
   console.error('RUN_FAILED', (error && error.stack) || error);

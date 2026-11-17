@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261116-094215-2ff6 / B-20261116-095320-410e / B-20261116-100905-1211 真窗口断言（CDP）
  *
@@ -107,7 +108,7 @@ class Cdp {
 }
 
 function seed() {
-  fs.rmSync(SB, { recursive: true, force: true });
+  rmSandbox(SB, { recursive: true, force: true });
   fs.mkdirSync(path.join(DATA, 'userdata'), { recursive: true });
   // 团队名册（清空 sessionId，防止任何唤醒；TEAM_SELFTEST=1 双保险）
   const team = JSON.parse(fs.readFileSync(REAL_TEAM_JSON, 'utf8').replace(/^\uFEFF/, ''));

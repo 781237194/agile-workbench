@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * test-notify-delivery.cjs — B-20261116-190049-6d72（Owner 定级 P0）+ 宪法第 25 条
  *
@@ -146,5 +147,5 @@ for (const file of scanFiles) {
 check('AC4 静态禁令：全仓 0 处「遍历角色 + sendMessage」广播写法', hits.length === 0, { hits });
 
 console.log('\n通知投递断言：' + pass + '/' + (pass + fails.length) + ' PASS');
-try { fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* ignore */ }
+try { rmSandbox(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* ignore */ }
 if (fails.length) { console.log(JSON.stringify(fails, null, 2)); process.exit(1); }

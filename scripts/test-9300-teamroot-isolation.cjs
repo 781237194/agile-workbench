@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261116-071224-9300 断言：团队根统一解析（环境隔离优先）。
  * - 静态：src/main.js 中旧表达式（layout.teamRoot||TEAM_ROOT）0 命中；resolveTeamRoot 调用点 ≥22。
@@ -53,7 +54,7 @@ ok('静态：resolveTeamRoot 调用点 ≥22（含 1 处误计定义也无妨）
 ok('静态：解析器 env 优先级 AWB_TEAM_ROOT > TEAM_ROOT', /AWB_TEAM_ROOT \|\| process\.env\.TEAM_ROOT/.test(src), null);
 
 // ---------- 运行断言 ----------
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
 fs.cpSync(path.join(ROOT, '团队'), A, { recursive: true, filter: (s) => !/[\\/]锁([\\/]|$)/.test(s) && !/[\\/]邮箱[\\/]/.test(s) });
 fs.cpSync(A, B, { recursive: true });
 for (const team of [A, B]) {

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-20261116-104535-1dfb（P0）自检：派单必达 —— deadline 状态机 / 12 键投递审计 / 单链三层升级 / 三信号 idle / 自动唤醒分级 / 恢复清标
  *
@@ -167,7 +168,7 @@ function taskPath(id) { return path.join(STATE, '任务', `${id}.json`); }
 function patchTask(id, patch) { const row = readJson(taskPath(id), null); if (!row) return null; const next = { ...row, ...patch }; writeTask(next); return next; }
 
 // ── 1) 沙盘 seed ───────────────────────────────────────────────────────────
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 fs.mkdirSync(path.join(STATE, '任务'), { recursive: true });
 fs.mkdirSync(path.join(STATE, '提交'), { recursive: true });
 fs.mkdirSync(LOGS, { recursive: true });

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261115-145830-2ae4 / 62b9 断言：推进前必须读测试报告结论
  *   ① 报告 status=不通过（但任务 evidence 字符串干净）→ 需求停在 dev_done，写 requirement_advance_skipped 带原文片段
@@ -54,7 +55,7 @@ function writeReport(name, headLine, body = '', reqId = '') {
 }
 
 // ---------- 沙盘 ----------
-fs.rmSync(SANDBOX, { recursive: true, force: true });
+rmSandbox(SANDBOX, { recursive: true, force: true });
 fs.mkdirSync(path.join(SANDBOX, '团队'), { recursive: true });
 fs.mkdirSync(path.join(SANDBOX, '项目'), { recursive: true });
 ok('沙盘 init', /团队已初始化/.test(run(['init']).stdout));
@@ -139,7 +140,7 @@ const mis1 = runJson(['req', 'mispushed', '--boot', pmToken, '--project', PROJEC
 ok('b28f 巡检：accepted 无 accept 决定 → 命中', mis1.code === 0 && (mis1.json.hits || []).some((h) => h.requirementId === req3Id), JSON.stringify(mis1.json && mis1.json.count));
 ok('b28f 巡检：给出恢复命令（不含手改 JSON）', Boolean(mis1.json && mis1.json.hits[0] && /req reopen .*--recover-mispushed/.test(String(mis1.json.hits[0].recovery))), JSON.stringify(mis1.json && mis1.json.hits[0] && mis1.json.hits[0].recovery));
 const nakedReopen = runJson(['req', 'reopen', '--boot', pmToken, '--project', PROJECT, '--requirement', req3Id, '--reason', '试试不带开关']);
-ok('不带 --recover-mispushed → 拒绝（防止误放行正常验收行）', Boolean(nakedReopen.json && nakedReopen.json.code === 'REOPEN_NOT_APPLICABLE'), JSON.stringify(nakedReopen.json && nakedReopen.json.code));
+ok('不带 --recover-mispushed → 拒绝（accepted 终态，R-d225 AC4 码 REQUIREMENT_CLOSED）', Boolean(nakedReopen.json && nakedReopen.json.code === 'REQUIREMENT_CLOSED'), JSON.stringify(nakedReopen.json && nakedReopen.json.code));
 const beforeEvents5 = events().length;
 const recover = runJson(['req', 'reopen', '--boot', pmToken, '--project', PROJECT, '--requirement', req3Id, '--reason', '误推 accepted 恢复（无 accept 决定）', '--recover-mispushed']);
 ok('--recover-mispushed → 恢复成功（accepted → dev）', recover.code === 0 && String((rowOf(req3Id) || {}).status || '') === 'dev', JSON.stringify(recover.json && recover.json.fromStatus));
@@ -151,7 +152,7 @@ const wf4 = readJson(WF, { requirements: {} });
 wf4.requirements[req4Id] = { id: req4Id, title: '正常验收夹具', status: 'accepted', round: 1, decisions: [{ status: 'accepted', at: now, channel: 'ui' }], createdAt: now, updatedAt: now, priority: 'P1' };
 writeJson(WF, wf4);
 const okReopen = runJson(['req', 'reopen', '--boot', pmToken, '--project', PROJECT, '--requirement', req4Id, '--reason', '不应允许', '--recover-mispushed']);
-ok('有 accept 决定的行 → --recover-mispushed 仍拒', Boolean(okReopen.json && okReopen.json.code === 'REOPEN_NOT_APPLICABLE'), JSON.stringify(okReopen.json && okReopen.json.code));
+ok('有 accept 决定的行 → --recover-mispushed 仍拒（REQUIREMENT_CLOSED）', Boolean(okReopen.json && okReopen.json.code === 'REQUIREMENT_CLOSED'), JSON.stringify(okReopen.json && okReopen.json.code));
 
 // ---------- 跨需求误读（M-20261115-153130-d8df04）：B 的不通过报告不得挡住 A ----------
 // 两条需求都在 dev_done；A 报告 v193=通过，B 报告 v194=不通过（版本更大=项目全局最新）。

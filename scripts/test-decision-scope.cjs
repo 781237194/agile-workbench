@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-e717 团队工具侧回归：决策箱范围（F-1）/ 语义（F-1b）/ 文案（F-2）/ 历史兜底（F-5）。
  *
@@ -34,7 +35,7 @@ function run(args, { allowFail = false } = {}) {
 }
 
 // ---------- 沙盘 ----------
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);

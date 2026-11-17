@@ -1,3 +1,4 @@
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 // 认领硬门端到端（CLI 真跑）：沙盘造一条超时未认领单 → 真跑 team.mjs send --ack --task → 断言被拒且任务文件字节不变。
 // 隔离：TEAM_ROOT 复制到 _tmp（清空 sessionId）+ TEAM_SELFTEST=1 + --no-wake，绝不碰真实团队状态。
 const fs = require('node:fs');
@@ -116,6 +117,6 @@ check('e2e-5 claim clear 手工清标：任务行 claimOverdue/claimLevel 已清
   clear.code === 0 && !('claimOverdue' in afterClear) && !('claimLevel' in afterClear) && /已清|本来就干净/.test(clear.out),
   { code: clear.code, tail: String(clear.out).slice(-160), keys: Object.keys(afterClear).filter((k) => k.startsWith('claim')) });
 
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 console.log('\n认领门端到端：' + pass + '/' + (pass + fails.length) + ' PASS');
 if (fails.length) { console.log(JSON.stringify(fails, null, 2)); process.exit(1); }

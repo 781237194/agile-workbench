@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261115-143112-bbf6（P1）断言：派单队列「吞单」三件套
  *   ① 锁/占用解除后 60 秒内必投递（泵一次即达）；② 滞留 >5 分钟向 PM escalation（10 分钟去重）；
@@ -55,7 +56,7 @@ function item(over = {}) {
 }
 
 // ---------- 沙盘 ----------
-fs.rmSync(SANDBOX, { recursive: true, force: true });
+rmSandbox(SANDBOX, { recursive: true, force: true });
 fs.mkdirSync(path.join(SANDBOX, '团队'), { recursive: true });
 fs.mkdirSync(path.join(SANDBOX, '项目'), { recursive: true });
 ok('沙盘 init', /团队已初始化/.test(run(['init']).stdout));

@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** R-464f 回归：dev_done 无当前轮测试任务 → 先建再叫（needTestTask + ensureTestTask 幂等）。 */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -26,7 +27,7 @@ const run = (args) => {
   return JSON.parse(t.slice(t.indexOf('{')));
 };
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'fast', '--json']);

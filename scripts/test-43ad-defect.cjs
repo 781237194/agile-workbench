@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-43ad 回归（团队工具侧）：缺陷单标准与场景缺陷（F-43ad-1/3/4/6 可判定部分）。
  * 跑法：node scripts/test-43ad-defect.cjs
@@ -31,7 +32,7 @@ function run(args, allowFail = false) {
     throw e;
   }
 }
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);

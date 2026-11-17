@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-155a / B-a17d 回归：幽灵需求（工作流没有行的需求）的登记 / 作废 / 同步。
  *
@@ -44,7 +45,7 @@ const readJsonl = (file) => (fs.existsSync(file)
   ? fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean)
   : []);
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
 // 沙盘绝不能带真实 sessionId（B-3c03：否则 send/唤醒会打到真实会话）

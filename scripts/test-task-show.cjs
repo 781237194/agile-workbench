@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261116-092803-8181 断言：team.mjs task show 不再恒抛 INTERNAL。
  *   AC1 存在任务可读（--json 时 stdout 恰好一行 JSON）；AC2 不存在 → TASK_NOT_FOUND（不是 INTERNAL）；
@@ -33,7 +34,7 @@ function run(args) {
 function lines(s) { return String(s || '').replace(/\r/g, '').trimEnd().split('\n').filter((x) => x !== ''); }
 
 // —— 沙盘 ——
-fs.rmSync(SB, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+rmSandbox(SB, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
 fs.cpSync(path.join(ROOT, '团队'), TEAM, {
   recursive: true,
   filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) && !/[\\/]邮箱[\\/]/.test(src) && !/[\\/]\.git([\\/]|$)/.test(src),

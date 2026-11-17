@@ -1,4 +1,5 @@
 'use strict';
+const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** B-3c03 回归：沙盘根（TEAM_ROOT 非安装默认）不唤醒真实会话，但业务返回/文案口径不变。 */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -25,7 +26,7 @@ function run(args, env = baseEnv) {
   return JSON.parse(t.slice(t.indexOf('{')));
 }
 
-fs.rmSync(SB, { recursive: true, force: true });
+rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'fast', '--json']);
