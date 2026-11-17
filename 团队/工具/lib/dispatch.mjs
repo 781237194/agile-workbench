@@ -118,10 +118,21 @@ export function buildNoticePrompt({ to, project, messageId, subject, from = '', 
   const tool = teamTool ? `node "${teamTool}" ` : '';
   // Owner 2026-11-14 08:44：唤醒正文直接带消息内容（subject + body，截断 600 字），不再只给 messageId。
   const excerpt = String(body || '').trim().slice(0, 600);
-  return `【团队消息 ${messageId}】${subject}\n`
+  const head = `【团队消息 ${messageId}】${subject}\n`
     + `${from ? from + ' → ' : ''}${to} · 项目：${project}\n`
     + `AC 引用：见需求正文 §验收标准（路径 + sha256）；version/change 指回需求正文当前版本。\n`
-    + (excerpt ? `正文（已截断 600 字，全文用 read --id ${messageId}）：\n${excerpt}\n` : '')
+    + (excerpt ? `正文（已截断 600 字，全文用 read --id ${messageId}）：\n${excerpt}\n` : '');
+  // Owner 2026-11-17 19:5x：PM 下发给角色的消息不能一律标成"回复/通知，不必新建任务"——
+  // 否则角色被叫醒后只回"收到"就停，产生"全员罢工"假象，PM 只能手动逐条派单（临时解决）。
+  // 口径：来自 pm 且收件人是角色的消息=需要判断处理；确实纯知悉才允许只回"已读"。
+  if (from === 'pm' && to !== 'pm') {
+    return head
+      + `这是 PM 下发给你的消息：先判断——**需要你执行**就立即按正文做、做完发完成回执（不要只回“收到”）；\n`
+      + `确属纯知悉（无动作要求）才可只回“已读”。判断不了的，回一行“需要明确”并说明卡点。\n`
+      + `请按需读取：${tool}inbox --all，再 read --id ${messageId}。\n`
+      + `最后只回一行：已执行 <做了什么> / 需处理 <卡点> / 已读 + ${messageId}。`;
+  }
+  return head
     + `这条是回复/通知，不是新派单；按需读取并按正常流程回执即可，不必为它新建任务。\n`
     + `请按需读取：${tool}inbox --all，再 read --id ${messageId}；需要回执时只 ack。\n`
     + `只回一行：已读/已回执 + ${messageId}。`;

@@ -10308,13 +10308,24 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     const tool = layout.teamTool;
     if (!isDispatch) {
       const noticeHeader = `【团队消息 ${messageId || '(缺 id)'}】${subject}`;
-      const noticeText = [
-        noticeHeader,
-        `${from ? from + ' → ' : ''}${role} · 项目：${projectName}`,
-        '这条是回复/通知，不是新派单；按需读取并按正常流程回执即可，不必为它新建任务。',
-        `请按需读取：node ${quote(tool)} inbox --boot <令牌> --all，再 read --boot <令牌> --id ${messageId}；需要回执时只 ack。`,
-        `只回一行：已读/已回执 + ${messageId}。`
-      ].join('\n');
+      // Owner 2026-11-17 19:5x：PM → 角色的消息不能一律标"回复/通知、不必新建任务"，
+      // 否则角色被叫醒也只回"收到"就停（产生"全员罢工"假象）。来自 pm 的按"需判断处理"呈现。
+      const pmInstruction = from === 'pm' && role !== 'pm';
+      const noticeText = pmInstruction
+        ? [
+          noticeHeader,
+          `${from ? from + ' → ' : ''}${role} · 项目：${projectName}`,
+          '这是 PM 下发给你的消息：先判断——需要你执行就立即按正文做、做完发完成回执（不要只回“收到”）；确属纯知悉才可只回“已读”；判断不了的回一行“需要明确”+卡点。',
+          `请按需读取：node ${quote(tool)} inbox --boot <令牌> --all，再 read --boot <令牌> --id ${messageId}。`,
+          `最后只回一行：已执行 <做了什么> / 需处理 <卡点> / 已读 + ${messageId}。`
+        ].join('\n')
+        : [
+          noticeHeader,
+          `${from ? from + ' → ' : ''}${role} · 项目：${projectName}`,
+          '这条是回复/通知，不是新派单；按需读取并按正常流程回执即可，不必为它新建任务。',
+          `请按需读取：node ${quote(tool)} inbox --boot <令牌> --all，再 read --boot <令牌> --id ${messageId}；需要回执时只 ack。`,
+          `只回一行：已读/已回执 + ${messageId}。`
+        ].join('\n');
       return {
         ok: Boolean(projectName && ROLE_IDS.includes(role) && messageId),
         text: noticeText,
