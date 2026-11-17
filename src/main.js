@@ -200,6 +200,10 @@ app.setPath('temp', TEMP_ROOT);
 if (IS_SELFTEST) {
   process.env.AWB_STORE = path.join(SELFTEST_ROOT, 'workbench.json');
   process.env.TEAM_ROOT = path.join(SELFTEST_ROOT, '团队');
+  // B-25c7 基线修复：自测沙盘必须给团队工具子进程传 TEAM_SELFTEST=1，
+  // 否则 lessons 门禁（LESSONS_UNREAD，R-51de 接入 req create）会在第 10–14 轮级联红；
+  // 与 lessons.mjs「selftest/沙盘默认豁免、TEAM_LESSONS_ENFORCE=1 可强制开启」一致。
+  process.env.TEAM_SELFTEST = '1';
 }
 // b55c 自检同理：状态库与团队状态都落在独立沙盘，绝不碰真实团队/项目。
 if (IS_B55C_CHECK) {
