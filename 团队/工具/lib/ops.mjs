@@ -2404,6 +2404,17 @@ function countRepushToday(project, itemId, nowMs) {
     && String(row.code || '') === 'STALLED_REQUEUE').length;
 }
 
+/** B-1d90：入队过滤告警每 itemId 每天只写一行（避免每拍刷审计/唤醒）。 */
+function hasRepushFilterAlert(project, itemId, nowMs) {
+  const day = new Date(Number(nowMs) || Date.now()).toISOString().slice(0, 10);
+  let rows = [];
+  try { rows = readDeliveryAuditRows(project); } catch { rows = []; }
+  return rows.some((row) => row
+    && String(row.itemId || '') === String(itemId || '')
+    && String(row.at || '').slice(0, 10) === day
+    && String(row.code || '').startsWith('REPUSH_FILTERED_'));
+}
+
 /** B-ebbc：attempt 用尽只告警一次——审计里已有同 itemId 的 ATTEMPT_CAP 行就不再写。 */
 function hasRepushCapAlert(project, itemId) {
   let rows = [];
@@ -3138,13 +3149,23 @@ async function wakeStalledRole(project, role) {
  * 把 idle 角色的未闭环任务重新入队（幂等键 itemId+attempt：已存在同 id 项或同 attempt 近期已入队 → 不新增、不自增）。
  * 返回 true 表示本次真的新增了队列项。
  */
-function requeueStalledItem(project, { itemId, role, taskId, now, attempt }) {
+export function requeueStalledItem(project, { itemId, role, taskId, now, attempt }) {
   const name = String(project || '');
   const id = String(itemId || '');
   const nowMs = Number(now) || Date.now();
   if (!name || !id) return { enqueued: false, skipped: 'bad_args', attempt: 1 };
   const queue = readDispatchQueue(name);
   if (queue.items.some((row) => String((row && row.id) || '') === id)) return { enqueued: false, skipped: 'already_queued', attempt: Math.max(1, Number(attempt) || 1) };
+  // B-1d90：入队前再兜一层（生产端批量灌队列的根因）：
+  //   ①任务不存在（历史 itemId 残留）②已闭环 ③镜像 ④该角色当前 claim 的正是这条 → 都不入队。
+  if (String(taskId || '')) {
+    let candidateTask = null;
+    try { candidateTask = loadTask(name, String(taskId)); } catch { candidateTask = null; }
+    if (!candidateTask) return { enqueued: false, skipped: 'task_missing', attempt: Math.max(1, Number(attempt) || 1) };
+    if (statusIsClosed(candidateTask.status)) return { enqueued: false, skipped: 'task_closed', attempt: Math.max(1, Number(attempt) || 1) };
+    if (isRequirementMirrorTask(candidateTask)) return { enqueued: false, skipped: 'mirror_task', attempt: Math.max(1, Number(attempt) || 1) };
+    if (taskClaimedByRole(candidateTask, role)) return { enqueued: false, skipped: 'self_claimed', attempt: Math.max(1, Number(attempt) || 1) };
+  }
   const state = readDeliveryState(name);
   const rec = state.items[id] || null;
   const lastMs = rec ? Date.parse(String(rec.lastAt || '')) : NaN;
@@ -3253,11 +3274,14 @@ export async function recoverStalledRoles(project, { now = Date.now(), write = t
     const droppedTaskIds = openTaskIds.slice(ENQUEUE_CAP_PER_TICK);
     if (droppedTaskIds.length) {
       openTaskIds.length = ENQUEUE_CAP_PER_TICK;
-      appendRoleActivityAudit(name, {
-        at, project: name, role, action: 'enqueue_cap', verdict: info.verdict, idleMs: info.idleMs,
-        signals: info.signals, wake: { ok: false, messageId: '', code: '' }, level: 'none',
-        detail: `cap=${ENQUEUE_CAP_PER_TICK};dropped=${droppedTaskIds.join(',')}`,
-      });
+      // 审计走投递审计（活跃度审计 action 有枚举白名单，不能新增 action）：每个被丢弃任务一行 blocked/ENQUEUE_CAP。
+      for (const droppedId of droppedTaskIds) {
+        appendDeliveryAudit(name, {
+          itemId: stalledQueueItemId(role, String(droppedId)), to: role, taskId: String(droppedId), attempt: 1,
+          result: 'blocked', code: 'ENQUEUE_CAP', stallMs: Math.max(0, Number(info.idleMs) || 0),
+          messageId: '', wakeOk: false, source: 'tick',
+        });
+      }
     }
     const targetTaskIds = openTaskIds.length ? openTaskIds : [''];
     const attempt = Number(
@@ -3276,6 +3300,13 @@ export async function recoverStalledRoles(project, { now = Date.now(), write = t
         const taskId = targetTaskIds[i] || '';
         const repush = requeueStalledItem(name, { itemId, role, taskId, now: nowMs, attempt });
         if (!repush.enqueued) {
+          // B-1d90：入队被过滤（任务闭环/镜像/自身在办/任务不存在）→ 每 itemId 每天只记一行，便于核对不刷屏。
+          if (['task_closed', 'mirror_task', 'self_claimed', 'task_missing'].includes(String(repush.skipped || '')) && !hasRepushFilterAlert(name, itemId, nowMs)) {
+            appendDeliveryAudit(name, {
+              itemId, to: role, taskId, attempt: Math.max(1, Number(repush.attempt) || 1), result: 'blocked', code: 'REPUSH_FILTERED_' + String(repush.skipped || '').toUpperCase(),
+              stallMs: Math.max(0, Number(info.idleMs) || 0), messageId: '', wakeOk: false, source: 'tick',
+            });
+          }
           // B-ebbc：attempt 用尽 → 放弃并只告警一次（ATTEMPT_CAP 审计行）；之后静默，不再每拍重投。
           if (repush.skipped === 'attempt_cap' && !hasRepushCapAlert(name, itemId)) {
             appendDeliveryAudit(name, {

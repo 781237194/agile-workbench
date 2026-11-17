@@ -88,7 +88,7 @@ function check(name, ok, detail) {
 
   // ── B：真 open 未回执 → 10 分钟内不重投；+11 分钟允许重投且 attempt 递增 ──
   const realTaskId = 'T-20261117-000002-ebbc';
-  writeTask(realTaskId, { status: 'working' });
+  writeTask(realTaskId, { status: 'open' }); // B-1d90：working=角色自身在办会被过滤，重投退避用例用 unclaimed open
   const itemId = `Q-STALL-analyst-${realTaskId}`;
   const stateFile = path.join(stateDir, '派单投递状态.json');
   const seedDelivered = (attempt, lastIso) => fs.writeFileSync(stateFile, JSON.stringify({
