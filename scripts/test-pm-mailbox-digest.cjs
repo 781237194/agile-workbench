@@ -125,6 +125,25 @@ const wakeRows = (sb) => {
     r4.ok === true && r4.woken === 3 && digest4.length === digest1.length + 1 && /3 条/.test(mergedBody) && /escalation|wake_failed|req_review|note/.test(mergedBody) && String(idsInRow.join(',')).includes('M-test-wakefailed-1') && String(idsInRow.join(',')).includes('M-test-reqreview-1'),
     { r4, digestRows: digest4.length, mergedBody, idsInRow });
 
+  /* ④b B-3c45：同一批未读消息连跑 3 拍 → 仍然只有 1 条 digest（不许每拍再叫一次） */
+  const beforeTicks = wakeRows(sb).filter((r) => String(r.reason) === 'mailbox_digest').length;
+  const t1 = await ops.pmMailboxDigest(PROJECT);
+  const t2 = await ops.pmMailboxDigest(PROJECT);
+  const t3 = await ops.pmMailboxDigest(PROJECT);
+  const afterTicks = wakeRows(sb).filter((r) => String(r.reason) === 'mailbox_digest').length;
+  check('④b B-3c45：同一批消息连跑 3 拍不重复唤醒（台账按 messageId 去重，digest 条数不增）',
+    afterTicks === beforeTicks && [t1, t2, t3].every((r) => r.ok === true && r.woken === 0),
+    { beforeTicks, afterTicks, ticks: [t1.woken, t2.woken, t3.woken] });
+
+  /* ④c 有新消息进来时，digest 只含新的那条（旧消息不再被重复摘要） */
+  send(sb, { id: 'M-test-new-2', type: 'escalation', subject: '新升级：只有这条该被叫醒' });
+  const r4c = await ops.pmMailboxDigest(PROJECT);
+  const digest4c = wakeRows(sb).filter((r) => String(r.reason) === 'mailbox_digest');
+  const lastIds = String(((digest4c[digest4c.length - 1] || {}).messageIds || []).join(','));
+  check('④c 有新消息时只摘要新的那条（旧 messageId 不再进 digest）',
+    r4c.ok === true && r4c.woken === 1 && lastIds.includes('M-test-new-2') && !lastIds.includes('M-test-wakefailed-1'),
+    { r4c, lastIds });
+
   /* ⑤ sendToPmWithWake：写邮箱 + 立刻唤醒 */
   const before5 = wakeRows(sb).length;
   const sent = await ops.sendToPmWithWake(PROJECT, { subject: '直接发并唤醒', body: '这条走统一入口', type: 'escalation' });
