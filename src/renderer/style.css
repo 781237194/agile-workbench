@@ -5057,3 +5057,32 @@ html[data-effect-level="reduced"] #awb-theme-particles { display: none; }
 .mailbox-latest-item { font-size: 11px; color: var(--text); opacity: 0.86; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mailbox-latest-queue { color: var(--muted); }
 .mailbox-latest-empty { font-size: 11px; color: var(--muted); }
+
+/* ── R-6bc8（T-37f5）会话排队面板：排队数 / 四态 / 失败数 / 跳过数 / 最近成功投递 ── */
+.session-queue-block .sq-banner {
+  margin: 2px 0 6px; padding: 6px 8px; border-radius: 5px;
+  border: 1px solid var(--gold-line); background: var(--gold-soft);
+  color: var(--gold-2); font-size: 8.5px; line-height: 1.55;
+}
+.sq-rows { display: flex; flex-direction: column; gap: 4px; }
+.sq-row {
+  display: grid; grid-template-columns: minmax(64px, 1.4fr) 44px 52px 34px 34px minmax(64px, 1fr);
+  gap: 6px; align-items: center; padding: 3px 6px; border-radius: 5px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  font-size: 9px; color: var(--text);
+}
+.sq-row .sq-role { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sq-row .sq-queued { font-family: var(--mono); text-align: right; color: var(--blue); }
+.sq-row[data-sq-known="false"] .sq-queued { color: var(--dim); }
+.sq-row .sq-state { font-family: var(--mono); text-align: center; border-radius: 4px; padding: 0 4px; background: var(--panel-3); color: var(--dim); }
+.sq-row .sq-state-fail { color: var(--red); }
+.sq-row .sq-state-skip { color: var(--gold); }
+.sq-row .sq-state-ok { color: var(--green); }
+.sq-row .sq-fail, .sq-row .sq-skip { font-family: var(--mono); text-align: right; color: var(--muted); }
+.sq-row .sq-last-ok { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sq-empty { color: var(--dim); font-size: 8.5px; padding: 4px 6px; }
+.sq-backpressure {
+  margin: 0 0 6px; padding: 5px 8px; border-radius: 5px;
+  border: 1px solid var(--gold-line); background: var(--gold-soft);
+  color: var(--gold-2); font-size: 9px; line-height: 1.5;
+}

@@ -61,6 +61,8 @@ if (IS_BOARD_WINDOW) {
     teamPresence: (payload) => ipcRenderer.invoke('team:presence', payload),
     // R-b5fc F-4b：角色队列面板（只读 role_queues.json；PM 看全量、角色只看自己）。
     teamRoleQueues: (payload) => ipcRenderer.invoke('team:role-queues', payload),
+    // R-6bc8（T-37f5）：会话排队面板（只读：会话排队.json 排队数 + 唤醒.jsonl 四态；不写任何会话）。
+    teamSessionQueue: (payload) => ipcRenderer.invoke('team:session-queue', payload),
     // R-1dfb（F7/AC5，卷 §六）：团队台活跃度三列只读通道——主进程统一算 + 5 分钟缓存，
     // 渲染层只显示不自算（最近提交 / 最近文件写入 / 最后成功唤醒）。
     teamRoleActivity: (payload) => ipcRenderer.invoke('team:role-activity', payload),

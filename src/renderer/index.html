@@ -513,6 +513,19 @@
                 <div id="team-session-list" class="team-session-list"></div>
               </section>
 
+              <!-- R-6bc8（T-37f5）：会话排队（只读）。三件事分开显示：排队数（DSH 会话 queued）/ 四态（唤醒日志 fail>skip>ok>none）/ 失败数与跳过数；积压 ≠ 失败。 -->
+              <section id="session-queue-panel" class="team-block session-queue-block" data-sq-degraded="false">
+                <div class="team-block-head">
+                  <h3>会话排队 <span class="muted">/ 积压 ≠ 失败</span></h3>
+                  <div class="team-head-tools">
+                    <span id="session-queue-meta" class="badge muted-badge" title="快照时间与数据来源">未加载</span>
+                  </div>
+                </div>
+                <p class="team-status-source">列含义：排队数（该角色 DSH 会话里 placement=queued 的条数，未知显示「—」不显示 0）、四态（fail / skip / ok / none，优先级 fail&gt;skip&gt;ok&gt;none，跳过优先于成功）、失败数、跳过数、最近成功投递时间（只取 ok 行）。统计窗口默认最近 24 小时；快照超过 120 秒未更新会降级黄条。</p>
+                <div id="session-queue-banner" class="sq-banner" role="status" hidden></div>
+                <div id="session-queue-rows" class="sq-rows" aria-label="六角色会话排队与唤醒状态"></div>
+              </section>
+
               <!-- R-b5fc F-4b：角色队列（只读 role_queues.json 派生文件；按当前会话角色绑定：角色只看自己，识别不到会话时才按 PM 全量并标来源） -->
               <section id="role-queue-block" class="team-block role-queue-block">
                 <div class="team-block-head">
@@ -583,7 +596,7 @@
                 <div id="team-log" class="team-log"></div>
               </section>
 
-              <section class="team-block">
+              <section class="team-block" data-dispatch-entry="1">
                 <div class="team-block-head"><h3>团队派单</h3><span class="muted">本地单派锁 10 分钟 · 角色互发不占锁</span></div>
                 <div class="dispatch-form">
                   <div class="dispatch-row">
@@ -834,5 +847,7 @@
 <script src="workspace-clean.js"></script>
 <!-- R-c4c7：团队收件箱实时面板（零轮询；只订阅 mailbox:changed，只在首屏/重聚焦各读一次快照） -->
 <script src="mailbox-panel.js"></script>
+<!-- R-6bc8（T-37f5）：会话排队面板（只读：排队数 + 四态 + 失败/跳过两列 + 背压提示） -->
+<script src="session-queue-panel.js"></script>
 </body>
 </html>

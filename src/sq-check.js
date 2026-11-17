@@ -1,0 +1,365 @@
+'use strict';
+/**
+ * R-6bc8（T-20261117-123812-37f5）会话排队面板自检（--sq-check）
+ *
+ * 口径（AC1–AC7，正文 §七）：
+ *   AC1 四态 fail > skip > ok > none（夹具逐条），同一角色混合时 fail 且失败/跳过各自计数；
+ *   AC2 积压 ≠ 失败：queued=3 + 只有 ok/skip → 不得 fail；再补 1 条 ok=false → fail 而 queued 仍为 3；
+ *   AC3 背压：排队=3 → [data-backpressure-hint] 存在且文案含「排队 3 条」「先别连发」；=2 → 节点不存在；
+ *   AC4 未知 ≠ 0：known:false → 「—」且 data-sq-known="false"，文本不为 0；
+ *   AC6 过期降级：快照 at 改到 10 分钟前 → data-sq-degraded="true" + 黄条含原因；恢复新鲜后消失；
+ *   AC7 无记录 + 旧行兼容（deliverAt/why/messageId）。
+ *   另加边界：快照缺失（未接入）、快照坏 JSON（沿用上一份）；沙盘只读与真实文件隔离断言。
+ *
+ * 隔离：AWB_DATA_DIR / TEAM_ROOT / AWB_STORE 全部指进 .sq-check-data 沙盘（main.js 已设）；
+ *      真实 团队/状态/项目/<项目>/唤醒.jsonl 只做「没被碰过」的 sha/mtime 断言，不读不写。
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+
+const READ_PANEL = `(() => {
+  const panel = document.getElementById('session-queue-panel');
+  const txt = (node) => (node ? String(node.textContent || '').trim() : '');
+  const rows = Array.from(document.querySelectorAll('[data-sq-row]')).map((row) => {
+    const queuedCell = row.querySelector('[data-sq-queued]');
+    const stateCell = row.querySelector('[data-sq-state]');
+    const failCell = row.querySelector('[data-sq-fail-count]');
+    const skipCell = row.querySelector('[data-sq-skip-count]');
+    const lastOkCell = row.querySelector('[data-sq-last-ok]');
+    return {
+      role: row.dataset.role || '',
+      queued: txt(queuedCell),
+      known: queuedCell ? String(queuedCell.getAttribute('data-sq-known') || '') : '',
+      rowKnown: String(row.getAttribute('data-sq-known') || ''),
+      state: txt(stateCell),
+      fail: txt(failCell),
+      skip: txt(skipCell),
+      lastOk: txt(lastOkCell),
+      lastOkTitle: lastOkCell ? String(lastOkCell.getAttribute('title') || '') : '',
+    };
+  });
+  const banner = document.getElementById('session-queue-banner');
+  const meta = document.getElementById('session-queue-meta');
+  const hint = document.querySelector('[data-backpressure-hint]');
+  const entry = document.querySelector('[data-dispatch-entry]');
+  return {
+    panel: Boolean(panel),
+    degraded: panel ? String(panel.getAttribute('data-sq-degraded') || '') : '',
+    bannerHidden: banner ? Boolean(banner.hidden) : null,
+    bannerText: txt(banner),
+    meta: txt(meta),
+    metaTitle: meta ? String(meta.getAttribute('title') || '') : '',
+    hasHint: Boolean(hint),
+    hintText: txt(hint),
+    hasEntry: Boolean(entry),
+    hintCount: document.querySelectorAll('[data-backpressure-hint]').length,
+    rows,
+  };
+})()`;
+
+/** 夹具名册：六角色 + 固定会话 id（不写真实 sessionId，避免误投递）。 */
+const ROSTER = [
+  { role: 'pm', name: '项目经理', sessionId: 'sq-fixture-pm' },
+  { role: 'programmer1', name: '高级程序员 A', sessionId: 'sq-fixture-p1' },
+  { role: 'tester', name: '测试人员', sessionId: 'sq-fixture-tester' },
+  { role: 'product', name: '产品设计师', sessionId: 'sq-fixture-product' },
+  { role: 'analyst', name: '需求分析师', sessionId: 'sq-fixture-analyst' },
+  { role: 'programmer2', name: '高级程序员 B', sessionId: '' },
+];
+
+function sha256Of(file) {
+  try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); } catch { return ''; }
+}
+
+function statOf(file) {
+  try {
+    const st = fs.statSync(file);
+    return { exists: true, mtimeMs: st.mtimeMs, size: st.size, sha256: sha256Of(file) };
+  } catch { return { exists: false, mtimeMs: 0, size: 0, sha256: '' }; }
+}
+
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', 'utf8');
+}
+
+function writeWake(file, rows) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, rows.map((row) => JSON.stringify(row)).join('\n') + (rows.length ? '\n' : ''), 'utf8');
+}
+
+/**
+ * 沙盘准备（readStore 之前调用）：团队状态根建好 + 状态库缺失时从真实 store 只读复制一份。
+ * 与 queue-check 同法，保证沙盘项目名与 团队/状态/项目/<项目>/ 一致。
+ */
+function prepareSqCheckSandbox(options = {}) {
+  const teamRoot = String(options.teamRoot || '');
+  if (teamRoot) fs.mkdirSync(path.join(teamRoot, '状态', '项目'), { recursive: true });
+  const storeFile = String(options.storeFile || '');
+  const fallback = String(options.fallbackStoreFile || '');
+  let needSeed = Boolean(storeFile && fallback && fs.existsSync(fallback) && !fs.existsSync(storeFile));
+  if (!needSeed && storeFile && fallback && fs.existsSync(fallback) && fs.existsSync(storeFile)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(storeFile, 'utf8').replace(/^\uFEFF/, ''));
+      needSeed = !parsed || !Array.isArray(parsed.projects) || !parsed.projects.length;
+    } catch { needSeed = true; }
+  }
+  if (needSeed) {
+    fs.mkdirSync(path.dirname(storeFile), { recursive: true });
+    fs.copyFileSync(fallback, storeFile);
+    console.log('SQ_CHECK_STORE_SEEDED ' + JSON.stringify({ from: fallback, to: storeFile }));
+  }
+  return { teamRoot, storeFile };
+}
+
+async function runSqCheck(options = {}) {
+  const outRoot = String(options.outRoot || process.cwd());
+  const outDir = process.env.AWB_SQ_OUT
+    ? path.resolve(process.env.AWB_SQ_OUT)
+    : path.join(outRoot, '_tmp', 'sq-check-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const checks = [];
+  const check = (name, ok, detail) => {
+    checks.push({ name, ok: Boolean(ok), detail });
+    console.log(`[${ok ? 'PASS' : 'FAIL'}] ${name}${detail === undefined ? '' : ' :: ' + (typeof detail === 'string' ? detail : JSON.stringify(detail)).slice(0, 400)}`);
+    return ok;
+  };
+
+  const app = options.app;
+  const teamName = String(options.teamName || '');
+  const sandboxTeamRoot = path.resolve(String(options.sandboxTeamRoot || ''));
+  const sandboxRoot = path.resolve(String(options.sandboxRoot || ''));
+  const stateDir = path.join(sandboxTeamRoot, '状态');
+  const projectDir = teamName ? path.join(stateDir, '项目', teamName) : path.join(stateDir, '项目', '沙盘');
+  const wakeFile = path.join(projectDir, '唤醒.jsonl');
+  const snapshotFile = path.join(stateDir, '会话排队.json');
+  const rosterFile = path.join(stateDir, '团队.json');
+  const realWakeFile = String(options.realWakeFile || '');
+  const realBefore = realWakeFile ? statOf(realWakeFile) : { exists: false, mtimeMs: 0, sha256: '' };
+
+  // 沙盘夹具：名册（六角色）+ 空唤醒日志（用例逐个重写）
+  writeJson(rosterFile, {
+    activeProject: teamName || '沙盘',
+    members: ROSTER.map((row) => ({ ...row })),
+  });
+  writeWake(wakeFile, []);
+
+  const now = Date.now();
+  const ago = (ms) => new Date(now - ms).toISOString();
+  const snapshotOf = (roles, atMs) => ({
+    schema: 1,
+    at: new Date(atMs || now).toISOString(),
+    project: teamName || '沙盘',
+    staleMs: 120000,
+    roles,
+  });
+  const baseRoles = [
+    { role: 'pm', sessionId: 'sq-fixture-pm', known: true, queued: 0 },
+    { role: 'programmer1', sessionId: 'sq-fixture-p1', known: true, queued: 1 },
+    { role: 'tester', sessionId: 'sq-fixture-tester', known: true, queued: 2 },
+    { role: 'product', sessionId: 'sq-fixture-product', known: true, queued: 3 },
+    { role: 'analyst', sessionId: 'sq-fixture-analyst', known: true, queued: 5 },
+    // AC4：无会话/未知 → known:false、queued:null（界面上是「—」，绝不是 0）
+    { role: 'programmer2', sessionId: '', known: false, queued: null },
+  ];
+
+  // 不调用 disableHardwareAcceleration（GPU 被禁时 capturePage 会超时，属既有坑）。
+  options.createWindow();
+  const win = options.getWindow();
+  await new Promise((resolve) => { if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve); else resolve(); });
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  await wait(1500);
+  const evalJs = (expr) => win.webContents.executeJavaScript(expr, true);
+  const shot = async (name) => {
+    try {
+      const file = path.join(outDir, name);
+      fs.writeFileSync(file, (await win.webContents.capturePage()).toPNG());
+      return file;
+    } catch { return ''; }
+  };
+  const refresh = async () => {
+    await evalJs('(async () => { if (typeof window.__sqRefresh === "function") await window.__sqRefresh(); return true; })()');
+    await wait(220);
+    return evalJs(READ_PANEL);
+  };
+  // 打开团队台（让面板与派单入口可见、截图能拍到）
+  await evalJs("(() => { const b = document.getElementById('team-pill'); if (b) b.click(); return true; })()");
+  await wait(700);
+  await evalJs("(() => { const el = document.getElementById('session-queue-panel'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' }); return true; })()");
+  await wait(300);
+
+  check('沙盘路径全部在本次 sq-check 数据根内', sandboxTeamRoot.startsWith(sandboxRoot + path.sep) && snapshotFile.startsWith(sandboxRoot + path.sep), { sandboxTeamRoot, sandboxRoot });
+  check('面板与派单入口都在（#session-queue-panel / [data-dispatch-entry]）', await evalJs("(() => Boolean(document.getElementById('session-queue-panel')) && Boolean(document.querySelector('[data-dispatch-entry]')))()") === true);
+
+  // ── AC1 四态 ──────────────────────────────────────────────
+  writeJson(snapshotFile, snapshotOf(baseRoles, now));
+  writeWake(wakeFile, [
+    { to: 'programmer1', at: ago(20 * 1000), ok: false, reason: 'WAKE_FAILED', messageIds: ['M-a'] },
+    { to: 'tester', at: ago(30 * 1000), ok: true, skipped: 'ALREADY_DELIVERED', reason: 'dedupe' },
+    { to: 'product', at: ago(40 * 1000), ok: true, deliveredAt: ago(40 * 1000), reason: 'default', messageIds: ['M-b'] },
+    { to: 'analyst', at: ago(50 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    { to: 'analyst', at: ago(60 * 1000), ok: true, skipped: 'MERGED_PENDING' },
+    { to: 'analyst', at: ago(70 * 1000), ok: true, deliveredAt: ago(70 * 1000) },
+  ]);
+  let panel = await refresh();
+  const rowOf = (p, role) => (p.rows || []).find((row) => row.role === role) || {};
+  check('AC1 六角色行齐全（含无记录与未知者）', (panel.rows || []).length === 6, (panel.rows || []).map((r) => r.role));
+  check('AC1① {ok:false}（无 skipped）→ fail', rowOf(panel, 'programmer1').state === 'fail', rowOf(panel, 'programmer1'));
+  check('AC1② {ok:true, skipped:ALREADY_DELIVERED} → skip（不得为 ok）', rowOf(panel, 'tester').state === 'skip', rowOf(panel, 'tester'));
+  check('AC1③ {ok:true} → ok 且 last-ok 取该行 deliveredAt', rowOf(panel, 'product').state === 'ok' && /刚刚|分钟前/.test(rowOf(panel, 'product').lastOk || '') && String(rowOf(panel, 'product').lastOkTitle).includes(ago(40 * 1000).slice(0, 10)), rowOf(panel, 'product'));
+  check('AC1④ 0 行 → none 且 last-ok「无记录」', rowOf(panel, 'pm').state === 'none' && rowOf(panel, 'pm').lastOk === '无记录', rowOf(panel, 'pm'));
+  check('AC1 同角色混合（fail+skip+ok）→ fail，失败数 1 / 跳过数 1 各自独立', rowOf(panel, 'analyst').state === 'fail' && rowOf(panel, 'analyst').fail === '1' && rowOf(panel, 'analyst').skip === '1', rowOf(panel, 'analyst'));
+  const ac1Shot = await shot('sq-ac1-four-states.png');
+
+  // ── AC2 积压 ≠ 失败 ───────────────────────────────────────
+  writeJson(snapshotFile, snapshotOf(baseRoles, now));
+  writeWake(wakeFile, [
+    { to: 'product', at: ago(20 * 1000), ok: true, deliveredAt: ago(20 * 1000) },
+    { to: 'product', at: ago(30 * 1000), ok: true, skipped: 'DEBOUNCED' },
+  ]);
+  panel = await refresh();
+  const productRow = rowOf(panel, 'product');
+  check('AC2 排队=3 且无 fail 行 → state ∈ {ok,skip}（不得 fail）', productRow.queued === '3' && ['ok', 'skip'].includes(productRow.state), productRow);
+  writeWake(wakeFile, [
+    { to: 'product', at: ago(20 * 1000), ok: true, deliveredAt: ago(20 * 1000) },
+    { to: 'product', at: ago(30 * 1000), ok: false, reason: 'WAKE_FAILED' },
+  ]);
+  panel = await refresh();
+  const productFail = rowOf(panel, 'product');
+  check('AC2 追加 1 条 {ok:false} → state=fail 而排队数仍为 3（数值不被失败态改写）', productFail.state === 'fail' && productFail.queued === '3', productFail);
+  const ac2Shot = await shot('sq-ac2-backlog-not-fail.png');
+
+  // ── AC4 未知 ≠ 0 ─────────────────────────────────────────
+  const unknownRow = rowOf(panel, 'programmer2');
+  check('AC4 known:false → 排队数「—」且 data-sq-known="false"、文本不为 0', unknownRow.queued === '—' && unknownRow.known === 'false' && unknownRow.queued !== '0', unknownRow);
+
+  // ── AC3 背压 ─────────────────────────────────────────────
+  const pickRole = async (role) => evalJs(`(() => {
+    const sel = document.getElementById('dispatch-role');
+    if (!sel) return '';
+    if (!Array.from(sel.options).some((o) => o.value === ${JSON.stringify(role)})) {
+      const opt = document.createElement('option');
+      opt.value = ${JSON.stringify(role)};
+      opt.textContent = ${JSON.stringify(role)};
+      sel.appendChild(opt);
+    }
+    sel.value = ${JSON.stringify(role)};
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    return sel.value;
+  })()`);
+  const picked3 = await pickRole('product'); // product 夹具 queued=3
+  await wait(500);
+  panel = await evalJs(READ_PANEL);
+  check('AC3 排队=3 → [data-backpressure-hint] 存在且文案含「排队 3 条」「先别连发」',
+    picked3 === 'product' && panel.hasHint === true && /排队\s*3\s*条/.test(panel.hintText) && /先别连发/.test(panel.hintText),
+    { picked3, hasHint: panel.hasHint, hintText: panel.hintText });
+  const ac3Shot = await shot('sq-ac3-backpressure.png');
+  // 改排队=2 → 节点必须不存在
+  writeJson(snapshotFile, snapshotOf(baseRoles.map((row) => (row.role === 'product' ? { ...row, queued: 2 } : row)), now));
+  await refresh();
+  const picked2 = await pickRole('product');
+  await wait(500);
+  panel = await evalJs(READ_PANEL);
+  check('AC3 排队=2 → 该节点 querySelector 为 null（不是隐藏）', picked2 === 'product' && panel.hasHint === false && panel.hintCount === 0, { picked2, hasHint: panel.hasHint, hintCount: panel.hintCount });
+
+  // ── AC6 过期降级 ─────────────────────────────────────────
+  writeJson(snapshotFile, snapshotOf(baseRoles, Date.now() - 10 * 60 * 1000));
+  await refresh();
+  await wait(300);
+  panel = await evalJs(READ_PANEL);
+  check('AC6 快照 10 分钟前 → data-sq-degraded="true" 且黄条可见含原因', panel.degraded === 'true' && panel.bannerHidden === false && /过期/.test(panel.bannerText), { degraded: panel.degraded, bannerHidden: panel.bannerHidden, bannerText: panel.bannerText });
+  check('AC6 黄条同时给出最近成功读取时间', /最近成功读取/.test(panel.bannerText || ''), panel.bannerText);
+  const ac6Shot = await shot('sq-ac6-degraded.png');
+  writeJson(snapshotFile, snapshotOf(baseRoles, Date.now()));
+  await refresh();
+  await refresh();
+  panel = await evalJs(READ_PANEL);
+  check('AC6 恢复新鲜（≤2 刷新周期）后黄条消失、degraded=false', panel.degraded === 'false' && panel.bannerHidden === true, { degraded: panel.degraded, bannerHidden: panel.bannerHidden });
+
+  // ── AC7 无记录 + 旧行兼容 ────────────────────────────────
+  writeJson(snapshotFile, snapshotOf(baseRoles, Date.now()));
+  writeWake(wakeFile, [
+    { to: 'tester', at: ago(25 * 1000), ok: true, deliverAt: ago(25 * 1000), why: '', messageId: 'M-old' },
+    { to: 'product', at: ago(35 * 1000), ok: true, skipped: 'DEBOUNCED' },
+  ]);
+  panel = await refresh();
+  const legacyRow = rowOf(panel, 'tester');
+  const debouncedRow = rowOf(panel, 'product');
+  check('AC7② 旧格式行（deliverAt/why/messageId）仍判 ok，时间取 deliverAt', legacyRow.state === 'ok' && /刚刚|分钟前/.test(legacyRow.lastOk || ''), legacyRow);
+  check('AC7③ {ok:true, skipped:DEBOUNCED} → skip', debouncedRow.state === 'skip', debouncedRow);
+  check('AC7① 0 行角色 → state=none + 「无记录」', rowOf(panel, 'pm').state === 'none' && rowOf(panel, 'pm').lastOk === '无记录', rowOf(panel, 'pm'));
+
+  // ── 边界：唤醒日志空 → 全部「无记录」 ─────────────────────
+  writeWake(wakeFile, []);
+  panel = await refresh();
+  check('边界·空值：唤醒日志为空 → 全部 none + 无记录（不崩）',
+    (panel.rows || []).every((row) => row.state === 'none' && row.lastOk === '无记录'),
+    (panel.rows || []).map((row) => `${row.role}:${row.state}/${row.lastOk}`));
+
+  // ── 边界：快照缺失 → 未接入 + 黄条（不显示 0） ─────────────
+  fs.rmSync(snapshotFile, { force: true });
+  panel = await refresh();
+  check('边界·空值：快照不存在 → degraded=true 且黄条含「未接入」', panel.degraded === 'true' && /未接入/.test(panel.bannerText || ''), { degraded: panel.degraded, bannerText: panel.bannerText });
+  check('边界·空值：快照不存在时排队数全部「—」而不是 0', (panel.rows || []).every((row) => row.queued === '—' && row.known === 'false'), (panel.rows || []).map((row) => `${row.role}:${row.queued}/${row.known}`));
+  const missingShot = await shot('sq-missing.png');
+
+  // ── 边界：坏 JSON → 沿用上一份 + 黄条（不清空面板） ─────────
+  writeJson(snapshotFile, snapshotOf(baseRoles, Date.now()));
+  await refresh();
+  fs.writeFileSync(snapshotFile, '{ "schema": 1, "roles": [ ', 'utf8');
+  panel = await refresh();
+  check('边界·异常：快照坏 JSON → 黄条说明并保留上一份数据（不清空、不崩）',
+    panel.degraded === 'true' && /解析失败|沿用/.test(panel.bannerText || '') && (panel.rows || []).length === 6,
+    { degraded: panel.degraded, bannerText: panel.bannerText, rows: (panel.rows || []).length });
+  const brokenShot = await shot('sq-broken.png');
+
+  // 还原成健康快照，给最终截图
+  writeJson(snapshotFile, snapshotOf(baseRoles, Date.now()));
+  writeWake(wakeFile, [
+    { to: 'programmer1', at: ago(15 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    { to: 'tester', at: ago(20 * 1000), ok: true, skipped: 'ALREADY_DELIVERED' },
+    { to: 'product', at: ago(25 * 1000), ok: true, deliveredAt: ago(25 * 1000) },
+  ]);
+  panel = await refresh();
+  const finalShot = await shot('sq-final.png');
+  check('还原后回到健康态（degraded=false、六行）', panel.degraded === 'false' && (panel.rows || []).length === 6, { degraded: panel.degraded, rows: (panel.rows || []).length });
+
+  // ── 只读与隔离 ───────────────────────────────────────────
+  const wakeSha = sha256Of(wakeFile);
+  await refresh();
+  await refresh();
+  check('只读：多次刷新后沙盘唤醒日志 sha256 未变', sha256Of(wakeFile) === wakeSha, { before: wakeSha.slice(0, 16), after: sha256Of(wakeFile).slice(0, 16) });
+  if (realWakeFile) {
+    const realAfter = statOf(realWakeFile);
+    check('隔离：真实 团队/状态/项目/<项目>/唤醒.jsonl 的 sha256 与 mtime 未被碰',
+      realAfter.exists === realBefore.exists && realAfter.sha256 === realBefore.sha256 && realAfter.mtimeMs === realBefore.mtimeMs,
+      { realWakeFile, before: realBefore.sha256.slice(0, 16), after: realAfter.sha256.slice(0, 16), exists: realAfter.exists });
+  } else {
+    check('隔离：没有真实唤醒日志路径（沙盘自足，无需比对）', true);
+  }
+  check('隔离：自检没有往真实 团队/状态/ 写快照', !fs.existsSync(path.join(outRoot, '团队', '状态', '会话排队.json')), path.join(outRoot, '团队', '状态'));
+
+  const failed = checks.filter((row) => !row.ok);
+  const report = {
+    ok: failed.length === 0,
+    total: checks.length,
+    failed: failed.length,
+    outDir,
+    sandbox: { teamRoot: sandboxTeamRoot, wakeFile, snapshotFile, dataRoot: sandboxRoot },
+    checks,
+    screenshots: {
+      ac1: ac1Shot, ac2: ac2Shot, ac3: ac3Shot, ac6: ac6Shot,
+      missing: missingShot, broken: brokenShot, final: finalShot,
+    },
+  };
+  fs.writeFileSync(path.join(outDir, 'sq-check.json'), JSON.stringify(report, null, 2), 'utf8');
+  if (report.ok) console.log('SESSION_QUEUE_CHECK_OK ' + JSON.stringify({ total: report.total, outDir }));
+  else console.log('SESSION_QUEUE_CHECK_FAIL ' + JSON.stringify({ total: report.total, failed: report.failed, outDir }));
+  app.exit(report.ok ? 0 : 1);
+  return report;
+}
+
+module.exports = { runSqCheck, prepareSqCheckSandbox };

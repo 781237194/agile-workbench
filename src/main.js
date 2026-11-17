@@ -66,6 +66,8 @@ const IS_C651_CHECK = process.argv.includes('--c651-check');
 const IS_B2EBE_CHECK = process.argv.includes('--b2ebe-check');
 // R-b5fc F-4b：角色队列面板自检（真实窗口 + 队列文件缺失用例）
 const IS_QUEUE_CHECK = process.argv.includes('--queue-check');
+// R-6bc8（T-20261117-123812-37f5）：会话排队面板自检（--sq-check；独立数据根 + 沙盘团队，跑 AC1–AC7）
+const IS_SQ_CHECK = process.argv.includes('--sq-check');
 // 自测沙盘根：默认 .selftest-data；AWB_SELFTEST_ROOT 可让并行验证/CI 各自隔离，绝不碰真实状态。
 const SELFTEST_ROOT = process.env.AWB_SELFTEST_ROOT
   ? path.resolve(process.env.AWB_SELFTEST_ROOT)
@@ -90,6 +92,8 @@ const REVIEW_DATA = process.env.AWB_REVIEW_DATA ? path.resolve(process.env.AWB_R
 const C651_DATA = process.env.AWB_C651_DATA ? path.resolve(process.env.AWB_C651_DATA) : path.join(ROOT, '.c651-check-data');
 // R-b5fc F-4b 自检独立数据根：队列用例只在沙盘里造 role_queues.json，不碰真实派生文件。
 const QUEUE_CHECK_DATA = process.env.AWB_QUEUE_DATA ? path.resolve(process.env.AWB_QUEUE_DATA) : path.join(ROOT, '.queue-check-data');
+// R-6bc8（T-37f5）会话排队自检数据根：快照与唤醒日志都只写沙盘，不碰真实团队状态。
+const SQ_CHECK_DATA = process.env.AWB_SQ_DATA ? path.resolve(process.env.AWB_SQ_DATA) : path.join(ROOT, '.sq-check-data');
 const DAEMON_CHECK_DATA = process.env.AWB_DAEMON_DATA ? path.resolve(process.env.AWB_DAEMON_DATA) : path.join(ROOT, '.daemon-check-data');
 const SUPPLEMENT_CHECK_DATA = process.env.AWB_SUPPLEMENT_DATA ? path.resolve(process.env.AWB_SUPPLEMENT_DATA) : path.join(ROOT, '.supplement-check-data');
 // B-2dd3 自检数据根同样独立（告警/崩溃归因审计只写沙盘）。
@@ -111,7 +115,8 @@ const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT
                     : IS_THEME_SHOTS ? THEME_SHOTS_DATA
                       : IS_B2DD3_CHECK ? B2DD3_DATA
                         : IS_OWNER_CHECK ? OWNER_CHECK_DATA
-                          : LOCAL_DATA;
+                          : IS_SQ_CHECK ? SQ_CHECK_DATA
+                            : LOCAL_DATA;
 const USER_DATA = path.join(DATA_ROOT, 'userdata');
 const TEMP_ROOT = path.join(DATA_ROOT, 'tmp');
 // DSH 地址持久化在仓库数据目录（D 盘），不写 C 盘、不写项目目录。
@@ -229,6 +234,11 @@ if (IS_REVIEW_CHECK) {
 // 数据根 userData 不变（仍是 .queue-check-data），只把团队状态根指进同一个沙盘。
 if (IS_QUEUE_CHECK) {
   process.env.TEAM_ROOT = path.join(QUEUE_CHECK_DATA, '团队');
+}
+// R-6bc8 会话排队自检：状态库与团队状态都进沙盘（快照/唤醒日志只在沙盘造，不碰真实团队）。
+if (IS_SQ_CHECK) {
+  process.env.AWB_STORE = path.join(SQ_CHECK_DATA, 'workbench.json');
+  process.env.TEAM_ROOT = path.join(SQ_CHECK_DATA, '团队');
 }
 // 守护状态界面自检：团队状态根进沙盘，守护状态文件只在沙盘里造，不读写真实守护心跳。
 if (IS_DAEMON_CHECK) {
@@ -5723,6 +5733,102 @@ ipcMain.handle('theme:metrics', async () => {
       return readRouteSupervisorStatus(name);
     } catch (e) {
       return { ok: false, code: 'ROUTE_STATUS_FAILED', message: String((e && e.message) || e).slice(0, 300) };
+    }
+  });
+  // ── R-6bc8（T-20261117-123812-37f5）会话排队可观测：只读快照 + 团队侧四态（积压 ≠ 失败）──────
+  // 数据两条：① 团队/状态/会话排队.json（插件 host half 写，壳只读；unknown 不写 0）；
+  //           ② 团队/状态/项目/<项目>/唤醒.jsonl（四态/失败数/跳过数/最近成功投递时间都来自这里）。
+  // 唤醒.jsonl 有 1.6MB 级（6000+ 行），按 mtime+size 缓存解析，绝不每次刷新重解析。
+  const SessionQueue = require('./session-queue.js');
+  let sqWakeCache = { file: '', key: '', rows: [], badLines: 0 };
+  const readWakeLogCached = (file) => {
+    if (!file) return { rows: [], badLines: 0 };
+    try {
+      const st = fs.statSync(file);
+      const key = `${st.mtimeMs}:${st.size}`;
+      if (sqWakeCache.file === file && sqWakeCache.key === key) return sqWakeCache;
+      const parsed = SessionQueue.parseWakeLog(fs.readFileSync(file, 'utf8'));
+      sqWakeCache = { file, key, rows: parsed.rows, badLines: parsed.badLines };
+      return sqWakeCache;
+    } catch {
+      // 文件不存在/读不到：按 0 行处理（面板显示「无记录」），不是故障。
+      return { rows: [], badLines: 0 };
+    }
+  };
+  // 快照解析失败时保留上一份可用快照（不清空面板；黄条说明原因）。
+  let sqLastGood = { file: '', snapshot: null };
+  ipcMain.handle('team:session-queue', async (_e, payload) => {
+    try {
+      const p = payload || {};
+      const teamRoot = resolveTeamRoot();
+      const { name } = teamProjectNameOf(p);
+      const snapshotFile = path.join(teamRoot, '状态', '会话排队.json');
+      let snapshot = null;
+      let snapshotError = '';
+      if (!fs.existsSync(snapshotFile)) {
+        snapshotError = 'missing';
+      } else {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(snapshotFile, 'utf8').replace(/^\uFEFF/, ''));
+          snapshot = parsed && typeof parsed === 'object' ? parsed : null;
+          if (!snapshot) snapshotError = 'broken';
+          else sqLastGood = { file: snapshotFile, snapshot };
+        } catch (error) {
+          snapshotError = 'broken';
+          console.warn('SESSION_QUEUE_BROKEN ' + JSON.stringify({
+            file: snapshotFile,
+            detail: String((error && error.message) || error).slice(0, 200),
+          }));
+          if (sqLastGood.file === snapshotFile && sqLastGood.snapshot) snapshot = sqLastGood.snapshot;
+        }
+      }
+      // 名册（团队.json members[].name）是角色显示名唯一来源；读不到就用六角色兜底。
+      const roles = [];
+      const roleNames = {};
+      try {
+        const team = JSON.parse(fs.readFileSync(path.join(teamRoot, '状态', '团队.json'), 'utf8').replace(/^\uFEFF/, ''));
+        for (const member of (Array.isArray(team.members) ? team.members : [])) {
+          if (!member || !member.role) continue;
+          const role = String(member.role);
+          if (!roles.includes(role)) roles.push(role);
+          if (member.name) roleNames[role] = String(member.name);
+        }
+      } catch { /* 名册不可读：用六角色默认顺序与默认名字 */ }
+      const projectName0 = String(name || '');
+      // 渲染层可以不传 projectId（面板是全局侧栏区块）：此时退回 store 的当前项目，
+      // 否则唤醒日志路径为空、四态永远显示「无记录」（第一次自检就踩到这里）。
+      let projectName = projectName0;
+      let resolvedProject = null;
+      if (!projectName) {
+        try {
+          const store = readStore();
+          resolvedProject = (store.projects || []).find((item) => item.id === store.activeProjectId)
+            || (store.projects || [])[0]
+            || null;
+          projectName = String((resolvedProject && (resolvedProject.teamName || resolvedProject.name)) || '');
+        } catch { projectName = ''; }
+      }
+      const wakeFile = projectName
+        ? path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName), '唤醒.jsonl')
+        : '';
+      const wake = readWakeLogCached(wakeFile);
+      const model = SessionQueue.buildPanelModel({
+        project: projectName,
+        roles: roles.length ? roles : SessionQueue.SIX_ROLES,
+        roleNames,
+        snapshot,
+        snapshotError,
+        wakeRows: wake.rows,
+        badLines: wake.badLines,
+        now: Date.now(),
+        windowMs: Number(p.windowMs) > 0 ? Number(p.windowMs) : SessionQueue.DEFAULT_WINDOW_MS,
+        staleMs: (snapshot && Number(snapshot.staleMs) > 0) ? Number(snapshot.staleMs) : SessionQueue.DEFAULT_STALE_MS,
+      });
+      model.snapshotFile = snapshotFile;
+      model.wakeFile = wakeFile;
+      return model;
+    } catch (e) {
+      return { ok: false, code: 'SESSION_QUEUE_FAILED', message: String((e && e.message) || e).slice(0, 300), rows: [], degraded: true };
     }
   });
   // B-e731（P0）：决策箱自动刷新——主进程 fs.watch 决策箱.json（团队工具用 tmp+rename 落盘，
@@ -19371,7 +19477,7 @@ async function installDshCookie() {
 }
 
 // 单实例：两个窗口同时写 workbench.json / 团队状态会丢更新。自测/布局自检用独立 userData，不参与锁。
-const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) ? true : app.requestSingleInstanceLock();
+const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_SQ_CHECK) ? true : app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
   // T-ece6：锁冲突不许静默退出——2026-11-14 的黑屏就是「另一个实例（含僵尸进程）占着锁，
   // 新进程拿不到锁直接 app.quit()，用户只看到窗口没了/黑屏」。这里显式打日志 + 弹一次人话提示。
@@ -19678,7 +19784,7 @@ function ensureRouteSupervisor(project) {
     }
     return null;
   }
-  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK) return null;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_SQ_CHECK) return null;
   if (process.env.AWB_ROUTE_DAEMON === 'off') return null;
   if (!project || !project.name) return null;
   const name = String(project.teamName || project.name || '');
@@ -20849,6 +20955,35 @@ app.whenReady().then(async () => {
       return;
     }
   }
+  if (IS_SQ_CHECK) {
+    try {
+      const sqCheck = require('./sq-check');
+      const sandboxTeamRoot = process.env.TEAM_ROOT || path.join(SQ_CHECK_DATA, '团队');
+      // 沙盘仓库：状态库缺失时从真实 store 只读复制一份过来（与 queue-check 同法）。
+      sqCheck.prepareSqCheckSandbox({
+        storeFile: storeFile(),
+        teamRoot: sandboxTeamRoot,
+        fallbackStoreFile: path.join(LOCAL_DATA, 'userdata', 'workbench.json'),
+      });
+      const store = readStore();
+      const project = store.projects.find((item) => item.id === store.activeProjectId) || store.projects[0] || null;
+      const teamName = project ? String(project.teamName || project.name || '') : '';
+      await sqCheck.runSqCheck({
+        app, createWindow, getWindow: () => mainWindow, readStore: () => readStore(), outRoot: ROOT,
+        teamName, sandboxTeamRoot, sandboxRoot: SQ_CHECK_DATA,
+        realWakeFile: teamName
+          ? path.join(ROOT, '团队', '状态', '项目', teamTools.teamSlug(teamName), '唤醒.jsonl')
+          : '',
+        storeFile: storeFile(),
+        fallbackStoreFile: path.join(LOCAL_DATA, 'userdata', 'workbench.json'),
+      });
+      return;
+    } catch (error) {
+      console.error('SQ_FATAL ' + String((error && error.stack) || error));
+      exitWithAudit(1);
+      return;
+    }
+  }
   if (IS_DAEMON_CHECK) {
     try {
       const daemonCheck = require('./daemon-check');
@@ -20913,7 +21048,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_B2DD3_CHECK) return;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_B2DD3_CHECK || IS_SQ_CHECK) return;
   // B-20261116-105124-c25a：窗口全关导致的退出也要留一行审计——历史上「壳 2-8 分钟整体退出」
   // 无法区分「人关了窗」「窗口被意外销毁」「主进程异常」三种，这一行能把第一种钉死。
   recordShellAudit('shell-window-all-closed', {});

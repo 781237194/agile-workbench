@@ -295,12 +295,20 @@ function wakeStateOf(rows, now, staleMs) {
   return { state: pick(), lastOkAt, lastAt: lastAt ? new Date(lastAt).toISOString() : '', stale }
 }
 
-function readWakeRows(teamRoot, role) {
-  const file = join(teamRoot, '状态', '唤醒.jsonl')
-  let text = ''
-  try { text = fs.readFileSync(file, 'utf8') } catch { return [] }
-  const rows = text.split(/\r?\n/).filter(Boolean).map((line) => { try { return JSON.parse(line) } catch { return null } }).filter(Boolean)
-  return rows.filter((row) => String((row && row.to) || '') === String(role || ''))
+function readWakeRows(teamRoot, role, activeProject) {
+  // 真实落点是「按项目分文件」：团队/状态/项目/<项目>/唤醒.jsonl（实测 1.6MB 级、6000+ 行）。
+  // 顶层 团队/状态/唤醒.jsonl 只在旧沙盘/夹具里出现，作兼容回退（只读它会让人以为生产上「无记录」）。
+  const candidates = []
+  const project = String(activeProject || '').trim()
+  if (project) candidates.push(join(teamRoot, '状态', '项目', project, '唤醒.jsonl'))
+  candidates.push(join(teamRoot, '状态', '唤醒.jsonl'))
+  for (const file of candidates) {
+    let text = ''
+    try { text = fs.readFileSync(file, 'utf8') } catch { continue }
+    const rows = text.split(/\r?\n/).filter(Boolean).map((line) => { try { return JSON.parse(line) } catch { return null } }).filter(Boolean)
+    return rows.filter((row) => String((row && row.to) || '') === String(role || ''))
+  }
+  return []
 }
 
 export async function collectSessionQueueSnapshot(ctx, pluginConfig, now = Date.now()) {
@@ -320,7 +328,7 @@ export async function collectSessionQueueSnapshot(ctx, pluginConfig, now = Date.
       state = await ctx.sessionController.state({ sessionId }, AbortSignal.timeout(3000))
     } catch { state = null }
     const queued = queuedOf(state)
-    const wake = wakeStateOf(readWakeRows(teamRoot, role), now, staleMs)
+    const wake = wakeStateOf(readWakeRows(teamRoot, role, team.activeProject), now, staleMs)
     roles.push({
       role, sessionId,
       known: queued.known && Boolean(sessionId),
