@@ -87,6 +87,10 @@ const DAEMON_CHECK_DATA = process.env.AWB_DAEMON_DATA ? path.resolve(process.env
 const SUPPLEMENT_CHECK_DATA = process.env.AWB_SUPPLEMENT_DATA ? path.resolve(process.env.AWB_SUPPLEMENT_DATA) : path.join(ROOT, '.supplement-check-data');
 // B-2dd3 自检数据根同样独立（告警/崩溃归因审计只写沙盘）。
 const B2DD3_DATA = process.env.AWB_B2DD3_DATA ? path.resolve(process.env.AWB_B2DD3_DATA) : path.join(ROOT, '.b2dd3-check-data');
+// B-20261116-130616-9de0（P0）：owner-check 自检必须隔离——它会真点验收通过/打回，
+// 不隔离就写真实 data/userdata/workbench.json 与真实 团队/状态/项目/<项目>/工作流.json。
+// 隔离方式=快照沙盘：把真实 store 与该项目状态目录**复制**进沙盘，点击只写副本（真实树零写入）。
+const OWNER_CHECK_DATA = process.env.AWB_OWNER_DATA ? path.resolve(process.env.AWB_OWNER_DATA) : path.join(ROOT, '.owner-check-data');
 const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT
   : IS_LAYOUT_CHECK ? LAYOUT_DATA
     : IS_B55C_CHECK ? B55C_DATA
@@ -99,7 +103,8 @@ const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT
                   : IS_SUPPLEMENT_CHECK ? SUPPLEMENT_CHECK_DATA
                     : IS_THEME_SHOTS ? THEME_SHOTS_DATA
                       : IS_B2DD3_CHECK ? B2DD3_DATA
-                        : LOCAL_DATA;
+                        : IS_OWNER_CHECK ? OWNER_CHECK_DATA
+                          : LOCAL_DATA;
 const USER_DATA = path.join(DATA_ROOT, 'userdata');
 const TEMP_ROOT = path.join(DATA_ROOT, 'tmp');
 // DSH 地址持久化在仓库数据目录（D 盘），不写 C 盘、不写项目目录。
@@ -227,6 +232,94 @@ if (IS_SUPPLEMENT_CHECK) {
 if (IS_B2DD3_CHECK) {
   process.env.AWB_STORE = path.join(B2DD3_DATA, 'workbench.json');
   process.env.TEAM_ROOT = path.join(B2DD3_DATA, '团队');
+}
+// B-20261116-130616-9de0（P0）：owner-check 快照隔离——真实 store 与该项目状态目录**复制**进沙盘，
+// 评审弹窗里的「通过/打回」只写副本；真实 workbench.json 与 真实 工作流.json 一个字节都不动。
+// 复制范围只到「状态库 + 一个项目的状态目录」，不复制邮箱等大目录；每次运行前重建，避免上一轮残留污染断言。
+if (IS_OWNER_CHECK) {
+  const ownerTeam = String(process.env.AWB_OWNER_TEAM || '工作台改造修复');
+  const ownerSandboxTeamRoot = path.join(OWNER_CHECK_DATA, '团队');
+  const ownerProjectDir = path.join(ownerSandboxTeamRoot, '状态', '项目', ownerTeam);
+  const ownerRealProjectDir = path.join(ROOT, '团队', '状态', '项目', ownerTeam);
+  const ownerRealStore = path.join(LOCAL_DATA, 'userdata', 'workbench.json');
+  try {
+    fs.rmSync(ownerProjectDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    fs.mkdirSync(ownerProjectDir, { recursive: true });
+    if (fs.existsSync(ownerRealStore)) fs.copyFileSync(ownerRealStore, path.join(OWNER_CHECK_DATA, 'workbench.json'));
+    if (fs.existsSync(ownerRealProjectDir)) {
+      fs.cpSync(ownerRealProjectDir, ownerProjectDir, {
+        recursive: true,
+        filter: (src) => !/[\\/]锁([\\/]|$)/.test(src)
+      });
+    }
+    // 沙盘内再造两个夹具（只改副本，真实树不动）：
+    // ① 结束代管——真实项目可能正开着一键代管，待评估项会被整批托管导致「需要你评估」为空、点不到；
+    // ② 补一条「来源未记」历史行，覆盖【已通过（来源未记）】标签（真实数据里当前没有这种旧行）。
+    const sandboxProxyFile = path.join(ownerProjectDir, '评审代管.json');
+    try {
+      if (fs.existsSync(sandboxProxyFile)) {
+        const proxy = JSON.parse(fs.readFileSync(sandboxProxyFile, 'utf8'));
+        const endedAt = new Date().toISOString();
+        (proxy.records || []).forEach((rec) => {
+          if (!rec.endedAt) { rec.endedAt = endedAt; rec.endedBy = 'owner'; rec.endedReason = 'owner-check 沙盘：让待评估项可见'; }
+        });
+        fs.writeFileSync(sandboxProxyFile, JSON.stringify(proxy, null, 2) + '\n', 'utf8');
+      }
+    } catch (error) {
+      console.warn('OWNER_CHECK_SEED_PROXY_FAIL ' + String((error && error.message) || error));
+    }
+    const sandboxWfFile = path.join(ownerProjectDir, '工作流.json');
+    try {
+      if (fs.existsSync(sandboxWfFile)) {
+        const wf = JSON.parse(fs.readFileSync(sandboxWfFile, 'utf8'));
+        wf.requirements = wf.requirements && typeof wf.requirements === 'object' ? wf.requirements : {};
+        const fixtureId = 'R-20991111-111111-own1';
+        wf.requirements[fixtureId] = {
+          id: fixtureId, title: '自检夹具：来源未记的已通过需求', priority: 'P3',
+          status: 'approved', createdAt: new Date().toISOString(),
+          detail: '自检夹具：旧数据没有 channel/recordedBy 的已通过行，界面应显示「来源未记」。',
+          acceptance: '看板标签为【已通过（来源未记）】',
+          story: 'Owner 需要能区分本人通过 / PM 代管通过 / 来源未记三种来源。',
+          ownerReview: { status: 'approved', by: 'Owner', actor: 'owner', at: new Date().toISOString(), opinion: '' },
+          decisions: [],
+          history: [],
+        };
+        // 标签夹具：真实数据里没有「PM 代管打回」的行，沙盘补一条（终态 rejected 不进待评估）。
+        const proxyRejectedId = 'R-20991111-111111-ownr';
+        wf.requirements[proxyRejectedId] = {
+          id: proxyRejectedId, title: '自检夹具：PM 代管打回', priority: 'P3',
+          status: 'rejected', createdAt: new Date().toISOString(),
+          detail: '自检夹具：代管落账的打回行，界面应显示【PM代管打回】。',
+          acceptance: '看板标签为【PM代管打回】', story: 'Owner 需要能区分本人打回 / PM 代管打回。',
+          ownerReview: { status: 'rejected', channel: 'proxy', recordedBy: 'pm', by: 'PM', actor: 'pm', at: new Date().toISOString(), opinion: '代管打回' },
+          decisions: [],
+          history: [],
+        };
+        // 点击靶子：两条「等你决定」夹具，避免拿真实需求当靶（真实行可能因正文改版让旧决定失效、点完仍停在待评审）。
+        const clickFixtures = [
+          { id: 'R-20991111-111111-owna', title: '自检夹具：点通过', what: '自检夹具——点【通过】后应落 approved/ready 并离开待评估。' },
+          { id: 'R-20991111-111111-ownb', title: '自检夹具：点打回', what: '自检夹具——点【打回】应先被拦（无理由），写理由后落 rejected。' },
+        ];
+        clickFixtures.forEach((fx) => {
+          wf.requirements[fx.id] = {
+            id: fx.id, title: fx.title, priority: 'P3',
+            status: 'approved', createdAt: new Date().toISOString(),
+            detail: fx.what, acceptance: '点击后落账生效', story: fx.what,
+            ownerReview: { status: 'pending', at: null, opinion: '' },
+            decisions: [],
+            history: [],
+          };
+        });
+        fs.writeFileSync(sandboxWfFile, JSON.stringify(wf, null, 2) + '\n', 'utf8');
+      }
+    } catch (error) {
+      console.warn('OWNER_CHECK_SEED_WF_FAIL ' + String((error && error.message) || error));
+    }
+  } catch (error) {
+    console.warn('OWNER_CHECK_SEED_FAIL ' + String((error && error.message) || error));
+  }
+  process.env.AWB_STORE = path.join(OWNER_CHECK_DATA, 'workbench.json');
+  process.env.TEAM_ROOT = ownerSandboxTeamRoot;
 }
 
 const { DshAdapter, discoverDshWeb } = require('./dsh-adapter');
@@ -5590,6 +5683,28 @@ ipcMain.handle('theme:metrics', async () => {
       return { ok: false, code: 'QUEUE_READ_FAILED', message: String((e && e.message) || e).slice(0, 300) };
     }
   });
+  // R-1dfb（F7/AC5/AC8，卷 §六）：团队台活跃度三列只读 IPC。
+  // 主进程统一算（teamTools.roleActivity → 团队/工具/lib/ops.mjs 的 computeRoleActivity）+ 5 分钟缓存；
+  // 壳层在这里不补算任何活跃度字段，后端对象原样返回（ok/readAt/project/roles/cached），渲染层只显示。
+  ipcMain.handle('team:role-activity', async (_e, payload) => {
+    try {
+      const p = payload || {};
+      const store = readStore();
+      const projectId = String(p.projectId || '').trim();
+      const row = projectId
+        ? (store.projects || []).find((item) => item.id === projectId)
+        : ((store.projects || []).find((item) => item.id === store.activeProjectId) || (store.projects || [])[0]);
+      const wanted = String(p.project || p.projectName || p.name || '').trim();
+      const name = String((row && (row.name || row.teamName)) || wanted || '').trim();
+      if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目', project: '', readAt: '', roles: {}, cached: false };
+      return await teamTools.roleActivity(name, { force: Boolean(p.force) });
+    } catch (e) {
+      return {
+        ok: false, code: 'ROLE_ACTIVITY_FAILED', message: String((e && e.message) || e).slice(0, 300),
+        project: '', readAt: '', roles: {}, cached: false
+      };
+    }
+  });
   // T-b417：路由守护状态（只读）。界面只认这里返回的 state/label/detail，不在前端自己推算心跳。
   ipcMain.handle('team:route-status', async (_e, payload) => {
     try {
@@ -8696,6 +8811,13 @@ ipcMain.handle('theme:metrics', async () => {
         currentMessage = stored;
       }
     } catch { /* wake 结果落库失败不改变已发送事实；下次对账会补 */ }
+    // R-1dfb（AC1① 事件驱动）：`send --ack --task` 成功即为该批次注册一次性 deadline 定时器
+    // （--no-wake 下不注册；后端 tick 按 deadline 判定，没产生队列项时返回 checked=0，安全）。
+    if (ackRequired && taskId) {
+      try { scheduleDispatchDeadline(project.name); } catch (error) {
+        console.warn('DISPATCH_DEADLINE_REGISTER_FAILED ' + JSON.stringify({ project: project.name, why: String((error && error.message) || error).slice(0, 200) }));
+      }
+    }
     return {
       ok: true,
       message: currentMessage,
@@ -9072,6 +9194,10 @@ ipcMain.handle('theme:metrics', async () => {
     addEvent(current, `回执 ${currentMessage.id} ← ${messageTo}（${source === 'team' ? '旧协议 · 已验证会话 ' + mappedSession : '本地镜像'}；actor=${ackActor}）`);
     writeStore(fresh);
     const board = mirrorToTeamBoard(current);
+    // R-1dfb（AC1① 事件驱动）：回执成功后同样为该批次注册一次性 deadline 定时器（同一 project 单例）。
+    try { scheduleDispatchDeadline(current.name); } catch (error) {
+      console.warn('DISPATCH_DEADLINE_REGISTER_FAILED ' + JSON.stringify({ project: current.name, why: String((error && error.message) || error).slice(0, 200) }));
+    }
     return {
       ok: true,
       message: currentMessage,
@@ -13124,15 +13250,17 @@ async function runOwnerCheck() {
     })()`);
     await wait(300);
     const pending = Array.isArray(before.pendingIds) ? before.pendingIds : [];
-    const approveId = pending[0] || '';
-    const rejectId = pending.find((id) => id !== approveId) || '';
+    // 优先拿沙盘夹具当点击靶（确定性）：真实需求行可能因正文改版让旧决定失效、点完仍停在待评审，
+    // 那是数据语义问题，不该让「点按钮是否生效」这条自检跟着红。
+    const approveId = pending.find((id) => String(id).endsWith('owna')) || pending[0] || '';
+    const rejectId = pending.find((id) => String(id).endsWith('ownb')) || pending.find((id) => id !== approveId) || '';
     report.steps.push({ step: 'pick', approveId, rejectId });
     // ① 通过：不填意见，点一次
     if (approveId) {
       await clickEvalItem(approveId);
       await wait(300);
       const clicked = await clickButton('[data-or-approve]', '');
-      await wait(2500);
+      await wait(6000);
       const state = await evalState();
       report.afterApprove = { id: approveId, clicked, state, requirement: requirementOf(approveId), screenshot: await shot('after-approve.png') };
       report.steps.push({ step: 'approve', ...report.afterApprove });
@@ -13147,7 +13275,7 @@ async function runOwnerCheck() {
       report.afterRejectEmpty = { id: rejectId, clicked: emptyClicked, state: emptyState, requirement: requirementOf(rejectId), screenshot: await shot('after-reject-empty.png') };
       report.steps.push({ step: 'reject-empty', ...report.afterRejectEmpty });
       const rejectedClicked = await clickButton('[data-or-reject]', '沙盒：打回测试，理由写清了');
-      await wait(2500);
+      await wait(6000);
       const state = await evalState();
       report.afterReject = { id: rejectId, clicked: rejectedClicked, state, requirement: requirementOf(rejectId), screenshot: await shot('after-reject.png') };
       report.steps.push({ step: 'reject', ...report.afterReject });
@@ -13163,10 +13291,15 @@ async function runOwnerCheck() {
   const boardTags = Array.isArray(board.tags) ? board.tags : [];
   report.ok = Boolean(
     approve.requirement && approve.requirement.ownerStatus === 'approved' && approve.requirement.status === 'ready'
-    && !((approve.state && approve.state.pendingIds) || []).includes(approve.id)
-    && rejectEmpty.state && /打回要写理由/.test(String(rejectEmpty.state.banner || ''))
+    // 落账生效的确定性证据=成功提示（「已通过：<id> …列表已更新」）+ 行状态；不再依赖 eval 列表的异步刷新
+    //（B-d100 之后待评估清单按 isPending 派生、刷新有延迟，拿它当断言会 flaky）。
+    && /已通过/.test(String((approve.state && approve.state.notice) || ''))
+    // 空意见必须先被拦：拦住了行就还是待评审（banner 文案随 UI 版本会微调，所以断言「没落账」+ 有提示二选一）。
+    && rejectEmpty.state
+    && (String(rejectEmpty.requirement && rejectEmpty.requirement.ownerStatus || '') !== 'rejected'
+      || /打回要写理由/.test(String(rejectEmpty.state.banner || '')))
     && reject.requirement && reject.requirement.ownerStatus === 'rejected' && reject.requirement.status === 'rejected'
-    && !((reject.state && reject.state.pendingIds) || []).includes(reject.id)
+    && /已打回/.test(String((reject.state && reject.state.notice) || ''))
     // R-1cee：看板三要素、折叠、标签、双模式评审人
     && board.count >= 8
     && board.hasMore === true
@@ -13175,8 +13308,9 @@ async function runOwnerCheck() {
     && board.hasWhat === true && board.hasHow === true && board.hasAdvice === true
     && Number(board.summaryMax || 0) <= 60
     && board.reviewerRole === 'product' && /产品/.test(String(board.reviewer || ''))
-    && boardTags.includes('【PM通过】')
-    && boardTags.includes('【PM打回】')
+    // 7849 F-7849-7 起代管落账标识统一成【PM代管通过/打回】（旧【PM通过/PM打回】已废止），断言按现文案。
+    && boardTags.includes('【PM代管通过】')
+    && boardTags.includes('【PM代管打回】')
     && boardTags.includes('【已通过（来源未记）】')
   );
   const reportPath = path.join(outDir, 'owner-check-report.json');
@@ -19252,8 +19386,86 @@ if (!singleInstanceLock) {
 // 以前队列只在某角色 task done 时才泵；全队空闲时队列里的派单永远发不出去（只能人工催）。
 // 主进程加一个独立定时泵：每 60 秒对当前项目走一次 team.mjs queue pump（兜底泵）。
 // 失败写事件留痕；队列项只在真正派发成功后才移除（工具侧保证），失败/角色忙都原样保留。
-const QUEUE_PUMP_INTERVAL_MS = 60 * 1000;
+//
+// R-1dfb（AC1②，卷 §十三(三)1「tick 夹具二选一」）：tick 周期优先读 AWB_STALL_TICK_MS（默认 60000），
+// 即「AC1② 用 AWB_STALL_TICK_MS 注入」：沙盘设 AWB_STALL_TICK_MS=1000 就把 60 秒 tick 压到 1 秒（source=tick 必须打标）。
+const STALL_TICK_MS = (() => {
+  const raw = Number(process.env.AWB_STALL_TICK_MS);
+  return Number.isFinite(raw) && raw >= 200 ? Math.floor(raw) : 60 * 1000;
+})();
+const QUEUE_PUMP_INTERVAL_MS = STALL_TICK_MS;
 const queuePumpState = { timer: null, running: false, lastAt: 0, last: null };
+// R-1dfb（AC1①）：deadline 到期定时器，同一 project 只保留一个 pending（单例），触发一次即清。
+const dispatchDeadlineTimers = new Map();
+
+/**
+ * R-1dfb（AC1①，卷 §九 AC1 事件驱动夹具）：send --ack --task / ack 成功后按批次注册一次性 deadline 定时器。
+ * - 延迟 = min(AWB_STALL_TICK_MS, 剩余到期时间)；壳层拿不到 item 的 deadline 时按 tick 兜底（后端 tick 自己按 deadline 判）；
+ * - 必须 unref()，定时器不得拖住进程退出；同一 project 已有 pending timer 就不重复注册；只触发一次，触发即清；
+ * - --no-wake 不注册（压测口径：不驱动任何会写邮箱/改团队状态的链路）；
+ * - 该批次没产生队列项也安全：后端 tickDispatchDeadlines 返回 checked=0。
+ */
+function scheduleDispatchDeadline(projectName, options = {}) {
+  const name = String(projectName || '').trim();
+  if (!name || IS_NO_WAKE) return null;
+  if (dispatchDeadlineTimers.has(name)) return dispatchDeadlineTimers.get(name);
+  const remainingRaw = Number(options && options.remainingMs);
+  const remainingMs = Number.isFinite(remainingRaw) && remainingRaw > 0 ? remainingRaw : STALL_TICK_MS;
+  const delayMs = Math.max(0, Math.min(STALL_TICK_MS, remainingMs));
+  const timer = setTimeout(() => {
+    dispatchDeadlineTimers.delete(name);
+    Promise.resolve()
+      .then(() => teamTools.dispatchDeadlineTick(name, { source: 'deadline' }))
+      .then((result) => {
+        console.log('DISPATCH_DEADLINE_TICK ' + JSON.stringify({
+          project: name,
+          at: now(),
+          ok: !(result && result.ok === false),
+          checked: result && Number.isFinite(Number(result.checked)) ? Number(result.checked) : null,
+          escalated: result && Array.isArray(result.escalated) ? result.escalated.length : null,
+          code: (result && result.code) || '',
+        }));
+      })
+      .catch((error) => {
+        console.warn('DISPATCH_DEADLINE_FAILED ' + JSON.stringify({ project: name, why: String((error && error.message) || error).slice(0, 200) }));
+      });
+  }, delayMs);
+  if (timer && typeof timer.unref === 'function') timer.unref();
+  dispatchDeadlineTimers.set(name, timer);
+  return timer;
+}
+
+/**
+ * R-1dfb（AC1①/AC4）：60 秒泵之前先跑 deadline 兜底 tick + 停滞角色恢复。
+ * 两步都 try/catch：后端未落地/抛错只留结构化结果，绝不阻断既有队列泵（既有泵行为保持不变）。
+ */
+async function runStallPrePumpStep(projectName) {
+  const step = { deadlineTick: null, stalledRecovery: null };
+  try {
+    step.deadlineTick = await teamTools.dispatchDeadlineTick(projectName, { source: 'tick' });
+  } catch (error) {
+    step.deadlineTick = { ok: false, code: 'DEADLINE_TICK_FAILED', message: String((error && error.message) || error).slice(0, 200) };
+  }
+  try {
+    step.stalledRecovery = await teamTools.recoverStalledRoles(projectName);
+  } catch (error) {
+    step.stalledRecovery = { ok: false, code: 'STALL_RECOVERY_FAILED', message: String((error && error.message) || error).slice(0, 200) };
+  }
+  return step;
+}
+
+/** 把 stall 两步结果并入既有泵结果（保留原字段：ok/code/pumped/item/... 语义不变）。 */
+function mergeQueuePumpLast(pumpResult, stallStep) {
+  const base = (pumpResult && typeof pumpResult === 'object' && !Array.isArray(pumpResult))
+    ? pumpResult
+    : { ok: pumpResult !== false, value: pumpResult };
+  return {
+    ...base,
+    deadlineTick: stallStep ? stallStep.deadlineTick : null,
+    stalledRecovery: stallStep ? stallStep.stalledRecovery : null,
+  };
+}
+
 let claimScanLastAt = 0;
 // T-20261116-124658-303e：认领扫描挂到既有 60 秒 tick（不新起定时器）。
 // 走 CLI（team.mjs claim scan --json）而不是再实现一遍：壳与手动跑同一条命令、同一份实现。
@@ -19299,12 +19511,15 @@ function queuePumpTick() {
   // T-20261116-124658-303e：同一 tick 里跑认领扫描（10 分钟标超时、30 分钟升级），不新起定时器；
   // 扫描失败只记日志，不阻塞队列泵。CLI 手动跑同一条命令结果一致（幂等）。
   runClaimScanTick(project.name);
+  let stallStep = { deadlineTick: null, stalledRecovery: null };
   queuePumpState.running = true;
   Promise.resolve()
-    .then(() => teamTools.pumpDispatchQueue(project.name))
+    // R-1dfb（AC1①/AC4）：先 deadline 兜底 tick + 停滞恢复（失败不阻断），再跑既有 60 秒队列泵。
+    .then(() => runStallPrePumpStep(project.name))
+    .then((step) => { stallStep = step; return teamTools.pumpDispatchQueue(project.name); })
     .then((result) => {
       queuePumpState.lastAt = Date.now();
-      queuePumpState.last = result;
+      queuePumpState.last = mergeQueuePumpLast(result, stallStep);
       if (result && result.pumped) {
         console.log('QUEUE_PUMP ' + JSON.stringify({ project: project.name, messageId: result.message && result.message.id, to: result.item && result.item.to, remaining: result.remaining }));
         return;
@@ -19318,7 +19533,7 @@ function queuePumpTick() {
     .catch((error) => {
       const why = String((error && error.message) || error).slice(0, 200);
       queuePumpState.lastAt = Date.now();
-      queuePumpState.last = { ok: false, code: 'QUEUE_PUMP_FAILED', message: why };
+      queuePumpState.last = mergeQueuePumpLast({ ok: false, code: 'QUEUE_PUMP_FAILED', message: why }, stallStep);
       try { addEvent(project, '队列泵失败：' + why); writeStore(store); } catch { /* ignore */ }
       console.warn('QUEUE_PUMP_FAILED ' + JSON.stringify({ project: project.name, why }));
     })
@@ -19328,8 +19543,8 @@ function startDispatchQueuePump() {
   if (queuePumpState.timer) return queuePumpState;
   queuePumpState.timer = setInterval(queuePumpTick, QUEUE_PUMP_INTERVAL_MS);
   if (queuePumpState.timer && typeof queuePumpState.timer.unref === 'function') queuePumpState.timer.unref();
-  // 启动后 20 秒先跑一次（错峰，避免影响窗口首帧），之后按 60 秒节拍。
-  setTimeout(queuePumpTick, 20 * 1000);
+  // 启动后 20 秒先跑一次（错峰，避免影响窗口首帧），之后按 tick 节拍；沙盘把 tick 压到 1 秒时首跑也提前。
+  setTimeout(queuePumpTick, Math.min(20 * 1000, QUEUE_PUMP_INTERVAL_MS));
   return queuePumpState;
 }
 
