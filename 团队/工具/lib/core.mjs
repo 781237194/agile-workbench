@@ -12,11 +12,14 @@ export const TEAM_ROOT = process.env.TEAM_ROOT
   ? path.resolve(process.env.TEAM_ROOT)
   : path.join(WORKSPACE, '团队');
 export const INSTALL_TEAM_ROOT = path.join(WORKSPACE, '团队');
-/** B-3c03：沙盘（TEAM_ROOT 指向非安装默认根）默认不唤醒真实会话，避免串台。 */
+/** B-3c03 / B-47c0：沙盘根判定——TEAM_ROOT 或 TEAM_PROJECTS_ROOT 任一被环境变量指走，
+ *  或 TEAM_SELFTEST=1，都视为沙盘；沙盘默认不唤醒真实会话（防串台）。 */
 export function isSandboxTeamRoot() {
-  // 判据：调用方是否用 TEAM_ROOT 环境变量把根指走（安装默认运行不设该变量）。
+  // 判据：调用方是否用 TEAM_ROOT/TEAM_PROJECTS_ROOT 把根指走（安装默认运行不设这两个变量）。
   // 不能用“模块所在位置推导”，因为沙盘是整目录复制，推导出来还是沙盘自己。
-  return Boolean(String(process.env.TEAM_ROOT || '').trim());
+  return Boolean(String(process.env.TEAM_ROOT || '').trim())
+    || Boolean(String(process.env.TEAM_PROJECTS_ROOT || '').trim())
+    || String(process.env.TEAM_SELFTEST || '') === '1';
 }
 export const PROJECTS_ROOT = process.env.TEAM_PROJECTS_ROOT
   ? path.resolve(process.env.TEAM_PROJECTS_ROOT)

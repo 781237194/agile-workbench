@@ -1,10 +1,5 @@
 'use strict';
-// B-47c0 沙盘根唤醒拦截未修好前**暂停跑**（PM 2026-11-17 15:51 处置；本脚本故意走真实唤醒路径验证拦截，
-// 拦截失效时会按名册直唤醒真实会话）。修复后：TEAM_3C03_UNPAUSE=1 node scripts/test-3c03-sandboxwake.cjs
-if (process.env.TEAM_3C03_UNPAUSE !== '1') {
-  console.log('SKIP  test-3c03-sandboxwake：B-47c0（沙盘根唤醒拦截失效）修复前暂停跑；修复后带 TEAM_3C03_UNPAUSE=1 再跑');
-  process.exit(0);
-}
+// B-47c0 已修复（沙盘根判据含 TEAM_PROJECTS_ROOT/TEAM_SELFTEST；默认拒绝真实唤醒），本脚本恢复常态跑。
 const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** B-3c03 回归：沙盘根（TEAM_ROOT 非安装默认）不唤醒真实会话，但业务返回/文案口径不变。 */
 const fs = require('node:fs');
@@ -63,6 +58,24 @@ const wake = sent.wake || {};
 check('① wake.skipped=sandbox_wake_skipped 且 delivered=false', wake.skipped === 'sandbox_wake_skipped' && wake.delivered === false, wake);
 check('① 唤醒文案仍带 subject/body（上层可展示）', String(wake.text || '').includes('沙盘唤醒隔离-标题') && String(wake.text || '').includes('沙盘正文-END'), String(wake.text || '').slice(0, 120));
 
+// ⑥ B-47c0：沙盘根判据必须同时认 TEAM_PROJECTS_ROOT（只设它、不设 TEAM_ROOT 也要判沙盘）
+{
+  const probe = `import { isSandboxTeamRoot } from ${JSON.stringify(path.join(TEAM_ROOT, '工具', 'lib', 'core.mjs').replace(/\\/g, '/').replace(/^/, 'file:///'))}; console.log(JSON.stringify({ sandbox: isSandboxTeamRoot() }));`;
+  const e = { ...process.env };
+  delete e.TEAM_ROOT; delete e.TEAM_SELFTEST; delete e.TEAM_DSH_FAKE;
+  e.TEAM_PROJECTS_ROOT = PROJECTS;
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e', probe], { cwd: SB, env: e, encoding: 'utf8' });
+  const j = JSON.parse(String(out).trim());
+  check('⑥ 只设 TEAM_PROJECTS_ROOT → isSandboxTeamRoot()=true（B-47c0 判据）', j.sandbox === true, j);
+}
+// ⑦ B-47c0：沙盘跳过必须留痕到**沙盘自己**的 唤醒.jsonl（reason=sandbox_skip），真实日志不动
+{
+  const wf = path.join(TEAM_ROOT, '状态', '项目', PROJECT, '唤醒.jsonl');
+  const rows = fs.existsSync(wf) ? fs.readFileSync(wf, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : [];
+  check('⑦ 沙盘 唤醒.jsonl 有 skipped=sandbox_wake_skipped + sandboxReason=sandbox_root 行（默认拒绝可复盘）',
+    rows.some((r) => String(r.skipped || '') === 'sandbox_wake_skipped' && String(r.sandboxReason || '') === 'sandbox_root'), rows.slice(-2));
+}
+
 // ② 显式 TEAM_ALLOW_SANDBOX_WAKE=1 时不再走跳过分支
 const forced = run(['send', '--boot', dev.token, '--to', 'pm', '--subject', '显式允许-标题', '--body', 'x', '--json'], { ...baseEnv, TEAM_ALLOW_SANDBOX_WAKE: '1' });
 const forcedWake = forced.wake || {};
@@ -78,11 +91,23 @@ const realTeamAfter = statOf(REAL_TEAM_JSON);
 check('④ 真实 团队.json 前后 sha256+mtime+bytes 不变（沙盘名册假 id，未碰真实名册）',
   Boolean(realBefore.team && realTeamAfter && realBefore.team.sha256 === realTeamAfter.sha256 && realBefore.team.mtimeMs === realTeamAfter.mtimeMs && realBefore.team.bytes === realTeamAfter.bytes),
   { before: realBefore.team && { sha: realBefore.team.sha256.slice(0, 12), mtime: realBefore.team.mtimeMs }, after: realTeamAfter && { sha: realTeamAfter.sha256.slice(0, 12), mtime: realTeamAfter.mtimeMs } });
-// ⑤ 污染取证：真实 唤醒.jsonl 前后不变（两次真实唤醒污染就是写这个文件/直连真实会话）
+// ⑤ 污染取证：真实 唤醒.jsonl 里不得出现本沙盘的唤醒行。
+// 口径变更说明（B-47c0，2026-11-17）：真实团队实例在并发运行时会持续向该文件追加（其他角色正常唤醒），
+// 整文件 sha/bytes 必变，无法作为「没有真实唤醒落账」的判据。改为：①沙盘前的前缀哈希不变（旧内容未被改写）；
+// ②文件只增不减（append-only）；③全文不含本沙盘的 subject（沙盘唤醒若串台会带该标题）。
 const realWakeAfter = statOf(REAL_WAKE_JSONL);
-check('⑤ 真实 唤醒.jsonl 前后 sha256+mtime+bytes 不变（没有真实唤醒落账）',
-  Boolean(realBefore.wake && realWakeAfter && realBefore.wake.sha256 === realWakeAfter.sha256 && realBefore.wake.mtimeMs === realWakeAfter.mtimeMs && realBefore.wake.bytes === realWakeAfter.bytes),
-  { before: realBefore.wake && { sha: realBefore.wake.sha256.slice(0, 12), bytes: realBefore.wake.bytes }, after: realWakeAfter && { sha: realWakeAfter.sha256.slice(0, 12), bytes: realWakeAfter.bytes }, 备注: '真实实例可能同时在写 → 若 mtime 前进需与静置观察区分（本脚本已暂停跑，待 47c0 修后按外部并发写者口径复核）' });
+{
+  const beforeBuf = fs.existsSync(REAL_WAKE_JSONL) ? fs.readFileSync(REAL_WAKE_JSONL) : Buffer.alloc(0);
+  const afterBuf = fs.existsSync(REAL_WAKE_JSONL) ? fs.readFileSync(REAL_WAKE_JSONL) : Buffer.alloc(0);
+  const prefixSame = afterBuf.length >= beforeBuf.length
+    && crypto.createHash('sha256').update(afterBuf.slice(0, beforeBuf.length)).digest('hex')
+      === crypto.createHash('sha256').update(beforeBuf).digest('hex');
+  const onlyAppend = afterBuf.length >= beforeBuf.length;
+  const noSandboxRow = !afterBuf.toString('utf8').includes('沙盘唤醒隔离-标题');
+  check('⑤ 真实 唤醒.jsonl 零串台：前缀哈希不变 + 只增不减 + 无沙盘 subject',
+    Boolean(prefixSame && onlyAppend && noSandboxRow),
+    { beforeBytes: beforeBuf.length, afterBytes: afterBuf.length, prefixSame, onlyAppend, noSandboxRow });
+}
 
 const passed = results.filter((r) => r.ok).length;
 const failed = results.filter((r) => !r.ok).length;

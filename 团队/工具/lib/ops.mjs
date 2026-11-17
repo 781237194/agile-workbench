@@ -1338,7 +1338,10 @@ async function tryWake({ project, target, batch, isDispatch = false, engineUrl =
     // 放在这里（伪消息已构造、测试注入已判过）以保持唤醒文案与留痕口径不变，只掐掉真实 DSH 调用。
     {
       const { isSandboxTeamRoot } = await import('./core.mjs');
-      if (isSandboxTeamRoot() && String(process.env.TEAM_ALLOW_SANDBOX_WAKE || '') !== '1') {
+      const sandbox = isSandboxTeamRoot();
+      const allowReal = String(process.env.TEAM_ALLOW_REAL_WAKE || '') === '1' && String(process.env.TEAM_WAKE_REASON || '').trim().length >= 2;
+      const allowLegacy = String(process.env.TEAM_ALLOW_SANDBOX_WAKE || '') === '1';
+      if (sandbox && !allowReal && !allowLegacy) {
         // 不真唤醒，但正文与入口语义照旧（自测/排查要能看见唤醒文案）。
         let text = '';
         try {
@@ -1348,7 +1351,32 @@ async function tryWake({ project, target, batch, isDispatch = false, engineUrl =
             from: last.from || '', teamTool: path.join(PATHS.teamRoot, '工具', 'team.mjs'), body: String(last.body || ''),
           });
         } catch { text = ''; }
-        return { ok: true, skipped: 'sandbox_wake_skipped', delivered: false, to: target, merged: batch.length, text, reason: '沙盘根不唤醒真实会话' };
+        // B-47c0：沙盘留痕统一由 wakeWithGuard 在成功分支写一行（skipped=sandbox_wake_skipped），
+        // 这里不重复写，避免同一事件两行日志（B4 断言要求一行）。
+        console.warn(`[wake] sandbox_skip：沙盘根不唤醒真实会话（to=${target}，project=${project}；如确需真实唤醒请 TEAM_ALLOW_REAL_WAKE=1 + TEAM_WAKE_REASON=…）`);
+        return { ok: true, skipped: 'sandbox_wake_skipped', delivered: false, to: target, merged: batch.length, text, reason: 'sandbox_root' };
+      }
+      // 双保险（B-47c0 ③）：沙盘名册若来自真实团队拷贝，目标 sessionId 命中真实名册 → 即使 allowLegacy 也拒绝真实唤醒。
+      if (sandbox && allowLegacy && !allowReal) {
+        try {
+          const team = loadTeam();
+          const member = (team.members || []).find((m) => m && String(m.role) === String(target));
+          const sid = String((member && member.sessionId) || '');
+          const { INSTALL_TEAM_ROOT } = await import('./core.mjs');
+          const realFile = path.join(INSTALL_TEAM_ROOT, '状态', '团队.json');
+          // 沙盘是整目录复制：其 core.mjs 里的 INSTALL_TEAM_ROOT 会指向沙盘自己，此时没有「独立真实名册」可比，
+          // 双保险跳过（真实安装里两者不同路径，才会真正比对）。
+          const independentReal = path.resolve(realFile) !== path.resolve(PATHS.team);
+          if (independentReal && sid && exists(realFile)) {
+            const real = JSON.parse(fs.readFileSync(realFile, 'utf8'));
+            const realMember = (real.members || []).find((m) => m && String(m.role) === String(target));
+            if (realMember && String(realMember.sessionId || '') === sid) {
+              appendWakeLog(project, { ok: true, skipped: 'sandbox_skip', reason: 'real_roster_session', to: target, sid });
+              console.warn(`[wake] sandbox_skip：目标会话 ${sid} 属于真实名册，拒绝唤醒（双保险）`);
+              return { ok: true, skipped: 'sandbox_wake_skipped', delivered: false, to: target, merged: batch.length, text: '', reason: 'real_roster_session' };
+            }
+          }
+        } catch { /* 双保险失败不阻断（已按根拦截） */ }
       }
     }
     return await wakeSessionForMessage({ project, to: target, msg: pseudoMsg, isDispatch, engineUrl, taskRow });
@@ -1422,6 +1450,23 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
     result = await tryWake({ project, target, batch, isDispatch, engineUrl, taskRow });
   }
   if (result && result.ok === true) {
+    // B-47c0：沙盘跳过也要留一行、且 reason 保留触发类型（receipt/dispatch/…），skipped 标明 sandbox_wake_skipped；
+    // 不计 deliveredAt（没有真实投递），调用方看到 delivered:false 即可。
+    if (result.skipped) {
+      for (const row of batch) {
+        if (row.dedupeKey) state.delivered[row.dedupeKey] = Date.now();
+      }
+      t.pending = [];
+      t.attempts = 0;
+      state.targets[target] = t;
+      writeWakeQueue(project, state);
+      appendWakeLog(project, {
+        to: target, ok: true, skipped: String(result.skipped), reason,
+        sandboxReason: String(result.reason || ''), merged: batch.length,
+        messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5),
+      });
+      return { ...(result || {}), ok: true, to: target, merged: batch.length, retried: false, reason };
+    }
     const deliveredAt = nowIso();
     for (const row of batch) {
       if (row.dedupeKey) state.delivered[row.dedupeKey] = Date.now();
@@ -4477,11 +4522,11 @@ function writeWorkflowBootState(projectName, roleId, records, meta) {
  *  不改 session.mjs / auto-rotate.mjs）。返回 {status:'ok'|'missing'|'skipped'|'absent', rosterSessionId}。 */
 async function verifyBootSessionExists(projectName, role) {
   try {
-    // 沙盘策略：TEAM_SELFTEST=1 且未显式给 TEAM_DSH_FAKE 时按策略豁免（显式 skipped，不静默）；
-    // 给了 fake 列表则照常校验（夹具可测「名册写不存在会话必失败」）。
-    const selftest = String(process.env.TEAM_SELFTEST || '') === '1';
-    if (selftest && !String(process.env.TEAM_DSH_FAKE || '').trim()) {
-      return { status: 'skipped', reason: 'TEAM_SELFTEST=1（沙盘按策略豁免 DSH 会话存在性校验）' };
+    // 沙盘策略：沙盘根（TEAM_ROOT/TEAM_PROJECTS_ROOT/TEAM_SELFTEST 任一）且未显式给 TEAM_DSH_FAKE 时按策略豁免
+    // （显式 skipped，不静默）；给了 fake 列表则照常校验（夹具可测「名册写不存在会话必失败」）。
+    const { isSandboxTeamRoot } = await import('./core.mjs');
+    if (isSandboxTeamRoot() && !String(process.env.TEAM_DSH_FAKE || '').trim()) {
+      return { status: 'skipped', reason: '沙盘根（TEAM_ROOT/TEAM_PROJECTS_ROOT/TEAM_SELFTEST）按策略豁免 DSH 会话存在性校验' };
     }
     const probe = await probeRoleSession(projectName, role);
     const rosterSessionId = String((probe && probe.sessionId) || '');
