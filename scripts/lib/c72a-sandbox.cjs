@@ -111,7 +111,7 @@ function seedSandbox(spec) {
   };
 }
 
-/** 沙盘启动环境（双隔离 + 禁唤醒）。 */
+/** 沙盘启动环境（双隔离 + 禁唤醒 + DSH_HOME 隔离）。 */
 function sandboxEnv(seed) {
   return {
     ...process.env,
@@ -120,6 +120,10 @@ function sandboxEnv(seed) {
     TEAM_PROJECTS_ROOT: path.join(seed.team, '状态', '项目'),
     TEAM_WORKBENCH_JSON: path.join(seed.data, 'userdata', 'workbench.json'),
     TEAM_SELFTEST: '1',
+    // 30d8：c72a 系 UI 测试会拉起内嵌 DSH 并切项目；不隔离 DSH_HOME 会把沙盘目录
+    // 注册进真实 ~/.dsh/storages/workspace.json（本次 4 个死工作区的根因）。
+    // 显式指到沙盘内，与 run-electron.cjs 的集中兜底形成双保险。
+    DSH_HOME: path.join(seed.base, 'dsh-home'),
   };
 }
 

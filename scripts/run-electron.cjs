@@ -142,6 +142,41 @@ if (inheritedRunAsNode) {
 }
 
 const args = argv.length ? argv : ['.'];
+
+// 30d8：沙盘测试集中隔离 DSH_HOME。
+// 背景：UI/沙盘测试拉起工作台（内嵌 DSH）时若未隔离 DSH_HOME，DSH 会把 _tmp 沙盘目录
+// 注册进真实 ~/.dsh/storages/workspace.json，沙盘清理后界面一直留着死工作区（c72a 事故）。
+// 关键：DSH 宿主派生的终端**通常已继承 DSH_HOME=~/.dsh**（本机会话实测），所以不能只在
+// 「未设置」时兜底，必须在识别到沙盘时**强制覆盖**（除非显式 AWB_ALLOW_REAL_DSH_HOME=1）。
+// 口径：AWB_DATA_DIR / TEAM_ROOT / TEAM_WORKBENCH_JSON 指向 `_tmp` 沙盘 → DSH_HOME=<沙盘根>/dsh-home。
+function sandboxRootOf() {
+  const cands = [process.env.AWB_DATA_DIR, process.env.TEAM_ROOT, process.env.TEAM_WORKBENCH_JSON]
+    .filter(Boolean)
+    .map((p) => path.resolve(String(p)));
+  for (const p of cands) {
+    const segs = p.split(path.sep);
+    let i = -1;
+    segs.forEach((seg, idx) => { if (/^_tmp([._-].*)?$/i.test(seg)) i = idx; });
+    // 沙盘根 = `_tmp/<沙盘目录>`：取 _tmp 的下一层（没有下一层时退回 _tmp 本身）
+    if (i > 0) return segs.slice(0, Math.min(segs.length, i + 2)).join(path.sep);
+  }
+  return '';
+}
+{
+  const sandboxRoot = sandboxRootOf();
+  const allowReal = process.env.AWB_ALLOW_REAL_DSH_HOME === '1';
+  if (sandboxRoot && !allowReal) {
+    const inherited = String(process.env.DSH_HOME || '');
+    const dshHome = path.join(sandboxRoot, 'dsh-home');
+    try { fs.mkdirSync(dshHome, { recursive: true }); } catch { /* 建目录失败不阻断启动，但 env 仍隔离 */ }
+    process.env.DSH_HOME = dshHome;
+    const overridden = inherited && path.resolve(inherited) !== dshHome;
+    // 写 stdout（不是 stderr）：这类自检脚本按 ok=true 判成功，stderr 会让 CI 误判失败
+    console.log(overridden
+      ? `[隔离] 沙盘测试强制改 DSH_HOME：继承 ${inherited}（真实家目录）→ ${dshHome}`
+      : `[隔离] 沙盘测试 DSH_HOME 已指向 ${dshHome}（不写真实 ~/.dsh）`);
+  }
+}
 let child;
 try {
   child = spawn(resolved.bin, args, {
