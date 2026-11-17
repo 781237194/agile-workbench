@@ -147,6 +147,9 @@ function seedSandbox() {
   const item = (id, title) => ({
     id, title, summary: '夹具：真窗口点一次回执', question: '是否通过', source: { kind: 'fixture', ref: 'B-20261115-162904-f6c0' },
     createdAt: '2026-11-15T00:00:00.000Z', by: 'pm', status: 'open', options: ['通过', '打回', '其他'],
+    // B-8cfd：决策箱列表现在「不满足七要素的历史条目不展示」（只留三数说明行），
+    // 旧夹具只写了 4 项 → 两条夹具都被过滤、所有行级断言报 missing。补齐缺的 3 项（默认项/影响/截止）。
+    defaultChoice: '通过', impact: '夹具：仅沙盘，不影响真实账本', dueAt: '2026-11-30',
     readAt: null, answeredAt: null, archivedAt: null, updatedAt: nowIso,
   });
   fs.writeFileSync(BOX_FILE, JSON.stringify({
