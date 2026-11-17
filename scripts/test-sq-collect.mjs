@@ -38,8 +38,11 @@ fs.writeFileSync(path.join(stateDir, '团队.json'), JSON.stringify({
 const now = Date.now();
 fs.writeFileSync(path.join(stateDir, '唤醒.jsonl'), [
   { at: new Date(now - 60000).toISOString(), to: 'analyst', ok: true, reason: 'wake' },
-  { at: new Date(now - 30000).toISOString(), to: 'tester', ok: false, reason: 'WAKE_FAILED' },
+  // B-20261117-181420-9688（P1）：tester 先失败、再跳过、**最近一条成功** —— 四态必须判 ok，
+  // 不能再像旧实现那样「窗口内曾失败一次就永久 fail」。
+  { at: new Date(now - 40000).toISOString(), to: 'tester', ok: false, reason: 'WAKE_FAILED' },
   { at: new Date(now - 20000).toISOString(), to: 'tester', ok: false, skipped: true, reason: 'skipped' },
+  { at: new Date(now - 10000).toISOString(), to: 'tester', ok: true, reason: 'wake' },
 ].map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
 
 const calls = { state: 0, writeSide: 0 };
@@ -70,7 +73,7 @@ const tester = disk.roles.find((row) => row.role === 'tester') || {};
 check('② analyst 排队=3、byPlacement steering=1/context=1、state=ok',
   analyst.queued === 3 && analyst.byPlacement && analyst.byPlacement.steering === 1 && analyst.byPlacement.context === 1 && analyst.state === 'ok',
   analyst);
-check('③ tester 有失败行 → state=fail（fail 优先于 skip）', tester.state === 'fail', tester);
+check('③ 9688：tester 先失败→跳过→最近一条 ok → state=ok（不再「曾失败就永久 fail」）', tester.state === 'ok', tester);
 check('④ pm 无 sessionId → known=false、queued=null（面板显示 —，不是 0）', (disk.roles.find((row) => row.role === 'pm') || {}).known === false && (disk.roles.find((row) => row.role === 'pm') || {}).queued === null, disk.roles.find((row) => row.role === 'pm'));
 check('⑤ 只读：sessionController.state 被调用，写侧方法 0 调用', calls.state >= 2 && calls.writeSide === 0, calls);
 check('⑥ 快照字段齐全（schema/at/project/staleMs/roles[]）', disk.schema === 1 && Boolean(disk.at) && disk.staleMs === 120000 && Array.isArray(disk.roles) && disk.roles.length === 3, { schema: disk.schema, roles: disk.roles.length });

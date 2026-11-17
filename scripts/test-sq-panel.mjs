@@ -37,11 +37,26 @@ check('① AC1① {ok:false}（无 skipped）→ fail', SRC.classifyRow(row({ ok
 check('① AC1② {ok:true, skipped:"ALREADY_DELIVERED"} → skip（不得为 ok）', SRC.classifyRow(row({ ok: true, skipped: 'ALREADY_DELIVERED' })) === 'skip', SRC.classifyRow(row({ ok: true, skipped: 'ALREADY_DELIVERED' })));
 check('① AC1③ {ok:true}（无 skipped）→ ok', SRC.classifyRow(row({ ok: true })) === 'ok', SRC.classifyRow(row({ ok: true })));
 check('① AC7③ {ok:true, skipped:"DEBOUNCED"} → skip', SRC.classifyRow(row({ ok: true, skipped: 'DEBOUNCED' })) === 'skip', SRC.classifyRow(row({ ok: true, skipped: 'DEBOUNCED' })));
-check('① 四态优先级 fail > skip > ok：三类行同角色 → fail', SRC.summarizeRows([row({ ok: false }), row({ ok: true, skipped: 'MERGED_PENDING' }), row({ ok: true })], { now }).state === 'fail');
-
-// 同一角色失败/跳过各自独立计数
-const mixed = SRC.summarizeRows([row({ ok: false }), row({ ok: false }), row({ ok: true, skipped: 'ALREADY_DELIVERED' }), row({ ok: true })], { now });
-check('① AC1 混合：failCount=2 / skipCount=1 / okCount=1 且 state=fail', mixed.failCount === 2 && mixed.skipCount === 1 && mixed.okCount === 1 && mixed.state === 'fail', mixed);
+// B-20261117-181420-9688（P1）：四态取「最近一次投递」，不再「窗口内曾失败就永久 fail」。
+check('① 9688① 先 fail 后 ok（最近一条 ok）→ state=ok（不再永久 fail）',
+  SRC.summarizeRows([row({ at: iso(120 * 1000), ok: false }), row({ at: iso(10 * 1000), ok: true })], { now }).state === 'ok');
+check('① 9688② 最近一条 fail（之前 ok）→ state=fail',
+  SRC.summarizeRows([row({ at: iso(120 * 1000), ok: true }), row({ at: iso(10 * 1000), ok: false })], { now }).state === 'fail');
+check('① 9688③ 同一条 ok=true + skipped → skip（单条判定，skip 优先）',
+  SRC.classifyRow({ ok: true, skipped: 'ALREADY_DELIVERED' }) === 'skip');
+check('① 9688④ 计数与状态分离：failCount=2 但最近一条 ok → state=ok，且 lastFailAt 有值',
+  (() => {
+    const s = SRC.summarizeRows([row({ at: iso(600 * 1000), ok: false }), row({ at: iso(300 * 1000), ok: false }), row({ at: iso(10 * 1000), ok: true })], { now });
+    return s.state === 'ok' && s.failCount === 2 && Boolean(s.lastFailAt);
+  })());
+const mixed = SRC.summarizeRows([
+  row({ at: iso(40 * 1000), ok: false }),
+  row({ at: iso(30 * 1000), ok: false }),
+  row({ at: iso(20 * 1000), ok: true, skipped: 'ALREADY_DELIVERED' }),
+  row({ at: iso(10 * 1000), ok: false }),
+], { now });
+check('① AC1 混合（最近一条是 fail）：state=fail，failCount=3 / skipCount=1 各自独立',
+  mixed.failCount === 3 && mixed.skipCount === 1 && mixed.state === 'fail', mixed);
 
 // ② AC2 积压≠失败
 const backlog = SRC.buildPanelModel({

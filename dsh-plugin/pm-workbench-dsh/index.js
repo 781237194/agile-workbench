@@ -393,7 +393,7 @@ function queuedOf(state) {
 
 function wakeStateOf(rows, now, staleMs) {
   const list = Array.isArray(rows) ? rows.filter(Boolean) : []
-  if (!list.length) return { state: 'none', lastOkAt: '', lastAt: '', stale: false }
+  if (!list.length) return { state: 'none', lastOkAt: '', lastAt: '', lastFailAt: '', stale: false }
   const atOf = (row) => Date.parse(String((row && (row.at || row.deliveredAt || row.deliverAt)) || '')) || 0
   const parsed = list.map((row) => {
     const ok = row.ok === true
@@ -403,9 +403,22 @@ function wakeStateOf(rows, now, staleMs) {
   const lastAt = parsed[0] ? parsed[0].at : 0
   const lastOk = parsed.find((row) => row.ok && row.at)
   const lastOkAt = lastOk ? new Date(lastOk.at).toISOString() : ''
+  const lastFail = parsed.find((row) => row.failed && row.at)
+  const lastFailAt = lastFail ? new Date(lastFail.at).toISOString() : ''
   const stale = lastAt ? (Number(now) - lastAt) > Number(staleMs) : false
-  const pick = () => (parsed.some((r) => r.failed) ? 'fail' : (parsed.some((r) => r.skipped) ? 'skip' : (parsed.some((r) => r.ok) ? 'ok' : 'none')))
-  return { state: pick(), lastOkAt, lastAt: lastAt ? new Date(lastAt).toISOString() : '', stale }
+  // B-20261117-181420-9688（P1）：四态取最近一次投递的结果，不能「窗口内曾失败一次就永久 fail」。
+  // 同时间戳 tie-break：skip > fail > ok。
+  const TIE_RANK = { skip: 3, fail: 2, ok: 1, none: 0 }
+  let state = 'none'
+  let latestAt = -1
+  for (const row of parsed) {
+    const kind = row.skipped ? 'skip' : (row.failed ? 'fail' : (row.ok ? 'ok' : 'none'))
+    if (row.at > latestAt || (row.at === latestAt && TIE_RANK[kind] > TIE_RANK[state])) {
+      state = kind
+      latestAt = row.at
+    }
+  }
+  return { state, lastOkAt, lastAt: lastAt ? new Date(lastAt).toISOString() : '', lastFailAt, stale }
 }
 
 function readWakeRows(teamRoot, role, activeProject) {

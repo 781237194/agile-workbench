@@ -245,8 +245,32 @@ async function runSqCheck(options = {}) {
   check('AC1② {ok:true, skipped:ALREADY_DELIVERED} → skip（不得为 ok）', rowOf(panel, 'tester').state === 'skip', rowOf(panel, 'tester'));
   check('AC1③ {ok:true} → ok 且 last-ok 取该行 deliveredAt', rowOf(panel, 'product').state === 'ok' && /刚刚|分钟前/.test(rowOf(panel, 'product').lastOk || '') && String(rowOf(panel, 'product').lastOkTitle).includes(ago(40 * 1000).slice(0, 10)), rowOf(panel, 'product'));
   check('AC1④ 0 行 → none 且 last-ok「无记录」', rowOf(panel, 'pm').state === 'none' && rowOf(panel, 'pm').lastOk === '无记录', rowOf(panel, 'pm'));
-  check('AC1 同角色混合（fail+skip+ok）→ fail，失败数 1 / 跳过数 1 各自独立', rowOf(panel, 'analyst').state === 'fail' && rowOf(panel, 'analyst').fail === '1' && rowOf(panel, 'analyst').skip === '1', rowOf(panel, 'analyst'));
+  check('AC1 同角色混合（fail+skip+ok）→ 最近一条是 fail ⇒ fail，失败数 1 / 跳过数 1 各自独立', rowOf(panel, 'analyst').state === 'fail' && rowOf(panel, 'analyst').fail === '1' && rowOf(panel, 'analyst').skip === '1', rowOf(panel, 'analyst'));
   const ac1Shot = (await shotOf('sq-ac1-four-states.png', '#session-queue-panel')).file;
+
+  // ── B-20261117-181420-9688（P1）：四态取「最近一次投递」，计数与状态分离 ─────────
+  writeJson(snapshotFile, snapshotOf(baseRoles, now));
+  writeWake(wakeFile, [
+    // 9688① 先失败、最近一次成功 → 必须 ok（旧实现会永久 fail）
+    { to: 'programmer1', at: ago(120 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    { to: 'programmer1', at: ago(10 * 1000), ok: true, deliveredAt: ago(10 * 1000) },
+    // 9688② 先成功、最近一次失败 → fail
+    { to: 'tester', at: ago(120 * 1000), ok: true, deliveredAt: ago(120 * 1000) },
+    { to: 'tester', at: ago(10 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    // 9688③ 同一条 ok=true + skipped → skip（单条判定，skip 优先）
+    { to: 'product', at: ago(10 * 1000), ok: true, skipped: 'ALREADY_DELIVERED' },
+    // 9688④ 24h 内有 2 次失败，但最近一次成功 → 状态 ok；失败数照旧计 2
+    { to: 'analyst', at: ago(300 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    { to: 'analyst', at: ago(200 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    { to: 'analyst', at: ago(10 * 1000), ok: true, deliveredAt: ago(10 * 1000) },
+  ]);
+  panel = await refresh();
+  check('9688① 先 fail 后 ok（最近一条 ok）→ state=ok，不再「曾失败就永久 fail」',
+    rowOf(panel, 'programmer1').state === 'ok' && rowOf(panel, 'programmer1').fail === '1', rowOf(panel, 'programmer1'));
+  check('9688② 先 ok 后 fail（最近一条 fail）→ state=fail', rowOf(panel, 'tester').state === 'fail', rowOf(panel, 'tester'));
+  check('9688③ 同一条 ok=true + skipped → state=skip（skip 单条优先）', rowOf(panel, 'product').state === 'skip', rowOf(panel, 'product'));
+  check('9688④ 计数与状态分离：analyst 24h 失败数=2 但最近一条 ok → state=ok（失败数不决定四态）',
+    rowOf(panel, 'analyst').state === 'ok' && rowOf(panel, 'analyst').fail === '2', rowOf(panel, 'analyst'));
 
   // ── AC2 积压 ≠ 失败 ───────────────────────────────────────
   writeJson(snapshotFile, snapshotOf(baseRoles, now));
@@ -258,8 +282,9 @@ async function runSqCheck(options = {}) {
   const productRow = rowOf(panel, 'product');
   check('AC2 排队=3 且无 fail 行 → state ∈ {ok,skip}（不得 fail）', productRow.queued === '3' && ['ok', 'skip'].includes(productRow.state), productRow);
   writeWake(wakeFile, [
-    { to: 'product', at: ago(20 * 1000), ok: true, deliveredAt: ago(20 * 1000) },
-    { to: 'product', at: ago(30 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    { to: 'product', at: ago(30 * 1000), ok: true, deliveredAt: ago(30 * 1000) },
+    // 9688：最近一条必须是 fail，否则按新语义（取最近一次）会判 ok
+    { to: 'product', at: ago(20 * 1000), ok: false, reason: 'WAKE_FAILED' },
   ]);
   panel = await refresh();
   const productFail = rowOf(panel, 'product');

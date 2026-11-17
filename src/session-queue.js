@@ -90,40 +90,60 @@ function parseWakeLog(text) {
 
 /**
  * 单角色四态汇总（窗口内）。
- * @returns {{state:'fail'|'skip'|'ok'|'none', failCount:number, skipCount:number, okCount:number, lastOkAt:string, lastAt:string, inWindow:number}}
+ *
+ * B-20261117-181420-9688（P1，Owner 截图验收）：四态必须取**最近一次投递的结果**，
+ * 不能「窗口内曾失败一次就永久 fail」——实测六角色最近一次全是 ok=true，但 5/6 显示 fail，
+ * 就因为旧实现用了 some(failed)。现在：
+ *   · state = 按 deliveredAt??deliverAt??at 降序第一条的归类（同时间戳 tie-break：skip > fail > ok）；
+ *   · failCount/skipCount/okCount 继续按窗口计数，**与状态彻底分离**（计数不影响四态）；
+ *   · 另给 lastAt/lastOkAt/lastFailAt 供面板显示「最近失败时间」。
+ *
+ * @returns {{state:'fail'|'skip'|'ok'|'none', failCount:number, skipCount:number, okCount:number, lastOkAt:string, lastAt:string, lastFailAt:string, inWindow:number, latestKind:string}}
  */
 function summarizeRows(rows, options = {}) {
   const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
   const windowMs = Number(options.windowMs) > 0 ? Number(options.windowMs) : DEFAULT_WINDOW_MS;
   const windowStart = now - windowMs;
+  const TIE_RANK = { skip: 3, fail: 2, ok: 1, none: 0 };
   let failCount = 0;
   let skipCount = 0;
   let okCount = 0;
   let inWindow = 0;
   let lastOkMs = 0;
   let lastMs = 0;
+  let lastFailMs = 0;
+  let latest = null; // { at, kind }
   for (const row of Array.isArray(rows) ? rows : []) {
     const at = rowAt(row);
     if (at && at < windowStart) continue; // 窗口外不计
     inWindow += 1;
     if (at > lastMs) lastMs = at;
     const kind = classifyRow(row);
-    if (kind === 'fail') failCount += 1;
-    else if (kind === 'skip') skipCount += 1;
-    else if (kind === 'ok') {
+    if (kind === 'fail') {
+      failCount += 1;
+      if (at > lastFailMs) lastFailMs = at;
+    } else if (kind === 'skip') {
+      skipCount += 1;
+    } else if (kind === 'ok') {
       okCount += 1;
       if (at > lastOkMs) lastOkMs = at;
     }
+    // 「最近一次投递」：时间新的优先；同一时间戳按 skip > fail > ok 定序（skip 是设计内不唤醒，语义更强）。
+    if (!latest || at > latest.at || (at === latest.at && TIE_RANK[kind] > TIE_RANK[latest.kind])) {
+      latest = { at, kind };
+    }
   }
-  const state = failCount > 0 ? 'fail' : (skipCount > 0 ? 'skip' : (okCount > 0 ? 'ok' : 'none'));
+  const state = latest ? latest.kind : 'none';
   return {
     state,
     failCount,
     skipCount,
     okCount,
     inWindow,
+    latestKind: state,
     lastOkAt: lastOkMs ? new Date(lastOkMs).toISOString() : '',
     lastAt: lastMs ? new Date(lastMs).toISOString() : '',
+    lastFailAt: lastFailMs ? new Date(lastFailMs).toISOString() : '',
   };
 }
 
@@ -255,6 +275,8 @@ function buildPanelModel(options = {}) {
       okCount: summary.okCount,
       lastOkAt: summary.lastOkAt,
       lastAt: summary.lastAt,
+      // B-20261117-181420-9688：最近失败时间（展示用；计数与四态分离，失败数不再决定状态）
+      lastFailAt: summary.lastFailAt || '',
     };
   });
 
