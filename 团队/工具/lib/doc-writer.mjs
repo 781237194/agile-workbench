@@ -21,7 +21,7 @@ export const DOC_LOCK_FILE = '.doc-write.lock';
 export const DOC_WRITER_DEFAULT = 'analyst';
 export const DOC_AUDIT_STATES = ['ok', 'untracked', 'mismatch', 'missing', 'registry_broken'];
 export const DOC_AUDIT_CODES = ['DOC_UNTRACKED_WRITE', 'DOC_BINDING_MISMATCH', 'DOC_BINDING_STALE', 'DOC_MISSING', 'REGISTRY_BROKEN', 'DOC_CONTENT_DRIFT'];
-export const REGISTRY_ACTIONS = ['baseline', 'write', 'freeze', 'unfreeze', 'unlock_lock', 'unlock_write', 'rollback', 'reassign', 'writer'];
+export const REGISTRY_ACTIONS = ['baseline', 'write', 'repair', 'freeze', 'unfreeze', 'unlock_lock', 'unlock_write', 'rollback', 'reassign', 'writer'];
 export const REGISTRY_KEYS = ['at', 'requirementId', 'path', 'action', 'sha256', 'bytes', 'writer', 'actor', 'prevSha', 'reason', 'transactionId'];
 
 /** 锁超时阈值（默认 60s；测试可用 AWB_DOC_LOCK_STALE_MS 覆盖，生产不得设置）。 */
@@ -265,7 +265,7 @@ export function writeRequirementDoc(opts = {}) {
 
   // 3) 三值校验：expectedSha === registrySha === diskSha
   const diskSha = hashFile(abs);
-  const regRow = latestDocRegistryRow(read.rows, rel, ['baseline', 'write', 'rollback']);
+  const regRow = latestDocRegistryRow(read.rows, rel, ['baseline', 'write', 'repair', 'rollback']);
   const registrySha = regRow && regRow.sha256 ? String(regRow.sha256) : null;
   if (!opts.expectedSha) {
     fail('EXPECTED_SHA_REQUIRED', '必须带 --expected-sha（强制乐观锁：写前先读，把读到的 sha 带回来）', { requirementId, path: rel, diskSha }, 1);
@@ -392,7 +392,7 @@ export function verifyDocRegistryChain(rows) {
     const rel = normalizeRel(row.path);
     if (!rel) continue;
     const action = String(row.action || '');
-    if (['baseline', 'write', 'rollback'].includes(action)) {
+    if (['baseline', 'write', 'repair', 'rollback'].includes(action)) {
       const prev = last.get(rel) || null;
       if (row.prevSha && prev && String(row.prevSha) !== String(prev)) {
         breaks.push({ path: rel, at: row.at, action, prevSha: String(row.prevSha).slice(0, 12), expectedPrev: String(prev).slice(0, 12) });
@@ -482,7 +482,7 @@ export function auditRequirementDocs(opts = {}) {
   }
   for (const doc of docs) {
     const codes = [];
-    const regRow = latestDocRegistryRow(rows, doc.rel, ['baseline', 'write', 'rollback']);
+    const regRow = latestDocRegistryRow(rows, doc.rel, ['baseline', 'write', 'repair', 'rollback']);
     const registrySha = regRow && regRow.sha256 ? String(regRow.sha256) : null;
     let state = 'ok';
     if (!registrySha) { state = 'untracked'; codes.push('DOC_UNTRACKED_WRITE'); }
@@ -510,12 +510,18 @@ export function auditRequirementDocs(opts = {}) {
       try { return sha256(requirementContentText(fs.readFileSync(path.join(project.path, doc.rel), 'utf8'))); } catch { return ''; }
     })();
     const boundContentHash = String((row && row.requirementReview && row.requirementReview.contentHash) || (row && row.contentHash) || '');
+    // 口径 §二.2：拿「RR/决定绑的版本」与磁盘比（不是拿登记比）——
+    // sha 不等但 contentHash 相等 = 仅元数据差异（程序自己写的 ## 状态记录），不影响决定有效性。
+    const boundSha = String((row && (row.requirementHash || row.docHash))
+      || (row && row.requirementReview && row.requirementReview.requirementHash) || '');
+    const refSha = boundSha || String(registrySha || '');
     let contentDrift = null;
-    if (String(registrySha || '') !== String(doc.diskSha || '')) {
+    if (refSha && String(refSha) !== String(doc.diskSha || '')) {
       const metaOnly = Boolean(diskContentHash && boundContentHash && diskContentHash === boundContentHash);
       contentDrift = {
         metaOnly,
         note: metaOnly ? '仅元数据差异，不影响决定有效性' : '实质内容与绑定版本不一致，需要重评或用 req doc repair 恢复',
+        boundSha: refSha.slice(0, 12),
         boundContentHash: boundContentHash ? boundContentHash.slice(0, 12) : null,
         diskContentHash: diskContentHash ? diskContentHash.slice(0, 12) : null,
       };
@@ -523,7 +529,7 @@ export function auditRequirementDocs(opts = {}) {
     }
     // 卷：只比登记，不比 RR
     const supplements = supplementsOf(project.path, doc.shortKey).map((sup) => {
-      const supReg = latestDocRegistryRow(rows, sup.rel, ['baseline', 'write', 'rollback']);
+      const supReg = latestDocRegistryRow(rows, sup.rel, ['baseline', 'write', 'repair', 'rollback']);
       const supRegistrySha = supReg && supReg.sha256 ? String(supReg.sha256) : null;
       const supCodes = [];
       let supState = 'ok';
@@ -556,7 +562,7 @@ export function auditRequirementDocs(opts = {}) {
   }
   for (const row of missingRows) {
     const rel = normalizeRel(row.path);
-    const regRow = latestDocRegistryRow(rows, rel, ['baseline', 'write', 'rollback']);
+    const regRow = latestDocRegistryRow(rows, rel, ['baseline', 'write', 'repair', 'rollback']);
     requirements.push({
       requirementId: String(row.requirementId || ''), path: rel, state: 'missing',
       diskSha: null, bytes: null, mtime: null,
