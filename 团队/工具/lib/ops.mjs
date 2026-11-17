@@ -24,6 +24,8 @@ import {
   DEFAULT_BOOT_TTL_MINUTES,
   // T-20261117-203046-9ff2：PM 关键消息钩子（store 写盘后立即回调这里 → 当场唤醒，不靠队列泵兜底）
   onPmCriticalMessage,
+  // B-20261117-224405-d376：任务 id 归一（布尔占位不再进正文/邮箱）
+  normalizeTaskId,
 } from './store.mjs';
 import { dispatchGateFor, scanClaims, claimSummary, clearClaimFlags, CLAIM_OVERDUE_MIN, CLAIM_STALLED_MIN } from './claim-watch.mjs';
 import { DshClient } from './dsh-session.mjs';
@@ -4639,6 +4641,10 @@ export async function cmdBoot(args) {
     },
   });
   const lines = [];
+  // B-20261118-004424-6c6b：可丢行（任务/提案/未读明细/授权）用 pushDrop 标记在原位置；
+  // 超限时从尾部丢这些行，关键行（可选插件/记忆降级/队列续跑）上移到核心区必留。
+  const droppableIdx = new Set();
+  const pushDrop = (text) => { lines.push(String(text)); droppableIdx.add(lines.length - 1); };
   // R-51de F-5①：boot 简报顶部红条（LESSONS_UNREAD 红条）；只提示、不阻断 boot（AC4④）
   let bootLessonGate = null;
   try { bootLessonGate = lessonGateFor({ project: projectName, role }); } catch { bootLessonGate = null; }
@@ -4728,6 +4734,23 @@ export async function cmdBoot(args) {
   }
   // R-f9b1 F-7⑧：本角色当前任务所涉需求的增补卷（缺失也写一行；不进必读计数、不阻塞 boot）。
   for (const line of supplementBriefLines(project, tasks)) lines.push(line);
+  // B-20261118-004424-6c6b：关键行上移到核心区——「可选插件 / 记忆降级 / 队列续跑」以前放在末尾，
+  // 超 2000 字按尾部截断时会被切掉（selftest「记忆插件 off → boot 降级」用例因此红）。现固定放在核心区，必留。
+  try {
+    const marks = optionalPluginMarks();
+    lines.push(`可选插件: ${marks.marks}（非核心，缺了不阻断；详见 docs/可选插件.md）`);
+    // R-8b9d：记忆插件 off/error 时把降级口径说清楚，避免角色以为 P0 记忆门还会硬卡或已静默放水。
+    if (marks.summary && marks.summary.memory !== 'on') {
+      lines.push(`记忆降级: memory:${marks.summary.memory} —— P0 记忆门降级为 MEMORY_SKIPPED（不阻断完成）；启用 dsh-memory-evolve 后恢复强校验（安装见 docs/可选插件.md）`);
+    }
+  } catch { /* 探测失败不加行，不影响简报 */ }
+  // B-20261113-005705-a577：boot 也触发一次兜底泵——全队空闲时队列不会因为“没有 task done”而永远不派。
+  const bootPump = await pumpQueueSafe(projectName, 'boot');
+  if (bootPump && bootPump.pumped) {
+    lines.push(`队列自动续跑: 已派 ${bootPump.message && bootPump.message.id} → ${bootPump.item && bootPump.item.to}（task ${(bootPump.item && bootPump.item.task) || '-'}）`);
+  } else if (bootPump && bootPump.ok === false) {
+    lines.push(`队列泵失败: ${String(bootPump.why || bootPump.code || 'QUEUE_PUMP_FAILED').slice(0, 120)}（队列项已保留，下次再试）`);
+  }
   // T-20261117-184114-4358（R-bcae）第二步：30 分钟 skill 评估提示（同窗口只一次；可 skip 但必须写 reason）。
   try {
     const skillPrompt = skillPromptLineFor(projectName, role);
@@ -4742,34 +4765,16 @@ export async function cmdBoot(args) {
   const reqIds = docs.requirements.list.map((r) => r.id);
   lines.push(`需求池: ${docs.requirements.count} 份${reqIds.length ? '（' + reqIds.slice(0, 6).join('、') + '）' : '（暂无 R-*.md）'} ｜ 他人文档索引: ${docs.peers.length} 份`);
   lines.push(`未读消息: ${unread.length}`);
-  for (const m of unread.slice(0, 3)) lines.push(`  [${m.id}] ${m.from}${m.ackRequired ? ' (要回执)' : ''}: ${m.subject}`);
+  // B-20261118-004424-6c6b：明细行进「可丢区」——超限时先丢它们，不挤掉关键行。
+  for (const m of unread.slice(0, 3)) pushDrop(`  [${m.id}] ${m.from}${m.ackRequired ? ' (要回执)' : ''}: ${m.subject}`);
   lines.push(`待办任务: ${tasks.length} ｜ 待处理提案: ${proposals.length}`);
-  for (const t of tasks.slice(0, 3)) lines.push(`  [${t.id}] ${t.priority} ${t.status} ${t.owner || '-'} ${t.title}`);
-  for (const p of proposals.slice(0, 3)) lines.push(`  [${p.id}] ${p.risk} ${p.status} by ${p.author}: ${p.title}`);
-  lines.push(`授权: ${grants.length ? grants.map((g) => `${g.actions.join('/')}@${g.project}:${g.scope.join(',')}`).join(' ｜ ') : '（无，需 PM grant）'}`);
-  // 可选插件降级标记：缺插件只标 off，不阻断核心流程（AC21.2/21.3）。
-  try {
-    const marks = optionalPluginMarks();
-    lines.push(`可选插件: ${marks.marks}（非核心，缺了不阻断；详见 docs/可选插件.md）`);
-    // R-8b9d：记忆插件 off/error 时把降级口径说清楚，避免角色以为 P0 记忆门还会硬卡或已静默放水。
-    if (marks.summary && marks.summary.memory !== 'on') {
-      lines.push(`记忆降级: memory:${marks.summary.memory} —— P0 记忆门降级为 MEMORY_SKIPPED（不阻断完成）；启用 dsh-memory-evolve 后恢复强校验（安装见 docs/可选插件.md）`);
-    }
-  } catch { /* 探测失败不加行，不影响简报 */ }
+  for (const t of tasks.slice(0, 3)) pushDrop(`  [${t.id}] ${t.priority} ${t.status} ${t.owner || '-'} ${t.title}`);
+  for (const p of proposals.slice(0, 3)) pushDrop(`  [${p.id}] ${p.risk} ${p.status} by ${p.author}: ${p.title}`);
+  pushDrop(`授权: ${grants.length ? grants.map((g) => `${g.actions.join('/')}@${g.project}:${g.scope.join(',')}`).join(' ｜ ') : '（无，需 PM grant）'}`);
   lines.push('下一步: 先读 inbox/待审提案；收到派单先 ack，再执行正文任务，产出落盘，完成后发完成回执并 task done；文件变更按现行流程直接提交（提案五步已随宪法修订废止，见宪法第 2 条）。');
-  // B-20261113-005705-a577：boot 也触发一次兜底泵——全队空闲时队列不会因为“没有 task done”而永远不派。
-  const bootPump = await pumpQueueSafe(projectName, 'boot');
-  if (bootPump && bootPump.pumped) {
-    lines.push(`队列自动续跑: 已派 ${bootPump.message && bootPump.message.id} → ${bootPump.item && bootPump.item.to}（task ${(bootPump.item && bootPump.item.task) || '-'}）`);
-  } else if (bootPump && bootPump.ok === false) {
-    lines.push(`队列泵失败: ${String(bootPump.why || bootPump.code || 'QUEUE_PUMP_FAILED').slice(0, 120)}（队列项已保留，下次再试）`);
-  }
   const maxBrief = Number(team.config.bootBriefMaxChars || 2000);
-  let briefing = lines.join('\n');
-  if (briefing.length > maxBrief) {
-    // 核心 4 份清单排在最前面，从尾部截断不会丢核心清单。
-    briefing = briefing.slice(0, maxBrief - 22) + '\n…（简报超限截断）';
-  }
+  const briefingComposed = composeBriefing(lines, droppableIdx, maxBrief);
+  let briefing = briefingComposed.text;
   // 接任包：只有“当前会话正是最近一次轮换进来的新会话”才附加，避免每轮都贴。
   let handover = null;
   try { handover = handoverForBoot(projectName, role, sessionId); } catch { handover = null; }
@@ -4801,11 +4806,46 @@ export async function cmdBoot(args) {
     ok: true, token: token.token, role, project: projectName, teamMode, sessionId, rulesHash: docs.rulesHash,
     bootTtlMinutes,
     docHashes: docs.hashes, read: bootRead, briefing, unread, tasks, proposals, grants,
+    // B-20261118-004424-6c6b：简报超限处理的可观测字段（dropped=被丢的可丢行数，truncated=是否尾部硬截断）
+    briefingMeta: { dropped: briefingComposed.dropped, truncated: briefingComposed.truncated, maxBrief },
     dispatchQueue: bootPump,
     bootQueue,
     handover: handover ? handover.text : null, handoverMeta: handover, startupPackage,
   });
   else textOut(startupPackage ? `${startupPackage}\n\n${briefing}` : (handover ? `${briefing}\n\n${handover.text}` : briefing));
+}
+
+/**
+ * B-20261118-004424-6c6b：boot 简报超限拼装（唯一实现，夹具直接单测）。
+ * 口径（宪法第 2 条「简报 ≤ maxChars」不变）：
+ *   ① 总长 ≤ maxChars；
+ *   ② 超限时**先丢可丢行**（任务/提案/未读明细/授权这类，从尾部逐个丢）；
+ *   ③ 关键行（可选插件 / 记忆降级 / 队列续跑）必须由调用方放在 baseLines 核心区——
+ *      它们不在可丢区，尾截断也只可能切到 base 的尾部；
+ *   ④ 丢完仍超限才尾部截断，并追加既有标记「…（简报超限截断）」。
+ * 返回 { text, dropped, truncated }：dropped=被丢掉的可丢行数，truncated=是否发生尾部硬截断。
+ */
+export function composeBriefing(lines, droppableIdx, maxChars) {
+  const arr = Array.isArray(lines) ? lines.map(String) : [];
+  const dropSet = droppableIdx instanceof Set
+    ? droppableIdx
+    : new Set(Array.isArray(droppableIdx) ? droppableIdx.map(Number) : []);
+  const max = Number.isFinite(Number(maxChars)) && Number(maxChars) > 0 ? Number(maxChars) : 2000;
+  const marker = '\n…（简报超限截断）';
+  const render = (dropped) => arr.filter((_, i) => !dropped.has(i)).join('\n');
+  const none = new Set();
+  if (render(none).length <= max) return { text: render(none), dropped: 0, truncated: false };
+  // ① 先丢可丢行：从尾部往前丢，直到「正文 + 标记」放得下（给标记留位置，超限必有明示）。
+  const dropped = new Set();
+  for (const idx of [...dropSet].sort((a, b) => b - a)) {
+    dropped.add(idx);
+    if (render(dropped).length + marker.length <= max) break;
+  }
+  const text = render(dropped);
+  if (text.length + marker.length <= max) return { text: text + marker, dropped: dropped.size, truncated: false };
+  // ② 可丢行已丢光还超限：尾部硬截断（标记必留）。
+  const headLen = Math.max(0, max - marker.length);
+  return { text: text.slice(0, headLen) + marker, dropped: dropped.size, truncated: true };
 }
 
 // ========== 消息 ==========
@@ -5118,7 +5158,7 @@ export async function cmdSend(args) {
       const { ensureBooted, findValidBootToken, inferBootTrigger } = await import('./auto-boot.mjs');
       if (findValidBootToken(b.project, to, '')) return null;
       const trigger = inferBootTrigger(b.project, to, String(args.session || ''));
-      return ensureBooted({ project: b.project, role: to, trigger, duringTask: String(args.task || '') });
+      return ensureBooted({ project: b.project, role: to, trigger, duringTask: normalizeTaskId(args.task) });
     } catch (e) { return { ok: false, why: String((e && e.message) || e) }; }
   };
   if (pmDispatch && !args.force) {
@@ -5132,7 +5172,7 @@ export async function cmdSend(args) {
         const bootForQueue = await ensureBootForDispatch();
         const item = enqueueDispatch(b.project, {
           from: b.role, to, subject: args.subject || '(无主题)', body,
-          task: String(args.task || ''), project: b.project, ackRequired: Boolean(args.ack),
+          task: normalizeTaskId(args.task), project: b.project, ackRequired: Boolean(args.ack),
           sessionId: b.sessionId,
         });
         appendEvent({ role: b.role, sessionId: b.sessionId, action: 'dispatch_queue_add', project: b.project, target: item.id, note: `to=${to} task=${item.task || ''}` });
@@ -5177,7 +5217,7 @@ export async function cmdSend(args) {
   const pendingBoot = Boolean(autoBoot && autoBoot.ok === false);
   const msg = notify({
     from: b.role, to, subject: args.subject || '(无主题)', body, project: b.project,
-    task: args.task || '', ackRequired: Boolean(args.ack), type: msgType, sessionId: b.sessionId,
+    task: normalizeTaskId(args.task), ackRequired: Boolean(args.ack), type: msgType, sessionId: b.sessionId,
   });
   if (pmDispatch) writeDispatchLock(b.project, msg, { targetSessionId: targetAlive && targetAlive.probe ? targetAlive.probe.sessionId : '' });
   let wake = null;
@@ -5519,7 +5559,7 @@ export async function cmdAsk(args) {
   await sweepOverdueAsks(b.project, { source: 'ask' });
   const id = `Q-${stamp()}-${randomHex(3)}`;
   const item = {
-    id, project: b.project, from: b.role, to, task: String(args.task || ''), question,
+    id, project: b.project, from: b.role, to, task: normalizeTaskId(args.task), question,
     status: 'open', at: nowIso(), answer: '', answeredAt: null, escalatedAt: null,
   };
   const store = readAskStore(b.project);
