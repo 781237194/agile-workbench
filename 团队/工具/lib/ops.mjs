@@ -5191,8 +5191,9 @@ export async function cmdSend(args) {
     });
   }
   // Owner 2026-11-14 08:44：投递成功即自动标已读（沙盘 SELFTEST 也算送达）；投递失败保持未读，重试由 c651 负责。
+  // B-47c0（PM 22:22 修复）：沙盘跳过 `sandbox_wake_skipped` 与 SELFTEST 同口径视为“沙盘已送达”→ 自动标已读；仍不写 deliveredAt，真实投递失败保持未读。
   let autoRead = null;
-  if (wake && wake.ok === true && (wake.skipped === 'SELFTEST' || wake.deliveredAt || !wake.skipped)) {
+  if (wake && wake.ok === true && (wake.skipped === 'SELFTEST' || wake.skipped === 'sandbox_wake_skipped' || wake.deliveredAt || !wake.skipped)) {
     try {
       readMessage(to, msg.id);
       autoRead = { ok: true, messageId: msg.id };
