@@ -217,10 +217,12 @@ const teamJson = path.join(REPO, '团队', '状态', '团队.json');
 const teamBefore = JSON.parse(fs.readFileSync(teamJson, 'utf8'));
 teamBefore.activeProject = '旧名迁移项目';
 fs.writeFileSync(teamJson, JSON.stringify(teamBefore, null, 2) + '\n', 'utf8');
-const renameRebind = run(['rebind', '--root', REPO, '--project', PROJ, '--from-name', '旧名迁移项目', '--to', TO, '--yes', '--json']);
+const renameRebind = run(['rebind', '--root', REPO, '--project', PROJ, '--name', '新名迁移项目', '--to', TO, '--yes', '--json']);
 const teamAfterRename = JSON.parse(fs.readFileSync(teamJson, 'utf8'));
-check('⑨ F4⑤ 改名前 activeProject 指向旧名 → rebind 后指向当前项目',
-  renameRebind.code === 0 && teamAfterRename.activeProject === PROJ, { activeProject: teamAfterRename.activeProject });
+check('⑨ F4⑤ 改名时 activeProject 旧名 → --name 新名（dry-run 计入 diff、写前备份、审计、提示重 boot）',
+  renameRebind.code === 0 && teamAfterRename.activeProject === '新名迁移项目'
+  && (renameRebind.json.diffs || []).some((d) => d.key === 'activeProject' && d.to === '新名迁移项目')
+  && /需重 boot/.test(String(renameRebind.json.message || '')), { activeProject: teamAfterRename.activeProject, diffs: renameRebind.json && renameRebind.json.diffs });
 const passed = results.filter((r) => r.ok).length;
 console.log(`\nB-4761（b0ea 返工）断言：${passed}/${results.length} PASS`);
 if (process.env.TEAM_SB_KEEP !== '1') fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

@@ -292,6 +292,13 @@ function cmdRebind(argv) {
   const dryRun = argv.yes !== true;
   const refs = pathRefs(repoRoot, project);
   const diffs = refs.map((r) => ({ file: r.file.replace(/\\/g, '/'), key: r.key, from: r.value, to }));
+  // F4⑤：团队.json activeProject 只在「改名时」重写（--name 给出新名）；dry-run 把它算进五处 diff 之一
+  const teamFile = path.join(repoRoot, '团队', '状态', '团队.json');
+  const newName = String(argv.name || '').trim();
+  const teamData = fs.existsSync(teamFile) ? readJsonSafe(teamFile) : null;
+  const curActive = teamData ? String(teamData.activeProject || '') : '';
+  const renameActive = Boolean(newName) && curActive !== newName;
+  if (renameActive) diffs.push({ file: teamFile.replace(/\\/g, '/'), key: 'activeProject', from: curActive, to: newName });
   if (!dryRun) {
     const { projectDir, stateDir, wbFile } = resolveRoots({ root: repoRoot, project });
     const pj = path.join(stateDir, '项目.json');
@@ -318,23 +325,26 @@ function cmdRebind(argv) {
       for (const r of refs.filter((x) => x.key === '项目信息.md 盘符路径')) text = text.split(r.value).join(to);
       fs.writeFileSync(info, text, 'utf8');
     }
-    // F4⑤：项目改名时同步 团队.json 的 activeProject（旧名 → 当前项目名，--from-name 给出旧名）
-    const teamFile = path.join(repoRoot, '团队', '状态', '团队.json');
-    const fromName = String(argv['from-name'] || '').trim();
-    if (fromName && fs.existsSync(teamFile)) {
-      const team = readJsonSafe(teamFile);
-      if (team && String(team.activeProject || '') === fromName) {
-        team.activeProject = project;
-        writeJsonFile(teamFile, team);
-        try {
-          const audit = path.join(repoRoot, '团队', '状态', '项目', project, '迁移审计.jsonl');
-          fs.mkdirSync(path.dirname(audit), { recursive: true });
-          fs.appendFileSync(audit, JSON.stringify({ at: new Date().toISOString(), project, action: 'rebind_active_project', from: fromName, to: project, reason: 'rename' }) + '\n', 'utf8');
-        } catch { /* 审计失败不阻断 */ }
-      }
+    // F4⑤：改名时（--name <新名>）重写 团队.json 的 activeProject：写前备份 + 迁移审计 + 提示重 boot
+    if (renameActive && teamData) {
+      try {
+        const backupDir = path.join(repoRoot, '_backup', `${new Date().toISOString().replace(/[:.]/g, '-')}-activeproject`);
+        fs.mkdirSync(backupDir, { recursive: true });
+        fs.copyFileSync(teamFile, path.join(backupDir, '团队.json'));
+      } catch (e) { fail('MIGRATION_BACKUP_FAILED', `团队.json 写前备份失败：${String((e && e.message) || e)}`); }
+      const team = readJsonSafe(teamFile) || {};
+      team.activeProject = newName;
+      writeJsonFile(teamFile, team);
+      try {
+        const audit = path.join(repoRoot, '团队', '状态', '项目', project, '迁移审计.jsonl');
+        fs.mkdirSync(path.dirname(audit), { recursive: true });
+        fs.appendFileSync(audit, JSON.stringify({ at: new Date().toISOString(), project, action: 'rebind_active_project', reason: 'activeProject_rename', from: curActive, to: newName }) + '\n', 'utf8');
+      } catch { /* 审计失败不阻断 */ }
     }
+    const rebootHint = renameActive ? '；团队.json 已改（rulesHash teamConfig）→ 目标侧全员令牌失效，需重 boot' : '';
+    return out({ ok: true, dryRun: false, renamedActive: renameActive, diffs, message: `已重写 ${diffs.length} 处路径 → ${to}${rebootHint}` }, argv.json);
   }
-  return out({ ok: true, dryRun, diffs, message: dryRun ? `[dry-run] ${diffs.length} 处路径待重写（加 --yes 才写）` : `已重写 ${diffs.length} 处路径 → ${to}` }, argv.json);
+  return out({ ok: true, dryRun: true, diffs, message: `[dry-run] ${diffs.length} 处待重写（含 activeProject 如为改名）——加 --yes 才写` }, argv.json);
 }
 
 /* ───────── rebind-sessions ───────── */
