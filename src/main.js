@@ -15,6 +15,8 @@ const SamplerDecide = require('./mem-sampler-decide.js');
 const RenderMemDir = require('./render-mem-dir.js');
 // B-20261117-113926-8be3：状态写入审计行（workbench.json 原来没有任何审计）
 const StoreAudit = require('./store-audit.js');
+// B-20261117-074103-75e9：「文件夹」重复点击去重/节流（纯逻辑，Node 可测；壳层只注入 shell.openPath）
+const FolderOpen = require('./folder-open.js');
 
 const ROOT = path.join(__dirname, '..');
 // B-20261116-071224-9300：团队根唯一解析器——隔离优先（AWB_TEAM_ROOT > TEAM_ROOT > layout > 仓库团队），
@@ -4933,6 +4935,25 @@ function registerIpc() {
     walk(root, 0);
     return { ok: true, root, files: out, count: out.length, truncated: out.length >= MAX_FILES, maxDepth: MAX_DEPTH };
   });
+  // B-20261117-074103-75e9：同一路径 3s 内只开一次、5 分钟内已开则不再新开（尽力聚焦已有窗口）。
+  const { execFile: execFileAsync } = require('node:child_process');
+  const focusExplorerWindow = (target) => new Promise((resolve) => {
+    try {
+      const winPath = String(target).replace(/\//g, '\\');
+      const script = [
+        `$t = ${JSON.stringify(winPath)};`,
+        '$sh = New-Object -ComObject Shell.Application;',
+        "$w = $sh.Windows() | Where-Object { $_.LocationURL -and (($_.LocationURL -replace 'file:///','') -replace '/','\\') -ieq $t } | Select-Object -First 1;",
+        'if ($w) { try { $w.Visible = $true } catch {} ; exit 0 } else { exit 1 }',
+      ].join(' ');
+      execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 4000 }, (err) => resolve(!err));
+    } catch { resolve(false); }
+  });
+  const folderOpener = FolderOpen.createFolderOpener({
+    openPath: (target) => shell.openPath(target),
+    focus: focusExplorerWindow,
+  });
+  ipcMain.handle('folder:open-stats', () => ({ ok: true, stats: folderOpener.stats() }));
   ipcMain.handle('files:open', async (_e, payload) => {
     const store = readStore();
     const project = store.projects.find((p) => p.id === (payload && payload.projectId));
@@ -4942,6 +4963,10 @@ function registerIpc() {
     const target = path.resolve(root, String((payload && payload.rel) || ''));
     if (!target.toLowerCase().startsWith(root.toLowerCase() + path.sep) && target.toLowerCase() !== root.toLowerCase()) throw new Error('路径越界');
     if (!fs.existsSync(target)) throw new Error('文件不存在：' + path.relative(root, target));
+    // 目录走去重；文件保持原样（同一份文件重开是正常操作）
+    let isDir = false;
+    try { isDir = fs.statSync(target).isDirectory(); } catch { isDir = false; }
+    if (isDir) return folderOpener.open(target);
     return shell.openPath(target);
   });
   ipcMain.handle('files:read', async (_e, payload) => {
@@ -5499,7 +5524,8 @@ ipcMain.handle('theme:metrics', async () => {
     const store = readStore();
     const p = store.projects.find((x) => x.id === projectId);
     if (!p) throw new Error('项目不存在');
-    return shell.openPath(p.path);
+    // B-20261117-074103-75e9：同一项目目录重复点击不再堆窗口（3s 节流 + 5 分钟已开复用）
+    return folderOpener.open(p.path);
   });
   ipcMain.handle('project:discover', () => {
     const store = readStore();
