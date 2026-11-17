@@ -127,6 +127,14 @@
       <button type="button" role="menuitemradio" data-theme-id="anime-dark" aria-checked="false"><span class="mm-ico" aria-hidden="true">❋</span><span class="mm-text">二次元暗</span></button>
       <button type="button" role="menuitemradio" data-theme-id="glass-dark" aria-checked="false"><span class="mm-ico" aria-hidden="true">◍</span><span class="mm-text">玻璃拟态暗</span></button>
     </div>
+    <!-- R-8947：关闭特效开关（三档 off/low/full，挂在「更多」菜单内，不新增滚动层、不进标题栏） -->
+    <button type="button" role="menuitem" data-more="effect" aria-haspopup="menu" aria-expanded="false"><span class="mm-ico" aria-hidden="true">✦</span><span class="mm-text">关闭特效：<span data-effect-current>完整</span></span><span class="mm-more-caret" aria-hidden="true">›</span></button>
+    <div class="mm-sub" data-effect-menu role="menu" aria-label="特效开关" hidden>
+      <button type="button" role="menuitemradio" data-effect-option="off" aria-checked="false"><span class="mm-ico" aria-hidden="true">◌</span><span class="mm-text">关闭（关闭后更流畅、更省电）</span></button>
+      <button type="button" role="menuitemradio" data-effect-option="low" aria-checked="false"><span class="mm-ico" aria-hidden="true">◍</span><span class="mm-text">低特效（减少粒子与动效）</span></button>
+      <button type="button" role="menuitemradio" data-effect-option="full" aria-checked="true"><span class="mm-ico" aria-hidden="true">✦</span><span class="mm-text">完整特效（默认，最丝滑）</span></button>
+    </div>
+    <div class="mm-error" data-effect-error role="alert" hidden></div>
     <button type="button" role="menuitem" data-more="refresh"><span class="mm-ico" aria-hidden="true">⟳</span><span class="mm-text">刷新工作区 / DSH 状态</span></button>
     <div class="more-sep"></div>
     <button type="button" role="menuitem" data-more="index"><span class="mm-ico" aria-hidden="true">◈</span><span class="mm-text">打开项目索引</span></button>

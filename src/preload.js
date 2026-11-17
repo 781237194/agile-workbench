@@ -51,6 +51,8 @@ if (IS_BOARD_WINDOW) {
     uiPerfAppend: (payload) => ipcRenderer.invoke('ui:perf-append', payload),
   themeMetrics: () => ipcRenderer.invoke('theme:metrics'),
     themeEffectLevel: () => ipcRenderer.invoke('theme:effect-level'),
+    // R-8947：特效三档唯一写入口（校验在 IPC 内，不依赖前端）
+    setThemeEffectLevel: (level) => ipcRenderer.invoke('theme:set-effect-level', level),
     createTask: (payload) => ipcRenderer.invoke('task:create', payload),
     updateTask: (payload) => ipcRenderer.invoke('task:update', payload),
     deleteTask: (payload) => ipcRenderer.invoke('task:delete', payload),

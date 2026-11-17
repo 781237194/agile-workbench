@@ -1065,6 +1065,69 @@ function themeMenuFocus(step) {
   items[next].focus();
 }
 
+/* ── R-8947 关闭特效开关（三档 off/low/full）─────────────────────────────
+ * 落盘值（workbench.json ui.effectLevel）：'off' | 'reduced' | 'full'
+ * DOM 属性（documentElement data-effect-level）：'off' | 'reduced' | 移除
+ * —— 选项值（off/low/full）与属性值不同名，AC1 禁止两者混用。 */
+const EFFECT_LEVEL_LABEL = { off: '关闭', low: '低特效', full: '完整' };
+const EFFECT_ATTR_OF = { off: 'off', low: 'reduced', full: '' };
+function effectLevelOfAttr(raw) {
+  const v = String(raw || '');
+  if (v === 'off') return 'off';
+  if (v === 'reduced') return 'low';
+  return 'full';
+}
+function currentEffectOption() {
+  return effectLevelOfAttr(document.documentElement.getAttribute('data-effect-level'));
+}
+function setEffectError(text) {
+  const box = $('#more-menu [data-effect-error]');
+  if (!box) return;
+  box.hidden = !text;
+  box.textContent = text ? String(text) : '';
+}
+function paintEffectMenu() {
+  const cur = currentEffectOption();
+  for (const item of $$('#more-menu [data-effect-menu] [data-effect-option]')) {
+    item.setAttribute('aria-checked', String(item.dataset.effectOption === cur));
+  }
+  const label = $('#more-menu [data-more="effect"] [data-effect-current]');
+  if (label) label.textContent = EFFECT_LEVEL_LABEL[cur] || '完整';
+}
+function applyEffectOption(opt) {
+  const attr = EFFECT_ATTR_OF[opt];
+  if (attr === undefined) return false;
+  if (attr) document.documentElement.setAttribute('data-effect-level', attr);
+  else document.documentElement.removeAttribute('data-effect-level');
+  try { if (typeof awbThemeFxSync === 'function') awbThemeFxSync(); } catch { /* 特效异常不影响界面 */ }
+  paintEffectMenu();
+  return true;
+}
+async function chooseEffectOption(opt) {
+  setEffectError('');
+  // 先写盘再改界面：写失败时界面保持原档（AC7 回退），不会停在半套状态。
+  const api = window.workbench && window.workbench.setThemeEffectLevel;
+  const res = typeof api === 'function' ? await api(opt).catch((e) => ({ ok: false, code: 'EFFECT_LEVEL_WRITE_FAILED', message: String((e && e.message) || e) })) : { ok: false, code: 'EFFECT_LEVEL_UNAVAILABLE' };
+  if (!res || res.ok !== true) {
+    setEffectError(`特效档位切换失败：${(res && res.code) || 'EFFECT_LEVEL_WRITE_FAILED'}${res && res.message ? `（${res.message}）` : ''}`);
+    // 回退到磁盘现状（重新读 IPC），不保留半套界面。
+    try {
+      const now = await window.workbench.themeEffectLevel();
+      applyEffectOption(effectLevelOfAttr(now && now.level));
+    } catch { /* ignore */ }
+    return false;
+  }
+  applyEffectOption(opt);
+  return true;
+}
+function setEffectMenu(open) {
+  const box = $('#more-menu [data-effect-menu]');
+  const btn = $('#more-menu [data-more="effect"]');
+  if (!box) return;
+  box.hidden = !open;
+  if (btn) btn.setAttribute('aria-expanded', String(Boolean(open)));
+}
+
 
 function activeProject() {
   if (!state) return null;
@@ -15900,6 +15963,16 @@ function bind() {
     setWorkspacePop(false);
   });
   $('#more-menu')?.addEventListener('click', (e) => {
+    // R-8947：点三档之一 → 写盘 + 应用（失败显示 [data-effect-error] 并回退）
+    const effectItem = e.target.closest('#more-menu [data-effect-menu] [data-effect-option]');
+    if (effectItem) {
+      e.stopPropagation();
+      const opt = effectItem.dataset.effectOption;
+      setEffectMenu(false);
+      setMoreMenu(false);
+      chooseEffectOption(opt);
+      return;
+    }
     // 外观子菜单的 5 项：点即切（R-fe90 AC1/AC3；当前项 aria-checked 唯一）
     // B-20261116-122745-dc6f：**必须限定在子菜单里**！applyThemeState 会给 <html> 打
     // data-theme-id（当前档），所以裸写 e.target.closest('[data-theme-id]') 时点「外观」根锚点会
@@ -15916,6 +15989,12 @@ function bind() {
     const btn = e.target.closest('[data-more]');
     if (!btn || btn.disabled) return;
     e.stopPropagation();
+    if (btn.dataset.more === 'effect') {
+      const box = $('#more-menu [data-effect-menu]');
+      const willOpen = Boolean(box && box.hidden);
+      setEffectMenu(willOpen);
+      return;
+    }
     // data-more="theme" 是「外观」根锚点（layout-check 的 themeInMoreMenu 依赖它）：点它展开 5 项
     if (btn.dataset.more === 'theme') {
       const box = $('#more-menu [data-theme-menu]');
@@ -16753,6 +16832,14 @@ window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /*
   } catch { /* ignore */ }
   // R-fe90 F7：手工档生效后立刻让特效层按新档位重排（否则要等下一次换主题才关粒子）。
   try { awbThemeFxSync(); } catch { /* 特效异常不影响界面 */ }
+  // R-8947：初始化菜单选中态，并接收主进程广播（多窗口/看板/webview 同档，AC9）。
+  try {
+    paintEffectMenu();
+    window.addEventListener('awb:effect-level', (ev) => {
+      const opt = ev && ev.detail && ev.detail.option;
+      if (opt) applyEffectOption(opt);
+    });
+  } catch { /* ignore */ }
   loadInboxSeen();
   bind();
   renderBridgeAlert();

@@ -4795,6 +4795,9 @@ html[data-style="glass"] .lessons-card {
 .mm-sub button { font-size: 11px; }
 .mm-sub button[aria-checked="true"] { color: var(--theme-accent); background: var(--gold-soft); border-color: var(--line-strong); box-shadow: var(--theme-glow); }
 .mm-sub button[aria-checked="true"] .mm-ico { color: var(--gold-2); }
+/* R-8947：特效开关的错误横幅（在 #more-menu 内，可见、可读、失败不静默） */
+.mm-error { margin: 4px 8px 6px; padding: 6px 8px; border: 1px solid var(--bad, #d9534f); border-radius: 6px; color: var(--bad, #d9534f); font-size: 11px; line-height: 1.4; white-space: normal; }
+.mm-error[hidden] { display: none; }
 
 /* ==========================================================================
    R-fe90 F-7 · 三套新主题的特效本体（默认 full；三层降级见文件末尾）

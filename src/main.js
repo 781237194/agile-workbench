@@ -51,6 +51,8 @@ if (process.argv.includes('--no-wake')) {
 const IS_SANDBOX = String(process.env.TEAM_SELFTEST || '') === '1';
 // 布局自检（T-846e）：在真实窗口里量 1280/1680/2560 三档并截图；只在显式参数下跑，不影响正常启动。
 const IS_LAYOUT_CHECK = process.argv.includes('--layout-check');
+// R-8947（T-20261117-214109-05ec）：关闭特效开关三档自检（真窗口 + 隔离数据根 + 截图），只认显式参数。
+const IS_EFFECT_CHECK = process.argv.includes('--effect-check');
 // R-fe90 AC1/AC6/AC12：5 档主题截图 + 每档 perf JSON 自检（独立数据根、真实窗口、走「更多→外观」入口点击）。
 const IS_THEME_SHOTS = process.argv.includes('--theme-shots');
 // 评审弹窗真实点击自检（B-fe22）：真实窗口点“通过/打回”，抓 DOM 反馈与工作流落账；只在显式参数下跑。
@@ -83,6 +85,8 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
 // 自测时 Chromium/状态也进沙盘根，避免两个自测实例抢同一份 userdata。
 // 布局自检同样用独立数据根（.layout-check-data），只读快照，不碰真实工作台状态。
 const LAYOUT_DATA = process.env.AWB_LAYOUT_DATA ? path.resolve(process.env.AWB_LAYOUT_DATA) : path.join(ROOT, '.layout-check-data');
+// R-8947：特效开关自检数据根（独立 workbench.json，不碰真实 ui.effectLevel）。
+const EFFECT_DATA = process.env.AWB_EFFECT_DATA ? path.resolve(process.env.AWB_EFFECT_DATA) : path.join(ROOT, '.effect-check-data');
 // 主题截图自检的数据根同样独立（不碰真实 workbench.json）。
 const THEME_SHOTS_DATA = process.env.AWB_THEME_DATA ? path.resolve(process.env.AWB_THEME_DATA) : path.join(ROOT, '.theme-shots-data');
 // b55c 验收同源自检同样独立数据根，跑完不影响真实工作台状态。
@@ -106,6 +110,7 @@ const B2DD3_DATA = process.env.AWB_B2DD3_DATA ? path.resolve(process.env.AWB_B2D
 const OWNER_CHECK_DATA = process.env.AWB_OWNER_DATA ? path.resolve(process.env.AWB_OWNER_DATA) : path.join(ROOT, '.owner-check-data');
 const DATA_ROOT = IS_SELFTEST ? SELFTEST_ROOT
   : IS_LAYOUT_CHECK ? LAYOUT_DATA
+    : IS_EFFECT_CHECK ? EFFECT_DATA
     : IS_B55C_CHECK ? B55C_DATA
       : IS_E29F_CHECK ? E29F_DATA
         : IS_C651_CHECK ? C651_DATA
@@ -259,6 +264,26 @@ if (IS_LAYOUT_CHECK) {
   } catch (error) {
     // 隔离失败必须 fail fast：不许回退真实路径跑布局自检。
     console.error('LAYOUT_CHECK_NOT_ISOLATED ' + String((error && error.message) || error));
+    process.exit(1);
+  }
+}
+// R-8947：--effect-check 同样按「快照沙盘 + 真实树零写入」隔离（复用同一 prepareSqCheckSandbox，不另造一套）。
+if (IS_EFFECT_CHECK) {
+  const effectTeamRoot = path.join(EFFECT_DATA, '团队');
+  const effectProjectRoot = path.join(EFFECT_DATA, '项目');
+  process.env.AWB_STORE = path.join(EFFECT_DATA, 'workbench.json');
+  process.env.TEAM_ROOT = effectTeamRoot;
+  process.env.TEAM_PROJECTS_ROOT = effectProjectRoot;
+  try {
+    const { prepareSqCheckSandbox } = require('./sq-check');
+    prepareSqCheckSandbox({
+      storeFile: process.env.AWB_STORE,
+      teamRoot: effectTeamRoot,
+      fallbackStoreFile: path.join(LOCAL_DATA, 'userdata', 'workbench.json'),
+      sandboxProjectDir: effectProjectRoot,
+    });
+  } catch (error) {
+    console.error('EFFECT_CHECK_NOT_ISOLATED ' + String((error && error.message) || error));
     process.exit(1);
   }
 }
@@ -5032,6 +5057,32 @@ ipcMain.handle('theme:metrics', async () => {
       return { ok: false, code: 'THEME_EFFECT_LEVEL_FAILED', message: String((error && error.message) || error).slice(0, 200), level: 'full' };
     }
   });
+  // R-8947：关闭特效开关三档（off/low/full）——唯一写入口；校验在 IPC 内（AC5④）。
+  // 落盘值映射：off→'off'，low→'reduced'，full→'full'（与 fx-layer computeMode 已有的档位语义一致）。
+  ipcMain.handle('theme:set-effect-level', async (_e, levelRaw) => {
+    const MAP = { off: 'off', low: 'reduced', full: 'full' };
+    const option = String(levelRaw == null ? '' : levelRaw);
+    if (!Object.prototype.hasOwnProperty.call(MAP, option)) {
+      return { ok: false, code: 'EFFECT_LEVEL_INVALID', message: `特效档位非法：${option}（只允许 off/low/full）` };
+    }
+    const stored = MAP[option];
+    try {
+      const store = readStore();
+      const current = String((store.ui && store.ui.effectLevel) || 'full');
+      if (current === stored) return { ok: true, changed: false, level: option, stored };
+      const next = { ...store, ui: { ...(store.ui || {}), effectLevel: stored } };
+      writeStore(next);
+      // 广播到所有窗口 + webview guest（AC9：主窗/看板窗/DSH webview 同档）。
+      const js = `(function(){try{var d=document.documentElement;var v=${JSON.stringify(stored === 'reduced' ? 'reduced' : stored === 'off' ? 'off' : '')};if(v){d.setAttribute('data-effect-level',v);}else{d.removeAttribute('data-effect-level');}try{if(typeof awbThemeFxSync==='function')awbThemeFxSync();}catch(e){}try{window.dispatchEvent(new CustomEvent('awb:effect-level',{detail:{option:${JSON.stringify(option)}}}));}catch(e){}}catch(e){}})();`;
+      for (const wc of webContents.getAllWebContents()) {
+        try { if (!wc.isDestroyed()) wc.executeJavaScript(js, true).catch(() => {}); } catch { /* 窗口销毁中 */ }
+      }
+      return { ok: true, changed: true, level: option, stored };
+    } catch (error) {
+      return { ok: false, code: 'EFFECT_LEVEL_WRITE_FAILED', message: String((error && error.message) || error).slice(0, 200) };
+    }
+  });
+
   ipcMain.handle('app:choose-dir', async () => {
     const r = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory', 'createDirectory'] });
     return r.canceled ? null : r.filePaths[0];
@@ -11847,6 +11898,177 @@ async function runThemeShots() {
 
 // 布局自检（T-846e）：真实窗口 + CDP 视口模拟，量 1280 / 1680 / 2560 三档，
 // 每档截图一张；正常启动不进入这条分支。
+async function runEffectCheck() {
+  const outDir = process.env.AWB_EFFECT_OUT ? path.resolve(process.env.AWB_EFFECT_OUT) : path.join(ROOT, '_tmp', 'effect-check-' + Date.now());
+  fs.mkdirSync(outDir, { recursive: true });
+  const file = storeFile();
+  const shaOfStore = () => { try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); } catch { return ''; } };
+  const startStore = (() => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return { ui: {} }; } })();
+  const startLevel = String((startStore.ui && startStore.ui.effectLevel) || 'full');
+  createWindow();
+  const win = mainWindow;
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else resolve();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const exec = (code) => win.webContents.executeJavaScript(code, true);
+  const report = { ok: true, at: new Date().toISOString(), startLevel, checks: [] };
+  const add = (name, ok, detail) => { report.checks.push({ name, ok: Boolean(ok), detail }); if (!ok) report.ok = false; };
+  const stateJs = `(function(){
+    var d=document.documentElement;
+    var st=window.__themeState?window.__themeState():null;
+    var s=st&&st.fx&&typeof st.fx.sample==='function'?st.fx.sample():null;
+    var opts=[].map.call(document.querySelectorAll('#more-menu [data-effect-option]'),function(x){return {opt:x.getAttribute('data-effect-option'),checked:x.getAttribute('aria-checked')};});
+    var cur=document.querySelector('#more-menu [data-effect-current]');
+    var err=document.querySelector('#more-menu [data-effect-error]');
+    var tb=document.getElementById('titlebar');
+    return {
+      attr:d.getAttribute('data-effect-level')||'',
+      optionOnRoot:d.hasAttribute('data-effect-option'),
+      menuInMore:!!document.querySelector('#more-menu [data-effect-menu]'),
+      options:opts, current:cur?cur.textContent:'',
+      error:err?{hidden:err.hidden,text:err.textContent}:null,
+      titlebarFx:tb?tb.querySelectorAll('[data-effect]').length:-1,
+      degrade:s?s.degrade:null, particles:s&&s.particles?s.particles.count:null, grid:s?s.grid:null,
+      fx:(window.__themeFx?window.__themeFx():null),
+      gridAnim:(function(){try{return String(getComputedStyle(document.body,'::before').animationName||'');}catch(e){return '';}})(),
+      gridSize:(function(){try{return String(getComputedStyle(document.body,'::before').backgroundSize||'');}catch(e){return '';}})()
+    };
+  })()`;
+  const readState = () => exec(stateJs);
+  const clickMore = () => exec(`(function(){var b=document.getElementById('btn-more');if(b)b.click();var e=document.querySelector('#more-menu [data-more="effect"]');if(e)e.click();return !!e;})()`);
+  const clickOpt = (opt) => exec(`(function(){var o=document.querySelector('#more-menu [data-effect-option="${opt}"]');if(o)o.click();return !!o;})()`);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // 首次运行（干净档=full）或第二次运行（startLevel=off，验证重启恢复 AC4③）
+  const st0 = await readState();
+  add('AC1 入口在「更多」菜单内、标题栏无 [data-effect]、根元素无 option 语义',
+    st0.menuInMore === true && st0.titlebarFx === 0 && st0.optionOnRoot === false,
+    { menuInMore: st0.menuInMore, titlebarFx: st0.titlebarFx, optionOnRoot: st0.optionOnRoot });
+  add('AC0 三档齐备（off/low/full 各一）', [].concat(st0.options.map((o) => o.opt)).sort().join(',') === 'full,low,off', st0.options);
+
+  if (startLevel === 'off') {
+    add('AC4③ 重启恢复：启动即 off（属性 off / 菜单 off / degrade off）',
+      st0.attr === 'off' && st0.current === '关闭' && st0.degrade && st0.degrade.level === 'off' && st0.degrade.effectLevelAttr === 'off',
+      { attr: st0.attr, current: st0.current, degrade: st0.degrade });
+    // 收尾复位到 full，避免下次自检起点不是干净档
+    await clickMore();
+    await clickOpt('full');
+    await sleep(700);
+    report.startLevel = startLevel;
+    report.ok = report.checks.every((c) => c.ok);
+    report.store = JSON.parse(fs.readFileSync(file, 'utf8')).ui;
+    fs.writeFileSync(path.join(outDir, 'effect-report.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
+    console.log('EFFECT_REPORT ' + JSON.stringify(report));
+    console.log('EFFECT_OK');
+    exitWithAudit(0);
+    return;
+  }
+
+  // ② 打开菜单 → 三档可见
+  const opened = await clickMore();
+  await sleep(300);
+  const st1 = await readState();
+  add('AC1 打开「更多」→ 特效子菜单可展开、三档可见', opened === true && st1.options.length === 3 && st1.options.every((o) => true), st1.options);
+
+  // ③ off：属性/选中/文案/降级/粒子/网格
+  await clickOpt('off');
+  await sleep(700);
+  const shaBefore = shaOfStore();
+  const stOff = await readState();
+  add('AC2/AC3 点「关闭」→ 属性 off、选中 off、文案「关闭」、degrade.level=off、粒子 0、grid=false',
+    stOff.attr === 'off' && stOff.current === '关闭'
+    && stOff.options.filter((o) => o.checked === 'true').map((o) => o.opt).join(',') === 'off'
+    && stOff.degrade && stOff.degrade.level === 'off' && stOff.degrade.effectLevelAttr === 'off'
+    && stOff.particles === 0 && stOff.gridAnim === 'none',
+    { attr: stOff.attr, current: stOff.current, options: stOff.options, degrade: stOff.degrade, particles: stOff.particles, grid: stOff.grid, fx: stOff.fx });
+  const storeOff = JSON.parse(fs.readFileSync(file, 'utf8'));
+  add('AC5① workbench.json ui.effectLevel=off', String((storeOff.ui && storeOff.ui.effectLevel) || '') === 'off', storeOff.ui);
+  add('AC5② 原子写产物：有 .bak、无 .tmp 残留', fs.existsSync(file + '.bak') && !fs.existsSync(file + '.tmp'), { bak: fs.existsSync(file + '.bak'), tmp: fs.existsSync(file + '.tmp') });
+  const again = await exec(`window.workbench.setThemeEffectLevel('off')`);
+  add('AC5③ 幂等：再设 off → changed:false 且 store sha 不变',
+    again && again.ok === true && again.changed === false && shaOfStore() === shaBefore,
+    { again, shaSame: shaOfStore() === shaBefore });
+  const shaBeforeInvalid = shaOfStore();
+  const invalid = await exec(`window.workbench.setThemeEffectLevel('abc')`);
+  add('AC5④ 绕过界面直连 IPC 传 abc → EFFECT_LEVEL_INVALID 且 store sha 不变',
+    invalid && invalid.ok === false && invalid.code === 'EFFECT_LEVEL_INVALID' && shaOfStore() === shaBeforeInvalid,
+    { invalid, shaSame: shaOfStore() === shaBeforeInvalid });
+
+  // ④ low：既有降级语义（reduced）
+  await clickMore();
+  await clickOpt('low');
+  await sleep(700);
+  const stLow = await readState();
+  add('AC2 low → 属性 reduced、选中 low、文案「低特效」、degrade.level=reduced',
+    stLow.attr === 'reduced' && stLow.current === '低特效'
+    && stLow.options.filter((o) => o.checked === 'true').map((o) => o.opt).join(',') === 'low'
+    && stLow.degrade && stLow.degrade.level === 'reduced',
+    { attr: stLow.attr, current: stLow.current, options: stLow.options, degrade: stLow.degrade });
+
+  // ⑤ full：属性移除、粒子/网格恢复
+  await clickMore();
+  await clickOpt('full');
+  await sleep(900);
+  const stFull = await readState();
+  add('AC2/AC3 点回「完整」→ 属性移除、选中 full、文案「完整」、粒子>0、grid=true、degrade.level=full',
+    stFull.attr === '' && stFull.current === '完整'
+    && stFull.options.filter((o) => o.checked === 'true').map((o) => o.opt).join(',') === 'full'
+    && stFull.degrade && stFull.degrade.level === 'full' && stFull.degrade.effectLevelAttr === ''
+    && Number(stFull.particles) > 0 && String(stFull.gridAnim).indexOf('awbThemeGridDrift') >= 0,
+    { attr: stFull.attr, current: stFull.current, options: stFull.options, degrade: stFull.degrade, particles: stFull.particles, grid: stFull.grid });
+
+  // ⑥ AC4①：F5 刷新仍为 off（设为 off → reload → 仍 off）
+  await clickMore();
+  await clickOpt('off');
+  await sleep(700);
+  await win.webContents.reload();
+  await new Promise((resolve) => {
+    if (win.webContents.isLoading()) win.webContents.once('did-finish-load', resolve);
+    else setTimeout(resolve, 200);
+  });
+  await sleep(1200);
+  const stReload = await readState();
+  add('AC4① F5 刷新后仍为 off（属性/菜单/degrade 三处）',
+    stReload.attr === 'off' && stReload.current === '关闭' && stReload.degrade && stReload.degrade.level === 'off',
+    { attr: stReload.attr, current: stReload.current, degrade: stReload.degrade });
+
+  // ⑦ AC8①：先回 full，再 ?lowfx=1 → degrade.level 仍是 off（既有语义不变，理由应是 lowfx=1 而不是手工档）
+  try {
+    await clickMore();
+    await clickOpt('full');
+    await sleep(700);
+    await win.loadFile(path.join(__dirname, 'renderer', 'index.html'), { query: { lowfx: '1' } });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const stLowfx = await readState();
+    add('AC8① ?lowfx=1 时 degrade.level=off 且 reasons 含 lowfx=1（既有降级语义不变）',
+      stLowfx.degrade && stLowfx.degrade.level === 'off' && (stLowfx.degrade.reasons || []).some((r) => String(r).indexOf('lowfx=1') >= 0),
+      stLowfx.degrade);
+    await win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  } catch (e) {
+    add('AC8① ?lowfx=1 时 degrade.level=off 且 reasons 含 lowfx=1（既有降级语义不变）', false, { error: String((e && e.message) || e) });
+  }
+
+  // ⑧ 截图证据
+  let shot = '';
+  try { shot = path.join(outDir, 'effect-menu.png'); fs.writeFileSync(shot, (await win.webContents.capturePage()).toPNG()); } catch { shot = ''; }
+  add('截图 1 张（真窗口）', Boolean(shot) && fs.statSync(shot).size > 1000, { shot, bytes: shot ? fs.statSync(shot).size : 0 });
+
+  // ⑦ 复位为 off 供第二次运行验证重启恢复
+  await clickMore();
+  await clickOpt('off');
+  await sleep(700);
+
+  report.store = JSON.parse(fs.readFileSync(file, 'utf8')).ui;
+  report.shot = shot;
+  fs.writeFileSync(path.join(outDir, 'effect-report.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
+  console.log('EFFECT_REPORT ' + JSON.stringify(report));
+  console.log('EFFECT_OK');
+  exitWithAudit(0);
+}
+
 async function runLayoutCheck() {
   const outDir = process.env.AWB_LAYOUT_OUT ? path.resolve(process.env.AWB_LAYOUT_OUT) : path.join(ROOT, '_tmp', 'layout-check-' + Date.now());
   fs.mkdirSync(outDir, { recursive: true });
@@ -19773,7 +19995,7 @@ async function installDshCookie() {
 }
 
 // 单实例：两个窗口同时写 workbench.json / 团队状态会丢更新。自测/布局自检用独立 userData，不参与锁。
-const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_SQ_CHECK) ? true : app.requestSingleInstanceLock();
+const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_EFFECT_CHECK || IS_THEME_SHOTS || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_SQ_CHECK) ? true : app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
   // T-ece6：锁冲突不许静默退出——2026-11-14 的黑屏就是「另一个实例（含僵尸进程）占着锁，
   // 新进程拿不到锁直接 app.quit()，用户只看到窗口没了/黑屏」。这里显式打日志 + 弹一次人话提示。
@@ -19787,7 +20009,7 @@ if (!singleInstanceLock) {
     if (dialog && typeof dialog.showErrorBox === 'function') dialog.showErrorBox('PM工作台：已有实例在运行', lockMsg);
   } catch { /* 无 GUI 环境只留日志 */ }
   app.quit();
-} else if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_THEME_SHOTS) {
+} else if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_EFFECT_CHECK && !IS_THEME_SHOTS) {
   app.on('second-instance', () => {
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -20080,7 +20302,7 @@ function ensureRouteSupervisor(project) {
     }
     return null;
   }
-  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_SQ_CHECK) return null;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_EFFECT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_SQ_CHECK) return null;
   if (process.env.AWB_ROUTE_DAEMON === 'off') return null;
   if (!project || !project.name) return null;
   const name = String(project.teamName || project.name || '');
@@ -21132,7 +21354,7 @@ app.whenReady().then(async () => {
   try { const t = setInterval(() => { try { runPmIdentityReconcile('interval60'); } catch { /* ignore */ } }, 60000); if (t.unref) t.unref(); } catch { /* ignore */ }
   await installDshCookie();
   // R-c1ed F-1 接线：采样定时器 + 启动/24h 清理（自检/布局检查模式不采，避免污染证据目录与拖慢断言）。
-  if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_THEME_SHOTS) {
+  if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_EFFECT_CHECK && !IS_THEME_SHOTS) {
     startRenderMemorySampler();
     scheduleRenderMemoryMaintenance();
   }
@@ -21151,6 +21373,15 @@ app.whenReady().then(async () => {
       await selftest();
     } catch (error) {
       console.error('SELFTEST_FAIL ' + String(error && error.stack || error));
+      exitWithAudit(1);
+    }
+    return;
+  }
+  if (IS_EFFECT_CHECK) {
+    try {
+      await runEffectCheck();
+    } catch (error) {
+      console.error('EFFECT_FAIL ' + String((error && error.stack) || error));
       exitWithAudit(1);
     }
     return;
@@ -21349,7 +21580,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_B2DD3_CHECK || IS_SQ_CHECK) return;
+  if (IS_SELFTEST || IS_LAYOUT_CHECK || IS_EFFECT_CHECK || IS_THEME_SHOTS || IS_OWNER_CHECK || IS_B55C_CHECK || IS_E29F_CHECK || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_B2DD3_CHECK || IS_SQ_CHECK) return;
   // B-20261116-105124-c25a：窗口全关导致的退出也要留一行审计——历史上「壳 2-8 分钟整体退出」
   // 无法区分「人关了窗」「窗口被意外销毁」「主进程异常」三种，这一行能把第一种钉死。
   recordShellAudit('shell-window-all-closed', {});
