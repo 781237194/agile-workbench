@@ -1961,13 +1961,14 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
   try {
     appendDeliveryAudit(project, {
       itemId: item.id, to: String(item.to || ''), taskId: String(item.task || ''),
-      attempt: Number(item.attempt) || 1, result: 'auto_dispatch', code: 'SOURCE_AUTO',
+      attempt: Number(item.attempt) || 1, result: 'delivered', code: 'SOURCE_AUTO', // 不扩枚举：用 code/source 区分自动重派
       stallMs: Number.isFinite(Date.parse(String(item.at || ''))) ? Math.max(0, Date.now() - Date.parse(String(item.at || ''))) : 0,
       messageId: String(msg.id || ''), wakeOk: false, source: 'auto',
     });
   } catch (e) {
-    // PM 2026-11-17 12:47：审计失败可非致命，但**不得静默**（硬线）。
+    // PM 2026-11-17 12:48 改批：审计失败不静默，用 appendEvent 兜底留痕（可查），console.error 同时打。
     console.error('[audit] auto dispatch audit failed: ' + (e && (e.code || e.message) || e));
+    try { appendEvent({ role: 'system', action: 'audit_write_failed', project, target: String(item.id || ''), note: `auto dispatch audit failed: ${String((e && (e.code || e.message)) || e).slice(0, 160)}` }); } catch { /* 事件也失败则放弃 */ }
   }
   const wake = await wakeSessionForMessage({ project, to: String(item.to || ''), msg, isDispatch: true });
   removeDispatchQueueItem(project, item.id);
@@ -2314,7 +2315,7 @@ const DELIVERY_AUDIT_KEYS = ['at', 'project', 'itemId', 'to', 'taskId', 'attempt
 /** 活跃度审计 10 键（卷 §七：键顺序固定）。 */
 const ROLE_ACTIVITY_AUDIT_KEYS = ['at', 'project', 'role', 'action', 'verdict', 'idleMs', 'signals', 'wake', 'level', 'detail'];
 /** 投递审计 result 枚举（卷 §八）。 */
-const DELIVERY_RESULTS = ['delivered', 'blocked', 'timeout', 'retry', 'upgraded', 'forced', 'recovered', 'auto_dispatch']; // B-d3a1：自动重派通道独立结果码
+const DELIVERY_RESULTS = ['delivered', 'blocked', 'timeout', 'retry', 'upgraded', 'forced', 'recovered'];
 // B-20261117-104213-ebbc：空闲重派的投递退避（delivered 未回执不再每拍重投）。
 const REPUSH_MIN_GAP_MS = 10 * 60 * 1000; // 同一 itemId 两次投递至少间隔 10 分钟
 const REPUSH_MAX_ATTEMPT = 3;             // attempt 到 3 次即放弃（只告警一次）
