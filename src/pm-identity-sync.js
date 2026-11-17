@@ -81,21 +81,27 @@ function planPmIdentitySync({ team = null, workbench = null, projectId = '', pro
     return { status: 'no_workspace', code: 'WB_NO_WORKSPACE', message: '该项目没有 workspace.sessionIds：不改写', targetSessionIds: null, audit: null };
   }
   const current = workspace.sessionIds.map(String);
+  const prevSessions = (project.sessions && typeof project.sessions === 'object') ? project.sessions : {};
+  const prevPm = String(prevSessions.pm || '');
   const pmSid = roster.sessionId;
-  if (current.includes(pmSid)) {
-    return { status: 'no_change', code: 'OK', message: '工作区绑定已包含名册 PM 会话', targetSessionIds: current, audit: null };
+  const alreadyAligned = prevPm === pmSid && current.includes(pmSid);
+  if (alreadyAligned) {
+    return { status: 'no_change', code: 'OK', message: '工作区绑定已包含名册 PM 会话且 sessions.pm 已对齐', targetSessionIds: current, targetSessions: { ...prevSessions }, audit: null };
   }
-  const targetSessionIds = [...new Set([...current, pmSid])];
+  // 覆盖式对齐（tester 红测口径）：旧 PM 会话从工作区移除，新会话补入；其它角色会话不动。
+  const filtered = current.filter((sid) => sid !== prevPm || sid === pmSid);
+  const targetSessionIds = [...new Set([...filtered, pmSid])];
+  const targetSessions = { ...prevSessions, pm: pmSid };
   const audit = {
     at: now,
     action: 'pm_identity_sync',
     project: String(project.name || project.id || projectName || ''),
     role: 'pm',
-    fromSessionId: '', // 名册换人前后的旧 PM 会话不一定留在工作区里，留空表示「名册声明新增」
+    fromSessionId: prevPm,
     toSessionId: pmSid,
     result: 'aligned',
   };
-  return { status: 'aligned', code: 'OK', message: `工作区绑定缺少名册 PM 会话，补入 ${pmSid.slice(0, 12)}`, targetSessionIds, audit };
+  return { status: 'aligned', code: 'OK', message: `工作区绑定对齐到名册 PM 会话 ${pmSid.slice(0, 12)}`, targetSessionIds, targetSessions, audit };
 }
 
 /** 按计划生成新的 workbench 对象（不改入参）；返回 {changed, workbench, audit}。 */
@@ -110,7 +116,62 @@ function applyPmIdentitySync(workbench, plan, { projectId = '', projectName = ''
   if (!project || !project.workspace) return { changed: false, workbench: data, audit: null, code: 'WB_NO_PROJECT' };
   project.workspace.sessionIds = plan.targetSessionIds.slice();
   project.workspace.updatedAt = String((plan.audit && plan.audit.at) || new Date().toISOString());
+  if (plan.targetSessions && typeof plan.targetSessions === 'object') project.sessions = { ...plan.targetSessions };
   return { changed: true, workbench: data, audit: plan.audit, code: 'OK' };
+}
+
+/** 文件级审计行（append-only jsonl）：比 7 键核心多 why/code/source/stage，供 tester 红测与排障检索。 */
+function auditRowOf(plan, { result = '', code = '', why = '', source = 'startup', stage = '' } = {}) {
+  return {
+    at: String((plan && plan.audit && plan.audit.at) || new Date().toISOString()),
+    role: 'pm',
+    project: String((plan && plan.audit && plan.audit.project) || ''),
+    fromSessionId: String((plan && plan.audit && plan.audit.fromSessionId) || ''),
+    toSessionId: String((plan && plan.audit && plan.audit.toSessionId) || ''),
+    result: String(result || (plan && plan.status === 'no_change' ? 'noop' : (plan && plan.status) || '')),
+    code: String(code || (plan && plan.code) || ''),
+    why: String(why || (plan && plan.message) || ''),
+    source: String(source || ''),
+    stage: String(stage || ''),
+  };
+}
+
+/**
+ * 一次「对齐」执行（IO 注入，便于无 Electron 单测）：
+ *   - 读 workbench 坏 → audit(fail WB_UNREADABLE)，不调 write；
+ *   - 已对齐 → audit(noop)，不调 write（幂等）；
+ *   - 需要对齐 → 调 writeWorkbench(新 workbench)：成功 audit(aligned)，失败 audit(fail WB_UNWRITABLE) 并给 retryInMs=60000。
+ */
+function reconcilePmIdentity({ team = null, workbench = null, projectId = '', projectName = '',
+  source = 'startup', stage = '', writeWorkbench = null, appendAudit = null, at = '' } = {}) {
+  const plan = planPmIdentitySync({ team, workbench, projectId, projectName, at });
+  const emit = (row) => { try { if (typeof appendAudit === 'function') appendAudit(row); } catch { /* 审计失败不影响主流程 */ } return row; };
+  if (plan.status === 'unreadable') {
+    emit(auditRowOf(plan, { result: 'fail', code: 'WB_UNREADABLE', source, stage }));
+    return { state: 'unreadable', code: 'WB_UNREADABLE', changed: false, plan };
+  }
+  if (plan.status !== 'aligned' && plan.status !== 'no_change') {
+    emit(auditRowOf(plan, { result: 'fail', code: plan.code || plan.status, source, stage }));
+    return { state: plan.status, code: plan.code || plan.status, changed: false, plan };
+  }
+  if (plan.status === 'no_change') {
+    emit(auditRowOf(plan, { result: 'noop', code: 'OK', source, stage }));
+    return { state: 'ok', code: 'OK', changed: false, plan };
+  }
+  const applied = applyPmIdentitySync(workbench, plan, { projectId, projectName });
+  if (!applied.changed) {
+    emit(auditRowOf(plan, { result: 'fail', code: applied.code || 'WB_APPLY_FAILED', source, stage }));
+    return { state: 'pending_write', code: applied.code || 'WB_APPLY_FAILED', changed: false, plan };
+  }
+  try {
+    if (typeof writeWorkbench !== 'function') throw new Error('writeWorkbench 未注入');
+    writeWorkbench(applied.workbench);
+  } catch (e) {
+    emit(auditRowOf(plan, { result: 'fail', code: 'WB_UNWRITABLE', why: String((e && e.message) || e), source, stage }));
+    return { state: 'pending_write', code: 'WB_UNWRITABLE', changed: false, retryInMs: 60000, plan };
+  }
+  emit(auditRowOf(plan, { result: 'aligned', code: 'OK', source, stage }));
+  return { state: 'ok', code: 'OK', changed: true, plan };
 }
 
 /** 校验审计行只含冻结的 7 键（接线层写审计前调用；多余键视为实现漂移）。 */
@@ -131,5 +192,7 @@ module.exports = {
   findProject,
   planPmIdentitySync,
   applyPmIdentitySync,
+  auditRowOf,
+  reconcilePmIdentity,
   validateAuditRow,
 };

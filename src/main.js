@@ -2271,6 +2271,83 @@ function readStore() {
   }
 }
 
+// T-20261117-183920-5d98（R-fd42）：PM 身份自动对齐——名册唯一真相；写 workbench 只走 writeStore（不触发 rulesHash）。
+const pmIdentitySync = require('./pm-identity-sync');
+function pmIdentityAuditFile(projectName) {
+  return path.join(resolveTeamRoot(), '状态', '项目', String(projectName || ''), '会话绑定对齐.jsonl');
+}
+function readPmIdentityRoster() {
+  try { return fs.readFileSync(path.join(resolveTeamRoot(), '状态', '团队.json'), 'utf8'); } catch { return null; }
+}
+function appendPmIdentityAudit(projectName, row) {
+  try {
+    const file = pmIdentityAuditFile(projectName);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, JSON.stringify(row) + '\n', 'utf8');
+  } catch { /* 审计失败不影响对齐 */ }
+}
+function activePmIdentityProject() {
+  try {
+    const store = readStore();
+    const list = Array.isArray(store.projects) ? store.projects : [];
+    const project = list.find((p) => p && String(p.id) === String(store.activeProjectId)) || list[0] || null;
+    return { store, project };
+  } catch { return { store: null, project: null }; }
+}
+let pmIdentityRetryTimer = null;
+let pmIdentityLast = { state: 'ok', code: 'OK', sessionShort: '', error: '' };
+function sendPmIdentityState(state) {
+  pmIdentityLast = state;
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('pm-identity:state', state); } catch { /* ignore */ }
+}
+/** 三时机（启动 / 60s / webview did-finish-load）共用的对齐入口；失败可见、幂等、写失败 60 秒重试一次。 */
+function runPmIdentityReconcile(source = 'startup') {
+  const roster = readPmIdentityRoster();
+  const { store, project } = activePmIdentityProject();
+  const rosterObj = (() => { try { return JSON.parse(roster); } catch { return null; } })();
+  const projectName = String((project && (project.teamName || project.name)) || (rosterObj && rosterObj.activeProject) || '');
+  if (!roster || !projectName) return pmIdentityLast;
+  // ④a：workbench 读不出来 → 报 WB_UNREADABLE + 不改写 + 界面可见（不静默）
+  if (storeFatal) {
+    appendPmIdentityAudit(projectName, {
+      at: new Date().toISOString(), role: 'pm', result: 'fail', code: 'WB_UNREADABLE',
+      why: 'workbench.json 损坏或不可读：已阻止写入', source, stage: source,
+    });
+    sendPmIdentityState({ state: 'unreadable', code: 'WB_UNREADABLE', sessionShort: '', error: 'WB_UNREADABLE：绑定文件损坏，已停止写入，请先修复 workbench.json' });
+    return pmIdentityLast;
+  }
+  if (!store || !project) return pmIdentityLast;
+  const result = pmIdentitySync.reconcilePmIdentity({
+    team: roster,
+    workbench: store,
+    projectId: String(project.id || ''),
+    projectName,
+    source,
+    stage: source,
+    writeWorkbench: (next) => writeStore(next),
+    appendAudit: (row) => appendPmIdentityAudit(projectName, row),
+  });
+  const rosterPm = pmIdentitySync.readRosterPm(roster);
+  const pmSid = String((rosterPm && rosterPm.sessionId) || '');
+  if (result.state === 'unreadable') {
+    sendPmIdentityState({ state: 'unreadable', code: 'WB_UNREADABLE', sessionShort: '', error: 'WB_UNREADABLE：绑定文件损坏，已停止写入，请先修复 workbench.json' });
+  } else if (result.state === 'pending_write') {
+    sendPmIdentityState({ state: 'pending_write', code: result.code || 'WB_UNWRITABLE', sessionShort: pmSid.slice(0, 8), error: '待写入：workbench 暂时写不进去，60 秒内重试一次' });
+    if (!pmIdentityRetryTimer) {
+      pmIdentityRetryTimer = setTimeout(() => { pmIdentityRetryTimer = null; try { runPmIdentityReconcile('retry'); } catch { /* ignore */ } }, 60000);
+      if (pmIdentityRetryTimer.unref) pmIdentityRetryTimer.unref();
+    }
+  } else {
+    sendPmIdentityState({ state: pmSid ? 'pending_activation' : 'ok', code: 'OK', sessionShort: pmSid.slice(0, 8), error: '' });
+  }
+  return result;
+}
+function schedulePmIdentityReconcile(source) {
+  setTimeout(() => { try { runPmIdentityReconcile(source); } catch { /* ignore */ } }, 800);
+}
+// 渲染层晚于首次推送时，可主动拉一次当前状态（避免竞态导致界面上没有绑定短号）。
+try { ipcMain.handle('pm-identity:get', () => pmIdentityLast); } catch { /* 重复注册忽略 */ }
+
 function writeStore(store) {
   // 写前先失效缓存：调用方可能已原地修改了缓存对象；即使本次写盘失败，也不能让下次读到脏缓存。
   storeCache = { file: '', key: '', value: null };
@@ -10279,6 +10356,8 @@ app.on('web-contents-created', (_e, wc) => {
     if (wc.getType() !== 'webview') return;
     wc.on('did-finish-load', () => {
       try { wc.setZoomFactor(isDshChatWebview(wc) ? DSH_VIEW_ZOOM : readZoomPref()); } catch { /* ignore */ }
+      // T-5d98 三时机之一：DSH webview 每次加载完成后重新对齐 PM 身份绑定。
+      schedulePmIdentityReconcile('webview_load');
     });
   } catch { /* ignore */ }
 });
@@ -20881,6 +20960,9 @@ app.whenReady().then(async () => {
   if (!singleInstanceLock) return;
   app.setName(APP_NAME);
   registerIpc();
+  // T-5d98：启动对齐 + 60 秒巡检（幂等；失败可见，写失败内部 60 秒重试一次）。
+  schedulePmIdentityReconcile('startup');
+  try { const t = setInterval(() => { try { runPmIdentityReconcile('interval60'); } catch { /* ignore */ } }, 60000); if (t.unref) t.unref(); } catch { /* ignore */ }
   await installDshCookie();
   // R-c1ed F-1 接线：采样定时器 + 启动/24h 清理（自检/布局检查模式不采，避免污染证据目录与拖慢断言）。
   if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_THEME_SHOTS) {

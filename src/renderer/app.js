@@ -2468,10 +2468,13 @@ function renderSessions() {
       data-session-id="${esc(sessionId || '')}" data-selected="${isCurrent ? 'true' : 'false'}" aria-selected="${isCurrent ? 'true' : 'false'}"
       title="${esc(titleMismatch ? `DSH 标题是「${live.currentTitle}」，应为「${roleSessionTitle(p, role.id)}」` : (sessionId ? '打开 ' + role.name + ' 的 DSH 会话操作' : '先建团队'))}">
       <span class="session-dot" style="--role-color:${esc(role.color)}" aria-hidden="true"></span>
-      <span class="session-main"><b>${esc(role.name)}</b><small>${sub}</small></span>
+      <span class="session-main"><b data-role-name>${esc(role.name)}</b><small>${sub}</small></span>
+      ${role.id === 'pm' ? '<span data-role-bound-session hidden></span><span data-role-binding-state></span>' : ''}
       <span class="session-state ${st.cls}" title="${esc(st.title)}">${esc(st.text)}</span>
     </div>`;
   }).join('');
+  // T-5d98：行重绘后补一次绑定状态（推送早于渲染时不会丢）。
+  try { if (typeof applyPmIdentityState === 'function') applyPmIdentityState(PM_IDENTITY_LAST || {}); } catch { /* ignore */ }
 }
 
 function roleSessionStatus(item) {
@@ -2480,8 +2483,50 @@ function roleSessionStatus(item) {
   return sessionState(p, item.role || item);
 }
 
-function renderTeamSessions() {
-  const box = $('#team-session-list');
+/**
+ * T-5d98（R-fd42）：把主进程推送的 PM 身份绑定状态落到界面。
+ * 锚点：行内 data-role-bound-session / data-role-binding-state；错误横幅 #binding-error-banner（不静默）。
+ */
+let PM_IDENTITY_LAST = null;
+function applyPmIdentityState(state) {
+  const st = state && typeof state === 'object' ? state : {};
+  PM_IDENTITY_LAST = st;
+  const mode = String(st.state || '');
+  const short = String(st.sessionShort || '');
+  const row = document.querySelector('.session-row[data-role-session="pm"]') || document.querySelector('[data-role-row][data-role="pm"]');
+  if (row) {
+    const bound = row.querySelector('[data-role-bound-session]');
+    if (bound) {
+      bound.hidden = false;
+      const text = mode === 'unreadable' || mode === 'pending_write'
+        ? '待写入'
+        : (mode === 'pending_activation' ? '已绑定（会话待激活）' : (short ? `已绑定 ${short}` : '已绑定'));
+      bound.textContent = text;
+    }
+    const stateEl = row.querySelector('[data-role-binding-state]');
+    if (stateEl) {
+      const normalized = mode === 'pending_activation' ? 'pending_activation'
+        : (mode === 'ok' ? 'ok' : (mode === 'pending_write' ? 'pending_write' : 'mismatch'));
+      stateEl.setAttribute('data-role-binding-state', normalized);
+      stateEl.textContent = mode === 'ok' ? '' : (mode === 'pending_activation' ? '待激活' : '待写入');
+    }
+  }
+  const banner = document.querySelector('#binding-error-banner');
+  if (banner) {
+    const err = String(st.error || '');
+    if (err) {
+      banner.hidden = false;
+      banner.textContent = err;
+      banner.setAttribute('data-code', String(st.code || ''));
+    } else {
+      banner.hidden = true;
+      banner.textContent = '';
+      banner.removeAttribute('data-code');
+    }
+  }
+}
+
+function renderTeamSessions() {  const box = $('#team-session-list');
   const count = $('#team-session-count');
   const note = $('#team-live-note');
   const p = activeProject();
@@ -15742,6 +15787,11 @@ function bind() {
       }
     });
     if (window.workbench && typeof window.workbench.onMemStats === 'function') window.workbench.onMemStats(paint);
+    // T-5d98（R-fd42）：PM 身份绑定状态——主进程三时机对齐后推送，这里只做展示（失败可见，不静默）。
+    if (window.workbench && typeof window.workbench.onPmIdentity === 'function') window.workbench.onPmIdentity(applyPmIdentityState);
+    if (window.workbench && typeof window.workbench.pmIdentityGet === 'function') {
+      Promise.resolve(window.workbench.pmIdentityGet()).then((s) => { if (s) applyPmIdentityState(s); }).catch(() => {});
+    }
     if (window.workbench && typeof window.workbench.onMemRecycleDone === 'function') {
       window.workbench.onMemRecycleDone((d) => { paint({ mb: d && d.after, thresholdMB: (d && d.thresholdMB) || 0, baselineMB: d && d.baselineMB }); toast(`已回收：${fmt(d && d.before)} → ${fmt(d && d.after)}`); });
     }

@@ -262,6 +262,9 @@ if (IS_BOARD_WINDOW) {
     // R-2a69：F1 新手引导（主进程统一接管 F1，转发到这里；焦点在 DSH webview 里也能触发）。
     onGuideOpen: (cb) => { const fn = () => { try { cb(); } catch { /* ignore */ } }; ipcRenderer.on('guide:open', fn); return () => ipcRenderer.removeListener('guide:open', fn); },
     onMemStats: (cb) => { const fn = (_e, data) => { try { cb(data); } catch { /* ignore */ } }; ipcRenderer.on('mem:stats', fn); return () => ipcRenderer.removeListener('mem:stats', fn); },
-    onMemRecycleDone: (cb) => { const fn = (_e, data) => { try { cb(data); } catch { /* ignore */ } }; ipcRenderer.on('mem:recycle-done', fn); return () => ipcRenderer.removeListener('mem:recycle-done', fn); }
+    onMemRecycleDone: (cb) => { const fn = (_e, data) => { try { cb(data); } catch { /* ignore */ } }; ipcRenderer.on('mem:recycle-done', fn); return () => ipcRenderer.removeListener('mem:recycle-done', fn); },
+    // T-5d98（R-fd42）：PM 身份绑定状态推送（ok / pending_activation / pending_write / unreadable + 错误文案）。
+    onPmIdentity: (cb) => { const fn = (_e, data) => { try { cb(data); } catch { /* ignore */ } }; ipcRenderer.on('pm-identity:state', fn); return () => ipcRenderer.removeListener('pm-identity:state', fn); },
+    pmIdentityGet: () => ipcRenderer.invoke('pm-identity:get')
   });
 }
