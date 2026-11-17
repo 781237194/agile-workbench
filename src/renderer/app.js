@@ -1080,11 +1080,25 @@ function effectLevelOfAttr(raw) {
 function currentEffectOption() {
   return effectLevelOfAttr(document.documentElement.getAttribute('data-effect-level'));
 }
+/** B-20261118-005604-54e3：顶部红字横幅——点档后「更多」菜单立即收起，行内错误矩形 0×0 看不见，
+ *  所以失败必须同时在 #effect-error-banner（role=alert，照 #decision-error-banner 先例）留一份可见文案。 */
+function setEffectBanner(text) {
+  const msg = text ? String(text) : '';
+  EFFECT_ERROR_TEXT = msg;
+  const el = $('#effect-error-banner');
+  const textEl = $('#effect-error-text');
+  if (el) el.hidden = !msg;
+  if (textEl) textEl.textContent = msg;
+}
+let EFFECT_ERROR_TEXT = '';
 function setEffectError(text) {
+  const msg = text ? String(text) : '';
   const box = $('#more-menu [data-effect-error]');
-  if (!box) return;
-  box.hidden = !text;
-  box.textContent = text ? String(text) : '';
+  if (box) {
+    box.hidden = !msg;
+    box.textContent = msg;
+  }
+  setEffectBanner(msg);
 }
 function paintEffectMenu() {
   const cur = currentEffectOption();
@@ -3604,6 +3618,8 @@ function bindDecisionFloat() {
   $('#decision-box-pill')?.addEventListener('click', () => setDecisionExpanded(!DECISION_FLOAT_STATE.expanded));
   $('#decision-box-close')?.addEventListener('click', () => setDecisionExpanded(false));
   $('#decision-error-close')?.addEventListener('click', () => decisionSetBanner(''));
+  // B-20261118-005604-54e3：特效失败横幅的「知道了」——只清提示，不改档位（档位已回退到磁盘现状）
+  $('#effect-error-close')?.addEventListener('click', () => setEffectError(''));
   // 意见输入也存草稿：自动刷新重绘后不丢已填内容。
   box.addEventListener('input', (event) => {
     const target = event.target;

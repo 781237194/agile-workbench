@@ -12060,6 +12060,66 @@ async function runEffectCheck() {
   try { shot = path.join(outDir, 'effect-menu.png'); fs.writeFileSync(shot, (await win.webContents.capturePage()).toPNG()); } catch { shot = ''; }
   add('截图 1 张（真窗口）', Boolean(shot) && fs.statSync(shot).size > 1000, { shot, bytes: shot ? fs.statSync(shot).size : 0 });
 
+  // ⑦ B-20261118-005604-54e3：只读 store 切档失败 → 顶部 #effect-error-banner 必须「失败瞬间可见」
+  //   （点档后「更多」菜单立即收起，行内 [data-effect-error] 是 0×0；旧实现要重开菜单才见红字）。
+  //   顺带覆盖恢复路径：恢复可写后再切同一档 → 成功且横幅自动消失。
+  const bannerJs = `(function(){
+    var b=document.getElementById('effect-error-banner');
+    if(!b) return {exists:false};
+    var r=b.getBoundingClientRect();
+    var t=document.getElementById('effect-error-text');
+    var menu=document.getElementById('more-menu');
+    var sub=document.querySelector('#more-menu [data-effect-menu]');
+    return {exists:true,hidden:!!b.hidden,role:b.getAttribute('role')||'',text:String(b.textContent||'').trim(),
+      textValue:String(t?t.textContent:'').trim(),
+      rect:{x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height)},
+      menuOpen:menu?!menu.hidden:null,subOpen:sub?!sub.hidden:null};
+  })()`;
+  const storeLevelNow = () => String((JSON.parse(fs.readFileSync(file, 'utf8')).ui || {}).effectLevel || 'full');
+  const chmodAll = (mode) => { for (const p of [file, file + '.bak', file + '.tmp']) { try { fs.chmodSync(p, mode); } catch { /* 文件不存在 */ } } };
+  let bannerFail = null;
+  try {
+    if (storeLevelNow() !== 'full') { await clickMore(); await clickOpt('full'); await sleep(700); }
+    const shaBeforeFail = shaOfStore();
+    chmodAll(0o444);
+    await clickMore();
+    await clickOpt('off');
+    await sleep(900);
+    bannerFail = await exec(bannerJs);
+    const stFail = await readState();
+    const levelAfterFail = storeLevelNow();
+    let bannerShot = '';
+    try {
+      bannerShot = path.join(outDir, 'effect-error-banner.png');
+      fs.writeFileSync(bannerShot, (await win.webContents.capturePage()).toPNG());
+    } catch { bannerShot = ''; }
+    report.bannerShot = bannerShot;
+    add('AC7② 只读 store 切档失败：顶部 #effect-error-banner 在菜单收起态可见（矩形>0、含 EFFECT_LEVEL_WRITE_FAILED、role=alert）、界面回退 full、store sha 不变',
+      Boolean(bannerFail) && bannerFail.exists === true && bannerFail.hidden === false && bannerFail.role === 'alert'
+      && bannerFail.rect.w > 0 && bannerFail.rect.h > 0
+      && /EFFECT_LEVEL_WRITE_FAILED/.test(String(bannerFail.textValue || bannerFail.text || ''))
+      && bannerFail.menuOpen === false
+      && levelAfterFail === 'full' && shaOfStore() === shaBeforeFail && stFail.attr === '',
+      { banner: bannerFail, levelAfterFail, shaSame: shaOfStore() === shaBeforeFail, attr: stFail.attr });
+  } catch (e) {
+    add('AC7② 只读 store 切档失败：顶部 #effect-error-banner 在菜单收起态可见（矩形>0、含 EFFECT_LEVEL_WRITE_FAILED、role=alert）、界面回退 full、store sha 不变', false, { error: String((e && e.message) || e) });
+  } finally {
+    // 只读 .bak 会卡住后续重写（json-atomic 先 copyFile 再 rename），恢复时三件一起解只读。
+    chmodAll(0o666);
+  }
+  try {
+    await clickMore();
+    await clickOpt('off');
+    await sleep(900);
+    const bannerOk = await exec(bannerJs);
+    const levelAfterOk = storeLevelNow();
+    add('AC7② 恢复可写后再切档成功 → 横幅自动消失且落盘 off',
+      Boolean(bannerOk) && bannerOk.hidden === true && levelAfterOk === 'off',
+      { banner: bannerOk, storeLevel: levelAfterOk });
+  } catch (e) {
+    add('AC7② 恢复可写后再切档成功 → 横幅自动消失且落盘 off', false, { error: String((e && e.message) || e) });
+  }
+
   // ⑦ 复位为 off 供第二次运行验证重启恢复
   await clickMore();
   await clickOpt('off');

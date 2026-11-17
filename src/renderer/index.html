@@ -161,6 +161,13 @@
       <span id="decision-error-text" data-decision-error-text></span>
       <button type="button" class="ghost small" id="decision-error-close" data-decision-error-close>知道了</button>
     </div>
+    <!-- B-20261118-005604-54e3：特效切档失败必须「失败瞬间」看得见——点档后「更多」菜单立即收起，
+         行内 [data-effect-error] 元素矩形 0×0；这里按决策箱横幅先例给顶部红字（收起菜单也可见）。 -->
+    <div id="effect-error-banner" class="decision-error-banner effect-error-banner" role="alert" data-effect-error-banner hidden>
+      <b>特效档位切换失败</b>
+      <span id="effect-error-text" data-effect-error-text></span>
+      <button type="button" class="ghost small" id="effect-error-close" data-effect-error-close>知道了</button>
+    </div>
     <div class="shell-body">
       <aside id="sidebar" aria-label="工作区与六角色会话">
         <div class="sidebar-head">
