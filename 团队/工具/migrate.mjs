@@ -457,6 +457,16 @@ function main() {
     '  migrate-check    AC6① 五步冒烟（项目可见/六角色 boot/无旧根残留/send-read-ack 回环/关键自检）',
   ].join('\n');
   try {
+    // 防呆：写操作必须能确认目标根。未传 --root 且 env TEAM_ROOT 指向另一个团队目录时，默认根会落在真实仓库，
+    // 沙盘/测试调用会误写真实 团队.json（本日已发生一次）→ 直接拒绝，要求显式 --root。
+    const WRITE_CMDS = ['import', 'rebind', 'rebind-sessions'];
+    if (WRITE_CMDS.includes(cmd) && !args.root && process.env.TEAM_ROOT) {
+      const defaultTeam = path.resolve(__dirname, '..', '..', '团队');
+      const envTeam = path.resolve(String(process.env.TEAM_ROOT));
+      if (envTeam !== defaultTeam) {
+        fail('ROOT_REQUIRED', '该命令会改团队账本/路径：env TEAM_ROOT 与默认根不一致时必须显式 --root <目标根>', { envTeam, defaultTeam });
+      }
+    }
     if (!cmd || cmd === 'help' || cmd === '--help') { console.log(HELP); return 0; }
     const table = { export: cmdExport, import: cmdImport, rebind: cmdRebind, 'rebind-sessions': cmdRebindSessions, 'migrate-check': cmdCheck };
     const fn = table[cmd];
