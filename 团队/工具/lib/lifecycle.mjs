@@ -13,6 +13,8 @@ import {
   exists, fail, nowIso, readText, writeJson, truncate, appendEvent,
 } from './core.mjs';
 import { projectStatePaths, saveTask, listTasks } from './store.mjs';
+// B-20261117-123207-ed72：任务是否闭环改走 gates.statusIsClosed 单源（accepted/cancelled/terminated 也算闭环）。
+import { statusIsClosed } from './gates.mjs';
 
 const TERMINAL = new Set(['accepted', 'terminated']);
 const CLOSED = new Set(['accepted', 'terminated', 'iteration']);
@@ -514,7 +516,7 @@ export function workflowAction({
   }
   for (const task of tasks) {
     const status = String((task.workflow && task.workflow.requirementStatus) || '');
-    if (!TERMINAL.has(status) && task.status !== 'done') ids.add(String(task.id));
+    if (!TERMINAL.has(status) && !statusIsClosed(task.status)) ids.add(String(task.id));
   }
   for (const id of ids) {
     const task = taskById.get(String(id));

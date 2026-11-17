@@ -699,7 +699,7 @@ export function gateTestReport({ projectPath, task, requirementId }) {
 
 /** G9：推进下一轮前不得有在办开发/测试任务或未消费派单。 */
 export function gateIteration({ rows, tasks }) {
-  const open = (tasks || []).filter((task) => task && task.status !== 'done' && task.type !== 'requirement');
+  const open = (tasks || []).filter((task) => task && !statusIsClosed(task.status) && task.type !== 'requirement');
   const busy = open.filter((task) => ['programmer1', 'programmer2', 'tester'].includes(String(task.owner || '')));
   const pending = (rows || []).filter((row) => ['dev', 'dev_review', 'dev_done', 'test'].includes(String(row.status || '')));
   if (!busy.length && !pending.length) return null;
@@ -849,7 +849,7 @@ export function detectPhaseJump({ state, row, tasks = [] } = {}) {
     && String(task.type || '') !== 'requirement'
     && String(task.requirementId || '') === requirementId);
   if (!kids.length) return null;
-  const open = kids.filter((task) => String(task.status || '') !== 'done');
+  const open = kids.filter((task) => !statusIsClosed(task.status));
   let expected = '';
   if (open.length) {
     if (open.some((task) => String(task.owner || '') === 'tester')) expected = 'test';

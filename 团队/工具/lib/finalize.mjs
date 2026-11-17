@@ -10,6 +10,8 @@ import { readWorkflowState } from './lifecycle.mjs';
 import { loadProject, projectStatePaths, listTasks, requireBoot } from './store.mjs';
 import { detectOptionalPlugins } from './plugins.mjs';
 import { PATHS, nowIso, stamp, ensureDir, jsonOut, textOut, fail } from './core.mjs';
+// B-20261117-123207-ed72：未闭环任务判定改走 gates.statusIsClosed 单源。
+import { statusIsClosed } from './gates.mjs';
 
 const FINALIZE_ROLES = new Set(['pm', 'owner']);
 
@@ -55,7 +57,7 @@ export function finalizePrecheck(projectName) {
   const requirements = Object.entries(reqs).map(([id, row]) => ({ id, status: String((row && row.status) || '') }));
   const openRequirements = requirements.filter((r) => !['accepted', 'terminated'].includes(r.status));
   const tasks = listTasks(projectName) || [];
-  const openTasks = tasks.filter((t) => String(t.status) !== 'done').map((t) => ({ id: t.id, owner: t.owner || '', status: t.status }));
+  const openTasks = tasks.filter((t) => !statusIsClosed(t.status)).map((t) => ({ id: t.id, owner: t.owner || '', status: t.status }));
   const dispatches = [];
   // 邮箱目录是 团队/状态/邮箱（PATHS.mail）；曾经误用 PATHS.team（团队.json 文件）拼路径，
   // 读到不存在的目录后静默 roles=[]，导致 AC22.4 派单前置永远 0（测试 v20 D1）。

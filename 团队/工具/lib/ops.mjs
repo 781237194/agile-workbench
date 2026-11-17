@@ -4703,7 +4703,7 @@ export async function cmdBoot(args) {
   let bootQueue = null;
   try { bootQueue = consumeBootQueue(projectName, role, sessionId); } catch (e) { bootQueue = { consumed: 0, why: String((e && e.message) || e) }; }
   const unread = listInbox(role, { project: projectName });
-  const tasks = listTasks(projectName).filter((t) => t.status !== 'done' && (!t.owner || t.owner === role));
+  const tasks = listTasks(projectName).filter((t) => !statusIsClosed(t.status) && (!t.owner || t.owner === role));
   const proposals = listProposals(projectName).filter((p) => ['proposed', 'reviewing', 'signing'].includes(p.status) && p.author !== role);
   const locks = listLocks().filter((l) => !l.stale);
   const grants = activeGrants(role, projectName);
@@ -5915,7 +5915,7 @@ export async function cmdTask(args) {
       // 受控校准入口：--allow-unowned-open 时把“无 owner 的历史 open 任务”排除出阻塞清单（事件里记被忽略的任务）。
       const ignoreUnowned = Boolean(args['allow-unowned-open']);
       const ignoredUnowned = ignoreUnowned
-        ? kids.filter((row) => row && !String(row.owner || '').trim() && String(row.status || '') !== 'done').map((row) => String(row.id))
+        ? kids.filter((row) => row && !String(row.owner || '').trim() && !statusIsClosed(row.status)).map((row) => String(row.id))
         : [];
       if (trigger) {
         try { advance = advanceRequirementAfterTaskDone(b.project, trigger, b.role, { ignoreUnowned }); } catch { advance = null; }
