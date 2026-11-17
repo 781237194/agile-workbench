@@ -4781,29 +4781,30 @@ function createTeamTools(options = {}) {
     const state = read.state;
     let boot = state.boots && typeof state.boots === 'object' ? state.boots[roleId] : null;
     let bootSource = 'state.boots';
+    const normalizeCliBoot = (cli) => (cli ? {
+      role: roleId,
+      project: name,
+      at: String(cli.ts || ''),
+      // B-20261116-135220-5887（B）：**不再伪造轮次**——用 CLI 记录的 round 与当前轮比，
+      // 缺失或不相等一律 BOOT_REQUIRED（换轮必须重 boot；回退只判轮次、判不了就拒绝，不放行）。
+      round: (cli.round === undefined || cli.round === null) ? null : Number(cli.round),
+      // complete 也不许假定：CLI 记录没有 completed=true 就按「未读全」处理（BOOT_INCOMPLETE），
+      // 不拿「有 docHashes」当读全的证据。
+      complete: cli.completed === true,
+      docs: cli.docHashes,
+      rulesHash: String(cli.baseHash || ''),
+      requirementsHash: String(cli.requirementsHash || ''),
+      requirementsContentHash: String(cli.requirementsContentHash || cli.requirementsHash || ''),
+      source: '阅读.jsonl boot（CLI）',
+      // CLI 与壳层算「本轮相关需求」的算法不同（壳层 readBootDocs vs CLI readDocSet），
+      // 回退路径上这一项不可比，只比较规则文档逐字节哈希（AC2 口径）。
+      poolComparable: false,
+    } : null);
     // AC2：壳层没写过 boots（纯 CLI boot 的角色），或 boots 里没有 docs 明细 → 回退 CLI boot 阅读记录。
     if (!boot || !boot.docs || !Object.keys(boot.docs).length) {
-      const cli = latestCliBootOf(name, roleId);
+      const cli = normalizeCliBoot(latestCliBootOf(name, roleId));
       if (cli) {
-        boot = {
-          role: roleId,
-          project: name,
-          at: String(cli.ts || ''),
-          // B-20261116-135220-5887（B）：**不再伪造轮次**——用 CLI 记录的 round 与当前轮比，
-          // 缺失或不相等一律 BOOT_REQUIRED（换轮必须重 boot；回退只判轮次、判不了就拒绝，不放行）。
-          round: (cli.round === undefined || cli.round === null) ? null : Number(cli.round),
-          // complete 也不许假定：CLI 记录没有 completed=true 就按「未读全」处理（BOOT_INCOMPLETE），
-          // 不拿「有 docHashes」当读全的证据。
-          complete: cli.completed === true,
-          docs: cli.docHashes,
-          rulesHash: String(cli.baseHash || ''),
-          requirementsHash: String(cli.requirementsHash || ''),
-          requirementsContentHash: String(cli.requirementsContentHash || cli.requirementsHash || ''),
-          source: '阅读.jsonl boot（CLI）',
-          // CLI 与壳层算「本轮相关需求」的算法不同（壳层 readBootDocs vs CLI readDocSet），
-          // 回退路径上这一项不可比，只比较规则文档逐字节哈希（AC2 口径）。
-          poolComparable: false,
-        };
+        boot = cli;
         bootSource = '阅读.jsonl boot';
       }
     }
@@ -4828,20 +4829,49 @@ function createTeamTools(options = {}) {
     const ttlMinutes = Math.max(1, Number(teamConfig().bootTtlMinutes || DEFAULT_BOOT_TTL_MINUTES));
     void ttlMinutes; // 仅展示用，见 bootEvidence()
     const requirementId = String(options.requirementId || '').trim();
-    void bootSource; // 来源仅用于排障：state.boots / 阅读.jsonl boot
     const live = readBootDocs(projectPath, roleId);
-    const stale = [];
     // 生成型索引（项目索引/需求总览）由工具在每次需求变化后重写，属于导航物，不是规则。
     // 拿它们的哈希作废 boot 会把“刚评审完就要派单”的整队卡死（ROUND11 的 RULES_CHANGED 根因）。
     // 规则文档（宪法/铁律/项目信息/角色卡）仍然逐字节比对，改了就必须重新 boot。
     const GENERATED_DOCS = new Set(['projectIndex', 'requirementOverview']);
-    for (const spec of bootDocSpecs(projectPath, roleId)) {
-      if (spec.required === false) continue;
-      const before = boot.docs && boot.docs[spec.key] ? boot.docs[spec.key] : null;
-      const now = live.docs[spec.key];
-      if (!now || !now.exists) stale.push(spec.label + '（缺失）');
-      else if (GENERATED_DOCS.has(spec.key)) continue;
-      else if (!before || before.hash !== now.hash || before.exists !== now.exists) stale.push(spec.label);
+    const computeStale = (bootRec) => {
+      const out = [];
+      for (const spec of bootDocSpecs(projectPath, roleId)) {
+        if (spec.required === false) continue;
+        const before = bootRec && bootRec.docs && bootRec.docs[spec.key] ? bootRec.docs[spec.key] : null;
+        const now = live.docs[spec.key];
+        if (!now || !now.exists) out.push(spec.label + '（缺失）');
+        else if (GENERATED_DOCS.has(spec.key)) continue;
+        else if (!before || before.hash !== now.hash || before.exists !== now.exists) out.push(spec.label);
+      }
+      return out;
+    };
+    let stale = computeStale(boot);
+    let staleReason = '';
+    let cliFallback = null;
+    if (stale.length) {
+      // B-4b70 AC1：boots 存在但**过旧**（docs 与磁盘不一致）时，先看有没有**更新的 CLI boot**（阅读.jsonl）——
+      // 记录过期 ≠ 文档被改：按最新一次 CLI boot 判定，能给「重 boot 即可」就别报成规则变更。
+      const cli = normalizeCliBoot(latestCliBootOf(name, roleId));
+      const shellAt = Date.parse(String((boot && boot.at) || ''));
+      const cliAt = Date.parse(String((cli && cli.at) || ''));
+      const cliNewer = Boolean(cli && cli.docs && cli.complete === true
+        && Number(cli.round || 0) === Number(state.round || 1)
+        && Number.isFinite(cliAt) && (!Number.isFinite(shellAt) || cliAt >= shellAt));
+      if (cliNewer) {
+        const staleCli = computeStale(cli);
+        cliFallback = { at: cli.at, source: boot.source || '', staleFor: staleCli.length };
+        boot = cli;
+        bootSource = '阅读.jsonl boot（壳层记录过期回退）';
+        if (!staleCli.length) {
+          stale = [];
+        } else {
+          stale = staleCli;
+          staleReason = 'documents_changed';
+        }
+      } else {
+        staleReason = 'stale_boot_record';
+      }
     }
     // 没有具体需求时才要求“本轮相关需求”整体仍然一致（迭代/终止用）。
     // 比对内容哈希：需求正文里的「- 状态：」和「## 状态记录」是程序自己写的，
@@ -4849,11 +4879,21 @@ function createTeamTools(options = {}) {
     if (!requirementId && boot.poolComparable !== false) {
       const beforePool = String(boot.requirementsContentHash || boot.requirementsHash || '');
       const nowPool = String(live.requirements.contentHash || live.requirements.hash || '');
-      if (beforePool !== nowPool) stale.push('本轮相关需求');
+      if (beforePool !== nowPool) {
+        stale.push('本轮相关需求');
+        if (!staleReason) staleReason = 'documents_changed';
+      }
     }
     if (stale.length) {
-      return failure('RULES_CHANGED', `角色「${ROLE_NAMES[roleId] || roleId}」boot 后必读文件已变化（${stale.join('、')}），旧阅读证据作废；请重新 boot`, {
-        role: roleId, project: name, stale, bootRead: boot, protocol: 'legacy'
+      // B-4b70 AC2：区分「文档真被改（要重读）」与「你的记录过期（重 boot 即可）」，别让两者都只说 RULES_CHANGED。
+      const fromCli = String(bootSource).includes('阅读.jsonl');
+      const docsChanged = staleReason !== 'stale_boot_record' || fromCli;
+      const hint = docsChanged
+        ? '必读文件确实被改过：先重新阅读宪法/铁律/项目信息/角色卡，再 boot'
+        : '这是你的 boot 记录过期（旧快照/旧会话），重 boot 一次即可，不需要改文档';
+      return failure('RULES_CHANGED', `角色「${ROLE_NAMES[roleId] || roleId}」boot 后必读文件已变化（${stale.join('、')}）；${hint}`, {
+        role: roleId, project: name, stale, bootRead: boot, bootSource,
+        staleReason: docsChanged ? 'documents_changed' : 'stale_boot_record', hint, cliFallback, protocol: 'legacy'
       });
     }
     // B-0b28：记录“这份需求的阅读证据来自哪里”（壳层 boot 记录 / 最新 CLI boot 令牌），供调用方审计。
@@ -4898,7 +4938,7 @@ function createTeamTools(options = {}) {
         });
       }
     }
-    return { ok: true, code: 'OK', role: roleId, project: name, round: state.round || 1, boot, live, requirementReadSource };
+    return { ok: true, code: 'OK', role: roleId, project: name, round: state.round || 1, boot, live, requirementReadSource, bootSource, cliFallback };
   }
 
   /**
