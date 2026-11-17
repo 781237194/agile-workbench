@@ -18,6 +18,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
+const { uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 B2：唯一沙盘
 
 const ROOT = path.resolve(__dirname, '..');
 const PROJ = path.join(ROOT, '项目', '工作台改造修复');
@@ -26,7 +27,7 @@ const REQ_ID = 'R-20261116-090831-0dbb';
 const PNAME = '工作台改造修复';
 const OPINION = '通过的意见产品也要看，而不是通过了就不看意见了，比如我通过的话也会提一些建议，对齐颗粒度或者参考我的口径，其他的都同意';
 const SESSION = 'sb-product-0dbb';
-const BASE = path.join(ROOT, '_tmp', '0dbb-materials');
+const BASE = uniqueSandbox('0dbb-materials');
 const SB_TEAM = path.join(BASE, '团队');
 const SB_STATE = path.join(SB_TEAM, '状态');
 const SB_PROJECT_STATE = path.join(SB_STATE, '项目', PNAME);

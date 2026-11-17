@@ -1,5 +1,5 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261116-071224-9300 断言：团队根统一解析（环境隔离优先）。
  * - 静态：src/main.js 中旧表达式（layout.teamRoot||TEAM_ROOT）0 命中；resolveTeamRoot 调用点 ≥22。
@@ -14,7 +14,7 @@ const { spawn, execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const PROJECT = '工作台改造修复';
-const SB = path.join(ROOT, '_tmp', '9300');
+const SB = uniqueSandbox('9300');
 const DATA = path.join(SB, 'data');
 const A = path.join(SB, 'A-团队');
 const B = path.join(SB, 'B-团队');

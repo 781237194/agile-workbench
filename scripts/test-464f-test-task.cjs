@@ -1,5 +1,5 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** R-464f 回归：dev_done 无当前轮测试任务 → 先建再叫（needTestTask + ensureTestTask 幂等）。 */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -7,7 +7,7 @@ const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', 'route-464f');
+const SB = uniqueSandbox('route-464f');
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const PROJECT = '守护沙盘';

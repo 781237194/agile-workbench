@@ -1,5 +1,5 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * T-20261115-110400-7ac3 沙盘断言：task reap（僵尸任务逻辑删除 + 审计 + NOOP + purge 护栏）。
  *
@@ -17,7 +17,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', '7ac3');
+const SB = uniqueSandbox('7ac3');
 const TEAM = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM, '工具', 'team.mjs');
