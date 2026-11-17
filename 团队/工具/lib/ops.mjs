@@ -38,6 +38,8 @@ import { ensureProjectStructure, structureReport, readRequirementDocs, requireme
 import { validateSkillContent, recordSkillEvaluation, readSkillEvaluations, skillPromptDue, skillPromptLineFor } from './skill.mjs';
 // T-20261117-211833-7a30（R-a4c7）：调度建议纯函数（三源 → 五类建议）。
 import { buildSchedAdvice } from './sched-advice.mjs';
+// B-20261117-212853-3027：skill 清单内核（verify / template write 与脚本共用单源）。
+import { verifySkillSet, writeSkillStateFile, writeSkillTemplates } from './skill-manifest.mjs';
 import {
   auditGate, detectPhaseEdit, gateDesign, gateIteration, gateRequirementFinal, gateRequirementDoc,
   gateRequirementReview, gateStageRole, gateTestReport, gateTestability, gateConfig,
@@ -6734,6 +6736,8 @@ function cmdReqSync(args) {
  *   skill status [--json]                 看本人最近一次 skill 评估与是否到点（30 分钟）
  *   skill skip --reason "…"               跳过本次提示（reason 必填，append-only 落 skill评估.jsonl）
  *   skill check --file <路径> [--json]     四要素校验（缺项拒收，exit 1）
+ *   skill verify [--json] [--write-state] 校验 manifest+sha+格式，并（可选）派生 团队/状态/技能清单.json
+ *   skill template write [--out <目录>] [--force]  把六主题模板写到项目内 skill/（或指定目录）
  */
 export function cmdSkill(args) {
   const b = bootFor(args, 'skill');
@@ -6753,6 +6757,28 @@ export function cmdSkill(args) {
     if (reason.length < 2) fail('SKILL_SKIP_REASON_REQUIRED', '跳过 skill 提示必须写 --reason（写进 skill评估.jsonl）', {}, 1);
     const row = recordSkillEvaluation(b.project, b.role, { action: 'skip', reason });
     out(args, `已跳过本次 skill 提示（reason=${reason}）`, { ok: true, row });
+    return;
+  }
+  if (sub === 'verify') {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+    const verify = verifySkillSet({ root });
+    let written = null;
+    if (args['write-state'] || args.writeState) written = writeSkillStateFile({ root });
+    const payload = { ok: verify.ok, findings: verify.findings, version: verify.manifest && verify.manifest.version, stateFile: verify.stateFile, stateWritten: written };
+    if (!verify.ok) fail('SKILL_VERIFY_FAILED', `skill 校验未通过（${verify.findings.length} 项）：${verify.findings.map((f) => `${f.code} ${f.file}`).join('；')}`, payload, 1);
+    out(args, `skill 校验通过：${verify.manifest.version}（${Object.keys(verify.manifest.files || {}).length} 文件）${written && written.ok ? `；已派生 ${written.file}` : ''}`, payload);
+    return;
+  }
+  if (sub === 'template') {
+    const action = String(args._[2] || 'write');
+    if (action !== 'write') fail('BAD_ACTION', `skill template 只支持 write（收到：${action}）`, {}, 1);
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+    const project = loadProject(b.project);
+    const outDir = String(args.out || '').trim();
+    const result = writeSkillTemplates({ root, out: outDir || path.join(project.path, 'skill'), force: Boolean(args.force) });
+    const payload = { ok: result.ok, dir: result.dir, written: result.written, skipped: result.skipped, code: result.code || '' };
+    if (!result.ok && result.code !== 'SKILL_TEMPLATE_NOOP') fail(result.code, `模板写出失败：${result.code}`, payload, 1);
+    out(args, `skill 模板：${result.written.length} 个写出、${result.skipped.length} 个跳过（${result.dir}）`, payload);
     return;
   }
   if (sub === 'check') {

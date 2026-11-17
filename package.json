@@ -37,7 +37,7 @@
     "test:renderer-load": "node scripts/test-renderer-load.cjs",
     "export:oss": "node scripts/export-open-source.mjs",
     "test:b75c": "node scripts/test-b75c-contenthash.cjs && node scripts/test-b75c-drift.cjs && node scripts/test-b75c-drift-sandbox.cjs",
-    "test:skill": "node scripts/skill-check.cjs && node scripts/test-bcae-skill-tamper.cjs && node scripts/test-bcae-skill-boot.cjs && node scripts/test-bcae-skill-step2.cjs"
+    "test:skill": "node scripts/skill-check.cjs && node scripts/test-bcae-skill-tamper.cjs && node scripts/test-bcae-skill-boot.cjs && node scripts/test-bcae-skill-step2.cjs && node scripts/test-c2b5-handover-skill.cjs && node scripts/test-b3027-bcae-gaps.cjs"
   },
   "devDependencies": {
     "electron": "^33.0.0"
