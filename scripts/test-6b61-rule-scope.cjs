@@ -109,7 +109,7 @@ const norm = (t) => String(t)
     return '索引+README 同源';
   });
 
-  check('S3 index --refresh：人工段 sha 不变、二次执行幂等', () => {
+  check('S3 AC5 幂等：连跑两次 index --refresh 产物**逐字节相等**，人工段 sha 不变', () => {
     const before = read(IDX);
     const m1 = sha(manualOf(before));
     const r1 = cli(['index', '--role', 'programmer1', '--project', PROJECT, '--boot', token, '--refresh']);
@@ -119,8 +119,9 @@ const norm = (t) => String(t)
     const r2 = cli(['index', '--role', 'programmer1', '--project', PROJECT, '--boot', token, '--refresh']);
     assert.ok(r2.ok, `二次 refresh 失败：${r2.out}${r2.err || ''}`);
     const t2 = read(IDX);
-    assert.strictEqual(norm(t2), norm(t1), '二次刷新不幂等（除时间戳外有差异）');
-    return '人工段 sha 稳定 + 幂等';
+    // AC5 要求「产物内容自稳定」：不再剔除时间戳/自我行，直接逐字节比较。
+    assert.strictEqual(t2, t1, '二次刷新产物不逐字节相等（索引仍写入易变内容）');
+    return '人工段 sha 稳定 + 逐字节幂等';
   });
 
   check('S4 AC6 靶词扫描：src/** + 团队/工具/** findings=0', () => {

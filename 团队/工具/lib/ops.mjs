@@ -9983,7 +9983,8 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
   const byRel = new Map(rows.map((r) => [r.target, r]));
   let selfStat = null;
   try { selfStat = fs.statSync(oldPath); } catch { /* first run */ }
-  const selfRow = selfStat ? { target: '项目索引.md', size: selfStat.size, mtime: selfStat.mtime.toISOString(), hash: '', owner: 'pm', version: '' } : null;
+  // AC5 幂等：索引自身行不写 size/mtime（否则每次重写都变，产物永不自稳定）；固定占位，连跑两次字节相等。
+  const selfRow = { target: '项目索引.md', size: null, mtime: '', hash: '', owner: 'pm', version: '' };
   const rel = (p) => p.replace(/\\/g, '/');
   const teamMode = projectTeamMode(project);
   const modeRoles = rolesForMode(teamMode);
@@ -10011,7 +10012,7 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
 
   lines.push(`# ${project.name} · 项目索引（目录）`);
   lines.push('');
-  lines.push(`> 自动生成：${nowIso()} ｜ 由 \`team.mjs index\` 维护，**这是目录，不是项目介绍或需求正文**。`);
+  lines.push('> 由 `team.mjs index` 维护（本行为固定文案，不写生成时间：AC5 要求连跑两次字节相等），**这是目录，不是项目介绍或需求正文**。');
   lines.push(`> 团队模式：${TEAM_MODE_LABELS[teamMode]}（${teamModeDescription(teamMode)}）。`);
   lines.push(`> ${READ_ORDER_LINE} → 角色卡/文件索引 → 任务指定文件；${IRON_POLICY_LINE}。`);
   lines.push('');
