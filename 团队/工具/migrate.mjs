@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { bsdtarZip, bsdtarUnzip, writeTarList } from './lib/evidence-pack.mjs';
 
 const MANIFEST_NAME = '迁移清单.json';
 const NOISE_RE = /(^|\/)(_backup|_tmp[^\/]*|\.selftest-[^\/]*|_archive|node_modules)(\/|$)|\.bak-\d+$|\.tmp$/;
@@ -31,6 +32,13 @@ function fail(code, message, extra = {}) {
 function out(obj, json) {
   if (json) process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
   else console.log(obj.message || JSON.stringify(obj));
+}
+/** 包内条目 kind（与 7aa8 evidence-pack kindOf 同口径）。 */
+function packKindOf(rel) {
+  const ext = path.extname(String(rel || '')).toLowerCase();
+  if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'].includes(ext)) return 'screenshot';
+  if (['.md', '.txt', '.log'].includes(ext)) return 'report';
+  return 'file';
 }
 function sha256File(file) {
   const buf = fs.readFileSync(file);
@@ -102,7 +110,42 @@ function cmdExport(argv) {
     source: { repoRoot, projectDir, stateDir }, excludesNoise: !withNoise, includesEvidence: withEvidence,
     items: entries.map((e) => ({ scope: e.scope, path: e.path, bytes: e.bytes, sha256: e.sha256 })),
   };
-  if (dryRun) return out({ ok: true, dryRun: true, out: outDir, files: entries.length, name: MANIFEST_NAME, message: `[dry-run] 将导出 ${entries.length} 个文件到 ${outDir}（加 --yes 才写盘）` }, argv.json);
+  const outIsZip = /\.zip$/i.test(outDir);
+  if (dryRun) return out({ ok: true, dryRun: true, out: outDir, zip: outIsZip, files: entries.length, name: MANIFEST_NAME, message: `[dry-run] 将导出 ${entries.length} 个文件到 ${outDir}${outIsZip ? '（zip 单文件包）' : ''}（加 --yes 才写盘）` }, argv.json);
+  if (outIsZip) {
+    // F1/F2/AC1：zip 单文件包——包根 迁移清单.json（files 四键 path/bytes/sha256/kind + totals{files,bytes} + assets + warnings）
+    const stage = path.join(repoRoot, '_tmp', `migrate-stage-${Date.now()}`);
+    try {
+      for (const e of entries) {
+        const dst = path.join(stage, e.path);
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(e.src, dst);
+      }
+      const totalBytes = entries.reduce((n, e) => n + e.bytes, 0);
+      const assets = entries.filter((e) => packKindOf(e.path) === 'screenshot').map((e) => ({ path: e.path, bytes: e.bytes }));
+      const zipManifest = {
+        version: 2, kind: 'pm-workbench-migration', project, at: new Date().toISOString(),
+        source: { repoRoot, projectDir, stateDir }, excludesNoise: !withNoise, includesEvidence: withEvidence,
+        files: entries.map((e) => ({ path: e.path, bytes: e.bytes, sha256: e.sha256, kind: packKindOf(e.path) })),
+        totals: { files: entries.length, bytes: totalBytes },
+        assets,
+        warnings: [],
+      };
+      writeJsonFile(path.join(stage, MANIFEST_NAME), zipManifest);
+      const listInfo = writeTarList([...entries.map((e) => e.path), MANIFEST_NAME]);
+      const listFile = listInfo.file;
+      const listExtras = listInfo.extra || [];
+      const packed = bsdtarZip({ out: outDir, listFile, cwd: stage });
+      if (packed.result.status !== 0) {
+        try { fs.unlinkSync(outDir); } catch { /* 半成品删除失败不掩盖错误 */ }
+        fail('MIGRATION_EXPORT_FAILED', `bsdtar 打包失败（exit=${packed.result.status}），已删半成品`, { status: packed.result.status, stderr: packed.stderr.slice(-1200) });
+      }
+      for (const f of [listFile, ...listExtras]) { try { fs.unlinkSync(f); } catch { /* 忽略 */ } }
+      return out({ ok: true, out: outDir, zip: true, files: entries.length, totals: zipManifest.totals, name: MANIFEST_NAME }, argv.json);
+    } finally {
+      try { fs.rmSync(stage, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* staging 清理失败不阻断 */ }
+    }
+  }
   fs.mkdirSync(outDir, { recursive: true });
   for (const e of entries) {
     const dst = path.join(outDir, '包', e.pack);
@@ -119,8 +162,11 @@ function loadManifest(outDir) {
     const file = path.join(outDir, name);
     if (fs.existsSync(file)) {
       const mf = readJsonSafe(file);
-      if (!mf || mf.kind !== 'pm-workbench-migration' || !Array.isArray(mf.items)) fail('MIGRATION_MANIFEST_INVALID', `清单格式不对：${file}`);
-      return { mf, file };
+      if (!mf || mf.kind !== 'pm-workbench-migration') fail('MIGRATION_MANIFEST_INVALID', `清单格式不对：${file}`);
+      // zip 单文件包清单用 files[]（F2），目录包旧版用 items[]；统一成 items 供校验/导入使用
+      const items = Array.isArray(mf.items) ? mf.items : (Array.isArray(mf.files) ? mf.files : null);
+      if (!items) fail('MIGRATION_MANIFEST_INVALID', `清单格式不对（缺 items/files）：${file}`);
+      return { mf: { ...mf, items }, file };
     }
   }
   fail('MIGRATION_MANIFEST_MISSING', `包根缺少 ${MANIFEST_NAME}：${outDir}`);
@@ -130,7 +176,9 @@ function verifyManifest(outDir) {
   const missing = [];
   const hashBad = [];
   for (const it of mf.items) {
-    const file = path.join(outDir, '包', it.path);
+    const flat = path.join(outDir, it.path);
+    const nested = path.join(outDir, '包', it.path);
+    const file = fs.existsSync(flat) ? flat : nested;
     if (!fs.existsSync(file)) { missing.push(it.path); continue; }
     const cur = sha256File(file);
     if (cur.sha256 !== it.sha256) hashBad.push(it.path);
@@ -141,7 +189,16 @@ function verifyManifest(outDir) {
 }
 function cmdImport(argv) {
   const { repoRoot, projectDir, stateDir, teamFile, wbFile } = resolveRoots(argv);
-  const outDir = path.resolve(String(argv.out || '').trim());
+  // F3：--zip <zip> 单文件包——用同一 bsdtar 封装解包到临时目录后走目录包逻辑
+  let zipTemp = '';
+  let outDir = argv.zip ? '' : path.resolve(String(argv.out || '').trim());
+  if (argv.zip) {
+    zipTemp = path.join(repoRoot, '_tmp', `migrate-unzip-${Date.now()}`);
+    const un = bsdtarUnzip({ zip: path.resolve(String(argv.zip)), outDir: zipTemp });
+    if (un.result.status !== 0) fail('MIGRATION_MANIFEST_MISSING', `zip 解包失败（exit=${un.result.status}）`, { stderr: un.stderr.slice(-800) });
+    outDir = zipTemp;
+    globalThis.__MIGRATE_ZIP_TEMP = zipTemp;
+  }
   if (!outDir) fail('OUT_REQUIRED', '需要 --out <导出目录>');
   const mf = verifyManifest(outDir);
   const dryRun = argv.yes !== true;
@@ -157,7 +214,8 @@ function cmdImport(argv) {
     }
   }
   for (const it of mf.items) {
-    const src = path.join(outDir, '包', it.path);
+    const srcFlat = path.join(outDir, it.path);
+    const src = fs.existsSync(srcFlat) ? srcFlat : path.join(outDir, '包', it.path);
     let dst;
     if (it.path.startsWith('项目/')) dst = path.join(repoRoot, it.path);
     else if (it.path.startsWith('团队/状态/项目/')) dst = path.join(repoRoot, it.path);
@@ -408,4 +466,6 @@ function main() {
     return process.exitCode;
   }
 }
+function cleanupZipTemp(dir) { if (!dir) return; try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* 忽略 */ } }
+process.on('exit', () => { try { const g = globalThis.__MIGRATE_ZIP_TEMP; if (g) cleanupZipTemp(g); } catch { /* 忽略 */ } });
 process.exit(main());

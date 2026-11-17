@@ -182,6 +182,22 @@ const rsClear = run(['rebind-sessions', '--root', REPO, '--project', PROJ, '--cl
 const afterClear = JSON.parse(fs.readFileSync(teamFile, 'utf8')).members;
 check('⑤ --clear 后六条 sessionId 空且 pending', rsClear.code === 0 && afterClear.every((m) => m.sessionId === '' && m.sessionPending === true), afterClear.map((m) => [m.role, m.sessionId, m.sessionPending]));
 
+
+// ⑦ zip 单文件包（F1/F2/F3/AC1）：export --out <zip> → 包根 迁移清单.json；import --zip 还原
+const ZIP = path.join(SB, 'pack.zip');
+const expZip = run(['export', '--root', REPO, '--project', PROJ, '--out', ZIP, '--yes', '--json']);
+check('⑦ export --out <zip> 生成 zip 单文件包', expZip.code === 0 && fs.existsSync(ZIP) && fs.statSync(ZIP).size > 0
+  && expZip.json && expZip.json.zip === true && expZip.json.totals && expZip.json.totals.files === mf.items.length, expZip.json || expZip.stderr);
+// import --zip 到干净目标根（复制工具后删掉项目数据）
+const REPO3 = path.join(SB, 'repo3');
+fs.cpSync(REPO, REPO3, { recursive: true });
+fs.rmSync(path.join(REPO3, '项目', PROJ), { recursive: true, force: true });
+fs.rmSync(path.join(REPO3, '团队', '状态', '项目', PROJ), { recursive: true, force: true });
+const impZip = run(['import', '--zip', ZIP, '--root', REPO3, '--project', PROJ, '--yes', '--json']);
+check('⑦ import --zip 校验清单并落地（路径/条目数一致）',
+  impZip.code === 0 && impZip.json && impZip.json.files === mf.items.length
+  && fs.existsSync(path.join(REPO3, '项目', PROJ, '需求', 'R-1.md')),
+  impZip.json || impZip.stderr);
 const passed = results.filter((r) => r.ok).length;
 console.log(`\nB-4761（b0ea 返工）断言：${passed}/${results.length} PASS`);
 if (process.env.TEAM_SB_KEEP !== '1') fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

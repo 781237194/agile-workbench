@@ -56,6 +56,26 @@ function requireTar() {
   return exe;
 }
 
+/**
+ * 通用 bsdtar zip 打包（AC7①：全仓唯一打包实现；7aa8 evidence-pack 与 4761 migrate 共用）。
+ * 返回 { result, stderr }，调用方负责判 exit 与删半成品。
+ */
+export function bsdtarZip({ out, listFile, cwd, timeoutMs = EXPORT_TIMEOUT_MS }) {
+  const tar = requireTar();
+  const result = spawnSync(tar, ['--format=zip', '-cf', out, '-v', '-T', listFile], {
+    cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: timeoutMs,
+  });
+  return { result, stderr: String(result.stderr || '') };
+}
+
+/** 通用 bsdtar 解包到目录（同一 tarExe 唯一入口，无第二套实现）。 */
+export function bsdtarUnzip({ zip, outDir, timeoutMs = EXPORT_TIMEOUT_MS }) {
+  const tar = requireTar();
+  fs.mkdirSync(outDir, { recursive: true });
+  const result = spawnSync(tar, ['-xf', zip, '-C', outDir], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: timeoutMs });
+  return { result, stderr: String(result.stderr || '') };
+}
+
 export function kindOf(file) {
   const ext = path.extname(String(file || '')).toLowerCase();
   if (['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'].includes(ext)) return 'screenshot';
@@ -271,7 +291,7 @@ function toPosix(p) { return String(p).replace(/\\/g, '/'); }
  * 所以非 ASCII 场景用 PowerShell 把 UTF-8 列表转成 ANSI（[Text.Encoding]::Default）再交给 tar，
  * 并用 TextDecoder('gbk') 回读校验每个名字都能往返；往返不了直接失败，不静默丢件。
  */
-function writeTarList(lines) {
+export function writeTarList(lines) {
   const utf8File = path.join(os.tmpdir(), `evidence-list-${process.pid}-${Date.now()}.utf8.txt`);
   fs.writeFileSync(utf8File, lines.join('\r\n') + '\r\n', 'utf8');
   const ascii = lines.every((l) => /^[\x00-\x7F]*$/.test(l));
@@ -441,13 +461,10 @@ export function exportEvidence(args) {
     // 6) bsdtar 打包（-T 显式列表，只写文件、不写目录条目；-v 逐行走 stderr，消费后每 5000 件打一行进度）
     const planned = items.map((i) => i.bytes);
     const sizeOf = (idx) => planned[idx] || 0;
-    const result = spawnSync(tar, ['--format=zip', '-cf', out, '-v', '-T', listFile], {
-      cwd: stageDir,
-      encoding: 'utf8',
-      maxBuffer: 256 * 1024 * 1024,
-      timeout: EXPORT_TIMEOUT_MS,
-    });
-    const stderr = String(result.stderr || '');
+    const packed = bsdtarZip({ out, listFile, cwd: stageDir });
+    const result = packed.result;
+    const stderr = packed.stderr;
+    void tar;
     let seen = 0;
     let sent = 0;
     let bytesAcc = 0;
