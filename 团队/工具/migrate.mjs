@@ -319,6 +319,10 @@ function cmdCheck(argv) {
   // ④ send→read→ack 回环（沙盘内真实 CLI 三连）
   let loop = { ok: false };
   try {
+    // AC6① ④：迁移包按设计不含团队级实例文档（团队宪法/项目铁律/角色卡由 team.mjs init 生成），
+    // 所以回环前先在目标侧执行 init 补环境（换机真实路径：import → init → migrate-check）。
+    let initOk = false;
+    try { const init = runCli(repoRoot, ['init', '--json']); initOk = Boolean(init && init.ok !== false); } catch { initOk = false; }
     const boot = runCli(repoRoot, ['boot', '--role', 'pm', '--project', project, '--session', 'sess-pm', '--json']);
     const token = String((boot && (boot.token || (boot.boot && boot.boot.token))) || '');
     if (!token) throw new Error('no token');
@@ -328,7 +332,7 @@ function cmdCheck(argv) {
     const testerBoot = runCli(repoRoot, ['boot', '--role', 'tester', '--project', project, '--session', 'sess-tester', '--json']);
     const testerToken = String((testerBoot && (testerBoot.token || (testerBoot.boot && testerBoot.boot.token))) || '');
     const ack = msgId && testerToken ? runCli(repoRoot, ['ack', '--boot', testerToken, '--id', msgId, '--note', 'migrate-check 回环 ack', '--json']) : null;
-    loop = { ok: Boolean(read && read.ok !== false && ack && ack.ok !== false), msgId };
+    loop = { ok: Boolean(initOk && read && read.ok !== false && ack && ack.ok !== false), msgId, initOk };
   } catch (e) { loop = { ok: false, error: String(e && e.message || e).slice(0, 200), stderr: String((e && e.stderr) || '').slice(0, 400) || undefined }; }
   push('④ send→read→ack 回环', loop.ok, loop);
 
