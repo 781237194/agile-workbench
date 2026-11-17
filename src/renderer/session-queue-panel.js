@@ -207,6 +207,7 @@
     for (const row of adv.roles) {
       const line = node('div', 'sq-sched-row');
       line.setAttribute('data-sched-role', String(row.role || ''));
+      line.setAttribute('data-sched-available', row.available === false ? 'false' : 'true');
       line.setAttribute('data-sched-advice', String(row.decision || ''));
       line.setAttribute('data-sched-level', String(row.level || ''));
       line.setAttribute('data-sched-reason', (row.reasons || []).join('；'));

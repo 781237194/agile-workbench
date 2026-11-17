@@ -3,11 +3,11 @@
  *
  * 覆盖：
  *   A 纯函数六组夹具（AC2）：queued>0→BUSY_HOLD / 行级 stale→STANDBY / 轮次到线→HANDOVER_FIRST /
- *     认领超时→STALL_ALERT / 空闲→IDLE_DISPATCH / 无排队行→STANDBY；
+ *     认领超时→STALE_ALERT / 空闲→IDLE_DISPATCH / 无排队行→STANDBY；
  *   B 新鲜度（AC1）：快照过期 / degraded / 行级 stale 都不得出 IDLE_DISPATCH；
  *   C 缺源降级（AC1⑥/AC3）：tasks 缺失 → UNAVAILABLE；rounds/usage 缺失 → null 且不判到线；
  *   D 阈值（AC3）：rotateRounds 默认 8（rounds=8 → HANDOVER_FIRST）；usage warn → HANDOVER_FIRST；
- *   E 停滞（AC6）：队列项滞留 ≥5 分钟 → STALL_ALERT；
+ *   E 停滞（AC6）：队列项滞留 ≥5 分钟 → STALE_ALERT；
  *   F CLI（AC5）：--json stdout 恰好一行 + 字段形状；重复调用不重复写其他文件；
  *   G 零副作用（AC4）：沙盘 会话排队/会话轮次/任务/role_queues 的 sha256+mtime 前后不变，只追加 调度建议.jsonl。
  *
@@ -91,11 +91,11 @@ const base = (over = {}) => ({
     assert.strictEqual(pm.level, 'bad');
     return pm.reasons.join('；');
   });
-  check('A4 认领超时 → STALL_ALERT', () => {
+  check('A4 认领超时 → STALE_ALERT', () => {
     const tasks = [{ id: 'T-1', owner: 'pm', status: 'working', claimedAt: iso(NOW - 11 * 60 * 1000) }];
     const a = buildSchedAdvice(base({ tasks }));
     const pm = a.roles.find((r) => r.role === 'pm');
-    assert.strictEqual(pm.decision, 'STALL_ALERT');
+    assert.strictEqual(pm.decision, 'STALE_ALERT');
     assert.ok(/认领超时/.test(pm.reasons.join('；')));
     return pm.reasons.join('；');
   });
@@ -133,10 +133,10 @@ const base = (over = {}) => ({
   });
 
   // ── C 缺源（AC1⑥ / AC3）
-  check('C1 tasks 缺失 → 全员 UNAVAILABLE', () => {
+  check('C1 tasks 缺失 → 全员 available:false（decision 仍 5 值）', () => {
     const a = buildSchedAdvice(base({ tasks: [], taskSourceAvailable: false }));
-    assert.ok(a.roles.every((r) => r.decision === 'UNAVAILABLE'), JSON.stringify(decisionsOf(a)));
-    return 'UNAVAILABLE ×6';
+    assert.ok(a.roles.every((r) => r.available === false), JSON.stringify(decisionsOf(a)));
+    return 'available=false ×6';
   });
   check('C2 rounds/usage 缺失 → null 且不判到线', () => {
     const a = buildSchedAdvice(base());
@@ -164,10 +164,10 @@ const base = (over = {}) => ({
   });
 
   // ── E 队列滞留（AC6）
-  check('E1 队列项滞留 ≥5 分钟 → STALL_ALERT', () => {
+  check('E1 队列项滞留 ≥5 分钟 → STALE_ALERT', () => {
     const a = buildSchedAdvice(base({ roleQueues: { pm: { queue: [{ id: 'q1', since: iso(NOW - 6 * 60 * 1000) }] } } }));
     const pm = a.roles.find((r) => r.role === 'pm');
-    assert.strictEqual(pm.decision, 'STALL_ALERT');
+    assert.strictEqual(pm.decision, 'STALE_ALERT');
     assert.ok(/队列滞留/.test(pm.reasons.join('；')));
     return '滞留→stall';
   });

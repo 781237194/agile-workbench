@@ -9,7 +9,7 @@
 import { usageLevelOf } from './session.mjs';
 import { statusIsClosed } from './gates.mjs';
 
-export const SCHED_DECISIONS = ['UNAVAILABLE', 'HANDOVER_FIRST', 'STALL_ALERT', 'BUSY_HOLD', 'IDLE_DISPATCH', 'STANDBY'];
+export const SCHED_DECISIONS = ['HANDOVER_FIRST', 'STALE_ALERT', 'BUSY_HOLD', 'IDLE_DISPATCH', 'STANDBY'];
 export const SCHED_ROLES = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
 export const SCHED_STALE_MS = 120000;
 export const SCHED_QUEUE_STALL_MS = 300000;
@@ -17,12 +17,12 @@ export const SCHED_CLAIM_WARN_MS = 10 * 60 * 1000;
 export const SCHED_ROTATE_ROUNDS_DEFAULT = 8;
 
 const NEXT_ACTION = {
-  UNAVAILABLE: '任务源不可用：先恢复 任务/ 目录，别派单',
   HANDOVER_FIRST: '先交接/换人，再由 PM 派新单',
-  STALL_ALERT: '先核对认领人：催办或收回重派（不要自动换人）',
+  STALE_ALERT: '先核对认领人：催办或收回重派（不要自动换人）',
   BUSY_HOLD: '忙：不派、入队，等其队列/在办收敛',
   IDLE_DISPATCH: '空闲：可以从待派清单里挑单派',
-  STANDBY: '空闲但无可派：待命',
+  STANDBY: '空闲但无可派（或数据源不新鲜）：待命',
+  UNAVAILABLE_SOURCE: '数据源不可用/不新鲜：先恢复 任务/ 与排队快照，再调度',
 };
 
 function parseMs(v) {
@@ -66,6 +66,8 @@ export function buildSchedAdvice(input) {
 
     const reasons = [];
     let decision = 'STANDBY';
+    // PM 2026-11-17 21:21 口径补充：UNAVAILABLE 不是 decision——数据源不可用/不新鲜时输出 available:false + reasons。
+    const available = taskSourceAvailable && !snapshotStale && !queueDegraded && !rowStale && Boolean(qRow);
 
     // 认领超时（10/30 分钟）；队列滞留（staleMs=300000）
     const claimedStalled = openTasks.filter((t) => {
@@ -78,8 +80,8 @@ export function buildSchedAdvice(input) {
     });
 
     if (!taskSourceAvailable) {
-      decision = 'UNAVAILABLE';
-      reasons.push('任务源缺失/不可用');
+      decision = 'STANDBY';
+      reasons.push('数据源不可用：任务/ 缺失（available=false，不判空闲）');
     } else if (rounds !== null && rounds >= rotateRounds) {
       decision = 'HANDOVER_FIRST';
       reasons.push(`轮次 ${rounds} ≥ ${rotateRounds}（先交接）`);
@@ -87,11 +89,11 @@ export function buildSchedAdvice(input) {
       decision = 'HANDOVER_FIRST';
       reasons.push(`用量档 ${usageLevel}（先交接）`);
     } else if (claimedStalled.length) {
-      decision = 'STALL_ALERT';
+      decision = 'STALE_ALERT';
       const worst = Math.max(...claimedStalled.map((t) => Math.round((now - parseMs(t.claimedAt)) / 60000)));
       reasons.push(`认领超时：${claimedStalled.map((t) => t.id).slice(0, 3).join('、')}（最长 ${worst} 分钟）`);
     } else if (queueStalled.length) {
-      decision = 'STALL_ALERT';
+      decision = 'STALE_ALERT';
       reasons.push(`队列滞留 ${queueStalled.length} 条（≥5 分钟）`);
     } else if (queued > 0 || running || openTasks.length > 0) {
       decision = 'BUSY_HOLD';
@@ -110,13 +112,14 @@ export function buildSchedAdvice(input) {
       reasons.push(state ? `状态 ${state} 不足以判空闲` : '无排队行（不得判空闲）');
     }
 
-    const level = ['UNAVAILABLE', 'HANDOVER_FIRST', 'STALL_ALERT'].includes(decision) ? 'bad' : decision === 'BUSY_HOLD' ? 'warn' : 'ok';
+    const level = !available ? 'bad' : ['HANDOVER_FIRST', 'STALE_ALERT'].includes(decision) ? 'bad' : decision === 'BUSY_HOLD' ? 'warn' : 'ok';
     out.push({
       role,
+      available,
       decision,
       reasons,
       level,
-      nextAction: NEXT_ACTION[decision],
+      nextAction: available ? NEXT_ACTION[decision] : NEXT_ACTION.UNAVAILABLE_SOURCE,
       sources: {
         queue: queue ? (snapshotStale ? 'stale' : 'file') : 'missing',
         rounds: rounds === null ? 'missing' : 'file',
@@ -124,7 +127,7 @@ export function buildSchedAdvice(input) {
         tasks: taskSourceAvailable ? 'file' : 'missing',
         roleQueue: roleQueues ? 'file' : 'missing',
       },
-      facts: { queued, running, state, rounds, usageLevel: usageLevel || null, openTasks: openTasks.length, snapshotStale, rowStale },
+      facts: { queued, running, state, rounds, usageLevel: usageLevel || null, openTasks: openTasks.length, snapshotStale, rowStale, available },
     });
   }
   // 顺序稳定性：输出恒按优先级降序 + 角色原序，便于 CLI/面板直接渲染

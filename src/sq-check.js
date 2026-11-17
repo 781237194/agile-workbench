@@ -315,8 +315,9 @@ async function runSqCheck(options = {}) {
       empty: box ? box.getAttribute('data-sched-empty') === '1' : false,
       rows: rows.length,
       rowsOk: rows.every((n) => n.hasAttribute('data-sched-advice')
-        && n.hasAttribute('data-sched-level') && n.hasAttribute('data-sched-reason')),
+        && n.hasAttribute('data-sched-level') && n.hasAttribute('data-sched-reason') && n.hasAttribute('data-sched-available')),
       decisions: rows.map((n) => n.getAttribute('data-sched-advice')),
+      availableFlags: rows.map((n) => n.getAttribute('data-sched-available')),
     };
   })()`;
   const schedPanel = await evalJs(SCHED_ROWS);
