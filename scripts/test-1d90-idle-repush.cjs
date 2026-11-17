@@ -86,6 +86,12 @@ function check(name, ok, detail) {
   const auditFile = path.join(stateDir, '派单投递审计.jsonl');
   const readQueue = () => { try { return JSON.parse(fs.readFileSync(queueFile, 'utf8')).items || []; } catch { return []; } };
   const readAudit = () => (fs.existsSync(auditFile) ? fs.readFileSync(auditFile, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : []);
+  const wakeLogFile = path.join(stateDir, '唤醒.jsonl');
+  const readWakeRows = () => (fs.existsSync(wakeLogFile)
+    ? fs.readFileSync(wakeLogFile, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
+    : []);
+  const stalledWakeCount = (role) => readWakeRows().filter((r) => String(r.to || '') === role && String(r.reason || '') === 'stalled').length;
+
   const nowMs = Date.now();
   const oldIso = new Date(nowMs - 3 * 60 * 60 * 1000).toISOString(); // 3 小时前：三信号全在窗口外
 
@@ -224,12 +230,18 @@ function check(name, ok, detail) {
   const pmStaleRow = (detStale.roles || {}).pm || {};
   const pmQueueBeforeStale = pmStallCount();
   await ops.recoverStalledRoles(PROJECT, { now: Date.now() + 4000, write: true });
-  // 口径（PM 2026-11-17 12:04 裁定 working 双向 + 1d90 self_claimed 设计）：
-  // working 且 owner=角色 → requeueStalledItem 判 self_claimed，**不重派给自己**；因此超窗口后应 idle 但不新增 Q-STALL。
-  // 若将来放开 self_claimed（选项 b），本条应改为「idle 且重派入队」。
-  check('K working + 产出超窗口 → verdict idle 且按 self_claimed 不重派（1d90 设计）',
-    pmStaleRow.verdict === 'idle' && pmStallCount() === pmQueueBeforeStale,
-    { verdict: pmStaleRow.verdict, before: pmQueueBeforeStale, after: pmStallCount(), signals: pmStaleRow.signals });
+  // 口径（PM 2026-11-17 12:47 裁定）：入队=派新活、唤醒=催在办的人，两者职责分离——
+  // ①self_claimed 保持：角色自己在办的 working 任务**不重新入队**（避免重复派单/灌脏队列）；
+  // ②但 working+窗口内无进度仍要叫醒：verdict=idle → wakeStalledRole 唤醒 1 次；
+  // ③受 27ca idle-episode 去重约束：同一 episode 再跑多拍仍只 1 条唤醒。
+  const pmWakeBefore = stalledWakeCount('pm');
+  for (let i = 0; i < 4; i += 1) {
+    await ops.recoverStalledRoles(PROJECT, { now: Date.now() + (5 + i) * 30000, write: true });
+  }
+  const pmWakeAfter = stalledWakeCount('pm');
+  check('K working + 产出超窗口 → idle：不入队(self_claimed) 但唤醒 1 条且同 episode 不重复',
+    pmStaleRow.verdict === 'idle' && pmStallCount() === pmQueueBeforeStale && pmWakeAfter === 1 && pmWakeBefore === 1,
+    { verdict: pmStaleRow.verdict, queueBefore: pmQueueBeforeStale, queueAfter: pmStallCount(), wakeBefore: pmWakeBefore, wakeAfter: pmWakeAfter });
 
   // 3 accepted + 1 open：accepted 不得进 openTaskIds、不得入队；open 仍算在办
   writeTask('T-1d90-pm-acc-1', { owner: 'pm', status: 'accepted', acceptedAt: oldIso });
