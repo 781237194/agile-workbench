@@ -151,7 +151,7 @@ const assert = require('node:assert');
   const pass = results.filter((r) => r.ok).length;
   const red = results.length - pass;
   const outEnv = process.env.AWB_B6C5_OUT || path.join('_tmp', 'run-b6c5.json');
-  // 绝对路径直接用；相对路径按仓库根解析（env 传绝对路径时 path.join 会拼成 ROOT\D:\... 这种坏路径）。
+  // 绝对路径直接用；相对路径按仓库根解析（env 传绝对路径时 path.join 会拼成「仓库根 + 盘符绝对路径」这种坏路径）。
   const outFile = path.isAbsolute(outEnv) ? outEnv : path.join(ROOT, outEnv);
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   fs.writeFileSync(outFile, JSON.stringify({ task: 'B-20261117-142519-b6c5', at: new Date().toISOString(), total: results.length, pass, red, results }, null, 2) + '\n', 'utf8');
