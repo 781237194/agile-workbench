@@ -1862,6 +1862,31 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
   // B-405f ②：目标会话无活性的 pending 锁也在这里清（泵是定时入口，覆盖 PM 不操作的时间段）。
   await releaseInactiveDispatchLock(project, { source: 'pump' });
   const queue = readDispatchQueue(project);
+  // B-d120（2026-11-17）：已收口任务（done/accepted/cancelled/terminated）的队列条目不得再投递——
+  // 历史入队遗留的条目在投递前统一清掉（带审计、不静默），否则每拍都会重投，表现为「永远 pending + delivered 审计翻倍」。
+  try {
+    const closedTaskIds = new Set(
+      listTasks(project).filter((t) => t && statusIsClosed(String(t.status || ''))).map((t) => String(t.id || '')),
+    );
+    if (closedTaskIds.size) {
+      const dropped = queue.items.filter((it) => it && it.task && closedTaskIds.has(String(it.task)));
+      if (dropped.length) {
+        queue.items = queue.items.filter((it) => !(it && it.task && closedTaskIds.has(String(it.task))));
+        writeDispatchQueue(project, queue);
+        for (const it of dropped) {
+          try {
+            appendDeliveryAudit(project, {
+              itemId: it.id, to: String(it.to || ''), taskId: String(it.task || ''),
+              attempt: Number(it.attempt) || 1, result: 'skipped', code: 'TASK_CLOSED_DROPPED',
+              stallMs: 0, messageId: '', wakeOk: false, source: pumpSource,
+            });
+          } catch { /* 审计失败不阻断清理 */ }
+          appendEvent({ role: 'system', action: 'dispatch_queue_dropped_closed', project, target: String(it.id),
+            note: `task=${it.task} to=${it.to || ''} code=TASK_CLOSED_DROPPED` });
+        }
+      }
+    }
+  } catch { /* 清理失败不阻断泵 */ }
   if (!queue.items.length) return { ok: true, pumped: false, reason: 'EMPTY', remaining: 0 };
   const roleKey = String(role || '');
   // 指定角色：只看它的第一项；role=''（兜底泵）：遍历队列，找第一个“角色已空闲”的项。

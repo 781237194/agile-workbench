@@ -21,7 +21,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { PATHS, readJson, writeJson } from './core.mjs';
 import { projectStatePaths, loadProject, projectTeamMode } from './store.mjs';
-import { ownerDecisionsOf, currentDecisionOf } from './gates.mjs';
+import { ownerDecisionsOf, currentDecisionOf, statusIsClosed } from './gates.mjs';
 
 export const ROLE_QUEUE_SCHEMA = 1;
 export const ROLE_QUEUE_FILE = 'role_queues.json';
@@ -131,7 +131,9 @@ export function buildRoleQueues(projectName) {
     if (!id) continue;
     const owner = String(task.owner || '');
     const status = String(task.status || '');
-    if (status === 'done') continue;
+    // d120（2026-11-17）：闭环判定走 gates.statusIsClosed 单源——以前只跳 done，
+    // 于是 accepted/cancelled/terminated 的收口任务会永远以 pending 挂在角色队列里（analyst 列实测复现）。
+    if (statusIsClosed(status)) continue;
     if (closedReqIds.has(String(task.requirementId || ''))) continue;
     if (!roles[owner]) continue;
     if (id.startsWith('B-')) {
