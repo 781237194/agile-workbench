@@ -267,6 +267,17 @@ function readAutoRotateSummary({ auditRows, now } = {}) {
   const failedToday = today.filter((row) => String(row.result) === 'fail' || String(row.stage) === 'failed'
     || (String(row.stage) === 'skipped' && String(row.code) === 'HANDOVER_TIMEOUT' && String(row.result) !== 'ok'));
   const byRole = {};
+  // B-20261118-002151-61f5：用量来源（file=会话用量.json / live=实时回退 / none=都取不到）→ 面板 data-ar-usage。
+  const usageByRole = {};
+  for (const row of rows) {
+    const ev = row && row.evidence && typeof row.evidence === 'object' ? row.evidence : {};
+    if (ev.usageSources && typeof ev.usageSources === 'object') {
+      for (const r of ev.usageSources.none || []) usageByRole[String(r)] = 'none';
+      for (const r of ev.usageSources.file || []) usageByRole[String(r)] = 'file';
+      for (const r of ev.usageSources.live || []) usageByRole[String(r)] = 'live';
+    }
+    if (row && row.role && ev.usageSource) usageByRole[String(row.role)] = String(ev.usageSource);
+  }
   for (const row of rows) {
     const role = String(row.role || '');
     if (!role) continue;
@@ -290,7 +301,13 @@ function readAutoRotateSummary({ auditRows, now } = {}) {
       reason: item.reason || '',
       auditTail: item.last ? `${String(item.last.stage || '')} · ${String(item.last.at || '')}` : '',
       error: item.failed || '',
+      usageSource: usageByRole[role] || '',
     };
+  }
+  // 只有 cycle 行（role 为空）时也要把用量来源带出来，面板才不会对空角色丢字段。
+  for (const [role, src] of Object.entries(usageByRole)) {
+    if (out[role]) out[role].usageSource = src;
+    else out[role] = { state: 'idle', reason: '', auditTail: '', error: '', usageSource: src };
   }
   return {
     byRole: out,
@@ -343,7 +360,7 @@ function buildPanelModel(options = {}) {
       // B-20261117-181420-9688：最近失败时间（展示用；计数与四态分离，失败数不再决定状态）
       lastFailAt: summary.lastFailAt || '',
       // R-fa0e（3a12）§六：自动换人字段（无记录时 state=idle、审计尾为空，不伪造）
-      autoRotate: autoRotate.byRole[role] || { state: 'idle', reason: '', auditTail: '', error: '' },
+      autoRotate: autoRotate.byRole[role] || { state: 'idle', reason: '', auditTail: '', error: '', usageSource: '' },
     };
   });
 

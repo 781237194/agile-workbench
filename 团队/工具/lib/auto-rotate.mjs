@@ -27,7 +27,7 @@ import { PATHS, WORKSPACE, appendLine } from './core.mjs';
 import { loadTeam, saveTeam, projectStatePaths, sendMessage } from './store.mjs';
 import { ROUNDS_MAX } from './session-archive.mjs';
 // B-20261117-212500-a837：换人必须真建会话（复用 session.mjs 的唯一出口），禁止在调度层自造 session id。
-import { createTeamSession } from './session.mjs';
+import { createTeamSession, sessionUsage, usageLevelOf } from './session.mjs';
 
 /* ── 常量（阈值与 session.mjs 同源：warn 30 万 / force 50 万；轮次沿用归档建议 20 轮） ── */
 export const DEFAULT_TOKEN_WARN = 300000;
@@ -143,8 +143,8 @@ export function collectCandidates({ now, usage, rounds, memberRoles, warnThresho
     if (!Number.isFinite(tokens) || tokens <= 0) continue;
     const atMs = Date.parse(String(row.at || ''));
     if (Number.isFinite(atMs) && now - atMs > 24 * 3600 * 1000) continue;   // 超 24h 视为用量过期
-    const level = tokens >= Number(forceThreshold) ? 'force' : (tokens >= Number(warnThreshold) ? 'warn' : '');
-    if (!level) continue;
+    const level = usageLevelOf(tokens, warnThreshold, forceThreshold);   // 单源：与 session usage / 水位提醒同一函数
+    if (level !== 'force' && level !== 'warn') continue;
     put({ role, kind: 'usage', level, tokens, atMs: Number.isFinite(atMs) ? atMs : now, usageAt: String(row.at || ''), sessionId: String(row.sessionId || '') });
   }
   for (const [role, raw] of Object.entries(rounds || {})) {
@@ -361,6 +361,47 @@ function usageRolesOf(usage) {
   return out;
 }
 
+/* ── B-20261118-002151-61f5：会话用量缺失/过期 → 回落实时值 ────────────────── */
+const USAGE_MAX_AGE_MS = 24 * 3600 * 1000;
+
+/** 会话用量.json 里某角色这一行是否「新鲜可用」：tokens>0 且（无 at 或 at 在 24h 内）。 */
+function usageRowFreshOf(usage, role, now) {
+  const row = usage && typeof usage === 'object' ? usage[role] : null;
+  if (!row || typeof row !== 'object') return { fresh: false, tokens: null, atMs: NaN };
+  const tokens = Number(row.tokens);
+  if (!Number.isFinite(tokens) || tokens <= 0) return { fresh: false, tokens: null, atMs: NaN };
+  const atMs = Date.parse(String(row.at || ''));
+  const fresh = !Number.isFinite(atMs) || (now - atMs <= USAGE_MAX_AGE_MS);
+  return { fresh, tokens, atMs };
+}
+
+/**
+ * 实时用量回退（需求正文：缺失/过期 → **同一函数**回落实时值；判档仍走 usageLevelOf 单源）。
+ * 唯一取数通道 = session.mjs 的 sessionUsage()（`team.mjs session usage` 同一实现）。
+ * 沙盘口径：TEAM_SELFTEST=1 且没有 TEAM_DSH_FAKE 时**不联网**（不让自检打到真实 DSH），直接返回不可用。
+ * 返回 { ok, rows:{role:{tokens,sessionId}}, why }。
+ */
+async function liveUsageOf({ projectName, roles, warn = DEFAULT_TOKEN_WARN, force = DEFAULT_TOKEN_FORCE }) {
+  const wanted = new Set((roles || []).map(String));
+  if (process.env.TEAM_SELFTEST === '1' && !String(process.env.TEAM_DSH_FAKE || '').trim()) {
+    return { ok: false, rows: {}, why: '沙盘（TEAM_SELFTEST=1）未注入 TEAM_DSH_FAKE：不联网取实时用量' };
+  }
+  try {
+    const r = await sessionUsage({ projectName, warnThreshold: warn, forceThreshold: force });
+    const rows = {};
+    for (const row of (r && r.rows) || []) {
+      const role = String((row && row.role) || '');
+      if (!role || (wanted.size && !wanted.has(role))) continue;
+      const tokens = Number(row.inputTokens);
+      if (!Number.isFinite(tokens) || tokens <= 0) continue;
+      rows[role] = { tokens, sessionId: String(row.sessionId || '') };
+    }
+    return { ok: true, rows, why: '', dshOk: r && r.dshOk !== false, source: 'session usage' };
+  } catch (e) {
+    return { ok: false, rows: {}, why: String((e && (e.code || e.message)) || e) };
+  }
+}
+
 /* ── AC7：交接请求正文六段行序（触发原因 / 目标文件 / 需写内容 / 死线 / 回执要求 / 模板） ── */
 export function handoverRequestBody({ role, level, kind, tokens, rounds, deadlineIso, projectName }) {
   const reason = kind === 'rounds'
@@ -538,11 +579,33 @@ export async function runAutoRotateCycle(projectName, options = {}) {
     return row && typeof row === 'object' && Number.isFinite(Number(row.roundsSinceArchive));
   });
   const roundsUnreadable = !fs.existsSync(roundsFileOf(name)) || !roundsShapeOk;
-  const usageRoles = usageRolesOf(usage);
-  const usageUnavailableRoles = memberRoles.filter((role) => !(usageRoles[role] && usageRoles[role].usable));
+  // B-20261118-002151-61f5：会话用量.json 缺失/超 24h → 回落实时值（sessionUsage），判档仍走 usageLevelOf。
+  // 文件新鲜时**不联网**（生产零额外开销）；只有确实缺/过期的角色才走实时回退。
+  const usageSourceByRole = {};
+  for (const role of memberRoles) {
+    const rowFresh = usageRowFreshOf(usage, role, now);
+    usageSourceByRole[role] = rowFresh.fresh ? 'file' : 'none';
+  }
+  const needLiveRoles = memberRoles.filter((role) => usageSourceByRole[role] !== 'file');
+  let liveInfo = { ok: false, rows: {}, why: 'not-needed' };
+  const liveUsage = { ...(usage && typeof usage === 'object' ? usage : {}) };
+  const liveRoles = [];
+  if (needLiveRoles.length) {
+    liveInfo = await liveUsageOf({ projectName: name, roles: needLiveRoles });
+    for (const role of needLiveRoles) {
+      const live = liveInfo.rows[role];
+      if (live && Number.isFinite(live.tokens) && live.tokens > 0) {
+        liveUsage[role] = { role, tokens: live.tokens, at: iso(now), sessionId: live.sessionId || '', source: 'live', live: true };
+        usageSourceByRole[role] = 'live';
+        liveRoles.push(role);
+      }
+    }
+  }
+  const usageUnavailableRoles = memberRoles.filter((role) => usageSourceByRole[role] === 'none');
+  const usageFileRoles = memberRoles.filter((role) => usageSourceByRole[role] === 'file');
   const workingByRole = {};
   for (const role of memberRoles) workingByRole[role] = workingTasksOf(name, role);
-  const candidates = collectCandidates({ now, usage, rounds, memberRoles, roundsLimit: cfg.rotateRounds });
+  const candidates = collectCandidates({ now, usage: liveUsage, rounds, memberRoles, roundsLimit: cfg.rotateRounds });
   const rows = readAudit(auditFile);
   const actions = [];
   const night = isNight(now);
@@ -556,8 +619,23 @@ export async function runAutoRotateCycle(projectName, options = {}) {
       // T-f35b①：调度层事件不进「换人流水线 stage 枚举」——改用 event=cycle（kind=schedule）；历史行不回改。
       at: nowIso, event: 'cycle', kind: 'schedule', code: 'CYCLE', result: 'ok', role: '', project: name,
       note: `一拍：${night ? '夜间' : nextDayWindow ? '次日窗口' : '白天'} · 候选 ${candidates.length} 个 · 源 ${source}`,
-      evidence: { mode: night ? 'night' : nextDayWindow ? 'next-day' : 'day', candidates: candidates.map((c) => `${c.role}:${c.level}`), source, config: cfg, configFallback },
+      evidence: { mode: night ? 'night' : nextDayWindow ? 'next-day' : 'day', candidates: candidates.map((c) => `${c.role}:${c.level}`), source, config: cfg, configFallback,
+        // B-61f5：用量来源逐角色可查（面板/审计都据此显示 file|live|none）
+        usageSources: { file: usageFileRoles, live: liveRoles, none: usageUnavailableRoles },
+        usageLive: needLiveRoles.length ? { ok: liveInfo.ok, why: liveInfo.why } : null },
     });
+    // B-61f5：实时回退要显式留痕（每天首拍记一行，避免每拍刷屏；后续每拍在 cycle.usageSources 里带 live 名单）
+    if (liveRoles.length) {
+      const todayKey = new Date(now + SHANGHAI_OFFSET_MS).toISOString().slice(0, 10);
+      const already = rows.some((r) => String(r.code) === 'USAGE_LIVE_FALLBACK' && String(r.at || '').slice(0, 10) === todayKey);
+      if (!already) {
+        appendAudit(auditFile, {
+          at: nowIso, stage: 'skipped', code: 'USAGE_LIVE_FALLBACK', result: 'ok', role: '', project: name,
+          note: `会话用量.json 缺失/超 24h → 回落实时值（session usage 同一函数，判档 usageLevelOf 单源）：${liveRoles.join('/')}`,
+          evidence: { usageSource: 'live', roles: liveRoles.map((r) => ({ role: r, tokens: liveUsage[r].tokens, sessionId: liveUsage[r].sessionId || '' })), usageFile: usageFileOf(name), live: { ok: liveInfo.ok, why: liveInfo.why } },
+        });
+      }
+    }
     // AC8：配置缺省回落要留痕（每天首拍记一行，避免每拍刷屏）
     if (configFallback) {
       const todayKey = new Date(now + SHANGHAI_OFFSET_MS).toISOString().slice(0, 10);
@@ -568,9 +646,9 @@ export async function runAutoRotateCycle(projectName, options = {}) {
     if (roundsUnreadable) {
       appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'ROUNDS_UNREADABLE', result: 'ok', role: '', project: name, note: '会话轮次.json 缺失或不可解析：本轮不做轮数触发（不按 0 轮处理）', evidence: { file: roundsFileOf(name) } });
     }
-    // AC1 反例：用量不可用（缺失/超 24h）要留痕
+    // AC1 反例：用量不可用（文件缺失/过期且实时也取不到）要留痕，不许静默
     for (const role of usageUnavailableRoles) {
-      appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'USAGE_UNAVAILABLE', result: 'ok', role, project: name, note: `${role} 的会话用量缺失或超 24h：本轮不按 token 触发（未知不等于 0）`, evidence: { usageFile: usageFileOf(name) } });
+      appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'USAGE_UNAVAILABLE', result: 'ok', role, project: name, note: `${role} 的会话用量缺失或超 24h，且实时值也取不到：本轮不按 token 触发（未知不等于 0）`, evidence: { usageFile: usageFileOf(name), usageSource: 'none', liveFallback: { ok: liveInfo.ok, why: liveInfo.why } } });
     }
   }
 
@@ -624,7 +702,8 @@ export async function runAutoRotateCycle(projectName, options = {}) {
           // T-f35b①：入队同样是调度层事件（event=enqueue / kind=schedule），不占用换人 stage 枚举。
         at: nowIso, event: 'enqueue', kind: 'schedule', code: 'NIGHT_QUEUED', result: 'ok', role: item.role, project: name,
           note: `已入队：${item.level} 档，次日 08:00 执行（deferredUntil=${deferredUntil}）`,
-          evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, forced: item.level === 'force', deferredUntil, nightKey: nightKey, order: item.atMs },
+          evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, forced: item.level === 'force', deferredUntil, nightKey: nightKey, order: item.atMs,
+          usageSource: item.kind === 'usage' ? (usageSourceByRole[item.role] || 'file') : 'rounds' },
         });
       }
       recorded.push(item.role);
@@ -702,7 +781,7 @@ export async function runAutoRotateCycle(projectName, options = {}) {
       const recentWarn = rows.some((r) => String(r.code) === 'WARN_ONLY' && String(r.role) === item.role
         && Math.abs(now - Date.parse(String(r.at || ''))) < TRIGGER_DEDUPE_MS);
       if (!dryRun && !recentWarn) {
-        appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'WARN_ONLY', result: 'ok', role: item.role, project: name, note: `${item.role} 到预警档（${item.tokens} / warn ${DEFAULT_TOKEN_WARN}）：只提醒不换人`, evidence: { level: 'warn', tokens: item.tokens, warn: DEFAULT_TOKEN_WARN } });
+        appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'WARN_ONLY', result: 'ok', role: item.role, project: name, note: `${item.role} 到预警档（${item.tokens} / warn ${DEFAULT_TOKEN_WARN}）：只提醒不换人`, evidence: { level: 'warn', tokens: item.tokens, warn: DEFAULT_TOKEN_WARN, usageSource: item.kind === 'usage' ? (usageSourceByRole[item.role] || 'file') : 'rounds' } });
         try {
           sendMessage({ from: 'system', to: item.role, project: name, type: 'session_rotate_warn', subject: `用量预警（只提醒不换人）：${item.tokens} ≥ ${DEFAULT_TOKEN_WARN}`, body: `${item.role} 本次会话用量 ${item.tokens}（预警档 ${DEFAULT_TOKEN_WARN} / 强制档 ${DEFAULT_TOKEN_FORCE}）。\n按口径：预警档只提醒、不自动换人；到强制档才会走交接流程。建议先把在办状态写进 <角色目录>/产出/交接-最新.md 备着。` });
         } catch { /* 审计已留痕 */ }
@@ -768,7 +847,9 @@ export async function runAutoRotateCycle(projectName, options = {}) {
         ? `阈值命中（${item.level}）：轮次 ${item.rounds}/${ROUNDS_MAX}（归零即归档）——已发 1 条交接请求，等回执（触发码 rotate_rounds）`
         : `阈值命中（${item.level}）：已发 1 条交接请求，等回执（触发码 rotate_tokens）`,
       trigger: { kind: item.kind, level: item.level, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens' },
-      evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens' },
+      evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens',
+        // B-61f5：token 触发的来源（file=会话用量.json / live=实时回退；轮次触发为 file 以外的 rounds 时写 'rounds'）
+        usageSource: item.kind === 'usage' ? (usageSourceByRole[item.role] || 'file') : 'rounds' },
     };
     if (!dryRun) {
       appendAudit(auditFile, row);

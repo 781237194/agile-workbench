@@ -90,9 +90,12 @@
       const ar = row.autoRotate || {};
       const arState = String(ar.state || 'idle');
       line.setAttribute('data-ar-state', arState);
+      // B-20261118-002151-61f5：用量来源（file=会话用量.json / live=实时回退 / none=取不到）只读展示
+      if (ar.usageSource) line.setAttribute('data-ar-usage', String(ar.usageSource));
       const arBox = node('div', 'sq-ar');
       const arChip = node('span', 'sq-ar-chip sq-ar-' + arState, `自动换人：${AR_STATE_LABEL[arState] || arState}`);
       arChip.setAttribute('data-ar-state', arState);
+      if (ar.usageSource === 'live') arChip.title = '本轮 token 判档来自实时回退（会话用量.json 缺失或超 24h）';
       arBox.appendChild(arChip);
       if (ar.reason) {
         const reasonEl = node('span', 'sq-ar-reason', String(ar.reason));
