@@ -20,7 +20,11 @@
 - insert:
     - id: pm-workbench-dsh
       name: ./pm-workbench-dsh/index.js
-      config: {}
+      # B-20261117-180718-9229：这里原来是 config: {} —— 插件拿不到 teamRoot，采集落相对路径后
+      # mkdir 抛错、又被静默吞掉，导致 Owner 重启 DSH 后面板永远「未接入」。
+      # 现在给默认值；插件侧另有 cfg > env > workbench.json 上溯 > 默认目录 的多级兜底。
+      config:
+        teamRoot: !!js process.env.AWB_TEAM_ROOT || 'D:/deepseek/agile-workbench/团队'
     - id: dsh-memory-evolve
       name: dsh-memory-evolve
       config: {}

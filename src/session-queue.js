@@ -178,6 +178,24 @@ function degradationOf(options = {}) {
   if (snapshotError === 'missing' || !snapshot) {
     return build(true, 'missing', '会话排队快照未接入（插件还没写过 团队/状态/会话排队.json）', '');
   }
+  // B-20261117-180718-9229：插件自己报告的采集异常优先——它比「未接入/过期」更具体，
+  // 面板要能区分「未配置 teamRoot」「采集失败」「写盘失败」，不能只显示「未接入」两个字。
+  const pluginDegraded = snapshot.degraded && typeof snapshot.degraded === 'object' ? snapshot.degraded : null;
+  if (pluginDegraded && pluginDegraded.code) {
+    const code = String(pluginDegraded.code);
+    const message = String(pluginDegraded.message || '插件采集异常');
+    const lastAttemptAt = String(pluginDegraded.lastAttemptAt || '');
+    const lastSuccessAt = String(snapshot.at || '');
+    return {
+      degraded: true,
+      code,
+      reason: message,
+      lastReadAt: lastSuccessAt,
+      ageMs: 0,
+      text: `插件采集异常（${code}）：${message}；最近尝试：${lastAttemptAt || '未记'}`
+        + `；上次成功：${lastSuccessAt || '无'}。修复：检查 DSH 插件配置 teamRoot（应为 …/团队 目录，需存在 状态/ 子目录）。`,
+    };
+  }
   if (snapshotError === 'broken') {
     return build(true, 'broken', '会话排队快照解析失败：沿用上一份可用数据', '');
   }

@@ -254,11 +254,124 @@ function renderText(value) {
  * - 四态 fail > skip > ok > none（skipped 优先）；
  * - 宿主侧直接 tmp+rename 原子写 团队/状态/会话排队.json（不 require 仓库 lib，cwd 无关）。
  */
-function teamRootOf(pluginConfig) {
-  const fromCfg = pluginConfig && typeof pluginConfig.teamRoot === 'string' ? pluginConfig.teamRoot.trim() : ''
-  const fromEnv = String(process.env.TEAM_ROOT || '').trim()
-  return fromCfg || fromEnv
+/**
+ * B-20261117-180718-9229：teamRoot 多级兜底（顺序写死，绝不返回相对路径）。
+ * 现场根因：bundle 的 cordis.patch.yml insert config:{} → 配置为空、DSH 进程也没有 TEAM_ROOT
+ * → 旧实现返回空串 → join('', '状态', …) 拼出相对路径 → mkdir 抛错 → 被 .catch 静默吞掉，
+ * 于是「重启 DSH 后面板永远未接入」且零日志。
+ */
+const TEAM_STATE_SUBDIR = '状态'
+
+function isTeamRootDir(candidate) {
+  const dir = String(candidate || '').trim()
+  if (!dir || !isAbsolute(dir)) return false
+  try {
+    return statSync(join(dir, TEAM_STATE_SUBDIR)).isDirectory()
+  } catch {
+    return false
+  }
 }
+
+function workbenchStoreCandidates(pluginConfig) {
+  const out = []
+  const push = (value) => {
+    const text = String(value || '').trim()
+    if (text && !out.includes(text)) out.push(text)
+  }
+  push(process.env.AWB_STORE)
+  if (process.env.AWB_DATA_DIR) push(join(process.env.AWB_DATA_DIR, 'userdata', 'workbench.json'))
+  if (process.env.DSH_PROFILE_DIR) push(join(process.env.DSH_PROFILE_DIR, 'data', 'userdata', 'workbench.json'))
+  for (const dir of defaultWorkbenchDirs(pluginConfig)) push(join(dir, 'data', 'userdata', 'workbench.json'))
+  return out
+}
+
+function defaultWorkbenchDirs(pluginConfig) {
+  const out = []
+  const push = (value) => {
+    const text = String(value || '').trim()
+    if (text && !out.includes(text)) out.push(text)
+  }
+  if (pluginConfig && typeof pluginConfig.workbenchDir === 'string') push(pluginConfig.workbenchDir)
+  push(process.env.AWB_WORKBENCH_DIR)
+  push(process.env.PM_WORKBENCH_DIR)
+  push(DEFAULT_DIRS[0])
+  push(DEFAULT_DIRS[1])
+  push(DEFAULT_DIRS[2])
+  return out
+}
+
+/** 从 workbench.json 的 projects[].path 上溯找到仓库根，再取 <repo>/团队。 */
+function teamRootFromWorkbenchStore(pluginConfig) {
+  for (const storeFile of workbenchStoreCandidates(pluginConfig)) {
+    let store = null
+    try { store = JSON.parse(fs.readFileSync(storeFile, 'utf8')) } catch { continue }
+    const projects = Array.isArray(store && store.projects) ? store.projects : []
+    for (const project of projects) {
+      let dir = String((project && project.path) || '').trim()
+      while (dir) {
+        const candidate = join(dir, '团队')
+        if (isTeamRootDir(candidate)) return { teamRoot: candidate, source: 'workbench-store', storeFile, projectPath: dir }
+        const parent = dirname(dir)
+        if (!parent || parent === dir) break
+        dir = parent
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * 解析 teamRoot：cfg → env(AWB_TEAM_ROOT/TEAM_ROOT) → workbench.json 上溯 → 默认工作台目录。
+ * 返回 { teamRoot, source, tried, error }；解析不到时 teamRoot='' 且 error.code=SQ_TEAMROOT_UNRESOLVED（绝不拼相对路径）。
+ */
+export function resolveTeamRoot(pluginConfig) {
+  const tried = []
+  const consider = (value, source) => {
+    const text = String(value || '').trim()
+    if (!text) return null
+    if (!isAbsolute(text)) {
+      tried.push({ source, value: text, ok: false, why: 'NOT_ABSOLUTE' })
+      return null
+    }
+    if (!isTeamRootDir(text)) {
+      tried.push({ source, value: text, ok: false, why: 'TEAM_STATE_MISSING' })
+      return null
+    }
+    tried.push({ source, value: text, ok: true, why: '' })
+    return { teamRoot: resolve(text), source }
+  }
+
+  const fromCfg = consider(pluginConfig && pluginConfig.teamRoot, 'config')
+  if (fromCfg) return { ...fromCfg, tried, error: null }
+  const fromAwbEnv = consider(process.env.AWB_TEAM_ROOT, 'env:AWB_TEAM_ROOT')
+  if (fromAwbEnv) return { ...fromAwbEnv, tried, error: null }
+  const fromEnv = consider(process.env.TEAM_ROOT, 'env:TEAM_ROOT')
+  if (fromEnv) return { ...fromEnv, tried, error: null }
+
+  const fromStore = teamRootFromWorkbenchStore(pluginConfig)
+  if (fromStore) {
+    tried.push({ source: 'workbench-store', value: fromStore.teamRoot, ok: true, why: '' })
+    return { teamRoot: resolve(fromStore.teamRoot), source: fromStore.source, tried, error: null, storeFile: fromStore.storeFile }
+  }
+  tried.push({ source: 'workbench-store', value: '', ok: false, why: 'NO_STORE_OR_PROJECT_PATH' })
+
+  for (const dir of defaultWorkbenchDirs(pluginConfig)) {
+    const hit = consider(join(dir, '团队'), `default:${dir}`)
+    if (hit) return { ...hit, tried, error: null }
+  }
+
+  return {
+    teamRoot: '',
+    source: '',
+    tried,
+    error: {
+      code: 'SQ_TEAMROOT_UNRESOLVED',
+      message: '找不到团队目录：DSH 插件未配置 teamRoot，进程也没有 TEAM_ROOT，且从工作台 workbench.json / 默认工作台目录都推不出来。请在 DSH 插件配置里设置 teamRoot（例如 D:/deepseek/agile-workbench/团队）。',
+      tried,
+    },
+  }
+}
+
 
 function atomicWriteJson(file, value, eol = "\n") {
   fs.mkdirSync(dirname(file), { recursive: true })
@@ -312,13 +425,55 @@ function readWakeRows(teamRoot, role, activeProject) {
 }
 
 export async function collectSessionQueueSnapshot(ctx, pluginConfig, now = Date.now()) {
-  const teamRoot = teamRootOf(pluginConfig)
-  if (!teamRoot) return { ok: false, code: 'TEAM_ROOT_MISSING' }
+  // B-20261117-180718-9229：先解析 teamRoot；解析不到就**明确失败**（绝不落相对路径）。
+  const resolved = resolveTeamRoot(pluginConfig)
+  const staleMs = Number((pluginConfig && pluginConfig.staleMs) || 120000)
+  if (!resolved.teamRoot) {
+    try {
+      console.error('[sq] teamRoot unresolved ' + JSON.stringify({ code: resolved.error.code, tried: resolved.tried.slice(0, 6) }))
+    } catch { /* 控制台不可写时忽略 */ }
+    return { ok: false, code: resolved.error.code, message: resolved.error.message, tried: resolved.tried }
+  }
+  const teamRoot = resolved.teamRoot
+  const file = join(teamRoot, TEAM_STATE_SUBDIR, '会话排队.json')
+  // 上一份快照：失败时保留它的 roles（不清空面板），并沿用它的 at 作为「上次成功时间」。
+  const previous = (() => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null } })()
+
+  const writeDegraded = (code, message) => {
+    const lastAttemptAt = new Date(Number(now) || Date.now()).toISOString()
+    const degraded = { code: String(code || 'SQ_COLLECT_FAILED'), message: String(message || '').slice(0, 300), lastAttemptAt }
+    const snapshot = {
+      schema: 1,
+      at: (previous && previous.at) || lastAttemptAt,
+      project: String((previous && previous.project) || ''),
+      teamRoot,
+      resolveSource: resolved.source,
+      staleMs,
+      degraded,
+      lastAttemptAt,
+      roles: Array.isArray(previous && previous.roles) ? previous.roles : [],
+    }
+    try {
+      atomicWriteJson(file, snapshot)
+      return { ok: false, code: degraded.code, message: degraded.message, file, wroteDegraded: true, keptRoles: snapshot.roles.length, teamRoot, resolveSource: resolved.source }
+    } catch (error) {
+      // 连 degraded 都写不进去：只能返回结构化错误（附 errno/path），由宿主日志兜底，不静默。
+      return {
+        ok: false, code: degraded.code, message: degraded.message, file, wroteDegraded: false,
+        writeError: { message: String((error && error.message) || error).slice(0, 300), path: file },
+        keptRoles: snapshot.roles.length, teamRoot, resolveSource: resolved.source,
+      }
+    }
+  }
+
   let team = null
-  try { team = JSON.parse(fs.readFileSync(join(teamRoot, '状态', '团队.json'), 'utf8')) } catch { return { ok: false, code: 'TEAM_JSON_MISSING' } }
+  try {
+    team = JSON.parse(fs.readFileSync(join(teamRoot, TEAM_STATE_SUBDIR, '团队.json'), 'utf8'))
+  } catch (error) {
+    return writeDegraded('SQ_TEAM_JSON_MISSING', `读不到 ${join(teamRoot, TEAM_STATE_SUBDIR, '团队.json')}：${String((error && error.message) || error).slice(0, 160)}`)
+  }
   // AC4：没有 sessionId 的角色也要出行（known=false / queued=null），面板显示「—」而不是 0
   const members = Array.isArray(team.members) ? team.members.filter((m) => m && m.role) : []
-  const staleMs = Number((pluginConfig && pluginConfig.staleMs) || 120000)
   const roles = []
   for (const member of members) {
     const role = String(member.role || '')
@@ -342,12 +497,18 @@ export async function collectSessionQueueSnapshot(ctx, pluginConfig, now = Date.
     schema: 1,
     at: new Date(Number(now) || Date.now()).toISOString(),
     project: String(team.activeProject || ''),
+    teamRoot,
+    resolveSource: resolved.source,
     staleMs,
+    degraded: null,
     roles,
   }
-  const file = join(teamRoot, '状态', '会话排队.json')
-  atomicWriteJson(file, snapshot)
-  return { ok: true, file, roles: roles.length }
+  try {
+    atomicWriteJson(file, snapshot)
+  } catch (error) {
+    return writeDegraded('SQ_WRITE_FAILED', `写快照失败：${String((error && error.message) || error).slice(0, 200)}；path=${file}`)
+  }
+  return { ok: true, file, roles: roles.length, teamRoot, resolveSource: resolved.source }
 }
 
 export function apply(ctx, config) {
@@ -361,7 +522,15 @@ export function apply(ctx, config) {
       if (stopped) return
       Promise.resolve()
         .then(() => collectSessionQueueSnapshot(ctx, pluginConfig))
-        .catch(() => { /* 采集失败不影响其它功能 */ })
+        // B-20261117-180718-9229：不许静默吞错——采集内部已写 degraded 快照，这里只兜「意外抛出」并留日志。
+        .catch((error) => {
+          try {
+            console.error('[sq] collect threw ' + JSON.stringify({
+              code: String((error && error.code) || ''),
+              message: String((error && error.message) || error).slice(0, 200),
+            }))
+          } catch { /* 控制台不可写时忽略 */ }
+        })
     }
     tick()
     const timer = setInterval(tick, intervalMs)

@@ -392,6 +392,50 @@ async function runSqCheck(options = {}) {
   }
   check('隔离：自检没有往真实 团队/状态/ 写快照', !fs.existsSync(path.join(outRoot, '团队', '状态', '会话排队.json')), path.join(outRoot, '团队', '状态'));
 
+  // ── B-20261117-180718-9229 两条新增断言 ────────────────────────────────────
+  // ①插件 teamRoot 解析不得返回相对路径（现场根因：config:{} + 无 env → 空串 → join('','状态',…)）。
+  const { pathToFileURL } = require('node:url');
+  const pluginModule = await import(pathToFileURL(path.join(outRoot, 'dsh-plugin', 'pm-workbench-dsh', 'index.js')).href);
+  const resolvedRelative = pluginModule.resolveTeamRoot({ teamRoot: 'relative/团队' });
+  const relOk = (!resolvedRelative.teamRoot || path.isAbsolute(resolvedRelative.teamRoot))
+    && resolvedRelative.tried.some((item) => item.why === 'NOT_ABSOLUTE')
+    && (!resolvedRelative.teamRoot ? Boolean(resolvedRelative.error && resolvedRelative.error.code === 'SQ_TEAMROOT_UNRESOLVED') : true);
+  check('9-① 插件 teamRoot 解析：配置相对路径 → 不得落相对路径（记为 NOT_ABSOLUTE，最终要么绝对目录要么显式 SQ_TEAMROOT_UNRESOLVED）',
+    relOk,
+    { teamRoot: resolvedRelative.teamRoot, source: resolvedRelative.source, error: resolvedRelative.error && resolvedRelative.error.code, tried: resolvedRelative.tried.slice(0, 3) });
+  check('9-①b 插件 teamRoot 解析：无配置时也能从 workbench.json 上溯或默认目录拿到绝对路径（安装即可用）',
+    Boolean(resolvedRelative.teamRoot) && path.isAbsolute(String(resolvedRelative.teamRoot)) && fs.existsSync(path.join(String(resolvedRelative.teamRoot), '状态')),
+    { teamRoot: resolvedRelative.teamRoot, source: resolvedRelative.source });
+
+  // ②采集抛错（团队.json 读不到）时：快照必须含 degraded.code 且保留上一份 roles，不得清空。
+  const degradeTeamRoot = path.join(outDir, 'degraded-team');
+  const degradeStateDir = path.join(degradeTeamRoot, '状态');
+  fs.mkdirSync(degradeStateDir, { recursive: true });
+  const degradeSnapshot = path.join(degradeStateDir, '会话排队.json');
+  const previousRoles = [{ role: 'pm', known: true, queued: 9, byPlacement: { queued: 9 } }];
+  writeJson(degradeSnapshot, { schema: 1, at: ago(60 * 1000), project: '沙盘', staleMs: 120000, degraded: null, roles: previousRoles });
+  // 故意不写 团队.json → collect 内部抛 SQ_TEAM_JSON_MISSING → 走 degraded 分支
+  const collectResult = await pluginModule.collectSessionQueueSnapshot({ sessionController: { state: async () => null } }, { teamRoot: degradeTeamRoot });
+  const afterDegrade = (() => { try { return JSON.parse(fs.readFileSync(degradeSnapshot, 'utf8')); } catch { return null; } })();
+  check('9-② 采集抛错 → 快照含 degraded.code（SQ_TEAM_JSON_MISSING）且保留上次 roles（不清空）',
+    collectResult && collectResult.ok === false && collectResult.code === 'SQ_TEAM_JSON_MISSING'
+    && Boolean(afterDegrade && afterDegrade.degraded && afterDegrade.degraded.code === 'SQ_TEAM_JSON_MISSING')
+    && Array.isArray(afterDegrade.roles) && afterDegrade.roles.length === previousRoles.length
+    && Boolean(afterDegrade.degraded.lastAttemptAt),
+    { code: collectResult && collectResult.code, degraded: afterDegrade && afterDegrade.degraded, roles: afterDegrade && (afterDegrade.roles || []).length });
+  // 面板侧：degraded 快照必须让面板显示原因（data-sq-reason）而不是只显示「未接入」
+  writeJson(snapshotFile, {
+    schema: 1, at: ago(30 * 1000), project: teamName || '沙盘', staleMs: 120000,
+    degraded: { code: 'SQ_WRITE_FAILED', message: '写快照失败：EACCES', lastAttemptAt: ago(10 * 1000) },
+    roles: baseRoles,
+  });
+  panel = await refresh();
+  const reasonAttr = await evalJs("(() => { const p = document.getElementById('session-queue-panel'); return p ? String(p.getAttribute('data-sq-reason') || '') : ''; })()");
+  check('9-③ 面板显示降级原因（data-sq-reason=插件 code，banner 含原因与修复指引），且排队数仍显示上次成功值',
+    reasonAttr === 'SQ_WRITE_FAILED' && /插件采集异常/.test(panel.bannerText || '') && /修复/.test(panel.bannerText || '')
+    && (panel.rows || []).some((row) => row.queued === '0' || row.queued === '3'),
+    { reasonAttr, bannerText: String(panel.bannerText || '').slice(0, 120), queued: (panel.rows || []).map((r) => r.queued) });
+
   const failed = checks.filter((row) => !row.ok);
   const report = {
     ok: failed.length === 0,

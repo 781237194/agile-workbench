@@ -98,7 +98,11 @@
     const meta = el(META_ID);
     const model = state.model || {};
     const degraded = Boolean(model.degraded || state.error);
-    if (panel) panel.setAttribute('data-sq-degraded', degraded ? 'true' : 'false');
+    if (panel) {
+      panel.setAttribute('data-sq-degraded', degraded ? 'true' : 'false');
+      // B-20261117-180718-9229：降级原因要能被断言/自诊断（未配置 teamRoot / 采集失败 / 写盘失败…）
+      panel.setAttribute('data-sq-reason', degraded ? String((state.error ? 'PANEL_ERROR' : ((model.banner && model.banner.code) || ''))) : '');
+    }
     if (banner) {
       const text = state.error
         ? `会话排队面板读取失败：${state.error}`
