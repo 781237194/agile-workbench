@@ -42,7 +42,19 @@ export function validatePmAcceptEvidence({ items, projectPath, maxItems = PM_ACC
     else if (outside) missing.push({ path: rel, kind, reason: 'EVIDENCE_OUTSIDE_PROJECT', abs });
     else if (!exists) missing.push({ path: rel, kind, reason: 'FILE_NOT_FOUND', abs });
     else if (claimed && claimed !== sha256) missing.push({ path: rel, kind, reason: 'HASH_MISMATCH', sha256, claimed });
-    if (rel && exists && !outside) evidence.push({ path: rel, sha256, kind, size });
+    if (rel && exists && !outside) {
+      // B-20261117-094326-8b64：report 必须真正判 PASS、且不得出现 FAIL/不通过/未通过（以前只校验文件存在，
+      // 却在错误文案里声称「含 PASS、不含 FAIL」——声称判却不判）。内容不合格 → 不进 evidence 并给明确 reason。
+      if (kind === 'report') {
+        let text = '';
+        try { text = fs.readFileSync(abs, 'utf8'); } catch { text = ''; }
+        const hasPass = /PASS/.test(text) || /通过/.test(text);
+        const hasFail = /(FAIL|不通过|未通过)/.test(text);
+        if (!hasPass) { missing.push({ path: rel, kind, reason: 'REPORT_PASS_REQUIRED' }); continue; }
+        if (hasFail) { missing.push({ path: rel, kind, reason: 'REPORT_HAS_FAIL' }); continue; }
+      }
+      evidence.push({ path: rel, sha256, kind, size });
+    }
   }
   if (!evidence.some((row) => row.kind === 'report')) missing.push({ path: '', kind: 'report', reason: 'REPORT_REQUIRED' });
   if (!evidence.some((row) => row.kind === 'screenshot')) missing.push({ path: '', kind: 'screenshot', reason: 'SCREENSHOT_REQUIRED' });
