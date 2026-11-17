@@ -4761,7 +4761,10 @@ html[data-style="glass"][data-theme="dark"] {
   /* AC10 待 Owner 定观感（B-20261117-021142-cef9）：纯白 .10 面板上浅色正文只有 1.12:1（面板背后是浅色内容时不可读）。
      测算见 程序员A/产出/测算-ac10-玻璃最小不透明度.md（最小 --panel alpha≈0.63 可使白底最差 ≥4.5:1）。
      **本行按 PM 指示保持原值不动，等 Owner 点头后再改代码。** */
-  --panel: rgba(255, 255, 255, .10); --panel-2: rgba(255, 255, 255, .14);
+  /* Owner 2026-11-17 07:40 拍板（方案 A / panelAlpha）：拟态玻璃下【需求·缺陷池】太透看不清、其他皮肤正常，
+     故把玻璃面板由「半透明白 .10」改为「深色半透明 .66」——纯白最差背景 5.14:1、常态 16.47:1（test-theme-contrast 实测）。
+     只改面板底色，不动 backdrop-filter 模糊与 --panel-inset 高光，其他四档不动。 */
+  --panel: rgba(16, 24, 32, .66); --panel-2: rgba(20, 30, 40, .72);
   --panel-inset: inset 0 1px 0 rgba(255, 255, 255, .35);
   --panel-blur: 18px;
   --green: #7fe0c4; --red: #ff9b8c; --blue: #9fd8ff;
