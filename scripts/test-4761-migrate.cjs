@@ -1,11 +1,7 @@
 /**
- * B-20261117-011143-d5f9（R-20261116-193349-4761）迁移包 CLI 回归
- * 沙盘假仓库（_tmp/4761-migrate-*）：
- *  ① export 默认 dry-run 零写入；--yes 生成 manifest + 包文件
- *  ② import 校验清单：清单被篡改 → MANIFEST_MISMATCH；目标已存在 → MIGRATION_EXISTS；--force 先备份再覆盖
- *  ③ rebind 默认 dry-run 打印 diff 零写入；--yes 才改 项目.json/workbench.json/项目信息.md
- *  ④ rebind-sessions 默认 dry-run；--yes 清空/重绑 sessionId（pending）
- *  ⑤ migrate-check 五步
+ * B-20261117-130603-b0ea 回归（4761 迁移包 AC 15 项返工）
+ * 覆盖 AC1（范围/名册/workbench/清单名）、AC2③（--no-evidence）、AC3（三错误码）、
+ * AC5（rebind-sessions 三种语义 + stale_session 审计）、AC6①（固定五步）、AC7②（清单键名）。
  * 跑法：node scripts/test-4761-migrate.cjs
  */
 const fs = require('fs');
@@ -39,11 +35,11 @@ const projDir = path.join(REPO, '项目', PROJ);
 const stateDir = path.join(REPO, '团队', '状态', '项目', PROJ);
 mk(path.join(projDir, '需求', 'R-1.md'), '# 需求\n');
 mk(path.join(projDir, '程序员A', '产出', 'a.md'), '# 产出\n');
+mk(path.join(projDir, '程序员A', '产出', '证据-x', '01.png'), 'png');
 mk(path.join(projDir, '项目信息.md'), '根目录：D:/old/path/项目\n');
 mk(path.join(stateDir, '项目.json'), JSON.stringify({ name: PROJ, path: 'D:/old/path/项目', dshWorkspaceId: 'ws-old' }, null, 2));
-mk(path.join(stateDir, '工作流.json'), JSON.stringify({ requirements: {} }, null, 2));
+mk(path.join(stateDir, '工作流.json'), JSON.stringify({ requirements: {}, boots: Object.fromEntries(['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'].map((r) => [r, { at: new Date().toISOString() }])) }, null, 2));
 mk(path.join(stateDir, '任务', 'T-1.json'), JSON.stringify({ id: 'T-1', status: 'done' }, null, 2));
-mk(path.join(stateDir, '任务', '.keep'), '');
 mk(path.join(projDir, '_backup', 'noise.txt'), 'noise');
 mk(path.join(projDir, '_tmp-x', 'noise2.txt'), 'noise');
 mk(path.join(REPO, '团队', '状态', '团队.json'), JSON.stringify({
@@ -54,62 +50,121 @@ mk(path.join(REPO, 'data', 'userdata', 'workbench.json'), JSON.stringify({
   version: 1, projects: [{ name: PROJ, id: 'p1', path: 'D:/old/path/项目', dshWorkspaceId: 'ws-old', workspace: { id: 'ws-old', path: 'D:/old/path/项目', name: PROJ, engineUrl: 'http://127.0.0.1:1' } }],
 }, null, 2));
 
+// migrate-check 需要真实团队工具（沙盘假仓库也要能跑 CLI）：复制 团队/工具、协议、宪法/铁律 + 六角色卡（boot 必读），
+// 这些只用于让 CLI 能跑，不参与导出计数（export 只打 项目/<P> 与 团队/状态/项目/<P> + 名册/workbench）。
+fs.cpSync(path.join(ROOT, '团队', '工具'), path.join(REPO, '团队', '工具'), { recursive: true });
+fs.cpSync(path.join(ROOT, '团队', '协议'), path.join(REPO, '团队', '协议'), { recursive: true });
+for (const f of ['团队宪法.md', '项目铁律.md']) {
+  const src = path.join(ROOT, '团队', f);
+  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(REPO, '团队', f));
+}
+for (const [role, dir] of [['pm', '项目经理'], ['product', '产品'], ['analyst', '需求分析师'], ['programmer1', '程序员A'], ['programmer2', '程序员B'], ['tester', '测试人员']]) {
+  const src = path.join(ROOT, '项目', '工作台改造修复', dir, '角色卡.md');
+  if (fs.existsSync(src)) mk(path.join(projDir, dir, '角色卡.md'), fs.readFileSync(src, 'utf8'));
+}
 const OUT = path.join(SB, 'pack');
+const diskCount = (() => {
+  let n = 0;
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); else n += 1; } };
+  walk(projDir); walk(stateDir);
+  return n;
+})();
+const noiseCount = 2;
+const expectItems = diskCount - noiseCount + 2; // + 名册 + workbench
 
-// ① export
+// ① export 范围/清单名/键名（AC1、AC7②）
 const help = run(['help']);
-check('help 列出 5 个命令', /export/.test(help.stdout) && /rebind-sessions/.test(help.stdout) && /migrate-check/.test(help.stdout), help.stdout.slice(0, 200));
+check('help 列出五命令 + --no-evidence/--clear', ['export', 'import', 'rebind', 'rebind-sessions', 'migrate-check', '--no-evidence', '--clear'].every((k) => help.stdout.includes(k)), help.stdout.slice(0, 300));
 const expDry = run(['export', '--root', REPO, '--project', PROJ, '--out', OUT, '--json']);
-check('① export 默认 dry-run、零写入', expDry.code === 0 && expDry.json && expDry.json.dryRun === true && !fs.existsSync(OUT), expDry.json || expDry.stderr);
+check('① export 默认 dry-run 零写入', expDry.code === 0 && expDry.json && expDry.json.dryRun === true && !fs.existsSync(OUT), expDry.json);
 const exp = run(['export', '--root', REPO, '--project', PROJ, '--out', OUT, '--yes', '--json']);
-const manifest = fs.existsSync(path.join(OUT, 'manifest.json')) ? JSON.parse(fs.readFileSync(path.join(OUT, 'manifest.json'), 'utf8')) : null;
-check('① export --yes 生成清单+包', exp.code === 0 && Boolean(manifest) && manifest.kind === 'pm-workbench-migration' && (manifest.files || []).length >= 4, manifest && manifest.files.length);
-const noise = (manifest && manifest.files || []).filter((f) => /_backup|_tmp-x/.test(f.rel));
-check('① export 默认排除噪音（_backup/_tmp*）', noise.length === 0, noise);
+const mfFile = path.join(OUT, '迁移清单.json');
+const mf = fs.existsSync(mfFile) ? JSON.parse(fs.readFileSync(mfFile, 'utf8')) : null;
+check('① 包根清单名为 迁移清单.json', exp.code === 0 && Boolean(mf), { mfFile, code: exp.code });
+check('① 清单条目数=磁盘文件-噪音+名册+workbench', mf && mf.items.length === expectItems, { items: mf && mf.items.length, expectItems, diskCount });
+const keyBad = (mf && mf.items || []).filter((it) => ['path', 'bytes', 'sha256'].some((k) => !(k in it)));
+check('① 清单条目键 path/bytes/sha256 齐全（AC7②）', keyBad.length === 0, keyBad.slice(0, 2));
+check('① 名册随包（团队/状态/团队.json）', (mf && mf.items || []).some((it) => it.path === '团队/状态/团队.json'), (mf && mf.items || []).map((i) => i.path));
+check('① workbench 登记随包（data/userdata/workbench.json）', (mf && mf.items || []).some((it) => it.path === 'data/userdata/workbench.json'), (mf && mf.items || []).map((i) => i.path));
+const noise = (mf && mf.items || []).filter((f) => /_backup|_tmp-x/.test(f.path));
+check('① 默认排除噪音（_backup/_tmp*）', noise.length === 0, noise.map((f) => f.path));
 
-// ② import
-const impDry = run(['import', '--root', REPO, '--project', PROJ, '--out', OUT, '--json']);
-check('② import 默认 dry-run', impDry.code === 0 && impDry.json && impDry.json.dryRun === true, impDry.json);
+// ② --no-evidence（AC2③）
+const OUT2 = path.join(SB, 'pack-noev');
+run(['export', '--root', REPO, '--project', PROJ, '--out', OUT2, '--yes', '--no-evidence', '--json']);
+const mf2 = fs.existsSync(path.join(OUT2, '迁移清单.json')) ? JSON.parse(fs.readFileSync(path.join(OUT2, '迁移清单.json'), 'utf8')) : null;
+const ev = (mf2 && mf2.items || []).filter((f) => /产出\/证据-/.test(f.path));
+check('② --no-evidence 包内不含 产出/证据-*', exp.code === 0 && Boolean(mf2) && ev.length === 0, ev.map((f) => f.path));
+
+// ③ 三错误码（AC3）
+const restore = (f, content) => fs.writeFileSync(f, content, 'utf8');
+const pickOne = mf.items.find((it) => it.scope === 'project' && it.path.endsWith('/a.md'));
+const oneFile = path.join(OUT, '包', pickOne.path);
+const orig = fs.readFileSync(oneFile, 'utf8');
+fs.appendFileSync(oneFile, '\n改1字节\n');
+const impHash = run(['import', '--root', REPO, '--project', PROJ, '--out', OUT, '--yes', '--json']);
+check('③ 改包内 1 件 → MIGRATION_HASH_MISMATCH', impHash.code === 2 && impHash.json && impHash.json.code === 'MIGRATION_HASH_MISMATCH', impHash.json || impHash.stderr);
+restore(oneFile, orig);
+const delFile = path.join(OUT, '包', pickOne.path);
+const delContent = fs.readFileSync(delFile, 'utf8');
+fs.rmSync(delFile, { force: true });
+const impMissing = run(['import', '--root', REPO, '--project', PROJ, '--out', OUT, '--yes', '--json']);
+check('③ 删 1 件 → MIGRATION_MISSING', impMissing.code === 2 && impMissing.json && impMissing.json.code === 'MIGRATION_MISSING', impMissing.json || impMissing.stderr);
+restore(delFile, delContent);
+fs.renameSync(mfFile, mfFile + '.bak');
+const impNoManifest = run(['import', '--root', REPO, '--project', PROJ, '--out', OUT, '--yes', '--json']);
+check('③ 删清单 → MIGRATION_MANIFEST_MISSING', impNoManifest.code === 2 && impNoManifest.json && impNoManifest.json.code === 'MIGRATION_MANIFEST_MISSING', impNoManifest.json || impNoManifest.stderr);
+fs.renameSync(mfFile + '.bak', mfFile);
+// 目标已存在 / --force 备份
 const impExists = run(['import', '--root', REPO, '--project', PROJ, '--out', OUT, '--yes', '--json']);
-check('② 目标已存在 → MIGRATION_EXISTS(exit 2)', impExists.code === 2 && impExists.json && impExists.json.code === 'MIGRATION_EXISTS', impExists.json || impExists.stderr);
-// 篡改包内一文件 → MANIFEST_MISMATCH
-const anyFile = path.join(OUT, '包', 'project', manifest.files.find((f) => f.scope === 'project').rel);
-fs.appendFileSync(anyFile, '\n篡改\n');
-const impTampered = run(['import', '--root', REPO, '--project', PROJ, '--out', OUT, '--yes', '--json']);
-check('② 清单被篡改 → MANIFEST_MISMATCH(exit 2)', impTampered.code === 2 && impTampered.json && impTampered.json.code === 'MANIFEST_MISMATCH', impTampered.json || impTampered.stderr);
-// 还原后 --force 导入到新仓库（备份旧目录）
-const restore = fs.readFileSync(anyFile, 'utf8').replace(/\n篡改\n$/, '');
-fs.writeFileSync(anyFile, restore);
+check('③ 目标已存在 → MIGRATION_EXISTS(exit 2)', impExists.code === 2 && impExists.json && impExists.json.code === 'MIGRATION_EXISTS', impExists.json);
 const REPO2 = path.join(SB, 'repo2');
 fs.cpSync(REPO, REPO2, { recursive: true });
 const impForce = run(['import', '--root', REPO2, '--project', PROJ, '--out', OUT, '--yes', '--force', '--json']);
-check('② --force 先备份再覆盖', impForce.code === 0 && impForce.json && Boolean(impForce.json.backup && fs.existsSync(impForce.json.backup)), impForce.json || impForce.stderr);
+check('③ --force 先备份再覆盖', impForce.code === 0 && impForce.json && Boolean(impForce.json.backup && fs.existsSync(impForce.json.backup)), impForce.json || impForce.stderr);
+const teamAfterImport = JSON.parse(fs.readFileSync(path.join(REPO2, '团队', '状态', '团队.json'), 'utf8'));
+check('① 名册导入后落在 团队/状态/团队.json', (teamAfterImport.members || []).length === 6, (teamAfterImport.members || []).length);
 
-// ③ rebind
+// ④ rebind（AC4）——保持原断言
 const wbBefore = fs.readFileSync(path.join(REPO, 'data', 'userdata', 'workbench.json'), 'utf8');
 const rebindDry = run(['rebind', '--root', REPO, '--project', PROJ, '--to', 'E:/new/root', '--json']);
-check('③ rebind 默认 dry-run 打印 diff、零写入', rebindDry.code === 0 && rebindDry.json && rebindDry.json.dryRun === true && (rebindDry.json.diffs || []).length >= 2
+check('④ rebind 默认 dry-run 零写入', rebindDry.code === 0 && rebindDry.json && rebindDry.json.dryRun === true && (rebindDry.json.diffs || []).length >= 2
   && fs.readFileSync(path.join(REPO, 'data', 'userdata', 'workbench.json'), 'utf8') === wbBefore, rebindDry.json);
 const rebind = run(['rebind', '--root', REPO, '--project', PROJ, '--to', 'E:/new/root', '--yes', '--json']);
 const pjAfter = JSON.parse(fs.readFileSync(path.join(stateDir, '项目.json'), 'utf8'));
 const wbAfter = JSON.parse(fs.readFileSync(path.join(REPO, 'data', 'userdata', 'workbench.json'), 'utf8'));
-check('③ rebind --yes 改 项目.json path', rebind.code === 0 && pjAfter.path === 'E:/new/root', pjAfter);
-check('③ rebind --yes 改 workbench.json 的 path/workspace.path', wbAfter.projects[0].path === 'E:/new/root' && wbAfter.projects[0].workspace.path === 'E:/new/root', wbAfter.projects[0]);
-check('③ rebind --yes 改 项目信息.md 盘符路径', fs.readFileSync(path.join(projDir, '项目信息.md'), 'utf8').includes('E:/new/root'), fs.readFileSync(path.join(projDir, '项目信息.md'), 'utf8').slice(0, 80));
+check('④ rebind --yes 改 项目.json/workbench/项目信息.md', rebind.code === 0 && pjAfter.path === 'E:/new/root'
+  && wbAfter.projects[0].path === 'E:/new/root' && wbAfter.projects[0].workspace.path === 'E:/new/root'
+  && fs.readFileSync(path.join(projDir, '项目信息.md'), 'utf8').includes('E:/new/root'), { pjAfter, wb: wbAfter.projects[0] });
 
-// ④ rebind-sessions
-const rsDry = run(['rebind-sessions', '--root', REPO, '--json']);
-check('④ rebind-sessions 默认 dry-run', rsDry.code === 0 && rsDry.json && rsDry.json.dryRun === true, rsDry.json);
-const rs = run(['rebind-sessions', '--root', REPO, '--session', 'pm=new-pm,tester=', '--yes', '--json']);
-const teamAfter = JSON.parse(fs.readFileSync(path.join(REPO, '团队', '状态', '团队.json'), 'utf8'));
-const byRole = Object.fromEntries(teamAfter.members.map((m) => [m.role, m.sessionId]));
-check('④ rebind-sessions --yes 按映射重绑/清空 pending', rs.code === 0 && byRole.pm === 'new-pm' && byRole.tester === '' && byRole.analyst === '', { byRole, changes: rs.json && rs.json.changes });
+// ⑤ rebind-sessions 三语义 + stale_session 审计（AC5）
+const teamFile = path.join(REPO, '团队', '状态', '团队.json');
+const rolesOf = () => Object.fromEntries(JSON.parse(fs.readFileSync(teamFile, 'utf8')).members.map((m) => [m.role, m.sessionId]));
+const before = rolesOf();
+const rsRoleDry = run(['rebind-sessions', '--root', REPO, '--project', PROJ, '--role', 'pm', '--session', 'new-pm', '--json']);
+check('⑤ rebind-sessions --role 默认 dry-run', rsRoleDry.code === 0 && rsRoleDry.json && rsRoleDry.json.dryRun === true, rsRoleDry.json);
+const rsRole = run(['rebind-sessions', '--root', REPO, '--project', PROJ, '--role', 'pm', '--session', 'new-pm', '--yes', '--json']);
+const afterRole = rolesOf();
+check('⑤ --role pm --session 新：只改 pm，其余五条不变', rsRole.code === 0 && afterRole.pm === 'new-pm'
+  && ['analyst', 'product', 'programmer1', 'programmer2', 'tester'].every((r) => afterRole[r] === before[r]), { afterRole, before });
+const wakeFile = path.join(stateDir, '唤醒.jsonl');
+const staleRows = fs.existsSync(wakeFile) ? fs.readFileSync(wakeFile, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).filter((r) => r.reason === 'stale_session') : [];
+check('⑤ 写 唤醒.jsonl reason=stale_session 审计', staleRows.length >= 1, staleRows.slice(0, 2));
+const rsClearDry = run(['rebind-sessions', '--root', REPO, '--project', PROJ, '--clear', '--json']);
+check('⑤ --clear 是布尔（不吞后续参数）+ dry-run', rsClearDry.code === 0 && rsClearDry.json && rsClearDry.json.dryRun === true, rsClearDry.json);
+const rsClear = run(['rebind-sessions', '--root', REPO, '--project', PROJ, '--clear', '--yes', '--json']);
+const afterClear = JSON.parse(fs.readFileSync(teamFile, 'utf8')).members;
+check('⑤ --clear 后六条 sessionId 空且 pending', rsClear.code === 0 && afterClear.every((m) => m.sessionId === '' && m.sessionPending === true), afterClear.map((m) => [m.role, m.sessionId, m.sessionPending]));
 
-// ⑤ migrate-check
-const chk = run(['migrate-check', '--root', REPO, '--project', PROJ, '--json']);
-check('⑤ migrate-check 五步 PASS', chk.code === 0 && chk.json && chk.json.ok === true && (chk.json.steps || []).length === 5, chk.json);
+// ⑥ migrate-check 固定五步（AC6①）
+const chk = run(['migrate-check', '--root', REPO, '--project', PROJ, '--out', OUT, '--json']);
+const stepNames = (chk.json && chk.json.steps || []).map((s) => s.name);
+check('⑥ migrate-check 五步固定（项目可见/六角色boot/无旧根/回环/自检）', chk.code === 0 && chk.json && chk.json.ok === true
+  && stepNames.length === 5
+  && stepNames[0].includes('项目可见') && stepNames[1].includes('boot') && stepNames[2].includes('旧根')
+  && stepNames[3].includes('ack') && stepNames[4].includes('自检'), chk.json || chk.stderr);
 
 const passed = results.filter((r) => r.ok).length;
-console.log(`\nB-4761 迁移包断言：${passed}/${results.length} PASS`);
+console.log(`\nB-4761（b0ea 返工）断言：${passed}/${results.length} PASS`);
 if (process.env.TEAM_SB_KEEP !== '1') fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 else console.log('[keep] ' + SB);
