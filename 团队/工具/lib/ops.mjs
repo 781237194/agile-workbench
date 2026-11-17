@@ -1952,7 +1952,20 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
     type: 'dispatch',
     sessionId: String(item.sessionId || ''),
   });
-  writeDispatchLock(project, msg);
+  // B-6c50（PM 2026-11-17 10:26）：自动重派（队列泵）**不得写 PM 派单锁**——以前这里 writeDispatchLock()
+  // 会把 PM 的正式派单挡在 PM_DISPATCH_PENDING 上（实测 10:24:32/10:25:32 两条自动重派 → analyst）。
+  // 自动通道改为：消息标 source=auto + 触发原因，写投递审计（source=auto），不占用 PM 锁；PM 与自动重派可并行。
+  const autoReason = String(item.reason || 'stalled_role');
+  msg.source = 'auto';
+  msg.trigger = autoReason;
+  try {
+    appendDeliveryAudit(project, {
+      itemId: item.id, to: String(item.to || ''), taskId: String(item.task || ''),
+      attempt: Number(item.attempt) || 1, result: 'auto_dispatch', code: 'SOURCE_AUTO',
+      stallMs: Number.isFinite(Date.parse(String(item.at || ''))) ? Math.max(0, Date.now() - Date.parse(String(item.at || ''))) : 0,
+      messageId: String(msg.id || ''), wakeOk: false, source: 'auto',
+    });
+  } catch { /* 审计写失败不阻断投递 */ }
   const wake = await wakeSessionForMessage({ project, to: String(item.to || ''), msg, isDispatch: true });
   removeDispatchQueueItem(project, item.id);
   appendEvent({ role: 'system', action: 'dispatch_pump', project, target: msg.id, note: `queue=${item.id} to=${item.to} task=${item.task || ''}` });
