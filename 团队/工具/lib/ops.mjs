@@ -5186,7 +5186,9 @@ export async function cmdSend(args) {
       const wf = readJson(path.join(projectStatePaths(b.project).dir, '工作流.json')) || {};
       const row = (wf.requirements && (wf.requirements[reqId] || Object.values(wf.requirements).find((r) => r && String(r.id) === reqId))) || null;
       const status = String((row && row.status) || '');
-      return ['accepted', 'done', 'terminated', 'iteration', 'rejected'].includes(status);
+      // B-20261117-210645-6f23（根因②）：**iteration 不是收口态**——它是「本轮返工中」，此时 PM 派单
+      // 必须仍是 dispatch，否则 `send --ack --task` 会被静默降级成通知，返工轮次根本派不下去。
+      return ['accepted', 'done', 'terminated', 'rejected'].includes(status);
     } catch { return false; }
   })();
   const targetClosed = taskDone || requirementClosed;
