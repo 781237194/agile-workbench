@@ -108,6 +108,13 @@ if (IS_BOARD_WINDOW) {
       ipcRenderer.on('team:decision-box-changed', handler);
       return () => { try { ipcRenderer.off('team:decision-box-changed', handler); } catch { /* ignore */ } };
     },
+    // B-20261117-133419-6543：看板后台重建完成推送（验收落账后不再同步等重建，完成后界面自刷新）。
+    onBoardRebuilt: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      const handler = (_event, payload) => { try { cb(payload || {}); } catch { /* 回调自身异常忽略 */ } };
+      ipcRenderer.on('board:rebuilt', handler);
+      return () => { try { ipcRenderer.off('board:rebuilt', handler); } catch { /* ignore */ } };
+    },
     // R-9db6 AC4（T-20261114-130838-5dfc）：决策箱「回执 PM」——单条或批量，落账 + 发 PM 并唤醒 PM。
     ownerDecisionAck: (payload) => ipcRenderer.invoke('owner:decision-ack', payload),
     teamMarkRead: (payload) => ipcRenderer.invoke('team:mark-read', payload),

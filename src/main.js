@@ -7096,6 +7096,20 @@ ipcMain.handle('theme:metrics', async () => {
       sessionId: meta.sessionId
     });
   }));
+  // B-20261117-133419-6543：看板重建排队器（去抖 + 同项目合并；完成后写审计并广播 board:rebuilt）。
+  // 验收落账后不再同步等 generateBoard（实测 939ms~3.4s），主链路立即返回，看板在后台重建。
+  const BoardRebuild = require('./board-rebuild.js');
+  const boardRebuild = BoardRebuild.createBoardRebuild({
+    debounceMs: Number(process.env.AWB_BOARD_REBUILD_DEBOUNCE_MS) > 0 ? Number(process.env.AWB_BOARD_REBUILD_DEBOUNCE_MS) : 600,
+    generateBoard: (project) => teamTools.generateBoard(project),
+    onDone: (payload) => {
+      try { recordShellAudit('board-rebuild', payload); } catch { /* 审计失败不阻断 */ }
+      for (const win of BrowserWindow.getAllWindows()) {
+        try { win.webContents.send('board:rebuilt', payload); } catch { /* 窗口在销毁中 */ }
+      }
+    },
+  });
+  const scheduleBoardRebuild = (project, reason) => boardRebuild.schedule(project, reason);
   ipcMain.handle('owner:accept', runWorkflowIpc(async (ctx, p, meta) => {
     // R-4f99 F-3：两种身份两种通道——Owner 本人 ui；PM 仅在有效代管下凭证据代验收 proxy。
     // 代管有效性在这里查评审代管.json；证据存在性/哈希由 team-tools 的 ownerAccept 复核（缺一即拒）。
@@ -7177,22 +7191,21 @@ ipcMain.handle('theme:metrics', async () => {
       // Owner 确认码已废弃：直接以 role=owner 接受；旧工具内部换码由 team-tools 静默完成。
       ownerConfirmed: true
     });
-    // R-ea86 F-E5：验收成功后 5 秒内 看板.json 该需求行必须变 accepted —— 这里同步重生成一次并回报耗时，
-    // 失败不影响已落账的验收（降级：顶部提示可手动刷新）。
+    // R-ea86 F-E5：验收成功后 看板.json 该需求行必须变 accepted。
+    // B-20261117-133419-6543：不再在本 IPC 里同步等 generateBoard（实测 939ms~3.4s，把验收拖成 6~10 秒）；
+    // 改成后台去抖合并重建（同项目连点只重建一次），完成后广播 board:rebuilt 让界面自刷新，失败写审计不静默。
     if (result && result.ok) {
-      const boardStarted = Date.now();
-      try {
-        const boardResult = await teamTools.generateBoard(acceptProject);
-        result.boardRefresh = {
-          ok: Boolean(boardResult && boardResult.ok),
-          ms: Date.now() - boardStarted,
-          path: (boardResult && boardResult.boardPath) || '',
-          at: new Date().toISOString(),
-          message: boardResult && boardResult.ok ? '' : String((boardResult && (boardResult.message || boardResult.why)) || '看板重生成失败，可手动刷新')
-        };
-      } catch (error) {
-        result.boardRefresh = { ok: false, ms: Date.now() - boardStarted, message: String((error && error.message) || error).slice(0, 200) };
-      }
+      const scheduled = scheduleBoardRebuild(acceptProject, 'owner-accept');
+      result.boardRefresh = {
+        ok: true,
+        async: true,
+        ...scheduled,
+        ms: 0,
+        at: new Date().toISOString(),
+        message: scheduled.queued
+          ? `看板在后台重建（约 ${Math.round((scheduled.debounceMs || 600) / 100) / 10} 秒后开始），完成后界面自动刷新`
+          : String(scheduled.message || '看板重建未排队'),
+      };
     }
     return result;
   }));

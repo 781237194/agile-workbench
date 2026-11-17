@@ -445,23 +445,26 @@
     const project = store && Array.isArray(store.projects) ? (store.projects.find((p) => p.id === store.activeProjectId) || store.projects[0]) : null;
     if (!project) return;
     state.projectId = project.id;
-    try {
-      const data = await api.ownerReviewData({ projectId: project.id });
-      if (data && data.ok) state.data = data;
-      // R-5550 AC5：解析结果在**加载时**统一算好（看板与弹窗共用同一份），渲染处不再各自取数。
-      if (ACP && state.data && Array.isArray(state.data.requirements)) {
-        for (const row of state.data.requirements) row.__ac = ACP.analyzeRequirement(row);
-      }
-    } catch { state.data = null; }
+    // B-20261117-133419-6543：评审数据与建议点互不依赖，改成并行取（原来串行两次大 IPC，
+    // 一次验收后要 1~3 秒空等）；任一路失败只影响自己那部分，不互相拖垮。
+    const [dataRes, sugRes] = await Promise.all([
+      (typeof api.ownerReviewData === 'function'
+        ? api.ownerReviewData({ projectId: project.id }).catch(() => null)
+        : Promise.resolve(null)),
+      (typeof api.ownerSuggestions === 'function'
+        ? api.ownerSuggestions({ projectId: project.id }).catch(() => null)
+        : Promise.resolve(null)),
+    ]);
+    if (dataRes && dataRes.ok) state.data = dataRes;
+    else if (dataRes === null) state.data = null;
+    // R-5550 AC5：解析结果在**加载时**统一算好（看板与弹窗共用同一份），渲染处不再各自取数。
+    if (ACP && state.data && Array.isArray(state.data.requirements)) {
+      for (const row of state.data.requirements) row.__ac = ACP.analyzeRequirement(row);
+    }
     // R-dba4（PM 14:32 裁决）：真相源=需求行 copy，壳层 store 只当缓存且**不参与渲染取数**，
     // 所以这里不再预热缓存（保留函数仅供后续「加速」用途，取数一律以行字段为准）。
     // R-f8e1 B 清单：读 团队/状态/项目/<项目>/需求建议点.json；文件缺失/坏 JSON 只当作“无建议点”，不阻断评审。
-    try {
-      if (api.ownerSuggestions) {
-        const sug = await api.ownerSuggestions({ projectId: project.id });
-        state.suggestions = (sug && Array.isArray(sug.items)) ? sug.items : [];
-      }
-    } catch { state.suggestions = []; }
+    state.suggestions = (sugRes && Array.isArray(sugRes.items)) ? sugRes.items : [];
     // B-20261113-004955-5f62：先取代管记录再算徽标，否则「N 条等你决定」扣不掉已托管的那几条。
     await updateProxyBadge();
     // 7849 AC3-补：代管期内 PM 代回执需要决策箱条目——只在「全部代管生效」时读，省一次 IPC。
@@ -3207,6 +3210,7 @@
     }
   }
 
+  let boardRebuiltTimer = null;
   function start() {
     buildShell();
     loadData();
@@ -3216,6 +3220,17 @@
     // 窗口隐藏时浏览器会把定时器降到 1 分钟，看起来就像“代管数不更新”）。
     if (window.workbench && typeof window.workbench.onProxyChanged === 'function') {
       window.workbench.onProxyChanged(() => { updateProxyBadge(); updateBadge(); });
+    }
+    // B-20261117-133419-6543：验收后看板在后台重建，完成后主进程推 board:rebuilt →
+    // 这里合并成一次轻量刷新（300ms 去抖），不再让用户在点验收时同步等看板重建。
+    if (window.workbench && typeof window.workbench.onBoardRebuilt === 'function') {
+      window.workbench.onBoardRebuilt((payload) => {
+        if (payload && payload.ok === false && typeof toast === 'function') {
+          try { toast('看板后台重建失败：' + String(payload.message || '').slice(0, 120), 'warn'); } catch { /* toast 不可用则忽略 */ }
+        }
+        clearTimeout(boardRebuiltTimer);
+        boardRebuiltTimer = setTimeout(() => { void loadData(); }, 300);
+      });
     }
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') loadData(); });
   }
