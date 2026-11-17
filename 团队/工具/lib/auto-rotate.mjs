@@ -23,8 +23,9 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { PATHS, WORKSPACE } from './core.mjs';
+import { PATHS, WORKSPACE, appendLine } from './core.mjs';
 import { loadTeam, saveTeam, projectStatePaths, sendMessage } from './store.mjs';
+import { ROUNDS_MAX } from './session-archive.mjs';
 
 /* ── 常量（阈值与 session.mjs 同源：warn 30 万 / force 50 万；轮次沿用归档建议 20 轮） ── */
 export const DEFAULT_TOKEN_WARN = 300000;
@@ -210,7 +211,23 @@ function rotateSession({ projectName, role, now, reason, auditFile, dryRun }) {
       }
     }
   }
-  const rotateRow = { at: iso(now), stage: 'rotate', code: 'ROTATED', result: 'ok', role, project: projectName, note: `已换人：${oldId || '未记录'} → ${newId}（${reason || 'context-full'}）`, evidence: { oldSessionId: oldId, newSessionId: newId, reason: String(reason || 'context-full') } };
+  // T-f35b（AC5 四测）：换人必须留「会话轮换记录 from/to/at/reason」+「归档或 archiveDeferred」。
+  // 记录 append-only 落 团队/状态/项目/<项目>/会话轮换.jsonl；有未闭环任务时不强行归档，写 archiveDeferred。
+  const openTasks = (() => {
+    try { return workingTasksOf(projectName, role).slice(0, 20); } catch { return []; }
+  })();
+  const archiveDeferred = openTasks.length
+    ? { code: 'ARCHIVE_DEFERRED', tasks: openTasks, note: '有未闭环任务：先闭环再归档（归档是建议不是硬门）' }
+    : null;
+  if (!dryRun) {
+    try {
+      appendLine(path.join(projectStatePaths(projectName).dir, '会话轮换.jsonl'), JSON.stringify({
+        at: iso(now), project: projectName, role, from: oldId, to: newId,
+        reason: String(reason || 'context-full'), by: 'auto-rotate', archiveDeferred,
+      }));
+    } catch { /* 记录失败不影响换人；审计行仍带 from/to */ }
+  }
+  const rotateRow = { at: iso(now), stage: 'rotate', code: 'ROTATED', result: 'ok', role, project: projectName, note: `已换人：${oldId || '未记录'} → ${newId}（${reason || 'context-full'}）`, evidence: { oldSessionId: oldId, newSessionId: newId, reason: String(reason || 'context-full'), from: oldId, to: newId, rotatedAt: iso(now), ...(archiveDeferred ? { archiveDeferred } : { archive: 'pending-daily' }) } };
   if (!dryRun) appendAudit(auditFile, rotateRow);
 
   // 新会话 boot 指令（给本人）+ 其余角色重 boot 广播（名册变更=全员旧令牌失效）
@@ -312,13 +329,25 @@ export function handoverRequestBody({ role, level, kind, tokens, rounds, deadlin
 /* ── ⑤ 接线：团队配置 + 周期 tick（route-daemon 调用） ───────────────── */
 export const DEFAULT_INTERVAL_MS = 300000;   // 5 分钟
 
-/** 团队配置 autoRotate={enabled,intervalMs,rotateRounds}；缺省 enabled=true / 300000 / 20；0 或 false = 关。 */
+/**
+ * 团队配置 autoRotate={enabled,intervalMs,rotateRounds}；缺省 enabled=true / 300000 / 8。
+ * 0 或 false = 关。PM 2026-11-17 21:36 最终口径：rotateRounds 默认 8、**上限 10**；
+ * 配置 >10 必须 fail fast（AUTO_ROTATE_CONFIG_INVALID）——静默回落会让「永不触发」被当成正常。
+ */
+export const ROUNDS_CONFIG_MAX = 10;
 export function autoRotateConfigOf(team) {
   const raw = (team && team.config && team.config.autoRotate) || {};
   const enabledRaw = raw.enabled === undefined ? true : raw.enabled;
   const enabled = !(enabledRaw === false || enabledRaw === 0 || String(enabledRaw) === '0' || String(enabledRaw) === 'false');
   const interval = Number(raw.intervalMs);
-  const rounds = Number(raw.rotateRounds);
+  const roundsRaw = raw.rotateRounds;
+  const rounds = Number(roundsRaw);
+  if (Number.isFinite(rounds) && rounds > ROUNDS_CONFIG_MAX) {
+    const err = new Error(`AUTO_ROTATE_CONFIG_INVALID：autoRotate.rotateRounds=${rounds} 超过上限 ${ROUNDS_CONFIG_MAX}（默认 8；上限 10；>10 视为配置错误，不静默回落）`);
+    err.code = 'AUTO_ROTATE_CONFIG_INVALID';
+    err.details = { rotateRounds: rounds, max: ROUNDS_CONFIG_MAX, default: DEFAULT_ROUNDS_LIMIT };
+    throw err;
+  }
   return {
     enabled,
     intervalMs: Number.isFinite(interval) && interval > 0 ? interval : DEFAULT_INTERVAL_MS,
@@ -338,7 +367,7 @@ export function queuedForToday({ rows, todayDefer }) {
     if (!role || seen.has(role)) continue;
     const stage = String(row.stage || '');
     const code = String(row.code || '');
-    const isQueueRow = stage === 'enqueue' || (stage === 'skipped' && code === 'NIGHT_SILENT');
+    const isQueueRow = stage === 'enqueue' || String(row.event || '') === 'enqueue' || (stage === 'skipped' && code === 'NIGHT_SILENT');
     if (!isQueueRow) continue;
     seen.add(role);
     out.push({ role, level: String(ev.level || (ev.forced ? 'force' : 'rounds')), kind: String(ev.kind || ''), tokens: ev.tokens, rounds: ev.rounds, forced: Boolean(ev.forced), order: Number(ev.order || 0), deferredUntil: target });
@@ -355,7 +384,12 @@ export function queuedForToday({ rows, todayDefer }) {
 export function runAutoRotateBeat(projectName, { now, state, source = 'route-daemon' } = {}) {
   const box = state && typeof state === 'object' ? state : {};
   let cfg;
-  try { cfg = autoRotateConfigOf(loadTeam()); } catch (e) { return { ok: false, code: 'TEAM_UNREADABLE', message: String((e && e.message) || e) }; }
+  try {
+    cfg = autoRotateConfigOf(loadTeam());
+  } catch (e) {
+    if (e && e.code === 'AUTO_ROTATE_CONFIG_INVALID') return { ok: false, code: 'AUTO_ROTATE_CONFIG_INVALID', message: String((e && e.message) || e), details: e.details || null };
+    return { ok: false, code: 'TEAM_UNREADABLE', message: String((e && e.message) || e) };
+  }
   if (!cfg.enabled) return { ok: true, skipped: 'disabled', config: cfg };
   const at = resolveNow(now);
   const last = Number(box.lastAt || 0);
@@ -388,10 +422,25 @@ export async function runAutoRotateCycle(projectName, options = {}) {
   const memberRoles = members.map((m) => m.role);
   const projectDir = projectDirOf(name);
   const mailDir = PATHS.mail;
-  const cfg = autoRotateConfigOf(team);
+  let cfg;
+  try {
+    cfg = autoRotateConfigOf(team);
+  } catch (e) {
+    if (e && e.code === 'AUTO_ROTATE_CONFIG_INVALID') {
+      return { ok: false, code: 'AUTO_ROTATE_CONFIG_INVALID', message: String((e && e.message) || e), details: e.details || null, project: name, at: iso(now) };
+    }
+    throw e;
+  }
   const rawAutoRotate = (team && team.config && team.config.autoRotate) || null;
   const configFallback = !(rawAutoRotate && typeof rawAutoRotate === 'object');
-  const roundsUnreadable = !fs.existsSync(roundsFileOf(name)) || !(rounds && typeof rounds === 'object' && Object.keys(rounds).length);
+  // 不可读 = 文件缺失 或 形状不对（没有任何 <role>.roundsSinceArchive 数字）；两种都不按 0 轮静默。
+  // T-f35b：轮次源「不可用」包括**形状不对**（如 {roles:{...}} 包了一层）——不能当成 0 轮静默。
+  const roundsKeys = Object.keys(rounds || {});
+  const roundsShapeOk = roundsKeys.length === 0 ? false : roundsKeys.some((key) => {
+    const row = rounds[key];
+    return row && typeof row === 'object' && Number.isFinite(Number(row.roundsSinceArchive));
+  });
+  const roundsUnreadable = !fs.existsSync(roundsFileOf(name)) || !roundsShapeOk;
   const usageRoles = usageRolesOf(usage);
   const usageUnavailableRoles = memberRoles.filter((role) => !(usageRoles[role] && usageRoles[role].usable));
   const workingByRole = {};
@@ -407,7 +456,8 @@ export async function runAutoRotateCycle(projectName, options = {}) {
   // ③ 审计补 stage=cycle（每拍一行，便于面板 [data-ar-audit-tail] 与「今日 N 次」统计）
   if (!dryRun) {
     appendAudit(auditFile, {
-      at: nowIso, stage: 'cycle', code: 'CYCLE', result: 'ok', role: '', project: name,
+      // T-f35b①：调度层事件不进「换人流水线 stage 枚举」——改用 event=cycle（kind=schedule）；历史行不回改。
+      at: nowIso, event: 'cycle', kind: 'schedule', code: 'CYCLE', result: 'ok', role: '', project: name,
       note: `一拍：${night ? '夜间' : nextDayWindow ? '次日窗口' : '白天'} · 候选 ${candidates.length} 个 · 源 ${source}`,
       evidence: { mode: night ? 'night' : nextDayWindow ? 'next-day' : 'day', candidates: candidates.map((c) => `${c.role}:${c.level}`), source, config: cfg, configFallback },
     });
@@ -474,7 +524,8 @@ export async function runAutoRotateCycle(projectName, options = {}) {
         appendAudit(auditFile, row);
         // ③ 审计补 stage=enqueue：把「入队」与「跳过」分开两类，次日队列直接按 enqueue 行取（对旧数据回退到 NIGHT_SILENT 行）。
         appendAudit(auditFile, {
-          at: nowIso, stage: 'enqueue', code: 'NIGHT_QUEUED', result: 'ok', role: item.role, project: name,
+          // T-f35b①：入队同样是调度层事件（event=enqueue / kind=schedule），不占用换人 stage 枚举。
+        at: nowIso, event: 'enqueue', kind: 'schedule', code: 'NIGHT_QUEUED', result: 'ok', role: item.role, project: name,
           note: `已入队：${item.level} 档，次日 08:00 执行（deferredUntil=${deferredUntil}）`,
           evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, forced: item.level === 'force', deferredUntil, nightKey: nightKey, order: item.atMs },
         });
@@ -584,16 +635,34 @@ export async function runAutoRotateCycle(projectName, options = {}) {
         actions.push({ stage: 'skipped', code: 'HANDOVER_TIMEOUT', role: item.role });
         continue;
       }
-      actions.push({ stage: 'wait_handover', role: item.role, requestedAt: pending.atIso });
+      // T-f35b③：已有在途交接请求（等回执阶段）→ 记 ALREADY_IN_FLIGHT（不重复发、不阻断）。
+      if (!dryRun) {
+        const already = rows.some((r) => String(r.code) === 'ALREADY_IN_FLIGHT' && String(r.role) === item.role
+          && Math.abs(now - Date.parse(String(r.at || ''))) < TRIGGER_DEDUPE_MS);
+        if (!already) {
+          appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'ALREADY_IN_FLIGHT', result: 'ok', role: item.role, project: name, note: `${item.role} 的交接请求仍在途（自 ${pending.atIso}）：不重复发（ALREADY_IN_FLIGHT）`, evidence: { requestedAt: pending.atIso, dedupeMs: TRIGGER_DEDUPE_MS } });
+        }
+      }
+      actions.push({ stage: 'skipped', code: 'ALREADY_IN_FLIGHT', role: item.role, requestedAt: pending.atIso });
       continue;
     }
     // 无在途请求：命中阈值 → 只发 1 条交接请求（60 秒内不重复）
     const recentTrigger = rows.some((r) => String(r.stage) === 'trigger' && String(r.role) === item.role
       && Math.abs(now - Date.parse(String(r.at || ''))) < TRIGGER_DEDUPE_MS);
-    if (recentTrigger) { actions.push({ stage: 'trigger', role: item.role, dedupe: true }); continue; }
+    if (recentTrigger) {
+      // T-f35b③：重复请求的显式码（不阻断；冷却逻辑不变，只是把「为什么不发」写清楚）。
+      if (!dryRun) {
+        appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'ALREADY_IN_FLIGHT', result: 'ok', role: item.role, project: name, note: `${item.role} 的交接请求已在途（60 秒去重窗口内）：不重复发（ALREADY_IN_FLIGHT）`, evidence: { dedupeMs: TRIGGER_DEDUPE_MS, level: item.level } });
+      }
+      actions.push({ stage: 'skipped', code: 'ALREADY_IN_FLIGHT', role: item.role });
+      continue;
+    }
     const row = {
       at: nowIso, stage: 'trigger', code: 'HANDOVER_REQUESTED', result: 'ok', role: item.role, project: name,
-      note: `阈值命中（${item.level}）：已发 1 条交接请求，等回执（触发码 rotate_${item.kind === 'rounds' ? 'rounds' : 'tokens'}）`,
+      // PM 2026-11-17 21:36 最终口径：轮次触发审计写「本轮 N/10（归零即归档）」（计数器语义不变）
+      note: item.kind === 'rounds'
+        ? `阈值命中（${item.level}）：轮次 ${item.rounds}/${ROUNDS_MAX}（归零即归档）——已发 1 条交接请求，等回执（触发码 rotate_rounds）`
+        : `阈值命中（${item.level}）：已发 1 条交接请求，等回执（触发码 rotate_tokens）`,
       trigger: { kind: item.kind, level: item.level, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens' },
       evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens' },
     };
