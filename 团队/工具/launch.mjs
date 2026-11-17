@@ -37,7 +37,7 @@ function startupText(role, project, workspace, teamMode = 'full') {
             : '');
   return `你是「${name}」（${role}），工作区 ${workspace}。\n`
     + `团队模式：${TEAM_MODE_LABELS[teamMode]}（${teamModeDescription(teamMode)}）。${fastDuty}\n`
-    + `全程中文思考、中文回复、中文写文档。每轮第一件事读 项目铁律.md；本回合只做两件事，不分析、不计划、不总结：\n`
+    + `全程中文思考、中文回复、中文写文档。每轮第一件事读《团队宪法》（唯一最高优先级；项目铁律按需避坑）；本回合只做两件事，不分析、不计划、不总结：\n`
     + `1) 运行 node 团队\\工具\\team.mjs boot --role ${role} --project "${project}"\n`
     + `2) ${wait}\n`
     + '不要建任务、不要写文件、不要输出方案。等老板/PM 下一条明确指令。';

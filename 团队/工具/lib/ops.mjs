@@ -2291,9 +2291,66 @@ async function pumpQueueSafe(project, source = 'timer') {
  * `queue status` 只读队列内容，方便排查“为什么卡住”。
  */
 /**
+ * B-20261117-205043-0c49：升级告警的「最后活动时间」证据（只读、有界）。
+ * 取 max(任务文件 mtime, 任务 updatedAt, 事件.jsonl 里该 role/taskId 的最近一行, 回执.jsonl 里该 role 的最近 ack)。
+ * 任一在阈值内 → 角色其实在动，不报「没动」。
+ */
+const CLAIM_STALL_COOLDOWN_MS = (() => {
+  const raw = Number(process.env.TEAM_CLAIM_STALL_COOLDOWN_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60 * 60 * 1000;
+})();
+
+function tailJsonl(file, limit = 400) {
+  try {
+    if (!fs.existsSync(file)) return [];
+    const text = fs.readFileSync(file, 'utf8');
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const out = [];
+    for (const line of lines.slice(Math.max(0, lines.length - limit))) {
+      try { out.push(JSON.parse(line)); } catch { /* 坏行跳过 */ }
+    }
+    return out;
+  } catch { return []; }
+}
+
+/** 最近活动时间（毫秒）；取不到返回 0（按「无活动」处理，与既有 idle 判据一致）。 */
+export function lastActivityAtOf(projectName, { role = '', taskId = '' } = {}) {
+  const name = String(projectName || '');
+  let latest = 0;
+  const bump = (ms) => { if (Number.isFinite(ms) && ms > latest) latest = ms; };
+  // ① 任务文件 mtime + updatedAt
+  if (taskId) {
+    try {
+      const f = taskPath(name, taskId);
+      const st = fs.statSync(f);
+      bump(st.mtimeMs);
+      const task = readJson(f, null);
+      bump(Date.parse(String((task && (task.updatedAt || task.claimedAt)) || '')));
+    } catch { /* 任务文件不存在就靠其它信号 */ }
+  }
+  // ② 事件.jsonl（appendEvent 写这里）：匹配 role / target / project
+  for (const row of tailJsonl(path.join(projectStatePaths(name).dir, '事件.jsonl'))) {
+    const hitRole = role && String(row.role || '') === role;
+    const hitTask = taskId && String(row.target || '') === taskId;
+    const hit = (hitRole || hitTask) && String(row.project || name) === name;
+    if (!hit) continue;
+    bump(Date.parse(String(row.at || '')));
+  }
+  // ③ 回执.jsonl / 阅读.jsonl：该角色的最近 ack / boot（会话活着就会有）
+  for (const row of tailJsonl(path.join(projectStatePaths(name).dir, '回执.jsonl'), 200)) {
+    if (role && String(row.role || row.from || '') === role) bump(Date.parse(String(row.at || '')));
+  }
+  for (const row of tailJsonl(path.join(projectStatePaths(name).dir, '阅读.jsonl'), 200)) {
+    if (role && String(row.role || '') === role) bump(Date.parse(String(row.at || '')));
+  }
+  return latest;
+}
+
+/**
  * Owner 2026-11-14 09:15：认领后 5 分钟无状态变化 → 告警 PM。
  * 只看 type=task/bug 且 status=working 的任务；阈值 TEAM_CLAIM_STALL_MS（默认 5 分钟，测试可注入）；
- * 同一 taskId+状态 10 分钟内不重复；任务 done/状态变化后自然不再命中。
+ * B-0c49：判据从「claim 年龄」改为「最后活动时间」（任务 mtime / 事件 / 回执 / 阅读），
+ *         并且同一 taskId+状态 **60 分钟**内只发 1 条（TEAM_CLAIM_STALL_COOLDOWN_MS 可注入），状态跃迁才再发。
  */
 export function claimStallCheck(project, { now = Date.now() } = {}) {
   const name = String(project || '');
@@ -2311,30 +2368,37 @@ export function claimStallCheck(project, { now = Date.now() } = {}) {
     if (String(task.status || '') !== 'working') continue;
     const claimedAt = Date.parse(String(task.claimedAt || task.createdAt || ''));
     if (Number.isNaN(claimedAt)) continue;
-    const age = now - claimedAt;
-    if (age < stallMs) continue;
-    const key = `${task.id}|${task.status}`;
-    const last = Date.parse(String(alerted[key] || ''));
-    if (!Number.isNaN(last) && now - last < 10 * 60 * 1000) continue;
     const role = String(task.owner || '');
+    // B-0c49①：看「最后活动」而不是「认领多久」——任务文件 mtime / 事件 / 回执 / 阅读 任一在阈值内就算在动。
+    const lastActivity = lastActivityAtOf(name, { role, taskId: String(task.id) });
+    const idleSince = Math.max(claimedAt, Number.isFinite(lastActivity) ? lastActivity : 0);
+    const age = now - idleSince;
+    if (age < stallMs) continue;
+    // B-0c49②：同一 taskId+状态 60 分钟内只发 1 条（旧实现 10 分钟，分钟数一变就再发一条）。
+    const key = `${task.id}|${task.status}`;
+    const prev = alerted[key];
+    const prevAt = Date.parse(String((prev && typeof prev === 'object') ? prev.at : prev) || '');
+    const prevStatus = (prev && typeof prev === 'object') ? String(prev.status || '') : '';
+    const stateChanged = prevStatus && prevStatus !== String(task.status || '');
+    if (!stateChanged && Number.isFinite(prevAt) && now - prevAt < CLAIM_STALL_COOLDOWN_MS) continue;
     const ownerName = ROLE_NAMES[role] || role || '（无 owner）';
     const minutes = Math.round(age / 60000);
     try {
       const msg = sendMessage({
         from: 'system', to: 'pm', type: 'escalation', project: name,
         subject: `认领后 ${minutes} 分钟没动：${task.id}`,
-        body: `${ownerName} 认领了 ${task.id}，已经 ${minutes} 分钟没有状态变化。\nrole=${role || '-'}\ntaskId=${task.id}\nclaimedAt=${task.claimedAt || '-'}\n当前状态=working\n请 PM 过问一下（换人/拆任务/确认卡在哪）。`,
+        body: `${ownerName} 认领了 ${task.id}，最后一次可见活动在 ${minutes} 分钟前（判据：任务文件/事件/回执/阅读 的最新时间）。\nrole=${role || '-'}\ntaskId=${task.id}\nclaimedAt=${task.claimedAt || '-'}\n最后活动=${Number.isFinite(lastActivity) && lastActivity > 0 ? new Date(lastActivity).toISOString() : '无记录'}\n当前状态=working\n请 PM 过问一下（换人/拆任务/确认卡在哪）。`,
         ackRequired: false,
       });
-      alerted[key] = nowIso();
-      hits.push({ taskId: task.id, role, messageId: msg.id, ageMs: age });
-      appendEvent({ role: 'system', sessionId: '', action: 'claim_stall_alert', project: name, target: task.id, note: `role=${role} age=${minutes}min message=${msg.id}` });
+      alerted[key] = { at: nowIso(), status: String(task.status || ''), level: 'claim_stall' };
+      hits.push({ taskId: task.id, role, messageId: msg.id, ageMs: age, lastActivity });
+      appendEvent({ role: 'system', sessionId: '', action: 'claim_stall_alert', project: name, target: task.id, note: `role=${role} idle=${minutes}min cooldown=${Math.round(CLAIM_STALL_COOLDOWN_MS / 60000)}min message=${msg.id}` });
     } catch (e) {
       hits.push({ taskId: task.id, role, error: String((e && e.message) || e) });
     }
   }
-  try { writeJson(file, { schema: 1, project: name, alerted, updatedAt: nowIso() }); } catch { /* 状态写失败不阻断 */ }
-  return { ok: true, stallMs, alerted: hits.length, hits };
+  try { writeJson(file, { schema: 2, project: name, alerted, updatedAt: nowIso() }); } catch { /* 状态写失败不阻断 */ }
+  return { ok: true, stallMs, cooldownMs: CLAIM_STALL_COOLDOWN_MS, alerted: hits.length, hits };
 }
 
 /**
@@ -2366,12 +2430,19 @@ export function queueStaleCheck(project, { now = Date.now() } = {}) {
   const nowMs = Number(now) || Date.now();
   const queue = readDispatchQueue(name);
   const hits = [];
+  const skipped = { delivered: 0, targetBusy: 0 };
+  // B-0c49③：只在「确实没投出去 + 目标角色空闲」时才报滞留——已送达的、以及目标正在 working 的正常排队不报。
+  const busyRoles = new Set(listTasks(name)
+    .filter((t) => t && String(t.status || '') === 'working' && t.owner)
+    .map((t) => String(t.owner)));
   for (const item of queue.items) {
     if (!item || !item.id) continue;
     const at = Date.parse(String(item.at || ''));
     if (!Number.isFinite(at)) continue;
     const age = nowMs - at;
     if (age < DISPATCH_QUEUE_STALE_MS) continue;
+    if (item.deliveredAt || item.delivered === true) { skipped.delivered += 1; continue; }
+    if (busyRoles.has(String(item.to || ''))) { skipped.targetBusy += 1; continue; }
     const sent = raiseQueueEscalation(name, {
       itemId: String(item.id), to: String(item.to || ''), taskId: String(item.task || ''),
       attempt: Number(item.attempt) || 1, stallMs: age, level: 'notice', now: nowMs,
@@ -2379,7 +2450,7 @@ export function queueStaleCheck(project, { now = Date.now() } = {}) {
     if (!sent) continue;
     hits.push({ queueId: item.id, to: String(item.to || ''), minutes: Math.round(age / 60000), level: 'notice', messageId: sent.messageId });
   }
-  return { ok: true, staleMs: DISPATCH_QUEUE_STALE_MS, alerted: hits.length, hits, remaining: queue.items.length };
+  return { ok: true, staleMs: DISPATCH_QUEUE_STALE_MS, alerted: hits.length, hits, skipped, remaining: queue.items.length };
 }
 
 function dispatchQueueArchiveFile(project) {
@@ -4551,7 +4622,7 @@ export async function cmdBoot(args) {
       lines.push(`记忆降级: memory:${marks.summary.memory} —— P0 记忆门降级为 MEMORY_SKIPPED（不阻断完成）；启用 dsh-memory-evolve 后恢复强校验（安装见 docs/可选插件.md）`);
     }
   } catch { /* 探测失败不加行，不影响简报 */ }
-  lines.push('下一步: 先读 inbox/待审提案；收到派单先 ack，再执行正文任务，产出落盘，完成后发完成回执并 task done；变更走 propose→review→sign→apply。');
+  lines.push('下一步: 先读 inbox/待审提案；收到派单先 ack，再执行正文任务，产出落盘，完成后发完成回执并 task done；文件变更按现行流程直接提交（提案五步已随宪法修订废止，见宪法第 2 条）。');
   // B-20261113-005705-a577：boot 也触发一次兜底泵——全队空闲时队列不会因为“没有 task done”而永远不派。
   const bootPump = await pumpQueueSafe(projectName, 'boot');
   if (bootPump && bootPump.pumped) {
@@ -9636,7 +9707,7 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
   const modeRoles = rolesForMode(teamMode);
   const modeLabel = teamMode === 'fast' ? '四角色' : '六角色';
   const required = [
-    ['项目铁律.md', '每次必读：底线、红线、失败即停', 'PM', '每次'],
+    ['项目铁律.md', '按需避坑：底线、红线、失败即停（不必每轮读）', 'PM', '按需'],
     ['项目信息.md', '项目目标、场景、交付、边界、任务分配', 'PM', '接需求/开工前'],
     ['协作准则.md', `${modeLabel}协同、启动顺序、需求与文件规则`, 'PM', '首次/规则变更'],
     ['项目索引.md', '本目录：必读顺序与文件导航', 'PM', '每次'],
@@ -9716,7 +9787,7 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
   if (!commits.length) lines.push('（暂无）');
   for (const c of commits) lines.push(`- ${c.id} ｜ ${String(c.createdAt).slice(0, 19).replace('T', ' ')} ｜ ${c.proposalId} ｜ ${c.after.map((a) => a.target).join(', ')}`);
   lines.push('');
-  lines.push('## 六、避雷铁律（每次必读）');
+  lines.push('## 六、避雷铁律（按需查，不必每轮读）');
   lines.push('');
   lines.push('- 每次先读《项目铁律.md》，再读项目信息/本索引/角色卡；不要凭上一次记忆开工。');
   lines.push('- 只读任务需要的文件；不要每次把 `需求/`、角色目录全量读一遍。');

@@ -155,7 +155,12 @@ ok('AC1 六角色的清单项都有 handover（required=false / core=false / rel
 const allSpecs = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e',
   `import { bootDocSpecs } from ${JSON.stringify('file:///' + SCAFFOLD.replace(/\\/g, '/'))};
    console.log(JSON.stringify(bootDocSpecs(${JSON.stringify(PROJ)}, '程序员B').map((s) => s.key)));`], { encoding: 'utf8' }));
-ok('AC1② 清单从 8 项变 9 项且只加不删', allSpecs.length === 9 && ['constitution', 'iron', 'projectInfo', 'roleCard', 'roleIndex', 'projectIndex', 'requirementOverview', 'collaboration', 'handover'].every((k) => allSpecs.includes(k)), allSpecs);
+// 口径变更说明（2026-11-17，R-bcae 4358 接入）：bootDocSpecs 在 handover 之外又新增了 skillIndex（基础流程 skill 索引，
+// required=false/core=false/不进 rulesHash），因此清单由 9 项变 10 项。断言改为「原 9 项全部保留 + 只允许 skillIndex 这一个新增键」，
+// 仍保留文件存在性断言（AC1 的六角色 handover 项不动）。
+const HANDOVER_BASE_SPECS = ['constitution', 'iron', 'projectInfo', 'roleCard', 'roleIndex', 'projectIndex', 'requirementOverview', 'collaboration', 'handover'];
+const specAdded = allSpecs.filter((k) => !HANDOVER_BASE_SPECS.includes(k));
+ok('AC1② 清单只加不删（原 9 项全在；新增仅 skillIndex）', HANDOVER_BASE_SPECS.every((k) => allSpecs.includes(k)) && specAdded.length === 1 && specAdded[0] === 'skillIndex', { allSpecs, added: specAdded });
 
 // ── AC2：有交接 → 一行提示 ──────────────────────────────────────────────
 rmRoleHandovers('程序员B');

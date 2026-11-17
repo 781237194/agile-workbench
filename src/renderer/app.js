@@ -721,7 +721,7 @@ const LEGACY_READ_ORDER = [
   { key: 'others', no: '4', label: '其他人文档', note: '其他角色目录 / 文件索引' }
 ];
 const LEGACY_PROJECT_DOCS = [
-  { key: 'rules', rel: '项目铁律.md', label: '项目铁律', mark: '律', note: '每次必读；项目目录缺失时旧工具会回退团队根' },
+  { key: 'rules', rel: '项目铁律.md', label: '项目铁律', mark: '律', note: '按需避坑（不必每轮读）；项目目录缺失时旧工具会回退团队根' },
   { key: 'info', rel: '项目信息.md', label: '项目信息', mark: '息', note: 'PM 先填写；未写清楚前 PM 不叫其他角色' },
   { key: 'index', rel: '项目索引.md', label: '项目索引', mark: '引', note: '先读索引再找文件；不跳过索引直接 glob/grep' },
   { key: 'overview', rel: '需求/00-需求总览.md', label: '需求总览', mark: '求', note: '当前需求总览；缺它旧 boot 会判必读不完整' },
@@ -8869,7 +8869,7 @@ function renderLegacyGate(project) {
       ${iterateVisibleWhy ? `<p class="legacy-iterate-why">迭代不可用：${esc(iterateVisibleWhy)}</p>` : ''}
       <div class="legacy-missing-list">
         <b>动作来源与边界</b>
-        <span><code>workflow:briefing</code>：每次必读/boot 的真实状态；过期、缺文件或文档变更会标出。</span>
+        <span><code>workflow:briefing</code>：必读分层与 boot 的真实状态（宪法每轮、铁律按需）；过期、缺文件或文档变更会标出。</span>
         <span><code>workflow:boot</code>：角色 boot；由界面发起时，后端记录 role/session，但“角色本人执行”仍以旧账证据为准，不冒充。</span>
         <span><code>workflow:*</code> 动作：产品评审 / Owner 决定 / 派单 / 开发互审 / 测试 / Owner 验收；旧命令明确缺失才写“缺”，矩阵没返回只写“未核验”，两种情况都禁用按钮并说明，界面不回退本机假成功。</span>
       </div>`;
@@ -10369,7 +10369,7 @@ async function legacyActionModal(action, reqId) {
   const reqs = legacyRequirements();
   const selectedReq = reqs.find((row) => row.id === reqId) || null;
   const titles = {
-    boot: '角色 boot / 每次必读',
+    boot: '角色 boot / 必读分层（宪法每轮、铁律按需）',
     'requirement-create': isQuickTeam() ? `新建需求（${terms.reviewer}）` : '新建需求（产品 / 需求分析师）',
     'owner-create': '向 PM 提交需求（Owner）',
     'owner-demand': '向 PM 提交需求（Owner）',
@@ -11058,7 +11058,7 @@ function renderLegacyTeamGate() {
   }).join('');
   // 列头（卷 §六写死文案）；tooltip 明说「提交」是团队提交记录，不是 git 代码提交（卷 §二）。
   const activityHead = `<div class="legacy-team-activity-head" style="display:flex;gap:5px;justify-content:flex-end;padding:0 4px;color:var(--muted);font-size:8px" title="团队提交记录（提交/*.json），非 git 代码提交">${LEGACY_ACTIVITY_COLUMNS.map((col) => `<span data-activity-head="${esc(col.key)}" style="flex:0 0 auto;min-width:56px;text-align:right;white-space:nowrap">${esc(col.label)}</span>`).join('')}</div>`;
-  box.innerHTML = `<div class="legacy-read-order">每次必读：<b>铁律 → 项目信息 → 角色卡 → 其他人文档</b>（角色目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 文件索引 ${ready.indexes}/${ready.total} · 其他文档 ${ready.others} 份 · 项目索引 ${ready.index ? '有' : '缺'}）</div>
+  box.innerHTML = `<div class="legacy-read-order">必读分层：<b>团队宪法（唯一最高，每轮） → 项目信息 → 角色卡 → 其他人文档（铁律按需避坑）</b>（角色目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 文件索引 ${ready.indexes}/${ready.total} · 其他文档 ${ready.others} 份 · 项目索引 ${ready.index ? '有' : '缺'}）</div>
     <div class="legacy-team-docs">${LEGACY_PROJECT_DOCS.map((doc) => `<button type="button" class="${legacyHas(doc.rel) ? 'ok' : 'bad'}" data-legacy-doc="${esc(doc.key)}" title="${esc(doc.rel)} · ${legacyHas(doc.rel) ? '存在' : '缺失'}">${esc(doc.label)} ${legacyHas(doc.rel) ? '有' : '缺'}</button>`).join('')}</div>
     <div class="legacy-team-list">${activityHead}${rows}</div>
     <div class="legacy-team-result">${(() => {
