@@ -96,8 +96,24 @@ function writeWake(file, rows) {
  */
 function prepareSqCheckSandbox(options = {}) {
   const teamRoot = String(options.teamRoot || '');
-  if (teamRoot) fs.mkdirSync(path.join(teamRoot, '状态', '项目'), { recursive: true });
   const storeFile = String(options.storeFile || '');
+  // B-20261117-213547-e6c9①：强制隔离——团队根/状态库若落在真实 团队/ 或 项目/ 下，直接 fail fast（不许回退真实路径）。
+  const repoRoot = path.resolve(__dirname, '..');
+  const realTeam = path.join(repoRoot, '团队');
+  const realProjects = path.join(repoRoot, '项目');
+  const under = (p, base) => {
+    const rp = path.resolve(p); const rb = path.resolve(base);
+    return rp === rb || rp.startsWith(rb + path.sep);
+  };
+  const notIsolated = [
+    ['teamRoot', teamRoot], ['storeFile', storeFile],
+  ].filter(([, p]) => p && (under(p, realTeam) || under(p, realProjects))).map(([k]) => k);
+  if (!teamRoot || !storeFile || notIsolated.length) {
+    const message = `SQ_CHECK_NOT_ISOLATED 自检拒绝在真实树上运行（缺变量或路径指向真实 团队/ 项目）：${notIsolated.join(',') || 'teamRoot/storeFile 为空'}`;
+    console.log(message);
+    throw new Error(message);
+  }
+  if (teamRoot) fs.mkdirSync(path.join(teamRoot, '状态', '项目'), { recursive: true });
   const fallback = String(options.fallbackStoreFile || '');
   let needSeed = Boolean(storeFile && fallback && fs.existsSync(fallback) && !fs.existsSync(storeFile));
   if (!needSeed && storeFile && fallback && fs.existsSync(fallback) && fs.existsSync(storeFile)) {
