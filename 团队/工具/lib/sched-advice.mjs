@@ -35,20 +35,13 @@ function parseMs(v) {
 export function buildSchedAdvice(input) {
   const now = Number.isFinite(input && input.now) ? input.now : Date.now();
   const staleMs = Number(input && input.staleMs) > 0 ? Number(input.staleMs) : SCHED_STALE_MS;
-  const rotateRounds = Number(input && input.rotateRounds) > 0 ? Number(input.rotateRounds) : SCHED_ROTATE_ROUNDS_DEFAULT;
-  // B-20261117-214440-6f3b（AC3 两处口径一致）：与 auto-rotate 同判——>ROUNDS_MAX(10) 一律配置错，不静默照跑。
-  if (rotateRounds > ROUNDS_MAX) {
-    return {
-      ok: false,
-      code: 'AUTO_ROTATE_CONFIG_INVALID',
-      message: `rotateRounds=${rotateRounds} 超过上限 ${ROUNDS_MAX}（默认 ${SCHED_ROTATE_ROUNDS_DEFAULT}；上限 ${ROUNDS_MAX}；>上限视为配置错误，不静默照跑）`,
-      at: new Date(now).toISOString(),
-      project: String((input && input.project) || ''),
-      degraded: true,
-      roles: [],
-      maxRounds: ROUNDS_MAX,
-    };
-  }
+  const rotateRoundsRaw = Number(input && input.rotateRounds) > 0 ? Number(input.rotateRounds) : SCHED_ROTATE_ROUNDS_DEFAULT;
+  // B-20261117-220423-4355（PM 推荐 B 案）：调度器只读、不应崩——>ROUNDS_MAX(10) 时 clamp 到上限，并在 reasons 里加 CONFIG_CLAMPED 告警。
+  const clamped = rotateRoundsRaw > ROUNDS_MAX;
+  const rotateRounds = clamped ? ROUNDS_MAX : rotateRoundsRaw;
+  const configWarning = clamped
+    ? `CONFIG_CLAMPED：rotateRounds=${rotateRoundsRaw} 超过上限 ${ROUNDS_MAX}（默认 ${SCHED_ROTATE_ROUNDS_DEFAULT}），已按 ${ROUNDS_MAX} 判到线`
+    : '';
   const queue = (input && input.queue) || null;
   const roundsMap = (input && input.rounds) || null;
   const usageMap = (input && input.usage) || null;
@@ -79,6 +72,7 @@ export function buildSchedAdvice(input) {
     const queueItems = roleQueues && roleQueues[role] && Array.isArray(roleQueues[role].queue) ? roleQueues[role].queue : [];
 
     const reasons = [];
+    if (configWarning) reasons.push(configWarning);
     let decision = 'STANDBY';
     // PM 2026-11-17 21:21 口径补充：UNAVAILABLE 不是 decision——数据源不可用/不新鲜时输出 available:false + reasons。
     const available = taskSourceAvailable && !snapshotStale && !queueDegraded && !rowStale && Boolean(qRow);
@@ -152,6 +146,10 @@ export function buildSchedAdvice(input) {
     project: String((input && input.project) || ''),
     degraded: snapshotStale || queueDegraded,
     roles: out,
+    rotateRounds,
+    rotateRoundsRaw,
+    maxRounds: ROUNDS_MAX,
+    configWarning,
     sourceNote: '只读建议：不派单、不换人；写盘仅调度建议.jsonl（append-only）',
   };
 }

@@ -7000,10 +7000,9 @@ export function cmdSched(args) {
     now: nowMs, project: b.project, rotateRounds, queue, rounds: roundsRaw, usage,
     tasks, taskSourceAvailable, roleQueues,
   });
-  // B-6f3b：AC3 两处口径一致——>ROUNDS_MAX(10) 属于配置错，CLI 直接失败（与 auto-rotate 的 AUTO_ROTATE_CONFIG_INVALID 同码）。
-  if (advice && advice.ok === false && advice.code === 'AUTO_ROTATE_CONFIG_INVALID') {
-    fail(advice.code, advice.message, { rotateRounds, max: advice.maxRounds, hint: `上限 ${advice.maxRounds}，建议 ${SCHED_ROTATE_ROUNDS_DEFAULT}` }, 1);
-  }
+  // B-20261117-220423-4355（PM 推荐 B 案）：调度器只读、不应崩——>10 时由 buildSchedAdvice clamp 到 10 并带 CONFIG_CLAMPED 告警，
+  // CLI 正常返回（exit 0），告警进文本输出的首行与审计行。
+  if (advice && advice.configWarning) console.warn(`[sched] ${advice.configWarning}`);
   // ③ 每次决策落一行审计：输入快照 hash + 命中规则（decision）+ 结果；④ 幂等+节流：同输入 60 秒内不重复落行。
   const logFile = path.join(dir, '调度建议.jsonl');
   const inputHash = crypto.createHash('sha256').update(JSON.stringify({ queue: queue || null, rounds: roundsRaw || null, usage: usage || null, tasks, roleQueues: roleQueues || null, rotateRounds: rotateRounds || null })).digest('hex');
@@ -7019,6 +7018,7 @@ export function cmdSched(args) {
     } else {
       fs.appendFileSync(logFile, JSON.stringify({
         at: advice.at, project: b.project, by: b.role, inputHash, degraded: advice.degraded,
+        rotateRounds: advice.rotateRounds, rotateRoundsRaw: advice.rotateRoundsRaw, configWarning: advice.configWarning || '',
         roles: advice.roles.map((r) => ({ role: r.role, available: r.available, rule: r.decision, decision: r.decision, level: r.level, reasons: r.reasons })),
       }) + '\n', 'utf8');
       auditRows += 1;
@@ -7029,7 +7029,7 @@ export function cmdSched(args) {
     process.stdout.write(JSON.stringify(advice) + '\n');
     return;
   }
-  const lines = [`调度建议（${b.project}，${advice.at}）${advice.degraded ? ' ⚠ 快照不新鲜/降级：不出 IDLE_DISPATCH' : ''}`];
+  const lines = [`调度建议（${b.project}，${advice.at}）${advice.degraded ? ' ⚠ 快照不新鲜/降级：不出 IDLE_DISPATCH' : ''}${advice.configWarning ? ` ⚠ ${advice.configWarning}` : ''}`];
   for (const r of advice.roles) lines.push(`- ${r.role}: ${r.decision}（${r.reasons.join('；')}）→ ${r.nextAction}`);
   lines.push('只读建议：不派单、不换人；写盘仅 调度建议.jsonl（append-only）');
   console.log(lines.join('\n'));

@@ -75,19 +75,22 @@ function check(name, fn) {
     return '文案在';
   });
 
-  // B-6f3b：第二处（sched）也必须拦 >10，两处同码口径。
+  // B-220423-4355（PM 推荐 B 案）：sched 侧不崩——>10 clamp 到 10 且 reasons 带 CONFIG_CLAMPED。
   const sched = await import('file:///' + path.join(LIB, 'sched-advice.mjs').replace(/\\/g, '/'));
-  check('R7 sched 纯函数：rotateRounds=11 → ok:false/AUTO_ROTATE_CONFIG_INVALID；10 正常', () => {
+  check('R7 sched 纯函数：rotateRounds=11 → clamp 10 + CONFIG_CLAMPED；10 正常', () => {
     const bad = sched.buildSchedAdvice({ now: Date.now(), project: 'x', rotateRounds: 11, tasks: [], taskSourceAvailable: true });
-    assert.strictEqual(bad.ok, false);
-    assert.strictEqual(bad.code, 'AUTO_ROTATE_CONFIG_INVALID');
-    assert.strictEqual(bad.maxRounds, 10);
+    assert.strictEqual(bad.ok, true, 'sched 不应崩/不 ok');
+    assert.strictEqual(bad.rotateRounds, 10);
+    assert.ok(/CONFIG_CLAMPED/.test(String(bad.configWarning || '')), '缺 configWarning');
+    assert.ok(bad.roles.every((r) => r.reasons.some((x) => /CONFIG_CLAMPED/.test(x))), 'reasons 里缺 CONFIG_CLAMPED');
     const good = sched.buildSchedAdvice({ now: Date.now(), project: 'x', rotateRounds: 10, tasks: [], taskSourceAvailable: true, queue: null });
     assert.strictEqual(good.ok, true);
-    return '11 拒 / 10 过';
+    assert.strictEqual(good.rotateRounds, 10);
+    assert.strictEqual(good.configWarning, '');
+    return '11→clamp 10+告警 / 10 正常';
   });
 
-  check('R8 CLI：sched advice --rotate-rounds 11 非 0 退出且带同码；10 正常', () => {
+  check('R8 CLI：sched advice --rotate-rounds 11 exit 0 且带 CONFIG_CLAMPED；10 正常', () => {
     const { execFileSync } = require('node:child_process');
     const team = path.join(ROOT, '团队', '工具', 'team.mjs');
     const run = (extra) => {
@@ -96,11 +99,12 @@ function check(name, fn) {
       } catch (e) { return { code: e.status == null ? 1 : e.status, out: String(e.stdout || '') + String(e.stderr || '') }; }
     };
     const bad = run(['--rotate-rounds', '11']);
-    assert.notStrictEqual(bad.code, 0, '11 竟然成功');
-    assert.ok(/AUTO_ROTATE_CONFIG_INVALID/.test(bad.out), bad.out.slice(0, 200));
+    assert.strictEqual(bad.code, 0, '11 应正常返回（只读建议不崩）');
+    assert.ok(/CONFIG_CLAMPED/.test(bad.out), bad.out.slice(0, 300));
     const good = run(['--rotate-rounds', '10']);
     assert.strictEqual(good.code, 0);
-    return 'CLI 同码拦截';
+    assert.ok(!/CONFIG_CLAMPED/.test(good.out), '10 不应告警');
+    return 'CLI clamp+告警 / 不崩';
   });
 
   const pass = results.filter((r) => r.ok).length;
