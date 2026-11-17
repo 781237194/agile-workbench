@@ -155,10 +155,27 @@ const wakeRows = (sb) => {
   check('⑤ sendToPmWithWake：写 PM 邮箱 + 立刻唤醒（reason=send_to_pm:*），不依赖兜底',
     sent.ok === true && Boolean(sent.messageId) && directWake.length >= 1 && mailed, { sent, directWake: directWake.length, mailed });
 
-  /* ⑥ 隔离 */
-  check('⑥ 隔离：真实 团队.json / workbench.json sha256 未变',
-    sha256(REAL_TEAM) === before.team && sha256(REAL_STORE) === before.store,
-    { teamSame: sha256(REAL_TEAM) === before.team, storeSame: sha256(REAL_STORE) === before.store });
+  /* ⑥ 隔离：真实树里不能出现沙盘标记（真实 团队.json / workbench.json 会被其他角色实时写，整文件 sha 不适合做基线） */
+  const realTeam = readJson(REAL_TEAM, { members: [] });
+  const sandboxSessionLeak = (realTeam.members || []).some((m) => /^sess-old-/.test(String(m.sessionId || '')));
+  const realStore = readJson(REAL_STORE, { projects: [] });
+  const storeLeak = (realStore.projects || []).some((p) => Object.values(p.sessions || {}).some((v) => /^sess-old-|^session-auto-/.test(String(v))));
+  const ledgerWritten = fs.existsSync(path.join(sb.state, '邮箱摘要已通知.json'));
+  check('⑥ 隔离：真实 团队.json / workbench.json 里 0 个沙盘夹具标识，且去重台账只落在沙盘',
+    !sandboxSessionLeak && !storeLeak && ledgerWritten,
+    { sandboxSessionLeak, storeLeak, ledgerWritten, realTeamSha: sha256(REAL_TEAM) === before.team });
+
+  /* ④d 把候选 read 掉（new→cur）→ 下一拍候选 0、不发唤醒 */
+  const pmNew = path.join(sb.team, '状态', '邮箱', 'pm', 'new');
+  const pmCur = path.join(sb.team, '状态', '邮箱', 'pm', 'cur');
+  fs.mkdirSync(pmCur, { recursive: true });
+  let moved = 0;
+  for (const f of fs.readdirSync(pmNew)) { fs.renameSync(path.join(pmNew, f), path.join(pmCur, f)); moved += 1; }
+  const before4d = wakeRows(sb).filter((r) => String(r.reason) === 'mailbox_digest').length;
+  const r4d = await ops.pmMailboxDigest(PROJECT);
+  const after4d = wakeRows(sb).filter((r) => String(r.reason) === 'mailbox_digest').length;
+  check('④d 候选被 read 掉（new→cur）后 → 候选 0 不发唤醒',
+    moved > 0 && r4d.ok === true && r4d.pending === 0 && after4d === before4d, { moved, r4d, before4d, after4d });
 
   const pass = results.filter((r) => r.ok).length;
   console.log('');

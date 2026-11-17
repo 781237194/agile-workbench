@@ -1895,9 +1895,10 @@ export async function pmMailboxDigest(project, { now = Date.now(), maxAgeMs = 15
   let notified = {};
   try { const raw = readJson(notifiedFile, {}); notified = (raw && typeof raw === 'object' && raw.ids) ? raw.ids : {}; } catch { notified = {}; }
   const pruneBefore = now - 24 * 3600 * 1000;
-  for (const [id, at] of Object.entries(notified)) {
-    // B-3c45 补：台账里写的是 ISO（nowIso()），必须 Date.parse 兜底；只 Number() 会得 NaN → 每拍把全部 id 删掉，
-    // 去重等于没做（PM hotfix 0a7dced 的这条剪枝就是这个坑）。
+  for (const [id, entry] of Object.entries(notified)) {
+    // B-3c45：台账条目是 { at, messageId, type }，同时兼容上一版直接写 ISO 字符串的形状。
+    // 剪枝必须 Date.parse 兜底（只 Number() 会得 NaN → 每拍把有效条目全删掉，去重静默失效）。
+    const at = (entry && typeof entry === 'object') ? entry.at : entry;
     const raw = Number(at);
     const t = Number.isFinite(raw) && raw > 0 ? raw : Date.parse(String(at || ''));
     if (!Number.isFinite(t) || t < pruneBefore) delete notified[id];
@@ -1936,7 +1937,9 @@ export async function pmMailboxDigest(project, { now = Date.now(), maxAgeMs = 15
     isDispatch: false,
     engineUrl,
     reason: 'mailbox_digest',
-    dedupeKey: `mailbox_digest:${ids.join(',')}`,
+    // 口径文件第③条：dedupeKey 要稳定（不随 id 列表抖动）。这里用「小时 + 本批第一条 id」：
+    // 同一批重跑 key 相同（被 delivered 去重），有新增消息时批首变化 → 仍会叫一次（否则新消息会被吞）。
+    dedupeKey: `mailbox_digest:${new Date(now + 8 * 3600 * 1000).toISOString().slice(0, 13).replace(/[-T]/g, '')}:${ids[0]}`,
     msg: {
       // 唤醒日志的 messageIds 取自 msg.id：单条直接用原消息 id（可直接回查），多条把 id 列表写进 id。
       id: ids.length === 1 ? ids[0] : `WAKE-DIGEST-${ids.length}:${ids.join(',')}`,
@@ -1948,10 +1951,13 @@ export async function pmMailboxDigest(project, { now = Date.now(), maxAgeMs = 15
       project: name,
     },
   });
-  // 唤醒发出后（ok 或 ALREADY_DELIVERED 都算已通知）把被摘要的 messageId 落盘，保证同一消息只叫一次。
+  // 唤醒发出后（ok 或 SELFTEST）把被摘要的 messageId 落盘：{ at, messageId, type }（口径文件第①条），
+  // 同一 messageId 24h 内只进摘要一次，这是「重复唤醒」的真正闸门（不靠 dedupeKey）。
   if (wake && (wake.ok === true || wake.skipped === 'SELFTEST')) {
     const at = nowIso();
-    for (const id of ids) notified[id] = at;
+    for (const msg of picked) {
+      notified[String(msg.id)] = { at, messageId: String(msg.id), type: String(msg.type || msg.kind || 'note') };
+    }
     try { writeJson(notifiedFile, { updatedAt: at, ids: notified }); } catch { /* 写失败下次仍会去重失败，但不阻断唤醒 */ }
   }
   return { ok: true, project: name, pending: fresh.length, woken: picked.length, messageIds: ids.slice(0, 5), byType, wake };
