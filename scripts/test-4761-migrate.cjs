@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const crypto = require('node:crypto');
 const { mkTempSandbox } = require(path.join(__dirname, 'lib', 'sandbox-dir.cjs'));
 
 const ROOT = path.resolve(__dirname, '..');
@@ -198,6 +199,18 @@ check('⑦ import --zip 校验清单并落地（路径/条目数一致）',
   impZip.code === 0 && impZip.json && impZip.json.files === expZip.json.files
   && (fs.existsSync(path.join(REPO3, '项目', PROJ, '需求')) && fs.readdirSync(path.join(REPO3, '项目', PROJ, '需求')).some((f) => f.startsWith('R-1'))),
   impZip.json || impZip.stderr);
+
+// ⑧ ad04 护栏：对真实仓库根执行 rebind/rebind-sessions 必须被拒且真实名册零改动
+const REAL_TEAM_FILE = path.join(ROOT, '团队', '状态', '团队.json');
+const shaOf = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+const realShaBefore = shaOf(REAL_TEAM_FILE);
+const liveRebind = run(['rebind', '--root', ROOT, '--project', '护栏反例项目', '--to', 'X:/fake', '--yes', '--json']);
+check('⑧ 对真实仓库根 rebind 被拒（MIGRATION_LIVE_ROOT_REFUSED，exit 2）',
+  liveRebind.code === 2 && liveRebind.json && liveRebind.json.code === 'MIGRATION_LIVE_ROOT_REFUSED', liveRebind.json || liveRebind.stderr);
+const liveRs = run(['rebind-sessions', '--root', ROOT, '--project', '护栏反例项目', '--role', 'pm', '--session', 'hack', '--yes', '--json']);
+check('⑧ 对真实仓库根 rebind-sessions 被拒（MIGRATION_LIVE_ROOT_REFUSED，exit 2）',
+  liveRs.code === 2 && liveRs.json && liveRs.json.code === 'MIGRATION_LIVE_ROOT_REFUSED', liveRs.json || liveRs.stderr);
+check('⑧ 真实名册 sha256 前后不变（零写入）', shaOf(REAL_TEAM_FILE) === realShaBefore, { before: realShaBefore, after: shaOf(REAL_TEAM_FILE) });
 const passed = results.filter((r) => r.ok).length;
 console.log(`\nB-4761（b0ea 返工）断言：${passed}/${results.length} PASS`);
 if (process.env.TEAM_SB_KEEP !== '1') fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

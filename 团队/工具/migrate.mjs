@@ -82,6 +82,28 @@ function resolveRoots(argv) {
   };
 }
 
+/** 真实仓库根（本工具所安装的开发/生产仓库）：写命令默认不得直接改它（2026-11-17 ad04 事故）。 */
+const REAL_REPO_ROOT = path.resolve(__dirname, '..', '..');
+function isLiveRepoRoot(root) {
+  try { return path.resolve(String(root || '')) === REAL_REPO_ROOT; } catch { return false; }
+}
+/** 写命令护栏：目标是真实仓库根时必须显式 --allow-live-root --reason，否则零写入拒绝；越权写迁移审计。 */
+function guardLiveRoot(argv, root, project) {
+  if (!isLiveRepoRoot(root)) return;
+  const allow = argv['allow-live-root'] === true || argv.allowLiveRoot === true;
+  const reason = String(argv.reason || '').trim();
+  if (!allow || !reason) {
+    fail('MIGRATION_LIVE_ROOT_REFUSED', '拒绝对真实仓库根执行写操作（rebind/rebind-sessions）：请在沙盘上用 --root，或显式 --allow-live-root --reason "<原因>"',
+      { root: String(root), hint: '沙盘根通常在 _tmp/ 下；真实根写操作会改团队账本/名册' });
+  }
+  // 越权：写迁移审计（项目级 append-only）
+  try {
+    const auditDir = path.join(REAL_REPO_ROOT, '团队', '状态', '项目', String(project || '_live'));
+    fs.mkdirSync(auditDir, { recursive: true });
+    fs.appendFileSync(path.join(auditDir, '迁移审计.jsonl'), JSON.stringify({ at: new Date().toISOString(), project: String(project || ''), action: 'allow_live_root', reason, argv: process.argv.slice(2) }) + '\n', 'utf8');
+  } catch { /* 审计失败不阻断（但已留 console） */ }
+}
+
 /* ───────── export ───────── */
 function cmdExport(argv) {
   const { repoRoot, project, projectDir, stateDir, teamFile, wbFile } = resolveRoots(argv);
@@ -266,6 +288,7 @@ function cmdRebind(argv) {
   if (!project) fail('PROJECT_REQUIRED', '需要 --project <项目名>');
   const to = String(argv.to || '').trim();
   if (!to) fail('TO_REQUIRED', '需要 --to <新根目录>');
+  { guardLiveRoot(argv, repoRoot, project); }
   const dryRun = argv.yes !== true;
   const refs = pathRefs(repoRoot, project);
   const diffs = refs.map((r) => ({ file: r.file.replace(/\\/g, '/'), key: r.key, from: r.value, to }));
@@ -302,6 +325,7 @@ function cmdRebind(argv) {
 /* ───────── rebind-sessions ───────── */
 function cmdRebindSessions(argv) {
   const repoRoot = argv.root ? path.resolve(argv.root) : path.resolve(__dirname, '..', '..');
+  { const project = String(argv.project || '').trim(); guardLiveRoot(argv, repoRoot, project); }
   const teamFile = path.join(repoRoot, '团队', '状态', '团队.json');
   const dryRun = argv.yes !== true;
   const team = readJsonSafe(teamFile);

@@ -6,12 +6,16 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const crypto = require('node:crypto');
 const { mkTempSandbox } = require(path.join(__dirname, 'lib', 'sandbox-dir.cjs'));
 
 const ROOT = path.resolve(__dirname, '..');
 const CLI = path.join(ROOT, '团队', '工具', 'migrate.mjs');
 const TEAM_TOOL_SRC = path.join(ROOT, '团队');
 const results = [];
+const REAL_TEAM_FILE = path.join(TEAM_TOOL_SRC, '状态', '团队.json');
+const shaOf = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+const realTeamShaBefore = shaOf(REAL_TEAM_FILE);
 function check(name, ok, detail) {
   results.push({ name, ok: Boolean(ok) });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '  ' + String(JSON.stringify(detail)).slice(0, 400)}`);
@@ -109,6 +113,7 @@ const wakeFile = path.join(B, '团队', '状态', '项目', PROJ, '唤醒.jsonl'
 const stale = fs.existsSync(wakeFile) ? fs.readFileSync(wakeFile, 'utf8').split(/\r?\n/).filter(Boolean).filter((l) => l.includes('stale_session')) : [];
 check('F5③ 旧会话 stale_session 审计', stale.length >= 1, stale.length);
 
+check('ad04 换机测试未动真实名册（sha256 起止一致）', shaOf(REAL_TEAM_FILE) === realTeamShaBefore, { before: realTeamShaBefore, after: shaOf(REAL_TEAM_FILE) });
 const passed = results.filter((r) => r.ok).length;
 console.log(`\nB-4761 换机链路断言：${passed}/${results.length} PASS`);
 if (process.env.TEAM_SB_KEEP !== '1') fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
