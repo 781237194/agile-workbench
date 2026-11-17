@@ -65,6 +65,16 @@
     return items;
   }
 
+  // B-b894：任务闭环状态唯一口径（与 团队/工具/lib/gates.mjs 的 CLOSED_TASK_STATUSES 同源，
+  // 由 scripts/test-b894-closed-status.cjs 断言两边逐项相等）。
+  // 现场：62b9 的 B-6029 是 accepted、T-a588 是 cancelled，旧实现只认 done，
+  // 导致 Owner 点不了【通过】，提示「还有 2 条测试任务没 done」。
+  const CLOSED_TASK_STATUSES = ['done', 'accepted', 'cancelled', 'terminated'];
+
+  function isClosedStatus(status) {
+    return CLOSED_TASK_STATUSES.includes(textOf(status));
+  }
+
   function isTestTask(task) {
     const owner = textOf(task && task.owner).toLowerCase();
     const stage = textOf(task && task.workflow && task.workflow.stage).toLowerCase();
@@ -79,7 +89,7 @@
     const tasksOfReq = (Array.isArray(tasks) ? tasks : [])
       .filter((task) => task && String(task.requirementId || '') === String(row && row.id || ''));
     const testTasks = tasksOfReq.filter(isTestTask);
-    const openTest = testTasks.filter((task) => String(task.status || '') !== 'done');
+    const openTest = testTasks.filter((task) => !isClosedStatus(task.status));
     const evidence = collectEvidence(row, testTasks);
     const report = evidence.find((item) => item.kind === 'report') || null;
     const shot = evidence.find((item) => item.kind === 'image') || null;
@@ -95,7 +105,7 @@
         open: openTest.length,
         reason: testTasks.length === 0
           ? '没有绑定测试任务'
-          : (openTest.length ? `还有 ${openTest.length} 条测试任务没 done：${openTest.map((task) => task.id).join('、')}` : `测试任务 ${testTasks.length} 条已完成`),
+          : (openTest.length ? `还有 ${openTest.length} 条测试任务没闭环（done/accepted/cancelled/terminated）：${openTest.map((task) => task.id).join('、')}` : `测试任务 ${testTasks.length} 条已完成`),
         path: '',
         go: 'test_task',
       },
@@ -228,7 +238,9 @@
     ownerDecisionOf, kindOfEvidence, collectEvidence, isTestTask, acceptPrereq, prereqSummary,
     acceptGate, acceptTierOf, evidenceIncompleteText, requiredKeysOf,
     TIER_OWNER, TIER_PROXY, EVIDENCE_INCOMPLETE_LABEL, PROXY_EVIDENCE_CODE,
-    OWNER_REQUIRED_KEYS, PROXY_REQUIRED_KEYS
+    OWNER_REQUIRED_KEYS, PROXY_REQUIRED_KEYS,
+    // B-b894：闭环状态口径对外暴露，供 scripts/test-b894-closed-status.cjs 与 gates.mjs 做同源断言。
+    CLOSED_TASK_STATUSES, isClosedStatus
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (globalScope) globalScope.AcceptPrereq = api;

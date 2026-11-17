@@ -732,15 +732,22 @@ export function gateConfig(project) {
 }
 
 /**
- * 任务层终态集合（B-dd67）：done=已完成、accepted=已验收、cancelled=已取消。
- * 这三种都不该再占角色名额——历史缺陷单验收后仍是 accepted，若不排除，G5 会让角色永久「忙」。
+ * 任务层终态集合（B-dd67 / B-b894）：done=已完成、accepted=已验收、cancelled=已取消、terminated=已终止。
+ * 这四种都不该再占角色名额、也不该再挡需求推进——历史缺陷单验收后仍是 accepted，
+ * 被作废/终止的任务是 terminated，若不排除，G5 会让角色永久「忙」、
+ * 验收前置会一直报「还有 N 条测试任务没 done」（62b9 现场：B-6029 accepted + T-a588 cancelled）。
  * 只把真在办的（open/working/…）算未闭环；判定按「不在终态集合里」= 未闭环，避免新增状态漏判。
  */
-export const CLOSED_TASK_STATUSES = Object.freeze(['done', 'accepted', 'cancelled']);
+export const CLOSED_TASK_STATUSES = Object.freeze(['done', 'accepted', 'cancelled', 'terminated']);
+
+/** 任务状态是否已闭环（B-b894：唯一口径，ops.mjs 与验收前置都必须用它，不要各写一套数组）。 */
+export function statusIsClosed(status) {
+  return CLOSED_TASK_STATUSES.includes(String(status || ''));
+}
 
 /** 任务是否已闭环（终态仍可扩展，但调用方只关心「还占不占角色」）。 */
 export function taskIsClosed(task) {
-  return CLOSED_TASK_STATUSES.includes(String((task && task.status) || ''));
+  return statusIsClosed(task && task.status);
 }
 
 /**
