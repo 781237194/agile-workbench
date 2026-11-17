@@ -1952,7 +1952,23 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
     type: 'dispatch',
     sessionId: String(item.sessionId || ''),
   });
-  writeDispatchLock(project, msg);
+  // B-6c50 / B-d3a1（PM 2026-11-17 12:08 批准，12:13 分工归 A）：自动重派**不得写 PM 派单锁**——
+  // 以前这里 writeDispatchLock() 会占住 PM 正式派单（实测 10:24:32/10:25:32 两条自动重派 → PM_DISPATCH_PENDING）。
+  // 自动通道改为：消息标 source=auto/trigger，投递审计 result=delivered + code=SOURCE_AUTO + source=auto（必须命中枚举）。
+  const autoReason = String(item.reason || 'stalled_role');
+  msg.source = 'auto';
+  msg.trigger = autoReason;
+  try {
+    appendDeliveryAudit(project, {
+      itemId: item.id, to: String(item.to || ''), taskId: String(item.task || ''),
+      attempt: Number(item.attempt) || 1, result: 'delivered', code: 'SOURCE_AUTO',
+      stallMs: Number.isFinite(Date.parse(String(item.at || ''))) ? Math.max(0, Date.now() - Date.parse(String(item.at || ''))) : 0,
+      messageId: String(msg.id || ''), wakeOk: false, source: 'auto',
+    });
+  } catch (e) {
+    // 审计写失败不得静默：写事件留痕（B-d3a1 要求）
+    try { appendEvent({ role: 'system', action: 'delivery_audit_failed', project, target: String(item.id || ''), note: `auto dispatch 审计写失败：${String((e && (e.code || e.message)) || e).slice(0, 160)}` }); } catch { /* 忽略 */ }
+  }
   const wake = await wakeSessionForMessage({ project, to: String(item.to || ''), msg, isDispatch: true });
   removeDispatchQueueItem(project, item.id);
   appendEvent({ role: 'system', action: 'dispatch_pump', project, target: msg.id, note: `queue=${item.id} to=${item.to} task=${item.task || ''}` });
