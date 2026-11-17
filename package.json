@@ -31,12 +31,13 @@
   ],
   "scripts": {
     "start": "node scripts/run-electron.cjs .",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer/flow-lanes.js && node --check src/renderer/app.js && node --check src/dsh-adapter.js && node --check src/team-tools.js && node --check scripts/run-electron.cjs && node --check scripts/test-entrypoints.cjs && node --check scripts/export-open-source.mjs && node --check scripts/assert-no-legacy.cjs && node scripts/assert-no-legacy.cjs && node scripts/test-renderer-load.cjs && node scripts/test-b75c-drift.cjs && node scripts/test-b75c-drift-sandbox.cjs",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer/flow-lanes.js && node --check src/renderer/app.js && node --check src/dsh-adapter.js && node --check src/team-tools.js && node --check scripts/run-electron.cjs && node --check scripts/test-entrypoints.cjs && node --check scripts/export-open-source.mjs && node --check scripts/assert-no-legacy.cjs && node scripts/assert-no-legacy.cjs && node scripts/test-renderer-load.cjs && node scripts/test-b75c-drift.cjs && node scripts/test-b75c-drift-sandbox.cjs && node scripts/skill-check.cjs && node scripts/test-bcae-skill-tamper.cjs",
     "selftest": "node scripts/run-electron.cjs . --selftest",
     "test:scripts": "node scripts/test-entrypoints.cjs",
     "test:renderer-load": "node scripts/test-renderer-load.cjs",
     "export:oss": "node scripts/export-open-source.mjs",
-    "test:b75c": "node scripts/test-b75c-contenthash.cjs && node scripts/test-b75c-drift.cjs && node scripts/test-b75c-drift-sandbox.cjs"
+    "test:b75c": "node scripts/test-b75c-contenthash.cjs && node scripts/test-b75c-drift.cjs && node scripts/test-b75c-drift-sandbox.cjs",
+    "test:skill": "node scripts/skill-check.cjs && node scripts/test-bcae-skill-tamper.cjs && node scripts/test-bcae-skill-boot.cjs && node scripts/test-bcae-skill-step2.cjs"
   },
   "devDependencies": {
     "electron": "^33.0.0"

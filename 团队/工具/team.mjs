@@ -7,7 +7,7 @@ import {
   cmdInit, cmdProject, cmdBoot, cmdSend, cmdInbox, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
   cmdShow, cmdReview, cmdSign, cmdApply, cmdGrant, cmdIndex, cmdStatus, cmdClaim, cmdReconcile,
   cmdVerify, cmdLog, cmdLock, cmdOwnerApprove, cmdOwner, cmdRoster, cmdPilot, cmdDoctor,
-  cmdReq, cmdFind, cmdBoard, cmdVote, cmdWorkflow, cmdOwnerProxyDecide, cmdQueue,
+  cmdReq, cmdFind, cmdBoard, cmdVote, cmdWorkflow, cmdOwnerProxyDecide, cmdQueue, cmdSkill,
   cmdAsk, cmdAnswer, cmdPresence, cmdMarkRead, cmdWake, cmdLessons, failLessonGate, lessonGateFor,
   cmdProjectConfig, sendLessonsProgramNotice, flushLessonsProgramWakes,
 } from './lib/ops.mjs';
@@ -320,6 +320,7 @@ async function main() {
     case 'ask': await cmdAsk(args); break;
     case 'answer': await cmdAnswer(args); break;
     case 'queue': await cmdQueue(args); break;
+    case 'skill': cmdSkill(args); break;
     case 'task': await cmdTask(args); break;
     case 'memory': cmdMemory(args); break;
     case 'req': cmdReq(args); break;

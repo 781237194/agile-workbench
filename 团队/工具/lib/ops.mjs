@@ -31,6 +31,8 @@ import {
   requirementReviewer, techReviewers, votersForMode, VOTE_RULE_TEXT,
 } from './roles.mjs';
 import { ensureProjectStructure, structureReport, readRequirementDocs, requirementContentText } from './scaffold.mjs';
+// T-20261117-184114-4358（R-bcae）：skill 四要素校验 + 30 分钟评估提示（append-only skill评估.jsonl）。
+import { validateSkillContent, recordSkillEvaluation, readSkillEvaluations, skillPromptDue, skillPromptLineFor } from './skill.mjs';
 import {
   auditGate, detectPhaseEdit, gateDesign, gateIteration, gateRequirementFinal, gateRequirementDoc,
   gateRequirementReview, gateStageRole, gateTestReport, gateTestability, gateConfig,
@@ -1894,7 +1896,10 @@ export async function pmMailboxDigest(project, { now = Date.now(), maxAgeMs = 15
   try { const raw = readJson(notifiedFile, {}); notified = (raw && typeof raw === 'object' && raw.ids) ? raw.ids : {}; } catch { notified = {}; }
   const pruneBefore = now - 24 * 3600 * 1000;
   for (const [id, at] of Object.entries(notified)) {
-    const t = Number(at);
+    // B-3c45 补：台账里写的是 ISO（nowIso()），必须 Date.parse 兜底；只 Number() 会得 NaN → 每拍把全部 id 删掉，
+    // 去重等于没做（PM hotfix 0a7dced 的这条剪枝就是这个坑）。
+    const raw = Number(at);
+    const t = Number.isFinite(raw) && raw > 0 ? raw : Date.parse(String(at || ''));
     if (!Number.isFinite(t) || t < pruneBefore) delete notified[id];
   }
   const fresh = [];
@@ -4488,6 +4493,11 @@ export async function cmdBoot(args) {
   }
   // R-f9b1 F-7⑧：本角色当前任务所涉需求的增补卷（缺失也写一行；不进必读计数、不阻塞 boot）。
   for (const line of supplementBriefLines(project, tasks)) lines.push(line);
+  // T-20261117-184114-4358（R-bcae）第二步：30 分钟 skill 评估提示（同窗口只一次；可 skip 但必须写 reason）。
+  try {
+    const skillPrompt = skillPromptLineFor(projectName, role);
+    if (skillPrompt) lines.push(skillPrompt);
+  } catch (e) { console.warn('[skill] prompt line failed:', String((e && e.message) || e)); }
   lines.push(`read 回执: ${PATHS.reads}（kind=boot；需求/任务文档哈希随令牌落盘，评审与派单前复核）`);
   if (bootQueue && bootQueue.consumed) {
     lines.push(`待启动队列: 已消费 ${bootQueue.consumed} 条（${bootQueue.items.map((it) => it.id).join('、')}；轮换后自动拉起）`);
@@ -6611,6 +6621,51 @@ function cmdReqSync(args) {
     ...violations.map((v) => `- [${v.rule}] ${v.id || v.file || ''} ${v.message}`),
     ...warnings.map((w) => `- 提醒 [${w.rule}] ${w.count} 条：${w.message}`),
   ].join('\n'), payload);
+}
+
+/**
+ * T-20261117-184114-4358（R-bcae）第二步：skill 子命令。
+ *   skill status [--json]                 看本人最近一次 skill 评估与是否到点（30 分钟）
+ *   skill skip --reason "…"               跳过本次提示（reason 必填，append-only 落 skill评估.jsonl）
+ *   skill check --file <路径> [--json]     四要素校验（缺项拒收，exit 1）
+ */
+export function cmdSkill(args) {
+  const b = bootFor(args, 'skill');
+  const sub = String(args._[1] || 'status');
+  if (sub === 'status') {
+    const rows = readSkillEvaluations(b.project).filter((r) => String(r.role || '') === b.role);
+    const last = rows.length ? rows[rows.length - 1] : null;
+    const due = skillPromptDue(b.project, b.role);
+    const payload = { ok: true, role: b.role, lastEval: last, due: due.due, dueReason: due.reason, lastAt: due.lastAt, dueInMs: due.dueInMs, total: rows.length };
+    out(args, last
+      ? `skill 评估：最近一次 ${last.at}（${last.action}${last.reason ? '：' + last.reason : ''}）；${due.due ? '已到 30 分钟，应提示创建/更新' : '未到 30 分钟'}`
+      : 'skill 评估：从未记录（首次提示会写一条 prompt）', payload);
+    return;
+  }
+  if (sub === 'skip') {
+    const reason = String(args.reason || '').trim();
+    if (reason.length < 2) fail('SKILL_SKIP_REASON_REQUIRED', '跳过 skill 提示必须写 --reason（写进 skill评估.jsonl）', {}, 1);
+    const row = recordSkillEvaluation(b.project, b.role, { action: 'skip', reason });
+    out(args, `已跳过本次 skill 提示（reason=${reason}）`, { ok: true, row });
+    return;
+  }
+  if (sub === 'check') {
+    const file = String(args.file || '').trim();
+    if (!file) fail('BAD_FILE', '需要 --file <skill 文件路径>', {}, 1);
+    const project = loadProject(b.project);
+    const abs = path.isAbsolute(file) ? file : path.join(project.path, file);
+    if (!exists(abs)) fail('SKILL_FILE_MISSING', `skill 文件不存在：${file}`, { file }, 1);
+    let text = '';
+    try { text = fs.readFileSync(abs, 'utf8'); } catch (e) { fail('SKILL_FILE_UNREADABLE', `读不了 skill 文件：${(e && e.message) || e}`, { file }, 1); }
+    const result = validateSkillContent(text);
+    const payload = { ok: result.ok, file, missing: result.missing, elements: ['会重复发生', '明确步骤', '可验证判据', '出错代价高'] };
+    if (!result.ok) {
+      fail('SKILL_FORMAT_INCOMPLETE', `skill 缺四要素：${result.missing.map((m) => `${m.label}（${m.why}）`).join('；')}；小问题可改记经验教训`, payload, 1);
+    }
+    out(args, `skill 四要素齐全：${file}`, payload);
+    return;
+  }
+  fail('BAD_ACTION', `skill 只支持 status | skip | check（收到：${sub}）`, {}, 1);
 }
 
 export function cmdReq(args) {
