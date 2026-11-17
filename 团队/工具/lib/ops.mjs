@@ -21,6 +21,8 @@ import {
   addGrant, revokeGrant, loadGrants, addReadReceipt, latestRead,
   projectTeamMode, projectRoleIds, persistProjectTeamMode, projectModeState,
   DEFAULT_BOOT_TTL_MINUTES,
+  // T-20261117-203046-9ff2：PM 关键消息钩子（store 写盘后立即回调这里 → 当场唤醒，不靠队列泵兜底）
+  onPmCriticalMessage,
 } from './store.mjs';
 import { dispatchGateFor, scanClaims, claimSummary, clearClaimFlags, CLAIM_OVERDUE_MIN, CLAIM_STALLED_MIN } from './claim-watch.mjs';
 import { DshClient } from './dsh-session.mjs';
@@ -1356,7 +1358,7 @@ async function tryWake({ project, target, batch, isDispatch = false, engineUrl =
  * - 失败：隔 400ms 重试一次；仍失败则把整批放回 pending（windowStart 清 0，下次立即可试）并留痕；
  * - 同一 dedupeKey（任务/消息）只发一次（ALREADY_DELIVERED）。
  */
-async function wakeWithGuard({ project, to, msg, isDispatch = false, engineUrl = '', taskRow = null, reason = '', dedupeKey = '' }) {
+export async function wakeWithGuard({ project, to, msg, isDispatch = false, engineUrl = '', taskRow = null, reason = '', dedupeKey = '' }) {
   const target = String(to || '');
   if (!target) return { ok: false, why: '缺少唤醒目标' };
   const nowMs = Date.now();
@@ -1447,6 +1449,30 @@ async function wakeWithGuard({ project, to, msg, isDispatch = false, engineUrl =
   appendWakeLog(project, { to: target, ok: false, why, messageIds, pending: 0, reason, source: 'wake', retried, retryScheduled: 1, nextAt: new Date(t.retry.dueAt).toISOString() });
   return { ok: false, to: target, why, code: 'WAKE_FAILED', attempts: retried ? 2 : 1, attempt: 1, retryAt: t.retry.dueAt, messageIds, retried };
 }
+
+/**
+ * T-20261117-203046-9ff2：注册「PM 关键消息 → 立即唤醒」钩子（模块加载时执行一次）。
+ * 为什么放这里而不是改十余处调用点：所有模块（ops/route-daemon/auto-rotate/handoff/decision-box…）都走 store.sendMessage，
+ * 在写盘出口统一挂一次，既覆盖现有全部调用点，也自动覆盖以后新增的代码；
+ * 队列泵里的 mailbox_digest 退化为「保险」（漏网消息仍有兜底）。
+ * 钩子只在 to=pm 且 type 属关键类型时触发；失败只吞（消息已落邮箱，digest 会补）。
+ */
+let pmCriticalHookRegistered = false;
+function registerPmCriticalWakeHook() {
+  if (pmCriticalHookRegistered) return;
+  pmCriticalHookRegistered = true;
+  try {
+    onPmCriticalMessage((msg) => {
+      let project = String((msg && msg.project) || '');
+      if (!project) {
+        try { project = String((loadTeam() && loadTeam().activeProject) || ''); } catch { project = ''; }
+      }
+      if (!project) return null;
+      return wakeWithGuard({ project, to: 'pm', msg, isDispatch: false, reason: `pm_critical:${String((msg && msg.type) || 'notice')}` });
+    });
+  } catch { /* 注册失败时仍有 digest 兜底 */ }
+}
+registerPmCriticalWakeHook();
 
 /**
  * R-c651 F-c651-2/3：消化到期的唤醒重试（5/15/30 秒各一次，共 3 次后告警）。

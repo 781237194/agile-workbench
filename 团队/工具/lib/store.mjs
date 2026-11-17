@@ -984,7 +984,29 @@ export function sendMessage(msg) {
   const box = mailBoxDir(msg.to, 'new');
   ensureDir(box);
   writeJson(path.join(box, `${record.ts.replace(/[:.]/g, '-')}-${id}.json`), record);
+  // T-20261117-203046-9ff2：给 PM 的关键消息（升级/唤醒失败/评审打回/决策回执…）**发完立即**通知钩子，
+  // 让 ops 侧当场唤醒 PM，而不是等队列泵的兜底摘要（兜底仍保留作保险）。
+  if (record.to === 'pm') {
+    const kind = String(record.type || '');
+    if (PM_CRITICAL_TYPES.has(kind)) {
+      for (const hook of pmCriticalHooks) {
+        try { Promise.resolve(hook(record)).catch(() => { /* 钩子失败不影响投递 */ }); } catch { /* 同上 */ }
+      }
+    }
+  }
   return record;
+}
+
+/** T-9ff2：PM 关键消息类型（这些类型写完必须立即唤醒，不得只落邮箱）。 */
+const PM_CRITICAL_TYPES = new Set([
+  'escalation', 'wake_failed', 'req_review', 'review_reject', 'owner_decision_receipt',
+  'session_rotate_warn', 'answer', 'question', 'proposal', 'vote_result',
+]);
+const pmCriticalHooks = [];
+/** 注册「PM 关键消息」钩子（ops.mjs 启动时注册一次；store 不反向依赖 ops，避免循环 import）。 */
+export function onPmCriticalMessage(fn) {
+  if (typeof fn === 'function' && !pmCriticalHooks.includes(fn)) pmCriticalHooks.push(fn);
+  return pmCriticalHooks.length;
 }
 
 export function listInbox(role, { includeCur = false, project = '' } = {}) {
