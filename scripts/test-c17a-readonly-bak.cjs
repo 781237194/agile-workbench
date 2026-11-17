@@ -31,6 +31,10 @@ const ROOT = (() => {
 const atomic = require(path.join(ROOT, '团队', '工具', 'lib', 'json-atomic.cjs'));
 const SB = path.join(ROOT, '_tmp', `c17a-${process.pid}`, '团队', '状态', '项目', '沙盘c17a');
 const FILE = path.join(SB, '样本.json');
+// B-20261117-140928-b51b：沙盘退出自动清理（顶层目录是 _tmp/c17a-<pid>，不是 SB 的上一级「项目」目录）。
+const C17A_ROOT = path.join(ROOT, '_tmp', `c17a-${process.pid}`);
+if (String(process.env.AWB_KEEP_SANDBOX || '') === '1') console.log('[b51b] 保留沙盘：' + C17A_ROOT);
+else process.on('exit', () => { try { fs.rmSync(C17A_ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 150 }); } catch { /* 清理失败不改变断言结论 */ } });
 
 const results = [];
 function check(name, fn) {

@@ -16,6 +16,10 @@ const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const SB = path.join(ROOT, '_tmp', 'lessons-gate-' + Date.now().toString(36));
+// B-20261117-140928-b51b：沙盘退出自动清理（保留排障用 AWB_KEEP_SANDBOX=1，会打印路径）；失败/异常路径也清。
+const { rmSandbox } = require('./lib/sandbox-dir.cjs');
+if (String(process.env.AWB_KEEP_SANDBOX || '') === '1') console.log('[b51b] 保留沙盘：' + SB);
+else process.on('exit', () => { try { rmSandbox(SB); } catch { /* 清理失败不改变断言结论 */ } });
 const TEAM = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const STORE = path.join(SB, 'workbench.json');

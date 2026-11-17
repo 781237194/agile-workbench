@@ -28,6 +28,10 @@ const PROJECT = '工作台改造修复';
 const REAL_BOX = path.join(REAL_TEAM, '状态', '项目', PROJECT, '决策箱.json');
 const BASE = path.join(ROOT, '_tmp', 'decision-box-ui');
 const SB = path.join(BASE, 'sb');
+// B-20261117-140928-b51b：沙盘退出自动清理（证据写在 EVID=项目/.../证据-决策箱回执，不依赖 BASE 保留）。
+const { rmSandbox: rmDecisionSandbox } = require('./lib/sandbox-dir.cjs');
+if (String(process.env.AWB_KEEP_SANDBOX || '') === '1') console.log('[b51b] 保留沙盘：' + BASE);
+else process.on('exit', () => { try { rmDecisionSandbox(BASE); } catch { /* 清理失败不改变断言结论 */ } });
 const DATA = path.join(SB, 'data');
 const TEAM = path.join(SB, '团队');
 const STATE_DIR = path.join(TEAM, '状态', '项目', PROJECT);

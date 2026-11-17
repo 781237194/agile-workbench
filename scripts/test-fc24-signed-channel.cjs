@@ -7,6 +7,10 @@ const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const SB = path.join(ROOT, '_tmp', 'fc24-signed');
+// B-20261117-140928-b51b（沙盘治理抽查：本脚本**说明保留理由**，不自动清理）——
+// 本脚本把证据 run-fc24.json 直接写在沙盘里（SB/run-fc24.json），退出即删会丢证据；
+// 需要清理时先把该文件移到 程序员B/产出/证据-fc24/，再手工删 _tmp/fc24-signed，或跑 team.mjs tmp prune。
+console.log('[b51b] 本沙盘保留证据（不自动清理）：' + SB);
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TEAM_TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');
