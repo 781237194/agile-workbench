@@ -751,6 +751,19 @@ export function taskIsClosed(task) {
 }
 
 /**
+ * B-4c66：镜像任务识别——需求在 `任务/` 里的镜像行（`type=requirement`，任务 id 与 requirementId 同名）。
+ * 它不是「角色在办的活」：随需求行永久存在、状态长期 open，把它算进「角色忙」会让角色永久接不了新活，
+ * 路由守护还会每拍判「他还有活」反复唤醒（分析师实测每次唤醒重发约 40 万 token 上下文）。
+ */
+export function isRequirementMirrorTask(task) {
+  if (!task) return false;
+  const id = String(task.id || '');
+  const reqId = String(task.requirementId || '');
+  if (String(task.type || '') === 'requirement') return true;
+  return Boolean(id && reqId && id === reqId);
+}
+
+/**
  * G5：目标角色是否忙——已有未闭环任务（TASK_OPEN）或活动锁（ROLE_BUSY）。
  * 派单前必须给出具体的任务 id / 锁，让 PM 先 done 或释放，而不是把第二个任务压上去。
  */
@@ -760,6 +773,8 @@ export function gateRoleBusy({ role, tasks = [], locks = [], excludeTaskIds = []
   const open = (tasks || []).filter((task) => {
     if (!task) return false;
     if (String(task.owner || '') !== String(role || '')) return false;
+    // B-4c66：镜像任务（type=requirement / id===requirementId）不是「在办任务」，不算忙。
+    if (isRequirementMirrorTask(task)) return false;
     // B-dd67：done/accepted/cancelled 都是终态，不再算未闭环（accepted 原先被算成忙，角色永久接不了新活）。
     if (taskIsClosed(task)) return false;
     // R-75ec：被 Owner 门冻结（blocked）的任务不占角色——角色已被要求停手，不能再因此挡住新派单。

@@ -27,6 +27,8 @@ import {
 } from './store.mjs';
 import {
   gateRequirementReview, gateOwnerDecision, gateTestability, ownerDecisionsOf, currentDecisionOf,
+  // B-4c66：镜像任务（type=requirement / id===requirementId）不算「还有活」，判定走 gates 单源助手。
+  isRequirementMirrorTask,
 } from './gates.mjs';
 import { requirementReviewer } from './roles.mjs';
 import { activeProxyFor } from './owner-proxy.mjs';
@@ -760,14 +762,15 @@ function isBugTask(taskId) {
 }
 
 /** 队列里该角色是否还有该需求（F-2 ⑤ 判“回执完就停”的本地证据）。 */
-function queueStillHas(projectName, role, requirementId, tasks) {
+export function queueStillHas(projectName, role, requirementId, tasks) {
   if (!requirementId) return false;
   let payload = null;
   try { payload = buildRoleQueues(projectName); } catch { payload = null; }
   const list = (payload && payload.roles && payload.roles[role] && payload.roles[role].queue) || [];
   if (list.some((item) => String(item.requirementId || '') === String(requirementId))) return true;
   // 队列口径可能漏（比如状态刚变），再用任务证据兜一层：该角色名下该需求有未完成任务也算没做完。
-  return tasks.some((t) => String(t.requirementId || '') === String(requirementId)
+  return tasks.some((t) => !isRequirementMirrorTask(t)
+    && String(t.requirementId || '') === String(requirementId)
     && String(t.owner || '') === String(role)
     && String(t.status || '') !== 'done');
 }
