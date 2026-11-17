@@ -80,8 +80,14 @@ export const PATH_WHITELIST = [
   // a48b 收口（T-20261112-213348-d9e8）：按 AC21.6 关键字口径逐条处置，以下为合法例外。
   { file: 'src/dsh-adapter.js', reason: '读取 DSH 本机会话凭据的运行时字段名/变量名（.credentials.yaml 的 browser-session 凭据）与 Windows 系统目录回退（系统目录不是本机专属路径）；不含硬编码密钥或用户目录', pending: false },
   { file: 'src/team-tools.js', reason: '壳层打包产物（bundle）：错误识别关键字含 browser-session 凭据/credentials 字样，用于把 DSH 认证失败翻译成人话；源码同仓，未写死密钥', pending: false },
+  { file: 'src/native/win32-capture.ps1', reason: '注释里的 stdin JSON 参数示例（out:\'D:\\\\...png\' 占位符），不是运行时路径；脚本只用 GetDC/BitBlt 取像素、不产生输入事件', pending: false },
   { file: '团队/工具/lib/broadcast.mjs', reason: '播报摘要脱敏正则的敏感词字面量（token/凭据/api_key 等），用于把值替换成 ***，不是硬编码密钥', pending: false },
   { file: '团队/工具/lib/dsh-session.mjs', reason: '读取 DSH 会话凭据的字段名/变量名（browser-session 凭据），同 src/dsh-adapter.js；不含硬编码密钥', pending: false },
+  { file: '团队/工具/lib/evidence-pack.mjs', reason: '敏感词扫描器自身的常量名与正则字面量（SECRET_SCAN_BYTES / SECRET_HIGH / SECRET_WIDE），用于识别并拒绝含凭据的证据包，不是硬编码密钥', pending: false },
+  { file: '团队/工具/team.mjs', reason: 'evidence 子命令帮助文本里的错误码名 EVIDENCE_SECRET_FOUND（拒包关键字），不是密钥', pending: false },
+  { file: 'scripts/capture-desktop.cjs', reason: '桌面取证的本机默认证据目录（D:\\awb-evidence\\desktop-capture，可用 AWB_CAPTURE_DIR 覆盖）与用法说明，属运行时默认值不是用户专属路径', pending: false },
+  { file: 'scripts/test-evidence-pack.cjs', reason: '测试夹具目录名（含「密钥」字样）与 EVIDENCE_SECRET_FOUND / secret_suspect_word 断言文本，用于验证拒包逻辑，不是硬编码密钥', pending: false },
+  { file: 'scripts/test-start-guard.cjs', reason: '测试构造的进程命令行样本（仓库内 route-daemon-host.cjs 的绝对路径），用于验证启动守卫识别命令行，不参与运行时', pending: false },
   { file: '团队/工具/lib/selftest.mjs', reason: '自测构造样本：脱敏用例故意写入 token=/凭据明文验证被替换为 ***；越界路径用例用系统目录绝对路径验证 PATH_OUTSIDE_REPO；均为测试数据，不是运行时硬编码', pending: false },
   // B-a163：沙盘启动脚本示例（他人合入）里的绝对路径仅用于演示 _tmp 沙盘目录，不是运行时路径。
   { file: 'scripts/sandbox-run.ps1', reason: '沙盘启动示例脚本：写死的是 _tmp 沙盘示例目录（D:\\...\\_tmp\\xxx），供人复制后改路径；不参与运行时，不含密钥', pending: false },
