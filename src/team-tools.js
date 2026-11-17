@@ -6592,11 +6592,39 @@ function createTeamTools(options = {}) {
         requirementId
       });
       if (verdict === 'approve') {
-        row.status = 'approved';
-        // Owner 还没决定：pending 不能写 by/actor，否则界面/审计会把“待办”当成 Owner 的记录。
-        row.ownerReview = { status: 'pending', at: null, opinion: '' };
-        state.phase = 'owner_review';
-        state.ownerReview = { required: true, status: 'pending', kind: 'requirement', roundKey: `${ctx.name}|${state.round}|${Object.keys(state.requirements).length}`, at: null, opinion: '' };
+        // B-20261117-012703-f2c0：产品重评不能无条件把 ownerReview 抹回 pending。
+        // 只有当 Owner 的决定已失效（正文改过）或根本没有决定时，才回到「待 Owner 决定」；
+        // 决定仍绑当前正文时必须按决定投影，否则 G3 会挡派单、账本与 decisions 真值不一致。
+        const ownerState = ownerDecisionStaleness(ctx.projectPath, requirementId, row);
+        if (ownerState.stale || !ownerState.decision) {
+          // 只给「还没进开发」的早期状态回填 approved；开发/测试/已验收这些前进状态不允许被产品重评倒推。
+          const advanced = ['ready', 'dispatched', 'dev', 'dev_review', 'dev_done', 'test', 'test_done', 'accepted', 'done', 'terminated'];
+          if (!advanced.includes(String(row.status || ''))) {
+            row.status = 'approved';
+          }
+          // Owner 还没决定：pending 不能写 by/actor，否则界面/审计会把“待办”当成 Owner 的记录。
+          row.ownerReview = { status: 'pending', at: null, opinion: '' };
+          state.phase = 'owner_review';
+          state.ownerReview = { required: true, status: 'pending', kind: 'requirement', roundKey: `${ctx.name}|${state.round}|${Object.keys(state.requirements).length}`, at: null, opinion: '' };
+        } else {
+          const decided = ownerState.decision;
+          row.ownerReview = {
+            ...(isPlainObject(row.ownerReview) ? row.ownerReview : {}),
+            status: String(decided.status || decided.decision || 'approved'),
+            at: decided.at || null,
+            opinion: String(decided.opinion || ''),
+            by: decided.by || 'Owner',
+            channel: String(decided.channel || ''),
+            recordedBy: String(decided.recordedBy || ''),
+            source: 'owner-decision-projection',
+          };
+          pushHistoryOnce(row, {
+            at,
+            action: 'product_review_keep_owner_decision',
+            by: role,
+            note: `Owner 决定仍绑当前正文（${String(decided.status || '')}），不抹回 pending`
+          }, { requirementId });
+        }
       } else {
         row.status = 'rejected';
         // 评审驳回后回到需求评审（可修改后重评），不能停在 requirement 阶段。
@@ -7593,6 +7621,63 @@ function decisionVersionMatches(decision, row) {
   if (decSha && cur.sha256 && decSha === cur.sha256) return true;
   if (decContent && cur.contentHash && decContent === cur.contentHash) return true;
   return false;
+}
+
+// B-20261117-100603-9dc0 / B-20261117-012703-f2c0：壳层要和 CLI 的 G3 用同一份「当前正文版本」。
+// 行上的 requirementHash 可能落后于磁盘（正文被改过但没人回写行字段），所以优先取磁盘真实哈希
+// （readRequirementDocs：hash=文件 sha256、contentHash=忽略程序维护行后的内容哈希），磁盘取不到才回退行字段。
+function currentRequirementDocVersion(projectPath, requirementId, row) {
+  const id = String(requirementId || '').trim();
+  try {
+    if (id && projectPath) {
+      const docs = readRequirementDocs(projectPath);
+      const hit = (docs.list || []).find((row) => String(row.id) === id) || null;
+      if (hit && (hit.hash || hit.contentHash)) {
+        return { sha256: String(hit.hash || ''), contentHash: String(hit.contentHash || ''), file: String(hit.file || ''), source: 'disk' };
+      }
+    }
+  } catch { /* 磁盘读不到就走行字段回退 */ }
+  const rowVersion = rowRequirementVersion(row || {});
+  return { sha256: rowVersion.sha256, contentHash: rowVersion.contentHash, file: '', source: 'row' };
+}
+
+/** 行上最近一条 Owner 决定（decisions 是 append-only，末条即最新）。 */
+function latestRequirementDecision(row) {
+  const list = row && Array.isArray(row.decisions) ? row.decisions : [];
+  return list.length ? list[list.length - 1] : null;
+}
+
+/** 决定是否绑给定的正文版本（与 decisionVersionMatches 同口径，但吃磁盘版本对象）。 */
+function decisionMatchesDocVersion(decision, version) {
+  if (!decision || !version) return false;
+  const basis = (decision.basis && decision.basis.requirement) || {};
+  const decSha = String(basis.sha256 || '');
+  const decContent = String(basis.contentHash || '');
+  if (decSha && version.sha256 && decSha === version.sha256) return true;
+  if (decContent && version.contentHash && decContent === version.contentHash) return true;
+  return false;
+}
+
+/**
+ * B-20261117-100603-9dc0：G3 同款判定（壳层验收用）。
+ * 有决定但绑的不是当前正文 → 失效；完全没有决定 → 不算失效（历史无 decisions 的行按兼容放行，不新增硬门）。
+ */
+function ownerDecisionStaleness(projectPath, requirementId, row) {
+  const decision = latestRequirementDecision(row);
+  if (!decision) return { stale: false, decision: null, version: null, reason: 'no-decision' };
+  const version = currentRequirementDocVersion(projectPath, requirementId, row);
+  if (!version.sha256 && !version.contentHash) {
+    // 正文与行字段都没有版本信息：不拿空值判失效（否则老数据全红），但要留痕。
+    return { stale: false, decision, version, reason: 'no-version' };
+  }
+  const fresh = decisionMatchesDocVersion(decision, version);
+  return {
+    stale: !fresh,
+    decision,
+    version,
+    reason: fresh ? 'fresh' : 'stale',
+    decisionSha: String((decision.basis && decision.basis.requirement && decision.basis.requirement.sha256) || ''),
+  };
 }
 
 async function applyOwnerDecisionToRequirement(input = {}) {
@@ -9717,6 +9802,24 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
         { requirementId, resolvedRequirementId, status: diskStatus, roleIds: acceptRoleIds, source }
       );
     }
+    // B-20261117-100603-9dc0：验收前补与 CLI G3 同款判定——Owner 决定必须绑当前正文。
+    // 原来壳层只看 decisions 末条 status / ownerReview.status，正文在 Owner 通过后被改过也能验收通过，
+    // 账本会出现「已验收但决定绑旧正文」；两侧必须同一份判定（复用 ownerDecisionStaleness，不要第二份实现）。
+    if (decision === 'accepted') {
+      const freshness = ownerDecisionStaleness(ctx.projectPath, resolvedRequirementId, meta);
+      if (freshness.stale) {
+        const decisionSha = String(freshness.decisionSha || '');
+        const currentSha = String((freshness.version && freshness.version.sha256) || '');
+        const decisionStatus = String((freshness.decision && (freshness.decision.status || freshness.decision.decision)) || '');
+        return failure('OWNER_DECISION_STALE', `需求 ${resolvedRequirementId} 的 Owner 决定（${decisionStatus || '未知状态'}）绑的是旧正文（${decisionSha ? decisionSha.slice(0, 12) : '无 basis hash'}），当前正文是 ${currentSha ? currentSha.slice(0, 12) : '未知'}——正文改过，决定已失效。请 Owner 对当前正文重新决定后再验收（这正是 CLI 侧 G3 的口径）。`, {
+          requirementId,
+          resolvedRequirementId,
+          decision: { status: decisionStatus, sha256: decisionSha },
+          current: { sha256: currentSha, contentHash: String((freshness.version && freshness.version.contentHash) || ''), source: String((freshness.version && freshness.version.source) || '') },
+          fix: 'Owner 在评审弹窗对当前正文点通过（或 PM 代管 owner proxy decide）后重试验收'
+        });
+      }
+    }
     // Owner 验收弹窗里的“迭代”也是同一道迭代闸门：其他在办需求没验收时不能启动下一轮。
     if (decision === 'iterate') {
       const businessGate = iterateGuard(ctx.name, read.state, { exceptRequirementId: resolvedRequirementId, projectPath: ctx.projectPath });
@@ -10444,6 +10547,11 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     // B-20261116-105609-2893：决定-版本绑定判定（自检脚本直接调用，避免测试另抄一份判据）
     decisionVersionMatches,
     rowRequirementVersion,
+    // B-20261117-100603-9dc0 / B-20261117-012703-f2c0：壳层 G3 同款判定（验收前 / 产品重评前各一处，共用这一份）
+    currentRequirementDocVersion,
+    ownerDecisionStaleness,
+    decisionMatchesDocVersion,
+    latestRequirementDecision,
     // R-dba4（工具侧）：需求行大白话 copy 写入口（IPC requirement:copy-save / CLI req copy 共用一个判据）
     saveRequirementCopy,
     launchSessions,
