@@ -24,7 +24,7 @@ function mkTempSandbox(name, opts) {
   fs.mkdirSync(base, { recursive: true });
   const prefix = String(name || 'sandbox').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'sandbox';
   const dir = fs.mkdtempSync(path.join(base, prefix + '-'));
-  if (options.keep !== true) {
+  if (options.keep !== true && !keepByEnv) {
     process.on('exit', () => { rmSandbox(dir); });
   }
   return dir;
@@ -82,6 +82,7 @@ function uniqueSandbox(name, opts) {
   while (fs.existsSync(dir)) { dir = path.join(base, `${stem}-${n}`); n += 1; }
   fs.mkdirSync(dir, { recursive: true });
   if (process.env.TEAM_SB_PROBE === '1') console.log('[sb] ' + dir); // 并发排障：打印本次唯一沙盘
+  const keepByEnv = process.env.TEAM_SB_KEEP === '1'; // 取证：保留沙盘（跑完需自行清理）
   if (options.keep !== true) {
     process.on('exit', () => { rmSandbox(dir); });
   }

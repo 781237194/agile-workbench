@@ -903,8 +903,18 @@ function createTeamTools(options = {}) {
 
   /** @deprecated R-ad44（T-b7dd）：唯一实现已收编到 团队/工具/lib/json-atomic.cjs（tmp→fsync→bak→rename + 锁 + prevSha + 审计 8 键）。
    *  旧名只作薄别名，既有 12 处调用不改；新代码请直接 require 那个 CJS。 */
+  // R-ad44 AC5：写入审计 case 上下文——两个 UI 入口各标自己的 case，便于「审计 case 与入口一一对应」。
+  let currentWriteCase = '';
+  function withWriteCase(name, fn) {
+    const prev = currentWriteCase;
+    currentWriteCase = String(name || '');
+    return Promise.resolve()
+      .then(fn)
+      .finally(() => { currentWriteCase = prev; });
+  }
   function writeJsonAtomic(file, data, opts) {
-    return jsonAtomicCore.writeJsonAtomic(file, data, opts);
+    const merged = currentWriteCase ? { ...(opts || {}), case: currentWriteCase } : opts;
+    return jsonAtomicCore.writeJsonAtomic(file, data, merged);
   }
 
   function writeTextAtomic(file, text) {
@@ -2775,6 +2785,9 @@ function createTeamTools(options = {}) {
 
   // R-9db6 AC4：决策箱「回执 PM」后端通道（单条或批量；壳层 IPC owner:decision-ack 调用）。
   async function decisionAck(input = {}) {
+    return withWriteCase('decisionAckSend', () => decisionAckInner(input));
+  }
+  async function decisionAckInner(input = {}) {
     const projectName = String(input.projectName || input.project || '').trim();
     if (!projectName) return failure('PROJECT_REQUIRED', '缺少团队项目名');
     const tool = path.join(layout.toolRoot, 'decision-ack-ipc.mjs');
@@ -7584,6 +7597,9 @@ function decisionVersionMatches(decision, row) {
 }
 
 async function applyOwnerDecisionToRequirement(input = {}) {
+    return withWriteCase('owner:decide', () => applyOwnerDecisionToRequirementInner(input));
+}
+async function applyOwnerDecisionToRequirementInner(input = {}) {
     const name = String((input.project && (input.project.teamName || input.project.name)) || input.projectName || '').trim();
     if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
     const requirementId = String(input.requirementId || '').trim();
