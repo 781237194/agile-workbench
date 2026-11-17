@@ -27,9 +27,15 @@
  *
  * 用法：
  *   node scripts/audit-state-writes.cjs                 # 默认只审 src/main.js + src/team-tools.js
- *   node scripts/audit-state-writes.cjs --all --json    # 全仓 src/** + scripts/**
+ *   node scripts/audit-state-writes.cjs --all --json    # 全仓 src/** + scripts/** + 团队/工具/**
+ *   node scripts/audit-state-writes.cjs --team          # 只审团队工具口径（团队/工具/**，B-20261117-113925-b64d）
  *   node scripts/audit-state-writes.cjs --self-check    # 已知答案对账，不一致 exit 1
  *   node scripts/audit-state-writes.cjs --file src/app.js --file src/team-tools.js
+ *
+ * 团队工具口径（B-20261117-113925-b64d，PM 裁定-ad44偏差与缺口分批-20261117.md §二）：
+ *   `团队/工具/**` 的状态文件写入（当前工作区.json / 会话.json / 项目.json）已收编到 json-atomic；
+ *   KNOWN_TEAM 与该口径**分别对账**（两者期望值不同源：src 侧是 93/69，团队侧是逐文件直接写计数）。
+ *   `--check-state-writes` 对团队工具要求 state=0；unknown（动态路径）须人工复核，不得当 0 放过。
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -39,6 +45,13 @@ const ROOT = path.resolve(__dirname, '..');
 /** 已知答案（2026-11-17 01:30 按现状重锚：89/68 → 92/69 → 93/69；原因见文件头注释第 3 条） */
 const KNOWN = Object.freeze({
   'src/main.js': { directWrites: 93, stateWrites: 69 },
+});
+/** 团队工具口径的已知答案（B-20261117-113925-b64d 收编后基线，2026-11-18 02:03 实测）。
+ *  说明：这两处不再允许有「写状态文件」的直接写；剩余直接写全是**项目目录内**普通文件
+ *  （workspace.json / 团队会话.json|md / 项目文档），不是团队状态文件，故计数值保留为基线而非 0。 */
+const KNOWN_TEAM = Object.freeze({
+  '团队/工具/launch.mjs': { directWrites: 3 },
+  '团队/工具/workspace.mjs': { directWrites: 1 },
 });
 /** 漂移容差：|实测−期望| ≤ 该值 → 判 NOISE（他人新增/删写点），> 该值 → 判 FAIL（口径疑似出错） */
 const KNOWN_DRIFT_TOLERANCE = 10;
@@ -228,6 +241,7 @@ function parseArgs(argv) {
     else if (a === '--check-state-writes') args.checkStateWrites = true;
     else if (a === '--include-tests') args.includeTests = true;
     else if (a === '--include-scripts') args.includeScripts = true;
+    else if (a === '--team') args.team = true;
     else if (a === '--file') { args.files.push(String(argv[i + 1] || '')); i += 1; }
     else if (a === '--help' || a === '-h') args.help = true;
   }
@@ -237,12 +251,14 @@ function parseArgs(argv) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
-    console.log('用法: node scripts/audit-state-writes.cjs [--all] [--json] [--self-check] [--file <相对路径>]...');
+    console.log('用法: node scripts/audit-state-writes.cjs [--all] [--json] [--self-check] [--check-state-writes] [--team] [--file <相对路径>]...');
     return 0;
   }
   let targets = args.files.filter(Boolean);
   if (!targets.length) {
-    targets = args.all ? walk('src', []).concat(walk('scripts', [])) : ['src/main.js', 'src/team-tools.js'];
+    if (args.team) targets = walk('团队/工具', []);
+    else if (args.all) targets = walk('src', []).concat(walk('scripts', [])).concat(walk('团队/工具', []));
+    else targets = ['src/main.js', 'src/team-tools.js'];
   }
   const files = [];
   for (const t of targets) {
@@ -271,11 +287,33 @@ function main() {
     }
   }
   const metricChecks = checks.filter((c) => c.metric);
-  const knownOk = metricChecks.length > 0 && metricChecks.every((c) => c.ok || c.drift);
+  // 口径分离：只跑 --team 时 src/main.js 不在目标里，KNOWN 全是 skipped——此时不算失败（不是口径坏）。
+  const knownOk = metricChecks.length === 0 || metricChecks.every((c) => c.ok || c.drift);
   const knownHardFail = metricChecks.some((c) => !c.ok && !c.drift);
   const knownExact = metricChecks.length > 0 && metricChecks.every((c) => c.ok);
   const driftRows = metricChecks.filter((c) => c.drift);
-  const out = { at: new Date().toISOString(), root: ROOT, targets, files, totals, knownAnswer: { rules: KNOWN, tolerance: KNOWN_DRIFT_TOLERANCE, reanchorBatches: 2, reanchorPolicy: '重锚须留痕（时点+原因+谁的提交带来增量）；累计 ≥3 批在回执里提报 PM，由他决定是否收口成固定快照', checks, ok: knownOk, exact: knownExact, hardFail: knownHardFail, drift: driftRows } };
+
+  // 团队工具口径对账（B-20261117-113925-b64d）：与 src 侧 KNOWN 不同源，单独判、单独展示。
+  const teamChecks = [];
+  for (const [rel, expect] of Object.entries(KNOWN_TEAM)) {
+    const got = files.find((f) => f.file === rel);
+    if (!got) { teamChecks.push({ file: rel, skipped: 'not-in-targets' }); continue; }
+    for (const [k, v] of Object.entries(expect)) {
+      const actual = got[k];
+      const delta = Number.isFinite(actual) ? actual - v : null;
+      const ok = actual === v;
+      const drift = !ok && delta !== null && Math.abs(delta) <= KNOWN_DRIFT_TOLERANCE;
+      teamChecks.push({
+        file: rel, metric: k, expect: v, actual, raw: got[k + 'Raw'], delta, ok, drift,
+        advice: ok ? '' : (drift ? `实测 ${actual} / 期望 ${v}（Δ${delta > 0 ? '+' : ''}${delta}），建议重锚 KNOWN_TEAM` : `实测 ${actual} / 期望 ${v}（Δ${delta > 0 ? '+' : ''}${delta}）超出容差：先查剥注释/正则口径`),
+      });
+    }
+  }
+  const teamMetric = teamChecks.filter((c) => c.metric);
+  const teamOk = teamMetric.length === 0 || teamMetric.every((c) => c.ok || c.drift);
+  const teamHardFail = teamMetric.some((c) => !c.ok && !c.drift);
+  const teamExact = teamMetric.length > 0 && teamMetric.every((c) => c.ok);
+  const out = { at: new Date().toISOString(), root: ROOT, targets, files, totals, knownAnswer: { rules: KNOWN, tolerance: KNOWN_DRIFT_TOLERANCE, reanchorBatches: 2, reanchorPolicy: '重锚须留痕（时点+原因+谁的提交带来增量）；累计 ≥3 批在回执里提报 PM，由他决定是否收口成固定快照', checks, ok: knownOk, exact: knownExact, hardFail: knownHardFail, drift: driftRows, team: { rules: KNOWN_TEAM, checks: teamChecks, ok: teamOk, exact: teamExact, hardFail: teamHardFail } } };
 
   // AC1①：白名单内状态写判定（默认只报数；带 --check-state-writes 时输出明细）
   let stateCheck = null;
@@ -283,8 +321,9 @@ function main() {
     const rows = [];
     for (const f of files) {
       if (f.missing) continue;
-      // AC1① 只看产品面：默认排除夹具/自检/一次性脚本（scripts/**），只扫 src/** 与 团队/工具/**
-      // 放开口径：--include-tests（含 scripts/test-*、fixture-*）或 --include-scripts（含 scripts/** 全部）
+      // AC1① 只看产品面：默认 targets 是 src/main.js + src/team-tools.js；`--all` 追加 scripts/** 与 团队/工具/**，
+      // `--team` 只扫 团队/工具/**（B-20261117-113925-b64d 收编口径）。
+      // 夹具/自检/一次性脚本按口径排除：--include-tests（含 scripts/test-*、fixture-*）或 --include-scripts（含 scripts/** 全部）
       const inScripts = /(^|\/)scripts\//.test(f.file);
       const isTestScript = /(^|\/)scripts\/(test-|fixture-)/.test(f.file);
       if (inScripts && !args.includeScripts && !(args.includeTests && isTestScript)) continue;
@@ -315,6 +354,15 @@ function main() {
     console.log(`  → ${knownExact ? '对账通过（与基线逐位一致），计数可采信'
       : (knownHardFail ? '对账未通过：偏差超出容差，先查剥注释/字符串与正则口径，仍不符则报 PM「基线本身错」'
         : `对账通过（含 ${driftRows.length} 条容差内漂移：数字随他人提交演进，建议按现状重锚 KNOWN；计数口径本身未坏）`)}`);
+    if (teamMetric.length) {
+      console.log('  团队工具口径对账（KNOWN_TEAM，与 src 侧分开核对）：');
+      for (const c of teamChecks) {
+        if (c.skipped) { console.log(`    SKIP  ${c.file}（不在本次目标里；用 --team 或 --all 纳入）`); continue; }
+        const tag = c.ok ? 'PASS ' : (c.drift ? 'NOISE' : 'FAIL ');
+        console.log(`    ${tag} ${c.file} ${c.metric} 期望 ${c.expect} / 剥后 ${c.actual} / 原始 ${c.raw}${c.ok ? '' : `  ${c.advice || ''}`}`);
+      }
+      console.log(`    → ${teamExact ? '团队工具口径与基线逐位一致' : (teamHardFail ? '团队工具口径偏差超出容差（先查口径）' : '团队工具口径仅容差内漂移')}`);
+    }
     if (stateCheck) {
       console.log('  AC1① 白名单内状态写判定（STATE_FILE_GLOBS，按后缀排除 *.tmp/*.bak/*.lock）：');
       console.log(`    结果  state=${stateCheck.counts.state}  unknown=${stateCheck.counts.unknown}  nonState=${stateCheck.counts.nonState}  implInternal=${stateCheck.counts.implInternal}`);
@@ -326,7 +374,7 @@ function main() {
     }
   }
   if (args.checkStateWrites && stateCheck && !stateCheck.pass) return 1;
-  if (args.selfCheck && !knownOk) return 1;
+  if (args.selfCheck && (!knownOk || teamHardFail)) return 1;
   return 0;
 }
 

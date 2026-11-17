@@ -10,6 +10,8 @@ import { projectStatePaths, setActiveProject } from './lib/store.mjs';
 import { generateIndex } from './lib/ops.mjs';
 import { ensureProjectStructure } from './lib/scaffold.mjs';
 import { DshClient } from './lib/dsh-session.mjs';
+// B-20261117-113925-b64d：当前工作区.json 走 ad44 原子写（tmp→fsync→bak→rename + 锁），不再裸写。
+import { writeJsonAtomic } from './lib/json-atomic.mjs';
 
 function parse(argv) {
   const out = { _: [] };
@@ -106,7 +108,8 @@ function registerTeamProject(project, target, workspaceId, teamMode = 'full') {
     createdBy: old?.createdBy || 'owner',
     dshWorkspaceId: workspaceId || old?.dshWorkspaceId || null,
   };
-  fs.writeFileSync(p.config, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+  // B-20261117-113925-b64d：项目.json 属团队状态文件（团队/状态/项目/<P>/项目.json），一并走原子写。
+  writeJsonAtomic(p.config, cfg);
   setActiveProject(project);
   return cfg;
 }
@@ -201,7 +204,7 @@ async function main() {
     const cfg = registerTeamProject(project, target, oldId, teamMode);
     const idx = generateIndex(cfg, { by: 'owner', sessionId: 'workspace', silent: true });
     const current = { ...old, teamMode, dshWorkspaceId: oldId, path: target, reused: true };
-    fs.writeFileSync(path.join(PATHS.state, '当前工作区.json'), JSON.stringify(current, null, 2) + '\n', 'utf8');
+    writeJsonAtomic(path.join(PATHS.state, '当前工作区.json'), current);
     if (args.json) jsonOut({ ok: true, created: false, teamMode, workspace: old, project: cfg, currentWorkspace: current, index: idx });
     else textOut(`工作区已存在：${target}（${TEAM_MODE_LABELS[teamMode]}）`);
     return;
@@ -230,7 +233,7 @@ async function main() {
   const cfg = registerTeamProject(project, target, workspaceId, teamMode);
   const idx = generateIndex(cfg, { by: 'owner', sessionId: 'workspace', silent: true });
   const current = { ...metadata, dshCreated, path: target, reused: false };
-  fs.writeFileSync(path.join(PATHS.state, '当前工作区.json'), JSON.stringify(current, null, 2) + '\n', 'utf8');
+  writeJsonAtomic(path.join(PATHS.state, '当前工作区.json'), current);
   appendEvent({
     role: 'owner', sessionId: 'workspace', action: 'workspace_create', project,
     target, note: `${teamMode} 角色目录已建 workspaceId=${workspaceId || 'no-register'}`,

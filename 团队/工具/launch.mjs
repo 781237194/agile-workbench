@@ -10,6 +10,9 @@ import {
   TEAM_MODES, TEAM_MODE_LABELS, isTeamMode, normalizeTeamMode, rolesForMode, teamModeDescription, MODEL_BY_ROLE,
 } from './lib/roles.mjs';
 import { DshClient } from './lib/dsh-session.mjs';
+// B-20261117-113925-b64d：团队工具的状态文件写入也走 ad44 的原子写（tmp→fsync→bak→rename + 锁），
+// 不再裸 fs.writeFileSync（崩溃时会留半截 JSON）。
+import { writeJsonAtomic } from './lib/json-atomic.mjs';
 
 function parse(argv) {
   const out = { _: [] };
@@ -286,11 +289,11 @@ const currentWorkspace = {
   reused: !workspaceResult.created,
   updatedAt: nowIso(),
 };
-fs.writeFileSync(path.join(PATHS.state, '当前工作区.json'), JSON.stringify(currentWorkspace, null, 2) + '\n', 'utf8');
+writeJsonAtomic(path.join(PATHS.state, '当前工作区.json'), currentWorkspace);
 
 const record = { generatedAt: nowIso(), workspace, workspaceId: dshWorkspace.workspaceId, dshWorkspaceCreated: workspaceResult.created, project, teamMode, restoreMode, seedVisible, seedResults, noPrompt, promptRoles, addMembers, sessions, errors, cleanup, indexRefreshed, sessionManifest, currentWorkspace };
 const file = path.join(PATHS.state, '会话.json');
-fs.writeFileSync(file, JSON.stringify(record, null, 2) + '\n', 'utf8');
+writeJsonAtomic(file, record);
 appendEvent({
   role: 'owner', sessionId: 'launch', action: 'launch_sessions', project,
   target: roles.join(','), note: `mode=${teamMode} created=${sessions.length} errors=${errors.length} prompt=${!noPrompt} addMembers=${addMembers}`,
