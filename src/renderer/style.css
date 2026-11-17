@@ -4771,6 +4771,18 @@ html[data-style="glass"][data-theme="dark"] {
   --shadow: 0 20px 48px rgba(2,10,18,.52);
 }
 
+/* T-c595 扩范围（Owner 2026-11-17 08:22）：玻璃档下「收件箱」「经验教训」两个面板同样偏透看不清。
+   来源与需求/缺陷池不同：
+   · #mailbox-panel 原本是 `linear-gradient(color-mix(--panel 96%, white 4%), --panel)` —— 混白会把底推亮，玻璃档更糊；
+   · .lessons-card 直接用 var(--panel)，玻璃档下 .66 仍透。
+   这里只在 glass 档覆盖成「深色近实色（α=.88，≥.80）」并去掉混白；其他四档一字不动。 */
+html[data-style="glass"] #mailbox-panel {
+  background: rgba(16, 24, 32, .88);
+}
+html[data-style="glass"] .lessons-card {
+  background: rgba(16, 24, 32, .88);
+}
+
 /* R-fe90 F-3：外观展开的 5 项（根锚点仍是 button[data-more="theme"]，不另起入口，B-0538） */
 .mm-more-caret { flex: 0 0 auto; margin-left: 2px; color: var(--dim); font-size: 11px; }
 .mm-sub { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 4px 10px; padding: 4px; border-left: 1px solid var(--line-strong); }
