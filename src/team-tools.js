@@ -6045,6 +6045,8 @@ function createTeamTools(options = {}) {
       // B-b55c：列表与确认同源——快照带上"这份状态哪个文件、什么时候读的"，
       // 界面才能显示来源，并把界面看到的状态回传给确认接口做一致性判断。
       source: workflowStateSource(read),
+      // B-20261116-095320-410e：快照读盘时刻（界面/自检用它证明数据新鲜度，超 60 秒未刷新要提示可能过期）。
+      readAt: new Date().toISOString(),
       workflow: state,
       phase,
       stage: WORKFLOW_STAGE_BY_PHASE[phase] || 'intake',
@@ -6083,6 +6085,10 @@ function createTeamTools(options = {}) {
       },
       counts: {
         requirements: requirements.length,
+        // B-20261116-095320-410e：口径数字只认工作流需求行（registered）；
+        // 快照兜底行（task-only / legacy-doc，unregistered）单列 fallback，不计入口径。
+        registered: requirements.filter((row) => !row.unregistered).length,
+        fallback: requirements.filter((row) => row.unregistered).length,
         tasks: tasks.length,
         open: open.length,
         done: tasks.length - open.length,

@@ -244,16 +244,18 @@
    * 池状态桶（与既有四状态键对应）：
    *   需求行：沿用 R-3f0d 的既有判定（accepted/done/iteration → accepted；dispatched/dev/… → active；
    *           approved/ready → approved；其余 other）。
-   *   任务行：accepted（验收通过）→ accepted；done（未验收）→ accepted（与既有 poolBucket 的 done 归属一致，
-   *           行内标签另示「已完成·未验收」）；working/dev_done/test_done → active；
-   *           open（新开）→ pending（不在四个状态键中，只在「全部」下可见）。
+   *   任务行（B-20261116-094215-2ff6②）：**「已验收」只认 acceptanceRecord.status=accepted**；
+   *           status=done / accepted 但没有 accepted 验收记录的 → `unaccepted`（已完成·未验收，单独计数，
+   *           不进「已验收」筛选，也不再被当成已验收）；
+   *           working/dev_done/test_done → active；open（新开）→ pending（不在四个状态键中，只在「全部」下可见）。
    */
   function poolBucket(row) {
     if (kindOf(row) !== 'requirement') {
       if (acceptanceAccepted(row)) return 'accepted';
       const status = String((row && row.status) || '').toLowerCase();
       if (status === 'working' || status === 'dev_done' || status === 'test_done') return 'active';
-      if (status === 'done' || status === 'accepted') return 'accepted';
+      // 已完成但验收记录缺失 / 未 accepted：显示「已完成·未验收」，单独一桶，不算已验收。
+      if (status === 'done' || status === 'accepted') return 'unaccepted';
       return 'pending';
     }
     const s = String((row && row.status) || '');
@@ -272,11 +274,27 @@
   }
 
   /** 行内状态标签：需求沿用既有语义；任务按 F-1b。
-   *  B-a17d：未登记（只有需求任务文件、工作流没有行）显示「未登记」，已作废显示「已作废」。 */
+   *  B-a17d：未登记（只有需求任务文件、工作流没有行）显示「未登记」，已作废显示「已作废」。
+   *  B-20261116-095320-410e：需求状态文案与评审弹窗六档同源（review-list-core.UI3_STATUS_TEXT 的同一张表），
+   *  已终止/已驳回/产品评审中/新建正文中不再统一糊成「待评审」。 */
+  const REQ_STATUS_LABEL = {
+    new: '新建/正文中', draft: '新建/正文中', drafting: '新建/正文中', writing: '新建/正文中',
+    created: '新建/正文中', open: '新建/正文中', requirement: '新建/正文中', pending: '新建/正文中',
+    review: '产品评审中', requirement_review: '产品评审中', product_review: '产品评审中',
+    approved: '已通过', owner_review: '等你决定',
+    ready: '已通过', dispatched: '进行中', dev: '进行中', dev_review: '进行中', dev_done: '进行中',
+    // 池的既有口径：test_done 属「进行中」桶（B-dee4 AC2 矩阵），标签跟着桶走（不改既有断言）。
+    test: '进行中', test_done: '进行中',
+    accepted: '已验收', done: '已验收', iteration: '迭代中',
+    terminated: '已终止', rejected: '已驳回'
+  };
   function poolStatusLabel(row) {
     if (kindOf(row) !== 'requirement') return taskStatusLabel(row);
     if (row && row.voided === true) return '已作废';
     if (row && row.unregistered === true) return '未登记';
+    const raw = String((row && row.status) || '');
+    const mapped = REQ_STATUS_LABEL[raw.toLowerCase()];
+    if (mapped) return mapped;
     const b = poolBucket(row);
     return b === 'accepted' ? '已验收' : b === 'active' ? '进行中' : b === 'approved' ? '已通过' : '待评审';
   }
@@ -284,13 +302,45 @@
   /**
    * 是否进池：
    *   - 缺陷/场景缺陷任务行：全量进池（F-1b 要求新开缺陷也能看到）；
-   *   - 需求行：保留既有口径（bucket 不是 other，或已有 reviewedAt）；
+   *   - 需求行：B-20261116-095320-410e 起**工作流里有状态的需求行一律进池**（含已终止/已驳回/
+   *     产品评审中/新建正文中）——以前这些行因 bucket=other 被挡在池外，池的需求数（81）比评审
+   *     界面（91）/流程面板（90）少一截，三处口径对不上。无状态且无 reviewedAt 的行仍不进池（既有口径）。
    *   - 未登记需求（B-a17d）：必须进池，否则 Owner 看不到也就没法一键登记/作废。
    */
   function poolEntered(row) {
     if (kindOf(row) !== 'requirement') return true;
     if (row && (row.unregistered === true || row.voided === true)) return true;
+    const status = String((row && row.status) || '').toLowerCase();
+    // 已收口（含终止/驳回）：一律进池——以前这些行因 bucket=other 被挡在池外，池的需求数比
+    // 评审界面/流程面板少一截（三处口径对不上），且「已终止」需求 Owner 在池里完全看不到。
+    if (['accepted', 'done', 'terminated', 'rejected', 'iteration'].includes(status)) return true;
+    // 产品评审中也进池（与评审界面的「产品评审中」档同集合）。
+    if (['review', 'requirement_review', 'product_review'].includes(status)) return true;
+    // 其余保持既有口径：有 status 且 bucket 不是 other，或已有 reviewedAt。
     return poolBucket(row) !== 'other' || !!(row && row.reviewedAt);
+  }
+
+  /**
+   * 池的口径数字（B-20261116-095320-410e）：与评审界面 / 流程面板用同一套定义——
+   *   requirement = 需求行总数；registered = 工作流需求行；fallback = 快照兜底行（未登记，单列）；
+   *   defect = 缺陷/场景缺陷任务行；accepted = 验收通过；unaccepted = 已完成但未验收（单独计数）。
+   */
+  function poolScopeCounts(rows) {
+    const list = Array.isArray(rows) ? rows : [];
+    const out = { all: list.length, requirement: 0, registered: 0, fallback: 0, unregistered: 0, voided: 0, defect: 0, accepted: 0, unaccepted: 0 };
+    for (const row of list) {
+      if (poolTypeGroup(row) === 'requirement') {
+        out.requirement += 1;
+        if (row && row.unregistered === true) { out.fallback += 1; out.unregistered += 1; } else out.registered += 1;
+        if (row && row.voided === true) out.voided += 1;
+        continue;
+      }
+      out.defect += 1;
+      const bucket = poolBucket(row);
+      if (bucket === 'accepted') out.accepted += 1;
+      if (bucket === 'unaccepted') out.unaccepted += 1;
+    }
+    return out;
   }
 
   /* ── 证据 / 测试报告 / 最近决策 ──────────────────────────────────────── */
@@ -668,7 +718,7 @@
       + `<span class="pool-id">${esc(id)}</span>`
       + `<span class="pool-title" title="${esc(title)}">${esc(title)}</span>`
       + ghost + voided
-      + `<span class="pool-state s-${bucket}">${esc(statusLabel)}</span>`
+      + `<span class="pool-state s-${bucket}${bucket === 'unaccepted' ? ' s-pending' : ''}">${esc(statusLabel)}</span>`
       + acceptByBadge
       + `<span class="pool-who">${esc(owner)}</span>`
       + retract
@@ -975,6 +1025,8 @@
     poolBucket,
     poolStatusLabel,
     poolEntered,
+    // B-20261116-095320-410e：池的口径数字（需求/工作流/兜底/已完成未验收），与评审/流程同源。
+    poolScopeCounts,
     parseEvidence,
     evidenceKindOf,
     pickTestReport,

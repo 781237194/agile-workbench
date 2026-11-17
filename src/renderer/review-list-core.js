@@ -37,6 +37,13 @@ function trimText(value) { return textOf(value).replace(/\s+/g, ' ').trim(); }
 function groupOf(row) {
   const status = trimText(row && row.status).toLowerCase();
   if (!status) return { group: 'pending', statusUnknown: true };
+  // B-20261116-094215-2ff6①：已有 Owner 决定（decisions 末条 approved/skipped，且绑当前正文版本）的行，
+  // 不得再按「approved / owner_review 状态」归到等你决定——这是「Owner 已经批过、界面还在等他」的根因。
+  // 无决定的行仍走下面的状态映射（approved 且未决定 → 等你决定，test-review-list G-01 口径不变）。
+  if (!CLOSED.has(status)) {
+    const decided = UI3_ownerDecisionOf(row);
+    if (decided === 'approved' || decided === 'skipped') return { group: 'running', statusUnknown: false };
+  }
   for (const item of GROUPS) {
     if (STATUS_GROUP[item.key].includes(status)) return { group: item.key, statusUnknown: false };
   }
@@ -282,7 +289,196 @@ function copyMissingAttr(blocks) {
   return (Array.isArray(blocks) ? blocks : []).filter((b) => b.missing).map((b) => b.key).join(',');
 }
 
-const api = { GROUPS, STATUS_GROUP, FIELD_LABEL, groupOf, overdueOf, unreadOf, updatedAtOf, sortRows, groupRows, acItemsOf, takePointsOf, copyBlocksOf, copyMissingAttr };
+/* ════════════════════════════════════════════════════════════════════════
+ * UI3：三处「需求口径」的唯一判定（B-20261116-094215-2ff6 / B-20261116-095320-410e /
+ * B-20261116-100905-1211）
+ *
+ * 口径定义（写死，三处必须同源）：
+ *   - 口径数字 = 工作流.json 里的需求行（registered），当前 100 行；
+ *   - 快照兜底行（task-only / legacy-doc，unregistered=true）单列说明，**不计入**口径数字；
+ *   - 评审弹窗六档：新建/正文中 → 产品评审中 → 等你决定 → 进行中 → 待验收 → 已收口。
+ *
+ * 命名：渲染层多个 <script> 共用全局词法作用域（2026-11-16 曾因跨文件顶层 const 撞名整份脚
+ * 本 SyntaxError），本块所有顶层标识符一律带 UI3_ 前缀，只能新增、不能顶掉既有名字。
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/** 已收口（与 app.js FLOW_CLOSED_STATUSES / flow-v4.js CLOSED 同口径）。 */
+const UI3_CLOSED_STATUSES = ['accepted', 'done', 'terminated', 'rejected'];
+/** 产品评审阶段的状态（产品还没通过、还不该 Owner 看）。 */
+const UI3_PRODUCT_REVIEW_STATUSES = ['review', 'requirement_review', 'product_review'];
+/** 新建 / 正文中（还没进产品评审）。 */
+const UI3_DRAFT_STATUSES = ['new', 'draft', 'drafting', 'writing', 'created', 'open', 'requirement', 'pending'];
+/** 进行中（产品已通过之后的实现链）。 */
+const UI3_RUNNING_STATUSES = ['ready', 'dispatched', 'dev', 'dev_review', 'dev_done', 'test', 'iteration', 'iteration_open', 'tech_review'];
+/** 六档（顺序 = 评审弹窗展示顺序）。 */
+const UI3_GROUPS = [
+  { key: 'draft', label: '新建/正文中' },
+  { key: 'product_review', label: '产品评审中' },
+  { key: 'pending', label: '等你决定' },
+  { key: 'running', label: '进行中' },
+  { key: 'test_done', label: '待验收' },
+  { key: 'closed', label: '已收口' }
+];
+/** 需求状态 → 人话（流程面板 / 池 / 评审共用同一张表；不再各写一份）。 */
+const UI3_STATUS_TEXT = {
+  new: '新建/正文中', draft: '新建/正文中', drafting: '新建/正文中', writing: '新建/正文中',
+  created: '新建/正文中', open: '新建/正文中', requirement: '新建/正文中', pending: '新建/正文中',
+  review: '产品评审中', requirement_review: '产品评审中', product_review: '产品评审中',
+  approved: '等你决定', owner_review: '等你决定',
+  tech_review: '技术评审', ready: '可派单', dispatched: '已派单', dev: '开发中', dev_review: '开发互审',
+  dev_done: '开发完成', test: '测试中', test_done: '待验收',
+  accepted: '已验收', done: '已完成', terminated: '已终止', rejected: '已驳回', iteration: '迭代中', iteration_open: '迭代中'
+};
+
+function UI3_statusOf(row) { return trimText(row && row.status).toLowerCase(); }
+
+/** 快照兜底行：工作流里没有行、由任务镜像 / 需求正文兜底出来的行（不计入口径数字）。 */
+function UI3_isFallbackRow(row) {
+  if (!row || typeof row !== 'object') return false;
+  return row.unregistered === true || row.registered === false
+    || row.source === 'task-only' || row.source === 'legacy-doc';
+}
+
+/**
+ * Owner 决定派生（与 owner-review-state.js 的 decidedStatusOf 同判据）：
+ * decisions[] 末条优先 → ownerReview.status；末条决定若绑的是旧正文版本（无 basis / hash 不等）
+ * 视为没有决定（那是上一版的决定，当前版本仍等重新决定）。
+ * 浏览器里优先用已加载的 OwnerReviewState（唯一实现），Node 单测/脚本缺失时用本文件同一套兜底。
+ */
+function UI3_ownerDecisionOf(row) {
+  const state = (typeof globalThis !== 'undefined' && globalThis.OwnerReviewState) ? globalThis.OwnerReviewState : null;
+  if (state && typeof state.decidedStatusOf === 'function') return trimText(state.decidedStatusOf(row)).toLowerCase();
+  const owner = (row && row.ownerReview && typeof row.ownerReview === 'object') ? row.ownerReview : {};
+  const top = Array.isArray(row && row.decisions) ? row.decisions.filter(Boolean) : [];
+  const legacy = Array.isArray(owner.decisions) ? owner.decisions.filter(Boolean) : [];
+  const latest = top.length ? top[top.length - 1] : (legacy.length ? legacy[legacy.length - 1] : null);
+  const pick = (value) => {
+    const text = trimText(value).toLowerCase();
+    return ['approved', 'rejected', 'skipped'].includes(text) ? text : '';
+  };
+  if (!latest) return pick(owner.status);
+  const from = pick(latest.status || latest.decision);
+  if (!from) return pick(owner.status);
+  // 版本校验（与 owner-review-state.js isDecisionCurrent 同口径）
+  const basis = (latest.basis && typeof latest.basis === 'object' && latest.basis.requirement) ? latest.basis.requirement : {};
+  const decidedSha = trimText(basis.sha256);
+  const decidedContent = trimText(basis.contentHash);
+  if (!decidedSha && !decidedContent) return ''; // 旧决定（无版本凭据）→ 过期
+  const rr = (row && row.requirementReview && typeof row.requirementReview === 'object') ? row.requirementReview : {};
+  const currentSha = trimText(row && (row.requirementHash || row.docHash)) || trimText(rr.requirementHash);
+  const currentContent = trimText(rr.contentHash) || trimText(row && row.contentHash);
+  if (!currentSha && !currentContent) return from; // 行上没有版本信息 → 无法证明过期，按当前算
+  if (decidedSha && currentSha && decidedSha === currentSha) return from;
+  if (decidedContent && currentContent && decidedContent === currentContent) return from;
+  return '';
+}
+
+/** 产品评审结论（requirementReview 优先，其次 productReview；无记录返回空串）。 */
+function UI3_productVerdictOf(row) {
+  const rr = (row && row.requirementReview && typeof row.requirementReview === 'object') ? row.requirementReview : {};
+  const pr = (row && row.productReview && typeof row.productReview === 'object') ? row.productReview : {};
+  return trimText(rr.verdict || pr.verdict || '').toLowerCase();
+}
+
+/** 这一行当前能不能「派单」（ready 且未作废、未收口）；流程面板的「可派单」只认它。 */
+function UI3_isDispatchable(row) {
+  const status = UI3_statusOf(row);
+  if (status !== 'ready') return false;
+  if (row && row.voided === true) return false;
+  return !UI3_CLOSED_STATUSES.includes(status);
+}
+
+/**
+ * 六档判定（唯一实现）：返回 { key, statusUnknown }。
+ * 顺序写死：已收口 > 已决定（已通过/已跳过 → 进行中）> 产品评审中 > 等你决定 > 待验收 > 进行中 > 新建。
+ * 注：评审弹窗的「等你决定」仍先走 owner-review.js 的 isPending（现有口径不变，含打回后复审、
+ * 决定绑旧版浮出），本函数只负责 isPending 之外的档；模块缺失时 owner-review.js 有同口径兜底。
+ */
+function UI3_bucketOf(row) {
+  const status = UI3_statusOf(row);
+  if (!status) return { key: 'draft', statusUnknown: true };
+  if (UI3_CLOSED_STATUSES.includes(status)) return { key: 'closed', statusUnknown: false };
+  const decided = UI3_ownerDecisionOf(row);
+  if (decided === 'approved' || decided === 'skipped') return { key: 'running', statusUnknown: false };
+  if (UI3_PRODUCT_REVIEW_STATUSES.includes(status)) {
+    // 产品已通过（RR approve）但状态没推进：交给流程/派单链，不再混进「产品评审中」，也不塞给 Owner。
+    return { key: UI3_productVerdictOf(row) === 'approve' ? 'running' : 'product_review', statusUnknown: false };
+  }
+  if (status === 'approved' || status === 'owner_review') return { key: 'pending', statusUnknown: false };
+  if (decided === 'rejected') return { key: 'pending', statusUnknown: false }; // 打回后已改：重新等 Owner 复审
+  if (status === 'test_done') return { key: 'test_done', statusUnknown: false };
+  if (UI3_RUNNING_STATUSES.includes(status)) return { key: 'running', statusUnknown: false };
+  if (UI3_DRAFT_STATUSES.includes(status)) return { key: 'draft', statusUnknown: false };
+  // 未列状态：不丢行、落等决定并打标（与 groupOf 同口径）。
+  return { key: 'pending', statusUnknown: true };
+}
+
+/** 状态人话；流程面板的 statusText 与池标签都从这里取，避免各写一份。 */
+function UI3_statusTextOf(rowOrStatus) {
+  const raw = (rowOrStatus && typeof rowOrStatus === 'object') ? rowOrStatus.status : rowOrStatus;
+  const status = trimText(raw).toLowerCase();
+  return UI3_STATUS_TEXT[status] || trimText(raw) || '—';
+}
+
+/** 需求行集合口径：{ all, registered, fallback }（fallback = 快照兜底行，不计入口径数字）。 */
+function UI3_requirementSet(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  let fallback = 0;
+  for (const row of list) if (UI3_isFallbackRow(row)) fallback += 1;
+  return { all: list.length, registered: list.length - fallback, fallback };
+}
+
+/** 六档计数 + 口径数字（三处共用；没有行的档给 0，不省略）。 */
+function UI3_groupCounts(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const counts = { draft: 0, product_review: 0, pending: 0, running: 0, test_done: 0, closed: 0 };
+  let unknown = 0;
+  for (const row of list) {
+    const info = UI3_bucketOf(row);
+    if (Object.prototype.hasOwnProperty.call(counts, info.key)) counts[info.key] += 1;
+    if (info.statusUnknown) unknown += 1;
+  }
+  const set = UI3_requirementSet(list);
+  return {
+    all: list.length,
+    registered: set.registered,
+    fallback: set.fallback,
+    unknown,
+    counts,
+    groups: UI3_GROUPS.map((item) => ({ key: item.key, label: item.label, count: counts[item.key] || 0 })),
+    open: list.length - counts.closed,
+    closed: counts.closed
+  };
+}
+
+/** 已收口（工作流口径）= accepted/done/terminated/rejected，供池/流程复用。 */
+function UI3_isClosedRow(row) { return UI3_CLOSED_STATUSES.includes(UI3_statusOf(row)); }
+
+/**
+ * 流程面板数据新鲜度：refreshedAt 是「最后一次成功读到工作流」的时刻（ISO 或毫秒）。
+ * 超过 staleAfterMs（默认 60 秒）没刷新 → stale=true，界面必须写「数据可能过期」，不许静默停在旧数字。
+ */
+function UI3_flowFreshness(refreshedAt, nowMs, staleAfterMs) {
+  const raw = refreshedAt === null || refreshedAt === undefined ? '' : refreshedAt;
+  const atMs = typeof raw === 'number' ? (raw > 0 ? raw : NaN) : Date.parse(trimText(raw));
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const limit = Number.isFinite(staleAfterMs) && staleAfterMs > 0 ? staleAfterMs : 60000;
+  if (!Number.isFinite(atMs)) return { refreshedAt: '', ageMs: null, stale: true, reason: 'NEVER_REFRESHED', limitMs: limit };
+  const ageMs = Math.max(0, now - atMs);
+  return {
+    refreshedAt: new Date(atMs).toISOString(),
+    ageMs,
+    stale: ageMs > limit,
+    reason: ageMs > limit ? 'STALE' : 'FRESH',
+    limitMs: limit
+  };
+}
+
+const api = { GROUPS, STATUS_GROUP, FIELD_LABEL, groupOf, overdueOf, unreadOf, updatedAtOf, sortRows, groupRows, acItemsOf, takePointsOf, copyBlocksOf, copyMissingAttr,
+  // B-2ff6 / B-410e / B-1211：三处同源口径（UI3 前缀，见上方注释）
+  UI3_GROUPS, UI3_CLOSED_STATUSES, UI3_STATUS_TEXT,
+  UI3_statusOf, UI3_isFallbackRow, UI3_ownerDecisionOf, UI3_productVerdictOf, UI3_isDispatchable,
+  UI3_bucketOf, UI3_statusTextOf, UI3_requirementSet, UI3_groupCounts, UI3_isClosedRow, UI3_flowFreshness };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 if (typeof globalThis !== 'undefined') globalThis.ReviewListCore = api;

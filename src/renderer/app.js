@@ -4050,7 +4050,7 @@ function boardMatchesProject(board, project) {
 function boardCountsMarkup(counts) {
   const nums = [
     ['需求', counts.requirements], ['任务', counts.tasks],
-    ['提交', counts.commits], ['回执', counts.receipts], ['文件', counts.files]
+    ['回执', counts.receipts]
   ];
   if (!nums.some(([, n]) => n !== null)) return '';
   return `<div class="team-board-nums">${nums.map(([label, n]) => `<div class="board-num"><b>${n === null ? '—' : n}</b><span>${label}</span></div>`).join('')}</div>`;
@@ -8349,6 +8349,12 @@ async function loadLegacyDocs(force = false) {
       // 不再用 p.workflowMirror.phase 覆盖刚读到的 snapshot：那是上次 apply 时的旧镜像，
       // 角色直接写 工作流.json 后它不会更新，会把流程图永久钉在旧阶段。
       legacyUi.workflow = merged;
+      // B-410e：首屏/刷新读到的这份工作流也要记「读到时刻」，否则流程面板会显示「刷新时刻未知」。
+      try {
+        const readAtMs = Date.parse(String((workflow && workflow.readAt) || (next && next.readAt) || ''));
+        flowLiveState.refreshedAt = Number.isFinite(readAtMs) ? readAtMs : Date.now();
+        flowLiveState.lastError = null;
+      } catch { /* 时间戳失败不影响取数 */ }
     } else {
       legacyUi.workflow = null;
     }
@@ -12011,8 +12017,24 @@ function applyPoolFilters() {
   const statusLabel = (POOL_FILTERS.find((f) => f.key === poolUi.filter) || {}).label || '全部';
   const kindLabel = (POOL_KIND_FILTERS.find((f) => f.key === poolUi.kindFilter) || {}).label || '全部类型';
   const query = String(poolUi.query || '').trim();
-  if ($('#pool-foot')) {
-    $('#pool-foot').textContent = `池内 ${rows.length} 条（需求 ${totalReq} · 缺陷 ${totalDef}），当前显示 ${visible.length} 条；状态：${statusLabel} · 类型：${kindLabel}${query ? ` · 搜索：${query}` : ''}`;
+  // B-20261116-095320-410e：池的口径数字挂到 #pool-foot（需求 = 工作流需求行；兜底行单列），
+  // 与评审界面 [data-owner-all-total] / 流程面板 [data-flow-total] 同一个 UI3 口径。
+  // B-20261116-094215-2ff6②：已完成但未验收的缺陷单独计数（不再混进「已验收」）。
+  const scope = (POOL_CORE && typeof POOL_CORE.poolScopeCounts === 'function')
+    ? POOL_CORE.poolScopeCounts(rows)
+    : { requirement: totalReq, registered: totalReq, fallback: 0, defect: totalDef, accepted: 0, unaccepted: 0, unregistered: 0 };
+  const foot = $('#pool-foot');
+  if (foot) {
+    const unacceptedNote = scope.unaccepted ? `；已完成未验收 ${scope.unaccepted}（不计入已验收）` : '';
+    const fallbackNote = scope.fallback ? `；另 ${scope.fallback} 条快照兜底行（单列、不计入口径）` : '';
+    foot.textContent = `池内 ${rows.length} 条（需求 ${scope.registered}${fallbackNote} · 缺陷 ${totalDef}），当前显示 ${visible.length} 条${unacceptedNote}；状态：${statusLabel} · 类型：${kindLabel}${query ? ` · 搜索：${query}` : ''}`;
+    foot.setAttribute('data-pool-total', String(rows.length));
+    foot.setAttribute('data-pool-req', String(scope.registered));
+    foot.setAttribute('data-pool-req-all', String(scope.requirement));
+    foot.setAttribute('data-pool-fallback', String(scope.fallback || 0));
+    foot.setAttribute('data-pool-def', String(totalDef));
+    foot.setAttribute('data-pool-accepted', String(scope.accepted || 0));
+    foot.setAttribute('data-pool-unaccepted', String(scope.unaccepted || 0));
   }
   const nomatch = $('#pool-nomatch');
   if (nomatch) nomatch.hidden = !(rows.length > 0 && visible.length === 0);
@@ -12508,15 +12530,22 @@ function renderLegacyFlowExtras(p) {
 /**
  * 流程图实时刷新：只读 workflow:state / workflow:next，不写文件、不重读全部文档。
  * 角色用 team.mjs 直接改文件时，界面最多 5 秒跟上；失败按 2s/5s/10s 退避，隐藏时暂停。
+ *
+ * B-20261116-095320-410e：面板数据必须能证明「什么时候读的」——
+ *   refreshedAt = 最后一次成功读到工作流的时刻（用快照 readAt 优先，其次本机读到的时间）；
+ *   超过 60 秒没刷新就 stale=true，界面写「数据可能过期」，不许静默停在旧数字（AC3）。
  */
-const flowLiveState = { failures: 0, nextAt: 0 };
+const flowLiveState = { failures: 0, nextAt: 0, refreshedAt: 0, lastError: null, loading: false };
+const FLOW_STALE_AFTER_MS = 60000;
 
 async function refreshFlowLive() {
   const p = activeProject();
   if (!p || !window.workbench) return false;
+  if (flowLiveState.loading) return false;
   const flowOpen = !$('#flow-panel')?.hidden;
-  if (!flowOpen && openDrawerName !== 'project') return false;
+  if (!flowOpen && openDrawerName !== 'project' && activeTab !== 'flow') return false;
   const wb = window.workbench;
+  flowLiveState.loading = true;
   try {
     const [wf, nx] = await Promise.all([
       typeof wb.workflowState === 'function' ? wb.workflowState({ projectId: p.id }).catch(() => null) : null,
@@ -12547,6 +12576,11 @@ async function refreshFlowLive() {
     };
     legacyUi.workflowError = null;
     flowLiveState.failures = 0;
+    flowLiveState.lastError = null;
+    // 数据时间戳：优先用快照自带的读盘时间（readAt，来自团队工具实时读 工作流.json）；
+    // 老快照没有 readAt 时退回“本机读到的时刻”，仍可证明刷新节奏。
+    const readAtMs = Date.parse(String((wf && wf.readAt) || ''));
+    flowLiveState.refreshedAt = Number.isFinite(readAtMs) ? readAtMs : Date.now();
     // R-db98 v2：验收要求「状态变化 5 秒内刷新」；节流 4 秒 + 1 秒心跳，保证最坏 5 秒内命中。
     flowLiveState.nextAt = Date.now() + 4000;
     renderFlow();
@@ -12556,18 +12590,24 @@ async function refreshFlowLive() {
     return true;
   } catch (error) {
     flowLiveState.failures += 1;
+    flowLiveState.lastError = String((error && (error.message || error.code)) || error || '刷新失败').slice(0, 120);
     const delay = flowLiveState.failures <= 1 ? 2000 : (flowLiveState.failures === 2 ? 5000 : 10000);
     flowLiveState.nextAt = Date.now() + delay;
-    // 只读刷新失败不打断界面，也不拿旧值冒充；下次按退避重试。
+    // 只读刷新失败不打断界面，也不拿旧值冒充；下次按退避重试，面板上写明「数据可能过期」。
+    renderFlow();
     return false;
+  } finally {
+    flowLiveState.loading = false;
   }
 }
 
-/** 1 秒心跳 + 5 秒节流：面板不可见时暂停，重新打开立即刷新一次。 */
+/** 1 秒心跳 + 5 秒节流：面板不可见时暂停，重新打开立即刷新一次。
+ *  B-410e：主界面「流程」页签（activeTab==='flow'）也算可见——以前只有浮窗/项目抽屉打开才刷新，
+ *  流程页停在旧快照上会继续显示「可派单」，而工作流里早已作废/终止。 */
 function flowRefreshTick() {
   const p = activeProject();
   const flowOpen = !$('#flow-panel')?.hidden;
-  if (!p || (!flowOpen && openDrawerName !== 'project')) { flowLiveState.nextAt = 0; return; }
+  if (!p || (!flowOpen && openDrawerName !== 'project' && activeTab !== 'flow')) { flowLiveState.nextAt = 0; return; }
   if (Date.now() < flowLiveState.nextAt) return;
   refreshFlowLive();
 }
@@ -12581,12 +12621,27 @@ const flowRenderUi = { projectId: '', sig: '' };
  * 右下角流程图不重绘，看起来“点了没反应”。现在把 ownerReview.status、decisions 条数与最近决定时间、
  * 账本分叉条数一起算进签名：判定后 5 秒轮询拿到新数据就会重绘。 */
 
-/** v4 流程面板数据：从工作流 requirements 构建（优先级排序、卡点/冲突/验收人）。 */
-/** 已收口状态：与 legacyActiveRequirement 同口径（验收/完成/终止/迭代/驳回）；流程图默认只看未收口。 */
+/** v4 流程面板数据：从工作流 requirements 构建（优先级排序、卡点/冲突/验收人）。
+ *  B-20261116-095320-410e：口径与评审界面 / 需求缺陷池同源——
+ *   ① 总数只认工作流需求行（registered）；快照兜底行单列（fallbackCount），不计入 total/open/closed；
+ *   ② 行状态文案走 review-list-core 的 UI3_STATUS_TEXT（唯一一张表），已作废/已终态的永不显示「可派单」；
+ *   ③ 数据带 refreshedAt + stale（超过 60 秒没刷新 → 界面写「数据可能过期」）。
+ */
 const FLOW_CLOSED_STATUSES = ['accepted', 'done', 'terminated', 'iteration', 'rejected'];
+/** 取 UI3 纯逻辑（review-list-core.js 在 app.js 之后加载，这里按调用时惰性取）。 */
+function flowUi3() {
+  return (typeof window !== 'undefined' && window.ReviewListCore) ? window.ReviewListCore : null;
+}
 function flowV4Data() {
   const wf = legacyWorkflow() || {};
-  const reqs = Array.isArray(wf.requirements) ? wf.requirements : [];
+  const allReqs = Array.isArray(wf.requirements) ? wf.requirements : [];
+  const ui3 = flowUi3();
+  // 口径：工作流需求行；快照兜底行（task-only / legacy-doc）单列说明，不混进 total/open/closed。
+  const isFallback = (r) => (ui3 && typeof ui3.UI3_isFallbackRow === 'function')
+    ? ui3.UI3_isFallbackRow(r)
+    : Boolean(r && (r.unregistered === true || r.registered === false || r.source === 'task-only' || r.source === 'legacy-doc'));
+  const reqs = allReqs.filter((r) => !isFallback(r));
+  const fallbackCount = allReqs.length - reqs.length;
   const byId = new Map(reqs.map((r) => [String(r.id), r]));
   const nameOf = (id) => String((byId.get(id) || {}).title || id || '');
   const PRI = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -12620,11 +12675,21 @@ function flowV4Data() {
     const created = Date.parse(r.createdAt || '') || 0;
     const days = created ? Math.max(0, Math.round((Date.now() - created) / 86400000)) : 0;
     const iterations = Array.isArray(r.history) ? r.history.filter((ev) => ev && ev.action === 'iterate').length : 0;
+    const closed = FLOW_CLOSED_STATUSES.includes(status);
+    // 「可派单」只认 ready 且未作废、未收口（UI3_isDispatchable 是唯一判据）。
+    const dispatchable = (ui3 && typeof ui3.UI3_isDispatchable === 'function')
+      ? ui3.UI3_isDispatchable(r)
+      : (status === 'ready' && r.voided !== true);
+    const baseText = (ui3 && typeof ui3.UI3_statusTextOf === 'function')
+      ? ui3.UI3_statusTextOf(status)
+      : '';
+    const statusText = r.voided === true && !closed ? '已作废'
+      : (status === 'ready' ? (dispatchable ? '可派单' : '待派单（不可派）') : baseText);
     return {
       id: String(r.id || ''), title: String(r.title || ''), pri: String(r.priority || 'P2').toUpperCase(),
-      owner: String(r.owner || r.createdBy || ''), status, statusText: '', stage: 0,
+      owner: String(r.owner || r.createdBy || ''), status, statusText, stage: 0,
       updatedAt: String(r.updatedAt || ''), closedAt: String(r.closedAt || ''), round: Number(r.round || wf.round || 1),
-      closed: FLOW_CLOSED_STATUSES.includes(status),
+      closed, voided: r.voided === true, dispatchable,
       iterationRound: iterations, acceptor, blocker, deps, conflicts,
       elapsed: days ? days + ' 天' : ''
     };
@@ -12637,7 +12702,61 @@ function flowV4Data() {
     { key: 'review-dev', on: items.some((i) => ['approved', 'ready'].includes(i.status)) && items.some((i) => ['dev', 'dev_review'].includes(i.status)), label: '评审 ∥ 开发' },
     { key: 'test-collect', on: items.some((i) => ['test', 'test_done'].includes(i.status)) && items.some((i) => i.status === 'review'), label: '测试 ∥ 下一次收集' }
   ];
-  return { round: Number(wf.round || 1), total: items.length, open: items.length - closedCount, closed: closedCount, active, items, parallel };
+  // 六档计数 / 口径数字（与评审弹窗、需求池同一个 UI3_groupCounts）。
+  const groupCounts = (ui3 && typeof ui3.UI3_groupCounts === 'function')
+    ? ui3.UI3_groupCounts(reqs)
+    : { all: reqs.length, registered: reqs.length, fallback: 0, counts: {}, groups: [], open: reqs.length - closedCount, closed: closedCount };
+  const freshness = (ui3 && typeof ui3.UI3_flowFreshness === 'function')
+    ? ui3.UI3_flowFreshness(flowLiveState.refreshedAt, Date.now(), FLOW_STALE_AFTER_MS)
+    : { refreshedAt: '', ageMs: null, stale: true, reason: 'NEVER_REFRESHED', limitMs: FLOW_STALE_AFTER_MS };
+  return {
+    round: Number(wf.round || 1),
+    total: reqs.length,
+    registered: reqs.length,
+    fallbackCount,
+    open: reqs.length - closedCount,
+    closed: closedCount,
+    active,
+    items,
+    parallel,
+    groupCounts,
+    freshness,
+    refreshError: flowLiveState.lastError || '',
+    refreshedAt: freshness.refreshedAt,
+    stale: freshness.stale === true
+  };
+}
+
+/** 把流程数据的口径数字与新鲜度挂到面板节点上（自检/测试按属性取数，不靠读文案）。
+ *  B-410e AC1/AC3：[data-flow-total] 与评审/池同源；[data-flow-refreshed-at]/[data-flow-stale] 是新鲜度契约。 */
+function paintFlowDataAnchors(data) {
+  const box = data || {};
+  const attrs = {
+    'data-flow-total': String(box.registered != null ? box.registered : (box.total || 0)),
+    'data-flow-open': String(box.open || 0),
+    'data-flow-closed': String(box.closed || 0),
+    'data-flow-fallback': String(box.fallbackCount || 0),
+    'data-flow-refreshed-at': String(box.refreshedAt || ''),
+    'data-flow-stale': box.stale ? '1' : '0',
+    'data-flow-refresh-error': String(box.refreshError || '')
+  };
+  for (const sel of ['#flow-mini', '#flow-board', '#flow-meta', '#flow-mini-meta', '#flow-summary']) {
+    const node = $(sel);
+    if (!node) continue;
+    for (const key of Object.keys(attrs)) node.setAttribute(key, attrs[key]);
+  }
+}
+
+/** 流程数据新鲜度人话：刷新时刻 + 过期提醒（超 60 秒 / 刷新失败都必须写出来，禁止静默）。 */
+function flowFreshnessText(data) {
+  const box = data || {};
+  const at = Number.isFinite(Date.parse(String(box.refreshedAt || ''))) ? fmtTime(box.refreshedAt) : '';
+  if (!at) return '｜ 数据刷新时刻未知（可能过期）';
+  if (box.stale) {
+    const err = box.refreshError ? `；最近一次刷新失败：${box.refreshError}` : '';
+    return `｜ ⚠ 数据可能过期（最后刷新 ${at}，超过 60 秒）${err}`;
+  }
+  return `｜ 数据刷新于 ${at}`;
 }
 
 function flowRenderSignature(p) {
@@ -12683,6 +12802,7 @@ function renderFlow() {
   if (!p) {
     flowRenderUi.projectId = '';
     flowRenderUi.sig = '';
+    paintFlowDataAnchors({ total: 0, registered: 0, open: 0, closed: 0, fallbackCount: 0, refreshedAt: '', stale: true });
     const empty = `<div class="flow-empty">先新建或选择一个项目，旧流程会随阶段与真实记录变化。</div>`;
     board.innerHTML = `<div class="view-empty compact"><span class="view-empty-mark">⇢</span><h3>还没有项目流程</h3><p>新建项目后，需求 → 产品评审 → Owner → PM 派单 → 开发互审 → 测试 → Owner 验收 → 迭代/终止会在这里展开。</p><div class="view-empty-actions"><button class="primary small" type="button" data-open-new-project>＋ 新建项目</button></div></div>`;
     if (meta) meta.textContent = '还没有项目。';
@@ -12713,7 +12833,15 @@ function renderFlow() {
   }
   // 并行泳道先渲染：每条需求一条泳道 + 项目级汇总；只重绘变化泳道。
   // 5 秒轮询：数据签名未变时直接返回，避免周期性全量重建大 DOM（渲染进程 CPU/内存峰值的主因）。
-  const flowSig = flowRenderSignature(p);
+  // B-410e：口径数字与新鲜度每次都要重算并挂到节点上（签名里带上 refreshedAt/stale，
+  // 「数据可能过期」才会随时间翻转；否则签名不变时永远停在旧文案）。
+  const v4 = flowV4Data();
+  paintFlowDataAnchors(v4);
+  const flowText = `${flowMeta(p)}${flowFreshnessText(v4)}`;
+  if (meta) meta.textContent = flowText;
+  const flowSig = `${flowRenderSignature(p)}|${v4.refreshedAt || ''}|${v4.stale ? 'S' : 'F'}|${v4.refreshError || ''}`;
+  // 数据过期（>60 秒没刷新 / 刷新失败）时清掉节流：下一次心跳立刻补一次实时读取，不静默停在旧数字。
+  if (v4.stale && !flowLiveState.loading) flowLiveState.nextAt = 0;
   if (flowRenderUi.projectId === p.id && flowRenderUi.sig === flowSig) return;
   flowRenderUi.projectId = p.id;
   flowRenderUi.sig = flowSig;
@@ -12727,15 +12855,15 @@ function renderFlow() {
   // 旧泳道/串行小图（产品评审/可测性/Owner/PM派单/开发…）不再默认渲染，避免两套图并存。
   // 节点图脚本缺失时回落到旧小图，保证面板不空。
   if (mini && !$('#flow-panel')?.hidden) {
-    if (window.FlowV4) window.FlowV4.render(mini, flowV4Data());
+    if (window.FlowV4) window.FlowV4.render(mini, v4);
     else mini.innerHTML = graphHtml || flowMarkup(p);
+    paintFlowDataAnchors(v4);
   }
   renderQuickTechReview(p);
   renderLegacyFlowExtras(p);
   renderLegacyRequirements();
-  const text = flowMeta(p);
-  if (meta) meta.textContent = text;
-  if (miniMeta) miniMeta.textContent = text;
+  if (meta) meta.textContent = flowText;
+  if (miniMeta) miniMeta.textContent = flowText;
   const boot = legacyBootSummary();
   const flowGate = legacyGateState();
   const activeReq = legacyActiveRequirement();

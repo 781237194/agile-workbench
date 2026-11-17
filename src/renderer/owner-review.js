@@ -560,6 +560,9 @@
     if (['dev', 'dev_review', 'dev_done'].includes(status)) return { text: '开发中', kind: 'info' };
     if (status === 'test') return { text: '测试中', kind: 'info' };
     if (status === 'test_done') return { text: '待验收', kind: 'warn' };
+    // B-20261116-100905-1211：产品评审阶段（正文已提交、产品还没评/未通过）有自己的档，
+    // 不能再显示「等你决定」——Owner 点进去只能看到一份产品没看过的正文。
+    if (['review', 'requirement_review', 'product_review'].includes(status)) return { text: '产品评审中', kind: 'info' };
     const owner = ownerReviewStatusOf(req);
     if (DECISION_BADGE[owner]) return { text: DECISION_BADGE[owner], kind: owner === 'approved' ? 'ok' : (owner === 'rejected' ? 'bad' : 'warn') };
     return { text: '等你决定', kind: 'pending' };
@@ -908,13 +911,20 @@
   }
 
   // ── B-504a「全部需求」清单（只做展示，不改流程）────────────────────────────────
-  // 状态分组：等你决定 / 进行中 / 待验收 / 已收口；筛选只影响这处清单，不改任何落账口径。
+  // 状态分组（B-20261116-100905-1211：六档）：新建/正文中 / 产品评审中 / 等你决定 / 进行中 / 待验收 / 已收口。
+  // 筛选条仍保留既有五枚（全部 + 四个状态键）——main.js 的 --review 自检把「5 枚」当契约，新增档只进分组、
+  // 不改筛选条数量；点「全部」时六组都会出现。
   const LIST_BUCKETS = [
+    { key: 'draft', label: '新建/正文中' },
+    { key: 'product_review', label: '产品评审中' },
     { key: 'pending', label: '等你决定' },
     { key: 'running', label: '进行中' },
     { key: 'test_done', label: '待验收' },
     { key: 'closed', label: '已收口' },
   ];
+  /** 筛选条（唯一契约：全部 + 四档；把新档做成筛选项会改掉 main.js --review 的 chips=5 断言）。 */
+  const LIST_FILTERS = ['pending', 'running', 'test_done', 'closed']
+    .map((key) => LIST_BUCKETS.find((bucket) => bucket.key === key));
   const CLOSED_REQ_STATUSES = ['accepted', 'done', 'terminated', 'iteration', 'rejected'];
   // B-20261116-061156-6155：列表里混入「工作流没有、只有任务镜像/缓存」的需求时，必须当场标出并禁用决定，
   // 不能等点了 owner:decide 才报 WORKFLOW_MUTATE_FAILED。source='task-only' 就是快照里 task 兜底出来的行。
@@ -934,7 +944,13 @@
     // 不能再落「等你决定」组——这是数据层已 approve、渲染层没消费导致的假待决。
     const decided = decidedStatusOf(req);
     if (decided === 'approved' || decided === 'skipped') return 'running';
-    // R-dba4（T-3957）：四组映射收在 review-list-core.js；未列状态落「等你决定」并标 unknown（以前会整行消失）。
+    // B-20261116-100905-1211 / B-20261116-094215-2ff6①：六档映射收在 review-list-core.js 的 UI3（唯一实现）；
+    // 产品评审中（requirementReview 空/未通过）不再混进等你决定；已通过的行在上面已归进行中。
+    if (RLC && typeof RLC.UI3_bucketOf === 'function') {
+      const ui3 = RLC.UI3_bucketOf(req);
+      if (ui3 && ['product_review', 'draft', 'test_done', 'closed', 'running', 'pending'].includes(ui3.key)) return ui3.key;
+    }
+    // R-dba4（T-3957）：模块缺失时的兜底仍按既有四组映射；未列状态落「等你决定」并标 unknown。
     if (RLC && typeof RLC.groupOf === 'function') return RLC.groupOf(req).group;
     if (status === 'test_done') return 'test_done';
     if (CLOSED_REQ_STATUSES.includes(status)) return 'closed';
@@ -971,16 +987,27 @@
   function renderAllRequirements(list, allRows) {
     const box = el('div', 'or-all');
     box.setAttribute('data-owner-all', '1');
+    // B-20261116-095320-410e：口径数字只认工作流需求行（registered）；快照兜底行单列、不计入。
+    const reqSet = (RLC && typeof RLC.UI3_requirementSet === 'function')
+      ? RLC.UI3_requirementSet(allRows)
+      : { all: allRows.length, registered: allRows.length, fallback: 0 };
+    box.setAttribute('data-owner-all-total', String(reqSet.registered));
+    box.setAttribute('data-owner-all-fallback', String(reqSet.fallback));
+    box.setAttribute('data-owner-all-rows', String(allRows.length));
     const head = el('h4', 'or-all-title');
     head.appendChild(el('b', '', '全部需求'));
-    head.appendChild(el('span', 'or-muted', `（共 ${allRows.length} 条 · 按状态分组；点一行展开正文、分析师建议与证据）`));
+    const fallbackNote = reqSet.fallback
+      ? `；另 ${reqSet.fallback} 条快照兜底行（工作流里没有，单列、不计入口径）`
+      : '';
+    head.appendChild(el('span', 'or-muted', `（工作流 ${reqSet.registered} 条${fallbackNote} · 按状态六档分组；点一行展开正文、分析师建议与证据）`));
     box.appendChild(head);
 
-    const counts = { all: allRows.length, pending: 0, running: 0, test_done: 0, closed: 0 };
+    const counts = { all: allRows.length, draft: 0, product_review: 0, pending: 0, running: 0, test_done: 0, closed: 0 };
     for (const row of allRows) counts[listBucketOf(row)] = (counts[listBucketOf(row)] || 0) + 1;
     const chips = el('div', 'or-all-filters');
     chips.setAttribute('data-owner-all-filters', '1');
-    const filterDefs = [{ key: 'all', label: '全部' }, ...LIST_BUCKETS];
+    // 筛选条保持「全部 + 四档」5 枚（main.js --review 自检把 5 枚当契约）；六档分组不受影响。
+    const filterDefs = [{ key: 'all', label: '全部' }, ...LIST_FILTERS.filter(Boolean)];
     for (const def of filterDefs) {
       const chip = el('button', 'or-chip', `${def.label}（${counts[def.key] || 0}）`);
       chip.type = 'button';
@@ -995,7 +1022,7 @@
     const visible = allRows.filter((row) => active === 'all' || listBucketOf(row) === active);
     if (!visible.length) box.appendChild(el('p', 'or-empty', '这个分组里暂时没有需求'));
     const groups = active === 'all'
-      // R-dba4（T-3957）：四组恒定都在（空组也给计数），组内按 逾期>未读>updatedAt 倒序>id 排序。
+      // R-dba4（T-3957）：各组恒定都在（空组跳过渲染），组内按 逾期>未读>updatedAt 倒序>id 排序。
       ? LIST_BUCKETS.map((bucket) => ({ ...bucket, rows: sortRowsOf(visible.filter((row) => listBucketOf(row) === bucket.key)) }))
       : [{ key: active, label: (LIST_BUCKETS.find((b) => b.key === active) || {}).label || active, rows: sortRowsOf(visible) }];
     for (const group of groups) {
