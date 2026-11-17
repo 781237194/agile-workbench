@@ -461,33 +461,37 @@ export function queuedForToday({ rows, todayDefer }) {
     const isQueueRow = stage === 'enqueue' || String(row.event || '') === 'enqueue' || (stage === 'skipped' && code === 'NIGHT_SILENT');
     if (!isQueueRow) continue;
     seen.add(role);
-    out.push({ role, level: String(ev.level || (ev.forced ? 'force' : 'rounds')), kind: String(ev.kind || ''), tokens: ev.tokens, rounds: ev.rounds, forced: Boolean(ev.forced), order: Number(ev.order || 0), deferredUntil: target });
+    const atMs = Date.parse(String(row.at || ''));
+    out.push({ role, level: String(ev.level || (ev.forced ? 'force' : 'rounds')), kind: String(ev.kind || ''), tokens: ev.tokens, rounds: ev.rounds, forced: Boolean(ev.forced), order: Number(ev.order || 0), deferredUntil: target,
+      // B-20261118-002301-9cff：入队时刻（作废判据 = enqueue 之后该角色是否已经 rotate 过）
+      queuedAt: Number.isFinite(atMs) ? atMs : 0, queuedAtIso: String(row.at || '') });
   }
   return out;
 }
 
 /**
- * 今日已换过的角色（B-20261117-212500-a837 ①｜严格队列口径，三源取并）：
- *   ① 自动换人.jsonl 的 rotate 行（本调度器自己换的）；
+ * 每角色最近一次 rotate 时间（B-20261118-002301-9cff；三源取并，**不按 08:00 截断**）：
+ *   ① 自动换人.jsonl 的 rotate 成功行（本调度器自己换的）；
  *   ② 团队/状态/项目/<P>/会话轮换.jsonl（append-only 轮换记录）；
- *   ③ 团队/状态/项目/<P>/会话轮换/<角色>.json（session.mjs rotate 的权威记录，覆盖 CLI / PM 手建降级换人）。
- * 只看 ≥ 今日 08:00 的记录；失败行（result=fail）不算换过。
+ *   ③ 团队/状态/项目/<P>/会话轮换/<角色>.json（session.mjs rotate 的权威记录，覆盖 CLI / PM 手换）��
+ * 返回 Map<role, { ms, at, source }>；失败行（result=fail）不算。
  */
-function rotatedTodayRoles({ projectName, rows, todayDefer }) {
-  const since = Date.parse(String(todayDefer || ''));
-  const cut = Number.isFinite(since) ? since : 0;
-  const out = new Set();
+function latestRotationByRole({ projectName, rows }) {
+  const out = new Map();
+  const put = (role, ms, at, source) => {
+    const r = String(role || '');
+    if (!r || !Number.isFinite(ms)) return;
+    const prev = out.get(r);
+    if (!prev || ms > prev.ms) out.set(r, { ms, at: String(at || ''), source });
+  };
   for (const row of rows || []) {
     if (String(row.stage) !== 'rotate') continue;
     if (String(row.result || '') === 'fail') continue;
-    const at = Date.parse(String(row.at || ''));
-    if (Number.isFinite(at) && at >= cut) out.add(String(row.role || ''));
+    put(row.role, Date.parse(String(row.at || '')), row.at, '自动换人.jsonl');
   }
-  const takeRecord = (rec) => {
+  const takeRecord = (rec, source) => {
     if (!rec || typeof rec !== 'object') return;
-    const role = String(rec.role || '');
-    const at = Date.parse(String(rec.at || rec.rotatedAt || ''));
-    if (role && Number.isFinite(at) && at >= cut) out.add(role);
+    put(rec.role, Date.parse(String(rec.at || rec.rotatedAt || '')), rec.at || rec.rotatedAt, source);
   };
   const dir = projectStatePaths(projectName).dir;
   try {
@@ -495,7 +499,7 @@ function rotatedTodayRoles({ projectName, rows, todayDefer }) {
     if (fs.existsSync(jsonl)) {
       for (const line of fs.readFileSync(jsonl, 'utf8').split(/\r?\n/)) {
         if (!line.trim()) continue;
-        try { takeRecord(JSON.parse(line)); } catch { /* 坏行忽略，不影响判断 */ }
+        try { takeRecord(JSON.parse(line), '会话轮换.jsonl'); } catch { /* 坏行忽略，不影响判断 */ }
       }
     }
   } catch { /* 无 jsonl 不阻断 */ }
@@ -504,7 +508,7 @@ function rotatedTodayRoles({ projectName, rows, todayDefer }) {
     if (fs.existsSync(rdir)) {
       for (const name of fs.readdirSync(rdir)) {
         if (!name.endsWith('.json')) continue;
-        try { takeRecord(readJsonSafe(path.join(rdir, name), null)); } catch { /* 坏记录忽略 */ }
+        try { takeRecord(readJsonSafe(path.join(rdir, name), null), '会话轮换/<角色>.json'); } catch { /* 坏记录忽略 */ }
       }
     }
   } catch { /* 无目录不阻断 */ }
@@ -717,12 +721,38 @@ export async function runAutoRotateCycle(projectName, options = {}) {
   if (nextDayWindow) {
     const todayDefer = iso(morningAt(now));   // 今日 08:00
     const queuedAll = queuedForToday({ rows, todayDefer });
-    // 今日已换过的角色不再入队（严格队列：每拍只换 1 个，且一个角色一天只换一次）
-    // 去重源=审计 rotate 行 + 会话轮换.jsonl + 会话轮换/<角色>.json（含 CLI/PM 手建降级换人）。
-    const rotatedRoles = rotatedTodayRoles({ projectName: name, rows, todayDefer });
-    const queued = queuedAll.filter((q) => !rotatedRoles.has(q.role));
+    // B-20261118-002301-9cff：去重口径改为「**入队之后**是否已 rotate 过」——逐角色最近一次 rotate 时间 vs 该角色入队时刻。
+    // 覆盖 PM 手换（会话轮换/<角色>.json）与本调度器换人（审计行 / 会话轮换.jsonl）；不再用 08:00 截断
+    // （手换常发生在 00:00–08:00，旧口径会把「入队 → 手换 → 次日窗口」判成未换过，导致二次换人）。
+    const latestRotate = latestRotationByRole({ projectName: name, rows });
+    const invalidated = [];
+    for (const q of queuedAll) {
+      const hit = latestRotate.get(q.role);
+      if (!hit) continue;
+      const since = Number(q.queuedAt) > 0 ? Number(q.queuedAt) : Date.parse(todayDefer);
+      const afterEnqueue = hit.ms >= since;                                  // 主判据：入队之后换过
+      const within24h = hit.ms <= now && (Number(now) - hit.ms) < 24 * 3600 * 1000;   // 兜底：24h 内换过（AC③ 同一角色不被换两次）
+      if (!afterEnqueue && !within24h) continue;
+      invalidated.push({ ...q, rotatedAt: hit.at, rotatedSource: hit.source, reason: afterEnqueue ? 'after-enqueue' : 'within-24h' });
+    }
+    if (!dryRun) {
+      for (const it of invalidated) {
+        appendAudit(auditFile, {
+          at: nowIso, stage: 'skipped', code: 'ALREADY_ROTATED', result: 'ok', role: it.role, project: name,
+          note: it.reason === 'after-enqueue'
+            ? `${it.role} 入队后（${it.queuedAtIso || '?'}）已换过人（${it.rotatedAt}，${it.rotatedSource}）：本窗口作废，不再二次换人`
+            : `${it.role} 24 小时内已换过人（${it.rotatedAt}，${it.rotatedSource}）：本窗口作废（避免同一角色 24h 内被换两次）`,
+          evidence: { queuedAt: it.queuedAtIso, deferredUntil: todayDefer, rotatedAt: it.rotatedAt, rotatedSource: it.rotatedSource, level: it.level, reason: it.reason },
+        });
+        actions.push({ stage: 'skipped', code: 'ALREADY_ROTATED', role: it.role, rotatedAt: it.rotatedAt, reason: it.reason });
+      }
+    }
+    const queued = queuedAll.filter((q) => !invalidated.some((x) => String(x.role) === String(q.role)));
     if (!queued.length) {
-      return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: [], actions, dryRun, source, note: '昨夜无入队记账：本窗口不执行任何命中（严格队列口径）' };
+      return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: [], invalidated: invalidated.map((x) => x.role), actions, dryRun, source,
+        note: invalidated.length
+          ? `昨夜入队角色都已在入队后换过人（${invalidated.map((x) => x.role).join('/')}）：本窗口不换（ALREADY_ROTATED）`
+          : '昨夜无入队记账：本窗口不执行任何命中（严格队列口径）' };
     }
     const order = (x) => (x.level === 'force' ? 0 : x.level === 'rounds' ? 1 : 2);
     queued.sort((a, b) => {
@@ -753,7 +783,7 @@ export async function runAutoRotateCycle(projectName, options = {}) {
     }
     actions.push({ stage: 'rotate', role: head.role, oldSessionId: rotated.oldId, newSessionId: rotated.newId, mode: 'next-day', createMode: rotated.mode, created: rotated.created });
     actions.push({ stage: 'broadcast_reboot', role: head.role, roles: rotated.others });
-    return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), rotated: [head.role], actions, dryRun, source, note: '每拍只换一个：本拍换 ' + head.role };
+    return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), rotated: [head.role], invalidated: invalidated.map((x) => x.role), actions, dryRun, source, note: '每拍只换一个：本拍换 ' + head.role };
   }
 
   /* ③ 白天常规流水线 */
