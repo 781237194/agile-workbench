@@ -190,7 +190,11 @@ function pathRefs(repoRoot, project) {
   const info = path.join(projectDir, '项目信息.md');
   if (fs.existsSync(info)) {
     const text = fs.readFileSync(info, 'utf8');
-    for (const v of text.match(/[A-Za-z]:[\\/][^\s|`)"']+/g) || []) refs.push({ file: info, key: '项目信息.md 盘符路径', value: v });
+    // F4④：排除 URL（https:// 等）与含 scheme 的串，只认单字母盘符路径
+    for (const v of text.match(/(?<![\w:/])[A-Za-z]:[\\/][^\s|`)"']+/g) || []) {
+      if (/^[a-z]+:\/\//i.test(v)) continue;
+      refs.push({ file: info, key: '项目信息.md 盘符路径', value: v });
+    }
   }
   return refs;
 }
@@ -260,7 +264,10 @@ function cmdRebindSessions(argv) {
     if (next === String(m.sessionId || '')) continue;
     changes.push({ role, from: String(m.sessionId || ''), to: next });
     if (!dryRun) {
-      m.sessionPrevSessionId = String(m.sessionId || '');
+      const prev = String(m.sessionId || '');
+      // F5②：旧会话归档字段（正文要求的 archivedSession / replacedBySessionId）
+      if (prev) { m.archivedSession = prev; m.replacedBySessionId = next; }
+      m.sessionPrevSessionId = prev;
       m.sessionRebindAt = new Date().toISOString();
       m.sessionId = next;
       m.sessionPending = next === '';
@@ -268,6 +275,16 @@ function cmdRebindSessions(argv) {
   }
   if (!dryRun && changes.length) {
     writeJsonFile(teamFile, team);
+    // F5③：迁移审计.jsonl（项目级，append-only，含每角色 from→to 与旧会话归档字段）
+    const auditProject = String(argv.project || '').trim();
+    if (auditProject) {
+      const auditFile = path.join(repoRoot, '团队', '状态', '项目', auditProject, '迁移审计.jsonl');
+      fs.mkdirSync(path.dirname(auditFile), { recursive: true });
+      const at = new Date().toISOString();
+      for (const c of changes) {
+        fs.appendFileSync(auditFile, JSON.stringify({ at, project: auditProject, role: c.role, from: c.from, to: c.to, archivedSession: c.from || '', replacedBySessionId: c.to, reason: 'rebind_sessions' }) + '\n', 'utf8');
+      }
+    }
     // AC5③：旧会话隔离审计——重绑后在项目 唤醒.jsonl 写 reason='stale_session'（旧会话不再被发往）
     const project = String(argv.project || '').trim();
     if (project) {
