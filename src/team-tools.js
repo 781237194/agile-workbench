@@ -5575,6 +5575,23 @@ function createTeamTools(options = {}) {
     return file;
   }
 
+  /**
+   * R-0dbb F7/AC11：Owner 意见的唯一取数（append-only `decisions[]` 末条）。
+   * 壳层快照与 CLI（`team.mjs req list` / `req review`）同判据：都读 decisions[-1].opinion，
+   * 原文不截断、不改写；`ownerOpinionAck` 只作「最近一次消费」展示，不是这里的取数对象。
+   */
+  function ownerOpinionViewOf(row) {
+    const list = row && Array.isArray(row.decisions) ? row.decisions.filter(Boolean) : [];
+    const last = list.length ? list[list.length - 1] : null;
+    const opinion = last && last.opinion !== undefined && last.opinion !== null ? String(last.opinion) : '';
+    return {
+      ownerOpinion: opinion,
+      ownerOpinionAt: String((last && (last.at || last.decidedAt)) || ''),
+      ownerOpinionSha256: opinion ? crypto.createHash('sha256').update(opinion, 'utf8').digest('hex') : '',
+      ownerOpinionStatus: String((last && (last.status || last.decision)) || '')
+    };
+  }
+
   function requirementView(task, meta) {
     const row = meta && typeof meta === 'object' ? meta : {};
     const source = task && typeof task === 'object' ? task : {};
@@ -5615,6 +5632,8 @@ function createTeamTools(options = {}) {
       test: row.test || null,
       ownerAcceptance: row.acceptance || null,
       doc: String(row.doc || ''),
+      // R-0dbb F7/AC11：Owner 意见原文与时间（与 CLI req list / req review 同判据，见 ownerOpinionViewOf）。
+      ...ownerOpinionViewOf(row),
       history: Array.isArray(row.history) ? row.history : [],
       // R-dba4 工具侧：大白话 copy 的唯一真相在需求行（壳层只读这里，不再现算第二份）
       ...requirementCopyView(row)
@@ -5881,6 +5900,21 @@ function createTeamTools(options = {}) {
     const byId = new Map(tasks.map((task) => [String(task.id), task]));
     const resolvedProjectPath = projectPath ? path.resolve(projectPath) : ((registrationFor(name) || {}).path || '');
     const voidRegistry = readRequirementVoidRegistry(resolvedProjectPath);
+    // R-0dbb F0：需求行补 `doc`（按需求 id 解析 `需求/<id>-*.md`），壳层 attachReviewDocText 才能挂 docText。
+    // 工作流/任务里 `doc` 键全库 0 命中（基线核对），不补这一步评审材料永远拿不到正文。
+    const requirementDocs = resolvedProjectPath ? readRequirementDocs(resolvedProjectPath).list : [];
+    const docEntryOf = (id) => {
+      const key = String(id || '').trim();
+      if (!key) return null;
+      const exact = requirementDocs.find((doc) => String(doc.id || '') === key);
+      if (exact) return exact;
+      // 兼容旧写法（4 位/6 位截断）：唯一命中才认，多命中不猜。
+      const hits = requirementDocs.filter((doc) => {
+        const docId = String(doc.id || '');
+        return docId && (docId.startsWith(key) || key.startsWith(docId));
+      });
+      return hits.length === 1 ? hits[0] : null;
+    };
     // id 比对：全等优先，其次唯一前缀兼容（同一秒撞号的两条 id 只有后缀不同，不会误判）。
     const voidEntryOf = (id) => {
       const key = String(id || '').trim();
@@ -5893,6 +5927,11 @@ function createTeamTools(options = {}) {
     for (const [id, meta] of Object.entries(state.requirements || {})) {
       seen.add(String(id));
       const view = requirementView(byId.get(String(id)), meta);
+      // R-0dbb F0：行上没有 doc（旧行全都没有）→ 按需求 id 回填正文相对路径。
+      if (!view.doc) {
+        const doc = docEntryOf(view.id || id);
+        if (doc) view.doc = doc.rel;
+      }
       const voidEntry = voidEntryOf(view.id || id);
       if (voidEntry) {
         if (!['terminated', 'accepted'].includes(String(view.status || ''))) view.status = 'terminated';
@@ -5909,6 +5948,10 @@ function createTeamTools(options = {}) {
       // ①作废优先：已作废的 id 不再从需求任务文件造回需求行（否则面板一直显示待评审）。
       if (voidEntryOf(task.id)) continue;
       const view = requirementView(task, null);
+      if (!view.doc) {
+        const doc = docEntryOf(view.id);
+        if (doc) view.doc = doc.rel;
+      }
       view.registered = false;
       view.unregistered = true;
       view.source = 'task-only';
@@ -5922,7 +5965,7 @@ function createTeamTools(options = {}) {
     if (resolvedProjectPath) {
       const knownDocs = requirements.map((row) => String(row.doc || '').replace(/\\/g, '/')).filter(Boolean);
       const knownIds = requirements.map((row) => String(row.id || '')).filter(Boolean);
-      for (const doc of readRequirementDocs(resolvedProjectPath).list) {
+      for (const doc of requirementDocs) {
         const rel = String(doc.rel || '').replace(/\\/g, '/');
         if (knownDocs.includes(rel)) continue;
         const docId = String(doc.id || '');

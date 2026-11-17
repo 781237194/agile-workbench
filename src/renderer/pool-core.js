@@ -910,7 +910,21 @@
       ? `<a href="#" class="pool-link pool-report-link" data-pool-rel="${esc(report)}">${esc(report)}</a>`
       : empmark();
 
-    return `<aside id="pool-detail" class="pool-detail" role="dialog" aria-label="${esc(typeLabel)}详情">
+    // R-0dbb F7/AC11③：Owner 通过（或打回）时写的意见必须能在池详情里读到**原文全文**。
+    // 取数只有一条路：快照行上的 ownerOpinion / ownerOpinionAt（team-tools.js requirementView 从
+    // decisions[-1] 派生，与 CLI `req list --json` 同判据）——渲染层不自己再算一遍、不前端拼。
+    // 锚点用 `data-owner-opinion-text`：`data-owner-opinion` 已被 owner-review.js 的意见输入框占用
+    // 且 scripts/test-owner-copy.cjs 断言其必须存在，不能复用。文本不截断、不加 line-clamp/省略号。
+    const opinionText = source.ownerOpinion === null || source.ownerOpinion === undefined ? '' : String(source.ownerOpinion);
+    const opinionAt = source.ownerOpinionAt === null || source.ownerOpinionAt === undefined ? '' : String(source.ownerOpinionAt);
+    const opinionSection = opinionText.trim()
+      ? `<section class="pool-detail-sec pool-detail-owner-opinion"><h5>Owner 意见（原文）</h5>`
+        + `<p class="pool-opinion-text" data-owner-opinion-text="1" data-owner-opinion-at="${esc(opinionAt)}">${esc(opinionText)}</p>`
+        + (opinionAt ? `<p class="pool-opinion-at">${esc(formatPoolTime(opinionAt))}</p>` : '')
+        + '</section>'
+      : '';
+
+    return `<aside id="pool-detail" class="pool-detail" data-pool-detail="1" role="dialog" aria-label="${esc(typeLabel)}详情">
       <header class="pool-detail-head">
         <span class="req-type ${kind}" title="${esc(typeLabel)}">${esc(typeLabel)}</span>
         <b class="pool-detail-title">${esc(title)}</b>
@@ -924,6 +938,7 @@
         <div><dt>最近决策</dt><dd data-pool-at="${esc(decisionRaw)}">${esc(formatPoolTime(decisionRaw) || EMPTY_FIELD)}</dd></div>
         <div><dt>验收人</dt><dd data-accept-by="${esc(accept.code)}" data-accept-at="${esc(accept.at)}"${accept.testGate ? ` data-accept-test-gate="${esc(accept.testGate)}"` : ''}>${esc(accept.label)}${accept.testGate === 'pm_signed' ? ' · 测试结论 PM 代签' : ''}${accept.at ? ' · ' + esc(formatPoolTime(accept.at)) : ''}</dd></div>
       </dl>
+      ${opinionSection}
       <section class="pool-detail-sec pool-detail-body"><h5>正文 / 摘要</h5>${detailBody}</section>
       ${requirementSection}
       ${supplementSectionMarkup(source)}

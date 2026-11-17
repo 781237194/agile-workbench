@@ -17,6 +17,12 @@
   const OPTION_HEAD_RE = /^[-*+\s]*\*{0,2}拍板选项\*{0,2}\s*[:：]\s*(.*)$/;
   const OPTION_RE = /^[-*+\s]*(?:[-*]\s*)?([A-Za-z])[.、:：)]\s*(.+)$/;
   const SECTION_RE = /^##\s+/;
+  // R-0dbb F1：v2 行内 AC 格式 `- **AC1（标题）** 正文…｜人话：…`（现行正文主流格式）。
+  // 老式 `- **AC1**` / `- **AC1.1**`（无括号）不在本正则内——按 F1 不要求命中，走整段兜底（AC7）。
+  const AC_INLINE_RE = /^\s*[-*]\s*\*\*AC(\d+)\s*[（(]([^）)]*)[）)]\*\*\s*(.*)$/;
+  // R-0dbb F3：人话两种写法——①新写/改版一律行尾（…｜人话：<一句>）；②缩进行 `- 人话：…` 只作兼容。
+  const PLAIN_TAIL_RE = /[｜|]\s*人话\s*[：:]\s*(.+)$/;
+  const PLAIN_LINE_RE = /^\s*[-*]\s*人话\s*[：:]\s*(.+)$/;
 
   function textOf(value) { return value === null || value === undefined ? '' : String(value); }
   function clean(value) { return textOf(value).replace(/\s+/g, ' ').trim(); }
@@ -104,7 +110,62 @@
     return { acs, duplicates, formatError: false };
   }
 
-  /** 校验：返回缺项清单（acId + missingFields）。 */
+  /**
+   * R-0dbb F1：解析 v2 行内 AC（`- **AC1（标题）** 正文…`）。
+   * 返回 { acs:[{id,title,text,plain,plainMissing,source:'inline'}], duplicates }。
+   * - 同一编号重复只留第一条并记 duplicates；
+   * - 人话取「行尾 `｜人话：…`」优先，「下一行 `- 人话：…`」只作兼容；两者都必须是正文原文子串，
+   *   否则视为未写（禁止程序编语义，见 AC6）；
+   * - 跨行续写：到下一条 AC / 空行 / 另一个列表项 / 章节标题为止，不把下一条 AC 吞进来。
+   */
+  function parseInlineAcs(text) {
+    const raw = textOf(text);
+    const lines = raw.split(/\r?\n/);
+    const acs = [];
+    const duplicates = [];
+    const seen = new Set();
+    for (let i = 0; i < lines.length; i += 1) {
+      const start = AC_INLINE_RE.exec(String(lines[i]).trim());
+      if (!start) continue;
+      const id = 'AC' + start[1];
+      if (seen.has(id)) { duplicates.push(id); continue; }
+      seen.add(id);
+      const title = clean(start[2] || '');
+      let rest = clean(start[3] || '');
+      let plain = '';
+      const tail = PLAIN_TAIL_RE.exec(rest);
+      if (tail) {
+        plain = textOf(tail[1]).trim();
+        rest = clean(rest.slice(0, tail.index));
+      }
+      if (!plain) {
+        const nextLine = i + 1 < lines.length ? String(lines[i + 1]) : '';
+        const compat = PLAIN_LINE_RE.exec(nextLine);
+        if (compat) { plain = textOf(compat[1]).trim(); i += 1; }
+      }
+      while (i + 1 < lines.length) {
+        const next = String(lines[i + 1]);
+        const trimmed = next.trim();
+        if (!trimmed) break;
+        if (AC_INLINE_RE.test(trimmed)) break;
+        if (/^[-*+]\s+/.test(trimmed)) break;
+        if (/^#{1,6}\s/.test(trimmed)) break;
+        rest = clean(rest + ' ' + trimmed);
+        i += 1;
+        if (!plain) {
+          const late = PLAIN_TAIL_RE.exec(rest);
+          if (late) { plain = textOf(late[1]).trim(); rest = clean(rest.slice(0, late.index)); }
+        }
+      }
+      // 人话必须是正文原文子串：逐字校验失败就当作没写（不许复述/改写/编造）。
+      if (plain && !raw.includes(plain)) plain = '';
+      const body = title ? `${id}：${title}${rest ? '：' + rest : ''}` : `${id}：${rest}`;
+      acs.push({ id, title, text: body.trim(), plain, plainMissing: !plain, source: 'inline' });
+    }
+    return { acs, duplicates };
+  }
+
+
   function validateAcs(acs) {
     const list = Array.isArray(acs) ? acs : [];
     const issues = [];
@@ -130,14 +191,21 @@
     const text = [textOf(source.docText), textOf(source.detail), textOf(source.acceptance), textOf(source.story)]
       .filter((part) => part.trim()).join('\n');
     const parsed = parseAcBlocks(text);
+    const hasBlock = parsed.acs.length > 0;
+    // R-0dbb F1/F2：block 优先（AC8 不混排）——有 `### ACn` 块时不再做行内解析。
+    const inline = hasBlock ? { acs: [], duplicates: [] } : parseInlineAcs(text);
     const validation = validateAcs(parsed.acs);
     return {
-      structured: parsed.acs.length > 0,
+      structured: hasBlock,
       acs: parsed.acs,
-      duplicates: parsed.duplicates,
+      duplicates: [...parsed.duplicates, ...inline.duplicates],
+      // R-0dbb F1：source ∈ block|inline|none；inlineStructured 与 structured 互斥（block 优先，不混排）。
+      source: hasBlock ? 'block' : (inline.acs.length ? 'inline' : 'none'),
+      inlineStructured: !hasBlock && inline.acs.length > 0,
+      inlineAcs: inline.acs,
       // 旧正文（没有 AC 块）不产生缺项——按 F-5550-6 渐进降级，不逐条报缺。
-      issues: parsed.acs.length ? validation.issues : [],
-      ok: parsed.acs.length > 0 && validation.ok,
+      issues: hasBlock ? validation.issues : [],
+      ok: hasBlock && validation.ok,
     };
   }
 
@@ -178,7 +246,7 @@
     };
   }
 
-  const api = { parseAcBlocks, validateAcs, analyzeRequirement, missingStats, boardFieldsOf, FIELD_KEYS };
+  const api = { parseAcBlocks, parseInlineAcs, validateAcs, analyzeRequirement, missingStats, boardFieldsOf, FIELD_KEYS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (globalScope) globalScope.AcParse = api;
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : null));

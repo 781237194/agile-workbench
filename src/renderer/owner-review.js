@@ -872,10 +872,22 @@
     // 4）评审阶段：先看验收标准，再看正文取舍点，再看动到哪个模块
     if (!acceptance) return clip60(`${tag}没写验收标准，建议打回补 AC`);
     if (acceptance.length < 8) return clip60(`${tag}验收标准太笼统，建议打回写清怎么算过`);
-    const point = detail.match(/(?:待确认|风险|取舍|建议)[：:]\s*([^；;。]{4,52})/);
-    if (point) {
-      const picked = one(point[1], 18);
-      if (picked) return clip60(`${tag}正文有取舍没说清，建议你定：${picked}`);
+    // R-0dbb F4：取舍点来源从「行内标签第一条」扩到「小节 + 还是/二选一/A 案/B 案/改为」句式（RLC.takePointsOf）。
+    // 最多 3 条、整句来自正文原文（不生成语义）；超出条数在末尾标「另有 N 条取舍」。
+    if (RLC && typeof RLC.takePointsOf === 'function') {
+      const take = RLC.takePointsOf(row);
+      // F4：每条 ≤40 字（RLC 已截到 40，这里只做代号清洗，不再二次压缩）。
+      const picked = (take.points || []).map((item) => one(item, 40)).filter(Boolean);
+      if (picked.length) {
+        const more = take.extra > 0 ? `（另有 ${take.extra} 条取舍）` : '';
+        return clip60(`${tag}建议你定：${picked.join('；')}${more}`, 200);
+      }
+    } else {
+      const point = detail.match(/(?:待确认|风险|取舍|建议)[：:]\s*([^；;。]{4,52})/);
+      if (point) {
+        const picked = one(point[1], 18);
+        if (picked) return clip60(`${tag}正文有取舍没说清，建议你定：${picked}`);
+      }
     }
     const mod = detail.match(/([\u4e00-\u9fa5A-Za-z0-9_]{2,10})(?:模块|页面|接口|弹窗|面板|看板|表单)/);
     if (mod) return clip60(`${tag}动到${mod[1]}，建议先问程序员 A 影响面再拍`);
@@ -884,7 +896,8 @@
     if (productComment) return clip60(`${tag}产品评审提了：${productComment}，建议先确认这点`);
     const rounds = Number((row && row.round) || 1);
     if (rounds > 1) return clip60(`${tag}已经到当前，建议先看这次改了什么再拍`);
-    if (pending) return clip60(`${tag}验收标准已写清，建议通过、进开发`);
+    // R-0dbb F5：正文确实没有取舍点时明说，不许用「直接放行去开发」这类误导兜底（AC5）。
+    if (pending) return clip60(`${tag}本条无待拍板点`);
     if (/待确认/.test(detail)) return clip60(`${tag}正文还有待确认项，建议让分析师先收口`);
     return clip60(`${tag}正文没写方案要点，建议让分析师先补正文`);
   }
@@ -1109,7 +1122,9 @@
     const blocked = acBoard ? clip60(acBoard.blocked, 120) : clip60(blockedTextOf(req, pending, proxyActive));
     // B-d1e5：这里以前是三段硬编码（通过/打回、验收通过/打回、先不动），Owner 看到的「清一色」就是它。
     // 现在统一走 adviceTextOf：按这条需求的状态、证据、验收标准、正文取舍点给一句具体动作。
-    const advise = acBoard ? clip60(acBoard.advice, 220) : clip60(adviceTextOf(req, pending));
+    // R-0dbb F4：展开行给取舍点全文（≤3 条 + 「另有 N 条取舍」，220 字上限防吞尾），收起行仍是 ≤60 字。
+    const adviseFull = acBoard ? clip60(acBoard.advice, 220) : clip60(adviceTextOf(req, pending), 220);
+    const advise = acBoard ? clip60(acBoard.advice) : clip60(adviceTextOf(req, pending));
     const open = state.listOpen.has(id);
     const item = el('div', 'or-all-row');
     item.setAttribute('data-owner-all-item', '1');
@@ -1143,7 +1158,8 @@
     // 三要素同时挂在行上（便于自检/读屏按行取），文案仍写在行内三行里。
     item.setAttribute('data-what', what);
     item.setAttribute('data-blocked', blocked);
-    item.setAttribute('data-advice', advise);
+    // R-0dbb AC4：展开行的 data-advice 放取舍点全文（≤3 条 +「另有 N 条取舍」），收起行保持 ≤60 字。
+    item.setAttribute('data-advice', adviseFull);
     if (acBoard) {
       item.setAttribute('data-ac-id', acBoard.acId);
       item.setAttribute('data-how', clip60(acBoard.how, 200));
@@ -1192,7 +1208,22 @@
           const li = el('li', 'or-ac-item');
           li.setAttribute('data-ac-id', item.id);
           li.setAttribute('data-ac-kind', item.kind);
-          li.textContent = item.text; // 保留全文，不 clip
+          // R-0dbb F2：AC 条目带来源（block|inline|fallback）；功能点/边界属合成项，不写 data-ac-source。
+          if (item.kind === 'AC') li.setAttribute('data-ac-source', item.source || 'fallback');
+          li.appendChild(document.createTextNode(item.text)); // 保留全文，不 clip
+          // R-0dbb F3/AC3：block/inline 每条必有人话位；正文没写 →「（正文未写人话）」（不许拿技术原文冒充）。
+          // data-ac-plain 的值只能是正文原文片段（AC6 子串断言）；兜底项与合成项不出人话位（AC7）。
+          if (item.kind === 'AC' && (item.source === 'block' || item.source === 'inline')) {
+            if (item.plain) {
+              const plainEl = el('span', 'or-ac-plain', `　人话：${item.plain}`);
+              plainEl.setAttribute('data-ac-plain', item.plain);
+              li.appendChild(plainEl);
+            } else {
+              const missingEl = el('span', 'or-ac-plain missing', '　（正文未写人话）');
+              missingEl.setAttribute('data-ac-plain-missing', '1');
+              li.appendChild(missingEl);
+            }
+          }
           acUl.appendChild(li);
         }
         detail.appendChild(acUl);

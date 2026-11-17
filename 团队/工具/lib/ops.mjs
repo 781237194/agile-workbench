@@ -134,6 +134,72 @@ function latestOwnerDecisionFor(row, task) {
   return list.length ? list[list.length - 1] : null;
 }
 
+/* ── R-0dbb F7/F8：Owner 意见的唯一取数与消费门 ──────────────────────────────
+ * 落账（机制已有）：Owner 通过/打回时 opinion 逐字进 decisions[]，ownerReview 是 decisions[] 的投影。
+ * 三处同源：`team.mjs req list --json`、`req review` 返回体、壳层快照（team-tools.js requirementView）
+ *           都只认 decisions[-1].opinion，不截断、不改写、不前端另拼。
+ * 消费：未 ack 再评 → OWNER_OPINION_UNREAD 且零写入（门禁在写盘/其它门之前）。
+ * 已消费集合：该需求 `history` 中 action='owner_opinion_ack' 行的 opinionSha256 去重集合（append-only）；
+ *            `requirementReview.ownerOpinionAck` 只作「最近一次」展示，不作判定依据（requirementReview 会被覆写）。
+ */
+
+/** 展示口径：decisions[-1].opinion（原文）+ at + sha256（CLI/req review/壳层同用）。 */
+export function ownerOpinionDisplayOf(row) {
+  const list = decisionListOf(row);
+  const last = list.length ? list[list.length - 1] : null;
+  const opinion = last && last.opinion !== undefined && last.opinion !== null ? String(last.opinion) : '';
+  return {
+    opinion,
+    at: String((last && (last.at || last.decidedAt)) || ''),
+    status: String((last && (last.status || last.decision)) || ''),
+    sha256: opinion ? sha256(opinion) : '',
+  };
+}
+
+/** 已消费集合：history 里 action='owner_opinion_ack' 的 opinionSha256（去重）。 */
+export function ownerOpinionAckSetOf(row) {
+  const set = new Set();
+  const history = Array.isArray(row && row.history) ? row.history : [];
+  for (const entry of history) {
+    if (!entry || String(entry.action || '') !== 'owner_opinion_ack') continue;
+    const value = String(entry.opinionSha256 || '').trim().toLowerCase();
+    if (value) set.add(value);
+  }
+  return set;
+}
+
+/**
+ * 消费门判定（纯函数，零写入）：当前有效 Owner 决定的 opinion 非空且未被 ack → { ok:false, code:'OWNER_OPINION_UNREAD' }。
+ * 空意见不拦（AC11⑥）；旧数据没有 ownerOpinionAck 一律按未消费处理（降级不静默放行）。
+ */
+export function ownerOpinionGateFor(row) {
+  const latest = latestValidOwnerDecision(row);
+  const opinion = latest && latest.opinion !== undefined && latest.opinion !== null ? String(latest.opinion) : '';
+  if (!opinion.trim()) {
+    return { ok: true, reason: 'EMPTY_OPINION', opinion: '', at: '', sha256: '', consumed: [] };
+  }
+  const sha = sha256(opinion);
+  const consumed = ownerOpinionAckSetOf(row);
+  if (consumed.has(sha)) return { ok: true, reason: 'ACKED', opinion, at: String(latest.at || ''), sha256: sha, consumed: [...consumed] };
+  return {
+    ok: false, code: 'OWNER_OPINION_UNREAD', reason: 'UNREAD',
+    opinion, at: String(latest.at || ''), sha256: sha, consumed: [...consumed],
+  };
+}
+
+/** --owner-opinion-ack 校验：≤300 字，且必须以「采纳：」或「不采纳：」开头（卷 §三 F8）。 */
+function normalizeOwnerOpinionAck(raw) {
+  const text = String(raw === undefined || raw === null ? '' : raw).trim();
+  if (!text) return '';
+  if (text.length > 300) {
+    fail('OWNER_OPINION_ACK_INVALID', `--owner-opinion-ack 最多 300 字（当前 ${text.length} 字）`, { length: text.length, max: 300, wrote: false });
+  }
+  if (!/^(?:采纳|不采纳)\s*[：:]/.test(text)) {
+    fail('OWNER_OPINION_ACK_INVALID', '--owner-opinion-ack 必须以「采纳：」或「不采纳：」开头，写清对 Owner 意见的处置', { sample: '采纳：按建议把颗粒度对齐到 AC 级；不采纳：…说明原因', wrote: false });
+  }
+  return text;
+}
+
 /**
  * 幂等 Owner：同 basis（需求/设计哈希一致）的同一决定已落账时，不要求新 nonce、不再 append，
  * 只把状态/相位同步回决定结果（修“重审把 ready 打回 approved 后只能请 Owner 重签”）。
@@ -4983,13 +5049,23 @@ export function cmdReq(args) {
     const tasks = listTasks(b.project);
     const reqs = tasks.filter((t) => t.type === 'requirement');
     const children = tasks.filter((t) => t.type !== 'requirement');
+    // R-0dbb F7/AC11②：每行带 Owner 意见原文 + 时间——与 req review / 壳层快照同判据（decisions[-1].opinion）。
+    const workflowRows = (() => {
+      try { return readWorkflowState(b.project).state.requirements || {}; } catch { return {}; }
+    })();
     const rows = reqs.map((r) => {
       const kids = children.filter((c) => c.requirementId === r.id);
+      const opinion = ownerOpinionDisplayOf(workflowRows[String(r.id)] || (r.workflow && typeof r.workflow === 'object' ? r.workflow : {}));
+      // 同时挂回任务对象：payload.requirements 就是这批对象，--json 里逐行可见。
+      r.ownerOpinion = opinion.opinion;
+      r.ownerOpinionAt = opinion.at;
+      r.ownerOpinionSha256 = opinion.sha256;
       return {
         id: r.id, p: r.priority, status: r.status, owner: r.owner || '-', title: r.title,
         review: r.review ? `${r.review.verdict}` : '-',
         tech: r.techReview ? `${r.techReview.verdict}` : '-',
         kids: kids.length, done: kids.filter((k) => k.status === 'done').length, acceptance: r.acceptance || '',
+        ownerOpinion: opinion.opinion, ownerOpinionAt: opinion.at,
       };
     });
     out(args, `需求看板（${b.project}，${reqs.length} 条）\n` + table(rows, [
@@ -5353,6 +5429,26 @@ function cmdReqReview(args) {
   const requirementId = String(args.id);
   const task = loadTask(b.project, requirementId);
   if (task.type !== 'requirement') fail('NOT_REQUIREMENT', `${requirementId} 不是需求（type=${task.type}）；需求评审只针对 req create 建的需求`, { id: requirementId, type: task.type });
+  // R-0dbb F8/AC11④⑤：Owner 意见消费门——必须放在写盘与其它门之前，未 ack 时**零写入**。
+  // 豁免：意见为空串不拦（AC11⑥）；Owner 通道（ui/tty）自评与 owner 角色不拦；PM 代记的意见同源适用。
+  const opinionGateRow = workflowRowFor(b.project, task.id) || {};
+  const opinionView = ownerOpinionDisplayOf(opinionGateRow);
+  const opinionGate = ownerOpinionGateFor(opinionGateRow);
+  let ownerOpinionAck = normalizeOwnerOpinionAck(args['owner-opinion-ack']);
+  if (!isTech && opinionGate.code === 'OWNER_OPINION_UNREAD' && !lessons.isOwnerChannel(args)) {
+    if (!ownerOpinionAck) {
+      fail('OWNER_OPINION_UNREAD', `Owner 对 ${task.id} 的意见还没消费：先读原文，再带 --owner-opinion-ack "采纳：…" / "不采纳：…" 重试`, {
+        requirementId: task.id,
+        ownerOpinion: opinionGate.opinion,
+        ownerOpinionAt: opinionGate.at,
+        opinionSha256: opinionGate.sha256,
+        consumed: opinionGate.consumed,
+        hint: '已消费集合＝工作流行 history 中 action=owner_opinion_ack 的 opinionSha256；同一 sha 只需 ack 一次',
+        wrote: false,
+      }, 1);
+    }
+  }
+  if (isTech) ownerOpinionAck = ''; // 技术评审不是产品对 Owner 意见的处置入口
   // 必读闸门：评审人必须在本轮 boot 里读过该需求正文；需求在 boot 后改过就要重新 boot 补读。
   assertRequirementDocsRead(b, project.path, task.id, isTech ? '技术评审' : '需求评审');
   const verdict = String(args.verdict || args.decision || '').toLowerCase();
@@ -5522,6 +5618,17 @@ function cmdReqReview(args) {
       source: 'team.mjs req review',
       command: 'req review',
     };
+    // R-0dbb F8：本次显式 ack（--owner-opinion-ack）落 requirementReview（只作「最近一次」展示；判定看 history）。
+    if (ownerOpinionAck) {
+      reviewPayload.ownerOpinionAck = {
+        text: ownerOpinionAck,
+        at: ts,
+        by: b.role,
+        opinionSha256: opinionGate.sha256,
+        opinion: opinionGate.opinion,
+        opinionAt: opinionGate.at,
+      };
+    }
     // 保留 productReview / requirementReview 两个同形别名：旧界面读前者，新审计读后者。
     task.workflow.productReview = reviewPayload;
     task.workflow.requirementReview = reviewPayload;
@@ -5628,6 +5735,16 @@ function cmdReqReview(args) {
   if (reviewDocGate && reviewDocGate.split && reviewDocGate.split.wrote) {
     syncRequirementSupplements(b.project, project.path, task.id);
   }
+  // R-0dbb F8：显式 ack 落 append-only 的 history——「已消费集合＝history 中 action=owner_opinion_ack 的
+  // opinionSha256 去重集合」的**唯一写入点**。requirementReview.ownerOpinionAck 只是最近一次展示（会被覆写）。
+  if (ownerOpinionAck && !isTech) {
+    syncWorkflowRow(b.project, task, nextStatus, {}, {
+      action: 'owner_opinion_ack',
+      by: b.role,
+      note: ownerOpinionAck,
+      historyExtra: { opinionSha256: opinionGate.sha256, opinion: opinionGate.opinion, opinionAt: opinionGate.at },
+    });
+  }
   appendEvent({
     role: b.role, sessionId: b.sessionId, action: isTech ? 'tech_review' : 'req_review', project: b.project,
     target: task.id, note: `${verdict} ${truncate(comments, 100)}`,
@@ -5647,6 +5764,10 @@ function cmdReqReview(args) {
       ok: true, requirement: task, review: record, kind: record.kind, teamMode,
       reviewFile: reviewFiles.jsonFile, mdFile: reviewFiles.mdFile, workflowFile: workflowSync.file,
       commentsSource, warnings,
+      // R-0dbb F7/AC11②：评审返回体与 req list 同口径带 Owner 意见原文/时间（逐字等于 decisions[-1].opinion）。
+      ownerOpinion: opinionView.opinion,
+      ownerOpinionAt: opinionView.at,
+      ...(ownerOpinionAck ? { ownerOpinionAck: { text: ownerOpinionAck, opinionSha256: opinionGate.sha256, at: ts } } : {}),
       ...(reviewDocGate ? {
         docSplit: {
           entry: 'review',

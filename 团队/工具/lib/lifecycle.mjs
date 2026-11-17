@@ -233,7 +233,7 @@ export function stampRejected(task, { source = '', role = '', at = nowIso() } = 
 /** 把任务状态增量写入 工作流.json；默认不存在不创建（只有驳回/流转才创建）。 */
 export function syncWorkflowRow(projectName, task, status, extra = {}, {
   create = false, action = '', by = '', note = '', phase = '', statePatch = null,
-  advanceRound = false, phaseAfter = null, event = null,
+  advanceRound = false, phaseAfter = null, event = null, historyExtra = null,
 } = {}) {
   const read = readWorkflowState(projectName);
   if (!read.exists && !create) return { file: read.file, created: false, state: null };
@@ -262,6 +262,8 @@ export function syncWorkflowRow(projectName, task, status, extra = {}, {
     action: action || row.status,
     by: by || '',
     note: truncate(note || '', 300),
+    // R-0dbb F8：允许调用方补结构化字段（如 owner_opinion_ack 的 opinionSha256）——history 是 append-only 审计落点。
+    ...(historyExtra && typeof historyExtra === 'object' ? historyExtra : {}),
   });
   if (typeof phaseAfter === 'function') {
     const derived = phaseAfter(state, row);
