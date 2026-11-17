@@ -14464,11 +14464,12 @@ async function selftestRound5(win, testRoot, mock) {
       catch (e) { message = String((e && e.message) || e); }
       return JSON.stringify({ ok: Boolean(r && r.ok), code: (r && r.code) || '', message: message.slice(0, 300) });
     `);
-    expect('重复通过被拒（DUPLICATE_DECISION）', dialogDuplicate.ok === false
-      && /DUPLICATE_DECISION/.test(String(dialogDuplicate.message || dialogDuplicate.code)), dialogDuplicate);
+    // e053 批次 A（PM 2026-11-17 11:14 裁定）：壳层 owner:decide 对同一需求重复通过是**接受并 append**（有意实现，
+    // append-only 决策链）；DUPLICATE_DECISION 守卫只存在于旧命令路径 src/team-tools.js:7636，不在壳层通道。
+    expect('重复通过被接受（shell append-only）', dialogDuplicate.ok === true, dialogDuplicate);
     const dialogAfterDuplicate = (readJsonFile(dialogWorkflowFile) || {}).requirements[dialogReqId] || {};
-    expect('重复通过不追加 decisions', Array.isArray(dialogAfterDuplicate.decisions)
-      && dialogAfterDuplicate.decisions.length === approveDecisions.length, dialogAfterDuplicate.decisions);
+    expect('重复通过 append decisions（append-only，+1 条）', Array.isArray(dialogAfterDuplicate.decisions)
+      && dialogAfterDuplicate.decisions.length === approveDecisions.length + 1, dialogAfterDuplicate.decisions);
     const dialogRejectEmpty = await evaluate('弹窗打回空意见', `
       let r = null; let message = '';
       try { r = await window.workbench.ownerDecide({ projectId: ${js(aId)}, requirementId: ${js(dialogReqId)}, status: 'rejected', opinion: '' }); }
@@ -14492,7 +14493,7 @@ async function selftestRound5(win, testRoot, mock) {
       && Boolean(dialogAfterReject.ownerReview) && dialogAfterReject.ownerReview.status === 'rejected', dialogAfterReject);
     // B-a08e：打回是在通过之后追加到顶层 decisions[]，只增不减、最后一条是 rejected。
     const rejectDecisions = Array.isArray(dialogAfterReject.decisions) ? dialogAfterReject.decisions : [];
-    expect('弹窗打回 append 顶层 decisions（append-only）', rejectDecisions.length === approveDecisions.length + 1
+    expect('弹窗打回 append 顶层 decisions（append-only：重复通过+打回共 +2 条）', rejectDecisions.length === approveDecisions.length + 2
       && String(rejectDecisions[rejectDecisions.length - 1].status) === 'rejected', rejectDecisions);
     report.ownerDialog = {
       approve: { ok: dialogApprove.ok, code: dialogApprove.code, requirement: dialogApprove.requirement },
