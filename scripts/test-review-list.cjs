@@ -94,5 +94,40 @@ const row = (id, status, extra) => ({ id, status, title: `需求 ${id}`, ...(ext
   check('C-06', '四块标签是大白话', blocks.map((b) => b.label).join('/') === '这是什么/怎么做/影响谁/建议你拍板', blocks.map((b) => b.label));
 }
 
+/* B-20261117-190649-d113：验收点逐条换行（splitAcceptanceLines 纯函数，只拆行不改字） */
+{
+  const A = '①完成注册；②完成登录；③完成登出；④完成改密；⑤完成注销';
+  const lines = RL.splitAcceptanceLines(A);
+  check('AL-01', '5 条验收点 → 5 行', lines.length === 5, lines);
+  check('AL-02', '拆行零丢失（拼接 === 原文）', lines.join('') === A, { got: lines.join(''), want: A });
+  check('AL-03', '逐条以①-⑤开头（顺序不变）', lines[0].startsWith('①') && lines[4].startsWith('⑤'), lines);
+  const multi = '第一条要求\n\n第二条要求\n①子项A；②子项B';
+  const mlines = RL.splitAcceptanceLines(multi);
+  check('AL-04', '多行原文：\\n 拆行 + 空行剔除 + 单行内再按①拆', mlines.length === 4 && mlines.join('') === multi.replace(/\r?\n/g, ''), mlines);
+  check('AL-05', '无编号「；」≥3 段 → 按；拆（分隔符留行尾）', (() => {
+    const s = '先做A；再做B；最后做C';
+    const l = RL.splitAcceptanceLines(s);
+    return l.length === 3 && l.join('') === s && l[0].endsWith('；');
+  })());
+  check('AL-06', '只有 1 个「；」不拆（同一句不切碎）', RL.splitAcceptanceLines('先做A；再做B').length === 1);
+  check('AL-07', '正文数字不误判条目（共 3 步 / 1.5 倍 / 第 2 项）', (() => {
+    const s = '共 3 步完成，耗时 1.5 倍以内，详见第 2 项';
+    const l = RL.splitAcceptanceLines(s);
+    return l.length === 1 && l[0] === s;
+  })());
+  check('AL-08', '超长单行（175 字无标点）不碎成多行且零裁切', (() => {
+    const s = '很长的验收描述'.repeat(25);
+    const l = RL.splitAcceptanceLines(s);
+    return l.length === 1 && l[0] === s && l[0].length === s.length;
+  })());
+  check('AL-09', '空 / null / 全空白 → []（渲染层兜底「未记录」）',
+    RL.splitAcceptanceLines('').length === 0 && RL.splitAcceptanceLines(null).length === 0 && RL.splitAcceptanceLines('   ').length === 0);
+  check('AL-10', '「1) 2)」数字括号前缀也能拆', (() => {
+    const s = '1) 先做A；2) 再做B';
+    const l = RL.splitAcceptanceLines(s);
+    return l.length === 2 && l.join('') === s;
+  })());
+}
+
 console.log(`\nR-dba4 渲染层断言：${passed}/${passed + failures.length} PASS`);
 if (failures.length) { console.error(JSON.stringify(failures, null, 2)); process.exit(1); }

@@ -2700,6 +2700,26 @@
     ];
     for (const [label, value] of blocks) {
       const row = el('div', 'or-summary-row');
+      if (label === '验收点') {
+        // B-20261117-190649-d113：验收点按条拆行（原文常写成「①…；②…；」，整段塞一行 Owner 无法逐条核对）。
+        // 只拆行不改字：splitAcceptanceLines 是纯函数（review-list-core.js），拼接回原文逐字相等。
+        row.classList.add('or-accept-row');
+        row.setAttribute('data-or-accept', '1');
+        row.appendChild(el('b', '', label));
+        const acceptBox = el('div', 'or-accept-lines');
+        acceptBox.setAttribute('data-or-accept-lines', '1');
+        const acceptLines = (RLC && typeof RLC.splitAcceptanceLines === 'function')
+          ? RLC.splitAcceptanceLines(value)
+          : [String(value)];
+        for (const line of (acceptLines.length ? acceptLines : ['未记录'])) {
+          const lineEl = el('div', 'or-accept-line', line);
+          lineEl.setAttribute('data-or-accept-line', '1');
+          acceptBox.appendChild(lineEl);
+        }
+        row.appendChild(acceptBox);
+        box.appendChild(row);
+        continue;
+      }
       row.appendChild(el('b', '', label));
       row.appendChild(el('span', '', value));
       box.appendChild(row);
@@ -2708,7 +2728,10 @@
       const detailRow = el('div', 'or-summary-row or-detail-row');
       detailRow.setAttribute('data-or-detail', '1');
       detailRow.appendChild(el('b', '', '详情全文'));
-      detailRow.appendChild(el('span', '', fullDetail));
+      // B-20261117-190649-d113：详情全文保留原文换行（pre-wrap），超长串 anywhere 断行，不横向溢出。
+      const detailText = el('span', 'or-detail-text', fullDetail);
+      detailText.setAttribute('data-or-detail-text', '1');
+      detailRow.appendChild(detailText);
       box.appendChild(detailRow);
     }
   }

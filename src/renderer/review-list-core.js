@@ -474,7 +474,68 @@ function UI3_flowFreshness(refreshedAt, nowMs, staleAfterMs) {
   };
 }
 
+/**
+ * B-20261117-190649-d113：评审弹窗「验收点」逐条换行。
+ *
+ * 需求验收标准常被写成「①…；②…；③…」一整串，塞进一行后 Owner 无法逐条核对。
+ * 这里只做**拆行**：不裁切、不改写、不排序，`lines.join('')` 与原文（去掉空行与 \n）逐字相等。
+ * 三个分支（按优先级）：
+ *   ① `\n`：显式换行一律拆（空行剔除）；
+ *   ② 条目前缀：①-⑳ / ⒈-⒛ / ⑴-⒇ / 1) / 1） / (1) / 1. —— 只认落在「；;。！？!?、，,」之后的（段首的那个由 0 位天然保留），
+ *      避免把「共 3 步」「1.5 倍」这类正文数字误当条目头；
+ *   ③ 无编号但「；」分隔 ≥3 段：按「；」拆，分隔符留在行尾（同样零丢失）。
+ * 纯函数（无 DOM / 无 IPC），scripts/test-review-list.cjs 直接断言。
+ */
+const ACCEPT_ITEM_HEAD_RE = /[①-⑳⒈-⒛⑴-⒇]|[（(]\s*\d{1,2}\s*[)）]|\d{1,2}\s*[)）]|\d{1,2}\s*[.．](?![\d.．])/g;
+const ACCEPT_SEP_BEFORE_RE = /[；;。！？!?、，,]/;
+
+function acceptBoundaryAt(text, at) {
+  let i = at - 1;
+  while (i >= 0 && /\s/.test(text[i])) i -= 1;
+  if (i < 0) return false;
+  return ACCEPT_SEP_BEFORE_RE.test(text[i]);
+}
+
+function splitAcceptanceOneLine(value) {
+  const text = textOf(value);
+  if (!text) return [];
+  const cuts = [];
+  ACCEPT_ITEM_HEAD_RE.lastIndex = 0;
+  let m = ACCEPT_ITEM_HEAD_RE.exec(text);
+  while (m) {
+    const at = m.index;
+    // 段首（at<=0）本来就该留在这行；只有「分隔符之后」的前缀才算新条目。
+    if (at > 0 && acceptBoundaryAt(text, at)) cuts.push(at);
+    m = ACCEPT_ITEM_HEAD_RE.exec(text);
+  }
+  if (cuts.length) {
+    const lines = [];
+    let prev = 0;
+    for (const at of cuts) { lines.push(text.slice(prev, at)); prev = at; }
+    lines.push(text.slice(prev));
+    return lines.filter((line) => line.trim());
+  }
+  // ③ 无编号：「；」分隔 ≥3 段才拆（2 段属于同一句，拆了反而碎）。
+  const parts = text.split(/(?<=[；;])/).filter((p) => p.trim());
+  if (parts.length >= 3) return parts;
+  return [text];
+}
+
+/** 验收点原文 → string[]；空输入给 []（渲染层负责「未记录」兜底）。 */
+function splitAcceptanceLines(value) {
+  const raw = textOf(value);
+  if (!raw.trim()) return [];
+  const lines = [];
+  for (const piece of raw.split(/\r?\n/)) {
+    if (!piece.trim()) continue;
+    for (const line of splitAcceptanceOneLine(piece)) lines.push(line);
+  }
+  return lines.length ? lines : [raw];
+}
+
 const api = { GROUPS, STATUS_GROUP, FIELD_LABEL, groupOf, overdueOf, unreadOf, updatedAtOf, sortRows, groupRows, acItemsOf, takePointsOf, copyBlocksOf, copyMissingAttr,
+  // B-20261117-190649-d113：验收点逐条换行（owner-review.js 渲染 [data-or-accept-line]）
+  splitAcceptanceLines,
   // B-2ff6 / B-410e / B-1211：三处同源口径（UI3 前缀，见上方注释）
   UI3_GROUPS, UI3_CLOSED_STATUSES, UI3_STATUS_TEXT,
   UI3_statusOf, UI3_isFallbackRow, UI3_ownerDecisionOf, UI3_productVerdictOf, UI3_isDispatchable,

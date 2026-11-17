@@ -4051,6 +4051,11 @@ html[data-theme="light"] .markdown-body pre.md-code { background: rgba(90, 72, 4
 .or-summary { border: 1px solid var(--line, #444); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }
 .or-summary-row { display: grid; grid-template-columns: 84px 1fr; gap: 8px; padding: 3px 0; font-size: 13px; }
 .or-summary-row b { opacity: .8; }
+/* B-20261117-190649-d113：验收点逐条换行（Owner 要能逐条核对）+ 详情全文保留原文换行、超长串不横向溢出 */
+.or-accept-row { align-items: start; }
+.or-accept-lines { display: grid; gap: 3px; min-width: 0; }
+.or-accept-line { overflow-wrap: anywhere; line-height: 1.55; }
+.or-detail-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .or-opinion-label { display: block; font-size: 13px; margin: 8px 0; }
 .or-opinion { display: block; width: 100%; min-height: 70px; margin-top: 4px; background: transparent; color: inherit; border: 1px solid var(--line, #444); border-radius: 8px; padding: 8px; font: inherit; }
 .or-skip { display: grid; gap: 6px; margin: 8px 0; }
