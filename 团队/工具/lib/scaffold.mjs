@@ -877,7 +877,12 @@ export function ensureProjectStructure({ name, root, desc = '', overwrite = fals
   }
 
   const teamIron = path.join(PATHS.teamRoot, '项目铁律.md');
-  put(path.join(base, '项目铁律.md'), exists(teamIron) ? readText(teamIron, DEFAULT_IRON) : DEFAULT_IRON);
+  const teamIronText = exists(teamIron) ? readText(teamIron, '') : '';
+  // T-20261117-211434-0585（6b61-B）：团队级 项目铁律.md 是**空白起点模板**（开头写「这不是规则全文 / 新建项目时的空白起点」），
+  // 直接复制会让新项目拿到一张白纸，与本项目实际使用的「按需清单」形态不一致。
+  // 判定为空白模板时回落到 DEFAULT_IRON（本项目在用的按需清单：宪法最高 + 10 条避坑）。
+  const teamIronIsBlank = /这不是规则全文|空白起点|空白模板/.test(teamIronText);
+  put(path.join(base, '项目铁律.md'), (teamIronText && !teamIronIsBlank) ? teamIronText : DEFAULT_IRON);
   // a28a：新建项目默认带经验教训登记册（默认继承；已有文件不覆盖）
   put(path.join(base, '经验教训登记册.md'), lessonsRegister(projectName, m));
 
