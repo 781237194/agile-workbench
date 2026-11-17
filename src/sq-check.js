@@ -188,8 +188,8 @@ async function runSqCheck(options = {}) {
   // 拍面板专用：先把壳内 webview 藏起来（独立原生层会盖住右侧抽屉）、把面板滚进抽屉可视区，再截。
   const shotOf = async (name, selector) => {
     const ready = await evalJs(`(async () => {
-      const d = document.getElementById('team-drawer');
-      if (d && d.hidden) { const b = document.getElementById('team-pill'); if (b) b.click(); }
+      const d = document.getElementById('session-queue-drawer');
+      if (d && d.hidden) { const b = document.getElementById('btn-session-queue'); if (b) b.click(); }
       const v = document.getElementById('dsh-view');
       if (v) { v.dataset.sqPrevDisplay = v.style.display || ''; v.style.display = 'none'; }
       await new Promise((r) => setTimeout(r, 400));
@@ -220,7 +220,7 @@ async function runSqCheck(options = {}) {
     return evalJs(READ_PANEL);
   };
   // 打开团队台（让面板与派单入口可见、截图能拍到）
-  await evalJs("(() => { const b = document.getElementById('team-pill'); if (b) b.click(); return true; })()");
+  await evalJs("(() => { const b = document.getElementById('btn-session-queue'); if (b) b.click(); return true; })()");
   await wait(700);
   await evalJs("(() => { const el = document.getElementById('session-queue-panel'); if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' }); return true; })()");
   await wait(300);

@@ -1996,15 +1996,25 @@ async function applyState(next) {
 function setDrawer(name, opts = {}) {
   const project = $('#project-drawer');
   const team = $('#team-drawer');
+  // R-6bc8（T-20261117-152156-85c9）：会话排队是第三个独立抽屉（Owner 打回：不许塞在团队台里）。
+  const sessionQueue = $('#session-queue-drawer');
   const mask = $('#drawer-mask');
   if (!project || !team) return;
-  const next = name === 'project' || name === 'team' ? name : null;
+  const next = name === 'project' || name === 'team' || name === 'session-queue' ? name : null;
   const changed = openDrawerName !== next;
   openDrawerName = next;
   project.hidden = next !== 'project';
   team.hidden = next !== 'team';
+  if (sessionQueue) sessionQueue.hidden = next !== 'session-queue';
+  const queueBtn = $('#btn-session-queue');
+  if (queueBtn) queueBtn.setAttribute('aria-pressed', next === 'session-queue' ? 'true' : 'false');
   if (mask) mask.hidden = !next;
   document.body.classList.toggle('drawer-open', Boolean(next));
+  if (next === 'session-queue') {
+    if (changed && !opts.keepScroll) $('#session-queue-drawer .drawer-scroll')?.scrollTo({ top: 0 });
+    // 面板自己带 8 秒刷新；打开时立刻取一次，打开即有数（不依赖等下一拍）。
+    if (typeof window.__sqRefresh === 'function') { void window.__sqRefresh(); }
+  }
   if (next === 'project') {
     if (changed && !opts.keepScroll) $('#project-drawer .drawer-scroll')?.scrollTo({ top: 0 });
     loadDshTeamStatus();
@@ -15612,6 +15622,8 @@ function bind() {
   // 顶栏操作
   $('#btn-board')?.addEventListener('click', () => setDrawer('project'));
   $('#btn-members')?.addEventListener('click', () => setDrawer('team'));
+  // R-6bc8（T-20261117-152156-85c9）：会话排队独立抽屉入口（紧挨「项目面板」）
+  $('#btn-session-queue')?.addEventListener('click', () => setDrawer('session-queue'));
   $('#legacy-owner-quick-removed')?.addEventListener('click', openOwnerGate);
   $('#legacyReviewStage')?.addEventListener('click', () => {
     if (activeProject()) openOwnerGate();

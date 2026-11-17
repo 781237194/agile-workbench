@@ -220,6 +220,8 @@
           </div>
           <div class="stage-actions">
             <button id="btn-board" class="stage-btn" type="button" title="打开项目面板（浮层）">项目面板</button>
+            <!-- R-6bc8（T-20261117-152156-85c9，Owner 打回）：会话排队独立成模块，入口紧挨「项目面板」，不挤占右侧团队/代管区域 -->
+            <button id="btn-session-queue" class="stage-btn" type="button" title="打开会话排队（独立模块：排队数 / 四态 / 失败与跳过 / 最近成功投递）" aria-pressed="false">会话排队</button>
             <button id="btn-members" class="stage-btn" type="button" title="打开团队台：六角色、消息、回执">团队台</button>
             <button id="btn-dsh-mode" class="stage-btn" type="button" title="重载 DSH 主画面" aria-pressed="false">重载 DSH</button>
             <button id="btn-side" class="stage-btn stage-icon" type="button" title="显示 / 隐藏左侧工作区栏" aria-pressed="true">◧</button>
@@ -513,18 +515,9 @@
                 <div id="team-session-list" class="team-session-list"></div>
               </section>
 
-              <!-- R-6bc8（T-37f5）：会话排队（只读）。三件事分开显示：排队数（DSH 会话 queued）/ 四态（唤醒日志 fail>skip>ok>none）/ 失败数与跳过数；积压 ≠ 失败。 -->
-              <section id="session-queue-panel" class="team-block session-queue-block" data-sq-degraded="false">
-                <div class="team-block-head">
-                  <h3>会话排队 <span class="muted">/ 积压 ≠ 失败</span></h3>
-                  <div class="team-head-tools">
-                    <span id="session-queue-meta" class="badge muted-badge" title="快照时间与数据来源">未加载</span>
-                  </div>
-                </div>
-                <p class="team-status-source">列含义：排队数（该角色 DSH 会话里 placement=queued 的条数，未知显示「—」不显示 0）、四态（fail / skip / ok / none，优先级 fail&gt;skip&gt;ok&gt;none，跳过优先于成功）、失败数、跳过数、最近成功投递时间（只取 ok 行）。统计窗口默认最近 24 小时；快照超过 120 秒未更新会降级黄条。</p>
-                <div id="session-queue-banner" class="sq-banner" role="status" hidden></div>
-                <div id="session-queue-rows" class="sq-rows" aria-label="六角色会话排队与唤醒状态"></div>
-              </section>
+              <!-- R-6bc8（T-20261117-152156-85c9，Owner 打回）：会话排队已拆成独立抽屉 #session-queue-drawer，
+                   不再塞在团队台里（团队台太挤）；这里只保留一段指向说明，面板本体在文件末尾的独立抽屉里。 -->
+              <p class="team-status-source" id="session-queue-moved-note">「会话排队」已独立成模块：顶部【会话排队】按钮（项目面板旁）打开，含排队数 / 四态 / 失败数 / 跳过数 / 最近成功投递。</p>
 
               <!-- R-b5fc F-4b：角色队列（只读 role_queues.json 派生文件；按当前会话角色绑定：角色只看自己，识别不到会话时才按 PM 全量并标来源） -->
               <section id="role-queue-block" class="team-block role-queue-block">
@@ -662,6 +655,35 @@
                 <button id="btn-team-project" class="ghost small" type="button">项目面板</button>
                 <button id="btn-team-sync" class="ghost small" type="button" title="重新向团队工具同步登记并绑定 DSH 工作区">同步团队登记</button>
               </div>
+            </div>
+          </section>
+
+          <!-- R-6bc8（T-20261117-152156-85c9，Owner 打回「不要塞进团队台、单独列个模块、放项目面板旁边」）：
+               会话排队独立抽屉。内容与锚点原样（[data-sq-row]/[data-sq-queued]/[data-sq-state]/[data-sq-last-ok]/
+               [data-sq-fail-count]/[data-sq-skip-count]/[data-sq-degraded]/#session-queue-banner 都不变），
+               入口=顶部 #btn-session-queue（紧挨「项目面板」）。 -->
+          <section id="session-queue-drawer" class="drawer session-queue-drawer" role="dialog" aria-modal="false" aria-label="会话排队" hidden>
+            <header class="drawer-head">
+              <div>
+                <h2>会话排队</h2>
+                <p id="session-queue-summary">六角色 · 排队数 / 四态 / 失败与跳过 / 最近成功投递</p>
+              </div>
+              <div class="drawer-head-right">
+                <button class="drawer-close" type="button" data-close-drawer="session-queue" aria-label="关闭会话排队">×</button>
+              </div>
+            </header>
+            <div class="drawer-scroll session-queue-scroll">
+              <section id="session-queue-panel" class="team-block session-queue-block" data-sq-degraded="false">
+                <div class="team-block-head">
+                  <h3>会话排队 <span class="muted">/ 积压 ≠ 失败</span></h3>
+                  <div class="team-head-tools">
+                    <span id="session-queue-meta" class="badge muted-badge" title="快照时间与数据来源">未加载</span>
+                  </div>
+                </div>
+                <p class="team-status-source">列含义：排队数（该角色 DSH 会话里 placement=queued 的条数，未知显示「—」不显示 0）、四态（fail / skip / ok / none，优先级 fail&gt;skip&gt;ok&gt;none，跳过优先于成功）、失败数、跳过数、最近成功投递时间（只取 ok 行）。统计窗口默认最近 24 小时；快照超过 120 秒未更新会降级黄条。</p>
+                <div id="session-queue-banner" class="sq-banner" role="status" hidden></div>
+                <div id="session-queue-rows" class="sq-rows" aria-label="六角色会话排队与唤醒状态"></div>
+              </section>
             </div>
           </section>
         </div>

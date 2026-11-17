@@ -186,13 +186,13 @@
     refresh();
     if (state.timer) clearInterval(state.timer);
     state.timer = setInterval(() => {
-      // 团队台收起时不跑（省一次 IPC）；打开时立刻补一次。
-      const drawer = el('team-drawer');
+      // 团队台收起时不跑（省一次 IPC）；本面板现在在独立抽屉里（R-6bc8 返工：不再挂团队台）。
+      const drawer = el('session-queue-drawer');
       if (drawer && drawer.hidden) return;
       refresh();
     }, REFRESH_MS);
-    const pill = el('team-pill');
-    if (pill) pill.addEventListener('click', () => setTimeout(refresh, 350));
+    const openBtn = el('btn-session-queue');
+    if (openBtn) openBtn.addEventListener('click', () => setTimeout(refresh, 150));
     const roleSelect = el('dispatch-role');
     if (roleSelect) roleSelect.addEventListener('change', paintBackpressure);
     const reload = el('btn-queue-refresh');
