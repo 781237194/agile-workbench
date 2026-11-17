@@ -5292,13 +5292,25 @@ export function cmdInbox(args) {
     const rows = listInbox(b.role, { project: b.project, includeCur: true });
     const unread = rows.filter((m) => !m.readAt);
     let marked = 0;
+    // B-20261117-013448-8fc2：审计必须落「被清 id 清单」——否则 B-d672 类「PM 漏收角色答复」事后
+    // 再也说不清「那条到底有没有送到」（清完只剩计数）。只记 id/from/subject 三个定位字段，不搬正文。
+    const cleared = [];
     for (const m of unread) {
-      try { readMessage(b.role, m.id); marked += 1; } catch { /* 单条失败不阻断其余 */ }
+      try {
+        readMessage(b.role, m.id);
+        marked += 1;
+        cleared.push({ id: m.id, from: m.from || '', subject: String(m.subject || '').slice(0, 80) });
+      } catch { /* 单条失败不阻断其余 */ }
     }
+    const messageIds = cleared.map((x) => x.id);
     const at = nowIso();
-    appendEvent({ role: b.role, sessionId: b.sessionId, action: 'inbox_mark_all_read', project: b.project, target: String(marked), note: `role=${b.role} unread=${unread.length} marked=${marked}` });
-    try { appendLine(PATHS.reads, JSON.stringify({ at, role: b.role, kind: 'mark-all-read', project: b.project, unread: unread.length, marked, source: 'inbox --mark-all-read' })); } catch { /* 审计失败不阻断 */ }
-    out(args, `已批量标已读：${b.role} 盘点未读 ${unread.length} 条，实际标记 ${marked} 条（审计已写）`, { ok: true, role: b.role, unread: unread.length, marked, at });
+    appendEvent({
+      role: b.role, sessionId: b.sessionId, action: 'inbox_mark_all_read', project: b.project, target: String(marked),
+      note: `role=${b.role} unread=${unread.length} marked=${marked}`,
+      data: { messageIds, cleared },
+    });
+    try { appendLine(PATHS.reads, JSON.stringify({ at, role: b.role, kind: 'mark-all-read', project: b.project, unread: unread.length, marked, messageIds, cleared, source: 'inbox --mark-all-read' })); } catch { /* 审计失败不阻断 */ }
+    out(args, `已批量标已读：${b.role} 盘点未读 ${unread.length} 条，实际标记 ${marked} 条（审计已写，含 ${messageIds.length} 个 id 可回查）`, { ok: true, role: b.role, unread: unread.length, marked, messageIds, at });
     return;
   }
   const msgs = listInbox(b.role, { includeCur: Boolean(args.all), project: b.project });
