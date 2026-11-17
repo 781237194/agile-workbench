@@ -309,32 +309,23 @@ function cmdCheck(argv) {
   const need = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
   push('② 六角色 boot 记录齐全', need.every((r) => boots.includes(r)), { boots });
 
-  // ③ 无旧根残留（清单记录的旧 repoRoot 不应再出现在 项目.json/workbench/项目信息.md 文本里）
-  const manifest = (() => {
-    try {
-      const outDir = path.resolve(String(argv.out || '').trim());
-      if (!outDir) return null;
-      const mf = readJsonSafe(path.join(outDir, MANIFEST_NAME)) || readJsonSafe(path.join(outDir, 'manifest.json'));
-      return mf && mf.source ? mf.source : null;
-    } catch { return null; }
-  })();
-  const oldRoot = manifest && manifest.repoRoot ? String(manifest.repoRoot).replace(/\\/g, '/') : '';
-  const residueFiles = [path.join(stateDir, '项目.json'), wbFile, path.join(projectDir, '项目信息.md')].filter((f) => fs.existsSync(f));
-  const residue = oldRoot
-    ? residueFiles.filter((f) => String(fs.readFileSync(f, 'utf8')).replace(/\\/g, '/').includes(oldRoot))
-    : [];
-  push('③ 无旧根残留', residue.length === 0, { oldRoot, residue: residue.map((f) => path.basename(f)) });
-
+  // ③ 无旧根残留：四处落点记录的路径必须都指向「本机存在的目录」（旧机路径 rebind 后应已改写，不存在即残留）
+  const pathRefsAll = pathRefs(repoRoot, project);
+  // F4④：URL（http(s)://、ws(s)://）不是盘符路径，不参与「旧根残留」判定
+  const isUrl = (v) => /^[a-z]+:\/\//i.test(String(v));
+  const staleRefs = pathRefsAll.filter((r) => !isUrl(r.value) && /[A-Za-z]:[\\/]/.test(String(r.value)) && !fs.existsSync(String(r.value)));
+  push('③ 无旧根残留（四处落点路径均指向本机存在目录）', staleRefs.length === 0,
+    { stale: staleRefs.map((r) => ({ key: r.key, value: r.value })) });
   // ④ send→read→ack 回环（沙盘内真实 CLI 三连）
   let loop = { ok: false };
   try {
-    const boot = runCli(repoRoot, ['boot', '--role', 'pm', '--project', project, '--json']);
+    const boot = runCli(repoRoot, ['boot', '--role', 'pm', '--project', project, '--session', 'sess-pm', '--json']);
     const token = String((boot && (boot.token || (boot.boot && boot.boot.token))) || '');
     if (!token) throw new Error('no token');
     const sent = runCli(repoRoot, ['send', '--boot', token, '--project', project, '--to', 'tester', '--subject', '迁移冒烟', '--body', 'migrate-check 回环', '--json']);
     const msgId = sent && sent.message && sent.message.id;
     const read = msgId ? runCli(repoRoot, ['read', '--boot', token, '--id', msgId, '--json']) : null;
-    const testerBoot = runCli(repoRoot, ['boot', '--role', 'tester', '--project', project, '--json']);
+    const testerBoot = runCli(repoRoot, ['boot', '--role', 'tester', '--project', project, '--session', 'sess-tester', '--json']);
     const testerToken = String((testerBoot && (testerBoot.token || (testerBoot.boot && testerBoot.boot.token))) || '');
     const ack = msgId && testerToken ? runCli(repoRoot, ['ack', '--boot', testerToken, '--id', msgId, '--note', 'migrate-check 回环 ack', '--json']) : null;
     loop = { ok: Boolean(read && read.ok !== false && ack && ack.ok !== false), msgId };

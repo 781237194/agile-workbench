@@ -33,6 +33,8 @@ const REPO = path.join(SB, 'repo');
 const PROJ = '迁移演示项目';
 const projDir = path.join(REPO, '项目', PROJ);
 const stateDir = path.join(REPO, '团队', '状态', '项目', PROJ);
+// 换机目标根（用真实沙盘项目目录，保证 rebind 后项目仍可见，migrate-check 才能 boot）
+const TO = projDir.replace(/\\/g, '/');
 mk(path.join(projDir, '需求', 'R-1.md'), '# 需求\n');
 mk(path.join(projDir, '程序员A', '产出', 'a.md'), '# 产出\n');
 mk(path.join(projDir, '程序员A', '产出', '证据-x', '01.png'), 'png');
@@ -42,10 +44,14 @@ mk(path.join(stateDir, '工作流.json'), JSON.stringify({ requirements: {}, boo
 mk(path.join(stateDir, '任务', 'T-1.json'), JSON.stringify({ id: 'T-1', status: 'done' }, null, 2));
 mk(path.join(projDir, '_backup', 'noise.txt'), 'noise');
 mk(path.join(projDir, '_tmp-x', 'noise2.txt'), 'noise');
-mk(path.join(REPO, '团队', '状态', '团队.json'), JSON.stringify({
-  version: 2,
-  members: ['pm', 'analyst', 'product', 'programmer1', 'programmer2', 'tester'].map((r) => ({ role: r, name: r, sessionId: `sess-${r}`, status: 'active' })),
-}, null, 2));
+// 名册基于真实 team.json 派生（保留 version/config 等 boot 依赖字段），只替换 members 与 activeProject
+{
+  const realTeam = JSON.parse(fs.readFileSync(path.join(ROOT, '团队', '状态', '团队.json'), 'utf8'));
+  realTeam.members = ['pm', 'analyst', 'product', 'programmer1', 'programmer2', 'tester']
+    .map((r) => ({ role: r, name: r, sessionId: `sess-${r}`, status: 'active' }));
+  delete realTeam.activeProject;
+  mk(path.join(REPO, '团队', '状态', '团队.json'), JSON.stringify(realTeam, null, 2) + '\n');
+}
 mk(path.join(REPO, 'data', 'userdata', 'workbench.json'), JSON.stringify({
   version: 1, projects: [{ name: PROJ, id: 'p1', path: 'D:/old/path/项目', dshWorkspaceId: 'ws-old', workspace: { id: 'ws-old', path: 'D:/old/path/项目', name: PROJ, engineUrl: 'http://127.0.0.1:1' } }],
 }, null, 2));
@@ -58,10 +64,13 @@ for (const f of ['团队宪法.md', '项目铁律.md']) {
   const src = path.join(ROOT, '团队', f);
   if (fs.existsSync(src)) fs.copyFileSync(src, path.join(REPO, '团队', f));
 }
-// 项目级必读：项目铁律.md（boot 规格按项目目录读，不是团队级模板）
+// 项目级必读：项目铁律.md / 项目索引.md / 需求/00-需求总览.md（boot 规格按项目目录读，缺即 MISSING_DOC）
 {
-  const src = path.join(ROOT, '项目', '工作台改造修复', '项目铁律.md');
-  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(projDir, '项目铁律.md'));
+  for (const rel of ['项目铁律.md', '项目索引.md', path.join('需求', '00-需求总览.md')]) {
+    const src = path.join(ROOT, '项目', '工作台改造修复', rel);
+    if (fs.existsSync(src)) mk(path.join(projDir, rel), fs.readFileSync(src, 'utf8'));
+    else mk(path.join(projDir, rel), '# ' + rel + '\n');
+  }
 }
 for (const [role, dir] of [['pm', '项目经理'], ['product', '产品'], ['analyst', '需求分析师'], ['programmer1', '程序员A'], ['programmer2', '程序员B'], ['tester', '测试人员']]) {
   const src = path.join(ROOT, '项目', '工作台改造修复', dir, '角色卡.md');
@@ -132,15 +141,27 @@ check('① 名册导入后落在 团队/状态/团队.json', (teamAfterImport.me
 
 // ④ rebind（AC4）——保持原断言
 const wbBefore = fs.readFileSync(path.join(REPO, 'data', 'userdata', 'workbench.json'), 'utf8');
-const rebindDry = run(['rebind', '--root', REPO, '--project', PROJ, '--to', 'E:/new/root', '--json']);
+const rebindDry = run(['rebind', '--root', REPO, '--project', PROJ, '--to', TO, '--json']);
 check('④ rebind 默认 dry-run 零写入', rebindDry.code === 0 && rebindDry.json && rebindDry.json.dryRun === true && (rebindDry.json.diffs || []).length >= 2
   && fs.readFileSync(path.join(REPO, 'data', 'userdata', 'workbench.json'), 'utf8') === wbBefore, rebindDry.json);
-const rebind = run(['rebind', '--root', REPO, '--project', PROJ, '--to', 'E:/new/root', '--yes', '--json']);
+const rebind = run(['rebind', '--root', REPO, '--project', PROJ, '--to', TO, '--yes', '--json']);
 const pjAfter = JSON.parse(fs.readFileSync(path.join(stateDir, '项目.json'), 'utf8'));
 const wbAfter = JSON.parse(fs.readFileSync(path.join(REPO, 'data', 'userdata', 'workbench.json'), 'utf8'));
-check('④ rebind --yes 改 项目.json/workbench/项目信息.md', rebind.code === 0 && pjAfter.path === 'E:/new/root'
-  && wbAfter.projects[0].path === 'E:/new/root' && wbAfter.projects[0].workspace.path === 'E:/new/root'
-  && fs.readFileSync(path.join(projDir, '项目信息.md'), 'utf8').includes('E:/new/root'), { pjAfter, wb: wbAfter.projects[0] });
+check('④ rebind --yes 改 项目.json/workbench/项目信息.md', rebind.code === 0 && pjAfter.path === TO
+  && wbAfter.projects[0].path === TO && wbAfter.projects[0].workspace.path === TO
+  && fs.readFileSync(path.join(projDir, '项目信息.md'), 'utf8').includes(TO), { pjAfter, wb: wbAfter.projects[0] });
+
+// ⑥ migrate-check 固定五步（AC6①）——放在 rebind 之后（目标根用真实沙盘目录）：
+// 且 ④ 会改项目 path、⑤ 会清空 sessionId，放在后面会让 boot 失败（顺序问题非实现问题）。
+// 此时 项目.json path 仍是导入时的原值（未 rebind），migrate-check 的 boot 可直接跑。
+// ⑥ migrate-check 固定五步（AC6①）
+const chk = run(['migrate-check', '--root', REPO, '--project', PROJ, '--out', OUT, '--json']);
+const stepNames = (chk.json && chk.json.steps || []).map((s) => s.name);
+check('⑥ migrate-check 五步固定（项目可见/六角色boot/无旧根/回环/自检）', chk.code === 0 && chk.json && chk.json.ok === true
+  && stepNames.length === 5
+  && stepNames[0].includes('项目可见') && stepNames[1].includes('boot') && stepNames[2].includes('旧根')
+  && stepNames[3].includes('ack') && stepNames[4].includes('自检'), chk.json || chk.stderr);
+
 
 // ⑤ rebind-sessions 三语义 + stale_session 审计（AC5）
 const teamFile = path.join(REPO, '团队', '状态', '团队.json');
@@ -160,21 +181,6 @@ check('⑤ --clear 是布尔（不吞后续参数）+ dry-run', rsClearDry.code 
 const rsClear = run(['rebind-sessions', '--root', REPO, '--project', PROJ, '--clear', '--yes', '--json']);
 const afterClear = JSON.parse(fs.readFileSync(teamFile, 'utf8')).members;
 check('⑤ --clear 后六条 sessionId 空且 pending', rsClear.code === 0 && afterClear.every((m) => m.sessionId === '' && m.sessionPending === true), afterClear.map((m) => [m.role, m.sessionId, m.sessionPending]));
-
-// ⑥ 前先把 项目.json 的 path 拨回真实沙盘目录：④ 的 rebind 测试已把它改成 E:/new/root（不存在），
-// 会让 migrate-check 的 boot 报 PROJECT_DIR_MISSING——这是断言顺序问题，不是实现问题。
-{
-  const pjFix = JSON.parse(fs.readFileSync(path.join(stateDir, '项目.json'), 'utf8'));
-  pjFix.path = projDir;
-  fs.writeFileSync(path.join(stateDir, '项目.json'), JSON.stringify(pjFix, null, 2) + '\n', 'utf8');
-}
-// ⑥ migrate-check 固定五步（AC6①）
-const chk = run(['migrate-check', '--root', REPO, '--project', PROJ, '--out', OUT, '--json']);
-const stepNames = (chk.json && chk.json.steps || []).map((s) => s.name);
-check('⑥ migrate-check 五步固定（项目可见/六角色boot/无旧根/回环/自检）', chk.code === 0 && chk.json && chk.json.ok === true
-  && stepNames.length === 5
-  && stepNames[0].includes('项目可见') && stepNames[1].includes('boot') && stepNames[2].includes('旧根')
-  && stepNames[3].includes('ack') && stepNames[4].includes('自检'), chk.json || chk.stderr);
 
 const passed = results.filter((r) => r.ok).length;
 console.log(`\nB-4761（b0ea 返工）断言：${passed}/${results.length} PASS`);
