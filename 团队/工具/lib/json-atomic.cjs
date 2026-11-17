@@ -43,15 +43,44 @@ function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('he
 function shaOfFile(file) {
   try { return sha256(fs.readFileSync(file)); } catch { return null; }
 }
+/** 清只读位（Windows 下 chmod 0o666 = 去掉只读属性）；不存在/无权限时静默忽略。 */
+function clearReadonly(target) {
+  if (!target) return;
+  try { fs.chmodSync(target, 0o666); } catch { /* 不存在或无法改：忽略 */ }
+}
+
+/**
+ * B-20261117-201937-c17a：备份目标文件到 .bak。
+ * 旧实现直接 copyFileSync：源文件只读时，Windows 会连目标一起复制成只读 → 用户解除原文件权限后，
+ * 下一次写仍因 .bak 只读在 copyfile 处 EPERM，恢复路径被卡死、无法自愈。
+ * 现在：写前清 .bak 只读 → 复制 → **再清一次 .bak 只读**；copyfile 被拒时清源只读位重试，仍失败退化为字节复制。
+ */
+function safeCopyBackup(file, bak) {
+  clearReadonly(bak);
+  try {
+    fs.copyFileSync(file, bak);
+  } catch {
+    clearReadonly(file);
+    try {
+      fs.copyFileSync(file, bak);
+    } catch {
+      fs.writeFileSync(bak, fs.readFileSync(file));
+    }
+  }
+  clearReadonly(bak); // 关键：.bak 绝不继承只读位，否则解除权限后仍 EPERM
+}
+
 function atomicWriteRaw(file, buf) {
   const tmp = file + '.tmp';
   try {
+    clearReadonly(tmp);
     const fd = fs.openSync(tmp, 'w');
     try { fs.writeSync(fd, buf); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    if (fs.existsSync(file)) fs.copyFileSync(file, file + '.bak');
+    const bak = file + '.bak';
+    if (fs.existsSync(file)) safeCopyBackup(file, bak);
     fs.renameSync(tmp, file);
   } catch (error) {
-    try { if (fs.existsSync(tmp)) fs.rmSync(tmp, { force: true }); } catch { /* 清理失败不掩盖原错误 */ }
+    try { if (fs.existsSync(tmp)) { clearReadonly(tmp); fs.rmSync(tmp, { force: true }); } } catch { /* 清理失败不掩盖原错误 */ }
     throw new AtomicError('WRITE_FAILED', `写失败：${file}（${(error && error.message) || error}）`, { file });
   }
 }
