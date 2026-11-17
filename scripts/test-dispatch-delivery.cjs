@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A/B：清理助手 + 唯一沙盘
 /**
  * R-20261116-104535-1dfb（P0）自检：派单必达 —— deadline 状态机 / 12 键投递审计 / 单链三层升级 / 三信号 idle / 自动唤醒分级 / 恢复清标
  *
@@ -29,7 +29,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const REPO = path.resolve(__dirname, '..');
-const SB = path.join(REPO, '_tmp', '1dfb-dispatch-sandbox');
+const SB = uniqueSandbox('1dfb-dispatch-sandbox'); // B-07b6 B：唯一沙盘（并发安全）
 const TEAM = path.join(SB, '团队');
 const PROJECTS = path.join(TEAM, '状态', '项目');
 const PROJ = '1dfb-dlv';

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261115-143112-bbf6（P1）断言：派单队列「吞单」三件套
  *   ① 锁/占用解除后 60 秒内必投递（泵一次即达）；② 滞留 >5 分钟向 PM escalation（10 分钟去重）；
@@ -15,7 +15,7 @@ const { execFileSync } = require('node:child_process');
 
 const REPO = path.resolve(__dirname, '..');
 const TEAM_MJS = path.join(REPO, '团队', '工具', 'team.mjs');
-const SANDBOX = path.join(REPO, '项目', '工作台改造修复', '_tmp', 'dispatch-queue-sandbox');
+const SANDBOX = uniqueSandbox('dispatch-queue-sandbox', { root: path.join(REPO, '项目', '工作台改造修复') }); // B-07b6 B：唯一沙盘（并发安全）
 const TEAM_ROOT = path.join(SANDBOX, '团队');
 const PROJECTS_ROOT = path.join(SANDBOX, '项目');
 const PROJECT = '队列沙盘';

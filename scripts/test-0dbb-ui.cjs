@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A/B：清理助手 + 唯一沙盘
 /**
  * R-0dbb「评审材料可读性」真窗口渲染断言（CDP，T-20261117-011142-d2a1）。
  *
@@ -25,7 +25,7 @@ const ROOT = path.resolve(__dirname, '..');
 const PROJ_REAL = path.join(ROOT, '项目', '工作台改造修复');
 const PNAME = '工作台改造修复';
 const RUN_ID = String(process.pid);
-const BASE = path.join(ROOT, '_tmp', '0dbb-ui');
+const BASE = uniqueSandbox('0dbb-ui'); // B-07b6 B：唯一沙盘（并发安全）
 const SB = path.join(BASE, `sb-${RUN_ID}`);
 const DATA = path.join(SB, 'data'); // 每次运行独立数据根：避免上一次实例的单实例锁把新实例顶掉
 const TEAM = path.join(SB, '团队');

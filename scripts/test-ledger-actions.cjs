@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A/B：清理助手 + 唯一沙盘
 /**
  * R-9fbe F-9fbe-5 / T-20261115-071322-0ed7（T-ed7）断言：账本分叉的两个处置入口。
  *
@@ -37,7 +37,7 @@ const MAIN = path.join(ROOT, 'src', 'main.js');
 const PRELOAD = path.join(ROOT, 'src', 'preload.js');
 const EVIDENCE_DIR = path.join(ROOT, '项目', '工作台改造修复', '程序员A', '产出', '证据-ed7');
 
-const SB = path.join(ROOT, '_tmp', 'ed7-ledger-actions');
+const SB = uniqueSandbox('ed7-ledger-actions'); // B-07b6 B：唯一沙盘（并发安全）
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');

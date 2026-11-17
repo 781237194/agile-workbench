@@ -1,5 +1,5 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-9fbe / T-20261115-063059-09e9 断言：账本分叉判定（带「重开时间」维度）。
  *
@@ -16,7 +16,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', '9fbe-ledger');
+const SB = uniqueSandbox('9fbe-ledger'); // B-07b6 B：唯一沙盘（并发安全）
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');

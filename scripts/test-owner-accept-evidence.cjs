@@ -26,6 +26,7 @@ const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A/B：清理助手 + 唯一沙盘
 
 const ROOT = path.resolve(__dirname, '..');
 const REAL_TEAM = path.join(ROOT, '团队');
@@ -34,7 +35,7 @@ const REAL_PROJECT = path.join(ROOT, '项目', '工作台改造修复');
 const REAL_STATE_DIR = path.join(REAL_TEAM, '状态', '项目', '工作台改造修复');
 const PROJECT = '工作台改造修复';
 const PROJECT_ID = 'P-b98f4eb7';
-const BASE = path.join(ROOT, '_tmp', '9b05-owner-accept');
+const BASE = uniqueSandbox('9b05-owner-accept'); // B-07b6 B：唯一沙盘（并发安全）
 const SB = path.join(BASE, 'sb');
 const TEAM = path.join(SB, '团队');
 const PROJECT_DIR = path.join(SB, 'project');

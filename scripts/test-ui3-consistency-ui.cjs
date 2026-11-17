@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A/B：清理助手 + 唯一沙盘
 /**
  * B-20261116-094215-2ff6 / B-20261116-095320-410e / B-20261116-100905-1211 真窗口断言（CDP）
  *
@@ -26,7 +26,7 @@ const { spawn } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const PNAME = '工作台改造修复';
-const BASE = path.join(ROOT, '_tmp', 'ui3-consistency-ui');
+const BASE = uniqueSandbox('ui3-consistency-ui'); // B-07b6 B：唯一沙盘（并发安全）
 const RUN = `sb-${process.pid}`;
 const SB = path.join(BASE, RUN);
 const DATA = path.join(SB, 'data');

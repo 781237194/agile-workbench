@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A/B：清理助手 + 唯一沙盘
 /**
  * R-62b9 AC6/AC7 · task accept 沙盘断言（T-3999/E2 工具侧，维修模式·PM 授权范围内）
  *
@@ -21,7 +21,7 @@ const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const REAL_TEAM = path.join(ROOT, '团队');
-const SB = path.join(ROOT, '_tmp', 'task-accept-62b9');
+const SB = uniqueSandbox('task-accept-62b9'); // B-07b6 B：唯一沙盘（并发安全）
 const SB_TEAM = path.join(SB, '团队');
 const SB_PROJECTS = path.join(SB, '项目');
 const PROJECT = '沙盘62b9';

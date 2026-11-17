@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * T-20261115-152105-7afb · R-c1ed F-1（采样分片 / 保留 / 取数通道 / 可复原判据）断言
  * 依据：增补卷-c1ed-1 §2.1/§2.2/§2.4/§3.1/§3.2/§3.3 + §5 AC-c1ed-1.1~1.4
@@ -12,7 +12,7 @@ const path = require('node:path');
 const RM = require('../src/render-memory.js');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', 'render-memory-test');
+const SB = uniqueSandbox('render-memory-test'); // B-07b6 B：唯一沙盘（并发安全）
 let passed = 0;
 const failures = [];
 function check(id, name, ok, detail) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A/B：清理助手 + 唯一沙盘
 /**
  * B-20261115-145830-2ae4 / 62b9 断言：推进前必须读测试报告结论
  *   ① 报告 status=不通过（但任务 evidence 字符串干净）→ 需求停在 dev_done，写 requirement_advance_skipped 带原文片段
@@ -19,7 +19,7 @@ const { execFileSync } = require('node:child_process');
 
 const REPO = path.resolve(__dirname, '..');
 const TEAM_MJS = path.join(REPO, '团队', '工具', 'team.mjs');
-const SANDBOX = path.join(REPO, '项目', '工作台改造修复', '_tmp', 'advance-report-sandbox');
+const SANDBOX = uniqueSandbox('advance-report-sandbox', { root: path.join(REPO, '项目', '工作台改造修复') }); // B-07b6 B：唯一沙盘（并发安全）
 const TEAM_ROOT = path.join(SANDBOX, '团队');
 const PROJECTS_ROOT = path.join(SANDBOX, '项目');
 const PROJECT = '推进沙盘';

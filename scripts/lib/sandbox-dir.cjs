@@ -59,4 +59,33 @@ function rmSandbox(target, opts) {
   }
 }
 
-module.exports = { mkTempSandbox, rmSandbox, REPO_ROOT };
+/**
+ * B-07b6 B 阶段：给「固定沙盘目录」脚本一个唯一目录（并发安全，不改报告件路径）。
+ *
+ * 背景：B1 名单里 16 个脚本把沙盘写死在 `_tmp/<名字>`（或 项目/…/_tmp/<名字>），
+ * 多个角色同时跑会互相 rm/重建 → EPERM/ENOTEMPTY。mkTempSandbox 用的是 mkdtemp 后缀，
+ * 路径不可预测、不便对照；uniqueSandbox 用「<名字>-<pid>-<时间戳36进制>」，可读且唯一。
+ *
+ * 用法：把 `const SB = path.join(ROOT, '_tmp', 'x')` 换成 `const SB = uniqueSandbox('x')`；
+ *       项目内沙盘传 { root: path.join(REPO, '项目', '<项目名>') }。
+ *       opts.keep=true 保留目录（排障用）；opts.prefix 覆盖默认名字。
+ */
+function uniqueSandbox(name, opts) {
+  const options = opts && typeof opts === 'object' ? opts : {};
+  const root = options.root ? path.resolve(String(options.root)) : REPO_ROOT;
+  const base = path.join(root, '_tmp');
+  fs.mkdirSync(base, { recursive: true });
+  const prefix = String(options.prefix || name || 'sandbox').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'sandbox';
+  const stem = `${prefix}-${process.pid}-${Date.now().toString(36)}`;
+  let dir = path.join(base, stem);
+  let n = 1;
+  while (fs.existsSync(dir)) { dir = path.join(base, `${stem}-${n}`); n += 1; }
+  fs.mkdirSync(dir, { recursive: true });
+  if (process.env.TEAM_SB_PROBE === '1') console.log('[sb] ' + dir); // 并发排障：打印本次唯一沙盘
+  if (options.keep !== true) {
+    process.on('exit', () => { rmSandbox(dir); });
+  }
+  return dir;
+}
+
+module.exports = { mkTempSandbox, rmSandbox, uniqueSandbox, REPO_ROOT };
