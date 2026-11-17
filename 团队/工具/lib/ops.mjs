@@ -6955,6 +6955,24 @@ export function cmdReq(args) {
       type: 'requirement', requirementId: '', acceptance: args.acceptance || '', story: args.story || '',
     });
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'req_create', project: b.project, target: task.id, note: `${task.priority} ${task.title}`, data: { task } });
+    // B-20261117-181529-7b49：建需求必须同时在 工作流.json 建行——否则新需求在工作流/面板/评审里静默消失，
+    // 只能靠 PM 记忆手工补登记。幂等：已有同 id 行则不动（不覆盖已有状态）。
+    let workflowRow = null;
+    try {
+      const wfRead = readWorkflowState(b.project);
+      const rows = (wfRead.state && wfRead.state.requirements) || {};
+      const hasRow = Object.values(rows).some((r) => r && String(r.id || '') === String(task.id));
+      if (!hasRow) {
+        const sync = syncWorkflowRow(b.project, task, 'review', {
+          priority: task.priority, title: task.title,
+        }, { create: true, action: 'req_create', by: b.role, note: `req create：${task.id}`, phase: 'requirement_review' });
+        workflowRow = sync.file;
+        appendEvent({ role: b.role, sessionId: b.sessionId, action: 'req_create_row', project: b.project, target: task.id, note: `工作流行已建 status=review`, data: { file: sync.file } });
+      }
+    } catch (e) {
+      // 行写失败不掩盖需求已建的事实，但必须显式报错（不许静默）——失败码供面板/自检识别。
+      fail('REQ_ROW_CREATE_FAILED', `需求 ${task.id} 已建，但工作流行写入失败：${String((e && e.message) || e)}`, { requirementId: task.id, taskCreated: true }, 1);
+    }
     // R-f9b1 F-11：create 入口——正文已存在才查（新需求正文通常由分析师随后写）。
     const createdProject = loadProject(b.project);
     const docCheck = docSizeGate(createdProject, task.id, { entry: 'create', role: b.role, noSplit: Boolean(args['no-split']) });
@@ -6965,7 +6983,7 @@ export function cmdReq(args) {
       }, 1);
     }
     out(args, `已建需求 ${task.id} [${task.priority}] ${task.title}${docCheck.after.exists ? `（正文 ${docCheck.after.bytes}B/${docCheck.after.level}）` : '（正文待写）'}`, {
-      ok: true, requirement: task,
+      ok: true, requirement: task, workflowRow,
       docSplit: docCheck.after.exists ? {
         entry: 'create', beforeBytes: docCheck.before.bytes, afterBytes: docCheck.after.bytes,
         level: docCheck.after.level, whitelisted: docCheck.after.whitelisted,
