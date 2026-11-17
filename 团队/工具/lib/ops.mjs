@@ -4644,6 +4644,9 @@ export async function cmdBoot(args) {
   try { bootLessonGate = lessonGateFor({ project: projectName, role }); } catch { bootLessonGate = null; }
   if (bootLessonGate && !bootLessonGate.ok) {
     lines.push(`⚠️ ${bootLessonGate.code}：经验教训登记册（${bootLessonGate.currentSha12 || '?'}）尚未读过${bootLessonGate.staleSha12 ? `（上次 ${bootLessonGate.staleSha12}）` : ''}；先跑 team.mjs lessons read（不阻断 boot）`);
+  } else if (bootLessonGate && bootLessonGate.warn && bootLessonGate.code === 'LESSONS_FILE_MISSING') {
+    // B-20261116-092803-4875：登记册文件不存在 → 门禁放行，只留一条提示（新项目/沙盘本来就没有这份文件）。
+    lines.push(`⚠️ ${bootLessonGate.code}：经验教训登记册不存在（${bootLessonGate.path || '项目根'}），本门禁已放行（仅提示，不阻断任何操作）；需要时跑 team.mjs project ensure 生成模板`);
   }
   const bootTtlMinutes = Number(team.config.bootTtlMinutes || DEFAULT_BOOT_TTL_MINUTES);
   const coreDocs = records.filter((d) => d.core);
@@ -8273,7 +8276,24 @@ export function ownerTestGate(projectName, requirementId) {
   }
   // B-20261115-184535-c98e：验收门第二道——需求名下不得有未完成子任务（开发/补单/复测/签章类），
   // 否则需求收口后账本分叉（75 条终态需求里 12 条仍有 open 任务）。保留 TEST_NOT_DONE 语义，两道门分开报码。
-  const leftover = children.filter((row) => !statusIsClosed(row.status));
+  // B-20261115-195612-03f4：第二道门抽成 requirementOpenTasksGate()——noTester 分支原先直接赋 ok:true 绕过了它。
+  const openGate = requirementOpenTasksGate(projectName, requirementId, children);
+  if (!openGate.ok) return openGate;
+  return { ok: true, mode: 'tasks', taskIds: testTasks.map((row) => row.id) };
+}
+
+/**
+ * B-20261115-195612-03f4：「需求名下不得有未完成子任务」独立检查（验收门第二道，唯一实现）。
+ * 有 tester 路径由 ownerTestGate 传入已取好的 children；noTester 路径自己取——同一函数、两处调用点。
+ * 只读、不写任何状态。返回 { ok:true, taskIds:[] } 或 { ok:false, code:'REQ_HAS_OPEN_TASKS', message, taskIds, open }。
+ */
+export function requirementOpenTasksGate(projectName, requirementId, children) {
+  const rows = Array.isArray(children)
+    ? children
+    : listTasks(projectName).filter((row) => row
+      && String(row.id) !== String(requirementId)
+      && String(row.requirementId || '') === String(requirementId));
+  const leftover = rows.filter((row) => !statusIsClosed(row.status));
   if (leftover.length) {
     return {
       ok: false,
@@ -8284,7 +8304,7 @@ export function ownerTestGate(projectName, requirementId) {
       open: leftover.map((row) => row.id),
     };
   }
-  return { ok: true, mode: 'tasks', taskIds: testTasks.map((row) => row.id) };
+  return { ok: true, taskIds: [] };
 }
 
 /**
@@ -8672,13 +8692,20 @@ export async function cmdOwner(args) {
     const acceptRoleIds = projectRoleIds(project);
     const noTester = !acceptRoleIds.includes('tester');
     if (noTester) {
-      testGate = { ok: true, mode: 'pm_signed', reason: 'roleIds 不含 tester：测试结论由 PM 代签，证据两件套仍必须齐' };
-      try {
-        appendEvent({
-          role: 'pm', sessionId: sessionOf(args), action: 'accept_test_gate_pm_signed', project: projectName,
-          target: requirementId, note: `roleIds=${acceptRoleIds.join(',')} 无 tester，验收改判证据两件套`,
-        });
-      } catch { /* 留痕失败不阻断验收 */ }
+      // B-20261115-195612-03f4：第二道门（名下不得有未完成子任务）在 noTester 分支同样执行，
+      // 且先于任何落账——拒收时零副作用（不写 accept_test_gate_pm_signed 事件、不改工作流）。
+      const openGate = requirementOpenTasksGate(projectName, requirementId);
+      if (!openGate.ok) {
+        testGate = openGate;
+      } else {
+        testGate = { ok: true, mode: 'pm_signed', reason: 'roleIds 不含 tester：测试结论由 PM 代签，证据两件套仍必须齐' };
+        try {
+          appendEvent({
+            role: 'pm', sessionId: sessionOf(args), action: 'accept_test_gate_pm_signed', project: projectName,
+            target: requirementId, note: `roleIds=${acceptRoleIds.join(',')} 无 tester，验收改判证据两件套`,
+          });
+        } catch { /* 留痕失败不阻断验收 */ }
+      }
     } else {
       testGate = ownerTestGate(projectName, requirementId);
     }
@@ -11690,7 +11717,7 @@ export function cmdLessons(args) {
       `经验教训登记册：${parsed.missing ? '缺失' : parsed.broken ? '解析失败' : `${parsed.totals} 条`}`,
       `当前版本 sha12：${parsed.fileSha ? parsed.fileSha.slice(0, 12) : '—'}`,
       `我的最近阅读：${rec ? `${String(rec.at).slice(0, 19)} @ ${String(rec.fileSha).slice(0, 12)}` : '无记录'}`,
-      `门禁：${gate.ok ? 'PASS' : gate.code}`,
+      `门禁：${gate.ok ? (gate.warn ? `PASS（${gate.code} 已放行，仅提示）` : 'PASS') : gate.code}`,
       statusTurnsLine(b.project, b.role),
     ].join('\n'), { ok: true, parsed: { totals: parsed.totals, fileSha: parsed.fileSha, broken: parsed.broken, missing: parsed.missing }, latest: rec, gate });
     return;

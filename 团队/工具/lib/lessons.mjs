@@ -156,7 +156,13 @@ function latestReadRecord(teamRoot, role) {
 
 /**
  * F-5 门禁：比较该角色最近一条阅读记录的 fileSha 与当前文件 sha256。
- * 返回 { ok:true } 或 { ok:false, code:'LESSONS_UNREAD'|'LESSONS_FILE_MISSING'|'LESSONS_PARSE_BROKEN', staleSha12, currentSha12 }
+ * 返回：
+ *   { ok:true }                                                  通过
+ *   { ok:true, warn:true, code:'LESSONS_FILE_MISSING' }           文件不存在 → **放行**，只提示（B-4875）
+ *   { ok:false, code:'LESSONS_UNREAD', staleSha12, currentSha12 } 文件在但该角色没读过当前 sha → 拦
+ *   { ok:false, code:'LESSONS_PARSE_BROKEN', parseWarn }           文件在但解析不出角色段 → 拦
+ * B-20261116-092803-4875：只有「文件存在但阅读记录 fileSha ≠ 当前 sha」才拦；
+ * 新项目/沙盘本来就没有这份登记册，门禁不得因此硬拦 req create/review/派单/验收。
  */
 function runLessonGate(role, projectDir, options = {}) {
   const opts = options && typeof options === 'object' ? options : {};
@@ -168,7 +174,20 @@ function runLessonGate(role, projectDir, options = {}) {
   const enforce = String((process.env && process.env.TEAM_LESSONS_ENFORCE) || '') === '1';
   if (sandbox && !enforce) return { ok: true, exempt: true, reason: 'SELFTEST', staleSha12: '', currentSha12: '' };
   const parsed = loadLessons(projectDir);
-  if (parsed.missing) return { ok: false, code: 'LESSONS_FILE_MISSING', message: `经验教训登记册缺失：${lessonsPath(projectDir)}` };
+  // B-20261116-092803-4875：登记册「文件不存在」不再当硬拦（与「文件在但你没读」同档是错的）。
+  // 新项目（a28a 之前建的）与沙盘本来就没有这份文件；gate 放行 + warn=true，由 boot 简报/status 给提示。
+  if (parsed.missing) {
+    return {
+      ok: true,
+      warn: true,
+      missing: true,
+      code: 'LESSONS_FILE_MISSING',
+      path: lessonsPath(projectDir),
+      staleSha12: '',
+      currentSha12: '',
+      message: `经验教训登记册不存在（${lessonsPath(projectDir)}）：本门禁放行（仅提示），需要时先跑 team.mjs project ensure 生成模板`,
+    };
+  }
   if (parsed.broken) return { ok: false, code: 'LESSONS_PARSE_BROKEN', message: '经验教训登记册无法解析（缺 `## <角色名>` 段）', parseWarn: parsed.parseWarn.slice(0, 5) };
   const currentSha12 = parsed.fileSha.slice(0, 12);
   const rec = String(opts.teamRoot || '').trim() ? latestReadRecord(opts.teamRoot, role) : null;
