@@ -229,6 +229,24 @@ function nextMorning(hour, minute) { const d = new Date(); d.setDate(d.getDate()
     check('⑥b [data-ar-summary] 文案：今日自动换人 N 次 / 失败 M 次', /今日自动换人\s*1\s*次\s*\/\s*失败\s*1\s*次/.test(String(model.autoRotate.summary)), model.autoRotate);
   }
 
+  /* ⑦ AC3 红线：角色有在办任务（working）→ 不换人、不发交接请求，只留 SKIPPED_BY_WORKING_TASK */
+  {
+    const now = Date.now();
+    const sb = makeSandbox('c7-working', { usage: usage(now), rounds });
+    writeJson(path.join(sb.state, '任务', 'T-fixture-working.json'), { id: 'T-fixture-working', project: PROJECT, type: 'task', priority: 'P1', owner: 'analyst', status: 'working', title: '在办夹具', createdAt: new Date(now).toISOString() });
+    const r1 = cycle(sb, now);
+    const r2 = cycle(sb, now + 5 * 60 * 1000);
+    const rows = sb.rows();
+    const skipped = rows.filter((x) => String(x.code) === 'SKIPPED_BY_WORKING_TASK' && String(x.role) === 'analyst');
+    const triggerRows = rows.filter((x) => String(x.stage) === 'trigger' && String(x.role) === 'analyst');
+    const rotateRows = rows.filter((x) => String(x.stage) === 'rotate');
+    const sessionSame = sb.sessionOf('analyst') === 'sess-old-analyst';
+    check('⑦ AC3 红线：有在办任务 → 不换人/不发交接请求，只记 SKIPPED_BY_WORKING_TASK',
+      r1.ok === true && r2.ok === true && skipped.length >= 1 && triggerRows.length === 0 && rotateRows.length === 0 && sessionSame
+      && /在办任务/.test(String(skipped[0].note || '')),
+      { r1ok: r1.ok, skipped: skipped.length, trigger: triggerRows.length, rotate: rotateRows.length, sessionSame, note: skipped[0] && skipped[0].note });
+  }
+
   const pass = results.filter((r) => r.ok).length;
   console.log('');
   console.log(`${pass === results.length ? 'AUTO_ROTATE_TICK_OK' : 'AUTO_ROTATE_TICK_WARN'} ${JSON.stringify({ total: results.length, pass, red: results.length - pass })}`);

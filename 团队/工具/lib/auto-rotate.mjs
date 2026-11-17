@@ -235,6 +235,78 @@ function rotateSession({ projectName, role, now, reason, auditFile, dryRun }) {
   return { oldId, newId, others: others.map((m) => m.role) };
 }
 
+/* ── AC3（红线）：在办任务不换人 ─────────────────────────────────────── */
+/** 该角色名下 status=working 的任务（镜像需求行不算「在办」，与 gates.isRequirementMirrorTask 同口径）。 */
+export function workingTasksOf(projectName, role) {
+  const dir = projectStatePaths(projectName).tasks;
+  const out = [];
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return out; }
+  for (const file of names) {
+    if (!file.endsWith('.json')) continue;
+    const task = readJsonSafe(path.join(dir, file), null);
+    if (!task || !task.id) continue;
+    if (String(task.status || '') !== 'working') continue;
+    if (String(task.owner || '') !== String(role || '')) continue;
+    if (String(task.type || '') === 'requirement' || String(task.id) === String(task.requirementId || '')) continue;
+    out.push(String(task.id));
+  }
+  return out;
+}
+
+/* ── AC6②③：换人后的 boot 校验（boot_verified / boot_timeout） ───────── */
+/** 新会话是否已 boot：读 阅读.jsonl 里 kind=boot 且 sessionId 命中（或 boots[role].at 晚于换人时刻）。 */
+export function bootObserved({ projectName, role, newSessionId, sinceMs }) {
+  const reads = path.join(PATHS.state, '阅读.jsonl');
+  try {
+    if (fs.existsSync(reads)) {
+      for (const line of fs.readFileSync(reads, 'utf8').split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        let row = null;
+        try { row = JSON.parse(line); } catch { continue; }
+        if (!row || String(row.kind || '') !== 'boot') continue;
+        if (String(row.sessionId || '') !== String(newSessionId || '')) continue;
+        const at = Date.parse(String(row.at || ''));
+        if (!Number.isFinite(at) || at >= sinceMs - 1000) return { observed: true, at: row.at || '' };
+      }
+    }
+  } catch { /* 读不到当未观察到，超时后按 boot_timeout 处理 */ }
+  // 兜底：工作流 boots[role]（部分角色走 CLI-only 回退，也可能落在 boots 上）
+  try {
+    const wf = readJsonSafe(path.join(projectStatePaths(projectName).dir, '工作流.json'), {});
+    const boot = wf && wf.boots && wf.boots[role];
+    const at = Date.parse(String((boot && boot.at) || ''));
+    if (Number.isFinite(at) && at >= sinceMs - 1000) return { observed: true, at: boot.at };
+  } catch { /* ignore */ }
+  return { observed: false, at: '' };
+}
+
+/* ── AC1 反例 / AC2：用量与轮次的可用性 ─────────────────────────────── */
+function usageRolesOf(usage) {
+  const out = {};
+  for (const [role, raw] of Object.entries(usage || {})) {
+    const row = raw && typeof raw === 'object' ? raw : {};
+    const tokens = Number(row.tokens);
+    out[role] = { usable: Number.isFinite(tokens) && tokens > 0, tokens: Number.isFinite(tokens) ? tokens : null };
+  }
+  return out;
+}
+
+/* ── AC7：交接请求正文六段行序（触发原因 / 目标文件 / 需写内容 / 死线 / 回执要求 / 模板） ── */
+export function handoverRequestBody({ role, level, kind, tokens, rounds, deadlineIso, projectName }) {
+  const reason = kind === 'rounds'
+    ? `轮数已达 ${rounds} 轮（阈值 ${DEFAULT_ROUNDS_LIMIT} 轮），需要换新会话`
+    : `上下文用量 ${tokens}（${level === 'force' ? '强制档' : '预警档'}：force ${DEFAULT_TOKEN_FORCE} / warn ${DEFAULT_TOKEN_WARN}），需要换新会话`;
+  return [
+    '一、触发原因：' + reason,
+    `二、目标文件：${ROLE_DIRS[role] || role}/产出/交接-最新.md（整份覆盖写，写最新的在办状态）`,
+    '三、需写内容：在办任务 id 与当前进度、下一步动作、未决问题与卡点、关键文件路径、本会话约定与临时口径',
+    `四、死线：${deadlineIso} 前完成（逾期不换人，只升级 PM 催办）`,
+    '五、回执要求：交接文件写完后回执 PM 一条，主题含「交接完成」，正文写「交接已完成 + 文件路径」（系统据此校验并执行换人）',
+    '六、模板：\n# 交接-最新（<角色> · <时间>）\n## 在办\n## 下一步\n## 卡点\n## 关键文件\n## 口径与约定',
+  ].join('\n');
+}
+
 /* ── ⑤ 接线：团队配置 + 周期 tick（route-daemon 调用） ───────────────── */
 export const DEFAULT_INTERVAL_MS = 300000;   // 5 分钟
 
@@ -315,6 +387,13 @@ export async function runAutoRotateCycle(projectName, options = {}) {
   const projectDir = projectDirOf(name);
   const mailDir = PATHS.mail;
   const cfg = autoRotateConfigOf(team);
+  const rawAutoRotate = (team && team.config && team.config.autoRotate) || null;
+  const configFallback = !(rawAutoRotate && typeof rawAutoRotate === 'object');
+  const roundsUnreadable = !fs.existsSync(roundsFileOf(name)) || !(rounds && typeof rounds === 'object' && Object.keys(rounds).length);
+  const usageRoles = usageRolesOf(usage);
+  const usageUnavailableRoles = memberRoles.filter((role) => !(usageRoles[role] && usageRoles[role].usable));
+  const workingByRole = {};
+  for (const role of memberRoles) workingByRole[role] = workingTasksOf(name, role);
   const candidates = collectCandidates({ now, usage, rounds, memberRoles, roundsLimit: cfg.rotateRounds });
   const rows = readAudit(auditFile);
   const actions = [];
@@ -328,8 +407,47 @@ export async function runAutoRotateCycle(projectName, options = {}) {
     appendAudit(auditFile, {
       at: nowIso, stage: 'cycle', code: 'CYCLE', result: 'ok', role: '', project: name,
       note: `一拍：${night ? '夜间' : nextDayWindow ? '次日窗口' : '白天'} · 候选 ${candidates.length} 个 · 源 ${source}`,
-      evidence: { mode: night ? 'night' : nextDayWindow ? 'next-day' : 'day', candidates: candidates.map((c) => `${c.role}:${c.level}`), source, config: cfg },
+      evidence: { mode: night ? 'night' : nextDayWindow ? 'next-day' : 'day', candidates: candidates.map((c) => `${c.role}:${c.level}`), source, config: cfg, configFallback },
     });
+    // AC8：配置缺省回落要留痕（每天首拍记一行，避免每拍刷屏）
+    if (configFallback) {
+      const todayKey = new Date(now + SHANGHAI_OFFSET_MS).toISOString().slice(0, 10);
+      const already = rows.some((r) => String(r.code) === 'CONFIG_FALLBACK' && String(r.at || '').slice(0, 10) === todayKey);
+      if (!already) appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'CONFIG_FALLBACK', result: 'ok', role: '', project: name, note: `团队配置没有 autoRotate → 回落默认值（enabled=true / intervalMs=${DEFAULT_INTERVAL_MS} / rotateRounds=${DEFAULT_ROUNDS_LIMIT}）`, evidence: { config: cfg } });
+    }
+    // AC2：轮次源不可读要显式留痕（不许静默当 0 轮）
+    if (roundsUnreadable) {
+      appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'ROUNDS_UNREADABLE', result: 'ok', role: '', project: name, note: '会话轮次.json 缺失或不可解析：本轮不做轮数触发（不按 0 轮处理）', evidence: { file: roundsFileOf(name) } });
+    }
+    // AC1 反例：用量不可用（缺失/超 24h）要留痕
+    for (const role of usageUnavailableRoles) {
+      appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'USAGE_UNAVAILABLE', result: 'ok', role, project: name, note: `${role} 的会话用量缺失或超 24h：本轮不按 token 触发（未知不等于 0）`, evidence: { usageFile: usageFileOf(name) } });
+    }
+  }
+
+  // AC6②③：换人后的 boot 校验（每拍补一次；15 分钟未 boot → boot_timeout + @PM）
+  const BOOT_TIMEOUT_MS = 15 * 60 * 1000;
+  for (const row of rows) {
+    if (String(row.stage) !== 'rotate' || !row.evidence || !row.evidence.newSessionId) continue;
+    const newSessionId = String(row.evidence.newSessionId);
+    const since = Date.parse(String(row.at || '')) || now;
+    if (now - since > 24 * 3600 * 1000) continue;
+    const settled = rows.some((r) => (String(r.code) === 'boot_verified' || String(r.code) === 'boot_timeout')
+      && String((r.evidence || {}).newSessionId || '') === newSessionId);
+    if (settled) continue;
+    const seen = bootObserved({ projectName: name, role: String(row.role || ''), newSessionId, sinceMs: since });
+    if (seen.observed) {
+      if (!dryRun) appendAudit(auditFile, { at: nowIso, stage: 'boot_check', code: 'boot_verified', result: 'ok', role: String(row.role || ''), project: name, note: `${row.role} 新会话已 boot（${seen.at}）`, evidence: { newSessionId, bootedAt: seen.at } });
+      actions.push({ stage: 'boot_check', code: 'boot_verified', role: row.role });
+    } else if (now - since > BOOT_TIMEOUT_MS) {
+      if (!dryRun) {
+        appendAudit(auditFile, { at: nowIso, stage: 'boot_check', code: 'boot_timeout', result: 'ok', role: String(row.role || ''), project: name, note: `${row.role} 换人后 15 分钟仍未 boot：已提示 PM`, evidence: { newSessionId, waitedMs: now - since } });
+        try {
+          sendMessage({ from: 'system', to: 'pm', project: name, type: 'escalation', subject: `boot_timeout：${row.role} 换人后未 boot`, body: `${row.role} 已于 ${row.at} 换到新会话 ${newSessionId}，15 分钟内没有观察到 boot。\n请确认新会话是否需要手动拉起；名册已更新，旧会话不再接该角色派单。` });
+        } catch { /* 审计已留痕 */ }
+      }
+      actions.push({ stage: 'boot_check', code: 'boot_timeout', role: row.role });
+    }
   }
 
   /* ① 夜间：只记账不换人（含 force），同夜同角色只 1 行 */
@@ -385,7 +503,21 @@ export async function runAutoRotateCycle(projectName, options = {}) {
       if (rb !== ra) return rb - ra;
       return Number(a.order || 0) - Number(b.order || 0);
     });
-    const head = queued[0];
+    // AC3（红线）：在办任务不换人——昨夜入队了也一样，先跳过并留痕
+    const eligible = [];
+    for (const q of queued) {
+      const working = workingByRole[q.role] || [];
+      if (working.length) {
+        if (!dryRun) appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'SKIPPED_BY_WORKING_TASK', result: 'ok', role: q.role, project: name, note: `${q.role} 有在办任务（${working.slice(0, 3).join(',')}）：本轮不换人（红线）`, evidence: { workingTasks: working } });
+        actions.push({ stage: 'skipped', code: 'SKIPPED_BY_WORKING_TASK', role: q.role });
+        continue;
+      }
+      eligible.push(q);
+    }
+    if (!eligible.length) {
+      return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), actions, dryRun, source, note: '昨夜入队的角色都有在办任务：本轮不换（AC3 红线）' };
+    }
+    const head = eligible[0];
     const rotated = rotateSession({ projectName: name, role: head.role, now, reason: `next-day-queue-${head.level}`, auditFile, dryRun });
     actions.push({ stage: 'rotate', role: head.role, oldSessionId: rotated.oldId, newSessionId: rotated.newId, mode: 'next-day' });
     actions.push({ stage: 'broadcast_reboot', role: head.role, roles: rotated.others });
@@ -405,6 +537,26 @@ export async function runAutoRotateCycle(projectName, options = {}) {
   };
 
   for (const item of candidates) {
+    // AC3（红线）：角色有在办任务 → 一律不换人、不发交接请求，只留痕
+    const working = workingByRole[item.role] || [];
+    if (working.length) {
+      if (!dryRun) appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'SKIPPED_BY_WORKING_TASK', result: 'ok', role: item.role, project: name, note: `${item.role} 有在办任务（${working.slice(0, 3).join(',')}）：不换人（AC3 红线）`, evidence: { workingTasks: working, level: item.level } });
+      actions.push({ stage: 'skipped', code: 'SKIPPED_BY_WORKING_TASK', role: item.role });
+      continue;
+    }
+    // AC1 反例：warn 档只提醒，不发交接请求、不换人
+    if (item.level === 'warn') {
+      const recentWarn = rows.some((r) => String(r.code) === 'WARN_ONLY' && String(r.role) === item.role
+        && Math.abs(now - Date.parse(String(r.at || ''))) < TRIGGER_DEDUPE_MS);
+      if (!dryRun && !recentWarn) {
+        appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'WARN_ONLY', result: 'ok', role: item.role, project: name, note: `${item.role} 到预警档（${item.tokens} / warn ${DEFAULT_TOKEN_WARN}）：只提醒不换人`, evidence: { level: 'warn', tokens: item.tokens, warn: DEFAULT_TOKEN_WARN } });
+        try {
+          sendMessage({ from: 'system', to: item.role, project: name, type: 'session_rotate_warn', subject: `用量预警（只提醒不换人）：${item.tokens} ≥ ${DEFAULT_TOKEN_WARN}`, body: `${item.role} 本次会话用量 ${item.tokens}（预警档 ${DEFAULT_TOKEN_WARN} / 强制档 ${DEFAULT_TOKEN_FORCE}）。\n按口径：预警档只提醒、不自动换人；到强制档才会走交接流程。建议先把在办状态写进 <角色目录>/产出/交接-最新.md 备着。` });
+        } catch { /* 审计已留痕 */ }
+      }
+      actions.push({ stage: 'skipped', code: 'WARN_ONLY', role: item.role });
+      continue;
+    }
     const pending = pendingOf(item.role);
     if (pending) {
       const done = handoverDone({ projectDir, role: item.role, mailDir, sinceMs: pending.at });
@@ -439,17 +591,18 @@ export async function runAutoRotateCycle(projectName, options = {}) {
     if (recentTrigger) { actions.push({ stage: 'trigger', role: item.role, dedupe: true }); continue; }
     const row = {
       at: nowIso, stage: 'trigger', code: 'HANDOVER_REQUESTED', result: 'ok', role: item.role, project: name,
-      note: `阈值命中（${item.level}）：已发 1 条交接请求，等回执`,
-      trigger: { kind: item.kind, level: item.level, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force' },
-      evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force' },
+      note: `阈值命中（${item.level}）：已发 1 条交接请求，等回执（触发码 rotate_${item.kind === 'rounds' ? 'rounds' : 'tokens'}）`,
+      trigger: { kind: item.kind, level: item.level, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens' },
+      evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens' },
     };
     if (!dryRun) {
       appendAudit(auditFile, row);
       try {
+        // AC7：交接请求正文六段固定行序
         sendMessage({
           from: 'system', to: item.role, project: name, type: 'session_rotate_warn',
-          subject: `请先交接（${item.level === 'force' ? '上下文到强制档' : '上下文到预警档'}）`,
-          body: `${item.role}：${item.kind === 'rounds' ? `轮次已 ${item.rounds} 轮（阈值 ${DEFAULT_ROUNDS_LIMIT}）` : `会话用量 ${item.tokens}（强制档 ${DEFAULT_TOKEN_FORCE} / 预警档 ${DEFAULT_TOKEN_WARN}）`}。\n请把在办状态写进 <角色目录>/产出/交接-最新.md 并回执 PM；15 分钟内未回执不换人、只升级 PM。`,
+          subject: `请先交接（${item.kind === 'rounds' ? `轮数 ${item.rounds}` : `${item.level === 'force' ? '强制档' : '预警档'} ${item.tokens}`}）`,
+          body: handoverRequestBody({ role: item.role, level: item.level, kind: item.kind, tokens: item.tokens, rounds: item.rounds, deadlineIso: iso(now + HANDOVER_TIMEOUT_MS), projectName: name }),
         });
       } catch { /* 审计已留痕 */ }
     }
