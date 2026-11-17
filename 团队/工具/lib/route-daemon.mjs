@@ -29,6 +29,7 @@ import {
   gateRequirementReview, gateOwnerDecision, gateTestability, ownerDecisionsOf, currentDecisionOf,
   // B-4c66：镜像任务（type=requirement / id===requirementId）不算「还有活」，判定走 gates 单源助手。
   isRequirementMirrorTask,
+  statusIsClosed,
 } from './gates.mjs';
 import { requirementReviewer } from './roles.mjs';
 import { activeProxyFor } from './owner-proxy.mjs';
@@ -772,7 +773,7 @@ export function queueStillHas(projectName, role, requirementId, tasks) {
   return tasks.some((t) => !isRequirementMirrorTask(t)
     && String(t.requirementId || '') === String(requirementId)
     && String(t.owner || '') === String(role)
-    && String(t.status || '') !== 'done');
+    && !statusIsClosed(t.status)); // B-ebbc ③：accepted/cancelled/terminated 都算已闭环，别再催
 }
 
 /**
@@ -1228,7 +1229,7 @@ async function runFollowUps(projectName, { status, tasks, now, engineUrl }) {
     // 2026-11-14 修正③：补催前先校验任务状态——done/cancelled 立即停，别再催。
     if (item.taskId) {
       const hitTask = tasks.find((t) => String(t.id) === String(item.taskId));
-      if (hitTask && ['done', 'cancelled'].includes(String(hitTask.status || ''))) {
+      if (hitTask && statusIsClosed(hitTask.status)) { // B-ebbc ③：accepted/terminated 也算已闭环
         delete status.followUps[key];
         appendRouteLog(projectName, {
           event: 'skip', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId),
@@ -1239,7 +1240,7 @@ async function runFollowUps(projectName, { status, tasks, now, engineUrl }) {
         continue;
       }
     }
-    const still = queueStillHas(projectName, role, requirementId, tasks) || Boolean(item.taskId && tasks.some((t) => String(t.id) === String(item.taskId) && String(t.status || '') !== 'done'));
+    const still = queueStillHas(projectName, role, requirementId, tasks) || Boolean(item.taskId && tasks.some((t) => String(t.id) === String(item.taskId) && !statusIsClosed(t.status))); // B-ebbc ③
     if (!still) {
       delete status.followUps[key];
       appendRouteLog(projectName, {

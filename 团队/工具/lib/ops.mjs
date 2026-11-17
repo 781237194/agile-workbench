@@ -2299,6 +2299,10 @@ const DELIVERY_AUDIT_KEYS = ['at', 'project', 'itemId', 'to', 'taskId', 'attempt
 const ROLE_ACTIVITY_AUDIT_KEYS = ['at', 'project', 'role', 'action', 'verdict', 'idleMs', 'signals', 'wake', 'level', 'detail'];
 /** 投递审计 result 枚举（卷 §八）。 */
 const DELIVERY_RESULTS = ['delivered', 'blocked', 'timeout', 'retry', 'upgraded', 'forced', 'recovered'];
+// B-20261117-104213-ebbc：空闲重派的投递退避（delivered 未回执不再每拍重投）。
+const REPUSH_MIN_GAP_MS = 10 * 60 * 1000; // 同一 itemId 两次投递至少间隔 10 分钟
+const REPUSH_MAX_ATTEMPT = 3;             // attempt 到 3 次即放弃（只告警一次）
+const REPUSH_DAILY_CAP = 5;               // 同一 itemId 每日最多重投 5 次
 /** 活跃度审计 action 枚举（卷 §七）。 */
 const ROLE_ACTIVITY_ACTIONS = ['stalled', 'woken', 'escalated', 'recovered', 'unknown'];
 /** 单链三层（卷 §四）。 */
@@ -2387,6 +2391,24 @@ function markDeliveryState(project, itemId, patch = {}) {
   state.items[id] = { ...base, ...(state.items[id] || {}), ...patch, attempt: Number((state.items[id] && state.items[id].attempt) || patch.attempt || base.attempt) || 1 };
   writeDeliveryState(name, state);
   return state.items[id];
+}
+
+/** B-ebbc：统计某 itemId「今天」已写出的重投审计行数（daily cap 判据，只读审计、不改状态结构）。 */
+function countRepushToday(project, itemId, nowMs) {
+  const day = new Date(Number(nowMs) || Date.now()).toISOString().slice(0, 10);
+  let rows = [];
+  try { rows = readDeliveryAuditRows(project); } catch { rows = []; }
+  return rows.filter((row) => row
+    && String(row.itemId || '') === String(itemId || '')
+    && String(row.at || '').slice(0, 10) === day
+    && String(row.code || '') === 'STALLED_REQUEUE').length;
+}
+
+/** B-ebbc：attempt 用尽只告警一次——审计里已有同 itemId 的 ATTEMPT_CAP 行就不再写。 */
+function hasRepushCapAlert(project, itemId) {
+  let rows = [];
+  try { rows = readDeliveryAuditRows(project); } catch { rows = []; }
+  return rows.some((row) => row && String(row.itemId || '') === String(itemId || '') && String(row.code || '') === 'ATTEMPT_CAP');
 }
 
 /** 追加一行 12 键投递审计；result 不在枚举里直接拒写（防止枚举污染）。 */
@@ -3039,16 +3061,24 @@ async function wakeStalledRole(project, role) {
 function requeueStalledItem(project, { itemId, role, taskId, now, attempt }) {
   const name = String(project || '');
   const id = String(itemId || '');
-  if (!name || !id) return false;
+  const nowMs = Number(now) || Date.now();
+  if (!name || !id) return { enqueued: false, skipped: 'bad_args', attempt: 1 };
   const queue = readDispatchQueue(name);
-  if (queue.items.some((row) => String((row && row.id) || '') === id)) return false;
+  if (queue.items.some((row) => String((row && row.id) || '') === id)) return { enqueued: false, skipped: 'already_queued', attempt: Math.max(1, Number(attempt) || 1) };
   const state = readDeliveryState(name);
   const rec = state.items[id] || null;
   const lastMs = rec ? Date.parse(String(rec.lastAt || '')) : NaN;
-  if (rec && String(rec.state || '') === 'stalled' && Number.isFinite(lastMs)) {
-    if ((Number(now) || Date.now()) - lastMs < Math.max(ROLE_IDLE_WINDOW_MS, 1000)) return false;
+  const prevAttempt = Math.max(1, Number(rec && rec.attempt) || Number(attempt) || 1);
+  // B-ebbc ②：同一 itemId 的两次重投至少间隔 10 分钟（delivered/stalled/upgraded 一视同仁——
+  // 升级后状态变 upgraded，若不按 lastAt 统一去抖仍会每拍重投）。
+  if (rec && Number.isFinite(lastMs)) {
+    if (nowMs - lastMs < REPUSH_MIN_GAP_MS) return { enqueued: false, skipped: 'repush_backoff', attempt: prevAttempt };
+    if (countRepushToday(name, id, nowMs) >= REPUSH_DAILY_CAP) return { enqueued: false, skipped: 'daily_cap', attempt: prevAttempt };
+    const nextAttempt = prevAttempt + 1;
+    if (nextAttempt >= REPUSH_MAX_ATTEMPT) return { enqueued: false, skipped: 'attempt_cap', attempt: prevAttempt };
+    attempt = nextAttempt;
   }
-  const at = new Date(Number(now) || Date.now()).toISOString();
+  const at = new Date(nowMs).toISOString();
   const roleName = roleCnName(role) || role;
   const body = [
     `空闲重派：检测到 ${roleName}（${role}）连续 ${Math.max(1, Math.round(ROLE_IDLE_WINDOW_MS / 60000))} 分钟窗口内无文件写入、无回执、无工作更新，但其名下还有未闭环任务。`,
@@ -3064,7 +3094,7 @@ function requeueStalledItem(project, { itemId, role, taskId, now, attempt }) {
     attempt: Number(attempt) || 1, ackRequired: true,
   });
   writeDispatchQueue(name, queue);
-  return true;
+  return { enqueued: true, skipped: '', attempt: Number(attempt) || 1 };
 }
 
 /**
@@ -3140,18 +3170,30 @@ export async function recoverStalledRoles(project, { now = Date.now(), write = t
       for (let i = 0; i < itemIds.length; i += 1) {
         const itemId = itemIds[i];
         const taskId = targetTaskIds[i] || '';
-        if (!requeueStalledItem(name, { itemId, role, taskId, now: nowMs, attempt })) continue;
+        const repush = requeueStalledItem(name, { itemId, role, taskId, now: nowMs, attempt });
+        if (!repush.enqueued) {
+          // B-ebbc：attempt 用尽 → 放弃并只告警一次（ATTEMPT_CAP 审计行）；之后静默，不再每拍重投。
+          if (repush.skipped === 'attempt_cap' && !hasRepushCapAlert(name, itemId)) {
+            appendDeliveryAudit(name, {
+              itemId, to: role, taskId, attempt: repush.attempt, result: 'blocked', code: 'ATTEMPT_CAP',
+              stallMs: Math.max(0, Number(info.idleMs) || 0), messageId: wake.messageId || '',
+              wakeOk: wake.ok === true, source: 'tick',
+            });
+          }
+          continue;
+        }
         requeued.push(itemId);
+        const effAttempt = Number(repush.attempt) || attempt;
         const rec = state.items[itemId] || null;
         state.items[itemId] = {
-          ...emptyDeliveryItem(attempt),
+          ...emptyDeliveryItem(effAttempt),
           ...(rec || {}),
-          state: 'stalled', attempt, lastAt: at, lastCode: 'STALLED', stalledAt: at,
+          state: 'stalled', attempt: effAttempt, lastAt: at, lastCode: 'STALLED', stalledAt: at,
           upgradedAt: String((rec && rec.upgradedAt) || ''),
         };
         stateDirty = true;
         appendDeliveryAudit(name, {
-          itemId, to: role, taskId, attempt, result: 'retry', code: 'STALLED_REQUEUE',
+          itemId, to: role, taskId, attempt: effAttempt, result: 'retry', code: 'STALLED_REQUEUE',
           stallMs: Math.max(0, Number(info.idleMs) || 0), messageId: wake.messageId || '',
           wakeOk: wake.ok === true, source: 'tick',
         });
@@ -4255,7 +4297,16 @@ function assertRequirementDocsRead(b, projectPath, requirementId, purpose) {
   });
 }
 
+// Owner 2026-11-17 10:19：彻底删除 --no-wake（发消息/回执一律唤醒）。
+// 任何入口（send/ack/wake）只要见到该参数就拒绝：零投递、零状态写入、零唤醒；不提供任何替代静默开关。
+function assertNoWakeRemoved(args) {
+  if (args && (args['no-wake'] !== undefined || args.noWake !== undefined)) {
+    fail('NO_WAKE_REMOVED', '程序已删除静默发送：发消息与回执一律唤醒（不允许 --no-wake）', { flag: '--no-wake', wrote: false });
+  }
+}
+
 export async function cmdSend(args) {
+  assertNoWakeRemoved(args);
   const b = bootFor(args, 'send');
   // R-51de F-5④：派单（--ack --task）前必须读过当前版本经验教训登记册（Owner 通道豁免）
   if (args.ack && args.task) failLessonGate(lessonGateFor(b, args));
@@ -4358,7 +4409,8 @@ export async function cmdSend(args) {
     if (projectPath) assertRequirementDocsRead(b, projectPath, taskRow.requirementId, '派单');
   }
   // 四处会话映射一致性：派单/唤醒前必须一致（AC17.11），避免叫醒旧会话；不一致给字段与修法。
-  const willWake = isDispatch || (Boolean(args.wake) && !args['no-wake']);
+  // Owner 2026-11-17 10:19：没有开关可关——--wake 只用于额外唤醒，唤醒不再受任何静默参数影响。
+  const willWake = isDispatch || Boolean(args.wake);
   if (willWake) assertSessionMapConsistent(b.project, isDispatch ? '派单' : '唤醒');
   // G1/G2/G3/G5/G0/G4：派开发前过需求定稿→评审→Owner 落账→角色忙→阶段角色表→设计签名。
   if (isDispatch && taskRow && taskRow.requirementId) {
@@ -4444,9 +4496,10 @@ export async function cmdSend(args) {
   if (pmDispatch) writeDispatchLock(b.project, msg, { targetSessionId: targetAlive && targetAlive.probe ? targetAlive.probe.sessionId : '' });
   let wake = null;
   // B-1e4a（R-45c7，Owner 2026-11-14 13:06）：本项目不存在"不唤醒"——任何消息类型（含 receipt）
-  // 落盘后都立即唤醒接收方；--no-wake 是唯一退出阀。唤醒≠要回执：ack 通知仍是 ackRequired=false + noEcho，
+  // 落盘后都立即唤醒接收方。发消息与回执一律唤醒，无静默开关（Owner 2026-11-17 10:19）。
+  // 唤醒≠要回执：ack 通知仍是 ackRequired=false + noEcho，
   // 收到通知的人只需 ack（已读），那条 ack 不会再触发新的唤醒链（见 store.mjs ackMessage 的 noEcho 分支）。
-  const wantWake = !args['no-wake'];
+  const wantWake = true;
   // B-743e：把首行归属随发送结果一起返回，便于自测与排障核对格式。
   const wakeHeader = wantWake && msg ? wakeHeaderFor(msg, to) : '';
   if (wantWake) {
@@ -4561,13 +4614,15 @@ export function cmdRead(args) {
 }
 
 export async function cmdAck(args) {
+  assertNoWakeRemoved(args);
   const b = bootFor(args, 'ack');
   if (!args.id) fail('BAD_ID', '需要 --id');
   // R-c651 F-c651-2：ack 的唤醒路径也是重试执行者（先消化到期重试）。
   let ackWakeRetry = null;
   try { ackWakeRetry = await processWakeRetries(b.project, { source: 'ack' }); } catch { ackWakeRetry = null; }
   const r = ackMessage(b.role, String(args.id), args.note || '已收到');
-  // Owner 2026-11-16 18:50（取代 11-14 的「纯回执不唤醒」）：回执落盘后必须唤醒原消息发送方，--no-wake 才静默。
+  // Owner 2026-11-16 18:50（取代 11-14 的「纯回执不唤醒」）：回执落盘后必须唤醒原消息发送方。
+  // Owner 2026-11-17 10:19：发消息与回执一律唤醒，无静默开关（--no-wake 已被删除）。
   clearDispatchLock(r.msg.project, String(args.id));
   appendEvent({
     role: b.role, sessionId: b.sessionId, action: 'ack', project: r.msg.project, target: r.msg.id,
@@ -4576,7 +4631,7 @@ export async function cmdAck(args) {
   // Owner 2026-11-16 18:50：回执必须唤醒发送方（尤其角色→PM 的回执）——此前 ack 只落盘不唤醒，PM 收不到。
   let ackWake = null;
   const ackWakeTarget = String((r.msg && r.msg.from) || '');
-  if (!r.already && ackWakeTarget && ackWakeTarget !== b.role && ackWakeTarget !== 'system' && !args['no-wake']) {
+  if (!r.already && ackWakeTarget && ackWakeTarget !== b.role && ackWakeTarget !== 'system') {
     try {
       ackWake = await wakeWithGuard({
         project: r.msg.project, to: ackWakeTarget, msg: r.receiptMessage || r.msg,
@@ -4643,6 +4698,7 @@ export function cmdMarkRead(args) {
 
 /** R-c651 F-c651-4：一键唤醒（限 PM/Owner 界面入口）。失败自动排 5/15/30 秒重试，3 次后告警 PM。 */
 export async function cmdWake(args) {
+  assertNoWakeRemoved(args);
   const project = String(args.project || '');
   const role = String(args.role || '').trim();
   if (!project) fail('BAD_PROJECT', '需要 --project');
