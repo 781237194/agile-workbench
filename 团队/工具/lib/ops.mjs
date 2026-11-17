@@ -2562,7 +2562,20 @@ function roleFileWriteScan(project, role, { cutoffMs = 0, cap = ACTIVITY_SCAN_CA
     }
   };
   walk(base, 0);
-  return { fileAt: latest ? new Date(latest).toISOString() : '', scanned, truncated, earlyExit };
+  // PM 2026-11-17 10:24 裁定 #5：fileAt 允许「window 内命中即早退」，但必须显式标注来源：
+  // window-hit = 时间窗内命中即提前返回（不是严格最大值）；max = 全量扫描取最大。
+  return {
+    fileAt: latest ? new Date(latest).toISOString() : '',
+    fileAtSource: earlyExit ? 'window-hit' : 'max',
+    scanned, truncated, earlyExit,
+  };
+}
+
+function roleFileWriteAtSource(project, role) {
+  try {
+    const scan = roleFileWriteScan(project, role);
+    return String((scan && scan.fileAtSource) || 'max');
+  } catch { return 'max'; }
 }
 
 function roleFileWriteAt(project, role) {
@@ -2694,9 +2707,17 @@ function taskClaimedByRole(task, role) {
   return false;
 }
 
+/**
+ * PM 2026-11-17 10:24 裁定 #4：本项目并存两套 idle 判据，禁止合并，但必须标注差异——
+ *  a) 本函数（F5 活跃度）四信号 + window 扫描：fileAt/ackAt/workingAt/progressAt；
+ *  b) detectStalledRoles（F6 空闲唤醒）三信号 + openTaskIds：file/ack/working，不含 progressAt；
+ *  差异原因：F5 判「这角色刚动过没有」（含在办任务产出 mtime），F6 判「该不该重派」（只看动作与回执）。
+ *  fileAtSource：window-hit 表示命中窗内即早退、不是严格最大值（裁定 #5）。
+ */
 function roleSignalsOf(project, role, { tasks = null } = {}) {
   return {
     fileAt: roleFileWriteAt(project, role),
+    fileAtSource: roleFileWriteAtSource(project, role),
     ackAt: roleLastAckAt(project, role),
     workingAt: roleWorkingAt(project, role, tasks),
   };
