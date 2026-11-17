@@ -2273,6 +2273,28 @@ function readStore() {
 
 // T-20261117-183920-5d98（R-fd42）：PM 身份自动对齐——名册唯一真相；写 workbench 只走 writeStore（不触发 rulesHash）。
 const pmIdentitySync = require('./pm-identity-sync');
+// B-bb6f：对齐必须同步第四处映射（项目/团队会话.json），否则新 PM「能看不能发」（send 报 SESSION_MAP_INCONSISTENT）。
+const pmIdentitySessionMap = require('./pm-identity-session-map');
+function pmIdentitySessionMapSync(project, pmSid) {
+  try {
+    const result = pmIdentitySessionMap.syncTeamSessionManifest(project && project.path, pmSid);
+    return result;
+  } catch (e) { return { ok: false, changed: false, code: 'SESSION_MANIFEST_ERROR', error: String((e && e.message) || e) }; }
+}
+/** 对齐后用 CLI 自己的四口径复验（与 send 的门禁同一实现），不一致返回 {ok:false}。 */
+function pmIdentitySessionMapCheck(projectName) {
+  try {
+    const teamTool = path.join(resolveTeamRoot(), '工具', 'team.mjs');
+    const out = execFileSync(process.execPath, [teamTool, 'session', 'check', '--project', String(projectName), '--json'], {
+      encoding: 'utf8', timeout: 30000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    });
+    const line = String(out || '').trim().split(/\r?\n/).filter(Boolean).pop() || '{}';
+    const parsed = JSON.parse(line);
+    return { ok: parsed.ok === true, ratio: parsed.ratio, inconsistent: parsed.rows ? parsed.rows.filter((r) => !r.consistent) : [] };
+  } catch (e) {
+    return { ok: false, code: 'SESSION_CHECK_FAILED', error: String((e && e.message) || e) };
+  }
+}
 function pmIdentityAuditFile(projectName) {
   return path.join(resolveTeamRoot(), '状态', '项目', String(projectName || ''), '会话绑定对齐.jsonl');
 }
@@ -2329,6 +2351,42 @@ function runPmIdentityReconcile(source = 'startup') {
   });
   const rosterPm = pmIdentitySync.readRosterPm(roster);
   const pmSid = String((rosterPm && rosterPm.sessionId) || '');
+  // B-bb6f：身份对齐的第四处——项目/团队会话.json（只补 pm 这一行；名册是真相不改）。
+  let mapSync = null;
+  if (pmSid && project && project.path) {
+    mapSync = pmIdentitySessionMapSync(project, pmSid);
+    if (mapSync && mapSync.ok === false && mapSync.code === 'SESSION_MANIFEST_MISSING') {
+      // 项目还没有 团队会话.json（新项目/沙盘最小夹具）：不制造红字，但要留痕，等 project ensure/首建后再对齐。
+      appendPmIdentityAudit(projectName, {
+        at: new Date().toISOString(), role: 'pm', result: 'noop', code: 'SESSION_MANIFEST_MISSING',
+        why: '团队会话.json 尚不存在：等首建后再同步（不阻断）', source, stage: source,
+      });
+      mapSync = null;
+    }
+    if (mapSync && mapSync.ok === false) {
+      appendPmIdentityAudit(projectName, {
+        at: new Date().toISOString(), role: 'pm', result: 'fail', code: String(mapSync.code || 'SESSION_MANIFEST_ERROR'),
+        why: `团队会话.json 同步失败：${String(mapSync.error || mapSync.code || '')}`, source, stage: source,
+      });
+      sendPmIdentityState({ state: 'unreadable', code: String(mapSync.code || 'SESSION_MANIFEST_ERROR'), sessionShort: pmSid.slice(0, 8), error: `团队会话.json 同步失败（${mapSync.code || 'ERROR'}）：新 PM 能看不能发，请检查 项目/${projectName}/团队会话.json` });
+      return pmIdentityLast;
+    }
+    if (mapSync && mapSync.changed) {
+      appendPmIdentityAudit(projectName, {
+        at: new Date().toISOString(), role: 'pm', result: 'aligned', code: 'SESSION_MANIFEST_SYNCED',
+        why: `团队会话.json pm ${String(mapSync.from || '').slice(0, 8)}→${pmSid.slice(0, 8)}`, source, stage: source,
+      });
+      const check = pmIdentitySessionMapCheck(projectName);
+      if (!check.ok) {
+        appendPmIdentityAudit(projectName, {
+          at: new Date().toISOString(), role: 'pm', result: 'fail', code: 'SESSION_MAP_INCONSISTENT',
+          why: `对齐后四处映射不一致：${check.ratio || ''} ${JSON.stringify((check.inconsistent || []).map((r) => r.role))}`, source, stage: source,
+        });
+        sendPmIdentityState({ state: 'unreadable', code: 'SESSION_MAP_INCONSISTENT', sessionShort: pmSid.slice(0, 8), error: `四处会话映射不一致（${check.ratio || '?'}）：新 PM 能看不能发，先跑 team.mjs session check --project ${projectName}` });
+        return pmIdentityLast;
+      }
+    }
+  }
   if (result.state === 'unreadable') {
     sendPmIdentityState({ state: 'unreadable', code: 'WB_UNREADABLE', sessionShort: '', error: 'WB_UNREADABLE：绑定文件损坏，已停止写入，请先修复 workbench.json' });
   } else if (result.state === 'pending_write') {
