@@ -26,7 +26,9 @@ function check(name, ok, detail) {
   const SB = mkTempSandbox('d3a1');
   const TEAM_ROOT = path.join(SB, '团队');
   const PROJECTS = path.join(SB, '项目');
-  const PROJECT = 'd3a1 自动重派沙盘';
+  // 注意：project add 会把项目名中的空格规范成下划线（目录名），夹具项目名不能带空格，
+  // 否则手写的 派单队列.json 与 pump 读取的目录不是同一个（曾导致 pump 返回 reason=EMPTY）。
+  const PROJECT = 'd3a1-sandbox';
   const TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');
   const env = {
     ...process.env,
@@ -74,8 +76,9 @@ function check(name, ok, detail) {
   }, null, 2) + '\n', 'utf8');
   fs.writeFileSync(path.join(stateDir, '派单队列.json'), JSON.stringify({
     items: [{
-      id: 'Q-STALL-analyst-' + taskId, to: 'analyst', task: taskId, at: oldIso,
+      id: 'Q-STALL-analyst-' + taskId, project: PROJECT, to: 'analyst', task: taskId, at: oldIso,
       attempt: 1, reason: 'stalled_role', from: 'pm', subject: '空闲重派', body: '自动重派正文',
+      ackRequired: true, sessionId: '',
     }],
   }, null, 2) + '\n', 'utf8');
 
@@ -89,8 +92,9 @@ function check(name, ok, detail) {
 
   check('① 自动重派投递成功', pump && pump.ok !== false && pump.pumped !== false, pump);
   check('② 自动重派未写 PM 派单锁', lockAfterPump === null, lockAfterPump);
-  check('③ 投递审计记录自动通道（result=auto_dispatch / code=SOURCE_AUTO / source=auto）', Boolean(autoRow)
-    && autoRow.code === 'SOURCE_AUTO' && autoRow.source === 'auto' && autoRow.result === 'auto_dispatch',
+  // PM 2026-11-17 12:48 改批：不扩 DELIVERY_RESULTS 枚举，用 code/source 区分自动通道（result 仍是 delivered）
+  check('③ 投递审计记录自动通道（result=delivered / code=SOURCE_AUTO / source=auto）', Boolean(autoRow)
+    && autoRow.code === 'SOURCE_AUTO' && autoRow.source === 'auto' && autoRow.result === 'delivered',
   { autoRow: autoRow || null, auditRows: audit.length, auditFile, allResults: audit.map((r) => r.result) });
 
   // ④ 随后 PM 正式派单必须成功（不被 PM_DISPATCH_PENDING 挡）
