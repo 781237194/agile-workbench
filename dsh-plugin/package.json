@@ -40,7 +40,6 @@
     }
   },
   "dependencies": {
-    "pm-workbench-dsh": "file:./pm-workbench-dsh",
     "dsh-memory-evolve": "^0.1.0",
     "dsh-ego-browser": "^0.9.7",
     "@liustack/modsearch": "^5.10.12",
