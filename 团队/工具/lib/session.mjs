@@ -95,6 +95,72 @@ function latestRotation(projectName, role) {
   } catch { return null; }
 }
 
+/**
+ * 自动建会话（B-20261117-212500-a837 的唯一出口｜禁止调用方自造 session id）。
+ * · 生产：必须走 `DshClient.create`；DSH 不可达 → ROTATE_MANUAL_REQUIRED（带可复制的手建降级命令），
+ *   建会话抛错/无 id → ROTATE_CREATE_FAILED（同样带手建降级命令）。
+ * · 沙盘（TEAM_SELFTEST=1）：允许传入 `createSession` 注入工厂（返回 `{ sessionId }`）模拟 DSH create；
+ *   未注入时行为与生产一致（不伪造会话）。
+ * 返回 `{ sessionId, created:true, mode:'auto', injected }`。
+ */
+export async function createTeamSession({
+  projectName = '', role = '', reason = '', oldId = '', sessionTitle = '',
+  createSession = null, list = null, project = null,
+} = {}) {
+  const name = String(projectName || '');
+  const command = `node 团队\\工具\\team.mjs session rotate --role ${role} --project "${name}" --session <新会话id> --reason "${reason || '手建降级'}"`;
+  const inject = process.env.TEAM_SELFTEST === '1' && typeof createSession === 'function' ? createSession : null;
+  if (inject) {
+    let res = null;
+    try {
+      res = await inject({ projectName: name, role, reason });
+    } catch (e) {
+      fail('ROTATE_CREATE_FAILED', `自动建会话失败（${String((e && e.message) || e)}）：请先手建一个会话，再执行下面命令登记（mode=manual）：${command}`, {
+        role, project: name, from: oldId, mode: 'manual', command, why: String((e && e.message) || e),
+        step: 'owner-create-session-then-rotate-with-session', injected: true,
+      });
+    }
+    const sid = String((res && (res.sessionId || res.id)) || '');
+    if (!sid) {
+      fail('ROTATE_CREATE_FAILED', `自动建会话失败（注入工厂未返回会话 id）：请先手建一个会话，再执行下面命令登记（mode=manual）：${command}`, {
+        role, project: name, from: oldId, mode: 'manual', command,
+        step: 'owner-create-session-then-rotate-with-session', injected: true,
+      });
+    }
+    return { sessionId: sid, created: true, mode: 'auto', injected: true };
+  }
+  const info = list || await listDshSessions();
+  if (!info.ok) {
+    // AC2b：能自动建会话就建；不能就"手建降级"——不是 500 式失败，而是给出可复制的下一步。
+    fail('ROTATE_MANUAL_REQUIRED', `DSH 不可达（${info.why}），无法自动建会话：请手建一个会话后执行下面命令登记（mode=manual）：${command}`, {
+      why: info.why, role, project: name, from: oldId, mode: 'manual', command,
+      step: 'owner-create-session-then-rotate-with-session', downgradedFrom: 'auto-create',
+    });
+  }
+  const proj = project || loadProject(name);
+  const client = new DshClient(process.env.DSH_WEB_URL);
+  const body = proj.dshWorkspaceId ? { workspaceId: proj.dshWorkspaceId } : { cwd: proj.path };
+  let createdRes = null;
+  try {
+    createdRes = await client.create(body);
+  } catch (e) {
+    // R-703f AC2b：自动建会话失败必须降级成“可复制的 handler 指令”，不能把 Owner 卡在报错里。
+    fail('ROTATE_CREATE_FAILED', `自动建会话失败（${String((e && e.message) || e)}）：请先手建一个会话，再执行下面命令登记（mode=manual）：${command}`, {
+      role, project: name, from: oldId, mode: 'manual', command, why: String((e && e.message) || e),
+      step: 'owner-create-session-then-rotate-with-session',
+    });
+  }
+  const sid = String((createdRes && createdRes.sessionId) || '');
+  if (!sid) {
+    fail('ROTATE_CREATE_FAILED', `自动建会话失败（DSH 未返回会话 id）：请先手建一个会话，再执行下面命令登记（mode=manual）：${command}`, {
+      role, project: name, from: oldId, mode: 'manual', command, step: 'owner-create-session-then-rotate-with-session',
+    });
+  }
+  const title = sessionTitle || `团队·${ROLE_NAMES[role] || role}`;
+  try { await client.rename({ sessionId: sid, title }); } catch { /* 标题失败不阻断 */ }
+  return { sessionId: sid, created: true, mode: 'auto', injected: false };
+}
+
 /** 四处映射一致性：每个角色四处取值必须相同；返回 6/6（fast 4/4）判定与不一致字段。 */
 export function checkSessionMap(projectName) {
   const name = String(projectName || '');
@@ -677,7 +743,7 @@ function archiveGate(projectName, role, oldId) {
 
 export async function rotateSession({
   projectName, role, sessionId = '', force = false, offline = false, reason = '', by = 'owner',
-  failAt = '', sessionTitle = '', windowMinutes = 30, dryRun = false,
+  failAt = '', sessionTitle = '', windowMinutes = 30, dryRun = false, createSession = null,
 }) {
   const name = String(projectName || '');
   if (!name) fail('NO_PROJECT', '需要 --project');
@@ -751,31 +817,11 @@ export async function rotateSession({
   let created = false;
   const offlineMode = offline || Boolean(process.env.TEAM_SELFTEST);
   if (!newId) {
-    if (offlineMode) fail('BAD_SESSION', '离线轮换必须用 --session 指定一个可用会话 id');
-    if (!list.ok) {
-      const command = `node 团队\\工具\\team.mjs session rotate --role ${role} --project "${name}" --session <新会话id> --reason "${reason || '手建降级'}"`;
-      // AC2b：能自动建会话就建；不能就"手建降级"——不是 500 式失败，而是给出可复制的下一步。
-      fail('ROTATE_MANUAL_REQUIRED', `DSH 不可达（${list.why}），无法自动建会话：请手建一个会话后执行下面命令登记（mode=manual）：${command}`, {
-        why: list.why, role, project: name, from: oldId, mode: 'manual', command,
-        step: 'owner-create-session-then-rotate-with-session', downgradedFrom: 'auto-create'
-      });
-    }
-    const client = new DshClient(process.env.DSH_WEB_URL);
-    const body = project.dshWorkspaceId ? { workspaceId: project.dshWorkspaceId } : { cwd: project.path };
-    let createdRes = null;
-    try {
-      createdRes = await client.create(body);
-    } catch (e) {
-      // R-703f AC2b：自动建会话失败必须降级成“可复制的 handler 指令”，不能把 Owner 卡在报错里。
-      const command = `node 团队\\工具\\team.mjs session rotate --role ${role} --project "${name}" --session <新会话id> --reason "${reason || '手建降级'}"`;
-      fail('ROTATE_CREATE_FAILED', `自动建会话失败（${String((e && e.message) || e)}）：请先手建一个会话，再执行下面命令登记（mode=manual）：${command}`, {
-        role, project: name, from: oldId, mode: 'manual', command, why: String((e && e.message) || e), step: 'owner-create-session-then-rotate-with-session'
-      });
-    }
-    newId = createdRes.sessionId;
+    // 离线（沙盘）模式：只有注入 createSession 工厂时才允许自动建会话；否则要求 --session（原行为不变）。
+    if (offlineMode && typeof createSession !== 'function') fail('BAD_SESSION', '离线轮换必须用 --session 指定一个可用会话 id');
+    const info = await createTeamSession({ projectName: name, role, reason, oldId, sessionTitle, createSession, list, project });
+    newId = info.sessionId;
     created = true;
-    const title = sessionTitle || `团队·${ROLE_NAMES[role] || role}`;
-    try { await client.rename({ sessionId: newId, title }); } catch { /* 标题失败不阻断 */ }
   } else {
     if (!/^session-[A-Za-z0-9-]+$/.test(newId)) fail('BAD_SESSION', `会话 id 格式不对：${newId}`);
     if (!offlineMode) {
