@@ -296,7 +296,7 @@ function cmdCheck(argv) {
   if (!project) fail('PROJECT_REQUIRED', '需要 --project <项目名>');
   const { projectDir, stateDir, wbFile, wakeLog } = resolveRoots({ root: repoRoot, project });
   const steps = [];
-  const push = (name, ok, detail) => steps.push({ name, ok: Boolean(ok), detail: ok ? '' : String(JSON.stringify(detail ?? '')).slice(0, 300) });
+  const push = (name, ok, detail) => steps.push({ name, ok: Boolean(ok), detail: ok ? '' : String(JSON.stringify(detail ?? '')).slice(0, 1200) });
 
   // ① 项目可见（项目目录 + 项目.json + 团队项目记录）
   let visible = fs.existsSync(projectDir) && fs.existsSync(path.join(stateDir, '项目.json'));

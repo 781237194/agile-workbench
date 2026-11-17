@@ -58,6 +58,11 @@ for (const f of ['团队宪法.md', '项目铁律.md']) {
   const src = path.join(ROOT, '团队', f);
   if (fs.existsSync(src)) fs.copyFileSync(src, path.join(REPO, '团队', f));
 }
+// 项目级必读：项目铁律.md（boot 规格按项目目录读，不是团队级模板）
+{
+  const src = path.join(ROOT, '项目', '工作台改造修复', '项目铁律.md');
+  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(projDir, '项目铁律.md'));
+}
 for (const [role, dir] of [['pm', '项目经理'], ['product', '产品'], ['analyst', '需求分析师'], ['programmer1', '程序员A'], ['programmer2', '程序员B'], ['tester', '测试人员']]) {
   const src = path.join(ROOT, '项目', '工作台改造修复', dir, '角色卡.md');
   if (fs.existsSync(src)) mk(path.join(projDir, dir, '角色卡.md'), fs.readFileSync(src, 'utf8'));
@@ -156,6 +161,13 @@ const rsClear = run(['rebind-sessions', '--root', REPO, '--project', PROJ, '--cl
 const afterClear = JSON.parse(fs.readFileSync(teamFile, 'utf8')).members;
 check('⑤ --clear 后六条 sessionId 空且 pending', rsClear.code === 0 && afterClear.every((m) => m.sessionId === '' && m.sessionPending === true), afterClear.map((m) => [m.role, m.sessionId, m.sessionPending]));
 
+// ⑥ 前先把 项目.json 的 path 拨回真实沙盘目录：④ 的 rebind 测试已把它改成 E:/new/root（不存在），
+// 会让 migrate-check 的 boot 报 PROJECT_DIR_MISSING——这是断言顺序问题，不是实现问题。
+{
+  const pjFix = JSON.parse(fs.readFileSync(path.join(stateDir, '项目.json'), 'utf8'));
+  pjFix.path = projDir;
+  fs.writeFileSync(path.join(stateDir, '项目.json'), JSON.stringify(pjFix, null, 2) + '\n', 'utf8');
+}
 // ⑥ migrate-check 固定五步（AC6①）
 const chk = run(['migrate-check', '--root', REPO, '--project', PROJ, '--out', OUT, '--json']);
 const stepNames = (chk.json && chk.json.steps || []).map((s) => s.name);
