@@ -21211,6 +21211,8 @@ app.whenReady().then(async () => {
         storeFile: storeFile(),
         teamRoot: sandboxTeamRoot,
         fallbackStoreFile: path.join(LOCAL_DATA, 'userdata', 'workbench.json'),
+        // B-20261117-2133 事故修复：从真实 store 复制的项目路径必须改指沙盘，否则自检会写真实项目目录。
+        sandboxProjectDir: path.join(SQ_CHECK_DATA, '项目'),
       });
       const store = readStore();
       const project = store.projects.find((item) => item.id === store.activeProjectId) || store.projects[0] || null;

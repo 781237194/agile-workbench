@@ -111,7 +111,35 @@ function prepareSqCheckSandbox(options = {}) {
     fs.copyFileSync(fallback, storeFile);
     console.log('SQ_CHECK_STORE_SEEDED ' + JSON.stringify({ from: fallback, to: storeFile }));
   }
-  return { teamRoot, storeFile };
+  // B-20261117-2133（现场事故）：从真实 store 复制过来的 projects[].path 指向**真实项目目录**，
+  // 于是自检期间任何「往项目目录写」的动作（如团队会话清单 团队会话.json 的引导）都会写到真实树里，
+  // 把 pm 的 sessionId 写成 sq-fixture-pm → 之后真实 send 被 SESSION_MAP_INCONSISTENT 拦。
+  // 修法：store 里的项目路径一律改指沙盘项目目录（不存在就建），自检只能写沙盘。
+  const sandboxProjectDir = String(options.sandboxProjectDir || '');
+  if (sandboxProjectDir && storeFile && fs.existsSync(storeFile)) {
+    try {
+      const store = JSON.parse(fs.readFileSync(storeFile, 'utf8').replace(/^\uFEFF/, ''));
+      let changed = false;
+      for (const p of (Array.isArray(store.projects) ? store.projects : [])) {
+        if (!p || typeof p !== 'object') continue;
+        const target = path.join(sandboxProjectDir, String(p.teamName || p.name || 'project'));
+        if (String(p.path || '') !== target) { p.path = target; changed = true; }
+        if (p.workspacePath !== undefined && String(p.workspacePath) !== target) { p.workspacePath = target; changed = true; }
+        if (p.workspace && typeof p.workspace === 'object' && String(p.workspace.path || '') !== target) {
+          p.workspace.path = target;
+          changed = true;
+        }
+        fs.mkdirSync(target, { recursive: true });
+      }
+      if (changed) {
+        fs.writeFileSync(storeFile, JSON.stringify(store, null, 2) + '\n', 'utf8');
+        console.log('SQ_CHECK_STORE_SANDBOXED ' + JSON.stringify({ sandboxProjectDir, storeFile }));
+      }
+    } catch (e) {
+      console.log('SQ_CHECK_STORE_SANDBOX_FAILED ' + JSON.stringify({ storeFile, why: String((e && e.message) || e) }));
+    }
+  }
+  return { teamRoot, storeFile, sandboxProjectDir };
 }
 
 async function runSqCheck(options = {}) {
