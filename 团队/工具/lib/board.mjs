@@ -438,7 +438,6 @@ html[data-theme="light"] #source-viewer pre{background:rgba(90,72,48,.06)}
 <div class="cards">${[
     ['requirements', '需求', d.requirements.length],
     ['tasks', '进行中任务', d.childTasks.filter((t) => t.status !== 'done').length],
-    ['proposals', '提案', d.proposals.length],
     ['receipts', '回执', d.receipts.length],
     ['files', '项目文件', d.files.length],
     ['members', '成员', d.members.length],
