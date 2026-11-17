@@ -10203,7 +10203,19 @@ function writeRoleIndexes(project) {
       ...rows.map((r) => `| ${r.target} | ${r.summary.replace(/\|/g, '\\|')} | ${r.size} | ${r.updated} | ${r.hash} |`), '',
     ];
     let text = lines.join('\n');
+    // B-20261115-120000-3c12：角色目录索引以前「整份覆盖」，手写的速查段必被吃掉。
+    // 现在：正文（表格）照旧自动生成，但 `<!-- manual:begin -->…<!-- manual:end -->` 之间的内容原样保留；
+    // 标记不存在时补一对空标记（AC2），且标记区永远排在截断点之后——8192 截断先砍表格，不砍手写段（AC1）。
+    const oldText = (() => { try { return exists(indexPath) ? readText(indexPath, '') : ''; } catch { return ''; } })();
+    const manualRe = /<!--\s*manual:begin\s*-->([\s\S]*?)<!--\s*manual:end\s*-->/i;
+    const oldManual = oldText ? manualRe.exec(oldText) : null;
+    const manualBody = oldManual ? String(oldManual[1] || '').replace(/^\n+|\n+$/g, '') : '';
     if (Buffer.byteLength(text, 'utf8') > 8192) text = text.slice(0, 7800) + '\n\n…（索引超限截断；完整文件请按目录继续阅读）\n';
+    text = text.replace(/\s*$/, '\n\n')
+      + '## 手写速查段（重建保留，标记区内的内容不会被覆盖）\n\n'
+      + '<!-- manual:begin -->\n'
+      + (manualBody ? manualBody + '\n' : '')
+      + '<!-- manual:end -->\n';
     writeText(indexPath, text);
     out.push(indexPath);
   }
