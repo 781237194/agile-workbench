@@ -1,0 +1,11 @@
+# B-20261118-033814-fd48：换行规则（否则 Windows 默认 core.autocrlf=true 克隆后
+# 团队/skill/** 被转成 CRLF → 字节变 → skill-check 报 SKILL_TEMPLATE_TAMPERED）。
+# 原则：**按字节校验的资产禁止任何换行转换**；只有 Windows 专用脚本固定 CRLF。
+
+# skill 清单/模板按 sha 字节校验，必须原样（-text = 不做任何换行转换）
+团队/skill/** -text
+
+# Windows 脚本：仓库内存 LF、检出为 CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
