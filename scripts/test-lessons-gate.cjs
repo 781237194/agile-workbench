@@ -218,18 +218,20 @@ check('S13 lessons read 后 req create 不再返回 LESSONS_UNREAD',
   !/LESSONS_UNREAD/.test(createAfterRead.out + createAfterRead.err),
   { readCode: readBeforeCreate.code, code: createAfterRead.code, out: (createAfterRead.out + createAfterRead.err).slice(0, 300) });
 
-// S14：PM 代管代验收未读 → LESSONS_UNREAD（验收处门禁）
+// S14：PM 代管代验收 → **PROXY_ACCEPT_FORBIDDEN**（代管不得代需求验收，B-20261116-105213-bd22 起）
+// 2026-11-17 08:18 PM 裁定（M-20261117-082018-a87815）：S14/S15 按新口径更新断言（旧期望「LESSONS_UNREAD」已过期）
 const proxyAcceptUnread = run(['owner', 'proxy', 'decide', '--boot', pmToken, '--project', PROJECT, '--requirement', 'R-20261116-000000-less', '--decision', 'accepted', '--action', 'accept', '--opinion', '沙盘代验收']);
-check('S14 PM 代管代验收未读 → LESSONS_UNREAD（验收处门禁）',
-  /LESSONS_UNREAD/.test(proxyAcceptUnread.out + proxyAcceptUnread.err),
+check('S14 PM 代管代验收 → PROXY_ACCEPT_FORBIDDEN（代管禁验收，先于经验教训门）',
+  /PROXY_ACCEPT_FORBIDDEN/.test(proxyAcceptUnread.out + proxyAcceptUnread.err),
   { code: proxyAcceptUnread.code, out: (proxyAcceptUnread.out + proxyAcceptUnread.err).slice(0, 300) });
 
-// S15（PM 点名 + tester 注记 2026-11-16 已上移门禁）：CLI 的 owner --action accept 未读 → LESSONS_UNREAD
-// 门禁现在位于 loadTask 之前，所以沙盘里不再先被 TASK_NOT_FOUND 遮住。
+// S15（PM 点名 + tester 注记 + B-fa6c）：CLI 的 owner --action accept 走 **Owner 通道豁免**——
+// 未读时**不报 LESSONS_UNREAD**（可被后续其它门拦，例如沙盘里没有该需求 → TASK_NOT_FOUND）。
+// 2026-11-17 08:18 PM 裁定：按 B-fa6c（Owner 验收被 LESSONS_UNREAD 误挡 → lessonGateFor 对 role=owner 豁免）更新断言。
 cleanReadLog();
 const ownerAcceptUnread = run(['owner', '--boot', pmToken, '--project', PROJECT, '--requirement', 'R-20261116-000000-less', '--action', 'accept', '--decision', 'accepted', '--opinion', '沙盘Owner验收']);
-check('S15 owner --action accept 未读 → LESSONS_UNREAD（优先于 TASK_NOT_FOUND）',
-  /LESSONS_UNREAD/.test(ownerAcceptUnread.out + ownerAcceptUnread.err) && !/TASK_NOT_FOUND/.test(ownerAcceptUnread.out + ownerAcceptUnread.err),
+check('S15 owner --action accept 未读 → 不报 LESSONS_UNREAD（Owner 通道豁免，B-fa6c）',
+  !/LESSONS_UNREAD/.test(ownerAcceptUnread.out + ownerAcceptUnread.err),
   { code: ownerAcceptUnread.code, out: (ownerAcceptUnread.out + ownerAcceptUnread.err).slice(0, 300) });
 // S15b：门禁判定本体仍单测一次（清空记录后 lessons status 报 LESSONS_UNREAD）
 const statusUnread = run(['lessons', 'status', '--boot', pmToken]);
