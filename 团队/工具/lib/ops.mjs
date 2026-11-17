@@ -35,6 +35,8 @@ import {
 import { ensureProjectStructure, structureReport, readRequirementDocs, requirementContentText } from './scaffold.mjs';
 // T-20261117-184114-4358（R-bcae）：skill 四要素校验 + 30 分钟评估提示（append-only skill评估.jsonl）。
 import { validateSkillContent, recordSkillEvaluation, readSkillEvaluations, skillPromptDue, skillPromptLineFor } from './skill.mjs';
+// T-20261117-211833-7a30（R-a4c7）：调度建议纯函数（三源 → 五类建议）。
+import { buildSchedAdvice } from './sched-advice.mjs';
 import {
   auditGate, detectPhaseEdit, gateDesign, gateIteration, gateRequirementFinal, gateRequirementDoc,
   gateRequirementReview, gateStageRole, gateTestReport, gateTestability, gateConfig,
@@ -6769,6 +6771,65 @@ export function cmdSkill(args) {
     return;
   }
   fail('BAD_ACTION', `skill 只支持 status | skip | check（收到：${sub}）`, {}, 1);
+}
+
+/**
+ * T-20261117-211833-7a30（R-a4c7）：调度建议（只读）——`team.mjs sched advice [--json] [--rotate-rounds N]`。
+ * 三源：会话排队.json（插件快照）/ 会话轮次.json / 任务清单 + role_queues；聚合走纯函数 sched-advice.mjs。
+ * 只追加写 项目/<项目>/调度建议.jsonl（append-only）；不派单、不换人、不改任何状态。
+ */
+export function cmdSched(args) {
+  const b = bootFor(args, 'sched');
+  const sub = String(args._[1] || 'advice');
+  if (sub !== 'advice') fail('BAD_ACTION', `sched 只支持 advice（收到：${sub}）`, {}, 1);
+  const project = loadProject(b.project);
+  const dir = projectStatePaths(b.project).dir;
+  const queueFile = path.join(PATHS.state, '会话排队.json');
+  const queueRaw = exists(queueFile) ? readJson(queueFile, null) : null;
+  const queue = (() => {
+    if (!queueRaw || String(queueRaw.project || '') !== b.project) return null;
+    const rolesMap = {};
+    for (const row of (Array.isArray(queueRaw.roles) ? queueRaw.roles : [])) {
+      if (!row || !row.role) continue;
+      rolesMap[String(row.role)] = {
+        state: String(row.state || (row.known ? 'ok' : 'unknown')),
+        queued: Number(row.queued || 0), running: row.state === 'running',
+        lastAt: String(row.lastAt || row.lastOkAt || ''), stale: Boolean(row.stale),
+      };
+    }
+    return { at: String(queueRaw.at || ''), degraded: queueRaw.degraded ? String(queueRaw.degraded) : '', roles: rolesMap };
+  })();
+  const roundsRaw = readJson(path.join(dir, '会话轮次.json'), null);
+  const usageRaw = readJson(path.join(dir, '会话用量.json'), null);
+  const usage = usageRaw && typeof usageRaw === 'object' ? usageRaw : null;
+  const taskDir = path.join(dir, '任务');
+  const taskSourceAvailable = exists(taskDir);
+  const tasks = taskSourceAvailable
+    ? fs.readdirSync(taskDir).filter((n) => n.endsWith('.json')).map((n) => readJson(path.join(taskDir, n), null)).filter(Boolean)
+    : [];
+  const roleQueues = readJson(path.join(dir, 'role_queues.json'), null);
+  const rotateRounds = Number(args['rotate-rounds'] || 0) > 0 ? Number(args['rotate-rounds']) : undefined;
+  const advice = buildSchedAdvice({
+    now: Date.now(), project: b.project, rotateRounds, queue, rounds: roundsRaw, usage,
+    tasks, taskSourceAvailable, roleQueues,
+  });
+  // append-only 审计（唯一写盘）
+  const logFile = path.join(dir, '调度建议.jsonl');
+  try {
+    fs.appendFileSync(logFile, JSON.stringify({
+      at: advice.at, project: b.project, by: b.role,
+      roles: advice.roles.map((r) => ({ role: r.role, decision: r.decision, level: r.level, reasons: r.reasons })),
+      degraded: advice.degraded,
+    }) + '\n', 'utf8');
+  } catch { /* 审计失败不阻断建议输出 */ }
+  if (args.json) {
+    process.stdout.write(JSON.stringify(advice) + '\n');
+    return;
+  }
+  const lines = [`调度建议（${b.project}，${advice.at}）${advice.degraded ? ' ⚠ 快照不新鲜/降级：不出 IDLE_DISPATCH' : ''}`];
+  for (const r of advice.roles) lines.push(`- ${r.role}: ${r.decision}（${r.reasons.join('；')}）→ ${r.nextAction}`);
+  lines.push('只读建议：不派单、不换人；写盘仅 调度建议.jsonl（append-only）');
+  console.log(lines.join('\n'));
 }
 
 export function cmdReq(args) {
