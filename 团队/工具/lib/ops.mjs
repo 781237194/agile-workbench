@@ -2619,7 +2619,9 @@ function roleWorkingAt(project, role, tasks = null) {
   let latest = 0;
   for (const task of rows) {
     if (!task || String(task.owner || '') !== roleKey) continue;
-    if (['done', 'cancelled'].includes(String(task.status || ''))) continue;
+    // B-20261117-102215-d52c：闭环判定统一走 gates.statusIsClosed（accepted/terminated 也算闭环），
+    // 禁止再手写 ['done','cancelled'] —— 漏 accepted 会把已验收任务算成未闭环 → 角色被误判 idle → F6 灌脏队列。
+    if (statusIsClosed(String(task.status || ''))) continue;
     for (const ts of [task.claimedAt, task.updatedAt]) {
       const ms = Date.parse(String(ts || ''));
       if (Number.isFinite(ms) && ms > latest) latest = ms;
@@ -3245,6 +3247,18 @@ export async function recoverStalledRoles(project, { now = Date.now(), write = t
       seenTaskIds.add(id);
       return true;
     });
+    // B-20261117-102215-d52c（PM 2026-11-17 10:22）：同一 tick 同一角色入队上限 ≤3，
+    // 超出的任务本次丢弃并写活跃度审计（防一次 tick 灌 N 条脏队列；被丢弃的下个 tick 会重新评估）。
+    const ENQUEUE_CAP_PER_TICK = 3;
+    const droppedTaskIds = openTaskIds.slice(ENQUEUE_CAP_PER_TICK);
+    if (droppedTaskIds.length) {
+      openTaskIds.length = ENQUEUE_CAP_PER_TICK;
+      appendRoleActivityAudit(name, {
+        at, project: name, role, action: 'enqueue_cap', verdict: info.verdict, idleMs: info.idleMs,
+        signals: info.signals, wake: { ok: false, messageId: '', code: '' }, level: 'none',
+        detail: `cap=${ENQUEUE_CAP_PER_TICK};dropped=${droppedTaskIds.join(',')}`,
+      });
+    }
     const targetTaskIds = openTaskIds.length ? openTaskIds : [''];
     const attempt = Number(
       (state.items[stalledQueueItemId(role, targetTaskIds[0] || '')] || {}).attempt,
@@ -3558,7 +3572,7 @@ export function pruneDispatchQueue(projectName, { apply = false, reason = 'queue
     if (taskId) {
       const task = tasks.get(taskId);
       if (!task) why = 'task_missing';
-      else if (['done', 'cancelled'].includes(String(task.status || ''))) why = 'task_closed';
+      else if (statusIsClosed(String((task && task.status) || ''))) why = 'task_closed';
     }
     if (!why && item.to && roster.size && !roster.has(String(item.to))) why = 'target_not_in_roster';
     if (why) items.push({ id: String(item.id || ''), to: String(item.to || ''), task: taskId, why, subject: String(item.subject || '').slice(0, 60) });
