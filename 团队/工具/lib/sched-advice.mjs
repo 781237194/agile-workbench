@@ -7,7 +7,7 @@
  * 新鲜度只看快照 at/lastAt 与 staleMs（默认 120s），**禁文件 mtime**。
  */
 import { usageLevelOf } from './session.mjs';
-import { statusIsClosed } from './gates.mjs';
+import { statusIsClosed, isRequirementMirrorTask } from './gates.mjs';
 import { ROUNDS_MAX } from './session-archive.mjs';
 
 export const SCHED_DECISIONS = ['HANDOVER_FIRST', 'STALE_ALERT', 'BUSY_HOLD', 'IDLE_DISPATCH', 'STANDBY'];
@@ -67,7 +67,8 @@ export function buildSchedAdvice(input) {
     const usageInput = usageRow ? Number(usageRow.inputTokens || usageRow.totalTokens || 0) : 0;
     const usageLevel = usageRow ? String(usageRow.level || usageLevelOf(usageInput)) : '';
     const openTasks = taskSourceAvailable
-      ? tasks.filter((t) => String(t.owner || '') === role && !statusIsClosed(String(t.status || '')))
+      // B-da51：镜像任务不是「在办」，不能算进角色负载/交接建议。
+      ? tasks.filter((t) => String(t.owner || '') === role && !isRequirementMirrorTask(t) && !statusIsClosed(String(t.status || '')))
       : [];
     const queueItems = roleQueues && roleQueues[role] && Array.isArray(roleQueues[role].queue) ? roleQueues[role].queue : [];
 

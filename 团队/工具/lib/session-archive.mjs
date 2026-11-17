@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { nowIso, stamp, ensureDir, fail, truncate, acquireLock, releaseLock, listLocks } from './core.mjs';
 import { loadProject, projectStatePaths, listTasks } from './store.mjs';
+import { statusIsClosed, isRequirementMirrorTask } from './gates.mjs';
 
 export const ROUNDS_MAX = 10;
 const ARCHIVE_DIR = '会话归档';
@@ -309,7 +310,10 @@ function pmDecisionLog(projectPath, role, record, text) {
 export function archiveSession({ projectName, role, reason = '', self = false, auto = false, operator = 'pm', force = false }) {
   if (!role) fail('BAD_ROLE', '需要 --role');
   const project = loadProject(projectName);
-  const open = (listTasks(projectName) || []).filter((t) => String(t.owner || '') === role && String(t.status) !== 'done');
+  // B-da51（f73f 回归）：未闭环判据 = 非终态（statusIsClosed）+ 非镜像任务（type=requirement）+ owner 命中。
+  // 镜像任务随需求行永久存在、f73f 起还带默认 owner（product/analyst），不能算「角色还有活」，否则归档被永久挡住。
+  const open = (listTasks(projectName) || []).filter((t) => String(t.owner || '') === role
+    && !isRequirementMirrorTask(t) && !statusIsClosed(String(t.status || 'done')));
   if (open.length) fail('TASK_OPEN', `角色 ${role} 还有 ${open.length} 个未闭环任务，先 done 再归档`, { tasks: open.map((t) => t.id) });
   const locks = (listLocks() || []).filter((l) => String(l.role || '') === role && !l.stale);
   if (locks.length) fail('ROLE_BUSY', `角色 ${role} 持活动锁，先释放再归档`, { locks: locks.map((l) => l.key) });

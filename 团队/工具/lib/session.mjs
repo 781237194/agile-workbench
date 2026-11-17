@@ -24,6 +24,7 @@ import {
   projectTeamMode, projectRoleIds, sendMessage,
 } from './store.mjs';
 import { ROLE_DIRS, ROLE_NAMES, rolesForMode, normalizeTeamMode } from './roles.mjs';
+import { statusIsClosed, isRequirementMirrorTask } from './gates.mjs';
 import { DshClient } from './dsh-session.mjs';
 import { roundsQuery, exportTranscriptToProject, auditOutput, archiveSession, firstTurnUsage, writeBackRotated, listArchives } from './session-archive.mjs';
 import { requireBoot } from './store.mjs';
@@ -736,7 +737,8 @@ function archiveGate(projectName, role, oldId) {
     .filter((a) => String(a.role || '') === String(role) && !a.nextSessionId)
     .filter((a) => !a.sessionId || String(a.sessionId) === String(oldId || ''));
   const openTasks = (listTasks(projectName) || [])
-    .filter((t) => String(t.owner || '') === String(role) && String(t.status) !== 'done')
+    // B-da51：与 session-archive 同口径——镜像任务不算「未闭环的活」，终态用 statusIsClosed。
+    .filter((t) => String(t.owner || '') === String(role) && !isRequirementMirrorTask(t) && !statusIsClosed(String(t.status || 'done')))
     .map((t) => t.id);
   const locks = (listLocks() || [])
     .filter((l) => String(l.role || '') === String(role) && !l.stale)
@@ -1112,7 +1114,8 @@ export function rotationPriority(projectName) {
   const project = loadProject(projectName);
   const roleIds = (() => { try { return projectRoleIds(project); } catch { return []; } })();
   const tierOf = (role) => ({ product: 0, analyst: 0, tester: 1, programmer1: 2, programmer2: 2, pm: 3 })[role] ?? 9;
-  const tasks = listTasks(projectName).filter((t) => t.status !== 'done');
+  // B-da51：镜像任务不算在办；终态用 statusIsClosed（accepted/cancelled/terminated）。
+  const tasks = listTasks(projectName).filter((t) => !isRequirementMirrorTask(t) && !statusIsClosed(String(t.status || 'done')));
   const locks = (() => { try { return requireLocks(); } catch { return []; } })();
   const rows = roleIds.map((role) => {
     const mine = tasks.filter((t) => String(t.owner || '') === role);
