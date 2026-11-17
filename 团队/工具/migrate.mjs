@@ -17,6 +17,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+// ESM 下没有 __dirname：默认根目录（未传 --root 时）依赖它，必须显式构造
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { bsdtarZip, bsdtarUnzip, writeTarList } from './lib/evidence-pack.mjs';
 
 const MANIFEST_NAME = '迁移清单.json';
@@ -279,6 +283,8 @@ function cmdRebind(argv) {
       if (row) {
         if (row.path) row.path = to;
         if (row.workspacePath) row.workspacePath = to;
+        // AC4④：workbench 条目自身的 dshWorkspaceId 也必须置 pending（不伪造 DSH 工作区 id）
+        if ('dshWorkspaceId' in row) { row.dshWorkspaceId = ''; row.dshWorkspaceIdPending = true; }
         if (row.workspace) { row.workspace.path = to; row.workspace.id = ''; row.workspace.pending = true; row.workspace.bound = false; }
         writeJsonFile(wbFile, data);
       }
