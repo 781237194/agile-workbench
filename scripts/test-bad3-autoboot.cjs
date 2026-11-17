@@ -54,6 +54,15 @@ const pmMessages = () => {
 rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true });
+// B-a5d5 夹具修正：沙盘复制真实团队会把真实邮箱里的历史消息一并带进来（本机确有 1 条历史
+// boot_failed，M-20261117-090858-6c7f0c），④ 两条计数断言（应 =1）就会变 2、连跑也不稳。
+// 这里在夹具建立后清空沙盘邮箱的 new/cur，让邮件计数只反映本脚本自己发出的消息。
+try {
+  const mailRoot = path.join(TEAM_ROOT, '状态', '邮箱');
+  for (const role of fs.readdirSync(mailRoot)) {
+    for (const sub of ['new', 'cur']) fs.rmSync(path.join(mailRoot, role, sub), { recursive: true, force: true });
+  }
+} catch { /* 无邮箱目录时忽略：本脚本断言的计数均为 0 基线 */ }
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);
 
 // ① 首次自动 boot：leader + booted
