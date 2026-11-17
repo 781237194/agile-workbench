@@ -190,7 +190,11 @@ function rotateSession({ projectName, role, now, reason, auditFile, dryRun }) {
   const team = loadTeam();
   const member = (team.members || []).find((m) => m && m.role === role);
   const oldId = String((member && member.sessionId) || '');
-  const newId = `session-auto-${role}-${now.toString(36)}`;
+  // B-20261117-212500-a837 中间态（step③ 一半）：新增「沙盘新会话注入通道」——
+  // 自检/沙盘可用 __AR_NEW_SESSION 指定将要写入名册的新会话 id（模拟 DSH create 的返回值）；
+  // 生产未设该 env 时行为完全不变（仍走本地生成，后续 step 再改为复用 session.mjs rotateSession）。
+  const injectedNewSessionId = String(process.env.__AR_NEW_SESSION || '').trim();
+  const newId = injectedNewSessionId || `session-auto-${role}-${now.toString(36)}`;
   const wbFile = workbenchFileOf();
   const store = readJsonSafe(wbFile, null);
   if (!dryRun) {
