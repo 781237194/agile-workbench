@@ -13,6 +13,8 @@ const ReviewCopy = require('./review-copy.js');
 const RenderMemory = require('./render-memory.js');
 const SamplerDecide = require('./mem-sampler-decide.js');
 const RenderMemDir = require('./render-mem-dir.js');
+// B-20261117-113926-8be3：状态写入审计行（workbench.json 原来没有任何审计）
+const StoreAudit = require('./store-audit.js');
 
 const ROOT = path.join(__dirname, '..');
 // B-20261116-071224-9300：团队根唯一解析器——隔离优先（AWB_TEAM_ROOT > TEAM_ROOT > layout > 仓库团队），
@@ -2274,6 +2276,14 @@ function writeStore(store) {
   storeCache = { file: '', key: '', value: null };
   if (storeFatal) throw new Error('状态文件损坏且没有可用备份，已阻止写入；请先处理 workbench.json.corrupt-*');
   const file = storeFile();
+  // B-20261117-113926-8be3：workbench.json 的写入原来没有任何审计行（json-atomic 的 appendAudit 只认
+  // 状态/项目/<项目>/ 下的文件）。这里在写前记 prevSha，写成功后 append 一行 8 键审计（无变化/失败不写）。
+  const storeAuditPrev = (() => {
+    try {
+      const st = fs.statSync(file);
+      return { bytes: st.size, sha: crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') };
+    } catch { return { bytes: 0, sha: '' }; }
+  })();
   // R-ad44（T-b7dd）：状态写收敛到唯一实现 json-atomic.cjs（<file>.tmp → fsync → <file>.bak → rename + 文件锁）。
   // AC9：本函数名/入参/返回/失败码与落盘字段不变；新增的 .lock 是瞬时文件、.bak 语义与原来一致（保留上一版）。
   try {
@@ -2281,6 +2291,23 @@ function writeStore(store) {
   } finally {
     // 写后失效缓存：同一毫秒内 mtime 可能不变，不能靠 mtime 自动识别；失败也要失效，避免下次读脏缓存。
     storeCache = { file: '', key: '', value: null };
+  }
+  try {
+    const st = fs.statSync(file);
+    const sha = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    if (sha !== storeAuditPrev.sha) {
+      const audit = StoreAudit.appendStoreWriteAudit({
+        file,
+        bytes: st.size,
+        prevSha: storeAuditPrev.sha,
+        sha,
+        caseName: 'writeStore',
+        actor: 'shell',
+      });
+      if (!audit.written) console.warn('STORE_AUDIT_SKIP ' + JSON.stringify({ reason: audit.reason, message: audit.message || '', file }));
+    }
+  } catch (error) {
+    console.warn('STORE_AUDIT_FAIL ' + JSON.stringify({ file, detail: String((error && error.message) || error).slice(0, 160) }));
   }
   storeWarning = null;
 }
