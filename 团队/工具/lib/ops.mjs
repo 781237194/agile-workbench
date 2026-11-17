@@ -1366,7 +1366,10 @@ async function wakeWithGuard({ project, to, msg, isDispatch = false, engineUrl =
   }
   const t = state.targets[target] || { windowStart: 0, pending: [], attempts: 0 };
   const item = { at: nowMs, dedupeKey: key, reason, messageId: (msg && msg.id) || '', subject: (msg && msg.subject) || '', from: (msg && msg.from) || '', kind: (msg && (msg.type || msg.kind)) || 'notice', to: target, body: truncate(String((msg && msg.body) || ''), 600) };
-  const inWindow = Number(t.windowStart) > 0 && nowMs - Number(t.windowStart) < WAKE_DEBOUNCE_MS;
+  // B-7d73（Owner 2026-11-17 19:1x 口径）：合并唤醒**仅限 to=pm 且非派单**；
+  // 非 PM 的派单一律立即唤醒，绝不 MERGED_PENDING（否则「派了单没人动」）。
+  const mergeAllowed = WAKE_DEBOUNCE_MS > 0 && target === 'pm' && !isDispatch;
+  const inWindow = mergeAllowed && Number(t.windowStart) > 0 && nowMs - Number(t.windowStart) < WAKE_DEBOUNCE_MS;
   if (inWindow) {
     t.pending = Array.isArray(t.pending) ? t.pending : [];
     t.pending.push(item);
@@ -4691,8 +4694,10 @@ export async function cmdSend(args) {
     } catch { return false; }
   })();
   const targetClosed = taskDone || requirementClosed;
-  // 只有“PM 给其他角色派单”才生成派单唤醒；完成回执、通知、请求都只投递。
-  // 收件人是 PM 或任务已完成时，即使带 --task/--ack 也降级为通知，避免让 PM 去执行已完成任务。
+  // B-20261117-195929-7d73（R-45c7 AC1）：默认唤醒**必须**开。Owner 2026-11-17 10:19 已明确删除静默开关
+  // （`--no-wake` → NO_WAKE_REMOVED，selftest 有断言），所以这里没有「关闭」分支：任何消息类型落盘后一律唤醒。
+  const willWake = true;
+  // 派单判定：PM 带 --ack 发给非 PM 角色，且目标未收口（完成回执/通知/请求只投递不派单）。
   const autoWanted = b.role === 'pm' && to !== 'pm' && Boolean(args.ack);
   const autoDispatch = autoWanted && !targetClosed;
   const isDispatch = requestedType === 'dispatch' ? autoDispatch : (requestedType ? false : autoDispatch);
@@ -4717,8 +4722,7 @@ export async function cmdSend(args) {
     if (projectPath) assertRequirementDocsRead(b, projectPath, taskRow.requirementId, '派单');
   }
   // 四处会话映射一致性：派单/唤醒前必须一致（AC17.11），避免叫醒旧会话；不一致给字段与修法。
-  // Owner 2026-11-17 10:19：没有开关可关——--wake 只用于额外唤醒，唤醒不再受任何静默参数影响。
-  const willWake = isDispatch || Boolean(args.wake);
+  // B-7d73：默认唤醒（willWake 已在上面按 --no-wake 判定），这里只做一致性断言。
   if (willWake) assertSessionMapConsistent(b.project, isDispatch ? '派单' : '唤醒');
   // G1/G2/G3/G5/G0/G4：派开发前过需求定稿→评审→Owner 落账→角色忙→阶段角色表→设计签名。
   if (isDispatch && taskRow && taskRow.requirementId) {
@@ -4803,10 +4807,8 @@ export async function cmdSend(args) {
   });
   if (pmDispatch) writeDispatchLock(b.project, msg, { targetSessionId: targetAlive && targetAlive.probe ? targetAlive.probe.sessionId : '' });
   let wake = null;
-  // B-1e4a（R-45c7，Owner 2026-11-14 13:06）：本项目不存在"不唤醒"——任何消息类型（含 receipt）
-  // 落盘后都立即唤醒接收方。发消息与回执一律唤醒，无静默开关（Owner 2026-11-17 10:19）。
-  // 唤醒≠要回执：ack 通知仍是 ackRequired=false + noEcho，
-  // 收到通知的人只需 ack（已读），那条 ack 不会再触发新的唤醒链（见 store.mjs ackMessage 的 noEcho 分支）。
+  // B-1e4a（R-45c7，Owner 2026-11-14 13:06）+ B-7d73（2026-11-17 19:59）：默认唤醒=开，任何消息类型
+  // （含通知/回执）落盘后都立即唤醒接收方；静默开关已被 Owner 10:19 删除（`--no-wake` 在入口即拒）。
   const wantWake = true;
   // B-743e：把首行归属随发送结果一起返回，便于自测与排障核对格式。
   const wakeHeader = wantWake && msg ? wakeHeaderFor(msg, to) : '';
