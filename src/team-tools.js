@@ -735,6 +735,47 @@ function loadOpsModule(layout) {
   return promise;
 }
 
+// B-20261117-093837-02e9：任务目录扫描缓存（进程级单例，所有 create() 实例共用一份）。
+// 根因：每次快照都全量 readdir + readFile + JSON.parse 800~900 个任务文件（本机实测 185ms/次），
+// 而面板/流程/池/验收在一次交互里会连打多次快照。签名取「目录 mtime + size」——任务写入走
+// json-atomic 的 tmp+rename，rename 会更新目录 mtime；再叠一个 TTL 兜住「原地写不改目录 mtime」的极端情况。
+// 约定：命中返回数组副本、其中任务对象是共享引用，调用方只读、不得原地改。
+const TASK_CACHE_TTL_MS = (() => {
+  const raw = Number(process.env.AWB_TASK_CACHE_TTL_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 2000;
+})();
+const TASK_CACHE_FREEZE = String(process.env.AWB_TASK_CACHE_FREEZE || '') === '1';
+const taskScanCache = new Map(); // dir -> { signature, at, rows }
+const taskCacheStats = { hits: 0, misses: 0, invalidations: 0, lastScanMs: 0, lastHitAt: '', size: 0 };
+// 需求正文扫描缓存（readWorkflowSnapshot 每次都会读 94 份正文算 hash，实测 120ms）
+const requirementDocsCache = new Map(); // dir -> { signature, at, value }
+const requirementDocsStats = { hits: 0, misses: 0, lastScanMs: 0 };
+function taskCacheSignatureOf(dir) {
+  try {
+    const st = fs.statSync(dir);
+    return `${Math.round(st.mtimeMs)}:${st.size}`;
+  } catch { return ''; }
+}
+function resetTaskCache() {
+  taskScanCache.clear();
+  requirementDocsCache.clear();
+  taskCacheStats.hits = 0;
+  taskCacheStats.misses = 0;
+  taskCacheStats.invalidations = 0;
+  taskCacheStats.lastScanMs = 0;
+  taskCacheStats.lastHitAt = '';
+  requirementDocsStats.hits = 0;
+  requirementDocsStats.misses = 0;
+  requirementDocsStats.lastScanMs = 0;
+}
+
+/** 需求正文写入后必须让正文缓存失效（否则同一 tick 里的二次读会看到旧正文/旧 hash）。 */
+function invalidateRequirementDocsCache(projectPath) {
+  try {
+    requirementDocsCache.delete(path.join(path.resolve(String(projectPath || '')), '需求'));
+  } catch { /* 路径不可解析时忽略 */ }
+}
+
 function createTeamTools(options = {}) {
   const initialRoot = options.teamRoot || process.env.TEAM_ROOT || path.join(repoRoot(), '团队');
   const layout = buildLayout(initialRoot, options.toolsDir);
@@ -4438,6 +4479,16 @@ function createTeamTools(options = {}) {
   function readRequirementDocs(projectPath) {
     const root = path.resolve(projectPath);
     const dir = path.join(root, '需求');
+    // B-20261117-093837-02e9：需求目录同样做「目录 mtime+size + TTL」缓存。
+    // 实测 94 份正文逐份 sha256+contentHash 要 120ms，而 readWorkflowSnapshot 每次都会读一遍。
+    const signature = taskCacheSignatureOf(dir);
+    const cached = signature ? requirementDocsCache.get(dir) : null;
+    if (TASK_CACHE_TTL_MS > 0 && cached && cached.signature === signature
+      && (Date.now() - cached.at) < TASK_CACHE_TTL_MS) {
+      requirementDocsStats.hits += 1;
+      return cached.value;
+    }
+    const started = Date.now();
     const list = [];
     let names = [];
     try { names = fs.readdirSync(dir); } catch { names = []; }
@@ -4475,7 +4526,11 @@ function createTeamTools(options = {}) {
     const contentHash = crypto.createHash('sha256')
       .update(JSON.stringify(list.map((row) => [row.rel, row.contentHash])))
       .digest('hex');
-    return { list, hash, contentHash, count: list.length };
+    const value = { list, hash, contentHash, count: list.length };
+    requirementDocsStats.misses += 1;
+    requirementDocsStats.lastScanMs = Date.now() - started;
+    if (signature) requirementDocsCache.set(dir, { signature, at: Date.now(), value });
+    return value;
   }
 
   /**
@@ -5406,17 +5461,41 @@ function createTeamTools(options = {}) {
     return path.join(projectStatePaths(projectName).tasks, String(taskId) + '.json');
   }
 
+  // B-20261117-093837-02e9：带目录签名缓存的读取（缓存与统计在模块级，见 createTeamTools 之前）。
+  function invalidateTaskCache(projectName) {
+    try {
+      taskScanCache.delete(projectStatePaths(projectName).tasks);
+      taskCacheStats.invalidations += 1;
+      taskCacheStats.size = taskScanCache.size;
+    } catch { /* 项目名不可解析时忽略 */ }
+  }
+
   function readLegacyTasks(projectName) {
     const dir = projectStatePaths(projectName).tasks;
+    const signature = taskCacheSignatureOf(dir);
+    const cached = taskScanCache.get(dir);
+    if (TASK_CACHE_TTL_MS > 0 && cached && signature && cached.signature === signature
+      && (Date.now() - cached.at) < TASK_CACHE_TTL_MS) {
+      taskCacheStats.hits += 1;
+      taskCacheStats.lastHitAt = new Date().toISOString();
+      return cached.rows.slice();
+    }
     const out = [];
     let names = [];
     try { names = fs.readdirSync(dir); } catch { return out; }
+    const scanStarted = Date.now();
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
       const task = readJsonSafe(path.join(dir, name));
       if (task && task.id) out.push(task);
     }
-    return out.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+    const rows = out.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+    if (TASK_CACHE_FREEZE) for (const row of rows) { try { Object.freeze(row); } catch { /* 忽略 */ } }
+    taskCacheStats.misses += 1;
+    taskCacheStats.lastScanMs = Date.now() - scanStarted;
+    if (signature) taskScanCache.set(dir, { signature, at: Date.now(), rows });
+    taskCacheStats.size = taskScanCache.size;
+    return rows.slice();
   }
 
   function patchLegacyTask(projectName, taskId, patch = {}) {
@@ -5433,6 +5512,7 @@ function createTeamTools(options = {}) {
     };
     try {
       writeJsonAtomic(file, next);
+      invalidateTaskCache(projectName);
       return { ok: true, code: 'OK', file, task: next };
     } catch (error) {
       return failure('TASK_WRITE_FAILED', `写旧任务文件失败：${String(error && error.message || error).slice(0, 200)}`, { file });
@@ -10577,6 +10657,11 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     latestRequirementDecision,
     // B-20261117-012404-17af：ownerReview 唯一投影（三处写入者共用，字段集固定）
     ownerReviewProjection,
+    // B-20261117-093837-02e9：任务扫描缓存（统计与手工失效，供自检/压测直接用）
+    taskCacheStats,
+    resetTaskCache,
+    invalidateTaskCache,
+    TASK_CACHE_TTL_MS,
     // R-dba4（工具侧）：需求行大白话 copy 写入口（IPC requirement:copy-save / CLI req copy 共用一个判据）
     saveRequirementCopy,
     launchSessions,
@@ -10641,6 +10726,9 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     readWorkflowState,
     writeWorkflowState,
     readWorkflowSnapshot,
+    // B-20261117-093837-02e9：任务扫描（带目录签名缓存）单独暴露，供自检脚本量化命中/失效
+    readLegacyTasks,
+    patchLegacyTask,
     // B-a17d：作废登记的唯一读取口（落点 <项目根>/需求/作废登记.jsonl，与团队工具同口径）。
     readRequirementVoidRegistry,
     requirementVoidRegistryFile,
