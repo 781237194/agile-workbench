@@ -5996,6 +5996,49 @@ ipcMain.handle('theme:metrics', async () => {
           }
         } catch { autoRotateRows = []; }
       }
+      // T-20261117-211833-7a30（R-a4c7）AC5②：调度建议（只读；与 CLI 同源纯函数，失败降级为空、不阻塞面板）
+      let schedAdvice = null;
+      if (projectName) {
+        try {
+          const schedOut = execFileSync(process.execPath, [path.join(teamRoot, '工具', 'team.mjs'), 'sched', 'advice', '--project', projectName, '--json'], {
+            encoding: 'utf8', timeout: 20000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+          });
+          const schedLine = String(schedOut || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
+          const parsed = JSON.parse(schedLine);
+          if (parsed && parsed.ok) schedAdvice = parsed;
+        } catch (e) {
+          console.warn('SCHED_ADVICE_FAILED ' + String((e && e.message) || e).slice(0, 200));
+        }
+      }
+      // 兜底（同样只读）：CLI 不可用（沙盘/打包路径差异）时，进程内直接调纯函数，保证面板至少出 UNAVAILABLE 行。
+      if (!schedAdvice && projectName) {
+        try {
+          const { pathToFileURL } = require('node:url');
+          const schedMod = await import(pathToFileURL(path.join(ROOT, '团队', '工具', 'lib', 'sched-advice.mjs')).href);
+          const projStateDir = path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName));
+          const readJsonIf = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; } };
+          const qRoles = {};
+          for (const row of (snapshot && Array.isArray(snapshot.roles) ? snapshot.roles : [])) {
+            if (!row || !row.role) continue;
+            qRoles[String(row.role)] = { state: String(row.state || (row.known ? 'ok' : 'unknown')), queued: Number(row.queued || 0), running: row.state === 'running', lastAt: String(row.lastAt || row.lastOkAt || ''), stale: Boolean(row.stale) };
+          }
+          const taskDir = path.join(projStateDir, '任务');
+          const taskSourceAvailable = fs.existsSync(taskDir);
+          const schedTasks = taskSourceAvailable
+            ? fs.readdirSync(taskDir).filter((n) => n.endsWith('.json')).map((n) => readJsonIf(path.join(taskDir, n))).filter(Boolean)
+            : [];
+          schedAdvice = schedMod.buildSchedAdvice({
+            now: Date.now(), project: projectName,
+            queue: snapshot ? { at: String(snapshot.at || ''), degraded: snapshot.degraded ? String(snapshot.degraded) : '', roles: qRoles } : null,
+            rounds: readJsonIf(path.join(projStateDir, '会话轮次.json')),
+            usage: readJsonIf(path.join(projStateDir, '会话用量.json')),
+            tasks: schedTasks, taskSourceAvailable,
+            roleQueues: readJsonIf(path.join(projStateDir, 'role_queues.json')),
+          });
+        } catch (e) {
+          console.warn('SCHED_ADVICE_FALLBACK_FAILED ' + String((e && e.message) || e).slice(0, 200));
+        }
+      }
       const model = SessionQueue.buildPanelModel({
         project: projectName,
         autoRotateRows,
@@ -6011,6 +6054,7 @@ ipcMain.handle('theme:metrics', async () => {
       });
       model.snapshotFile = snapshotFile;
       model.wakeFile = wakeFile;
+      model.sched = schedAdvice;
       return model;
     } catch (e) {
       return { ok: false, code: 'SESSION_QUEUE_FAILED', message: String((e && e.message) || e).slice(0, 300), rows: [], degraded: true };

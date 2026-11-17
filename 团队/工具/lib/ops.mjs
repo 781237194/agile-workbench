@@ -6779,7 +6779,12 @@ export function cmdSkill(args) {
  * 只追加写 项目/<项目>/调度建议.jsonl（append-only）；不派单、不换人、不改任何状态。
  */
 export function cmdSched(args) {
-  const b = bootFor(args, 'sched');
+  // 只读建议允许不带令牌（界面 IPC/只读调用）：带 --boot 时仍按令牌校验身份；不带则按 --project 只读。
+  const projectName0 = String(args.project || '').trim();
+  const b = (args.boot || args.token)
+    ? bootFor(args, 'sched')
+    : { role: String(args.role || 'system'), project: projectName0 };
+  if (!b.project) fail('NO_PROJECT', '需要 --project 或已在项目上下文', {}, 1);
   const sub = String(args._[1] || 'advice');
   if (sub !== 'advice') fail('BAD_ACTION', `sched 只支持 advice（收到：${sub}）`, {}, 1);
   const project = loadProject(b.project);

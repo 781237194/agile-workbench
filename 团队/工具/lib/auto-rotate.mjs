@@ -29,7 +29,9 @@ import { loadTeam, saveTeam, projectStatePaths, sendMessage } from './store.mjs'
 /* ── 常量（阈值与 session.mjs 同源：warn 30 万 / force 50 万；轮次沿用归档建议 20 轮） ── */
 export const DEFAULT_TOKEN_WARN = 300000;
 export const DEFAULT_TOKEN_FORCE = 500000;
-export const DEFAULT_ROUNDS_LIMIT = 20;
+// T-20261117-211833-7a30（R-a4c7 AC3①）：到线口径单源——默认 8，且必须 ≤ session-archive 的 ROUNDS_MAX(10)，
+// 避免「归档归零线 10 < 换人触发线 20」这种永不归零的矛盾。调度建议（sched-advice.mjs）用同一个默认值。
+export const DEFAULT_ROUNDS_LIMIT = 8;
 export const HANDOVER_TIMEOUT_MS = 15 * 60 * 1000;
 export const TRIGGER_DEDUPE_MS = 60 * 1000;
 export const ROTATE_COOLDOWN_MS = 60 * 60 * 1000;

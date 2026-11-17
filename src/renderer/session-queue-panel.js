@@ -185,8 +185,42 @@
     hint.title = '只提示、不阻断派单；对方正在处理，连发只会让排队更长';
   }
 
+  /** T-20261117-211833-7a30（R-a4c7）AC5②：调度建议行（只读；锚点 data-sched-*，追加在既有抽屉里，不新建容器层级）。 */
+  function renderSched() {
+    const host = el(ROWS_ID);
+    if (!host) return;
+    let box = el('session-queue-sched');
+    if (!box) {
+      box = node('div', 'sq-sched');
+      box.id = 'session-queue-sched';
+      host.parentNode.insertBefore(box, host.nextSibling);
+    }
+    box.textContent = '';
+    const adv = state.model && state.model.sched;
+    if (!adv || !Array.isArray(adv.roles) || !adv.roles.length) {
+      box.setAttribute('data-sched-empty', '1');
+      box.textContent = '调度建议：暂无（队列表未接入或项目未就绪）';
+      return;
+    }
+    box.removeAttribute('data-sched-empty');
+    box.setAttribute('data-sched-at', String(adv.at || ''));
+    for (const row of adv.roles) {
+      const line = node('div', 'sq-sched-row');
+      line.setAttribute('data-sched-role', String(row.role || ''));
+      line.setAttribute('data-sched-advice', String(row.decision || ''));
+      line.setAttribute('data-sched-level', String(row.level || ''));
+      line.setAttribute('data-sched-reason', (row.reasons || []).join('；'));
+      line.title = String(row.nextAction || '');
+      line.appendChild(node('span', 'sq-sched-role', row.role || ''));
+      line.appendChild(node('span', 'sq-sched-decision', row.decision || ''));
+      line.appendChild(node('span', 'sq-sched-action', row.nextAction || ''));
+      box.appendChild(line);
+    }
+  }
+
   function render() {
     renderRows();
+    renderSched();
     renderBanner();
     paintBackpressure();
   }

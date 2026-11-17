@@ -275,6 +275,26 @@ async function runSqCheck(options = {}) {
     };
   })()`;
   const readable = await evalJs(READABLE);
+  // ── T-20261117-211833-7a30（R-a4c7）AC5②：调度建议锚点必须挂在既有抽屉里（#session-queue-sched + data-sched-*）──
+  const SCHED_ROWS = `(() => {
+    const box = document.getElementById('session-queue-sched');
+    const drawer = document.getElementById('session-queue-drawer');
+    const rows = Array.from(document.querySelectorAll('[data-sched-role]'));
+    return {
+      boxExists: Boolean(box),
+      inDrawer: Boolean(box && drawer && drawer.contains(box)),
+      at: box ? String(box.getAttribute('data-sched-at') || '') : '',
+      empty: box ? box.getAttribute('data-sched-empty') === '1' : false,
+      rows: rows.length,
+      rowsOk: rows.every((n) => n.hasAttribute('data-sched-advice')
+        && n.hasAttribute('data-sched-level') && n.hasAttribute('data-sched-reason')),
+      decisions: rows.map((n) => n.getAttribute('data-sched-advice')),
+    };
+  })()`;
+  const schedPanel = await evalJs(SCHED_ROWS);
+  check('调度建议锚点在既有抽屉内（#session-queue-sched / data-sched-role/advice/level/reason/at）',
+    schedPanel.boxExists === true && schedPanel.inDrawer === true
+    && schedPanel.rows > 0 && schedPanel.rowsOk === true && Boolean(schedPanel.at), schedPanel);
   check('可读性：列头存在（data-sq-header）且 6 列（角色 + 排队数 / 四态 / 失败 / 跳过 / 最近成功投递）',
     readable.hasHeader === true && readable.headerAnchor === '1' && readable.headerCells.length === 6, readable.headerCells);
   const headerText = (readable.headerCells || []).join('|');
