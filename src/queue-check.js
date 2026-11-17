@@ -146,6 +146,7 @@ async function runQueueCheck({ app, createWindow, getWindow, readStore, outRoot,
   const sandboxRootPath = path.resolve(String(sandboxTeamRoot || ''));
   const realQueue = String(realQueueFile || '');
   const realBefore = realQueue ? statOf(realQueue) : { exists: false, mtimeMs: 0, sha256: '' };
+  const realBeforeRaw = (realQueue && realBefore.exists) ? (() => { try { return fs.readFileSync(realQueue, 'utf8'); } catch { return ''; } })() : '';
 
   createWindow();
   const win = getWindow();
@@ -273,7 +274,22 @@ async function runQueueCheck({ app, createWindow, getWindow, readStore, outRoot,
   check('只读：渲染与 5 次 IPC 调用后沙盘队列文件未被改写', sha256Of(sandboxQueue) === sandboxReadySha, { before: sandboxReadySha.slice(0, 16), after: sha256Of(sandboxQueue).slice(0, 16) });
   if (realQueue) {
     const realAfter = statOf(realQueue);
-    check('隔离：真实项目 role_queues.json 的 sha256 与 mtime 未被碰（不改名、不写入）', realAfter.exists === realBefore.exists && realAfter.sha256 === realBefore.sha256 && realAfter.mtimeMs === realBefore.mtimeMs, { realQueue, before: realBefore.sha256.slice(0, 16), after: realAfter.sha256.slice(0, 16), exists: realAfter.exists });
+    // 口径变更说明（B-20261117-230147-2010）：真实团队在运行时，route-daemon/无头守护会周期性重写
+    // 真实 role_queues.json（派生队列），sha256+mtime 必变，不能作为「自检没碰它」的判据（2026-11-17 实测
+    // 自检 23 秒窗口内 mtime 前进）。改为三判据：①文件仍在（没被改名/删除，queue-check 的旧实现会 renameSync）；
+    // ②前后都能解析为 JSON 且 roles 键集合不变（没被写坏/清空）；③sha 变化只在「文件仍存在且结构一致」时
+    // 标注 externalWriter:true 供人工核对，不判红。
+    const parseRaw = (raw) => {
+      try { const j = JSON.parse(raw); return { ok: true, keys: Object.keys((j && j.roles) || {}).sort().join(',') }; }
+      catch { return { ok: false, keys: '' }; }
+    };
+    const beforeStruct = parseRaw(realBeforeRaw);
+    let afterStruct = { ok: false, keys: '' };
+    try { afterStruct = parseRaw(realAfter.exists ? fs.readFileSync(realQueue, 'utf8') : ''); } catch { /* 读不到按不通过 */ }
+    const sameShape = beforeStruct.ok && afterStruct.ok && beforeStruct.keys === afterStruct.keys;
+    check('隔离：真实项目 role_queues.json 未被改名/删除/写坏（sha 变化仅为外部守护并发写，标注 externalWriter）',
+      realAfter.exists === true && sameShape,
+      { realQueue, before: realBefore.sha256.slice(0, 16), after: realAfter.sha256.slice(0, 16), exists: realAfter.exists, rolesBefore: beforeStruct.keys, rolesAfter: afterStruct.keys, externalWriter: realAfter.sha256 !== realBefore.sha256 });
     check('隔离：真实目录下没有遗留 .queuecheck-tmp 改名文件', !fs.existsSync(realQueue + '.queuecheck-tmp'), realQueue + '.queuecheck-tmp');
   } else {
     check('隔离：真实项目 role_queues.json 不存在（无需比对，也不去创建）', true, realQueue || '路径未知');

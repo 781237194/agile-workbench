@@ -235,7 +235,32 @@ if (IS_REVIEW_CHECK) {
 // queue-check 也要隔离团队状态：否则自检会临时改名真实 role_queues.json（测试报告-v67 观察项 1）。
 // 数据根 userData 不变（仍是 .queue-check-data），只把团队状态根指进同一个沙盘。
 if (IS_QUEUE_CHECK) {
+  process.env.AWB_STORE = path.join(QUEUE_CHECK_DATA, 'workbench.json');
   process.env.TEAM_ROOT = path.join(QUEUE_CHECK_DATA, '团队');
+  process.env.TEAM_PROJECTS_ROOT = path.join(QUEUE_CHECK_DATA, '项目');
+}
+// B-20261117-230147-2010（daee 结论）：layout-check 也必须与 sq-check 同法隔离——
+// 不设 TEAM_ROOT 时会回落真实 团队/，任何写团队根/项目目录的动作都会污染真实树。
+// 复用 e6c9 的 prepareSqCheckSandbox（同一份隔离实现，不另造第二套）：强制隔离校验 + store 路径改指沙盘。
+if (IS_LAYOUT_CHECK) {
+  const layoutTeamRoot = path.join(LAYOUT_DATA, '团队');
+  const layoutProjectRoot = path.join(LAYOUT_DATA, '项目');
+  process.env.AWB_STORE = path.join(LAYOUT_DATA, 'workbench.json');
+  process.env.TEAM_ROOT = layoutTeamRoot;
+  process.env.TEAM_PROJECTS_ROOT = layoutProjectRoot;
+  try {
+    const { prepareSqCheckSandbox } = require('./sq-check');
+    prepareSqCheckSandbox({
+      storeFile: process.env.AWB_STORE,
+      teamRoot: layoutTeamRoot,
+      fallbackStoreFile: path.join(LOCAL_DATA, 'userdata', 'workbench.json'),
+      sandboxProjectDir: layoutProjectRoot,
+    });
+  } catch (error) {
+    // 隔离失败必须 fail fast：不许回退真实路径跑布局自检。
+    console.error('LAYOUT_CHECK_NOT_ISOLATED ' + String((error && error.message) || error));
+    process.exit(1);
+  }
 }
 // R-6bc8 会话排队自检：状态库与团队状态都进沙盘（快照/唤醒日志只在沙盘造，不碰真实团队）。
 if (IS_SQ_CHECK) {
