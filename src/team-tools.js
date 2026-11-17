@@ -4765,13 +4765,11 @@ function createTeamTools(options = {}) {
         role: roleId, project: name, bootRound: boot.round || null, round: state.round || 1, protocol: 'legacy'
       });
     }
+    // 阶段二 A 案（Owner 2026-11-17 09:56）：「令牌不再按时间过期」——壳层与 CLI 同口径。
+    // 唯一该重 boot 的理由是「规则文档哈希变了」（见下面 live/stale 逐字节比对），不是时间。
+    // bootTtlMinutes 保留仅为审计展示（令牌文件里的 expiresAt 也是展示值），不再参与拒绝。
     const ttlMinutes = Math.max(1, Number(teamConfig().bootTtlMinutes || DEFAULT_BOOT_TTL_MINUTES));
-    const bootAt = Date.parse(String(boot.at || ''));
-    if (!Number.isFinite(bootAt) || Date.now() - bootAt > ttlMinutes * 60000) {
-      return failure('BOOT_EXPIRED', `角色「${ROLE_NAMES[roleId] || roleId}」的 boot 已超过 ${ttlMinutes} 分钟；请重新 boot`, {
-        role: roleId, project: name, at: boot.at || null, ttlMinutes, protocol: 'legacy'
-      });
-    }
+    void ttlMinutes; // 仅展示用，见 bootEvidence()
     const requirementId = String(options.requirementId || '').trim();
     void bootSource; // 来源仅用于排障：state.boots / 阅读.jsonl boot
     const live = readBootDocs(projectPath, roleId);
@@ -5196,25 +5194,26 @@ function createTeamTools(options = {}) {
       }
       const expiresMs = record && record.expiresAt ? Date.parse(record.expiresAt) : NaN;
       const expireAtMs = Number.isFinite(expiresMs) ? expiresMs : (record ? record.atMs + ttlMinutes * 60000 : NaN);
-      const expired = Boolean(record) && Number.isFinite(expireAtMs) && Date.now() > expireAtMs;
+      // 阶段二 A 案：令牌不再按时间过期（壳层与 CLI 同口径），expiresAt 仅作审计展示。
+      const expired = false;
+      const ageMinutes = record && Number.isFinite(record.atMs) ? Math.max(0, Math.round((Date.now() - record.atMs) / 60000)) : null;
       const matchesCurrent = Boolean(record && current.sessionId && record.sessionId === current.sessionId);
       let state = 'never';
       if (record) {
         if (!current.sessionId) state = 'unbound';
         else if (record.sessionId !== current.sessionId) state = 'stale-session';
-        else if (expired) state = 'expired';
         else state = 'booted';
       }
       roles[role] = {
         role,
         state,
         label: state === 'booted' ? '已 BOOT'
-          : state === 'expired' ? `BOOT 过期（超过 ${ttlMinutes} 分钟）`
-            : state === 'stale-session' ? '未 BOOT（本会话未 boot）'
-              : state === 'unbound' ? '未 BOOT（当前会话未绑定）' : '未 BOOT',
+          : state === 'stale-session' ? '未 BOOT（本会话未 boot）'
+            : state === 'unbound' ? '未 BOOT（当前会话未绑定）' : '未 BOOT',
         at: record ? record.at : null,
         atMs: record ? record.atMs : null,
         expiresAt: record && Number.isFinite(expireAtMs) ? new Date(expireAtMs).toISOString() : null,
+        ageMinutes,
         ttlMinutes,
         sessionId: record ? record.sessionId : '',
         currentSessionId: current.sessionId || '',

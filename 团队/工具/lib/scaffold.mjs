@@ -14,6 +14,10 @@ import {
 
 export const DEFAULT_IRON = `# 项目铁律（默认版）
 
+> 定位（阶段二 A 案，Owner 2026-11-17 08:57）：本文件是**本项目避坑清单，按需读、不每轮**（开工/接手时读一次即可）。
+> 流程与职责以《团队宪法》与本人角色卡为准；本文件只在「宪法/角色卡没写到的具体坑」上补充，冲突时以宪法为准。
+> 本文件已移出 rulesHash：改它不会让全员令牌失效。
+
 1. 中文思考、中文回复、中文写文档；代码标识/命令/路径可英文。
 2. 只改本项目目录，出界先申请授权。
 3. 不动 DSH_HOME、profiles、插件、外壳。
@@ -277,7 +281,7 @@ export function collaborationRules(projectName, mode = 'full') {
     + roleTable
     + `\n\n`
     + `## 二、主流程（每次照做）\n\n`
-    + `1. **先索引**：每次先读《项目铁律.md》，再读《项目信息.md》《项目索引.md》、角色目录《文件索引.md》和《角色卡.md》，然后才读任务指定文件。\n`
+    + `1. **先索引**：每次先读《团队宪法.md》（唯一最高优先级），再读《项目信息.md》《项目索引.md》、角色目录《文件索引.md》和《角色卡.md》，然后才读任务指定文件；《项目铁律.md》按需（开工/接手时读一次避坑）。\n`
     + `2. **派单**：PM 先把 Owner 需求写成《项目信息.md》，再建需求/任务；${fast ? '需求分析师给优先级建议，PM 终审' : '产品给优先级建议，PM 终审'}。重要消息要求回执。\n`
     + `3. **认领**：负责人只认领自己的任务，先 read，后 ack（已回执）；执行正文任务、产出落盘、完成回执 + task done 才算完成。\n`
     + (fast
@@ -337,7 +341,7 @@ export function projectInfo(projectName, desc = '', mode = 'full') {
   const roleDirs = roles.map((r) => `\`${ROLE_DIRS[r]}/\``).join('、');
   return `# ${projectName} · 项目信息\n\n`
     + `> **由项目经理根据 Owner 需求填写，角色只读。** 没写清前，PM 不叫其他角色。\n`
-    + `> 每次先读《项目铁律.md》，再读本文件，然后读角色卡与项目索引。\n`
+    + `> 先读《团队宪法.md》（唯一最高优先级）与本文件，再读角色卡与项目索引；《项目铁律.md》按需（开工/接手读一次避坑）。\n`
     + `> 团队模式：${TEAM_MODE_LABELS[m]}（${teamModeDescription(m)}）。\n\n`
     + `## 一、项目目标\n\n${desc ? desc + '\n' : '（待 PM 填写：这个项目到底要做什么、为什么做）'}\n\n`
     + `## 二、使用场景与用户\n\n（待 PM 填写：谁用、在什么场景用、现有替代方案）\n\n`
@@ -414,7 +418,7 @@ export function reqPoolReadme(mode = 'full') {
 export function rootReadme(projectName, desc = '', mode = 'full') {
   const m = normalizeTeamMode(mode);
   return `# ${projectName}\n\n${desc || `${TEAM_MODE_LABELS[m]}协同项目（团队工作台创建）。`}\n\n`
-    + `先读顺序：[项目铁律.md](项目铁律.md) → [项目信息.md](项目信息.md) → [项目索引.md](项目索引.md) → [协作准则.md](协作准则.md) → 各角色目录的 文件索引.md。\n\n`
+    + `先读顺序：\`团队/团队宪法.md\`（唯一最高优先级） → [项目信息.md](项目信息.md) → [项目索引.md](项目索引.md) → [协作准则.md](协作准则.md) → 各角色目录的 文件索引.md；[项目铁律.md](项目铁律.md) 按需（开工/接手读一次）。\n\n`
     + `- 团队模式：${TEAM_MODE_LABELS[m]}（${teamModeDescription(m)}）。\n`
     + `- 代码写 \`site/\`（或项目信息指定目录）；临时文件放 \`_tmp/\`，交付前清理。\n`
     + `- 变更只走 propose → show → review → sign → apply；没有回执 = 没发生。\n`;
@@ -425,10 +429,10 @@ export function rootIndex(projectName, mode = 'full') {
   const dirs = rolesForMode(m).map((r) => ROLE_DIRS[r]);
   return `# ${projectName} · 项目索引（目录）\n\n`
     + `> 由 \`team.mjs index\` 自动重建；**这是目录，不是项目介绍或需求正文**。\n`
-    + `> 先读顺序：项目铁律 → 项目信息 → 项目索引 → 角色卡/文件索引 → 任务指定文件。\n\n`
+    + `> 先读顺序：团队宪法（唯一最高优先级） → 项目信息 → 项目索引 → 角色卡/文件索引 → 任务指定文件；项目铁律按需。\n\n`
     + `<!-- 人工说明:BEGIN -->\n`
     + `- 项目信息：[项目信息.md](项目信息.md)（PM 先填，角色后读）\n`
-    + `- 项目铁律：[项目铁律.md](项目铁律.md)（每次必读）\n`
+    + `- 项目铁律：[项目铁律.md](项目铁律.md)（按需避坑清单，不每轮读）\n`
     + `- 协作准则：[协作准则.md](协作准则.md)\n`
     + `- 需求目录：[需求/00-需求总览.md](需求/00-需求总览.md)\n`
     + `- 角色目录：${dirs.map((d) => `${d}/`).join('、')}、需求/\n`
@@ -504,9 +508,11 @@ export function readRequirementDocs(root) {
 }
 
 /**
- * boot 必读清单，顺序即协议：团队宪法 → 项目铁律 → 项目信息 → 角色卡 → 项目索引 → 需求总览 → 协作准则。
- * 必读分两层：core=true 的 4 份是核心必读（缺一份 boot 直接 MISSING_DOC）；
+ * boot 必读清单，顺序即协议：团队宪法（唯一最高优先级）→ 项目信息 → 角色卡三层核心；
+ * 项目铁律/项目索引/需求总览/协作准则为按需文档。
+ * 必读分两层：core=true 的 3 份是核心必读（缺一份 boot 直接 MISSING_DOC）；
  * 其余为按需文档（读得到就带进 read 证据，读不到在简报里列“未读”，不冒充已读）。
+ * 阶段二 A 案（Owner 2026-11-17 08:57）：项目铁律由「核心必读」降为「按需避坑清单」，且已移出 rulesHash。
  * 第二层“任务相关”由 store.readDocSet 按本人未完成任务动态带入（需求正文 + 上游产出）。
  */
 export function bootDocSpecs(root, roleDirName) {
@@ -514,7 +520,7 @@ export function bootDocSpecs(root, roleDirName) {
   const role = roleDirName || '';
   return [
     { key: 'constitution', label: '团队宪法', path: path.join(PATHS.teamRoot, '团队宪法.md'), rel: '团队宪法.md', required: true, core: true },
-    { key: 'iron', label: '项目铁律', path: path.join(base, '项目铁律.md'), rel: '项目铁律.md', required: true, core: true },
+    { key: 'iron', label: '项目铁律', path: path.join(base, '项目铁律.md'), rel: '项目铁律.md', required: false, core: false },
     { key: 'projectInfo', label: '项目信息', path: path.join(base, '项目信息.md'), rel: '项目信息.md', required: true, core: true },
     { key: 'roleCard', label: '角色卡', path: role ? path.join(base, role, '角色卡.md') : '', rel: role ? `${role}/角色卡.md` : '', required: true, core: true },
     { key: 'roleIndex', label: '角色文件索引', path: role ? path.join(base, role, '文件索引.md') : '', rel: role ? `${role}/文件索引.md` : '', required: false },

@@ -4198,7 +4198,7 @@ export async function cmdBoot(args) {
     ? '快速模式: 需求评审=需求分析师 ｜ 技术评审记录=程序员A ｜ 投票=vote start/cast/status'
     : '完整模式: 需求评审=产品设计师 ｜ 技术评审记录=产品/程序员A ｜ 投票=vote start/cast/status');
   lines.push(`阶段: ${team.phase} ｜ 活跃成员: ${activeRoles(team).filter((r) => rolesForMode(teamMode).includes(r)).join(', ')} ｜ 当前锁: ${locks.length ? locks.map((l) => l.key + '@' + l.role).slice(0, 6).join(', ') : '无'}`);
-  lines.push(`纪律: 中文思考、中文回复、中文写文档 ｜ 每次先读项目铁律 ｜ 消息≤${team.config.messageMaxChars}字 ｜ 回执≤${team.config.ackNoteMaxChars}字 ｜ 先读索引再找文件`);
+  lines.push(`纪律: 中文思考、中文回复、中文写文档 ｜ 每轮先读《团队宪法》（唯一最高优先级；项目铁律按需避坑） ｜ 消息≤${team.config.messageMaxChars}字 ｜ 回执≤${team.config.ackNoteMaxChars}字 ｜ 先读索引再找文件`);
   lines.push('派单闭环: ack=已回执（收到/认领）≠ 已完成；执行正文任务 → 产出写本角色目录（开发代码写 site/**）→ 完成回执 + task done --evidence');
   lines.push(`结构化输出: ${OUTPUT_DISCIPLINE}`);
   const outSpec = OUTPUT_DOCS[role];

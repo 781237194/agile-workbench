@@ -217,11 +217,12 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     if (String(pmBoot.briefing || '').length > LIMITS.bootBriefMaxChars) {
       failStep('boot 简报超限', `${String(pmBoot.briefing).length} > ${LIMITS.bootBriefMaxChars}`);
     }
-    // 必读分层：核心 4 份 + 按需 + 任务相关；简报必须列“已读/未读”，不能只给一句“已读齐”。
-    if (!/必读-核心已读 4\/4/.test(String(pmBoot.briefing || ''))) failStep('boot 简报缺“必读-核心已读 4/4”', String(pmBoot.briefing || '').slice(0, 600));
+    // 必读分层（阶段二 A 案）：核心 3 份（宪法/项目信息/角色卡）+ 按需（含项目铁律）+ 任务相关；简报必须列“已读/未读”。
+    if (!/必读-核心已读 3\/3/.test(String(pmBoot.briefing || ''))) failStep('boot 简报缺“必读-核心已读 3/3”', String(pmBoot.briefing || '').slice(0, 600));
     if (!String(pmBoot.briefing || '').includes('必读-按需已读')) failStep('boot 简报缺“必读-按需已读”');
     if (!String(pmBoot.briefing || '').includes('必读-任务相关')) failStep('boot 简报缺“必读-任务相关”');
-    if (!Array.isArray(pmBoot.read && pmBoot.read.core) || pmBoot.read.core.length !== 4) failStep('boot read 证据缺 core 4 份', JSON.stringify(pmBoot.read && pmBoot.read.core));
+    if (!Array.isArray(pmBoot.read && pmBoot.read.core) || pmBoot.read.core.length !== 3) failStep('boot read 证据缺 core 3 份', JSON.stringify(pmBoot.read && pmBoot.read.core).slice(0, 300));
+    if (Array.isArray(pmBoot.read && pmBoot.read.core) && pmBoot.read.core.some((x) => String((x && x.key) || '') === 'iron')) failStep('A 案：项目铁律不应再是核心必读', JSON.stringify(pmBoot.read.core).slice(0, 300));
     if (!Array.isArray(pmBoot.read && pmBoot.read.taskDocs)) failStep('boot read 证据缺 taskDocs 字段');
     if (Number(pmBoot.bootTtlMinutes) !== 480) failStep('boot 返回的 bootTtlMinutes 不是 480', String(pmBoot.bootTtlMinutes));
     // B-defb（Owner 2026-11-16 06:19）：简报不再写「480 分钟 = 8 小时」——令牌实际不限时，

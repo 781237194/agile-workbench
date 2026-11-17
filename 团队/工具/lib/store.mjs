@@ -612,9 +612,10 @@ export function readDocSet(role, project) {
   }
   files.teamConfig = PATHS.team;
   hashes.teamConfig = hashFile(PATHS.team);
+  // 阶段二 A 案（Owner 2026-11-17 08:57）：项目铁律降为「按需避坑清单」，**移出 rulesHash**——
+  // 改项目级铁律不再让全员令牌失效；仍保留 constitution / roleCard / teamConfig 三项。
   const rulesHash = sha256(JSON.stringify({
     constitution: hashes.constitution,
-    iron: hashes.iron,
     roleCard: hashes.roleCard,
     teamConfig: hashes.teamConfig,
   }));
