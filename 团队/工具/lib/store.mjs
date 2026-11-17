@@ -948,6 +948,19 @@ export function mailBoxDir(role, box) {
   return path.join(PATHS.mail, role, box);
 }
 
+/**
+ * B-20261117-224405-d376：任务 id 归一化（唯一口径）。
+ * 只接受非空字符串 / 有限数字；`true`（CLI 把 `--task` 当裸开关解析出来的布尔占位）、
+ * `false`、`undefined`、对象等一律归一为 `''`，避免派单/唤醒正文出现 `task:true`/`任务：true`。
+ */
+export function normalizeTaskId(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : (typeof raw === 'number' && Number.isFinite(raw) ? String(raw) : '');
+  if (!text) return '';
+  // 占位词（true/false/undefined/null，含大小写与字符串化形态）一律视为「没有任务 id」。
+  if (/^(true|false|undefined|null)$/i.test(text)) return '';
+  return text;
+}
+
 export function sendMessage(msg) {
   // R-9db6 F-9db6-10②：断消息通道注入（只在测试里设），用于造 RECEIPT_FAILED；生产默认不设。
   if (process.env.TEAM_MESSAGE_SEND_FAIL === '1') {
@@ -969,7 +982,7 @@ export function sendMessage(msg) {
     subject: truncate(msg.subject || '(无主题)', 80),
     body,
     project: msg.project || '',
-    task: msg.task || '',
+    task: normalizeTaskId(msg.task),
     ackRequired: Boolean(msg.ackRequired),
     type: msg.type || 'note',
     replyTo: msg.replyTo || '',

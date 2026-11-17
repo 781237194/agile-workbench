@@ -2,6 +2,7 @@
 // 派单不是通知：唤醒后必须执行正文任务、把产出落盘、完成后回完成回执。
 // ack 只代表“已回执/已认领”，task done --evidence 才代表“已完成”。
 import path from 'node:path';
+import { normalizeTaskId } from './store.mjs';
 // T-20261117-204902-ca6b：通知类唤醒正文的唯一来源（CJS，壳层 src/team-tools.js 也 require 同一份）。
 import wakeText from './wake-text.cjs';
 
@@ -84,8 +85,10 @@ export function buildDispatchPrompt({
   to, project, projectPath, roleDir, codeDir = '',
   messageId, subject, taskId = '', taskTitle = '', teamTool, readingList = [],
 }) {
+  // B-20261117-224405-d376：任务 id 只认字符串；true/false/「true」/对象等占位值归一为空（正文不再出现 任务：true）。
+  const taskIdText = normalizeTaskId(taskId);
   const roleOut = path.join(projectPath, roleDir || '');
-  const taskLine = taskId ? `任务：${taskId}${taskTitle ? ' ' + taskTitle : ''}` : '任务：见本条消息正文';
+  const taskLine = taskIdText ? `任务：${taskIdText}${taskTitle ? ' ' + taskTitle : ''}` : '任务：见本条消息正文';
   const outputRule = codeDir
     ? `产出按纪律落盘：代码写 ${path.join(projectPath, codeDir)}（默认 site/**，以《项目信息.md》为准）；另在本角色目录 ${roleOut}/产出/ 留 实现说明-vN.md 与 代码快照-vN/（与代码同哈希、版本递增、不覆盖旧版）；不写别人目录`
     : `产出写到本角色目录：${roleOut}（含 产出/，版本递增，不覆盖旧版），不写别人目录`
@@ -93,13 +96,13 @@ export function buildDispatchPrompt({
   const steps = [
     `node "${teamTool}" boot --role ${to} --project "${project}"  # 记下令牌 T`,
     `inbox --boot <T> --all，再 read --boot <T> --id ${messageId}`,
-    `ack --boot <T> --id ${messageId} --note "已回执：${taskId || '任务'} + 交付物 + 边界"  # 只表示已收到/已认领，不算完成`,
+    `ack --boot <T> --id ${messageId} --note "已回执：${taskIdText || '任务'} + 交付物 + 边界"  # 只表示已收到/已认领，不算完成`,
   ];
-  if (taskId) steps.push(`task claim --boot <T> --id ${taskId}`);
+  if (taskIdText) steps.push(`task claim --boot <T> --id ${taskIdText}`);
   steps.push(`执行消息正文中的任务本身（正文没写清先问 PM，不要自己扩需求）；${outputRule}`);
   steps.push(`收尾写记忆（R-8514）：project 1 条（任务 id + 产出路径 + 1–2 行进展）；长期约定/决策/踩坑提交 key 建议（仅 Owner 在记忆面板确认后生效）；密钥/隐私只记路径，不写值`);
-  steps.push(`完成后先发完成回执：send --boot <T> --to pm --subject "已完成 ${taskId || messageId}" --body "执行结果 + 产出路径 + 证据"  # 回执不是派单，不要带 --ack/--task`);
-  if (taskId) steps.push(`再 task done --boot <T> --id ${taskId} --evidence "产出路径/提交号/验证输出"  # 到这里才算已完成（P0 任务缺 project 记忆会被 MEMORY_MISSING 拒绝）`);
+  steps.push(`完成后先发完成回执：send --boot <T> --to pm --subject "已完成 ${taskIdText || messageId}" --body "执行结果 + 产出路径 + 证据"  # 回执不是派单，不要带 --ack/--task`);
+  if (taskIdText) steps.push(`再 task done --boot <T> --id ${taskIdText} --evidence "产出路径/提交号/验证输出"  # 到这里才算已完成（P0 任务缺 project 记忆会被 MEMORY_MISSING 拒绝）`);
   const numbered = steps.map((s, i) => `${i + 1}) ${s}`).join('\n');
   const reading = Array.isArray(readingList) && readingList.length
     ? `\n本轮必读（程序指定，缺一不可）：${readingList.map((rel) => path.join(projectPath, rel)).join('；')}\n`
@@ -110,7 +113,7 @@ export function buildDispatchPrompt({
     + `中文思考、中文回复、中文写文档；**每轮先读《团队宪法》（唯一最高优先级）**，项目铁律为按需避坑清单（不必每轮读），再按需读 项目信息.md / 项目索引.md / 你的 文件索引.md 与 角色卡.md。\n`
     + reading
     + `按顺序做完，不要只回“收到”：\n${numbered}\n`
-    + `完成标准：有产出 + 完成回执 + ${taskId ? 'task done 证据' : '结果说明'}；已回执 ≠ 已完成，只 ack 不算完成。\n`
+    + `完成标准：有产出 + 完成回执 + ${taskIdText ? 'task done 证据' : '结果说明'}；已回执 ≠ 已完成，只 ack 不算完成。\n`
     + `最后只回一行：已完成/未完成 + 任务 id + 产出路径；不要输出方案，不要巡检全队。`;
 }
 

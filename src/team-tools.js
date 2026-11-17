@@ -10307,7 +10307,12 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     const from = String(input.from || input.sender || '').trim();
     const messageId = String(input.messageId || '').trim();
     const subject = String(input.subject || '任务派单').slice(0, 80);
-    const task = String(input.task || '').trim();
+    // B-20261117-224405-d376：任务 id 与团队工具 lib/store.mjs 的 normalizeTaskId 同口径——
+    // 只认非空字符串/有限数字；true/false/「true」/undefined/null 一律当「没有任务 id」，不再拼进派单正文。
+    const rawTask = input.task;
+    const taskText = typeof rawTask === 'string' ? rawTask.trim()
+      : (typeof rawTask === 'number' && Number.isFinite(rawTask) ? String(rawTask) : '');
+    const task = /^(true|false|undefined|null)$/i.test(taskText) ? '' : taskText;
     const ackRequired = input.ackRequired !== false;
     // 三型只判一次：派单 = PM → 非 PM 且要回执；回执/通知/角色互发只发“去 inbox 读”的提示。
     // 旧调用方（不传 from）保持派单语义，兼容 main.js 既有自测；PM 自己永远不是派单执行者。

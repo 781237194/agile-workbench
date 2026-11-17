@@ -8988,7 +8988,11 @@ ipcMain.handle('theme:metrics', async () => {
     const body = String(p.body !== undefined ? p.body : (p.text !== undefined ? p.text : '')).trim();
     if (!body) throw new Error('派单内容不能为空');
     const subject = String(p.subject || '任务派单').slice(0, 80);
-    const taskId = String(p.taskId || p.task || '');
+    // B-20261117-224405-d376：任务 id 归一（布尔/占位词不再当任务 id，避免派单正文出现 task:true）。
+    const rawTaskId = p.taskId !== undefined ? p.taskId : p.task;
+    const taskIdText = typeof rawTaskId === 'string' ? rawTaskId.trim()
+      : (typeof rawTaskId === 'number' && Number.isFinite(rawTaskId) ? String(rawTaskId) : '');
+    const taskId = /^(true|false|undefined|null)$/i.test(taskIdText) ? '' : taskIdText;
     const ackRequired = p.ack !== false && p.ackRequired !== false;
     // 旧协议 PM 单派锁只约束 PM→其他角色且要求回执的派单；角色→PM、角色互发不占 PM 锁。
     const pmDispatch = from === 'pm' && role !== 'pm' && ackRequired;
