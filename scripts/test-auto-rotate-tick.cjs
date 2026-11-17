@@ -126,6 +126,7 @@ function beat(sb, nowMs, stateObj) {
   try { return JSON.parse(line.split('@@AR@@')[1]); } catch (e) { return { ok: false, error: String(e.message) }; }
 }
 
+function daytimeBase() { const d = new Date(); d.setHours(15, 0, 0, 0); return d.getTime(); }
 function atNight(hour, minute) { const d = new Date(); d.setHours(hour, minute, 0, 0); return d.getTime(); }
 function nextMorning(hour, minute) { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(hour, minute, 0, 0); return d.getTime(); }
 
@@ -163,9 +164,10 @@ function nextMorning(hour, minute) { const d = new Date(); d.setDate(d.getDate()
     const r1 = cycle(sb, night);
     const r2 = cycle(sb, night + 5 * 60 * 1000);
     const rows = sb.rows();
-    const hasCycle = rows.some((x) => x.stage === 'cycle');
+    // T-f35b①：cycle/enqueue 是调度层事件（event 字段），不再占用换人 stage 枚举；断言两者都兼容。
+    const hasCycle = rows.some((x) => x.event === 'cycle' || x.stage === 'cycle');
     const nightRows = rows.filter((x) => x.stage === 'skipped' && x.code === 'NIGHT_SILENT');
-    const enqueueRows = rows.filter((x) => x.stage === 'enqueue');
+    const enqueueRows = rows.filter((x) => x.event === 'enqueue' || x.stage === 'enqueue');
     const rotateRows = rows.filter((x) => x.stage === 'rotate');
     const perRole = {};
     for (const x of nightRows) perRole[x.role] = (perRole[x.role] || 0) + 1;
@@ -231,7 +233,7 @@ function nextMorning(hour, minute) { const d = new Date(); d.setDate(d.getDate()
 
   /* ⑦ AC3 红线：角色有在办任务（working）→ 不换人、不发交接请求，只留 SKIPPED_BY_WORKING_TASK */
   {
-    const now = Date.now();
+    const now = daytimeBase();
     const sb = makeSandbox('c7-working', { usage: usage(now), rounds });
     writeJson(path.join(sb.state, '任务', 'T-fixture-working.json'), { id: 'T-fixture-working', project: PROJECT, type: 'task', priority: 'P1', owner: 'analyst', status: 'working', title: '在办夹具', createdAt: new Date(now).toISOString() });
     const r1 = cycle(sb, now);
@@ -245,6 +247,20 @@ function nextMorning(hour, minute) { const d = new Date(); d.setDate(d.getDate()
       r1.ok === true && r2.ok === true && skipped.length >= 1 && triggerRows.length === 0 && rotateRows.length === 0 && sessionSame
       && /在办任务/.test(String(skipped[0].note || '')),
       { r1ok: r1.ok, skipped: skipped.length, trigger: triggerRows.length, rotate: rotateRows.length, sessionSame, note: skipped[0] && skipped[0].note });
+  }
+
+  /* ⑧ T-f35b③：60 秒内重复请求 → 审计写 ALREADY_IN_FLIGHT（不阻断、不发第二条请求） */
+  {
+    const now = daytimeBase();
+    const sb = makeSandbox('c8-already-in-flight', { usage: usage(now) });
+    const r1 = cycle(sb, now);
+    const r2 = cycle(sb, now + 5 * 1000);
+    const rows = sb.rows();
+    const inFlight = rows.filter((x) => String(x.code) === 'ALREADY_IN_FLIGHT');
+    const triggers = rows.filter((x) => String(x.stage) === 'trigger');
+    check('⑧ 60 秒内重复请求 → 记 ALREADY_IN_FLIGHT（只 1 条 trigger，不重复发）',
+      r1.ok === true && r2.ok === true && inFlight.length === 1 && inFlight[0].role === 'analyst' && triggers.length === 1,
+      { inFlight: inFlight.length, triggers: triggers.length, r2actions: r2.actions });
   }
 
   const pass = results.filter((r) => r.ok).length;
