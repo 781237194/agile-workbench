@@ -3154,7 +3154,19 @@ export async function recoverStalledRoles(project, { now = Date.now(), write = t
   // ② idle 角色：重新入队 + 自动唤醒 + 分级
   for (const [role, info] of Object.entries(detection.roles || {})) {
     if (info.verdict !== 'idle') continue;
-    const openTaskIds = Array.isArray(info.openTaskIds) ? info.openTaskIds.slice() : [];
+    // T-1dfb 收口前置（PM 2026-11-17 10:17）：F6 入队前必须按**当前**任务状态过滤已闭环任务
+    // （done/accepted/cancelled/terminated 均算闭环，统一走 gates.statusIsClosed 单源），并去重；
+    // 否则同一 tick 会把已验收任务重新灌进队列、并派给角色去做已完成的事。
+    const taskStatusById = new Map(listTasks(name).map((task) => [String(task.id), String(task.status || '')]));
+    const seenTaskIds = new Set();
+    const openTaskIds = (Array.isArray(info.openTaskIds) ? info.openTaskIds : []).filter((taskId) => {
+      const id = String(taskId || '');
+      if (!id || seenTaskIds.has(id)) return false;
+      if (!taskStatusById.has(id)) return false; // 任务已不存在 → 不入队
+      if (statusIsClosed(taskStatusById.get(id))) return false; // 已闭环终态 → 不入队
+      seenTaskIds.add(id);
+      return true;
+    });
     const targetTaskIds = openTaskIds.length ? openTaskIds : [''];
     const attempt = Number(
       (state.items[stalledQueueItemId(role, targetTaskIds[0] || '')] || {}).attempt,
