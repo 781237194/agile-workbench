@@ -13,6 +13,7 @@ import {
   acquireLock, releaseLock, lockInfo, appendEvent, randomHex, sha256,
 } from './core.mjs';
 import { projectStatePaths, loadProject, sendMessage, findMessage, listInbox } from './store.mjs';
+import { writeJsonAtomic } from './json-atomic.mjs';
 // R-5016 F-5：guard 转投要写「决策收口.jsonl」；审计实现单源在 decision-route.mjs（只在调用期引用，无初始化期循环依赖）。
 import { appendDecisionRouteAudit, DECISION_TARGET_ANCHORS } from './decision-route.mjs';
 
@@ -66,15 +67,24 @@ export function readDecisionBox(projectName) {
   }
 }
 
-/** 写盘：tmp+rename 原子写，并留 .bak-<时间戳>（F-9db6-3）。 */
-export function writeDecisionBox(projectName, box) {
+// R-ad44 AC5：决策箱写盘也走唯一写入口，并带 case 上下文（审计行 case 与入口一一对应）。
+let currentWriteCase = '';
+export function withDecisionWriteCase(name, fn) {
+  const prev = currentWriteCase;
+  currentWriteCase = String(name || '');
+  return Promise.resolve().then(fn).finally(() => { currentWriteCase = prev; });
+}
+
+/** 写盘：原子写 + .bak-<时间戳>（F-9db6-3）；R-ad44 AC5：改走 json-atomic 唯一写入口（带 case）。 */
+export function writeDecisionBox(projectName, box, opts = {}) {
   const file = decisionBoxPath(projectName);
   ensureDir(path.dirname(file));
   if (exists(file)) {
     try { fs.copyFileSync(file, `${file}.bak-${Date.now()}`); } catch { /* 备份失败不阻断写盘，但审计会缺一份 */ }
   }
   const next = { schema: 1, project: String(projectName || ''), items: box.items || [], meta: box.meta || {}, updatedAt: nowIso() };
-  writeJson(file, next);
+  const caseName = (opts && opts.case) || currentWriteCase;
+  writeJsonAtomic(file, next, caseName ? { case: caseName } : undefined);
   return { file, box: next };
 }
 
@@ -446,6 +456,11 @@ async function wakeDecisionRecipient(projectName, message) {
  *   通过后只发 1 条汇总 owner_decision_receipt，再在同一把锁里逐条落账（receiptSeq 逐条 +1）。
  */
 export async function acknowledgeDecisions(projectName, input = {}) {
+  // R-ad44 AC5：回执写盘统一带 case=decisionAckSend（入口②）
+  return withDecisionWriteCase('decisionAckSend', () => acknowledgeDecisionsInner(projectName, input));
+}
+
+export async function acknowledgeDecisionsInner(projectName, input = {}) {
   const channel = clean(input.channel, 20) || 'ui';
   const source = clean(input.source, 40) || 'decision_box_ack';
   // 7849 AC3-补：代回执三要素先验（缺一 PROXY_UNAUTHORIZED，零副作用）。
