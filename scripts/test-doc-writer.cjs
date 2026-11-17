@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-c6dc（T-20261115-145649-732e）断言：需求正文唯一写入口 / 并发检测 / 登记链 / req audit
  *
@@ -17,7 +17,7 @@ const { execFileSync } = require('node:child_process');
 
 const REPO = path.resolve(__dirname, '..');
 const TEAM_MJS = path.join(REPO, '团队', '工具', 'team.mjs');
-const SANDBOX = path.join(REPO, '项目', '工作台改造修复', '_tmp', 'doc-writer-sandbox');
+const SANDBOX = uniqueSandbox('doc-writer-sandbox', { root: path.join(REPO, '项目', '工作台改造修复') });
 const TEAM_ROOT = path.join(SANDBOX, '团队');
 const PROJECTS_ROOT = path.join(SANDBOX, '项目');
 const PROJECT = '写者沙盘';

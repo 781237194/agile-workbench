@@ -17,13 +17,14 @@ const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
+const { uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 B2：唯一沙盘
 
 const ROOT = path.resolve(__dirname, '..');
 const REAL_TEAM = path.join(ROOT, '团队');
 const REAL_STORE = path.join(ROOT, 'data', 'userdata', 'workbench.json');
 const PROJECT = '工作台改造修复';
 const REAL_BOX = path.join(REAL_TEAM, '状态', '项目', PROJECT, '决策箱.json');
-const BASE = path.join(ROOT, '_tmp', '5016-ui');
+const BASE = uniqueSandbox('5016-ui');
 const SB = path.join(BASE, 'sb');
 const DATA = path.join(SB, 'data');
 const TEAM = path.join(SB, '团队');

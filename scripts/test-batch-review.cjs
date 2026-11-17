@@ -27,6 +27,7 @@ const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
+const { uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 B2：唯一沙盘
 
 const ROOT = path.resolve(__dirname, '..');
 const TEAM_TOOL = path.join(ROOT, '团队', '工具', 'team.mjs');
@@ -34,7 +35,7 @@ const REAL_TEAM = path.join(ROOT, '团队');
 const REAL_STORE = path.join(ROOT, 'data', 'userdata', 'workbench.json');
 const REAL_STATE_DIR = path.join(REAL_TEAM, '状态', '项目', '工作台改造修复');
 const PROJECT = '工作台改造修复';
-const BASE = path.join(ROOT, '_tmp', 'b3065');
+const BASE = uniqueSandbox('b3065');
 const SB = BASE;
 const EVID = path.join(ROOT, '项目', '工作台改造修复', '程序员A', '产出', '证据-3065');
 const PORT = 9437;

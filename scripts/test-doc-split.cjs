@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-f9b1 工具侧断言：正文上限治理（三入口 / 拆卷 / 13 键审计 / 幂等 / 回滚 / 可读性 / 断链）
  *
@@ -18,7 +18,7 @@ const { execFileSync } = require('node:child_process');
 
 const REPO = path.resolve(__dirname, '..');
 const TEAM_MJS = path.join(REPO, '团队', '工具', 'team.mjs');
-const SANDBOX = path.join(REPO, '项目', '工作台改造修复', '_tmp', 'doc-split-sandbox');
+const SANDBOX = uniqueSandbox('doc-split-sandbox', { root: path.join(REPO, '项目', '工作台改造修复') });
 const TEAM_ROOT = path.join(SANDBOX, '团队');
 const PROJECTS_ROOT = path.join(SANDBOX, '项目');
 const PROJECT = '拆分沙盘';

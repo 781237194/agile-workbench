@@ -11,10 +11,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
+const { uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 B2：唯一沙盘
 
 const ROOT = path.resolve(__dirname, '..');
 const PROJECT = '工作台改造修复';
-const BASE = path.join(ROOT, '_tmp', 'ui3bugs');
+const BASE = uniqueSandbox('ui3bugs');
 const DATA = path.join(BASE, 'data');
 const TEAM = path.join(BASE, '团队');
 const STATE_DIR = path.join(TEAM, '状态', '项目', PROJECT);
