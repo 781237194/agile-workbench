@@ -24,6 +24,9 @@ const ROLE_NAMES = {
 const LATEST_N = 3;
 const DEFAULT_DEBOUNCE_MS = 300;
 const DEFAULT_FALLBACK_MS = 30000;
+// B-20261116-114813-c7a1：未降级态的存在性核对间隔（30s）。AC3 口径：这是唯一新增的「非事件驱动」读取，
+// 只 stat 邮箱根目录（不读文件内容），并计入 state().healthChecks 便于审计。
+const DEFAULT_HEALTH_MS = 30000;
 
 function readDirEntries(dir) {
   try {
@@ -189,7 +192,13 @@ function createMailboxWatcher(options = {}) {
 
   const watchers = new Map(); // key -> FSWatcher
   const failures = new Map(); // key -> reason
-  const timers = { debounce: null, fallback: null };
+  const timers = { debounce: null, fallback: null, health: null };
+  // B-20261116-114813-c7a1：**未降级态**的轻量存在性核对间隔（默认 30s，自检可用 AWB_MAILBOX_HEALTH_MS 调小）。
+  // 唯一原因：邮箱根目录整体 rename 不在监听树内产生事件 → 以前只能等下一次事件，面板静默停旧值。
+  const healthMs = Math.max(500, Number(options.healthMs || process.env.AWB_MAILBOX_HEALTH_MS || DEFAULT_HEALTH_MS) || DEFAULT_HEALTH_MS);
+  let healthChecks = 0;
+  let lastHealthAt = '';
+  let rootVanished = false;
   let snapshot = null;
   let started = false;
   let degraded = false;
@@ -374,8 +383,21 @@ function createMailboxWatcher(options = {}) {
     }
   };
 
-  /** 只在「收到事件」后核对：某个上次还在的 new 目录消失 → 监听失效 */
+  /** 只在「收到事件」后核对：某个上次还在的 new 目录消失 / 邮箱根消失 → 监听失效 */
   const checkHealth = () => {
+    // c7a1：事件路径也顺便核一次根目录（rename 后若有其他事件到达，可立刻降级，不必等 30s）
+    let rootExists = true;
+    try { fs.statSync(path.join(teamRoot, '状态', '邮箱')); } catch { rootExists = false; }
+    if (!rootExists) {
+      rootVanished = true;
+      for (const key of ['mailbox', 'mailbox-root']) {
+        const watcher = watchers.get(key);
+        if (watcher) { try { watcher.close(); } catch { /* ignore */ } watchers.delete(key); }
+      }
+      enterDegraded('ROOT_VANISHED 邮箱根目录不存在（疑似整体 rename）');
+      scheduleFallback();
+      return;
+    }
     if (!knownNewDirs) return;
     const vanished = [];
     for (const roleId of roleIds) {
@@ -424,7 +446,45 @@ function createMailboxWatcher(options = {}) {
       if (fs.existsSync(newDirOf(roleId))) missingDirs.delete(roleId);
       else stillBad = true;
     }
+    // c7a1：根目录整体 rename 后恢复——根回来了才允许解除降级
+    if (rootVanished) {
+      let rootBack = true;
+      try { fs.statSync(path.join(teamRoot, '状态', '邮箱')); } catch { rootBack = false; }
+      if (rootBack) rootVanished = false;
+      else stillBad = true;
+    }
     if (!stillBad && degraded) leaveDegraded();
+  };
+
+  /**
+   * B-20261116-114813-c7a1：**未降级态**的轻量存在性核对（默认 30s 一次 stat 邮箱根目录）。
+   * 背景：邮箱根目录整体 rename 不在监听树内产生事件，旧实现只能等下一次子目录事件，面板会静默停在旧数字。
+   * 边界（AC3）：只 stat，不读文件内容；降级期间由 fallback（30s 递归重算+重建）接手，这里不重复跑；都是 setTimeout 链，不是 setInterval。
+   */
+  const scheduleHealthCheck = () => {
+    if (!started || timers.health) return;
+    timers.health = setTimeout(() => {
+      timers.health = null;
+      if (!started) return;
+      if (!degraded) {
+        const root = path.join(teamRoot, '状态', '邮箱');
+        let exists = true;
+        try { fs.statSync(root); } catch { exists = false; }
+        healthChecks += 1;
+        lastHealthAt = new Date().toISOString();
+        if (!exists) {
+          rootVanished = true;
+          // 旧 watcher 挂在已消失的 inode 上：先关掉，恢复时由 reattach() 重建
+          for (const key of ['mailbox', 'mailbox-root']) {
+            const watcher = watchers.get(key);
+            if (watcher) { try { watcher.close(); } catch { /* ignore */ } watchers.delete(key); }
+          }
+          enterDegraded('ROOT_VANISHED 邮箱根目录不存在（疑似整体 rename）');
+        }
+      }
+      scheduleHealthCheck();
+    }, healthMs);
+    if (timers.health && typeof timers.health.unref === 'function') timers.health.unref();
   };
 
   const start = () => {
@@ -433,6 +493,7 @@ function createMailboxWatcher(options = {}) {
     attachMailboxWatch();
     attachQueueWatch();
     recompute('initial');
+    scheduleHealthCheck();
     return snapshot;
   };
 
@@ -440,8 +501,10 @@ function createMailboxWatcher(options = {}) {
     started = false;
     clearTimeout(timers.debounce);
     clearTimeout(timers.fallback);
+    clearTimeout(timers.health);
     timers.debounce = null;
     timers.fallback = null;
+    timers.health = null;
     for (const watcher of watchers.values()) { try { watcher.close(); } catch { /* ignore */ } }
     watchers.clear();
   };
@@ -468,6 +531,11 @@ function createMailboxWatcher(options = {}) {
       failures: Object.fromEntries(failures),
       roles: roleIds,
       stateDir,
+      // c7a1：AC3 的「新增读取频次」口径 —— 30s 一次 stat 邮箱根，只 stat 不读内容
+      healthCheckMs: healthMs,
+      healthChecks,
+      lastHealthAt,
+      rootVanished,
     }),
   };
 }
