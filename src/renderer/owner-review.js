@@ -69,8 +69,9 @@
     if (['approved', 'rejected', 'skipped'].includes(fromDecision)) {
       const basis = (latest && latest.basis && latest.basis.requirement) || {};
       const decidedSha = String(basis.sha256 || basis.contentHash || '');
+      // B-20261117-095558-1a2a①：当前正文以壳层扫描磁盘的 docSha256 优先（行上 requirementHash 可能是旧 RR 值）。
       const currentSha = String(
-        (req && req.requirementHash) || (req && req.docHash)
+        (req && req.docSha256) || (req && req.requirementHash) || (req && req.docHash)
         || (req && req.requirementReview && req.requirementReview.requirementHash) || ''
       );
       if (decidedSha && currentSha && decidedSha === currentSha) return fromDecision;
@@ -587,7 +588,8 @@
   function staleInfoOf(req) {
     const owner = (req && req.ownerReview && typeof req.ownerReview === 'object') ? req.ownerReview : {};
     const currentHash = String(
-      (req && (req.requirementHash || req.docHash))
+      (req && req.docSha256)
+      || (req && (req.requirementHash || req.docHash))
       || (req && req.requirementReview && req.requirementReview.requirementHash)
       || ''
     );
@@ -1365,15 +1367,12 @@
     const box = dialog.querySelector('[data-or-banner]') || dialog.querySelector('[data-or-error]');
     if (!box) return;
     const info = humanizeError(err);
-    // B-20261116-122422-8487：DUPLICATE_DECISION 不是「失败」，是「刚才那次其实已经落账了」。
-    // 以前统一显示「现在还不能提交」，Owner 会以为点不动；这里改成「已在 HH:MM:SS 落账，正在刷新」并强制重读。
+    // B-20261116-122422-8487 / B-20261117-095558-1a2a③：DUPLICATE_DECISION 不是「失败」，是「刚才那次已经落账了」。
+    // 以前统一显示「现在还不能提交」，Owner 会以为点不动；这里按**成功**处理：清错误横幅 + 绿色提示 + 静默刷新。
     if (info.code === 'DUPLICATE_DECISION' || /DUPLICATE_DECISION/.test(String((err && err.message) || err || ''))) {
       const at = latestDecisionAtText();
-      box.innerHTML = '';
-      box.appendChild(el('div', 'or-banner-title', '✓ 这个决定已经落账了，正在刷新'));
-      box.appendChild(el('div', 'or-banner-reason', `该决定已在 ${at || '刚才'} 落账，列表马上更新；不需要再点一次。`));
-      box.appendChild(el('div', 'or-banner-code', '（错误码 DUPLICATE_DECISION）'));
-      box.hidden = false;
+      try { hideBanner(); } catch { /* 成功路径不因提示失败而中断 */ }
+      showNotice(`该决定已在 ${at || '刚才'} 落账（重复提交已被幂等吸收），正在刷新列表`);
       loadData().catch(() => {});
       return;
     }

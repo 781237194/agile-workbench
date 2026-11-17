@@ -102,7 +102,10 @@
    */
   function currentDocHashOf(req) {
     const row = req || {};
-    const candidates = [row.requirementHash, row.docHash, row.requirementReview && row.requirementReview.requirementHash];
+    // B-20261117-095558-1a2a①：**当前正文**以壳层扫描磁盘得到的 docSha256 为准（row.docSha256），
+    // requirementHash/docHash/RR.requirementHash 都可能是「上一次评审时」的旧值——拿它们当当前版本会把
+    // 刚落账的新鲜决定误判成「上一版已过期」（ad44 现场：决定 basis=1a618bd0 与磁盘一致，行上却是 1211a8a3）。
+    const candidates = [row.docSha256, row.requirementHash, row.docHash, row.requirementReview && row.requirementReview.requirementHash];
     for (const candidate of candidates) {
       const value = textOf(candidate);
       if (value) return value;
@@ -122,7 +125,7 @@
     const decidedSha = textOf(requirement.sha256);
     const decidedContent = textOf(requirement.contentHash);
     const currentSha = currentDocHashOf(req);
-    const currentContent = textOf((req && req.requirementReview && req.requirementReview.contentHash) || (req && req.contentHash));
+    const currentContent = textOf((req && req.docContentHash) || (req && req.requirementReview && req.requirementReview.contentHash) || (req && req.contentHash));
     if (!decidedSha && !decidedContent) return false; // 旧决定（11-15 那批没有 basis）
     // B-20261116-122422-8487：行上完全没有版本信息时（视图未导出 / 老快照），**不能**判成旧版本——
     // 以前这里走「有 hash 但当前版本未知 → 不能证明是当前版本 → false」，导致刚落账的决定被判过期、

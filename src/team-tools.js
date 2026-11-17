@@ -5864,6 +5864,10 @@ function createTeamTools(options = {}) {
       // 于是行一直留在「等你决定」、再点还报 DUPLICATE_DECISION。这里把版本三元组原样带出去。
       requirementHash: String(row.requirementHash || ''),
       contentHash: String(row.contentHash || ''),
+      // B-20261117-095558-1a2a①：**当前正文**（磁盘扫描值）单独一列带出去，渲染层优先用它判版本；
+      // 未带则回落旧字段（老快照/老调用点不受影响）。
+      docSha256: String(row.docSha256 || ''),
+      docContentHash: String(row.docContentHash || ''),
       requirementReview: row.requirementReview || null,
       dispatch: row.dispatch || null,
       dev: row.dev || null,
@@ -6166,9 +6170,13 @@ function createTeamTools(options = {}) {
       seen.add(String(id));
       const view = requirementView(byId.get(String(id)), meta);
       // R-0dbb F0：行上没有 doc（旧行全都没有）→ 按需求 id 回填正文相对路径。
-      if (!view.doc) {
-        const doc = docEntryOf(view.id || id);
-        if (doc) view.doc = doc.rel;
+      // B-20261117-095558-1a2a①：同时带上**当前正文**的 sha256/contentHash（docEntry 就是刚扫描的 需求/*.md），
+      // 渲染层据此判「决定是否绑当前版本」；以前它去拿 row.requirementHash（RR 留的旧哈希）→ 新鲜决定被误判过期。
+      const liveDoc = docEntryOf(view.id || id);
+      if (liveDoc) {
+        if (!view.doc) view.doc = liveDoc.rel;
+        view.docSha256 = String(liveDoc.hash || '');
+        view.docContentHash = String(liveDoc.contentHash || '');
       }
       const voidEntry = voidEntryOf(view.id || id);
       if (voidEntry) {

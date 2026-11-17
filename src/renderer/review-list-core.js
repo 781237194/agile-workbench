@@ -360,13 +360,15 @@ function UI3_ownerDecisionOf(row) {
   const from = pick(latest.status || latest.decision);
   if (!from) return pick(owner.status);
   // 版本校验（与 owner-review-state.js isDecisionCurrent 同口径）
+  // B-20261117-095558-1a2a①：当前正文优先取壳层扫描磁盘的 docSha256/docContentHash；
+  // requirementHash 可能是上一次评审留下的旧值（ad44 现场），拿它当当前版本会误判「已过期」。
   const basis = (latest.basis && typeof latest.basis === 'object' && latest.basis.requirement) ? latest.basis.requirement : {};
   const decidedSha = trimText(basis.sha256);
   const decidedContent = trimText(basis.contentHash);
   if (!decidedSha && !decidedContent) return ''; // 旧决定（无版本凭据）→ 过期
   const rr = (row && row.requirementReview && typeof row.requirementReview === 'object') ? row.requirementReview : {};
-  const currentSha = trimText(row && (row.requirementHash || row.docHash)) || trimText(rr.requirementHash);
-  const currentContent = trimText(rr.contentHash) || trimText(row && row.contentHash);
+  const currentSha = trimText(row && row.docSha256) || trimText(row && (row.requirementHash || row.docHash)) || trimText(rr.requirementHash);
+  const currentContent = trimText(row && row.docContentHash) || trimText(rr.contentHash) || trimText(row && row.contentHash);
   if (!currentSha && !currentContent) return from; // 行上没有版本信息 → 无法证明过期，按当前算
   if (decidedSha && currentSha && decidedSha === currentSha) return from;
   if (decidedContent && currentContent && decidedContent === currentContent) return from;

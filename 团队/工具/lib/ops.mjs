@@ -9323,7 +9323,9 @@ export async function cmdOwner(args) {
   }, {
     create: true,
     action: actionName,
-    by: 'Owner',
+    // B-20261117-095558-1a2a④：代管代记（proxy）时 history 的 by 必须记 pm，与 decisions[].by 一致；
+    // 以前固定写 'Owner'，审计看历史会以为 Owner 本人点的。
+    by: proxyMode ? 'pm' : 'Owner',
     note: decision,
     phase: nextPhase,
     statePatch: { ownerReview: stateOwnerReview, decisions },
