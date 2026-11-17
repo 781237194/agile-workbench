@@ -391,22 +391,47 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     if ((pmInbox2.messages || []).some((m) => String(m.subject || '').startsWith('回执: 回执:'))) failStep('回执递归未修好');
     pass('消息 → 已读 → 回执 → 回信（回执不再回执）');
 
-    // Owner 2026-11-14 09:10 / 13:06 合并口径：ack 自动生成的回执/通知不走 cmdSend，不额外唤醒（防套娃）；
-    // 但 send --type receipt 必须唤醒（见 B-1e4a）。回执类消息被 ack 后不得再生成回执。两条都从 唤醒.jsonl / PM 邮箱取证。
+    // Owner 2026-11-16 18:50（B-20261117-082720-6e7c，取代 11-14 09:10「纯回执不唤醒」）：
+    // **回执必须唤醒原消息发送方**——DSH 是排队制、agent 无输入无输出，不唤醒对方就无法决策；
+    // 只有显式 --no-wake 才静默。这里三条都从返回值 + 唤醒.jsonl + 事件流取证（硬回归）。
     {
       const ackWakeFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl');
-      const ackWakeRows = fs.existsSync(ackWakeFile)
+      const readWakeRows = () => (fs.existsSync(ackWakeFile)
         ? read(ackWakeFile).split(/\r?\n/).filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean)
-        : [];
-      const receiptId = String(receiptMsg.id || '');
-      const hitPm = ackWakeRows.filter((row) => String(row.to || '') === 'pm'
-        && (Array.isArray(row.messageIds) ? row.messageIds : []).map(String).includes(receiptId));
-      if (hitPm.length) {
-        failStep('纯回执不该唤醒（Owner 09:10），但 唤醒.jsonl 里有它', JSON.stringify(hitPm.slice(0, 2)).slice(0, 400));
+        : []);
+      // ① A(pm) 发 --ack → B(programmer1) ack → 返回值必须报告 ackWake.to=A 且 ok
+      if (!(ack && ack.ackWake && ack.ackWake.ok === true && ack.ackWake.to === 'pm')) {
+        failStep('回执必须唤醒原消息发送方（ackWake.to 应为 pm）', JSON.stringify(ack && ack.ackWake).slice(0, 300));
       }
+      // ② 唤醒.jsonl 必须有 to=pm 且带该回执消息 id 的行（沙盘 skipped=SELFTEST 也算已尝试）
+      const receiptId = String(receiptMsg.id || '');
+      const hitPm = readWakeRows().filter((row) => String(row.to || '') === 'pm'
+        && (Array.isArray(row.messageIds) ? row.messageIds : []).map(String).includes(receiptId));
+      if (!hitPm.length) {
+        failStep('唤醒.jsonl 缺少 ack 唤醒发送方的行（to=pm + receiptMessageId）', JSON.stringify({ receiptId, rows: readWakeRows().slice(-3) }).slice(0, 400));
+      }
+      // ③ 事件流必须留 ack_wake 审计行且 target=被回执的原消息
+      const eventsFile = path.join(teamRoot, '状态', '事件.jsonl');
+      const eventRows = fs.existsSync(eventsFile)
+        ? read(eventsFile).split(/\r?\n/).filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean)
+        : [];
+      const ackWakeEvent = eventRows.filter((row) => String(row.action || '') === 'ack_wake' && String(row.target || '') === String(m1.message.id));
+      if (!ackWakeEvent.length) {
+        failStep('事件流缺少 ack_wake 审计行（target=原消息 id）', JSON.stringify(eventRows.slice(-6).map((r) => r.action)).slice(0, 300));
+      }
+      // ④ 回执类消息再被 ack 不得套娃（回执不再回执）
       const nested = (pmInbox2.messages || []).filter((m) => String(m.subject || '').startsWith('回执: 回执:'));
       if (nested.length) failStep('回执套娃（ack 回执消息又生成回执消息）', JSON.stringify(nested.slice(0, 2)).slice(0, 300));
-      pass('纯回执不唤醒（只落已读存档）；回执不再回执');
+      // ⑤ --no-wake 静默分支仍有效：新派单 → B ack --no-wake → 不新增「to=pm 且非 skipped」的唤醒行
+      const m2 = json(['send', '--boot', pmBoot.token, '--to', 'programmer1', '--subject', '静默回执用例', '--body', 'x', '--ack', '--json']);
+      json(['read', '--boot', pgBoot.token, '--id', m2.message.id, '--json']);
+      const wakeCountBeforeSilent = readWakeRows().length;
+      const silentAck = json(['ack', '--boot', pgBoot.token, '--id', m2.message.id, '--note', '静默测试', '--no-wake', '--json']);
+      if (silentAck.ackWake) failStep('--no-wake 下不该唤醒（ackWake 应为 null）', JSON.stringify(silentAck.ackWake).slice(0, 200));
+      const newWakeRows = readWakeRows().slice(wakeCountBeforeSilent);
+      const silentLeak = newWakeRows.filter((row) => String(row.to || '') === 'pm' && row.skipped !== 'SELFTEST' && row.skipped !== 'sandbox_wake_skipped');
+      if (silentLeak.length) failStep('--no-wake 仍唤醒了 pm', JSON.stringify(silentLeak).slice(0, 300));
+      pass('回执必唤醒发送方（Owner 11-16 18:50，取代 09:10 纯回执不唤醒）；--no-wake 才静默；回执不再回执');
     }
 
     // Owner 2026-11-14 07:44 最终口径：取消消息合并与分级——所有消息立即投递、立即唤醒，不攒批、不建池、不串台。
@@ -649,6 +674,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     json(['roster', 'add', '--boot', fullPm, '--role', 'analyst', '--name', '需求分析师', '--reason', 'full/fast 动态角色', '--json']);
     fullPm = json(['boot', '--role', 'pm', '--project', '试点', '--session', 'selftest-full-pm', '--json']).token;
 
+    // 经验教训门禁在沙盘里由 lessons.mjs 的 TEAM_SELFTEST 豁免（B-4875 口径），这里不再逐个角色补 lessons read。
     const fullReq = json(['req', 'create', '--boot', fullPm, '--title', '评审与投票用例', '--priority', 'P1', '--acceptance', '可测试、可判定', '--json']);
     const fullReqId = fullReq.requirement && fullReq.requirement.id;
     if (!fullReqId) failStep('req create 没返回需求 id', JSON.stringify(fullReq));
@@ -1464,7 +1490,8 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     const state = JSON.parse(read(stateFile));
     state.requirements[ownerReqId].status = 'test';
     write(stateFile, JSON.stringify(state, null, 2) + '\n');
-    const reviewInTest = json(['req', 'review', '--boot', gateProduct3.token, '--id', ownerReqId, '--verdict', 'approve', '--comments', '测试阶段复审', '--json']);
+    // R-0dbb F8 消费门：ownerReqId 已有 Owner 意见（1471/1477），复审必须先显式 ack（真实工作流也是这样）。
+    const reviewInTest = json(['req', 'review', '--boot', gateProduct3.token, '--id', ownerReqId, '--verdict', 'approve', '--comments', '测试阶段复审', '--owner-opinion-ack', '采纳：按 Owner 意见处置（selftest 沙盘）', '--json']);
     if (!reviewInTest.ok) failStep('test 阶段产品复审被 G0 误拦', JSON.stringify(reviewInTest));
     state.requirements[ownerReqId].status = 'ready';
     write(stateFile, JSON.stringify(state, null, 2) + '\n');
@@ -1909,10 +1936,16 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       if (!(ackReceipt.receiptMessage && ackReceipt.receiptMessage.type === 'notice')) failStep('B-1e4a ②：ack 完成回执未投 notice', JSON.stringify(ackReceipt.receiptMessage).slice(0, 200));
       const noticeMsg = json(['inbox', '--boot', qDev.token, '--all', '--json']).messages.find((m) => m.id === ackReceipt.receiptMessage.id);
       if (!noticeMsg) failStep('B-1e4a ②：原发送者没收到 notice', '');
+      const before2 = wakeAllRows().length;
       const ackNotice2 = json(['ack', '--boot', qDev.token, '--id', noticeMsg.id, '--note', '已读', '--json']);
       if (ackNotice2.receiptMessage) failStep('B-1e4a ②：ack notice 又产生了消息', JSON.stringify(ackNotice2.receiptMessage).slice(0, 200));
-      const ackNoticeWakes = wakeAllRows().filter((row) => (row.messageIds || []).map(String).includes(String(noticeMsg.id)));
-      if (ackNoticeWakes.length) failStep('B-1e4a ②：ack notice 产生了新唤醒', JSON.stringify(ackNoticeWakes.length));
+      // Owner 2026-11-16 18:50（取代 11-14 09:10「纯回执不唤醒」）：ack 程序确认 notice 也必须唤醒其发送方（pm）；
+      // 旧断言「ack notice 不该产生唤醒」是新规矩下的定时炸弹，改成「新增唤醒只能指向 notice 的发送方」。
+      const ackNoticeWakes = wakeAllRows().slice(before2)
+        .filter((row) => (row.messageIds || []).map(String).includes(String(noticeMsg.id)));
+      if (!ackNoticeWakes.length || ackNoticeWakes.some((row) => String(row.to || '') !== 'pm')) {
+        failStep('B-1e4a ②：ack notice 未唤醒其发送方（pm）或唤醒了别人', JSON.stringify(ackNoticeWakes).slice(0, 300));
+      }
       // ③ 连发 3 条各唤醒（不合并）
       const three2 = [];
       for (let i = 1; i <= 3; i += 1) three2.push(json(['send', '--boot', qDev.token, '--to', 'pm', '--subject', `全唤醒连发 ${i}`, '--body', 'x', '--type', 'escalation', '--json']));
@@ -1925,7 +1958,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       const silentRows = wakeAllRows().filter((row) => (row.messageIds || []).map(String).includes(String(silent2.message.id)));
       if (silentRows.length) failStep('B-1e4a ④：--no-wake 仍为该消息新增唤醒留痕', JSON.stringify(silentRows.length));
     }
-    pass('B-1e4a（R-45c7）：receipt 也唤醒、notice 被 ack 不再唤醒、连发 3 条各唤醒、--no-wake 唯一退出阀');
+    pass('B-1e4a（R-45c7）：receipt 也唤醒、notice 被 ack 唤醒发送方（Owner 11-16 18:50 取代 09:10）、连发 3 条各唤醒、--no-wake 唯一退出阀');
 
     // ===== B-d111（已按 Owner 08:08 改口径）：不再有窗口合并；保留 delivered 去重、失败重试、兜底补发 =====
     const wakeQueueFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒队列.json');
@@ -2213,7 +2246,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     const beforeRereview = JSON.parse(read(path.join(teamRoot, '状态', '项目', '试点', '工作流.json')));
     const decisionsBefore = Array.isArray(beforeRereview.requirements[ownerReqId].decisions)
       ? beforeRereview.requirements[ownerReqId].decisions.length : 0;
-    const rereview = json(['req', 'review', '--boot', gateProduct8.token, '--id', ownerReqId, '--verdict', 'approve', '--comments', 'Owner 批准后重审', '--json']);
+    const rereview = json(['req', 'review', '--boot', gateProduct8.token, '--id', ownerReqId, '--verdict', 'approve', '--comments', 'Owner 批准后重审', '--owner-opinion-ack', '采纳：按 Owner 意见处置（selftest 沙盘）', '--json']);
     const afterRereview = JSON.parse(read(path.join(teamRoot, '状态', '项目', '试点', '工作流.json')));
     const rereviewRow = afterRereview.requirements[ownerReqId];
     if (rereviewRow.status !== 'ready') failStep('重审把 ready 回退了', JSON.stringify({ status: rereviewRow.status, phase: afterRereview.phase }));
@@ -2258,7 +2291,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     write(legacyStatePath, JSON.stringify(legacyState, null, 2) + '\n');
     write(legacyTaskPath, JSON.stringify(legacyTask, null, 2) + '\n');
     const legacyDecisionsBefore = legacyTask.workflow.decisions.length;
-    json(['req', 'review', '--boot', gateProduct8.token, '--id', ownerReqId, '--verdict', 'approve', '--comments', '旧 basis 重审', '--json']);
+    json(['req', 'review', '--boot', gateProduct8.token, '--id', ownerReqId, '--verdict', 'approve', '--comments', '旧 basis 重审', '--owner-opinion-ack', '采纳：按 Owner 意见处置（selftest 沙盘）', '--json']);
     const afterLegacy = JSON.parse(read(legacyStatePath));
     const legacyRow = afterLegacy.requirements[ownerReqId];
     const legacyTaskAfter = JSON.parse(read(legacyTaskPath));
@@ -2624,7 +2657,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     if (pmPending743.length) failStep('取消合并后仍在积 pending', JSON.stringify(pmPending743).slice(0, 300));
     const wakeLog743 = fs.existsSync(path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl')) ? read(path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl')) : '';
     if (wakeLog743.includes('MERGED_PENDING')) failStep('取消合并后仍出现 MERGED_PENDING', wakeLog743.slice(-200));
-    pass('B-743e：唤醒首行【系统消息·非Owner】来自角色（类型）→ 收件人 ｜ 项目；纯回执不唤醒（Owner 09:10）');
+    pass('B-743e：唤醒首行【系统消息·非Owner】来自角色（类型）→ 收件人 ｜ 项目；receipt 类型必须唤醒（Owner 13:06 取代 09:10 纯回执不唤醒）');
 
     // ===== Owner 评审代管三态（R-81a5b）：本轮/每轮/结束，幂等与落盘 =====
     const proxyStart = json(['owner', 'proxy', 'start', '--project', '试点', '--requirement', ownerReqId, '--scope', 'once', '--authorization', 'selftest', '--json']);
@@ -2660,29 +2693,37 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       if (String(rowNoProxy.status) === 'accepted') failStep('无代管被拒但需求已被改成 accepted（有副作用）', String(rowNoProxy.status));
     }
     pass('B-9400：无有效代管 → PM 代验收被拒（PROXY_UNAUTHORIZED）');
-    // 缺证据：开代管但只给不存在的报告 → PM_ACCEPT_EVIDENCE_REQUIRED，且零副作用（状态不变、决策链不增）。
+    // 缺证据：开代管但只给不存在的报告。Owner 2026-11-16 10:52 裁定（B-bd22）后，「代管不得代需求验收」
+    // 先于证据门生效 → 期望码从 PM_ACCEPT_EVIDENCE_REQUIRED 改为 PROXY_ACCEPT_FORBIDDEN（需求验收只能 Owner 本人；
+    // 证据门只走缺陷单 task accept，由 scripts/test-owner-accept-evidence.cjs / test-task-accept-62b9.cjs 覆盖）。
     json(['owner', 'proxy', 'start', '--project', '试点', '--requirement', ownerReqId, '--scope', 'always', '--authorization', 'selftest B-9400', '--json']);
     const before9400 = JSON.parse(read(path.join(teamRoot, '状态', '项目', '试点', '工作流.json'))).requirements[ownerReqId];
     const missingEv = run(['owner', '--project', '试点', '--requirement', ownerReqId, '--decision', 'accepted', '--action', 'accept', '--proxy-recorded-by', 'pm', '--evidence', '不存在的报告.md:report', '--opinion', 'selftest B-9400 缺证据', '--json'], { expectFail: true });
-    if (!String(missingEv.stdout + missingEv.stderr).includes('PM_ACCEPT_EVIDENCE_REQUIRED')) failStep('缺证据时未判 PM_ACCEPT_EVIDENCE_REQUIRED', String(missingEv.stdout + missingEv.stderr).slice(0, 240));
+    if (!String(missingEv.stdout + missingEv.stderr).includes('PROXY_ACCEPT_FORBIDDEN')) failStep('缺证据时代管未被 PROXY_ACCEPT_FORBIDDEN 拦（代管不得代需求验收）', String(missingEv.stdout + missingEv.stderr).slice(0, 240));
     const after9400 = JSON.parse(read(path.join(teamRoot, '状态', '项目', '试点', '工作流.json'))).requirements[ownerReqId];
     if (String(after9400.status) !== String(before9400.status) || JSON.stringify(after9400.ownerReview || null) !== JSON.stringify(before9400.ownerReview || null)) failStep('缺证据被拒时仍有副作用', JSON.stringify({ before: before9400.status, after: after9400.status }));
-    pass('B-9400：缺证据 → PM_ACCEPT_EVIDENCE_REQUIRED 且零副作用');
-    // 正例：报告(PASS) + 截图(PNG 魔数) 就位 → 代验收成功，落 channel=proxy/actor=pm/decidedBy=owner/evidence 2 项。
+    pass('B-9400：有代管 + 缺证据 → PROXY_ACCEPT_FORBIDDEN（代管不得代需求验收）且零副作用');
+    // 即使证据齐全也不许代管代验收（Owner 11-16 10:52）：证据门不是代验收的放行条件。
     const evDir9400 = path.join(projectsRoot, '试点', '测试人员', '产出');
     fs.mkdirSync(evDir9400, { recursive: true });
     write(path.join(evDir9400, 'B-9400-测试报告.md'), '# B-9400 测试报告\n\n- 结果：PASS\n- 日期：2026-11-14\n');
     const shot9400 = path.join(evDir9400, 'B-9400-截图.png');
     fs.writeFileSync(shot9400, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('selftest-png-body')]));
     const evJson9400 = JSON.stringify([{ path: '测试人员/产出/B-9400-测试报告.md', kind: 'report' }, { path: '测试人员/产出/B-9400-截图.png', kind: 'screenshot' }]);
-    const okAccept9400 = json(['owner', '--project', '试点', '--requirement', ownerReqId, '--decision', 'accepted', '--action', 'accept', '--proxy-recorded-by', 'pm', '--evidence', evJson9400, '--opinion', 'B-9400 代验收正例', '--json']);
-    if (!okAccept9400.ok) failStep('B-9400 正例代验收失败', JSON.stringify(okAccept9400).slice(0, 240));
+    const fullEv9400 = run(['owner', '--project', '试点', '--requirement', ownerReqId, '--decision', 'accepted', '--action', 'accept', '--proxy-recorded-by', 'pm', '--evidence', evJson9400, '--opinion', 'B-9400 代验收正例', '--json'], { expectFail: true });
+    if (!/PROXY_ACCEPT_FORBIDDEN/.test(String(fullEv9400.stdout + fullEv9400.stderr))) failStep('证据齐全时代管仍未被 PROXY_ACCEPT_FORBIDDEN 拦', String(fullEv9400.stdout + fullEv9400.stderr).slice(0, 240));
+    pass('B-9400：有代管 + 证据齐全 → 仍 PROXY_ACCEPT_FORBIDDEN（需求验收只能 Owner 本人）');
+    // 需求验收唯一通道仍可用：Owner 本人验收（--test-owner 仅 TEAM_SELFTEST=1 可用）。
+    const confirm9400 = json(['owner', 'confirm', '--project', '试点', '--requirement', ownerReqId, '--decision', 'accepted', '--action', 'accept', '--test-owner', '--json']);
+    const okAccept9400 = json(['owner', '--project', '试点', '--requirement', ownerReqId, '--decision', 'accepted', '--action', 'accept', '--opinion', 'B-9400 Owner 本人验收', '--owner-confirm', confirm9400.nonce, '--json']);
+    if (!okAccept9400.ok) failStep('B-9400 正例（Owner 本人）验收失败', JSON.stringify(okAccept9400).slice(0, 240));
     const wf9400 = JSON.parse(read(path.join(teamRoot, '状态', '项目', '试点', '工作流.json')));
     const row9400 = wf9400.requirements[ownerReqId];
     const last9400 = (row9400.decisions || []).slice(-1)[0] || {};
-    if (last9400.channel !== 'proxy' || last9400.actor !== 'pm' || last9400.decidedBy !== 'owner') failStep('B-9400 落账字段不对（应 channel=proxy/actor=pm/decidedBy=owner）', JSON.stringify(last9400).slice(0, 240));
-    if (!Array.isArray(last9400.evidence) || last9400.evidence.length !== 2 || !last9400.evidence.every((x) => x.path && x.sha256)) failStep('B-9400 落账缺 evidence[{path,sha256,kind}]', JSON.stringify(last9400.evidence).slice(0, 200));
-    pass('B-9400：代验收正例落账 channel=proxy/actor=pm/decidedBy=owner/evidence 两项');
+    // 本人验收的决定对象字段是 by=Owner / actor=owner / channel=test（沙盘 --test-owner）；代管才有 decidedBy。
+    if (String(last9400.actor || '') !== 'owner' || !['ui', 'tty', 'test'].includes(String(last9400.channel))) failStep('B-9400 Owner 验收落账字段不对（应 actor=owner + channel ui/tty/test）', JSON.stringify(last9400).slice(0, 240));
+    if (String(row9400.status) !== 'accepted') failStep('B-9400 Owner 验收后需求状态不是 accepted', String(row9400.status));
+    pass('B-9400：Owner 本人验收成功（decidedBy=owner，需求 accepted）');
     json(['owner', 'proxy', 'end', '--project', '试点', '--json']);
 
     // ===== T-3422：CLI 代验收入口（owner proxy decide --action accept）=====
@@ -2710,11 +2751,12 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       // ① 无代管 → PROXY_ACCEPT_FORBIDDEN（R-7849 新口径：结束/未开启代管后不得代验收）
       const t3422No = run(['owner', 'proxy', 'decide', '--project', '试点', '--requirement', t3422Id, '--decision', 'accepted', '--action', 'accept', '--evidence', '[]', '--opinion', 'T-3422 无代管', '--json'], { expectFail: true });
       if (!/PROXY_ACCEPT_FORBIDDEN|PROXY_UNAUTHORIZED/.test(String(t3422No.stdout + t3422No.stderr))) failStep('T-3422 无代管未被拒', String(t3422No.stdout + t3422No.stderr).slice(0, 240));
-      // ② 有代管 + 缺证据 → PM_ACCEPT_EVIDENCE_REQUIRED 且零副作用
+      // ② 有代管 + 缺证据 → 同样是 PROXY_ACCEPT_FORBIDDEN 且零副作用
+      //    （Owner 2026-11-16 10:52 裁定：代管不得代需求验收，先于证据门生效）
       json(['owner', 'proxy', 'start', '--project', '试点', '--requirement', t3422Id, '--scope', 'always', '--authorization', 'selftest T-3422', '--json']);
       const before3422 = JSON.parse(read(wfFile3422)).requirements[t3422Id];
       const t3422Miss = run(['owner', 'proxy', 'decide', '--project', '试点', '--requirement', t3422Id, '--decision', 'accepted', '--action', 'accept', '--evidence', '不存在的报告.md:report', '--opinion', 'T-3422 缺证据', '--json'], { expectFail: true });
-      if (!String(t3422Miss.stdout + t3422Miss.stderr).includes('PM_ACCEPT_EVIDENCE_REQUIRED')) failStep('T-3422 缺证据未被拒', String(t3422Miss.stdout + t3422Miss.stderr).slice(0, 240));
+      if (!/PROXY_ACCEPT_FORBIDDEN/.test(String(t3422Miss.stdout + t3422Miss.stderr))) failStep('T-3422 缺证据未被 PROXY_ACCEPT_FORBIDDEN 拦', String(t3422Miss.stdout + t3422Miss.stderr).slice(0, 240));
       const after3422 = JSON.parse(read(wfFile3422)).requirements[t3422Id];
       if (String(after3422.status) !== String(before3422.status) || JSON.stringify(after3422.ownerReview || null) !== JSON.stringify(before3422.ownerReview || null)) failStep('T-3422 缺证据被拒却有副作用', JSON.stringify({ before: before3422.status, after: after3422.status }).slice(0, 200));
       // ③ B-20261116-105213-bd22（Owner 2026-11-16 10:52 裁定）：**代管也不许代需求验收**——
