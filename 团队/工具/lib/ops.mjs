@@ -170,8 +170,75 @@ export function ownerOpinionDisplayOf(row) {
   };
 }
 
-/** 已消费集合：history 里 action='owner_opinion_ack' 的 opinionSha256（去重）。 */
-export function ownerOpinionAckSetOf(row) {
+/** B-20261117-080706-1259：已消费集合的**持久落点**——项目级 append-only 文件。
+ *  为什么不能只靠 `history`：`lifecycle.appendRowHistory()` 只保留最近 100 条（lifecycle.mjs:122），
+ *  一条 ack 被挤出窗口后同一意见会被再次要求 ack（重复劳动 + 台账抖动）。 */
+export function opinionAckFileOf(projectName) {
+  return path.join(projectStatePaths(String(projectName)).dir, '意见消费.jsonl');
+}
+
+/** 读持久落点：{ set: Set<lowercase sha>, rows }。坏行忽略（门禁不因审计坏行而失效）。 */
+export function readOpinionAcks(projectName) {
+  const set = new Set();
+  const rows = [];
+  if (!projectName) return { set, rows };
+  let list = [];
+  try { list = readJsonl(opinionAckFileOf(projectName)); } catch { list = []; }
+  for (const r of Array.isArray(list) ? list : []) {
+    const sha = String((r && r.opinionSha256) || '').trim().toLowerCase();
+    if (!sha || set.has(sha)) continue;
+    set.add(sha);
+    rows.push(r);
+  }
+  return { set, rows };
+}
+
+/** 追加一条消费记录（幂等：同 sha 已存在返回 false、不重复写）。 */
+export function appendOpinionAck(projectName, entry = {}) {
+  const sha = String(entry.opinionSha256 || '').trim().toLowerCase();
+  if (!projectName || !sha) return false;
+  const { set } = readOpinionAcks(projectName);
+  if (set.has(sha)) return false;
+  appendLine(opinionAckFileOf(projectName), JSON.stringify({
+    at: entry.at || nowIso(),
+    requirementId: String(entry.requirementId || ''),
+    opinionSha256: sha,
+    by: String(entry.by || ''),
+    note: truncate(String(entry.note || ''), 120),
+    source: String(entry.source || 'ack'),
+  }));
+  return true;
+}
+
+/** 旧数据一次性回填（AC③）：把各需求 `history` 里已有的 owner_opinion_ack 写进持久落点，幂等可重跑。 */
+export function backfillOpinionAcks(projectName) {
+  const wf = readWorkflowState(projectName);
+  const rows = (wf.state && wf.state.requirements) || {};
+  let scanned = 0;
+  let appended = 0;
+  for (const row of Object.values(rows)) {
+    if (!row || typeof row !== 'object') continue;
+    const history = Array.isArray(row.history) ? row.history : [];
+    for (const entry of history) {
+      if (!entry || String(entry.action || '') !== 'owner_opinion_ack') continue;
+      scanned += 1;
+      const wrote = appendOpinionAck(projectName, {
+        requirementId: String(row.id || ''),
+        opinionSha256: entry.opinionSha256,
+        by: String(entry.by || 'backfill'),
+        note: String(entry.note || ''),
+        at: String(entry.at || ''),
+        source: 'backfill',
+      });
+      if (wrote) appended += 1;
+    }
+  }
+  return { scanned, appended, file: opinionAckFileOf(projectName) };
+}
+
+/** 已消费集合：**持久落点为主**（不受 history 100 条截断影响）+ history 兼容（旧数据/未回填时仍生效）。
+ *  opts.projectName 缺省时只读 history（保持旧签名对纯函数测试的兼容）。 */
+export function ownerOpinionAckSetOf(row, opts = {}) {
   const set = new Set();
   const history = Array.isArray(row && row.history) ? row.history : [];
   for (const entry of history) {
@@ -179,25 +246,39 @@ export function ownerOpinionAckSetOf(row) {
     const value = String(entry.opinionSha256 || '').trim().toLowerCase();
     if (value) set.add(value);
   }
+  if (opts && opts.projectName) {
+    for (const sha of readOpinionAcks(opts.projectName).set) set.add(sha);
+  }
   return set;
 }
 
 /**
- * 消费门判定（纯函数，零写入）：当前有效 Owner 决定的 opinion 非空且未被 ack → { ok:false, code:'OWNER_OPINION_UNREAD' }。
+ * 消费门判定（默认零写入）：当前有效 Owner 决定的 opinion 非空且未被 ack → { ok:false, code:'OWNER_OPINION_UNREAD' }。
  * 空意见不拦（AC11⑥）；旧数据没有 ownerOpinionAck 一律按未消费处理（降级不静默放行）。
+ * opts.projectName：带上才查持久落点（AC①②③ 的关键）；opts.backfill：命中 history 里的 ack 但持久落点缺失时顺手补齐。
  */
-export function ownerOpinionGateFor(row) {
+export function ownerOpinionGateFor(row, opts = {}) {
   const latest = latestValidOwnerDecision(row);
   const opinion = latest && latest.opinion !== undefined && latest.opinion !== null ? String(latest.opinion) : '';
   if (!opinion.trim()) {
-    return { ok: true, reason: 'EMPTY_OPINION', opinion: '', at: '', sha256: '', consumed: [] };
+    return { ok: true, reason: 'EMPTY_OPINION', opinion: '', at: '', sha256: '', consumed: [], source: 'none' };
   }
   const sha = sha256(opinion);
-  const consumed = ownerOpinionAckSetOf(row);
-  if (consumed.has(sha)) return { ok: true, reason: 'ACKED', opinion, at: String(latest.at || ''), sha256: sha, consumed: [...consumed] };
+  const historySet = ownerOpinionAckSetOf(row);
+  const fileSet = opts.projectName ? readOpinionAcks(opts.projectName).set : new Set();
+  const consumed = new Set([...historySet, ...fileSet]);
+  // 旧数据兼容：history 里有 ack 但持久落点还没有 → 顺手回填（append-only、幂等；失败不影响判定）。
+  if (opts.projectName && opts.backfill && historySet.size) {
+    for (const value of historySet) {
+      if (fileSet.has(value)) continue;
+      try { appendOpinionAck(opts.projectName, { requirementId: String(row.id || ''), opinionSha256: value, by: 'backfill', source: 'backfill-inline' }); } catch { /* 回填失败不阻断门禁 */ }
+    }
+  }
+  const picked = fileSet.has(sha) ? 'persist' : (historySet.has(sha) ? 'history' : 'none');
+  if (consumed.has(sha)) return { ok: true, reason: 'ACKED', opinion, at: String(latest.at || ''), sha256: sha, consumed: [...consumed], source: picked };
   return {
     ok: false, code: 'OWNER_OPINION_UNREAD', reason: 'UNREAD',
-    opinion, at: String(latest.at || ''), sha256: sha, consumed: [...consumed],
+    opinion, at: String(latest.at || ''), sha256: sha, consumed: [...consumed], source: 'none',
   };
 }
 
@@ -7172,6 +7253,21 @@ export function cmdSched(args) {
   console.log(lines.join('\n'));
 }
 
+/** B-20261117-080706-1259：把已有 history 里的 owner_opinion_ack 一次性回填到 意见消费.jsonl（幂等可重跑）。 */
+export function cmdReqOpinionAckBackfill(args) {
+  const b = bootFor(args, 'req');
+  if (b.role !== 'pm') {
+    fail('PERMISSION_DENIED', '意见消费回填是整项目账本动作，只允许 PM 执行', { role: b.role, wrote: false });
+  }
+  const res = backfillOpinionAcks(b.project);
+  appendEvent({
+    role: b.role, sessionId: b.sessionId, action: 'opinion_ack_backfill', project: b.project,
+    target: String(res.appended), note: `scanned=${res.scanned} appended=${res.appended}`, data: res,
+  });
+  out(args, `意见消费回填：扫描 history 中 ack ${res.scanned} 条，补齐 ${res.appended} 条 → ${res.file}`,
+    { ok: true, ...res });
+}
+
 export function cmdReq(args) {
   const sub = args._[1] || 'list';
   // R-dba4（工具侧，T-20261115-142650-acfe）：需求行「大白话 copy」写入口（与壳层 requirement:copy-save 同判据）
@@ -7179,6 +7275,8 @@ export function cmdReq(args) {
   // 需求评审 / 技术评审记录：fast 由需求分析师评审，full 由产品设计师评审；
   // 技术评审记录在 fast 由程序员A、full 由产品或程序员A记录。PM 不评审。
   if (sub === 'review') return cmdReqReview(args);
+  // B-20261117-080706-1259：Owner 意见消费的旧数据一次性回填（history → 意见消费.jsonl，幂等）。
+  if (sub === 'ack-backfill' || sub === 'opinion-backfill') return cmdReqOpinionAckBackfill(args);
   // 可测性评审（TR-Q）：测试人员本人记录；Owner 门（G2.5）读这份证据。
   if (sub === 'trq') return cmdReqTrq(args);
   // 被驳回需求的出口：PM 决定进入下一轮或终止；两者都会同步 工作流.json。
@@ -7719,7 +7817,7 @@ function cmdReqReview(args) {
   // 豁免：意见为空串不拦（AC11⑥）；Owner 通道（ui/tty）自评与 owner 角色不拦；PM 代记的意见同源适用。
   const opinionGateRow = workflowRowFor(b.project, task.id) || {};
   const opinionView = ownerOpinionDisplayOf(opinionGateRow);
-  const opinionGate = ownerOpinionGateFor(opinionGateRow);
+  const opinionGate = ownerOpinionGateFor(opinionGateRow, { projectName: b.project, backfill: true });
   let ownerOpinionAck = normalizeOwnerOpinionAck(args['owner-opinion-ack']);
   if (!isTech && opinionGate.code === 'OWNER_OPINION_UNREAD' && !lessons.isOwnerChannel(args)) {
     if (!ownerOpinionAck) {
@@ -7729,7 +7827,7 @@ function cmdReqReview(args) {
         ownerOpinionAt: opinionGate.at,
         opinionSha256: opinionGate.sha256,
         consumed: opinionGate.consumed,
-        hint: '已消费集合＝工作流行 history 中 action=owner_opinion_ack 的 opinionSha256；同一 sha 只需 ack 一次',
+        hint: '已消费集合＝项目 意见消费.jsonl（append-only，不受 history 100 条截断影响）+ 工作流行 history 中 action=owner_opinion_ack 的 opinionSha256；同一 sha 只需 ack 一次',
         wrote: false,
       }, 1);
     }
@@ -8021,9 +8119,16 @@ function cmdReqReview(args) {
   if (reviewDocGate && reviewDocGate.split && reviewDocGate.split.wrote) {
     syncRequirementSupplements(b.project, project.path, task.id);
   }
-  // R-0dbb F8：显式 ack 落 append-only 的 history——「已消费集合＝history 中 action=owner_opinion_ack 的
-  // opinionSha256 去重集合」的**唯一写入点**。requirementReview.ownerOpinionAck 只是最近一次展示（会被覆写）。
+  // R-0dbb F8 + B-20261117-080706-1259：显式 ack 落两处——
+  // ①项目 意见消费.jsonl（append-only 持久落点，**判定主源**，不受 history 100 条截断影响）；
+  // ②工作流行 history（append-only 审计/人读）。requirementReview.ownerOpinionAck 只是「最近一次」展示。
   if (ownerOpinionAck && !isTech) {
+    try {
+      appendOpinionAck(b.project, {
+        requirementId: task.id, opinionSha256: opinionGate.sha256, by: b.role,
+        note: ownerOpinionAck, at: ts, source: 'review',
+      });
+    } catch { /* 持久落点写失败不阻断评审本身，history 仍留痕 */ }
     syncWorkflowRow(b.project, task, nextStatus, {}, {
       action: 'owner_opinion_ack',
       by: b.role,
