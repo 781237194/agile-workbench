@@ -208,9 +208,12 @@ class Sandbox {
   cleanup() { try { fs.rmSync(this.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* ignore */ } }
 }
 
+// 夹具时间：白天用例一律固定在本地 10:00（否则 22:00–08:00 夜间门会让 rotate 类用例天然红）
+function dayTimeMs() { const d = new Date(); d.setHours(10, 0, 0, 0); return d.getTime(); }
+
 // ── 7 条断言 ────────────────────────────────────────────────────────────────
 async function case1() {
-  const now = Date.now();
+  const now = dayTimeMs();
   const sb = new Sandbox('c1-threshold').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, input: 500000, at: new Date(now).toISOString(), source: 'fixture' } } });
   try {
     const before = snap({ team: sb.teamFile });
@@ -227,7 +230,7 @@ async function case1() {
 }
 
 async function case2() {
-  const now = Date.now();
+  const now = dayTimeMs();
   const sb = new Sandbox('c2-handover').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(now).toISOString(), source: 'fixture' } } });
   try {
     const oldId = sb.sessionOf('analyst');
@@ -247,7 +250,7 @@ async function case2() {
 }
 
 async function case3() {
-  const now = Date.now();
+  const now = dayTimeMs();
   const sb = new Sandbox('c3-timeout').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(now).toISOString(), source: 'fixture' } } });
   try {
     const r1 = sb.runCycle(now);
@@ -297,20 +300,121 @@ async function case4and5() {
 }
 
 async function case6() {
+  // 改法按 PM M-20261117-201536-fe515a（转达 B 自检④）：**不手写审计行**，
+  //   ① 注入时间「今夜 23:30」跑 1 拍 → 真实走夜间入队路径（enqueue / NIGHT_SILENT）
+  //   ② 跳到「次日 08:05」跑 3 拍 → 断言 analyst(force) 先换、product(rounds) 次之、**每拍只换 1 个**
+  const night = new Date(); night.setHours(23, 30, 0, 0);
+  const nightMs = night.getTime();
+  const day = new Date(nightMs); day.setDate(day.getDate() + 1); day.setHours(8, 5, 0, 0);
+  const dayMs = day.getTime();
+  const sb = new Sandbox('c6-nextday').seed({
+    usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(nightMs).toISOString(), source: 'fixture' } },
+    rounds: { product: { roundsSinceArchive: 30 } },
+  });
+  try {
+    // ① 夜间 1 拍：真实入队
+    const nightRun = sb.runCycle(nightMs);
+    const nightRows = sb.auditRows();
+    const queued = nightRows.filter((r) => String(r.stage) === 'enqueue'
+      || (String(r.stage) === 'skipped' && String(r.code) === 'NIGHT_SILENT'));
+    const queuedRoles = [...new Set(queued.map((r) => String(r.role)))].sort();
+    const nightRotates = nightRows.filter((r) => String(r.stage) === 'rotate').length;
+
+    // ② 次日 08:05 连跑 3 拍，逐拍统计 rotate 数（每拍 1 个）
+    const sliceFrom = (n) => sb.auditRows().slice(n);
+    let mark = sb.auditRows().length;
+    const run1 = sb.runCycle(dayMs);
+    const a1 = sliceFrom(mark); mark = sb.auditRows().length;
+    const run2 = sb.runCycle(dayMs + 60 * 1000);
+    const a2 = sliceFrom(mark); mark = sb.auditRows().length;
+    const run3 = sb.runCycle(dayMs + 120 * 1000);
+    const a3 = sliceFrom(mark);
+    const rots = (rows) => rows.filter((r) => String(r.stage) === 'rotate' && String(r.result) !== 'fail').map((r) => String(r.role));
+    const rot1 = rots(a1); const rot2 = rots(a2); const rot3 = rots(a3);
+    const order = [...rot1, ...rot2, ...rot3];
+    const perCycle = rot1.length === 1 && rot2.length === 1 && rot3.length === 0;
+    const orderOk = order.length >= 2 && order[0] === 'analyst' && order[1] === 'product';
+    const runs = [nightRun, run1, run2, run3];
+    return check('⑥ 夜间 23:30 打 1 拍真实入队 → 次日 08:05 连打 3 拍：analyst(force) 先换、product(rounds) 次之、每拍只换 1 个',
+      runs.every((r) => r.entryOk) && nightRotates === 0 && queuedRoles.join(',') === 'analyst,product' && perCycle && orderOk,
+      { entryOk: runs.map((r) => r.entryOk), errors: runs.map((r) => r.error).filter(Boolean), queuedRoles, nightRotates, perCycle, rot1, rot2, rot3, order });
+  } finally { sb.cleanup(); }
+}
+
+async function case7() {
+  // 反例（PM 2026-11-17 20:03 M-20261117-200342-df2f29 明确要求保留）：
+  // 次日 08:05 窗口内，即使阈值命中（force 520000 / 轮数 30），只要**昨夜没有入队记账**，本窗口不得换任何人。
   const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(8, 5, 0, 0);
   const now = d.getTime();
-  const sb = new Sandbox('c6-nextday').seed({
+  const sb = new Sandbox('c7-nextday-noqueue').seed({
     usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(now).toISOString(), source: 'fixture' } },
     rounds: { product: { roundsSinceArchive: 30 } },
   });
   try {
+    const rosterBefore = ROLES.map((r) => sb.sessionOf(r)).join(',');
     const runs = [sb.runCycle(now), sb.runCycle(now + 60 * 1000), sb.runCycle(now + 120 * 1000)];
     const rows = sb.auditRows();
-    const rotateRows = rows.filter((r) => r.stage === 'rotate' && String(r.result) !== 'fail');
-    const firstRotate = rotateRows[0] || null;
-    return check('⑥ 次日 08:05 → force 档角色优先执行（首个 rotate 为 force 角色）',
-      runs.every((r) => r.entryOk) && Boolean(firstRotate) && String(firstRotate.role) === 'analyst' && !rotateRows.some((r) => String(r.role) === 'product' && rotateRows.indexOf(r) < rotateRows.indexOf(firstRotate)),
-      { entryOk: runs.map((r) => r.entryOk), errors: runs.map((r) => r.error).filter(Boolean), rotateRoles: rotateRows.map((r) => `${r.role}/${r.result}/${r.code || ''}`), firstRotate });
+    const rotateRows = rows.filter((r) => String(r.stage) === 'rotate');
+    const rosterSame = ROLES.map((r) => sb.sessionOf(r)).join(',') === rosterBefore;
+    return check('⑧ 反例：次日 08:05 无昨夜入队记账 → 阈值命中也不换任何人（严格队列口径）',
+      runs.every((r) => r.entryOk) && rotateRows.length === 0 && rosterSame,
+      { entryOk: runs.map((r) => r.entryOk), errors: runs.map((r) => r.error).filter(Boolean), rotateRows: rotateRows.map((r) => String(r.role)), rosterSame, stages: rows.map((r) => `${r.stage}/${r.code || ''}`) });
+  } finally { sb.cleanup(); }
+}
+
+// AC2 错形状用例（PM 2026-11-17 21:10 裁定：由测试补，不计开发）
+async function case8() {
+  const now = dayTimeMs();
+  // 轮次文件写成错误形状 {"roles": {...}}：解析得通但形状不对 → 不得按 0 轮静默处理，必须留痕 ROUNDS_UNREADABLE
+  const sb = new Sandbox('c8-rounds-shape').seed({
+    usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 200000, at: new Date(now).toISOString(), source: 'fixture' } },
+    rounds: { roles: { product: { roundsSinceArchive: 30 } } },
+  });
+  try {
+    const r1 = sb.runCycle(now);
+    const rows = sb.auditRows();
+    const unreadable = rows.filter((r) => String(r.code) === 'ROUNDS_UNREADABLE');
+    const rotates = rows.filter((r) => String(r.stage) === 'rotate');
+    return check('⑨ AC2 错形状 {"roles":{…}} → 不触发轮数换人，且留痕 skipped/ROUNDS_UNREADABLE（不按 0 轮静默）',
+      r1.entryOk && rotates.length === 0 && unreadable.length >= 1,
+      { entryOk: r1.entryOk, rotates: rotates.length, unreadable: unreadable.map((r) => `${r.stage}/${r.code}`), stages: rows.map((r) => `${r.stage}/${r.code || ''}`) });
+  } finally { sb.cleanup(); }
+}
+
+// AC5 轮换四测用例（PM 2026-11-17 21:10 裁定：由测试补，不计开发）
+async function case9() {
+  const now = dayTimeMs();
+  const sb = new Sandbox('c9-rotate-four').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(now).toISOString(), source: 'fixture' } } });
+  try {
+    const oldId = sb.sessionOf('analyst');
+    sb.runCycle(now);                       // ① 触发交接请求
+    sb.handover('analyst', now);            // ② 交接 + 回执
+    const r2 = sb.runCycle(now + 2 * 60 * 1000);  // ③ rotate
+    const newId = sb.sessionOf('analyst');
+    const wbSessions = (() => { const wb = readJson(sb.workbenchFile, {}); const p = ((wb.projects || [])[0] || {}); return (p.sessions || {}); })();
+    // ③ 会话轮换记录：需求 AC5③ 写「会话轮换/<角色>.json」；f35b 实现在 会话轮换.jsonl（append-only）。
+    //    两处都认（记录必须含 from/to/at/reason），但把实际落点写进 detail 以便口径核对。
+    const rotFile = path.join(sb.state, '会话轮换', 'analyst.json');
+    const rotJsonl = path.join(sb.state, '会话轮换.jsonl');
+    const rot = readJson(rotFile, null);
+    const jsonlRow = (() => {
+      try {
+        return fs.readFileSync(rotJsonl, 'utf8').split(/\r?\n/).filter(Boolean)
+          .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
+          .filter((r) => String(r.role) === 'analyst').pop() || null;
+      } catch { return null; }
+    })();
+    const rec = rot || jsonlRow;
+    const recText = JSON.stringify(rec || {});
+    const hasRotRecord = Boolean(rec) && recText.includes(newId) && /from|oldSessionId/i.test(recText) && /at/i.test(recText) && /reason/i.test(recText);
+    const landing = rot ? '会话轮换/analyst.json' : (jsonlRow ? '会话轮换.jsonl' : 'none');
+    // ④ 归档目录存在 或 记录含 archiveDeferred
+    const archiveDir = path.join(sb.state, '归档');
+    const archiveOk = fs.existsSync(archiveDir) || /archiveDeferred/i.test(recText + JSON.stringify(sb.auditRows()));
+    const pass = r2.entryOk && newId !== oldId && String(wbSessions.analyst || '') === newId && hasRotRecord && archiveOk;
+    return check('⑩ AC5 轮换四测：名册 / workbench.sessions / 会话轮换记录(from,to,at,reason) / 归档或 archiveDeferred',
+      pass,
+      { entryOk: r2.entryOk, oldId, newId, wbAnalyst: String(wbSessions.analyst || ''), landing, hasRotRecord, archiveOk, expectedByReq: '会话轮换/analyst.json', rotSample: rec ? Object.keys(rec).slice(0, 8) : null });
   } finally { sb.cleanup(); }
 }
 
@@ -324,10 +428,22 @@ async function main() {
   await case3();
   await case4and5();
   await case6();
+  await case7();
+  await case8();
+  await case9();
   const realAfter = snap(REAL_FILES);
-  const unchanged = Object.keys(realBefore).filter((k) => realBefore[k].sha256 === realAfter[k].sha256 && realBefore[k].sha256 !== '');
-  check('⑦ 真实 团队.json / workbench.json 前后 sha256 不变（零写入）', unchanged.length === Object.keys(realBefore).length,
-    { before: realBefore, after: realAfter });
+  // ⑦ 基线口径（沿用 PM 2026-11-17 19:52 给 fd42 ⑥ 的裁定）：真实 workbench.json 会被**其他角色**写
+  // （本轮实测：A 的 5d98 PM 身份 60 秒巡检在跑测试期间把真实 workbench.json +18B 并换了 sha），
+  // 所以不能拿它的 sha 当基线。改为判「隔离是否渗漏」这条真正要保证的性质：
+  //   ① 真实 团队.json sha 不变（名册只由 rotate 改，沙盘 rotate 不得碰真实名册）；
+  //   ② 真实 workbench.json 里**不出现沙盘夹具会话 id**（sess-old-* / session-auto-*），即夹具没漏进真实文件。
+  const realWbText = (() => { try { return fs.readFileSync(REAL_STORE_FILE, 'utf8'); } catch { return ''; } })();
+  const leakHits = (realWbText.match(/sess-old-[a-z0-9]+|session-auto-[a-z0-9]+-[a-z0-9]+/g) || []).slice(0, 5);
+  const teamSame = Boolean(realBefore.team.sha256) && realBefore.team.sha256 === realAfter.team.sha256;
+  const wbChangedByOthers = realBefore.workbench.sha256 !== realAfter.workbench.sha256;
+  check('⑦ 隔离不渗漏：真实 团队.json sha 不变 + 真实 workbench.json 无沙盘夹具会话 id（真实 workbench 可能被其他角色写，不作 sha 基线）',
+    teamSame && leakHits.length === 0,
+    { teamSame, leakHits, wbChangedByOthers, before: realBefore, after: realAfter });
 
   const total = results.length;
   const pass = results.filter((r) => r.ok).length;

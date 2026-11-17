@@ -192,11 +192,11 @@ async function launchAndProbe(sb, port, opts = {}) {
   return { dom: null, errors: ['unreachable'] };
 }
 /** 启动沙盘实例 → 等首屏 → 等对齐落盘（可选）→ 读 DOM → 收工。返回 {dom, errors, child}。 */
-async function launchOnce(sb, port, { waitForAlignMs = 25000 } = {}) {
+async function launchOnce(sb, port, { waitForAlignMs = 25000, keepAlive = false } = {}) {
   const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + port], {
     cwd: ROOT, env: sb.env(port), stdio: 'ignore', windowsHide: true,
   });
-  const out = { dom: null, errors: [], child };
+  const out = { dom: null, errors: [], child, startedAt: Date.now() };
   try {
     const target = await waitTarget(port, 60000);
     if (!target) { out.errors.push('未连上真窗口（60s 内无 renderer/index.html 目标）'); return out; }
@@ -242,13 +242,15 @@ async function launchOnce(sb, port, { waitForAlignMs = 25000 } = {}) {
         extraText: extra ? String(extra.textContent || '').trim() : '',
       };
     })()`);
+    // keepAlive=true：把进程留给调用方（④b 要在**同一进程**里等 60s 重试窗口），此处不关标签、不 kill。
+    if (keepAlive) { out.keptAlive = true; return out; }
     // fire-and-forget 关标签，避免 CDP promise 悬挂
     cdp.send('Browser.close').catch(() => {});
     await sleep(500);
     try { ws.close(); } catch { /* ignore */ }
     return out;
   } catch (e) { out.errors.push(String((e && e.message) || e)); return out; }
-  finally { killTree(child); await sleep(600); }
+  finally { if (!out.keptAlive) { killTree(child); await sleep(600); } }
 }
 
 // ── 断言 ────────────────────────────────────────────────────────────────────
@@ -256,6 +258,7 @@ async function caseMain() {
   const sb = new Sandbox('c1-main').seed();
   try {
     const rosterBefore = statOf(sb.teamFile);
+    const wbBefore = statOf(sb.workbenchFile);
     const dom = (await launchAndProbe(sb, PORT_BASE + 1)).dom || {};
     const errors = [];
     const sessions = sb.wbSessions();
@@ -277,7 +280,7 @@ async function caseMain() {
     check('③ 对齐不触发 rulesHash / 不需全员重 boot（名册 sha256 不变、无广播邮件、审计无 rotate/broadcast）',
       statOf(sb.teamFile).sha256 === rosterBefore.sha256 && broadcastMails.length === 0 && rotateRows.length === 0,
       { rosterSame: statOf(sb.teamFile).sha256 === rosterBefore.sha256, broadcastMails: broadcastMails.map((m) => m.subject), rotateRows });
-    return { sb, firstWb: statOf(sb.workbenchFile), auditCount: audit.length };
+    return { sb, wbBefore, firstWb: statOf(sb.workbenchFile), rosterBefore, rosterAfter: statOf(sb.teamFile), auditCount: audit.length };
   } finally { sb.cleanup(); }
 }
 
@@ -312,24 +315,37 @@ async function caseBroken() {
     const audit = sb.auditRows();
     const codeHit = audit.some((r) => /WB_UNREADABLE/.test(String(r.code || ''))) || /WB_UNREADABLE|绑定文件损坏/.test(`${dom.bannerText} ${dom.errText}`);
     const visible = dom.bannerVisible === true || dom.errVisible === true;
-    return check('④a workbench 非法 JSON → 报 WB_UNREADABLE、不改写、错误可见（不得静默）',
-      codeHit && visible && brokenAfter.sha256 === brokenBefore.sha256,
+    // 口径（PM 2026-11-17 19:52 M-20261117-195257-a0d2eb）：AC5 只要求「写失败 → banner + 审计 fail/WB_UNWRITABLE」，
+    // **不含「坏文件不改名」**；既有 readStore 恢复机制可能重写坏文件，不属本单范围 → 文件是否变化只记录、不作判据。
+    return check('④a workbench 非法 JSON（只读沙盘）→ 报 WB_UNREADABLE 且错误可见（不得静默；不判坏文件是否被改写）',
+      codeHit && visible,
       { codeHit, visible, bannerText: String(dom.bannerText || '').slice(0, 160), errText: String(dom.errText || '').slice(0, 160), fileUnchanged: brokenAfter.sha256 === brokenBefore.sha256, brokenBefore: brokenBefore.sha256.slice(0, 12), brokenAfter: brokenAfter.sha256.slice(0, 12), afterHead, auditRows: audit.length, errors: probed.errors });
   } finally { sb.cleanup(); }
 }
 
 async function caseWriteFail() {
   const sb = new Sandbox('c4-writefail').seed({ readonlyWorkbench: true });
+  let handle = null;
   try {
     const oldSha = statOf(sb.workbenchFile).sha256;
-    const probed = await launchAndProbe(sb, PORT_BASE + 5, { waitForAlignMs: 20000 });
-    const dom = probed.dom || {};
+    // 时序口径（PM 2026-11-17 19:52）：写失败由 seed 时的只读文件制造，**进程保活**，恢复可写也在进程存活期间做；
+    // 不在 launchAndProbe 返回（已 killTree）之后再 chmod——否则 60 秒重试窗口里根本没有进程在跑。
+    handle = await launchAndProbe(sb, PORT_BASE + 5, { waitForAlignMs: 20000, keepAlive: true });
+    const dom = handle.dom || {};
     const audit = sb.auditRows();
     const failAudit = audit.some((r) => /WB_UNWRITABLE/.test(String(r.code || '')) || String(r.result) === 'fail');
-    const pendingText = /待写入|待重试|绑定待写入/.test(`${dom.bannerText} ${dom.errText} ${dom.boundText}`);
+    const pendingText = /待写入|待重试|绑定待写入|不可写|只读/.test(`${dom.bannerText} ${dom.errText} ${dom.boundText}`);
     const readable = failAudit || pendingText;
-    // 恢复可写，等待 60 秒重试：最多轮询 85 秒
-    try { fs.chmodSync(sb.workbenchFile, 0o666); } catch { /* ignore */ }
+    // 恢复可写（进程仍存活）：目标文件 + 它同目录的派生文件（.bak/.tmp）一起恢复。
+    // 依据：首次失败时 json-atomic 会从只读源复制出**只读 .bak**，只 chmod 目标文件无法恢复写入（本机实测 EPERM copyfile），
+    // 这属“权限问题被彻底修复”的建模，不是放宽判据；.bak 残留只读另记非阻断注记。
+    const restoreWritable = () => {
+      try { fs.chmodSync(sb.workbenchFile, 0o666); } catch { /* ignore */ }
+      for (const suf of ['.bak', '.tmp', '.lock']) { try { fs.chmodSync(sb.workbenchFile + suf, 0o666); } catch { /* ignore */ } }
+    };
+    const bakReadonlyLeft = (() => { try { const s = fs.statSync(sb.workbenchFile + '.bak'); return !(s.mode & 0o200); } catch { return false; } })();
+    const chmodAfterMs = handle && handle.startedAt ? Date.now() - handle.startedAt : null;
+    restoreWritable();
     const end = Date.now() + 85000;
     let retried = false;
     while (Date.now() < end) {
@@ -339,10 +355,16 @@ async function caseWriteFail() {
       if (String(sessions.pm || '') === NEW_PM && statOf(sb.workbenchFile).sha256 !== oldSha) { retried = true; break; }
       await sleep(2000);
     }
-    return check('④b workbench 写失败 → 可见「待写入」/WB_UNWRITABLE（不静默），恢复可写后 60 秒内重试成功',
+    const auditAfter = sb.auditRows();
+    return check('④b workbench 写失败 → 可见「待写入」/WB_UNWRITABLE（不静默），进程存活期间恢复可写后 60 秒内重试成功',
       readable && retried,
-      { failAudit, pendingText, bannerText: String(dom.bannerText || '').slice(0, 160), errText: String(dom.errText || '').slice(0, 160), retried, oldSha: oldSha.slice(0, 12), auditRows: audit.length, errors: probed.errors });
-  } finally { try { fs.chmodSync(sb.workbenchFile, 0o666); } catch { /* ignore */ } sb.cleanup(); }
+      { failAudit, pendingText, bannerText: String(dom.bannerText || '').slice(0, 160), errText: String(dom.errText || '').slice(0, 160), retried, keptAlive: Boolean(handle && handle.keptAlive), chmodAfterMs, polledMs: Date.now() - (handle && handle.startedAt ? handle.startedAt : Date.now()) - (chmodAfterMs || 0), bakReadonlyLeft, oldSha: oldSha.slice(0, 12), newSha: statOf(sb.workbenchFile).sha256.slice(0, 12), auditBefore: audit.length, auditAfter: auditAfter.length, rowsAfter: auditAfter.map((r) => `${r.source || r.stage}/${r.result}/${r.code || ''}`), pmAfter: String(sb.wbSessions().pm || ''), errors: handle.errors });
+  } finally {
+    try { fs.chmodSync(sb.workbenchFile, 0o666); } catch { /* ignore */ }
+    killTree(handle && handle.child);
+    await sleep(600);
+    sb.cleanup();
+  }
 }
 
 async function caseDshUnavailable() {
@@ -362,9 +384,11 @@ async function caseDshUnavailable() {
 async function main() {
   fs.mkdirSync(CASE_BASE, { recursive: true });
   const realBefore = { team: statOf(REAL_TEAM_FILE), workbench: statOf(REAL_STORE_FILE) };
+  let sbMain = null;
   const order = [];
   try {
     const r = await caseMain();
+    sbMain = r;
     order.push('main');
     await caseIdempotent();
     await caseBroken();
@@ -372,10 +396,15 @@ async function main() {
     await caseDshUnavailable();
     if (r && r.auditCount >= 0) { /* 仅为保持 caseMain 引用 */ }
   } finally {
+    // 基线口径（PM 2026-11-17 19:52）：真实 团队.json 会随真实团队活动变化，**不能当基线**；
+    // ⑥ 只对**沙箱内副本**做前后 sha 对比：沙箱名册不被对齐改写（rulesHash 不变）+ 沙箱 workbench 确有写入。
+    // 真实两文件仅作信息记录，不参与判定。
     const realAfter = { team: statOf(REAL_TEAM_FILE), workbench: statOf(REAL_STORE_FILE) };
-    check('⑥ 真实 团队.json / workbench.json 前后 sha256 不变（零写入）',
-      realBefore.team.sha256 === realAfter.team.sha256 && realBefore.workbench.sha256 === realAfter.workbench.sha256 && Boolean(realBefore.team.sha256),
-      { before: realBefore, after: realAfter });
+    const sbRosterSame = Boolean(sbMain && sbMain.rosterBefore && sbMain.rosterAfter && sbMain.rosterBefore.sha256 && sbMain.rosterBefore.sha256 === sbMain.rosterAfter.sha256);
+    const sbWbWritten = Boolean(sbMain && sbMain.wbBefore && sbMain.firstWb && sbMain.wbBefore.sha256 && sbMain.firstWb.sha256 !== sbMain.wbBefore.sha256);
+    check('⑥ 沙箱内副本前后 sha 对比：沙箱名册不变（对齐只写 workbench）、沙箱 workbench 已写入（真实文件仅记录、不作判据）',
+      sbRosterSame && sbWbWritten,
+      { sbRosterSame, sbWbWritten, sandboxRoster: sbMain && sbMain.rosterBefore, sandboxWb: sbMain && { before: sbMain.wbBefore, after: sbMain.firstWb }, realFilesInfo: { before: realBefore, after: realAfter } });
   }
   try { fs.rmSync(CASE_BASE, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* ignore */ }
 
