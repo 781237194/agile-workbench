@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "version": "1.1.0",
-  "approvedBy": "Owner",
+  "approvedBy": "PM(代管)-待Owner确认",
   "approvedAt": "2026-11-17",
   "dir": "团队/skill/基础流程",
   "previousVersion": {
     "version": "1.0.0",
     "archive": "团队/skill/归档/基础流程-1.0.0/"
   },
-  "change": "新增「换人 / 交接」小节（六角色）：何时交接 / 交接文件八节 / 回执 / boot / 广播 / 失败回滚。依据 T-20261117-211626-c2b5（PM 派单 M-20261117-212341-65d24f）。",
+  "change": "新增「换人 / 交接」小节（六角色）：何时交接 / 交接文件八节 / 回执 / boot / 广播 / 失败回滚。依据 T-20261117-211626-c2b5（PM 派单 M-20261117-212341-65d24f）。 【依据口径】本版由 PM 代管批准，依据是 Owner 口头要求「把换人/交接纳入基础 skill」（PM 派单 M-20261117-212341-65d24f），非 Owner 显式签字；Owner 确认后改回 approvedBy=Owner。",
   "files": {
     "00-索引.md": "410a5dbc33abd16b2e50c05042e5e752a083205f41d4b45ab116a957df5a5a9b",
     "analyst.md": "68bffb8deba4fa2d864728e49abd7963bc1d3a405c36e08e5322b40cbf0d9a8f",

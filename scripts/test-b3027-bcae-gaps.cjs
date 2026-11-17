@@ -76,7 +76,8 @@ check('P2 正式清单落点 团队/状态/技能清单.json 与 manifest 同源
   const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
   const manifest = JSON.parse(fs.readFileSync(path.join(SKILL_DIR, 'skill-manifest.json'), 'utf8'));
   assert.strictEqual(state.version, manifest.version);
-  assert.strictEqual(state.approvedBy, 'Owner');
+  // 批准人口径随 PM 2026-11-17 21:39 诚信口径调整：Owner 未显式签字时标「PM(代管)-待Owner确认」。
+  assert.ok(/代管|Owner/.test(String(state.approvedBy)), `approvedBy 口径不符：${state.approvedBy}`);
   assert.deepStrictEqual(state.files, manifest.files);
   return `version ${state.version} / ${Object.keys(state.files).length} 文件`;
 });

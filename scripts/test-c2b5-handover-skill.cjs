@@ -60,10 +60,12 @@ check('H2 六要素齐（何时交接/交接文件八节/回执/boot/广播/失�
   return '6/6 各 7 项';
 });
 
-check('H3 manifest 1.1.0 + approvedBy=Owner + previousVersion.archive', () => {
+check('H3 manifest 1.1.0 + 批准人已标代管待确认 + previousVersion.archive', () => {
   const m = JSON.parse(fs.readFileSync(path.join(DIR, 'skill-manifest.json'), 'utf8'));
   assert.strictEqual(m.version, '1.1.0');
-  assert.strictEqual(m.approvedBy, 'Owner');
+  // PM 2026-11-17 21:39 诚信口径：Owner 未显式签字，approvedBy 必须标「PM(代管)-待Owner确认」；Owner 确认后改回 Owner。
+  assert.ok(/代管/.test(String(m.approvedBy)), `approvedBy 应为代管待确认口径，实际：${m.approvedBy}`);
+  assert.ok(/待\s*Owner\s*确认/.test(String(m.approvedBy)) || /Owner/.test(String(m.approvedBy)), `approvedBy 缺待确认标注：${m.approvedBy}`);
   assert.strictEqual(m.previousVersion && m.previousVersion.version, '1.0.0');
   assert.ok(/归档\/基础流程-1\.0\.0/.test(String(m.previousVersion.archive || '')));
   assert.strictEqual(m.schema, 1);
