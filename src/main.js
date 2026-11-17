@@ -2281,19 +2281,39 @@ function pmIdentitySessionMapSync(project, pmSid) {
     return result;
   } catch (e) { return { ok: false, changed: false, code: 'SESSION_MANIFEST_ERROR', error: String((e && e.message) || e) }; }
 }
-/** 对齐后用 CLI 自己的四口径复验（与 send 的门禁同一实现），不一致返回 {ok:false}。 */
+/** 对齐后用 CLI 自己的四口径复验（与 send 的门禁同一实现）。
+ *  B-20261117-213254-094e（D-2）：`session check --json` 是**多行** JSON（实测 70+ 行，末行是 `}`），
+ *  旧实现取末行 parse 必抛 → 被 catch 成 SESSION_CHECK_FAILED，又被上层当成「四处不一致」→ 界面假红。
+ *  现在：解析**整段 stdout**（容忍前缀噪声，取首个 `{` 到最后一个 `}`），并把「检查器跑失败」与「真不一致」分成不同 code。 */
 function pmIdentitySessionMapCheck(projectName) {
+  let stdout = '';
   try {
     const teamTool = path.join(resolveTeamRoot(), '工具', 'team.mjs');
-    const out = execFileSync(process.execPath, [teamTool, 'session', 'check', '--project', String(projectName), '--json'], {
+    stdout = String(execFileSync(process.execPath, [teamTool, 'session', 'check', '--project', String(projectName), '--json'], {
       encoding: 'utf8', timeout: 30000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    });
-    const line = String(out || '').trim().split(/\r?\n/).filter(Boolean).pop() || '{}';
-    const parsed = JSON.parse(line);
-    return { ok: parsed.ok === true, ratio: parsed.ratio, inconsistent: parsed.rows ? parsed.rows.filter((r) => !r.consistent) : [] };
+    }) || '');
   } catch (e) {
-    return { ok: false, code: 'SESSION_CHECK_FAILED', error: String((e && e.message) || e) };
+    return { ok: false, code: 'SESSION_CHECK_FAILED', error: String((e && e.message) || e), stdoutTail: String(stdout).slice(-400) };
   }
+  let parsed = null;
+  const text = stdout.trim();
+  try { parsed = JSON.parse(text); } catch { /* 落下去尝试截取对象 */ }
+  if (!parsed) {
+    const first = text.indexOf('{');
+    const last = text.lastIndexOf('}');
+    if (first >= 0 && last > first) {
+      try { parsed = JSON.parse(text.slice(first, last + 1)); } catch { parsed = null; }
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    return { ok: false, code: 'SESSION_CHECK_UNPARSABLE', error: 'session check 输出无法解析为 JSON', stdoutTail: text.slice(-400) };
+  }
+  return {
+    ok: parsed.ok === true,
+    ratio: parsed.ratio,
+    inconsistent: Array.isArray(parsed.rows) ? parsed.rows.filter((r) => !r.consistent) : [],
+    checkSkipped: Boolean(parsed.skipped),
+  };
 }
 function pmIdentityAuditFile(projectName) {
   return path.join(resolveTeamRoot(), '状态', '项目', String(projectName || ''), '会话绑定对齐.jsonl');
@@ -2377,7 +2397,14 @@ function runPmIdentityReconcile(source = 'startup') {
         why: `团队会话.json pm ${String(mapSync.from || '').slice(0, 8)}→${pmSid.slice(0, 8)}`, source, stage: source,
       });
       const check = pmIdentitySessionMapCheck(projectName);
-      if (!check.ok) {
+      // D-2：检查器自己跑失败（SESSION_CHECK_FAILED / SESSION_CHECK_UNPARSABLE）≠ 四处真不一致——分开提示，不制造红字。
+      if (!check.ok && check.code) {
+        appendPmIdentityAudit(projectName, {
+          at: new Date().toISOString(), role: 'pm', result: 'warn', code: String(check.code),
+          why: `对齐后复验检查器失败（不是映射不一致）：${String(check.error || '').slice(0, 160)}`, source, stage: source,
+        });
+        console.warn('PM_IDENTITY_SESSION_CHECK_FAILED ' + JSON.stringify({ code: check.code, error: String(check.error || '').slice(0, 200) }));
+      } else if (!check.ok) {
         appendPmIdentityAudit(projectName, {
           at: new Date().toISOString(), role: 'pm', result: 'fail', code: 'SESSION_MAP_INCONSISTENT',
           why: `对齐后四处映射不一致：${check.ratio || ''} ${JSON.stringify((check.inconsistent || []).map((r) => r.role))}`, source, stage: source,
