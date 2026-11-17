@@ -7458,8 +7458,7 @@ function createTeamTools(options = {}) {
       auth.channel = ownerChannel;
       auth.actor = auth.actor || 'owner';
       auth.at = auth.at || at;
-      row.ownerReview = {
-        ...mergedRowReview,
+      row.ownerReview = ownerReviewProjection(mergedRowReview, {
         ...auth,
         status: decision,
         by: 'Owner',
@@ -7468,7 +7467,7 @@ function createTeamTools(options = {}) {
         opinion,
         source: shellOwnedOwner ? `workbench-${mode}-owner` : 'team.mjs owner',
         command: shellOwnedOwner ? 'workbench' : 'owner'
-      };
+      });
       row.updatedAt = at;
       pushHistoryOnce(row, { at, action: 'owner_review', by: 'Owner', note: decision }, {
         requirementId
@@ -7486,8 +7485,7 @@ function createTeamTools(options = {}) {
         row.status = 'ready';
         state.phase = 'dispatch';
       }
-      state.ownerReview = {
-        ...mergedStateReview,
+      state.ownerReview = ownerReviewProjection(mergedStateReview, {
         ...auth,
         required: true,
         status: decision,
@@ -7498,7 +7496,7 @@ function createTeamTools(options = {}) {
         opinion,
         roundKey,
         command: 'owner'
-      };
+      });
       pushWorkflowEventOnce(state, {
         at, action: 'owner_requirement', role: 'owner', project: ctx.name, requirementId,
         note: `${decision}${opinion ? '：' + opinion.slice(0, 80) : ''}`
@@ -7623,7 +7621,34 @@ function decisionVersionMatches(decision, row) {
   return false;
 }
 
-// B-20261117-100603-9dc0 / B-20261117-012703-f2c0：壳层要和 CLI 的 G3 用同一份「当前正文版本」。
+// B-20261117-012404-17af：ownerReview 只保留**一份投影**（字段集固定）。
+// 原来同一次 decide 有三个写入者（recordOwnerDecision / applyOwnerDecisionToRequirement / 验收），
+// 各自拼对象导致「同一状态两套形状」：消费方拿到 #1 就没有 kind/stale 这些键，表现为时好时坏。
+// 现在三处一律走 ownerReviewProjection(base, patch)，字段集写死；派生字段（stale 等）不落库，读时算。
+function ownerReviewProjection(base, patch = {}) {
+  const merged = { ...(isPlainObject(base) ? base : {}), ...(isPlainObject(patch) ? patch : {}) };
+  const status = String(merged.status || '');
+  // 未决定（pending/optional/空）不能写 by/actor，否则界面/审计会把「待办」当成 Owner 的记录。
+  const decided = Boolean(status) && status !== 'pending' && status !== 'optional';
+  const out = {
+    ...merged,
+    status,
+    at: decided ? (merged.at || null) : null,
+    opinion: decided ? String(merged.opinion || '') : '',
+    by: decided ? String(merged.by || 'Owner') : '',
+    actor: decided ? String(merged.actor || 'owner') : '',
+    channel: decided ? String(merged.channel || '') : '',
+    recordedBy: decided ? String(merged.recordedBy || '') : '',
+    source: String(merged.source || ''),
+    command: String(merged.command || ''),
+    kind: String(merged.kind || ''),
+    basis: merged.basis && typeof merged.basis === 'object' ? merged.basis : null,
+  };
+  // ownerReview 只是最新摘要：decisions 一律留在需求行的 decisions[]（append-only），不塞进摘要。
+  delete out.decisions;
+  return out;
+}
+
 // 行上的 requirementHash 可能落后于磁盘（正文被改过但没人回写行字段），所以优先取磁盘真实哈希
 // （readRequirementDocs：hash=文件 sha256、contentHash=忽略程序维护行后的内容哈希），磁盘取不到才回退行字段。
 function currentRequirementDocVersion(projectPath, requirementId, row) {
@@ -7791,8 +7816,7 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
         ...(input.committee ? { committee: input.committee } : {}),
       };
       row.decisions = [...previousRowDecisions, decisionRecord];
-      row.ownerReview = { ...previousRowReview, ...auth, status, source: 'workbench-dialog', command: 'owner' };
-      delete row.ownerReview.decisions;
+      row.ownerReview = ownerReviewProjection(previousRowReview, { ...auth, status, source: 'workbench-dialog', command: 'owner' });
       row.updatedAt = at;
       pushHistoryOnce(row, {
         at,
@@ -7811,14 +7835,14 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
         row.status = 'ready';
         state.phase = 'dispatch';
       }
-      state.ownerReview = {
-        ...previousStateReview,
+      state.ownerReview = ownerReviewProjection(previousStateReview, {
         ...auth,
         required: true,
         status,
         kind: 'requirement',
         requirementId,
-      };
+        command: 'owner',
+      });
       pushWorkflowEventOnce(state, {
         at,
         action: 'owner_requirement',
@@ -10033,8 +10057,7 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
       if (decision === 'accepted') {
         row.status = 'accepted';
         state.phase = 'accepted';
-        state.ownerReview = {
-          ...mergedOwnerReview,
+        state.ownerReview = ownerReviewProjection(mergedOwnerReview, {
           ...auth,
           required: true,
           status: 'approved',
@@ -10043,7 +10066,7 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
           actor: auth.actor || (role === 'owner' ? 'owner' : role),
           at,
           opinion
-        };
+        });
       } else if (decision === 'iterate') {
         row.status = 'iteration';
         state.phase = 'iteration';
@@ -10072,8 +10095,7 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
         row.status = 'rejected';
         // 验收打回：需求同样回到需求评审（改完重走评审/派单），不停在 requirement。
         state.phase = REJECTED_REQUIREMENT_PHASE;
-        state.ownerReview = {
-          ...mergedOwnerReview,
+        state.ownerReview = ownerReviewProjection(mergedOwnerReview, {
           ...auth,
           required: true,
           status: 'rejected',
@@ -10081,8 +10103,9 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
           by: mergedOwnerReview.by || role,
           actor: auth.actor || (role === 'owner' ? 'owner' : role),
           at,
-          opinion
-        };
+          opinion,
+          command: 'owner'
+        });
       }
       pushWorkflowEventOnce(state, { at, action: 'owner_accept', role, project: ctx.name, requirementId: resolvedRequirementId, note: decision }, {
         actions: acceptEventActions,
@@ -10552,6 +10575,8 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     ownerDecisionStaleness,
     decisionMatchesDocVersion,
     latestRequirementDecision,
+    // B-20261117-012404-17af：ownerReview 唯一投影（三处写入者共用，字段集固定）
+    ownerReviewProjection,
     // R-dba4（工具侧）：需求行大白话 copy 写入口（IPC requirement:copy-save / CLI req copy 共用一个判据）
     saveRequirementCopy,
     launchSessions,
