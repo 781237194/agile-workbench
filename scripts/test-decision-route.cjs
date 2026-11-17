@@ -211,6 +211,8 @@ ok('AC8 工作流三条历史状态未变', JSON.stringify(statusesBefore) === J
 const report = { at: new Date().toISOString(), task: 'T-20261115-131211-c984', rule: 'R-5016/v1', pass, fail, failures, results };
 const outFile = path.join(REPO, '项目', '工作台改造修复', '_tmp', 'decision-route-run.json');
 fs.writeFileSync(outFile, JSON.stringify(report, null, 2) + '\n', 'utf8');
+// B-07b6 B1：并发验证——固定 run.json 保持证据路径稳定，另写一份带 pid 的副本，两进程互不覆盖
+fs.writeFileSync(outFile.replace(/\.json$/, `-${process.pid}.json`), JSON.stringify(report, null, 2) + '\n', 'utf8');
 console.log(`\n=== R-5016 工具侧断言：${pass} 通过 / ${fail} 失败 ===`);
 for (const f of failures) console.log(`✗ ${f.name}  ${f.detail}`);
 console.log(`报告：${outFile}`);

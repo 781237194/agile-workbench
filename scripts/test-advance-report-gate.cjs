@@ -318,6 +318,8 @@ ok('证据路径名含 FAIL：无 test_not_passed 审计', !events().slice(befor
 const report = { at: new Date().toISOString(), task: 'B-20261115-145830-2ae4', pass, fail, failures, results };
 const outFile = path.join(REPO, '项目', '工作台改造修复', '_tmp', 'advance-report-run.json');
 fs.writeFileSync(outFile, JSON.stringify(report, null, 2) + '\n', 'utf8');
+// B-07b6 B1：并发验证——固定 run.json 保持证据路径稳定，另写一份带 pid 的副本，两进程互不覆盖
+fs.writeFileSync(outFile.replace(/\.json$/, `-${process.pid}.json`), JSON.stringify(report, null, 2) + '\n', 'utf8');
 console.log(`\n=== B-2ae4/62b9 报告结论闸门断言：${pass} 通过 / ${fail} 失败 ===`);
 for (const f of failures) console.log(`✗ ${f.name}  ${f.detail}`);
 console.log(`报告：${outFile}`);
