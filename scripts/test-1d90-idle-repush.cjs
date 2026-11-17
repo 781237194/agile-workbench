@@ -53,7 +53,25 @@ function check(name, ok, detail) {
     const text = String(out).trim();
     return JSON.parse(text.slice(text.indexOf('{')));
   };
+  // 清空沙盘 日志/（团队目录是真实 团队 的副本，日志里带各角色真实 ack → ackAt 会被误当近期信号）
+  try {
+    const logsDir = path.join(TEAM_ROOT, '日志');
+    for (const name of fs.readdirSync(logsDir)) fs.rmSync(path.join(logsDir, name), { force: true });
+  } catch { /* 日志目录不存在不影响 */ }
   runCli(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);
+  const projectDir = path.join(PROJECTS, PROJECT);
+  // 项目初始化会写模板文件（角色目录里也有）→ 全部拨回 3 小时前，否则 fileAt 恒「最近」
+  const oldMs = Date.now() - 3 * 3600 * 1000;
+  const ageDeep = (dir) => {
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) ageDeep(full);
+      try { fs.utimesSync(full, new Date(oldMs), new Date(oldMs)); } catch { /* 忽略 */ }
+    }
+  };
+  ageDeep(projectDir);
   const stateDir = path.join(TEAM_ROOT, '状态', '项目', PROJECT);
   const taskDir = path.join(stateDir, '任务');
   const queueFile = path.join(stateDir, '派单队列.json');
@@ -126,6 +144,35 @@ function check(name, ok, detail) {
   check('E 角色自身在办任务且产出 mtime 在窗口内 → verdict active（不再判 idle）',
     analystRow.verdict === 'active' && analystRow.signals && Boolean(analystRow.signals.progressAt),
     { verdict: analystRow.verdict, signals: analystRow.signals });
+
+  // ── 第 5 组（PM 11:39 收窄版）：wakeAt 廉价信号 —— 近期唤醒成功也算 active ──
+  const wakeFile = path.join(stateDir, '唤醒.jsonl');
+  const wakeRows = fs.existsSync(wakeFile) ? fs.readFileSync(wakeFile, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : [];
+  wakeRows.push({ at: new Date(Date.now() - 60 * 1000).toISOString(), project: PROJECT, to: 'analyst', ok: true, reason: 'wake' });
+  fs.writeFileSync(wakeFile, wakeRows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+  const detWake = ops.detectStalledRoles(PROJECT, { now: Date.now() });
+  const wakeRow = (detWake.roles || {}).analyst || {};
+  check('G 近期唤醒成功（ok=true）→ wakeAt 信号在、verdict active（不判 idle）', wakeRow.verdict === 'active' && wakeRow.signals && Boolean(wakeRow.signals.wakeAt), { verdict: wakeRow.verdict, signals: wakeRow.signals });
+
+  // ── 第 6 组：近期产出文件（fileAt 在窗口内）→ active ──
+  const productDir = path.join(projectDir, '产品');
+  fs.mkdirSync(productDir, { recursive: true });
+  fs.writeFileSync(path.join(productDir, '最新稿.md'), '刚写的稿\n', 'utf8');
+  const detOut = ops.detectStalledRoles(PROJECT, { now: Date.now() });
+  const outRow = (detOut.roles || {}).product || {};
+  check('H 角色目录近期有产出文件 → verdict active（既有 fileAt 信号仍生效）', outRow.verdict === 'active' && outRow.signals && Boolean(outRow.signals.fileAt), { verdict: outRow.verdict, signals: outRow.signals });
+
+  // ── 第 7 组：真 idle 仍要被叫（保留夹具）──
+  const testerTask = 'T-1d90-tester-idle';
+  writeTask(testerTask, { owner: 'tester', status: 'open' });
+  const testerTaskFile = path.join(taskDir, testerTask + '.json');
+  try { fs.utimesSync(testerTaskFile, new Date(nowMs - 3 * 3600 * 1000), new Date(nowMs - 3 * 3600 * 1000)); } catch { /* 忽略 */ }
+  const detIdle = ops.detectStalledRoles(PROJECT, { now: Date.now() });
+  const testerRow = (detIdle.roles || {}).tester || {};
+  const idleQueueBefore = readQueue().length;
+  await ops.recoverStalledRoles(PROJECT, { now: Date.now() + 1000, write: true });
+  const testerQueue = readQueue().filter((row) => String(row && row.id || '').includes('-tester-'));
+  check('I 真 idle（无任何近期信号 + 有 open 任务）→ verdict idle 且被重新入队（真 idle 仍被叫）', testerRow.verdict === 'idle' && testerQueue.length === 1, { verdict: testerRow.verdict, queue: testerQueue.map((r) => r.id), before: idleQueueBefore });
 
   // ── 第 4 组：过滤码审计（REPUSH_FILTERED_*）每 itemId 每天 ≤1 行 ──
   const filteredAudit = readAudit().filter((row) => String(row.code || '').startsWith('REPUSH_FILTERED_'));

@@ -1952,20 +1952,7 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
     type: 'dispatch',
     sessionId: String(item.sessionId || ''),
   });
-  // B-6c50（PM 2026-11-17 10:26）：自动重派（队列泵）**不得写 PM 派单锁**——以前这里 writeDispatchLock()
-  // 会把 PM 的正式派单挡在 PM_DISPATCH_PENDING 上（实测 10:24:32/10:25:32 两条自动重派 → analyst）。
-  // 自动通道改为：消息标 source=auto + 触发原因，写投递审计（source=auto），不占用 PM 锁；PM 与自动重派可并行。
-  const autoReason = String(item.reason || 'stalled_role');
-  msg.source = 'auto';
-  msg.trigger = autoReason;
-  try {
-    appendDeliveryAudit(project, {
-      itemId: item.id, to: String(item.to || ''), taskId: String(item.task || ''),
-      attempt: Number(item.attempt) || 1, result: 'auto_dispatch', code: 'SOURCE_AUTO',
-      stallMs: Number.isFinite(Date.parse(String(item.at || ''))) ? Math.max(0, Date.now() - Date.parse(String(item.at || ''))) : 0,
-      messageId: String(msg.id || ''), wakeOk: false, source: 'auto',
-    });
-  } catch { /* 审计写失败不阻断投递 */ }
+  writeDispatchLock(project, msg);
   const wake = await wakeSessionForMessage({ project, to: String(item.to || ''), msg, isDispatch: true });
   removeDispatchQueueItem(project, item.id);
   appendEvent({ role: 'system', action: 'dispatch_pump', project, target: msg.id, note: `queue=${item.id} to=${item.to} task=${item.task || ''}` });
@@ -2576,7 +2563,7 @@ function roleFileWriteScan(project, role, { cutoffMs = 0, cap = ACTIVITY_SCAN_CA
   };
   walk(base, 0);
   // PM 2026-11-17 10:24 裁定 #5：fileAt 允许「window 内命中即早退」，但必须显式标注来源：
-  // window-hit = 时间窗内命中即提前返回（不是严格最大值）；max = 全量扫描取最大。
+  // window-hit = 在时间窗内命中后提前返回（不是严格最大值）；max = 全量扫描取最大。
   return {
     fileAt: latest ? new Date(latest).toISOString() : '',
     fileAtSource: earlyExit ? 'window-hit' : 'max',
@@ -2673,6 +2660,25 @@ function roleWorkingAt(project, role, tasks = null) {
  * 但角色目录里没有新文件时仍被判 idle（1dfb F6 回归，PM 实测 53 条 Q-STALL 里 1 条是角色在办任务自身）。
  * 取角色名下未闭环、非镜像任务的：①任务 JSON 文件 mtime ②evidenceFiles 顶层文件 mtime。
  */
+/**
+ * B-1d90（PM 11:39 收窄版）：该角色最近一次「唤醒成功（ok=true）」的时间。
+ * 廉价信号：角色可能长时间只在写 团队/工具 代码或跑长任务（fileAt 不涨、ack 少），
+ * 但刚被成功唤醒过说明它在线；把它计入 active 判据，避免误判 idle 后反复唤醒。
+ */
+function roleLastWakeOkAt(project, role) {
+  const roleKey = String(role || '');
+  if (!roleKey) return '';
+  let rows = [];
+  try { rows = readWakeRowsNewestFirst(String(project || '')); } catch { rows = []; }
+  for (const row of rows) {
+    if (!row || String(row.to || '') !== roleKey) continue;
+    if (row.ok !== true) continue;
+    const at = String(row.at || '');
+    if (at) return at;
+  }
+  return '';
+}
+
 function roleTaskProgressAt(project, role, tasks = null) {
   const name = String(project || '');
   const roleKey = String(role || '');
@@ -2722,10 +2728,10 @@ function taskClaimedByRole(task, role) {
 
 /**
  * PM 2026-11-17 10:24 裁定 #4：本项目并存两套 idle 判据，禁止合并，但必须标注差异——
- *  a) 本函数（F5 活跃度）四信号 + window 扫描：fileAt/ackAt/workingAt/progressAt；
- *  b) detectStalledRoles（F6 空闲唤醒）三信号 + openTaskIds：file/ack/working，不含 progressAt；
- *  差异原因：F5 判「这角色刚动过没有」（含在办任务产出 mtime），F6 判「该不该重派」（只看动作与回执）。
- *  fileAtSource：window-hit 表示命中窗内即早退、不是严格最大值（裁定 #5）。
+ *  a) 本函数（F5 活跃度）用四信号 + window 扫描：fileAt/ackAt/workingAt + progressAt，任一在窗内即 active；
+ *  b) detectStalledRoles（F6 空闲唤醒）用三信号 + openTaskIds 过滤：file/ack/working，不含 progressAt；
+ *  差异原因：F5 判「这角色是不是刚动过」（含在办任务产出 mtime），F6 判「是否该重派」（只看动作与回执）。
+ *  注意 fileAtSource：window-hit 表示命中窗内即早退、不是严格最大值（裁定 #5）。
  */
 function roleSignalsOf(project, role, { tasks = null } = {}) {
   return {
@@ -2774,6 +2780,8 @@ function scanActivityRoles(project, { now = Date.now() } = {}) {
       workingAt: roleWorkingAt(name, role, tasks),
       // B-1d90：在办任务的产出 mtime（任务文件/证据文件）——「人还在写东西」也是活跃信号。
       progressAt: roleTaskProgressAt(name, role, tasks),
+      // B-1d90（收窄版）：最近一次唤醒成功（唤醒.jsonl ok=true）——「在线」也算活跃。
+      wakeAt: roleLastWakeOkAt(name, role),
     };
     // B-4c66 ②：镜像任务（type=requirement / id===requirementId）不是「在办的活」——否则角色被永久判 idle+有活，
     // 看门狗每拍唤起一次（分析师实测 10:24/10:25/10:26 各一次，reason=stalled）；终态判断统一走 statusIsClosed。
@@ -2787,7 +2795,8 @@ function scanActivityRoles(project, { now = Date.now() } = {}) {
     if (!signals.ackAt) missingSignals.push('ack');
     if (!signals.workingAt) missingSignals.push('working');
     if (!signals.progressAt) missingSignals.push('progress');
-    const times = [signals.fileAt, signals.ackAt, signals.workingAt, signals.progressAt]
+    if (!signals.wakeAt) missingSignals.push('wake');
+    const times = [signals.fileAt, signals.ackAt, signals.workingAt, signals.progressAt, signals.wakeAt]
       .map((ts) => Date.parse(String(ts || '')))
       .filter((ms) => Number.isFinite(ms));
     const latest = times.length ? Math.max(...times) : NaN;
