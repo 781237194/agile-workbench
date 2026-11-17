@@ -18,6 +18,8 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 // R-ad44（T-b7dd）：JSON 状态写的唯一实现已收编到 团队/工具/lib/json-atomic.cjs（F1：Node20 不支持 require(ESM)，故实现是 CJS）。
 const jsonAtomicCore = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'json-atomic.cjs'));
+// b75c：Owner 决定「绑的是不是当前正文版本」的唯一判定函数（与 CLI 的 gates.mjs 共用同一份 CJS 单源）。
+const decisionVersionCore = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'decision-version.cjs'));
 const { execFile } = require('node:child_process');
 // R-1dfb：把 团队/工具/lib/ops.mjs（ESM）桥接进 CJS 壳层，动态 import 需要 file:// URL。
 const { pathToFileURL } = require('node:url');
@@ -7692,13 +7694,9 @@ function rowRequirementVersion(row) {
 // 无 basis / hash 不等 → false（旧决定，不参与同轮同状态去重）。
 function decisionVersionMatches(decision, row) {
   if (!decision) return false;
-  const basis = (decision.basis && decision.basis.requirement) || {};
-  const decSha = String(basis.sha256 || '');
-  const decContent = String(basis.contentHash || '');
+  // b75c：contentHash 优先，缺失才回落 sha256——判定本体在 团队/工具/lib/decision-version.cjs（与 CLI 同一份）。
   const cur = rowRequirementVersion(row);
-  if (decSha && cur.sha256 && decSha === cur.sha256) return true;
-  if (decContent && cur.contentHash && decContent === cur.contentHash) return true;
-  return false;
+  return decisionVersionCore.decisionMatchesVersion(decision, cur) === true;
 }
 
 // B-20261117-012404-17af：ownerReview 只保留**一份投影**（字段集固定）。
@@ -7752,15 +7750,10 @@ function latestRequirementDecision(row) {
   return list.length ? list[list.length - 1] : null;
 }
 
-/** 决定是否绑给定的正文版本（与 decisionVersionMatches 同口径，但吃磁盘版本对象）。 */
+/** 决定是否绑给定的正文版本（与 decisionVersionMatches 同口径，判定本体是 decision-version.cjs 单源）。 */
 function decisionMatchesDocVersion(decision, version) {
   if (!decision || !version) return false;
-  const basis = (decision.basis && decision.basis.requirement) || {};
-  const decSha = String(basis.sha256 || '');
-  const decContent = String(basis.contentHash || '');
-  if (decSha && version.sha256 && decSha === version.sha256) return true;
-  if (decContent && version.contentHash && decContent === version.contentHash) return true;
-  return false;
+  return decisionVersionCore.decisionMatchesVersion(decision, version) === true;
 }
 
 /**

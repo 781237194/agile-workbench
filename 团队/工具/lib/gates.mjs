@@ -9,6 +9,9 @@ import { fail, nowIso, sha256, readText } from './core.mjs';
 import { projectStatePaths } from './store.mjs';
 import { readRequirementDocs } from './scaffold.mjs';
 import { readRequirementDocVersion, versionGate } from './req-version.mjs';
+// b75c：决定「绑的是不是当前正文版本」的唯一判定函数（CJS 单源，壳层 src/team-tools.js 共用同一份）。
+import decisionVersion from './decision-version.cjs';
+const { decisionMatchesVersion } = decisionVersion;
 // B-20261115-123038-2e24：ownerReview 投影单源（旧版决定 → pending + stale:true + staleSha12）。
 import { ownerReviewView, ownerReviewStaleOf } from './owner-review-projection.mjs';
 
@@ -350,8 +353,11 @@ export function decisionIsCurrent(decision, row) {
   const decidedContent = String(requirement.contentHash || '');
   const currentSha = currentRequirementVersionOf(row);
   const currentContent = String((row && row.requirementReview && row.requirementReview.contentHash) || (row && row.contentHash) || '');
-  if (decidedSha && currentSha) return decidedSha === currentSha;
-  if (decidedContent && currentContent) return decidedContent === currentContent;
+  // b75c：与壳层同一函数（decision-version.cjs）——contentHash 优先，只差程序维护行不算旧版；
+  // contentHash 缺失才回落原始 sha256（旧决定兼容），行为与以前一致。
+  const matched = decisionMatchesVersion(decision, { sha256: currentSha, contentHash: currentContent });
+  if (matched === true) return true;
+  if (matched === false) return false;
   if (decidedSha || decidedContent) return false; // 有 hash 但当前版本未知 → 不能证明是当前版本
   const owner = (row && row.ownerReview && typeof row.ownerReview === 'object') ? row.ownerReview : null;
   const ownerStatus = String((owner && owner.status) || '');
