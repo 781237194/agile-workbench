@@ -408,11 +408,12 @@ export function taskGateOf({ task, row = null, readFailed = false } = {}) {
   // 否则产品重评通过、Owner 重批后任务仍被 TASK_GATE_NOT_APPROVED 挡死。terminated/rejected 仍按收口拦。
   const closedBad = ['terminated', 'rejected'].includes(rowStatus);
   if (!closedBad && ['approved', 'skipped', 'accepted'].includes(status)) return null;
-  const cause = (status === 'rejected' || closedBad || status === 'terminated')
-    ? 'rejected' : (status ? 'pending' : 'missing');
-  // B-20261115-123038-2e24：拒绝时把「ownerReview 的上次决定是否绑旧版」一并透出——
-  // 否则只报「未落账/未通过」，看不出其实是「上一版批准已过期，需重新评审」（界面 stale 徽标同口径）。
+  // B-20261117-132015-3b44：区分 stale 与 missing——「有旧版批准但正文已改版」应报 stale（需重评），
+  // 只有「从未落过决定」才是 missing。以前两者都报 missing（cause=missing），误导为「Owner 没批过」。
   const ownerReviewStale = ownerReviewStaleOf(row);
+  const cause = (status === 'rejected' || closedBad || status === 'terminated')
+    ? 'rejected' : (status ? 'pending' : (ownerReviewStale ? 'stale' : 'missing'));
+  // B-20261115-123038-2e24：拒绝时把「ownerReview 的上次决定是否绑旧版」一并透出——
   const staleHint = ownerReviewStale
     ? `；ownerReview 上次决定绑旧版正文（${ownerReviewStale.staleSha12 || '无版本凭据'}），需重新评审`
     : '';
