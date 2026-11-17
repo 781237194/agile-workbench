@@ -298,7 +298,8 @@ export function carrierOf(requirementId, tasks, row = null) {
       && ['programmer1', 'programmer2'].includes(String(t.owner || ''))
       // B-3db4（2026-11-14）：只看在办任务。以前不排除 done，会拿已完成的缺陷任务当载体，
       // 把新派的 develop 丢给那个早就收工的人（45c7 就被派给了已 done 的 a1cf 的 owner）。
-      && !['done', 'rejected', 'terminated', 'cancelled'].includes(String(t.status || '')))
+      && !statusIsClosed(t.status)
+      && String(t.status || '') !== 'rejected') // B-0868：闭环判定统一 statusIsClosed（accepted/terminated/cancelled/done），排除 rejected 业务态
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0];
   return hit ? String(hit.owner) : '';
 }
@@ -427,7 +428,8 @@ export function planForRow(row, ctx) {
       // 完全没有候选任务才是 no_carrier_task（产品未投载体）。
       const candidates = tasksOf(id, tasks, (t) => ['task', 'bug'].includes(String(t.type || ''))
         && isCurrentRound(row, t)
-        && !['done', 'rejected', 'terminated', 'cancelled'].includes(String(t.status || '')));
+        && !statusIsClosed(t.status)
+        && String(t.status || '') !== 'rejected'); // B-0868：同上，accepted 不再被当在办
       // T-5238 回归修复：只有“候选存在但 owner 为空”才是 carrier_owner_missing；
       // 候选 owner 非空但不是程序员A/B（如 analyst）仍按 F-1⑤ 落 no_carrier_task + alertPm。
       const ownerless = candidates.filter((t) => !String(t.owner || '').trim());
@@ -450,7 +452,7 @@ export function planForRow(row, ctx) {
   if (status === 'dev_done') {
     const devs = tasksOf(id, tasks, (t) => ['programmer1', 'programmer2'].includes(String(t.owner || '')));
     if (!devs.length) return { skip: 'no_dev_task' };
-    const undone = devs.filter((t) => String(t.status || '') !== 'done');
+    const undone = devs.filter((t) => !statusIsClosed(t.status)); // B-0868：done/accepted/cancelled/terminated 都算闭环
     if (undone.length) {
       return { gateBlocked: { code: 'DEV_TASKS_UNDONE', gate: 'DEV', message: `${undone.length} 个开发任务未完成：${undone.map((t) => t.id).slice(0, 3).join(',')}` } };
     }
@@ -466,7 +468,7 @@ export function planForRow(row, ctx) {
   if (status === 'test_done') {
     const tests = tasksOf(id, tasks, (t) => String(t.owner || '') === 'tester');
     if (!tests.length) return { skip: 'no_test_task', alertPm: true };
-    const undone = tests.filter((t) => String(t.status || '') !== 'done');
+    const undone = tests.filter((t) => !statusIsClosed(t.status)); // B-0868：同上，测试任务闭环单源
     if (undone.length) {
       return { gateBlocked: { code: 'TEST_TASKS_UNDONE', gate: 'TEST', message: `${undone.length} 个测试任务未完成：${undone.map((t) => t.id).slice(0, 3).join(',')}` } };
     }
