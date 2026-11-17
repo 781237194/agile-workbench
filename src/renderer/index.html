@@ -682,6 +682,17 @@
                 </div>
                 <p class="team-status-source">列含义：排队数（该角色 DSH 会话里 placement=queued 的条数，未知显示「—」不显示 0）、四态（fail / skip / ok / none，优先级 fail&gt;skip&gt;ok&gt;none，跳过优先于成功）、失败数、跳过数、最近成功投递时间（只取 ok 行）。统计窗口默认最近 24 小时；快照超过 120 秒未更新会降级黄条。</p>
                 <div id="session-queue-banner" class="sq-banner" role="status" hidden></div>
+                <!-- B-20261117-192034-e9b5（Owner 19:20 截图）：列头一行——右侧两列数字以前没有表头，owner 不知道是「失败数」「跳过数」。
+                     与 .sq-row 同 grid（--sq-cols 单源），字号 ≥12px；窗口写进列头（24h）。
+                     锚点 data-sq-header 固定；行内 data-sq-* 锚点全部保留。 -->
+                <div id="session-queue-header" class="sq-header" data-sq-header="1">
+                  <span class="sq-h sq-h-role">角色</span>
+                  <span class="sq-h sq-h-num" title="该角色 DSH 会话里 placement=queued 的条数；「—」表示未知/未接入（未知不等于 0）">排队数</span>
+                  <span class="sq-h sq-h-state" title="fail 失败（真的没送出去）/ skip 跳过（设计内不唤醒）/ ok 成功 / none 无记录；优先级 fail &gt; skip &gt; ok &gt; none">四态</span>
+                  <span class="sq-h sq-h-num" title="最近 24 小时唤醒失败数（真的没送出去）">失败数(24h)</span>
+                  <span class="sq-h sq-h-num" title="最近 24 小时跳过数（设计内不唤醒，不计失败也不计成功）">跳过数(24h)</span>
+                  <span class="sq-h sq-h-last" title="最近一次成功投递时间（只取 ok 行）；「无记录」表示窗口内没有成功投递">最近成功投递</span>
+                </div>
                 <div id="session-queue-rows" class="sq-rows" aria-label="六角色会话排队与唤醒状态"></div>
               </section>
             </div>

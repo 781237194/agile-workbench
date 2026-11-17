@@ -5067,27 +5067,44 @@ html[data-effect-level="reduced"] #awb-theme-particles { display: none; }
 .session-queue-block .sq-banner {
   margin: 2px 0 6px; padding: 6px 8px; border-radius: 5px;
   border: 1px solid var(--gold-line); background: var(--gold-soft);
-  color: var(--gold-2); font-size: 8.5px; line-height: 1.55;
+  color: var(--gold-2); font-size: 12px; line-height: 1.55;
 }
-.sq-rows { display: flex; flex-direction: column; gap: 4px; }
+/* B-20261117-192034-e9b5（Owner 19:20 截图：9px 看不清 + 右侧两列没列头）：
+   字号 9px→13px、内边距 3px6px→8px10px、行距 4→8、列头 ≥12px、面板最小宽 ≥560px。
+   列宽只在这里定义一次（--sq-cols），列头与数据行共用，避免两处各写一套漂移。 */
+.session-queue-block { --sq-cols: minmax(92px, 1.15fr) 76px 76px 104px 104px minmax(96px, 1fr); }
+/* B-20261117-192034-e9b5：列含义说明原来是 7.5px（比行还小），同为可读性根因；只在本面板放大，不动全局 .team-status-source。 */
+.session-queue-block .team-status-source { font-size: 12px; line-height: 1.6; }
+.sq-header {
+  display: grid; grid-template-columns: var(--sq-cols);
+  gap: 8px; align-items: center; margin: 0 0 4px; padding: 0 10px;
+  font-size: 12px; line-height: 1.5; color: var(--muted);
+}
+.sq-header .sq-h { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sq-header .sq-h-num { text-align: right; }
+.sq-header .sq-h-state { text-align: center; }
+.sq-header .sq-h-last { text-align: left; }
+.sq-rows { display: flex; flex-direction: column; gap: 8px; }
 .sq-row {
-  display: grid; grid-template-columns: minmax(64px, 1.4fr) 44px 52px 34px 34px minmax(64px, 1fr);
-  gap: 6px; align-items: center; padding: 3px 6px; border-radius: 5px;
+  display: grid; grid-template-columns: var(--sq-cols);
+  gap: 8px; align-items: center; padding: 8px 10px; border-radius: 6px;
   background: var(--panel-2); border: 1px solid var(--line);
-  font-size: 9px; color: var(--text);
+  font-size: 13px; line-height: 1.5; color: var(--text);
 }
 .sq-row .sq-role { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sq-row .sq-queued { font-family: var(--mono); text-align: right; color: var(--blue); }
 .sq-row[data-sq-known="false"] .sq-queued { color: var(--dim); }
-.sq-row .sq-state { font-family: var(--mono); text-align: center; border-radius: 4px; padding: 0 4px; background: var(--panel-3); color: var(--dim); }
+.sq-row .sq-state { font-family: var(--mono); text-align: center; border-radius: 5px; padding: 2px 6px; font-size: 12px; background: var(--panel-3); color: var(--dim); }
 .sq-row .sq-state-fail { color: var(--red); }
 .sq-row .sq-state-skip { color: var(--gold); }
 .sq-row .sq-state-ok { color: var(--green); }
 .sq-row .sq-fail, .sq-row .sq-skip { font-family: var(--mono); text-align: right; color: var(--muted); }
 .sq-row .sq-last-ok { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sq-empty { color: var(--dim); font-size: 8.5px; padding: 4px 6px; }
+.sq-empty { color: var(--dim); font-size: 12px; padding: 6px 8px; }
 .sq-backpressure {
-  margin: 0 0 6px; padding: 5px 8px; border-radius: 5px;
+  margin: 0 0 6px; padding: 6px 8px; border-radius: 5px;
   border: 1px solid var(--gold-line); background: var(--gold-soft);
-  color: var(--gold-2); font-size: 9px; line-height: 1.5;
+  color: var(--gold-2); font-size: 12px; line-height: 1.5;
 }
+/* B-20261117-192034-e9b5：面板最小宽 ≥560px（列头 + 6 列数字不挤压）；窄窗口按可用宽度收，不横向溢出 */
+#session-queue-drawer { min-width: min(560px, calc(100% - 52px)); }

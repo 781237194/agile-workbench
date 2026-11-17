@@ -248,6 +248,83 @@ async function runSqCheck(options = {}) {
   check('AC1 同角色混合（fail+skip+ok）→ 最近一条是 fail ⇒ fail，失败数 1 / 跳过数 1 各自独立', rowOf(panel, 'analyst').state === 'fail' && rowOf(panel, 'analyst').fail === '1' && rowOf(panel, 'analyst').skip === '1', rowOf(panel, 'analyst'));
   const ac1Shot = (await shotOf('sq-ac1-four-states.png', '#session-queue-panel')).file;
 
+  // ── B-20261117-192034-e9b5（Owner 19:20 截图）：可读性——字号 9px→≥13px、补列头、面板宽 ≥560 ──
+  const READABLE = `(() => {
+    const panel = document.getElementById('session-queue-panel');
+    const header = document.getElementById('session-queue-header');
+    const rowsHost = document.getElementById('session-queue-rows');
+    const drawer = document.getElementById('session-queue-drawer');
+    const row = document.querySelector('[data-sq-row]');
+    const state = row ? row.querySelector('[data-sq-state]') : null;
+    const px = (n) => (n ? parseFloat(getComputedStyle(n).fontSize) || 0 : 0);
+    const rowsEls = Array.from(document.querySelectorAll('[data-sq-row]'));
+    return {
+      hasHeader: Boolean(header),
+      headerVisible: Boolean(header) && getComputedStyle(header).display !== 'none',
+      headerCells: header ? Array.from(header.children).map((c) => String(c.textContent || '').trim()) : [],
+      headerAnchor: header ? header.getAttribute('data-sq-header') : '',
+      rowFont: px(row), stateFont: px(state), headerFont: px(header),
+      drawerWidth: drawer ? Math.round(drawer.getBoundingClientRect().width) : 0,
+      rowsOverflow: rowsHost ? { scrollWidth: rowsHost.scrollWidth, clientWidth: rowsHost.clientWidth } : null,
+      rowsCount: rowsEls.length,
+      anchorsKept: rowsEls.every((n) => n.hasAttribute('data-sq-row')
+        && Boolean(n.querySelector('[data-sq-queued]')) && Boolean(n.querySelector('[data-sq-state]'))
+        && Boolean(n.querySelector('[data-sq-fail-count]')) && Boolean(n.querySelector('[data-sq-skip-count]'))
+        && Boolean(n.querySelector('[data-sq-last-ok]'))),
+      panelDegraded: panel ? panel.getAttribute('data-sq-degraded') : '',
+    };
+  })()`;
+  const readable = await evalJs(READABLE);
+  check('可读性：列头存在（data-sq-header）且 6 列（角色 + 排队数 / 四态 / 失败 / 跳过 / 最近成功投递）',
+    readable.hasHeader === true && readable.headerAnchor === '1' && readable.headerCells.length === 6, readable.headerCells);
+  const headerText = (readable.headerCells || []).join('|');
+  check('可读性：列头写清含义与统计窗口（失败数(24h) / 跳过数(24h) 必须出现）',
+    ['排队数', '四态', '失败数(24h)', '跳过数(24h)', '最近成功投递'].every((t) => headerText.includes(t)), headerText);
+  check('可读性：数据行字号 ≥13px、四态徽标 ≥12px、列头 ≥12px（原来行 9px / 说明 8.5px）',
+    readable.rowFont >= 13 && readable.stateFont >= 12 && readable.headerFont >= 12,
+    { rowFont: readable.rowFont, stateFont: readable.stateFont, headerFont: readable.headerFont });
+  check('可读性：面板宽 ≥560px（六列数字不挤压）', readable.drawerWidth >= 560, { drawerWidth: readable.drawerWidth });
+  check('可读性：行容器无横向滚动（scrollWidth<=clientWidth）',
+    Boolean(readable.rowsOverflow) && readable.rowsOverflow.scrollWidth <= readable.rowsOverflow.clientWidth + 1, readable.rowsOverflow);
+  check('可读性：现有 data-sq-* 锚点全部保留（六行 × 排队数/四态/失败数/跳过数/最近成功）',
+    readable.rowsCount === 6 && readable.anchorsKept === true, { rowsCount: readable.rowsCount, anchorsKept: readable.anchorsKept });
+  // before/after：改前用旧样式覆盖复现（9px + 无列头），改后恢复真实样式；同一窗口、同一宽度、同一夹具。
+  // Owner 常用 1280 宽 → 先把内容区切到 1280×800 再拍，拍完还原。
+  const prevContentSize = win.getContentSize();
+  try { win.setContentSize(1280, 800); } catch { /* 切不动就按当前宽度拍，不阻断 */ }
+  await wait(600);
+  const narrow = await evalJs(READABLE);
+  check('可读性：1280 宽下字号 ≥13px、面板宽 ≥560px、行容器无横向滚动',
+    narrow.rowFont >= 13 && narrow.drawerWidth >= 560
+    && Boolean(narrow.rowsOverflow) && narrow.rowsOverflow.scrollWidth <= narrow.rowsOverflow.clientWidth + 1,
+    { rowFont: narrow.rowFont, drawerWidth: narrow.drawerWidth, rowsOverflow: narrow.rowsOverflow });
+  const OLD_STYLE_ID = 'sq-readability-old-style';
+  await evalJs(`(() => {
+    if (document.getElementById(${JSON.stringify(OLD_STYLE_ID)})) return true;
+    const s = document.createElement('style');
+    s.id = ${JSON.stringify(OLD_STYLE_ID)};
+    s.textContent = '#session-queue-header{display:none!important}.sq-row{font-size:9px!important;padding:3px 6px!important;gap:6px!important;grid-template-columns:minmax(64px,1.4fr) 44px 52px 34px 34px minmax(64px,1fr)!important}#session-queue-drawer{min-width:0!important}';
+    document.head.appendChild(s);
+    return true;
+  })()`);
+  await wait(250);
+  const beforeReadable = await evalJs(READABLE);
+  const readableBeforeShot = (await shotOf('sq-readable-before.png', '#session-queue-panel')).file;
+  await evalJs(`(() => { const n = document.getElementById(${JSON.stringify(OLD_STYLE_ID)}); if (n) n.remove(); return true; })()`);
+  await wait(250);
+  const restoredReadable = await evalJs(READABLE);
+  check('可读性：移除 before 覆盖后列头恢复可见、字号回到 ≥13px（after 图拍的是真实样式）',
+    restoredReadable.headerVisible === true && restoredReadable.rowFont >= 13,
+    { headerVisible: restoredReadable.headerVisible, rowFont: restoredReadable.rowFont });
+  const readableAfterShot = (await shotOf('sq-readable-after.png', '#session-queue-panel')).file;
+  check('可读性：before 覆盖确实复现旧样式（行 ≤9px 且列头不可见），不是「改后再拍一张」',
+    beforeReadable.rowFont > 0 && beforeReadable.rowFont <= 9 && beforeReadable.headerVisible === false,
+    { rowFont: beforeReadable.rowFont, headerVisible: beforeReadable.headerVisible });
+  check('可读性：before/after 截图都已落盘（同窗口同宽同夹具，1280 宽）',
+    Boolean(readableBeforeShot) && Boolean(readableAfterShot), { readableBeforeShot, readableAfterShot });
+  try { win.setContentSize(prevContentSize[0], prevContentSize[1]); } catch { /* 还原失败不影响断言 */ }
+  await wait(400);
+
   // ── B-20261117-181420-9688（P1）：四态取「最近一次投递」，计数与状态分离 ─────────
   writeJson(snapshotFile, snapshotOf(baseRoles, now));
   writeWake(wakeFile, [
@@ -415,7 +492,20 @@ async function runSqCheck(options = {}) {
   } else {
     check('隔离：没有真实唤醒日志路径（沙盘自足，无需比对）', true);
   }
-  check('隔离：自检没有往真实 团队/状态/ 写快照', !fs.existsSync(path.join(outRoot, '团队', '状态', '会话排队.json')), path.join(outRoot, '团队', '状态'));
+  // B-20261117-192034-e9b5 补：真实 团队/状态/会话排队.json 现在由 DSH 插件正常产出（本机重启后已有），
+  // 所以不能再断言「文件不存在」——改为断言「真实快照不是本次沙盘写的」（teamRoot 指向真实团队，不落在沙盘根下）。
+  const realSnapshot = path.join(outRoot, '团队', '状态', '会话排队.json');
+  const realSnapshotInfo = (() => {
+    if (!fs.existsSync(realSnapshot)) return { exists: false, teamRoot: '', project: '' };
+    try {
+      const parsed = JSON.parse(fs.readFileSync(realSnapshot, 'utf8'));
+      return { exists: true, teamRoot: String(parsed.teamRoot || ''), project: String(parsed.project || '') };
+    } catch { return { exists: true, teamRoot: '<unparsable>', project: '' }; }
+  })();
+  const realSnapshotNotFromSandbox = !realSnapshotInfo.exists
+    || Boolean(realSnapshotInfo.teamRoot) && !realSnapshotInfo.teamRoot.toLowerCase().startsWith(String(sandboxRoot).toLowerCase());
+  check('隔离：自检没有往真实 团队/状态/ 写快照（真实快照若存在，teamRoot 必须指向真实团队而不是本次沙盘）',
+    realSnapshotNotFromSandbox, { realSnapshot, sandboxRoot, ...realSnapshotInfo });
 
   // ── B-20261117-180718-9229 两条新增断言 ────────────────────────────────────
   // ①插件 teamRoot 解析不得返回相对路径（现场根因：config:{} + 无 env → 空串 → join('','状态',…)）。
