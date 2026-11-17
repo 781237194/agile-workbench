@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   PATHS, TeamError, fail, nowIso, sha256, hashFile, shortHash, exists, ensureDir, readText, readJson,
@@ -6814,19 +6815,38 @@ export function cmdSched(args) {
     : [];
   const roleQueues = readJson(path.join(dir, 'role_queues.json'), null);
   const rotateRounds = Number(args['rotate-rounds'] || 0) > 0 ? Number(args['rotate-rounds']) : undefined;
+  // PM 2026-11-17 21:27 实现意见④：AWB_NOW_MS 可注入（夹具不真等）
+  const nowMs = (() => {
+    const env = Number(process.env.AWB_NOW_MS || 0);
+    if (Number.isFinite(env) && env > 0) return env;
+    const argNow = Date.parse(String(args.now || ''));
+    return Number.isFinite(argNow) ? argNow : Date.now();
+  })();
   const advice = buildSchedAdvice({
-    now: Date.now(), project: b.project, rotateRounds, queue, rounds: roundsRaw, usage,
+    now: nowMs, project: b.project, rotateRounds, queue, rounds: roundsRaw, usage,
     tasks, taskSourceAvailable, roleQueues,
   });
-  // append-only 审计（唯一写盘）
+  // ③ 每次决策落一行审计：输入快照 hash + 命中规则（decision）+ 结果；④ 幂等+节流：同输入 60 秒内不重复落行。
   const logFile = path.join(dir, '调度建议.jsonl');
+  const inputHash = crypto.createHash('sha256').update(JSON.stringify({ queue: queue || null, rounds: roundsRaw || null, usage: usage || null, tasks, roleQueues: roleQueues || null, rotateRounds: rotateRounds || null })).digest('hex');
+  let throttled = false;
+  let auditRows = 0;
   try {
-    fs.appendFileSync(logFile, JSON.stringify({
-      at: advice.at, project: b.project, by: b.role,
-      roles: advice.roles.map((r) => ({ role: r.role, decision: r.decision, level: r.level, reasons: r.reasons })),
-      degraded: advice.degraded,
-    }) + '\n', 'utf8');
+    const prevRows = exists(logFile) ? fs.readFileSync(logFile, 'utf8').split(/\r?\n/).filter(Boolean).slice(-50) : [];
+    auditRows = prevRows.length;
+    const last = prevRows.length ? (() => { try { return JSON.parse(prevRows[prevRows.length - 1]); } catch { return null; } })() : null;
+    const lastMs = last ? Date.parse(String(last.at || '')) : NaN;
+    if (last && last.inputHash === inputHash && Number.isFinite(lastMs) && (nowMs - lastMs) < 60000) {
+      throttled = true;
+    } else {
+      fs.appendFileSync(logFile, JSON.stringify({
+        at: advice.at, project: b.project, by: b.role, inputHash, degraded: advice.degraded,
+        roles: advice.roles.map((r) => ({ role: r.role, available: r.available, rule: r.decision, decision: r.decision, level: r.level, reasons: r.reasons })),
+      }) + '\n', 'utf8');
+      auditRows += 1;
+    }
   } catch { /* 审计失败不阻断建议输出 */ }
+  advice.audit = { file: logFile, inputHash, throttled, rows: auditRows };
   if (args.json) {
     process.stdout.write(JSON.stringify(advice) + '\n');
     return;

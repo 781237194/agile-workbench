@@ -179,19 +179,20 @@ const base = (over = {}) => ({
   assert.ok(token, `沙盘 boot 失败：${boot.out.slice(0, 200)}${boot.err || ''}`);
 
   check('F1 CLI --json 恰好一行且字段齐全', () => {
-    const out = execFileSync(process.execPath, [path.join(SB_TEAM, '工具', 'team.mjs'), 'sched', 'advice', '--role', 'programmer1', '--project', PROJECT, '--boot', token, '--json'], { cwd: ROOT, encoding: 'utf8', timeout: 120000, env: env() });
+    const out = execFileSync(process.execPath, [path.join(SB_TEAM, '工具', 'team.mjs'), 'sched', 'advice', '--role', 'programmer1', '--project', PROJECT, '--boot', token, '--json'], { cwd: ROOT, encoding: 'utf8', timeout: 120000, env: { ...env(), AWB_NOW_MS: String(NOW) } });
     const lines = String(out).trim().split(/\r?\n/).filter(Boolean);
     assert.strictEqual(lines.length, 1, `stdout 不是一行：${lines.length}`);
     const j = JSON.parse(lines[0]);
     for (const k of ['ok', 'at', 'project', 'degraded', 'roles']) assert.ok(k in j, `缺字段 ${k}`);
     assert.ok(Array.isArray(j.roles) && j.roles.length);
     for (const r of j.roles) {
-      for (const k of ['role', 'decision', 'reasons', 'level', 'nextAction', 'sources']) assert.ok(k in r, `role 行缺 ${k}`);
+      for (const k of ['role', 'available', 'decision', 'reasons', 'level', 'nextAction', 'sources']) assert.ok(k in r, `role 行缺 ${k}`);
     }
+    for (const k of ['file', 'inputHash', 'throttled', 'rows']) assert.ok(k in (j.audit || {}), `audit 缺 ${k}`);
     return `${j.roles.length} 角色 / 单行`;
   });
 
-  check('G1 零副作用：三源文件 sha256+mtime 前后不变，只追加 调度建议.jsonl', () => {
+  check('G1 零副作用：三源文件 sha256+mtime 前后不变，只追加 调度建议.jsonl（含 inputHash）', () => {
     const watch = [
       path.join(SB_STATE, '会话排队.json'),
       path.join(SB_PROJ_STATE, '会话轮次.json'),
@@ -200,13 +201,27 @@ const base = (over = {}) => ({
     const before = watch.map((f) => [sha(f), stat(f)]);
     const logFile = path.join(SB_PROJ_STATE, '调度建议.jsonl');
     const logBefore = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').split(/\n/).filter(Boolean).length : 0;
-    const out = execFileSync(process.execPath, [path.join(SB_TEAM, '工具', 'team.mjs'), 'sched', 'advice', '--role', 'programmer1', '--project', PROJECT, '--boot', token, '--json'], { cwd: ROOT, encoding: 'utf8', timeout: 120000, env: env() });
-    assert.ok(JSON.parse(String(out).trim()).ok);
+    const out = execFileSync(process.execPath, [path.join(SB_TEAM, '工具', 'team.mjs'), 'sched', 'advice', '--role', 'programmer1', '--project', PROJECT, '--boot', token, '--json'], { cwd: ROOT, encoding: 'utf8', timeout: 120000, env: { ...env(), AWB_NOW_MS: String(NOW + 10 * 60 * 1000) } });
+    const parsed = JSON.parse(String(out).trim());
+    assert.ok(parsed.ok);
+    assert.strictEqual(parsed.audit.throttled, false);
+    assert.ok(/^[0-9a-f]{64}$/.test(parsed.audit.inputHash), 'inputHash 不是 sha256');
     const after = watch.map((f) => [sha(f), stat(f)]);
     assert.deepStrictEqual(after, before, '三源文件被改写');
     const logAfter = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').split(/\n/).filter(Boolean).length : 0;
     assert.strictEqual(logAfter, logBefore + 1, '调度建议.jsonl 应恰好 +1 行');
     return `三源未变；审计 +1（${logAfter}）`;
+  });
+
+  check('G2 幂等+节流：同输入 60 秒内重复调用 → throttled=true 且不再落行', () => {
+    const logFile = path.join(SB_PROJ_STATE, '调度建议.jsonl');
+    const logBefore = fs.readFileSync(logFile, 'utf8').split(/\n/).filter(Boolean).length;
+    const out = execFileSync(process.execPath, [path.join(SB_TEAM, '工具', 'team.mjs'), 'sched', 'advice', '--role', 'programmer1', '--project', PROJECT, '--boot', token, '--json'], { cwd: ROOT, encoding: 'utf8', timeout: 120000, env: { ...env(), AWB_NOW_MS: String(NOW + 5.5 * 60 * 1000) } });
+    const parsed = JSON.parse(String(out).trim());
+    assert.strictEqual(parsed.audit.throttled, true);
+    const logAfter = fs.readFileSync(logFile, 'utf8').split(/\n/).filter(Boolean).length;
+    assert.strictEqual(logAfter, logBefore, '节流期间不应再落行');
+    return 'throttled=true，行数不变';
   });
 
   fs.rmSync(SB, { recursive: true, force: true });
