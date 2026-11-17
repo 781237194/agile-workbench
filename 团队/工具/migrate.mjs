@@ -328,9 +328,10 @@ function cmdCheck(argv) {
     if (!token) throw new Error('no token');
     const sent = runCli(repoRoot, ['send', '--boot', token, '--project', project, '--to', 'tester', '--subject', '迁移冒烟', '--body', 'migrate-check 回环', '--json']);
     const msgId = sent && sent.message && sent.message.id;
-    const read = msgId ? runCli(repoRoot, ['read', '--boot', token, '--id', msgId, '--json']) : null;
+    // 回环必须由**收件人**读与 ack（发件人 token 读自己的投递件会 MESSAGE_NOT_FOUND/FORBIDDEN，实测 exit 3）
     const testerBoot = runCli(repoRoot, ['boot', '--role', 'tester', '--project', project, '--session', 'sess-tester', '--json']);
     const testerToken = String((testerBoot && (testerBoot.token || (testerBoot.boot && testerBoot.boot.token))) || '');
+    const read = msgId && testerToken ? runCli(repoRoot, ['read', '--boot', testerToken, '--id', msgId, '--json']) : null;
     const ack = msgId && testerToken ? runCli(repoRoot, ['ack', '--boot', testerToken, '--id', msgId, '--note', 'migrate-check 回环 ack', '--json']) : null;
     loop = { ok: Boolean(initOk && read && read.ok !== false && ack && ack.ok !== false), msgId, initOk };
   } catch (e) { loop = { ok: false, error: String(e && e.message || e).slice(0, 200), stderr: String((e && e.stderr) || '').slice(0, 400) || undefined }; }
