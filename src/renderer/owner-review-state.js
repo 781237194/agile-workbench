@@ -16,7 +16,11 @@
   'use strict';
 
   // 与 app.js 的 FLOW_CLOSED_STATUSES / flow-v4.js 的 CLOSED 同一口径（收口态不再进评审队列）。
-  const CLOSED_REQ_STATUSES = ['accepted', 'terminated', 'iteration', 'rejected'];
+  // PM 2026-11-17 15:5x 紧急热修（Owner 反馈「返工不出现在评审【等你决定】」反复出现）：
+  // `iteration` 不是终态（它是返工第 N 轮的进行态）。把它放进 closed 会让
+  // 「Owner 打回 → PM req iterate → 等 Owner 对当前正文重落决定」这条行**永远不出现**在评审列表，
+  // Owner 在界面上根本点不到。移出后由 isPending 的 stalePendingOf/reworkInfo 正常浮出。
+  const CLOSED_REQ_STATUSES = ['accepted', 'terminated', 'rejected'];
   const REWORK_LABEL = '已修改待复审';
 
   function textOf(value) {

@@ -59,10 +59,21 @@ check('打回后没有改动（updatedAt 早于打回）→ 不进待评审', S.
 const stillRejected = reworkCase({ status: 'rejected' });
 check('仍停在 rejected（没重新提交）→ 不进待评审', S.isPending(stillRejected) === false, S.isPending(stillRejected));
 
-/* ── 三、收口态一律不进队列 ───────────────────────────────────────────── */
-for (const status of ['accepted', 'terminated', 'iteration']) {
+/* ── 三、收口态不进队列；iteration 不是终态（PM 2026-11-17 热修） ───────── */
+for (const status of ['accepted', 'terminated']) {
   check('收口态 ' + status + ' → 不进待评审（即使上次是打回）', S.isPending(reworkCase({ status })) === false);
 }
+// PM 2026-11-17 15:5x：Owner 打回 → PM req iterate → 行停在 iteration 等 Owner 对当前正文重落决定。
+// 旧实现把 iteration 当终态隐藏，导致 Owner 在评审列表里「看不到返工项」（Owner 反馈反复出现）。
+const iterRework = reworkCase({ status: 'iteration' });
+check('打回后 PM 已转下一轮（status=iteration）→ 仍进待评审（返工待复审）',
+  S.isPending(iterRework) === true && S.reworkInfo(iterRework).isRework === true, S.reworkInfo(iterRework));
+// 但 iteration 且决定已绑当前正文（已通过）→ 不算待决定。
+const iterApproved = Object.assign(reworkCase({ status: 'iteration' }), {
+  requirementHash: DOC,
+  decisions: [{ status: 'approved', at: '2026-11-14T13:00:00Z', basis: basisOf() }],
+});
+check('iteration 且最新决定 approved 且绑当前正文 → 不进待评审', S.isPending(iterApproved) === false);
 
 /* ── 四、首次评审 / 已通过 / 已跳过 / 待决定 的既有口径不回归 ────────────────── */
 const firstReview = { id: 'R-1', status: 'approved', updatedAt: T('2026-11-14T10:00:00Z') };

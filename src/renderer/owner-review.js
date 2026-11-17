@@ -89,7 +89,7 @@
     if (OR_STATE) return OR_STATE.isPending(req);
     const status = String((req && req.status) || '');
     const owner = decidedStatusOf(req);
-    if (['accepted', 'terminated', 'iteration', 'rejected'].includes(status)) return false;
+    if (['accepted', 'terminated', 'rejected'].includes(status)) return false; // PM 热修 2026-11-17：iteration 非终态，返工行必须能进待评审
     if (['approved', 'skipped', 'rejected'].includes(owner)) return false;
     return status === 'approved' || status === 'owner_review';
   }
@@ -113,7 +113,7 @@
     const rows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
     return rows.filter((row) => {
       const status = String((row && row.status) || '');
-      if (['accepted', 'terminated', 'iteration', 'rejected'].includes(status)) return false;
+      if (['accepted', 'terminated', 'rejected'].includes(status)) return false; // PM 热修 2026-11-17：iteration 非终态，返工行必须能进待评审
       // B-dee4：Owner 决定一律走派生值（decisions 末条优先）。只读 ownerReview.status 时，
       // 被产品复审重置成 pending 的已通过行会被算进「一键代管覆盖 N 条」，数字虚高、还会被再交出去一次。
       const owner = decidedStatusOf(row);
@@ -925,7 +925,9 @@
   /** 筛选条（唯一契约：全部 + 四档；把新档做成筛选项会改掉 main.js --review 的 chips=5 断言）。 */
   const LIST_FILTERS = ['pending', 'running', 'test_done', 'closed']
     .map((key) => LIST_BUCKETS.find((bucket) => bucket.key === key));
-  const CLOSED_REQ_STATUSES = ['accepted', 'done', 'terminated', 'iteration', 'rejected'];
+  // PM 热修 2026-11-17：iteration 不是终态（返工第 N 轮进行中），放进 closed 会让
+  // 「Owner 打回 → PM req iterate → 待 Owner 对当前正文重落决定」的行在列表里消失。
+  const CLOSED_REQ_STATUSES = ['accepted', 'done', 'terminated', 'rejected'];
   // B-20261116-061156-6155：列表里混入「工作流没有、只有任务镜像/缓存」的需求时，必须当场标出并禁用决定，
   // 不能等点了 owner:decide 才报 WORKFLOW_MUTATE_FAILED。source='task-only' 就是快照里 task 兜底出来的行。
   function isUnregisteredOf(req) {
