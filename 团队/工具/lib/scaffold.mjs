@@ -764,6 +764,9 @@ export function bootDocSpecs(root, roleDirName) {
     { key: 'projectIndex', label: '项目索引', path: path.join(base, '项目索引.md'), rel: '项目索引.md', required: true },
     { key: 'requirementOverview', label: '需求总览', path: path.join(base, '需求', '00-需求总览.md'), rel: '需求/00-需求总览.md', required: true },
     { key: 'collaboration', label: '协作准则', path: path.join(base, '协作准则.md'), rel: '协作准则.md', required: false },
+    // T-20261117-184114-4358（R-bcae）：基础流程 skill 索引（随仓库分发，Owner 批准版本）。
+    // optional：未建时只提示不阻断 boot；不进 rulesHash（rulesHash 只取宪法/铁律/角色卡/名册）。
+    { key: 'skillIndex', label: '基础流程 skill 索引', path: path.join(PATHS.teamRoot, 'skill', '基础流程', '00-索引.md'), rel: '团队/skill/基础流程/00-索引.md', required: false, core: false },
     // R-5b14（每角色默认交接文档）：optional 发现项，只提示不阻断、**不进 rulesHash**
     // （rulesHash 只取 constitution/iron/roleCard/teamConfig，见 store.readDocSet）。
     { key: 'handover', label: '交接文档', path: role ? path.join(base, role, '产出', '交接-最新.md') : '', rel: role ? `${role}/产出/交接-最新.md` : '', required: false, core: false },

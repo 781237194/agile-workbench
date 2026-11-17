@@ -4469,6 +4469,18 @@ export async function cmdBoot(args) {
   }
   lines.push(`必读-按需已读: ${optionalRead.length ? optionalRead.map((d) => d.rel || d.path).join(' ') : '（无）'}`);
   if (optionalMissing.length) lines.push(`必读-未读: ${optionalMissing.map((d) => d.rel || d.label).join(' ')}`);
+  // T-20261117-184114-4358（R-bcae）：基础流程 skill 索引——已读/未建都明示，不静默；新 PM 额外提示不可更改。
+  try {
+    const allDocs = Array.isArray(docs.docs) ? docs.docs : [];
+    const skillDoc = allDocs.find((d) => String(d.key || '') === 'skillIndex') || null;
+    const skillExists = Boolean(skillDoc && skillDoc.exists !== false && skillDoc.hash);
+    if (skillExists) {
+      lines.push(`skill: 索引已读 团队/skill/基础流程/00-索引.md（按需读本人 ${role}.md；基础流程为 Owner 批准版本，manifest: skill-manifest.json）`);
+    } else {
+      lines.push(`skill: 未建 skill（创建路径 团队/skill/基础流程/00-索引.md + 本人 ${role}.md；模板格式见需求 R-bcae）`);
+    }
+    if (role === 'pm' && skillExists) lines.push('skill 提示: 基础流程 skill 为 Owner 批准版本，不可更改（改版须 Owner 批准 + manifest 归档）。');
+  } catch { /* skill 提示失败不阻断 boot */ }
   if (taskDocs.length) {
     lines.push(`必读-任务相关（${taskDocs.length}）: ${taskDocs.map((d) => d.rel).join(' ')}`);
   } else {
