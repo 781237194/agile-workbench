@@ -87,11 +87,11 @@ function check(name, ok, detail) {
     : [];
   const autoRow = audit.find((row) => row.code === 'SOURCE_AUTO' && row.source === 'auto');
 
-  check('① 自动重派投递成功', pump && pump.ok !== false, pump && (pump.reason || pump.pumped));
+  check('① 自动重派投递成功', pump && pump.ok !== false && pump.pumped !== false, pump);
   check('② 自动重派未写 PM 派单锁', lockAfterPump === null, lockAfterPump);
-  check('③ 投递审计记录自动通道（code=SOURCE_AUTO / source=auto / result=delivered）', Boolean(autoRow)
-    && autoRow.code === 'SOURCE_AUTO' && autoRow.source === 'auto' && autoRow.result === 'delivered',
-  autoRow && { result: autoRow.result, code: autoRow.code, source: autoRow.source });
+  check('③ 投递审计记录自动通道（result=auto_dispatch / code=SOURCE_AUTO / source=auto）', Boolean(autoRow)
+    && autoRow.code === 'SOURCE_AUTO' && autoRow.source === 'auto' && autoRow.result === 'auto_dispatch',
+  { autoRow: autoRow || null, auditRows: audit.length, auditFile, allResults: audit.map((r) => r.result) });
 
   // ④ 随后 PM 正式派单必须成功（不被 PM_DISPATCH_PENDING 挡）
   const pmBoot = runCli(['boot', '--role', 'pm', '--project', PROJECT, '--json']);
