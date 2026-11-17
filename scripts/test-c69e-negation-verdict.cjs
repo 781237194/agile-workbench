@@ -1,5 +1,5 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261115-171015-c69e 沙盘断言：报告结论门识别否定句/零值短语。
  *
@@ -22,7 +22,7 @@ const { execFileSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', 'c69e');
+const SB = uniqueSandbox('c69e');
 const TEAM = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM, '工具', 'team.mjs');

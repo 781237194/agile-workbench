@@ -1,5 +1,5 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-e717 团队工具侧回归：决策箱范围（F-1）/ 语义（F-1b）/ 文案（F-2）/ 历史兜底（F-5）。
  *
@@ -11,7 +11,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', 'decision-scope-test');
+const SB = uniqueSandbox('decision-scope-test');
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TEAM_TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');

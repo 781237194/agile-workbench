@@ -1,12 +1,12 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** T-be21 回归：派单前自动 boot 接线（先 boot 后投递）。 */
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', 'be21-dispatch');
+const SB = uniqueSandbox('be21-dispatch');
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TEAM_TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');

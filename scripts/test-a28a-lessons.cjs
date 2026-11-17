@@ -4,10 +4,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const cp = require('node:child_process');
+const { uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 B2：唯一沙盘
 
 const REPO = path.resolve(__dirname, '..');
 const SRC_TEAM = path.join(REPO, '团队');
-const BASE = path.join(REPO, '_tmp', 'a28a-smoke');
+const BASE = uniqueSandbox('a28a-smoke');
 const ROOT = path.join(BASE, 'team');
 const PROJECTS = path.join(BASE, 'projects');
 const PROJ = 'sbox';

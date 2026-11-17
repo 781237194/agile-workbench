@@ -13,10 +13,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn, execFileSync } = require('node:child_process');
+const { uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 B2：唯一沙盘
 
 const ROOT = path.resolve(__dirname, '..');
 const PROJECT = '工作台改造修复';
-const BASE = path.join(ROOT, '_tmp', 'c1ed-obs');
+const BASE = uniqueSandbox('c1ed-obs');
 const DATA = path.join(BASE, 'data');
 const TEAM = path.join(BASE, '团队');
 const STATE = path.join(TEAM, '状态', '项目', PROJECT);

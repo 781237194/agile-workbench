@@ -1,5 +1,5 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-c42e（P0）回归：消息移档到 cur 后 ack 不能报 INTERNAL ENOENT。
  *
@@ -18,7 +18,7 @@ const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', 'ack-cur-test');
+const SB = uniqueSandbox('ack-cur-test');
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TEAM_TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');

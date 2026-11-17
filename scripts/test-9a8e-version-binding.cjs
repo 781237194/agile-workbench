@@ -1,5 +1,5 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-9a8e / T-20261115-012022-df1d 断言：评审与正文版本绑定（version + hash / req stale / d225 合流）。
  *
@@ -20,7 +20,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', '9a8e');
+const SB = uniqueSandbox('9a8e');
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');

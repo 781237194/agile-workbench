@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * T-20261117-081947-6ea6（团队看板移除【提案】【提交】【文件】三张数字卡片）真窗口取证。
  *
@@ -26,7 +26,7 @@ const PROJECT = '工作台改造修复';
 const REAL_TEAM = path.join(ROOT, '团队');
 const REAL_STORE = path.join(ROOT, 'data', 'userdata', 'workbench.json');
 const REAL_TEAM_JSON = path.join(REAL_TEAM, '状态', '团队.json');
-const BASE = path.join(ROOT, '_tmp', 'board-cards');
+const BASE = uniqueSandbox('board-cards');
 const SB = path.join(BASE, 'sb');
 const DATA = path.join(SB, 'data');
 const TEAM = path.join(SB, '团队');

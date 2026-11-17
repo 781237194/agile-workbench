@@ -1,12 +1,12 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** R-bad3 回归：boot 自动化（单飞 / 复用 / 审计字段 / 失败告警去重）。 */
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', 'bad3-autoboot');
+const SB = uniqueSandbox('bad3-autoboot');
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TEAM_TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');

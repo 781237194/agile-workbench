@@ -1,5 +1,5 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * R-5b14（每角色默认交接文档）自检：AC1–AC12。
  *
@@ -15,7 +15,7 @@ const { execFileSync } = require('node:child_process');
 const ROOT = path.resolve(__dirname, '..');
 const TEAM_MJS = path.join(ROOT, '团队', '工具', 'team.mjs');
 const SCAFFOLD = path.join(ROOT, '团队', '工具', 'lib', 'scaffold.mjs');
-const SB = path.join(ROOT, '_tmp', 'handover');
+const SB = uniqueSandbox('handover');
 const TEAM = path.join(SB, '团队');
 const PROJ_ROOT = path.join(SB, '项目');
 const PROJ = path.join(PROJ_ROOT, '工作台改造修复');
