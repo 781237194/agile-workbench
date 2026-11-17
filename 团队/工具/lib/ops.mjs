@@ -39,7 +39,7 @@ import { validateSkillContent, recordSkillEvaluation, readSkillEvaluations, skil
 // T-20261117-211833-7a30（R-a4c7）：调度建议纯函数（三源 → 五类建议）。
 import { buildSchedAdvice, SCHED_ROTATE_ROUNDS_DEFAULT } from './sched-advice.mjs';
 // B-20261117-212853-3027：skill 清单内核（verify / template write 与脚本共用单源）。
-import { verifySkillSet, writeSkillStateFile, writeSkillTemplates } from './skill-manifest.mjs';
+import { verifySkillSet, writeSkillStateFile, writeSkillTemplates, runSkillSelfCheck } from './skill-manifest.mjs';
 import {
   auditGate, detectPhaseEdit, gateDesign, gateIteration, gateRequirementFinal, gateRequirementDoc,
   gateRequirementReview, gateStageRole, gateTestReport, gateTestability, gateConfig,
@@ -6771,8 +6771,13 @@ function cmdReqSync(args) {
  *   skill template write [--out <目录>] [--force]  把六主题模板写到项目内 skill/（或指定目录）
  */
 export function cmdSkill(args) {
-  const b = bootFor(args, 'skill');
-  const sub = String(args._[1] || 'status');
+  const sub0 = String(args._[1] || 'status');
+  // B-214842-d138：`skill check --selftest` 是只读自检入口（AC10），不写任何状态 → 允许免令牌运行；
+  // 其余子命令仍必须带 --boot（身份校验）。
+  const b = (sub0 === 'check' && args.selftest)
+    ? { role: String(args.role || 'system'), project: String(args.project || '') }
+    : bootFor(args, 'skill');
+  const sub = sub0;
   if (sub === 'status') {
     const rows = readSkillEvaluations(b.project).filter((r) => String(r.role || '') === b.role);
     const last = rows.length ? rows[rows.length - 1] : null;
@@ -6813,6 +6818,20 @@ export function cmdSkill(args) {
     return;
   }
   if (sub === 'check') {
+    // B-20261117-214842-d138（bcae AC10）：`skill check --selftest` ——沙盘跑 AC1–AC8，输出 SKILL_CHECK_OK，真实状态零写入。
+    if (args.selftest) {
+      const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+      const r = runSkillSelfCheck({ root });
+      const payload = { ok: r.ok, entry: 'skill check --selftest', checks: r.checks, realBefore: r.realBefore };
+      if (!r.ok) fail('SKILL_SELFTEST_FAILED', `skill 自检未通过：${r.checks.filter((c) => !c.ok).map((c) => `${c.ac}（${c.detail}）`).join('；')}`, payload, 1);
+      if (args.json) process.stdout.write(JSON.stringify(payload) + '\n');
+      else {
+        // 首行固定「SKILL_CHECK_OK <完整 JSON 载荷>」（单行，便于脚本/验收直接取），明细行跟在后面。
+        console.log('SKILL_CHECK_OK ' + JSON.stringify(payload));
+        for (const c of r.checks) console.log(`- ${c.ac}: ${c.ok ? 'PASS' : 'FAIL'} ${c.detail || ''}`);
+      }
+      return;
+    }
     const file = String(args.file || '').trim();
     if (!file) fail('BAD_FILE', '需要 --file <skill 文件路径>', {}, 1);
     const project = loadProject(b.project);
