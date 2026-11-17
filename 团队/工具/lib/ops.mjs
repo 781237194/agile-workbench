@@ -1886,11 +1886,23 @@ export async function pmMailboxDigest(project, { now = Date.now(), maxAgeMs = 15
   let inbox = [];
   try { inbox = listInbox('pm', { project: '' }); } catch { inbox = []; }
   const woken = wokenMessageIdsOf(name);
+  // B-3c45（PM 插队修 2026-11-17 20:30）：摘要按 messageId 持久去重。
+  // 旧实现只写唤醒日志（日志里是合成 digest id，不含被摘要消息 id），导致同一批消息每拍重复唤醒。
+  // 这里落盘 邮箱摘要已通知.json：同一 messageId 24h 内只进摘要一次；已 read（有 readAt）的不再进摘要。
+  const notifiedFile = path.join(projectStatePaths(name).dir, '邮箱摘要已通知.json');
+  let notified = {};
+  try { const raw = readJson(notifiedFile, {}); notified = (raw && typeof raw === 'object' && raw.ids) ? raw.ids : {}; } catch { notified = {}; }
+  const pruneBefore = now - 24 * 3600 * 1000;
+  for (const [id, at] of Object.entries(notified)) {
+    const t = Number(at);
+    if (!Number.isFinite(t) || t < pruneBefore) delete notified[id];
+  }
   const fresh = [];
   for (const msg of inbox) {
     if (!msg || !msg.id) continue;
     const id = String(msg.id);
-    if (woken.has(id)) continue;
+    if (woken.has(id) || notified[id]) continue;
+    if (msg.readAt || msg.ackAt) continue; // 已读/已回执的不再进摘要
     const atMs = Date.parse(String(msg.ts || msg.deliveredAt || ''));
     if (!Number.isFinite(atMs) || now - atMs > maxAgeMs) continue;
     fresh.push(msg);
@@ -1931,6 +1943,12 @@ export async function pmMailboxDigest(project, { now = Date.now(), maxAgeMs = 15
       project: name,
     },
   });
+  // 唤醒发出后（ok 或 ALREADY_DELIVERED 都算已通知）把被摘要的 messageId 落盘，保证同一消息只叫一次。
+  if (wake && (wake.ok === true || wake.skipped === 'SELFTEST')) {
+    const at = nowIso();
+    for (const id of ids) notified[id] = at;
+    try { writeJson(notifiedFile, { updatedAt: at, ids: notified }); } catch { /* 写失败下次仍会去重失败，但不阻断唤醒 */ }
+  }
   return { ok: true, project: name, pending: fresh.length, woken: picked.length, messageIds: ids.slice(0, 5), byType, wake };
 }
 
