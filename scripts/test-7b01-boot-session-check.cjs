@@ -64,6 +64,14 @@ delete team.activeProject;
 fs.writeFileSync(path.join(SB_TEAM, '状态', '团队.json'), JSON.stringify(team, null, 2));
 assert.ok(cli(['project', 'add', '--name', PROJECT, '--team-mode', 'full'], { TEAM_SELFTEST: '1' }).ok, '沙盘 project add 失败');
 
+const teamPath = path.join(SB_TEAM, '状态', '团队.json');
+const setRoster = (sid) => {
+  const t = JSON.parse(fs.readFileSync(teamPath, 'utf8'));
+  const m = (t.members || []).find((x) => x.role === 'programmer1');
+  if (m) m.sessionId = String(sid || '');
+  fs.writeFileSync(teamPath, JSON.stringify(t, null, 2));
+};
+
 check('B1 无 DSH 环境 → skipped 显式标注 + stderr 告警', () => {
   const r = cli(['boot', '--role', 'programmer1', '--project', PROJECT, '--session', 's-a'], { TEAM_SELFTEST: '1' });
   assert.ok(r.ok, r.out.slice(0, 300));
@@ -71,7 +79,8 @@ check('B1 无 DSH 环境 → skipped 显式标注 + stderr 告警', () => {
   return 'skipped 可见';
 });
 
-check('B2 fake 列表含 session-real → boot ok 且「会话校验: ok」', () => {
+check('B2 fake 列表含名册会话 → boot ok 且「会话校验: ok」', () => {
+  setRoster('session-real-7b01');
   const r = cli(['boot', '--role', 'programmer1', '--project', PROJECT, '--session', 'session-real-7b01'], {
     TEAM_SELFTEST: '1', TEAM_DSH_FAKE: JSON.stringify([{ sessionId: 'session-real-7b01' }]),
   });
@@ -80,7 +89,8 @@ check('B2 fake 列表含 session-real → boot ok 且「会话校验: ok」', ()
   return 'ok 可见';
 });
 
-check('B3 fake 列表不含 session-ghost → bootstrap 失败 SESSION_NOT_FOUND_IN_DSH（不 exit 0）', () => {
+check('B3 fake 列表不含名册会话 → boot 失败 SESSION_NOT_FOUND_IN_DSH（不 exit 0）', () => {
+  setRoster('session-ghost-7b01');
   const r = cli(['boot', '--role', 'programmer1', '--project', PROJECT, '--session', 'session-ghost-7b01'], {
     TEAM_SELFTEST: '1', TEAM_DSH_FAKE: JSON.stringify([{ sessionId: 'session-real-7b01' }]),
   });

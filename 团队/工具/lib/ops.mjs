@@ -55,7 +55,6 @@ import { buildDispatchPrompt, buildNoticePrompt, buildWakeHeader, buildWakeLine,
 import { assertNoPendingSubagent, subagentAudit } from './subagent.mjs';
 import {
   handoverForBoot, validateHandover, assertSessionMapConsistent, probeRoleSession, nudgeRoleBoot, consumeBootQueue,
-  listDshSessions,
 } from './session.mjs';
 import { validatePmAcceptEvidence, parseEvidenceArg, validateAcceptGates } from './pm-accept-evidence.mjs';
 import { detectOptionalPlugins, optionalPluginMarks, pluginStatusLines } from './plugins.mjs';
@@ -4474,24 +4473,22 @@ function writeWorkflowBootState(projectName, roleId, records, meta) {
   return { ok: true, file, docs: Object.keys(docsMap).length, complete: next.boots[roleId].complete };
 }
 
-/** B-20261117-224146-7b01：boot 校验名册 sessionId 是否真在 DSH 会话列表。
- *  返回 {status: 'ok'|'missing'|'skipped'|'absent'}；DSH 不可用时 skipped（显式标注，不静默放行）。 */
-async function verifyBootSessionExists(role, sessionId) {
-  const sid = String(sessionId || '');
-  if (!sid) return { status: 'absent' };
+/** B-20261117-224146-7b01：boot 校验**名册会话**是否真在 DSH 会话列表（只读复用 session.mjs 的 probeRoleSession，
+ *  不改 session.mjs / auto-rotate.mjs）。返回 {status:'ok'|'missing'|'skipped'|'absent', rosterSessionId}。 */
+async function verifyBootSessionExists(projectName, role) {
   try {
     // 沙盘策略：TEAM_SELFTEST=1 且未显式给 TEAM_DSH_FAKE 时按策略豁免（显式 skipped，不静默）；
-    // 给了 fake 列表则照常校验（夹具可测「不存在会话必失败」）。
+    // 给了 fake 列表则照常校验（夹具可测「名册写不存在会话必失败」）。
     const selftest = String(process.env.TEAM_SELFTEST || '') === '1';
     if (selftest && !String(process.env.TEAM_DSH_FAKE || '').trim()) {
       return { status: 'skipped', reason: 'TEAM_SELFTEST=1（沙盘按策略豁免 DSH 会话存在性校验）' };
     }
-    const res = await listDshSessions();
-    if (!res || res.ok !== true) return { status: 'skipped', reason: String((res && res.why) || 'DSH 会话列表不可用（离线/未连 DSH）') };
-    const ids = new Set((res.items || []).map((x) => String((x && x.sessionId) || '')).filter(Boolean));
-    const fake = Boolean(res.fake);
-    if (ids.has(sid)) return { status: 'ok', count: ids.size, fake };
-    return { status: 'missing', count: ids.size, fake };
+    const probe = await probeRoleSession(projectName, role);
+    const rosterSessionId = String((probe && probe.sessionId) || '');
+    if (!rosterSessionId) return { status: 'absent', rosterSessionId };
+    if (probe.state === 'missing') return { status: 'missing', rosterSessionId, dshOk: true };
+    if (probe.state === 'unknown' || probe.dshOk === false) return { status: 'skipped', reason: String((probe && probe.why) || 'DSH 会话列表不可用（离线/未连 DSH）'), rosterSessionId };
+    return { status: 'ok', rosterSessionId };
   } catch (e) {
     return { status: 'skipped', reason: `会话列表读取失败：${String((e && e.message) || e)}` };
   }
@@ -4508,11 +4505,11 @@ export async function cmdBoot(args) {
   const docs = readDocSet(role, project);
   const teamMode = docs.teamMode || projectTeamMode(project);
   const sessionId = sessionOf(args);
-  // B-7b01：名册会话必须真实存在于 DSH（否则换人失败被假绿掩盖）；先校验、后发令牌。
-  const sessionExistence = await verifyBootSessionExists(role, sessionId);
+  // B-7b01：名册会话必须真实存在于 DSH（否则换人失败被假绿掩盖）；先校验、后发令牌。只读复用 session.mjs 的 probeRoleSession。
+  const sessionExistence = await verifyBootSessionExists(projectName, role);
   if (sessionExistence.status === 'missing') {
-    fail('SESSION_NOT_FOUND_IN_DSH', `名册里 ${role} 的会话 ${sessionId} 不在 DSH 会话列表中（DSH 现有 ${sessionExistence.count} 个会话${sessionExistence.fake ? '，当前为沙盘 fake 列表' : ''}）：疑似换人失败/手工改名册。处理：先 session rotate 生成真实会话再重 boot，或联系 PM 修正 团队/状态/团队.json。`, {
-      role, sessionId, dshCount: sessionExistence.count, fake: sessionExistence.fake,
+    fail('SESSION_NOT_FOUND_IN_DSH', `名册里 ${role} 的会话 ${sessionExistence.rosterSessionId} 不在 DSH 会话列表中：疑似换人失败/手工改名册。处理：先 session rotate 生成真实会话再重 boot，或联系 PM 修正 团队/状态/团队.json。`, {
+      role, rosterSessionId: sessionExistence.rosterSessionId,
       hint: `node 团队\\工具\\team.mjs session rotate --role ${role} --project "${projectName}"`,
     }, 1);
   }
@@ -4616,7 +4613,7 @@ export async function cmdBoot(args) {
   lines.push(`令牌: ${token.token}（**不限时**，expiresAt 仅审计展示、不作拒绝依据；当前所有写操作都要带 --boot）｜ 哈希 rules ${shortHash(docs.rulesHash)} / index ${shortHash(docs.hashes.projectIndex)}`);
   lines.push(`身份: ${member.name}（${role}）｜ 会话: ${sessionId}`);
   // B-7b01：会话存在性校验结果必须可见（skipped 也要显式，不能静默放行）。
-  if (sessionExistence.status === 'ok') lines.push(`会话校验: ok（名册会话存在于 DSH，共 ${sessionExistence.count} 个${sessionExistence.fake ? ' · fake 列表' : ''}）`);
+  if (sessionExistence.status === 'ok') lines.push(`会话校验: ok（名册会话 ${sessionExistence.rosterSessionId} 存在于 DSH）`);
   else if (sessionExistence.status === 'skipped') {
     console.warn(`[session] 会话存在性校验 skipped：${sessionExistence.reason}`);
     lines.push(`会话校验: skipped（${sessionExistence.reason}；离线/沙盘不阻断，但已在 stderr 告警）`);

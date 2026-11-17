@@ -171,7 +171,7 @@ function usageOfSession(info) {
   return { uncachedInputTokens: uncached, cacheReadTokens: cacheRead, outputTokens: output, inputTokens: input, totalTokens: input + cacheRead + output };
 }
 
-export function listDshSessions() {
+function listDshSessions() {
   // B-405f 用例注入：沙盘里没有真 DSH，用 TEAM_DSH_FAKE 提供会话列表（只允许 TEAM_SELFTEST=1 时生效）。
   const fake = process.env.TEAM_SELFTEST === '1' ? String(process.env.TEAM_DSH_FAKE || '') : '';
   if (fake) {
