@@ -1,5 +1,5 @@
 'use strict';
-const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
+const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /**
  * B-20261116-201956-e616 端到端：缺陷单验收（CLI `task accept --as pm`）第二件证据用 .log/.json 的 record。
  *
@@ -18,7 +18,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const SB = path.join(ROOT, '_tmp', 'e616-cli');
+const SB = uniqueSandbox('e616-cli');
 const TEAM_ROOT = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TEAM_TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');

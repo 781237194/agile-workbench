@@ -12,10 +12,11 @@
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 B3：唯一沙盘
 
 const ROOT = path.resolve(__dirname, '..');
 const TEAM = path.join(ROOT, '团队', '工具', 'team.mjs');
-const SB = path.join(ROOT, '_tmp', 'b7738-sandbox-' + Date.now().toString(36));
+const SB = uniqueSandbox('b7738-sandbox');
 const PROJECT = '沙盘7738';
 const RID = 'R-20261114-000001-773a';
 const OPINION = '验收打回：引导第 7 步没写“更多→外观”，也缺验收截图；请补齐后重交';
