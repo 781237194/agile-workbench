@@ -231,9 +231,11 @@ run(['owner', '--project', PROJECT, '--requirement', iterationReq, '--decision',
 const taskE = run(['task', 'create', '--boot', pm, '--project', PROJECT, '--type', 'task', '--title', '迭代冻结夹具', '--priority', 'P1', '--detail', '夹具', '--requirement', iterationReq, '--json']).json.task.id;
 const iterate = run(['req', 'iterate', '--boot', pm, '--project', PROJECT, '--id', iterationReq, '--reason', 'AC9 迭代', '--json']);
 const frozenE = readTask(taskE);
-check('AC9 迭代 → 未完成任务 blocked（blockedCause=iteration）',
-  iterate.json && iterate.json.ok === true && String(frozenE.status) === 'blocked' && String(frozenE.blockedCause) === 'iteration',
-  { status: frozenE.status, cause: frozenE.blockedCause, code: iterate.json && iterate.json.code });
+// B-6f23：返工期（iteration）不再冻结任务（旧口径冻结会导致 claim 先判门禁、解不开）；
+// 打回时的冻结会在 PM req iterate 时被解冻回原状态。
+check('AC9 迭代 → 任务不再被冻结（B-6f23 修订：iteration 走解冻，blockedCause 清空）',
+  iterate.json && iterate.json.ok === true && String(frozenE.status) !== 'blocked' && !frozenE.blockedCause,
+  { status: frozenE.status, cause: frozenE.blockedCause, beforeStatus: frozenE.beforeStatus, code: iterate.json && iterate.json.code });
 
 const passed = results.filter((row) => row.ok).length;
 const failed = results.length - passed;

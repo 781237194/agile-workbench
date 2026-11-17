@@ -952,10 +952,10 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       failStep('req iterate 没有把 iterationRound 写进工作流行', JSON.stringify(lifeWfIter.requirements[lifeReqId]));
     }
     const lifeChildAfter = JSON.parse(read(path.join(stateShiDian, '任务', `${lifeChild.task.id}.json`)));
-    // R-75ec AC9：迭代不再把子任务收口成 done，而是冻结成 blocked（blockedCause=iteration），
-    // 等需求重新过 Owner 门后解冻继续。
-    if (lifeChildAfter.status !== 'blocked' || lifeChildAfter.blockedCause !== 'iteration') {
-      failStep('req iterate 没有冻结关联子任务（R-75ec AC9）', JSON.stringify(lifeChildAfter));
+    // B-6f23（修订 R-75ec AC9）：返工期 iteration **不再冻结**子任务（返工需可 claim/可派单）；
+    // 打回时留下的 blocked 会在 req iterate 的解冻分支里回到原状态；terminate 仍冻结。
+    if (lifeChildAfter.status === 'blocked' || lifeChildAfter.blockedCause) {
+      failStep('req iterate 仍冻结了关联子任务（B-6f23：iteration 不算冻结）', JSON.stringify(lifeChildAfter));
     }
 
     const termReq = json(['req', 'create', '--boot', fullPm, '--title', '驳回后终止用例', '--priority', 'P1', '--acceptance', '不再进入开发', '--json']);

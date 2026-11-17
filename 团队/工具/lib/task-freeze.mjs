@@ -1,9 +1,11 @@
 /**
  * R-75ec：任务层 Owner 门禁的**设备效果层**——冻结 / 解冻 / 落账即生效。
  *
- * 口径（主正文 §五 AC3/AC8/AC9 + 增补卷 §三/§四/§六）：
+ * 口径（主正文 §五 AC3/AC8/AC9 + 增补卷 §三/§四/§六；B-20261117-214907-6f23 修订）：
  *   - Owner 决定落账的同一写路径立即调用 `applyOwnerDecisionEffects()`：
- *     rejected/iteration/terminated → 冻结该需求全部未完成任务（blocked + beforeStatus）
+ *     rejected/terminated → 冻结该需求全部未完成任务（blocked + beforeStatus）
+ *     **iteration（返工期）→ 解冻**（回 beforeStatus，缺省 open）——返工期仍需正常 claim/派单，
+ *     不能把任务冻成 blocked 死锁（旧口径 iteration 也冻结，导致 claim 先判门禁 → 无法解开）。
  *     approved/skipped/accepted   → 解冻（回 beforeStatus，缺省 open）
  *   - 冻结时逐条给任务 owner 发停手通知，失败落 `blockedNotify` + 需求行 events；
  *     PM 只收 1 条汇总（带 notifyFailed[]）。
@@ -16,13 +18,20 @@ import { auditGate } from './gates.mjs';
 
 const FREEZE_CODES = { rejected: 'OWNER_REJECTED', iteration: 'OWNER_ITERATION', terminated: 'OWNER_TERMINATED' };
 const PASS_STATUSES = ['approved', 'skipped', 'accepted'];
-const FREEZE_CAUSES = ['rejected', 'iteration', 'terminated'];
+// B-6f23：iteration 不再是冻结原因（返工需要可 claim/可派单）；它走「解冻」分支。
+const FREEZE_CAUSES = ['rejected', 'terminated'];
+const UNFREEZE_CAUSES = ['iteration'];
 
 /** 判定该需求行当前应冻结还是解冻：返回 {mode:'freeze'|'unfreeze'|'noop', cause, code}。 */
 export function decisionEffect(row = null, decisionStatus = '') {
   const rowStatus = String((row && row.status) || '');
   const status = String(decisionStatus || '');
+  // 显式冻结决定优先（Owner 打回/终止永远冻）。
   if (FREEZE_CAUSES.includes(status)) return { mode: 'freeze', cause: status, code: FREEZE_CODES[status] };
+  // B-6f23：返工期（iteration）→ 解冻（旧口径 freezing 会让任务 blocked 死锁）。
+  if (UNFREEZE_CAUSES.includes(status) || rowStatus === 'iteration') {
+    return { mode: 'unfreeze', cause: '', code: FREEZE_CODES.iteration };
+  }
   if (FREEZE_CAUSES.includes(rowStatus)) return { mode: 'freeze', cause: rowStatus, code: FREEZE_CODES[rowStatus] };
   if (PASS_STATUSES.includes(status)) return { mode: 'unfreeze', cause: '', code: 'OWNER_GATE_PASSED' };
   return { mode: 'noop', cause: '', code: '' };
@@ -82,7 +91,7 @@ export function freezeTasksOfRequirement(project, requirementId, { cause = 'reje
 }
 
 /** 解冻一个需求下所有 blocked 任务（回 beforeStatus，缺省 open）。重复解冻 NOOP。 */
-export function unfreezeTasksOfRequirement(project, requirementId, { by = 'system', source = 'cli' } = {}) {
+export function unfreezeTasksOfRequirement(project, requirementId, { by = 'system', source = 'cli', code = 'OWNER_GATE_PASSED' } = {}) {
   const unfrozen = [];
   const skipped = [];
   for (const row of tasksOfRequirement(project, requirementId)) {
@@ -100,7 +109,7 @@ export function unfreezeTasksOfRequirement(project, requirementId, { by = 'syste
     task._action = 'unfreeze';
     saveTask(project, task);
     auditGate(project, {
-      role: by, source, action: 'task_unfreeze', gate: 'G3', code: 'OWNER_GATE_PASSED',
+      role: by, source, action: 'task_unfreeze', gate: 'G3', code: String(code || 'OWNER_GATE_PASSED'),
       missing: [], requirementId, taskId: task.id, attempted: 'task_unfreeze',
       next: `已恢复为 ${task.status}`,
     });
@@ -135,6 +144,6 @@ export function applyOwnerDecisionEffects(project, requirementId, decisionStatus
     }
     return { mode: 'freeze', ...result };
   }
-  const result = unfreezeTasksOfRequirement(project, requirementId, { by, source });
+  const result = unfreezeTasksOfRequirement(project, requirementId, { by, source, code: effect.code });
   return { mode: 'unfreeze', frozen: [], unfrozen: result.unfrozen, note: result.skipped, notifyFailed: [] };
 }
