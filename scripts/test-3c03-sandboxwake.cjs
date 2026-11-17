@@ -29,6 +29,15 @@ function run(args, env = baseEnv) {
 rmSandbox(SB, { recursive: true, force: true });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
+// 污染防护（2026-11-17 两次真实 PM 被唤醒后加）：沙盘名册绝不能保留真实 sessionId——
+// 一旦「沙盘根拦截」失效（本脚本故意走真实唤醒路径验证它），就会按真实名册把唤醒打进真人会话。
+{
+  const tf = path.join(TEAM_ROOT, '状态', '团队.json');
+  const team = JSON.parse(fs.readFileSync(tf, 'utf8'));
+  for (const m of team.members || []) m.sessionId = `sess-sandbox-${String(m.role || 'x')}`;
+  delete team.activeProject;
+  fs.writeFileSync(tf, JSON.stringify(team, null, 2) + '\n', 'utf8');
+}
 run(['project', 'add', '--name', PROJECT, '--team-mode', 'fast', '--json']);
 const pm = run(['boot', '--role', 'pm', '--project', PROJECT, '--session', 's-pm', '--json']);
 const dev = run(['boot', '--role', 'programmer1', '--project', PROJECT, '--session', 's-p1', '--json']);
