@@ -323,6 +323,9 @@ function cmdCheck(argv) {
     // 所以回环前先在目标侧执行 init 补环境（换机真实路径：import → init → migrate-check）。
     let initOk = false;
     try { const init = runCli(repoRoot, ['init', '--json']); initOk = Boolean(init && init.ok !== false); } catch { initOk = false; }
+    // PM 2026-11-17 13:40 口径：④ 在「导入后的目标根」上跑——init 之后还要 project add 登记（PROJECT_DIR_MISSING 的常见原因），
+    // 已登记则忽略 PROJECT_EXISTS。包内容类断言（AC1/AC7）仍走假仓库，两套分开。
+    try { runCli(repoRoot, ['project', 'add', '--name', project, '--dir', projectDir, '--team-mode', 'full', '--json']); } catch { /* 已登记则忽略 */ }
     const boot = runCli(repoRoot, ['boot', '--role', 'pm', '--project', project, '--session', 'sess-pm', '--json']);
     const token = String((boot && (boot.token || (boot.boot && boot.boot.token))) || '');
     if (!token) throw new Error('no token');
