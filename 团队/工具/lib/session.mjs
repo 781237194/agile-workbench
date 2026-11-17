@@ -1186,6 +1186,20 @@ export async function cmdSession(args) {
   if (action === 'rotate') {
     const role = String(args.role || '');
     if (!role) fail('BAD_ROLE', '需要 --role');
+    // B-20261118-001244-cdd0：rotate 会改四处会话映射（团队.json / 项目会话映射 / workbench），属敏感操作，
+    // 必须带有效启动令牌且限定 PM/Owner——原实现只有 archive 分支调 requireBoot，rotate 空令牌也能换人。
+    // 沙盘（TEAM_SELFTEST=1）默认豁免以保持既有 selftest/夹具可用；门禁本体用 TEAM_BOOT_ENFORCE=1 强制（cdd0 夹具即此）。
+    // 校验放在接任包检查之前（起手第一件事）：失败零副作用，不写任何映射/记录/归档。
+    const bootSandbox = String(process.env.TEAM_SELFTEST || '') === '1';
+    const bootEnforce = String(process.env.TEAM_BOOT_ENFORCE || '') === '1';
+    if (!bootSandbox || bootEnforce) {
+      const bootToken = String(args.boot || '').trim();
+      if (!bootToken) fail('BOOT_REQUIRED', '会话轮换必须带 --boot 启动令牌（只有 PM/Owner 能换人）', { role, project: projectName });
+      const bootInfo = requireBoot(bootToken);
+      if (!['pm', 'owner'].includes(String(bootInfo.role || ''))) {
+        fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话（当前令牌角色 ${bootInfo.role || '-'}）`, { role, project: projectName, tokenRole: bootInfo.role || '' });
+      }
+    }
     // B-3f02：rotate 前机械检查接任包 6 小节；4 个必填小节缺失 → 拒 rotate（零副作用）。
     try {
       const pre = buildHandover({ projectName, role, sessionId: String(args.session || '') });
