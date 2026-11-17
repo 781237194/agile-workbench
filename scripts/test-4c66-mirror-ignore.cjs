@@ -62,6 +62,18 @@ function check(name, ok, detail) {
   const stillDone = daemon.queueStillHas('不存在的项目-4c66', 'analyst', reqId, [mirror, realDone]);
   check('④ 真实任务都 done → queueStillHas=false', stillDone === false, { stillDone });
 
+  // ④b 分析师复核补的两条（PM 2026-11-17 10:14 转达）
+  // 正面复现当前 bug：需求已 ready、角色名下只有镜像 open → 必须 false（否则每拍唤醒）
+  const readyRequirement = { id: reqId, status: 'ready', ownerReview: { status: 'approved' } };
+  const stillReadyMirror = daemon.queueStillHas('不存在的项目-4c66', 'analyst', reqId, [mirror, mirrorById]);
+  check('④b 需求 ready + 只有镜像 open → queueStillHas=false（当前 bug 的正面复现）',
+    String(readyRequirement.status) === 'ready' && stillReadyMirror === false, { readyStatus: readyRequirement.status, stillReadyMirror });
+  // 防改过头：同需求另有真实未完成开发任务（working/open）→ 必须 true，不能把真实在办一起漏掉
+  const realWorkingDev = { id: 'T-20991111-111111-4c6e', type: 'task', requirementId: reqId, owner: 'analyst', status: 'working', title: '真实在办任务' };
+  const stillRealWorking = daemon.queueStillHas('不存在的项目-4c66', 'analyst', reqId, [mirror, realWorkingDev]);
+  check('④b 镜像 + 同需求真实未完成任务（working）→ queueStillHas=true（防改过头）',
+    stillRealWorking === true, { stillRealWorking, realWorkingDev });
+
   // ⑤ 真实数据快照（INFO）
   try {
     const tasksDir = path.join(STATE_DIR, '任务');
