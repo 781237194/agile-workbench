@@ -39,6 +39,7 @@ import {
   taskGateOf, decisionListOf, latestDecisionOf,
   // B-b894：任务闭环状态唯一口径（done/accepted/cancelled/terminated），别再在 ops 里写数组。
   statusIsClosed,
+  isRequirementMirrorTask,
 } from './gates.mjs';
 import * as lessons from './lessons.mjs';
 import { buildDispatchPrompt, buildNoticePrompt, buildWakeHeader, buildWakeLine, isRegisteredKind } from './dispatch.mjs';
@@ -2650,8 +2651,12 @@ function scanActivityRoles(project, { now = Date.now() } = {}) {
       ackAt: roleLastAckAt(name, role),
       workingAt: roleWorkingAt(name, role, tasks),
     };
+    // B-4c66 ②：镜像任务（type=requirement / id===requirementId）不是「在办的活」——否则角色被永久判 idle+有活，
+    // 看门狗每拍唤起一次（分析师实测 10:24/10:25/10:26 各一次，reason=stalled）；终态判断统一走 statusIsClosed。
     const openTaskIds = tasks
-      .filter((task) => task && String(task.owner || '') === String(role) && !['done', 'cancelled'].includes(String(task.status || '')))
+      .filter((task) => task && String(task.owner || '') === String(role)
+        && !isRequirementMirrorTask(task)
+        && !statusIsClosed(task.status))
       .map((task) => String(task.id));
     const missingSignals = [];
     if (!signals.fileAt) missingSignals.push('file');

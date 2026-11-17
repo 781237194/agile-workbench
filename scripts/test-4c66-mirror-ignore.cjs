@@ -17,6 +17,7 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const STATE_DIR = path.join(ROOT, '团队', '状态', '项目', '工作台改造修复');
@@ -100,6 +101,66 @@ function check(name, ok, detail) {
     }
   } catch (error) {
     console.log('INFO  真实数据快照跳过：' + String((error && error.message) || error));
+  }
+
+  // ⑥ 看门狗（ops.mjs scanActivityRoles.openTaskIds）：分析师 10:27 实测「镜像仍被算成在办，每拍唤醒」。
+  //    行为断言：沙盘里某角色名下只有镜像时 openTaskIds 必须为空；有真实在办任务时必须包含它、仍排除镜像。
+  try {
+    const { mkTempSandbox } = require(path.join(__dirname, 'lib', 'sandbox-dir.cjs'));
+    const SB = mkTempSandbox('4c66-watchdog');
+    const TEAM_ROOT = path.join(SB, '团队');
+    const PROJECTS = path.join(SB, '项目');
+    const TOOL = path.join(TEAM_ROOT, '工具', 'team.mjs');
+    const PROJECT = '镜像看门狗沙盘';
+    const env = { ...process.env, TEAM_ROOT, TEAM_PROJECTS_ROOT: PROJECTS, TEAM_SELFTEST: '1', TEAM_WORKBENCH_JSON: path.join(SB, 'data', 'userdata', 'workbench.json') };
+    fs.mkdirSync(path.join(SB, 'data', 'userdata'), { recursive: true });
+    fs.mkdirSync(PROJECTS, { recursive: true });
+    fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
+    const teamFile = path.join(TEAM_ROOT, '状态', '团队.json');
+    const teamData = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
+    (teamData.members || []).forEach((m) => { m.sessionId = ''; });
+    delete teamData.activeProject;
+    fs.writeFileSync(teamFile, JSON.stringify(teamData, null, 2) + '\n', 'utf8');
+    const runCli = (args) => {
+      const out = execFileSync(process.execPath, [TOOL, ...args], { cwd: SB, env, encoding: 'utf8' });
+      const text = String(out).trim();
+      return JSON.parse(text.slice(text.indexOf('{')));
+    };
+    runCli(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);
+    runCli(['boot', '--role', 'analyst', '--project', PROJECT, '--session', 's-4c66-analyst', '--json']);
+    const taskDir = path.join(TEAM_ROOT, '状态', '项目', PROJECT, '任务');
+    fs.mkdirSync(taskDir, { recursive: true });
+    const mirrorId = 'R-20991111-111111-wd01';
+    fs.writeFileSync(path.join(taskDir, `${mirrorId}.json`), JSON.stringify({
+      id: mirrorId, project: PROJECT, type: 'requirement', requirementId: mirrorId,
+      title: '看门狗夹具：需求镜像', owner: 'analyst', status: 'open',
+      createdAt: new Date().toISOString(), history: [],
+    }, null, 2) + '\n', 'utf8');
+    // 探针：在沙盘 env 下 import ops.mjs 调 detectStalledRoles（PATHS 在 import 时按 env 计算，必须子进程）
+    const opsUrl = new URL('file:///' + path.join(ROOT, '团队', '工具', 'lib', 'ops.mjs').replace(/\\/g, '/')).href;
+    const probe = () => {
+      const code = `import { detectStalledRoles } from ${JSON.stringify(opsUrl)};\n`
+        + `const r = detectStalledRoles(${JSON.stringify(PROJECT)});\n`
+        + 'const row = (r.roles && r.roles.analyst) || {};\n'
+        + 'console.log(JSON.stringify({ verdict: row.verdict, openTaskIds: row.openTaskIds || [] }));';
+      const out = execFileSync(process.execPath, ['--input-type=module', '-e', code], { cwd: SB, env, encoding: 'utf8' });
+      return JSON.parse(String(out).trim().split('\n').pop());
+    };
+    const onlyMirror = probe();
+    check('⑥ 角色名下只有镜像 → 看门狗 openTaskIds 不含镜像（不再判 idle+有活）',
+      Array.isArray(onlyMirror.openTaskIds) && onlyMirror.openTaskIds.length === 0, { onlyMirror, mirrorId });
+    const realId = 'T-20991111-111111-wd02';
+    fs.writeFileSync(path.join(taskDir, `${realId}.json`), JSON.stringify({
+      id: realId, project: PROJECT, type: 'task', requirementId: 'R-20991111-111111-wd00',
+      title: '看门狗夹具：真实在办任务', owner: 'analyst', status: 'working',
+      claimedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), history: [],
+    }, null, 2) + '\n', 'utf8');
+    const withReal = probe();
+    check('⑥ 角色名下有真实在办任务 → openTaskIds 仍包含它且不含镜像',
+      Array.isArray(withReal.openTaskIds) && withReal.openTaskIds.includes(realId) && !withReal.openTaskIds.includes(mirrorId),
+      { withReal, realId, mirrorId });
+  } catch (error) {
+    check('⑥ 看门狗沙盘用例可运行', false, String((error && error.message) || error).slice(0, 300));
   }
 
   const passed = results.filter((r) => r.ok).length;
