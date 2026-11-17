@@ -259,6 +259,23 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
         fs.writeFileSync(wbFile, JSON.stringify(store, null, 2) + '\n', 'utf8');
       }
     }
+    // B-2d6d / a837 复核：四处映射之四——<项目>/团队会话.json 的 roles[].sessionId 也要同步，
+    // 否则 checkSessionMap 判 6/6 不一致（团队.json / 团队会话.json / workbench.sessions / workspace.sessionIds）。
+    try {
+      const manifestFile = path.join(projectDirOf(projectName), '团队会话.json');
+      const manifest = readJsonSafe(manifestFile, null);
+      if (manifest && Array.isArray(manifest.roles)) {
+        let changed = false;
+        for (const row of manifest.roles) {
+          if (row && String(row.role) === role && String(row.sessionId || '') !== newId) { row.sessionId = newId; changed = true; }
+        }
+        if (changed) {
+          const tmp = `${manifestFile}.tmp-${process.pid}`;
+          fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+          fs.renameSync(tmp, manifestFile);
+        }
+      }
+    } catch { /* manifest 缺失/损坏不阻断换人（团队.json 与 workbench 已写） */ }
   }
   // T-f35b（AC5 四测）：换人必须留「会话轮换记录 from/to/at/reason」+「归档或 archiveDeferred」。
   // 记录 append-only 落 团队/状态/项目/<项目>/会话轮换.jsonl；有未闭环任务时不强行归档，写 archiveDeferred。
