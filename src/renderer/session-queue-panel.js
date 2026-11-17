@@ -21,6 +21,8 @@
   const state = { model: null, error: '', busy: false, timer: null, mounted: false };
 
   const STATE_LABEL = { fail: '失败（真的没送出去）', skip: '跳过（设计内不唤醒）', ok: '成功', none: '无记录' };
+  // R-fa0e（3a12）§六：自动换人六态（[data-ar-state]）
+  const AR_STATE_LABEL = { idle: '空闲', warn: '预警/已入队', pending_handover: '等交接回执', rotating: '正在换人', rebooting: '已广播重 boot', failed: '失败' };
 
   const el = (id) => document.getElementById(id);
   const node = (tag, className, text) => {
@@ -84,6 +86,32 @@
       lastOk.title = row.lastOkAt ? `最近成功投递：${row.lastOkAt}` : '窗口内没有成功投递记录';
       line.appendChild(lastOk);
 
+      // R-fa0e（3a12）§六：自动换人只读字段（六值 state 挂在行上 → [data-ar-state][data-role]）
+      const ar = row.autoRotate || {};
+      const arState = String(ar.state || 'idle');
+      line.setAttribute('data-ar-state', arState);
+      const arBox = node('div', 'sq-ar');
+      const arChip = node('span', 'sq-ar-chip sq-ar-' + arState, `自动换人：${AR_STATE_LABEL[arState] || arState}`);
+      arChip.setAttribute('data-ar-state', arState);
+      arBox.appendChild(arChip);
+      if (ar.reason) {
+        const reasonEl = node('span', 'sq-ar-reason', String(ar.reason));
+        reasonEl.setAttribute('data-ar-reason', '1');
+        arBox.appendChild(reasonEl);
+      }
+      if (ar.auditTail) {
+        const tail = node('span', 'sq-ar-tail', String(ar.auditTail));
+        tail.setAttribute('data-ar-audit-tail', '1');
+        tail.title = '最近一条自动换人审计（stage · at）';
+        arBox.appendChild(tail);
+      }
+      if (ar.error) {
+        const err = node('span', 'sq-ar-error', String(ar.error));
+        err.setAttribute('data-ar-error', '1');
+        arBox.appendChild(err);
+      }
+      line.appendChild(arBox);
+
       host.appendChild(line);
     }
     if (!host.childNodes.length) {
@@ -97,6 +125,13 @@
     const banner = el(BANNER_ID);
     const meta = el(META_ID);
     const model = state.model || {};
+    // R-fa0e（3a12）§六：团队台只读汇总 [data-ar-summary]
+    const arSummary = document.querySelector('[data-ar-summary]');
+    if (arSummary) {
+      const ar = model.autoRotate || {};
+      arSummary.textContent = String(ar.summary || '今日自动换人 0 次 / 失败 0 次');
+      arSummary.title = '自动换人只读汇总（数据源：团队/状态/项目/<项目>/自动换人.jsonl）';
+    }
     const degraded = Boolean(model.degraded || state.error);
     if (panel) {
       panel.setAttribute('data-sq-degraded', degraded ? 'true' : 'false');

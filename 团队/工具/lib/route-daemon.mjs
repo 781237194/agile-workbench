@@ -33,6 +33,8 @@ import {
 } from './gates.mjs';
 import { requirementReviewer } from './roles.mjs';
 import { activeProxyFor } from './owner-proxy.mjs';
+// R-fa0e（T-20261117-195120-3a12）：自动换人周期拍（团队配置 autoRotate 门禁，默认 5 分钟；0/false=关）。
+import { runAutoRotateBeat } from './auto-rotate.mjs';
 import { addDecision } from './decision-box.mjs';
 import { ROLE_QUEUE_FILE, buildRoleQueues, writeRoleQueues } from './route-queues.mjs';
 import { scenarioConfirmState } from './scenario-confirm.mjs';
@@ -1568,6 +1570,7 @@ export async function runDaemon(projectName, { intervalMs = null, once = false, 
   const ticks = [];
   let index = 0;
   let stopped = false;
+  const autoRotateState = { lastAt: 0, busy: false };
   const onSignal = () => { stopped = true; };
   try {
     process.once('SIGINT', onSignal);
@@ -1581,7 +1584,13 @@ export async function runDaemon(projectName, { intervalMs = null, once = false, 
   }
   try {
     while (!stopped && index < limit) {
+      // R-fa0e（3a12）：先跑自动换人拍（配置关闭/未到间隔即跳过；同拍 busy 防重入；异常只记日志不拖垮守护）。
+      const ar = runAutoRotateBeat(name, { state: autoRotateState, source: 'route-daemon' });
+      if (ar && ar.ok === false) {
+        try { appendRouteLog(name, { event: 'auto_rotate_error', source: 'auto-rotate', why: String(ar.message || ar.code || '').slice(0, 300), ok: false }); } catch { /* 日志失败不影响守护 */ }
+      }
       const result = await routeTick(name, { engineUrl, lockKey: lock.key, releaseAtEnd: false });
+      result.autoRotate = ar && (ar.skipped ? { skipped: ar.skipped } : { ok: true, mode: ar.result && ar.result.mode, rotated: ar.result && ar.result.rotated });
       ticks.push(result);
       index += 1;
       if (index >= limit || stopped) break;

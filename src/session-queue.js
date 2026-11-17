@@ -250,6 +250,57 @@ function degradationOf(options = {}) {
 }
 
 /**
+ * R-fa0e（T-20261117-195120-3a12）§六：自动换人只读汇总 → 面板 [data-ar-*] 的取数口径。
+ * 只读 `团队/状态/项目/<项目>/自动换人.jsonl`，不写任何状态；任何解析失败都降级为「无记录」，不抛。
+ * state 六值：idle / warn / pending_handover / rotating / rebooting / failed。
+ */
+function readAutoRotateSummary({ auditRows, now } = {}) {
+  const rows = Array.isArray(auditRows) ? auditRows.filter(Boolean) : [];
+  const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const todayKey = new Date(at + 8 * 3600 * 1000).toISOString().slice(0, 10);   // 上海本地日期
+  const dayLocal = (iso) => {
+    const ms = Date.parse(String(iso || ''));
+    return Number.isFinite(ms) ? new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 10) : '';
+  };
+  const today = rows.filter((row) => dayLocal(row.at) === todayKey);
+  const rotatedToday = today.filter((row) => String(row.stage) === 'rotate' && String(row.result) !== 'fail');
+  const failedToday = today.filter((row) => String(row.result) === 'fail' || String(row.stage) === 'failed'
+    || (String(row.stage) === 'skipped' && String(row.code) === 'HANDOVER_TIMEOUT' && String(row.result) !== 'ok'));
+  const byRole = {};
+  for (const row of rows) {
+    const role = String(row.role || '');
+    if (!role) continue;
+    const stage = String(row.stage || '');
+    const code = String(row.code || '');
+    const item = byRole[role] || { last: null, pending: false, rotating: false, rebooting: false, failed: '', reason: '', state: 'idle' };
+    item.last = row;
+    if (stage === 'trigger') { item.pending = true; item.state = 'pending_handover'; item.reason = `已发交接请求，等回执（${String(row.at || '').slice(11, 16)}）`; }
+    if (stage === 'rotate') { item.pending = false; item.state = 'rotating'; item.reason = String(row.note || '已换人'); }
+    if (stage === 'broadcast_reboot') { item.rebooting = true; item.reason = String(row.note || '已广播重 boot'); }
+    if (stage === 'skipped' && code === 'NIGHT_SILENT') { item.state = 'warn'; item.reason = '夜间静默（22–08）未换人'; }
+    if (stage === 'enqueue') { item.state = 'warn'; item.reason = `已入队次日 08:00 执行（${String(row.evidence && row.evidence.level || '')}）`; }
+    if (stage === 'skipped' && code === 'HANDOVER_TIMEOUT') { item.state = 'failed'; item.failed = 'HANDOVER_TIMEOUT'; item.reason = '交接超时：不换人，已升级 PM'; }
+    if (String(row.result) === 'fail') { item.state = 'failed'; item.failed = code || 'rotate_failed'; }
+    byRole[role] = item;
+  }
+  const out = {};
+  for (const [role, item] of Object.entries(byRole)) {
+    out[role] = {
+      state: item.state || 'idle',
+      reason: item.reason || '',
+      auditTail: item.last ? `${String(item.last.stage || '')} · ${String(item.last.at || '')}` : '',
+      error: item.failed || '',
+    };
+  }
+  return {
+    byRole: out,
+    rotatedToday: rotatedToday.length,
+    failedToday: failedToday.length,
+    summary: `今日自动换人 ${rotatedToday.length} 次 / 失败 ${failedToday.length} 次`,
+  };
+}
+
+/**
  * 面板模型：六角色 × （排队数 / 四态 / 失败数 / 跳过数 / 最近成功投递时间）+ 降级原因。
  */
 function buildPanelModel(options = {}) {
@@ -272,6 +323,7 @@ function buildPanelModel(options = {}) {
   }
 
   const snapRoles = readSnapshotRoles(snapshot);
+  const autoRotate = readAutoRotateSummary({ auditRows: options.autoRotateRows, now });
   const rows = roles.map((role) => {
     const entry = snapRoles.get(role) || null;
     const summary = summarizeRows(wakeByRole.get(role) || [], { now, windowMs });
@@ -290,6 +342,8 @@ function buildPanelModel(options = {}) {
       lastAt: summary.lastAt,
       // B-20261117-181420-9688：最近失败时间（展示用；计数与四态分离，失败数不再决定状态）
       lastFailAt: summary.lastFailAt || '',
+      // R-fa0e（3a12）§六：自动换人字段（无记录时 state=idle、审计尾为空，不伪造）
+      autoRotate: autoRotate.byRole[role] || { state: 'idle', reason: '', auditTail: '', error: '' },
     };
   });
 
@@ -307,6 +361,8 @@ function buildPanelModel(options = {}) {
     badLines: wake.badLines,
     rows,
     backpressure: backpressureHint((rows.find((row) => row.role === 'pm') || {}).queued),
+    // R-fa0e（3a12）§六：团队台只读汇总 [data-ar-summary]
+    autoRotate: { summary: autoRotate.summary, rotatedToday: autoRotate.rotatedToday, failedToday: autoRotate.failedToday },
   };
 }
 

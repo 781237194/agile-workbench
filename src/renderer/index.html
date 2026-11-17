@@ -680,6 +680,8 @@
                   <h3>会话排队 <span class="muted">/ 积压 ≠ 失败</span></h3>
                   <div class="team-head-tools">
                     <span id="session-queue-meta" class="badge muted-badge" title="快照时间与数据来源">未加载</span>
+                    <!-- R-fa0e（T-20261117-195120-3a12）§六：自动换人只读汇总 -->
+                    <span id="ar-summary" class="badge muted-badge" data-ar-summary="1" title="自动换人只读汇总">今日自动换人 0 次 / 失败 0 次</span>
                   </div>
                 </div>
                 <p class="team-status-source">列含义：排队数（该角色 DSH 会话里 placement=queued 的条数，未知显示「—」不显示 0）、四态（fail / skip / ok / none，优先级 fail&gt;skip&gt;ok&gt;none，跳过优先于成功）、失败数、跳过数、最近成功投递时间（只取 ok 行）。统计窗口默认最近 24 小时；快照超过 120 秒未更新会降级黄条。</p>

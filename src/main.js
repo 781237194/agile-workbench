@@ -5926,8 +5926,21 @@ ipcMain.handle('theme:metrics', async () => {
         ? path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName), '唤醒.jsonl')
         : '';
       const wake = readWakeLogCached(wakeFile);
+      // R-fa0e（T-20261117-195120-3a12）§六：自动换人审计（只读；缺失/坏行都当「无记录」，不降级面板）
+      let autoRotateRows = [];
+      if (projectName) {
+        try {
+          const arFile = path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName), '自动换人.jsonl');
+          if (fs.existsSync(arFile) && fs.statSync(arFile).size <= 2 * 1024 * 1024) {
+            autoRotateRows = fs.readFileSync(arFile, 'utf8').split(/\r?\n/).filter(Boolean)
+              .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+              .filter(Boolean).slice(-500);
+          }
+        } catch { autoRotateRows = []; }
+      }
       const model = SessionQueue.buildPanelModel({
         project: projectName,
+        autoRotateRows,
         roles: roles.length ? roles : SessionQueue.SIX_ROLES,
         roleNames,
         snapshot,

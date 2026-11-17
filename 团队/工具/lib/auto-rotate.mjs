@@ -82,7 +82,13 @@ export function nightKeyOf(ms) {
   const dayMs = p.hour < NIGHT_END_HOUR ? localMidnight - 86400000 : localMidnight;
   return new Date(dayMs).toISOString().slice(0, 10);
 }
-/** 次日 08:00（上海）对应的时间戳。 */
+/** 指定上海时间的当天 08:00（用于「昨夜入队 → 今日 08:00」的比较）。 */
+export function morningAt(ms, hour = NIGHT_END_HOUR) {
+  const p = shanghaiParts(ms);
+  const localMidnight = Date.UTC(p.y, p.m - 1, p.day);
+  return localMidnight + hour * 3600000 - SHANGHAI_OFFSET_MS;
+}
+/** 次日 08:00（上海）对应的时间戳（夜间入队用：23:30 → 明日 08:00；02:00 → 今日 08:00）。 */
 export function nextMorningAt(ms, hour = NIGHT_END_HOUR) {
   const p = shanghaiParts(ms);
   const localMidnight = Date.UTC(p.y, p.m - 1, p.day);
@@ -229,6 +235,70 @@ function rotateSession({ projectName, role, now, reason, auditFile, dryRun }) {
   return { oldId, newId, others: others.map((m) => m.role) };
 }
 
+/* ── ⑤ 接线：团队配置 + 周期 tick（route-daemon 调用） ───────────────── */
+export const DEFAULT_INTERVAL_MS = 300000;   // 5 分钟
+
+/** 团队配置 autoRotate={enabled,intervalMs,rotateRounds}；缺省 enabled=true / 300000 / 20；0 或 false = 关。 */
+export function autoRotateConfigOf(team) {
+  const raw = (team && team.config && team.config.autoRotate) || {};
+  const enabledRaw = raw.enabled === undefined ? true : raw.enabled;
+  const enabled = !(enabledRaw === false || enabledRaw === 0 || String(enabledRaw) === '0' || String(enabledRaw) === 'false');
+  const interval = Number(raw.intervalMs);
+  const rounds = Number(raw.rotateRounds);
+  return {
+    enabled,
+    intervalMs: Number.isFinite(interval) && interval > 0 ? interval : DEFAULT_INTERVAL_MS,
+    rotateRounds: Number.isFinite(rounds) && rounds > 0 ? rounds : DEFAULT_ROUNDS_LIMIT,
+  };
+}
+
+/** 昨夜入队（deferredUntil = 今日 08:00）的角色；优先 stage=enqueue，旧数据回退 NIGHT_SILENT 行。 */
+export function queuedForToday({ rows, todayDefer }) {
+  const target = String(todayDefer || '');
+  const out = [];
+  const seen = new Set();
+  for (const row of rows || []) {
+    const ev = row && row.evidence ? row.evidence : {};
+    if (String(ev.deferredUntil || '') !== target) continue;
+    const role = String(row.role || '');
+    if (!role || seen.has(role)) continue;
+    const stage = String(row.stage || '');
+    const code = String(row.code || '');
+    const isQueueRow = stage === 'enqueue' || (stage === 'skipped' && code === 'NIGHT_SILENT');
+    if (!isQueueRow) continue;
+    seen.add(role);
+    out.push({ role, level: String(ev.level || (ev.forced ? 'force' : 'rounds')), kind: String(ev.kind || ''), tokens: ev.tokens, rounds: ev.rounds, forced: Boolean(ev.forced), order: Number(ev.order || 0), deferredUntil: target });
+  }
+  return out;
+}
+
+/**
+ * 跑一拍（带配置门禁）——route-daemon 循环里直接调它：
+ *   · enabled=false / 0 → 跳过；距上次不足 intervalMs → 跳过（不重入）；
+ *   · 同一进程内用传入的 state 记上次执行时间（不落盘，重启后重算）。
+ * 返回 { ok, skipped?: 'disabled'|'interval', result? }。
+ */
+export function runAutoRotateBeat(projectName, { now, state, source = 'route-daemon' } = {}) {
+  const box = state && typeof state === 'object' ? state : {};
+  let cfg;
+  try { cfg = autoRotateConfigOf(loadTeam()); } catch (e) { return { ok: false, code: 'TEAM_UNREADABLE', message: String((e && e.message) || e) }; }
+  if (!cfg.enabled) return { ok: true, skipped: 'disabled', config: cfg };
+  const at = resolveNow(now);
+  const last = Number(box.lastAt || 0);
+  if (last && at - last < cfg.intervalMs) return { ok: true, skipped: 'interval', config: cfg, nextAt: iso(last + cfg.intervalMs) };
+  if (box.busy) return { ok: true, skipped: 'busy', config: cfg };
+  box.lastAt = at;
+  box.busy = true;
+  try {
+    const result = runAutoRotateCycle(projectName, { now: at, dryRun: false, source });
+    return { ok: true, config: cfg, result };
+  } catch (e) {
+    return { ok: false, code: 'AUTO_ROTATE_FAILED', message: String((e && e.message) || e).slice(0, 300), config: cfg };
+  } finally {
+    box.busy = false;
+  }
+}
+
 /* ── 主循环 ─────────────────────────────────────────────────────────── */
 export async function runAutoRotateCycle(projectName, options = {}) {
   const name = String(projectName || process.env.__AR_PROJECT || '').trim();
@@ -244,13 +314,23 @@ export async function runAutoRotateCycle(projectName, options = {}) {
   const memberRoles = members.map((m) => m.role);
   const projectDir = projectDirOf(name);
   const mailDir = PATHS.mail;
-  const candidates = collectCandidates({ now, usage, rounds, memberRoles });
+  const cfg = autoRotateConfigOf(team);
+  const candidates = collectCandidates({ now, usage, rounds, memberRoles, roundsLimit: cfg.rotateRounds });
   const rows = readAudit(auditFile);
   const actions = [];
   const night = isNight(now);
   const nextDayWindow = isNextDayWindow(now);
   const nightKey = nightKeyOf(now);
   const nowIso = iso(now);
+
+  // ③ 审计补 stage=cycle（每拍一行，便于面板 [data-ar-audit-tail] 与「今日 N 次」统计）
+  if (!dryRun) {
+    appendAudit(auditFile, {
+      at: nowIso, stage: 'cycle', code: 'CYCLE', result: 'ok', role: '', project: name,
+      note: `一拍：${night ? '夜间' : nextDayWindow ? '次日窗口' : '白天'} · 候选 ${candidates.length} 个 · 源 ${source}`,
+      evidence: { mode: night ? 'night' : nextDayWindow ? 'next-day' : 'day', candidates: candidates.map((c) => `${c.role}:${c.level}`), source, config: cfg },
+    });
+  }
 
   /* ① 夜间：只记账不换人（含 force），同夜同角色只 1 行 */
   if (night) {
@@ -263,32 +343,53 @@ export async function runAutoRotateCycle(projectName, options = {}) {
       const row = {
         at: nowIso, stage: 'skipped', code: 'NIGHT_SILENT', result: 'ok', role: item.role, project: name,
         note: '夜间 22:00–08:00 一律不换人（含 force），已入队次日 08:00 执行',
-        reason: '夜间静默：22:00–08:00 不换人（含 force），只记账',
+        reason: '夜间静默（22–08）未换人：只记账，次日 08:00 起按队列入队执行',
         evidence: {
-          threshold: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, warn: DEFAULT_TOKEN_WARN, force: DEFAULT_TOKEN_FORCE, roundsLimit: DEFAULT_ROUNDS_LIMIT },
+          threshold: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, warn: DEFAULT_TOKEN_WARN, force: DEFAULT_TOKEN_FORCE, roundsLimit: cfg.rotateRounds },
           forced: item.level === 'force',
           deferredUntil, nightKey, source,
         },
       };
-      if (!dryRun) appendAudit(auditFile, row);
+      if (!dryRun) {
+        appendAudit(auditFile, row);
+        // ③ 审计补 stage=enqueue：把「入队」与「跳过」分开两类，次日队列直接按 enqueue 行取（对旧数据回退到 NIGHT_SILENT 行）。
+        appendAudit(auditFile, {
+          at: nowIso, stage: 'enqueue', code: 'NIGHT_QUEUED', result: 'ok', role: item.role, project: name,
+          note: `已入队：${item.level} 档，次日 08:00 执行（deferredUntil=${deferredUntil}）`,
+          evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, forced: item.level === 'force', deferredUntil, nightKey: nightKey, order: item.atMs },
+        });
+      }
       recorded.push(item.role);
       actions.push({ stage: 'skipped', code: 'NIGHT_SILENT', role: item.role, deferredUntil });
     }
     return { ok: true, project: name, at: nowIso, mode: 'night', nightKey, candidates: candidates.map((c) => `${c.role}:${c.level}`), recorded, actions, dryRun, source };
   }
 
-  /* ② 次日 08:00–08:30 执行窗口：force 优先，直接 rotate（夜间已入队，不再等回执） */
+  /* ② 次日 08:00–08:30 执行窗口：**严格按昨夜入队记账**执行，每次只换一个角色
+       （PM 2026-11-17 19:52 裁定：昨夜无入队 → 本窗口不执行任何阈值命中） */
   if (nextDayWindow) {
-    for (const item of candidates) {
-      const recent = rows.some((r) => String(r.stage) === 'rotate' && String(r.role) === item.role
-        && Math.abs(Date.parse(String(r.at || '')) - now) < ROTATE_COOLDOWN_MS);
-      if (recent) { actions.push({ stage: 'rotate', role: item.role, skipped: 'ROTATE_COOLDOWN' }); continue; }
-      const rotated = rotateSession({ projectName: name, role: item.role, now, reason: `next-day-${item.level}`, auditFile, dryRun });
-      actions.push({ stage: 'rotate', role: item.role, oldSessionId: rotated.oldId, newSessionId: rotated.newId, mode: 'next-day' });
-      actions.push({ stage: 'broadcast_reboot', role: item.role, roles: rotated.others });
-      rows.push({ at: nowIso, stage: 'rotate', role: item.role, evidence: { usageAt: item.usageAt } });
+    const todayDefer = iso(morningAt(now));   // 今日 08:00
+    const queuedAll = queuedForToday({ rows, todayDefer });
+    // 今日已换过的角色不再入队（严格队列：每拍只换 1 个，且一个角色一天只换一次）
+    const rotatedRoles = new Set(rows
+      .filter((r) => String(r.stage) === 'rotate' && Date.parse(String(r.at || '')) >= Date.parse(todayDefer))
+      .map((r) => String(r.role || '')));
+    const queued = queuedAll.filter((q) => !rotatedRoles.has(q.role));
+    if (!queued.length) {
+      return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: [], actions, dryRun, source, note: '昨夜无入队记账：本窗口不执行任何命中（严格队列口径）' };
     }
-    return { ok: true, project: name, at: nowIso, mode: 'next-day', candidates: candidates.map((c) => `${c.role}:${c.level}`), actions, dryRun, source };
+    const order = (x) => (x.level === 'force' ? 0 : x.level === 'rounds' ? 1 : 2);
+    queued.sort((a, b) => {
+      if (order(a) !== order(b)) return order(a) - order(b);
+      const ra = Number(a.rounds || 0); const rb = Number(b.rounds || 0);
+      if (rb !== ra) return rb - ra;
+      return Number(a.order || 0) - Number(b.order || 0);
+    });
+    const head = queued[0];
+    const rotated = rotateSession({ projectName: name, role: head.role, now, reason: `next-day-queue-${head.level}`, auditFile, dryRun });
+    actions.push({ stage: 'rotate', role: head.role, oldSessionId: rotated.oldId, newSessionId: rotated.newId, mode: 'next-day' });
+    actions.push({ stage: 'broadcast_reboot', role: head.role, roles: rotated.others });
+    return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), rotated: [head.role], actions, dryRun, source, note: '每拍只换一个：本拍换 ' + head.role };
   }
 
   /* ③ 白天常规流水线 */
