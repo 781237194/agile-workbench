@@ -20,11 +20,12 @@
  * ============================================================================
  */
 import { spawn } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
+import fs, { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, normalize, resolve } from 'node:path'
 
-export const inject = ['tools']
+// R-6bc8（T-37f5）：host half 只读消费 sessionController.state（写侧一律不碰）。
+export const inject = ['tools', 'sessionController']
 
 const TOOL_NAME = 'pm_workbench_open'
 const START_FILE = 'start.cmd'
@@ -247,8 +248,117 @@ function renderText(value) {
   return lines.join('\n')
 }
 
+/**
+ * R-6bc8：会话排队快照采集（host half，只读）。
+ * - 排队数只算 placement==='queued'；steering/context 进 byPlacement 明细；
+ * - 四态 fail > skip > ok > none（skipped 优先）；
+ * - 宿主侧直接 tmp+rename 原子写 团队/状态/会话排队.json（不 require 仓库 lib，cwd 无关）。
+ */
+function teamRootOf(pluginConfig) {
+  const fromCfg = pluginConfig && typeof pluginConfig.teamRoot === 'string' ? pluginConfig.teamRoot.trim() : ''
+  const fromEnv = String(process.env.TEAM_ROOT || '').trim()
+  return fromCfg || fromEnv
+}
+
+function atomicWriteJson(file, value, eol = "\n") {
+  fs.mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.tmp-${process.pid}`
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + eol, 'utf8')
+  fs.renameSync(tmp, file)
+}
+
+function queuedOf(state) {
+  const queue = state && Array.isArray(state.queue) ? state.queue : null
+  if (queue === null) return { known: false, count: null, byPlacement: null }
+  const byPlacement = { queued: 0, steering: 0, context: 0 }
+  for (const row of queue) {
+    const placement = String((row && row.placement) || 'queued')
+    byPlacement[placement] = (byPlacement[placement] || 0) + 1
+  }
+  return { known: true, count: byPlacement.queued || 0, byPlacement }
+}
+
+function wakeStateOf(rows, now, staleMs) {
+  const list = Array.isArray(rows) ? rows.filter(Boolean) : []
+  if (!list.length) return { state: 'none', lastOkAt: '', lastAt: '', stale: false }
+  const atOf = (row) => Date.parse(String((row && (row.at || row.deliveredAt || row.deliverAt)) || '')) || 0
+  const parsed = list.map((row) => {
+    const ok = row.ok === true
+    const skipped = row.skipped === true || row.state === 'skipped' || /^skipped$/i.test(String(row.reason || row.why || ''))
+    return { ok, skipped, failed: !ok && !skipped, at: atOf(row) }
+  }).sort((a, b) => b.at - a.at)
+  const lastAt = parsed[0] ? parsed[0].at : 0
+  const lastOk = parsed.find((row) => row.ok && row.at)
+  const lastOkAt = lastOk ? new Date(lastOk.at).toISOString() : ''
+  const stale = lastAt ? (Number(now) - lastAt) > Number(staleMs) : false
+  const pick = () => (parsed.some((r) => r.failed) ? 'fail' : (parsed.some((r) => r.skipped) ? 'skip' : (parsed.some((r) => r.ok) ? 'ok' : 'none')))
+  return { state: pick(), lastOkAt, lastAt: lastAt ? new Date(lastAt).toISOString() : '', stale }
+}
+
+function readWakeRows(teamRoot, role) {
+  const file = join(teamRoot, '状态', '唤醒.jsonl')
+  let text = ''
+  try { text = fs.readFileSync(file, 'utf8') } catch { return [] }
+  const rows = text.split(/\r?\n/).filter(Boolean).map((line) => { try { return JSON.parse(line) } catch { return null } }).filter(Boolean)
+  return rows.filter((row) => String((row && row.to) || '') === String(role || ''))
+}
+
+export async function collectSessionQueueSnapshot(ctx, pluginConfig, now = Date.now()) {
+  const teamRoot = teamRootOf(pluginConfig)
+  if (!teamRoot) return { ok: false, code: 'TEAM_ROOT_MISSING' }
+  let team = null
+  try { team = JSON.parse(fs.readFileSync(join(teamRoot, '状态', '团队.json'), 'utf8')) } catch { return { ok: false, code: 'TEAM_JSON_MISSING' } }
+  // AC4：没有 sessionId 的角色也要出行（known=false / queued=null），面板显示「—」而不是 0
+  const members = Array.isArray(team.members) ? team.members.filter((m) => m && m.role) : []
+  const staleMs = Number((pluginConfig && pluginConfig.staleMs) || 120000)
+  const roles = []
+  for (const member of members) {
+    const role = String(member.role || '')
+    const sessionId = String(member.sessionId || '')
+    let state = null
+    try {
+      state = await ctx.sessionController.state({ sessionId }, AbortSignal.timeout(3000))
+    } catch { state = null }
+    const queued = queuedOf(state)
+    const wake = wakeStateOf(readWakeRows(teamRoot, role), now, staleMs)
+    roles.push({
+      role, sessionId,
+      known: queued.known && Boolean(sessionId),
+      queued: queued.known ? queued.count : null,
+      byPlacement: queued.byPlacement,
+      state: wake.state, lastOkAt: wake.lastOkAt, lastAt: wake.lastAt,
+      stale: wake.stale || !queued.known,
+    })
+  }
+  const snapshot = {
+    schema: 1,
+    at: new Date(Number(now) || Date.now()).toISOString(),
+    project: String(team.activeProject || ''),
+    staleMs,
+    roles,
+  }
+  const file = join(teamRoot, '状态', '会话排队.json')
+  atomicWriteJson(file, snapshot)
+  return { ok: true, file, roles: roles.length }
+}
+
 export function apply(ctx, config) {
   const pluginConfig = config && typeof config === 'object' ? config : {}
+
+  // R-6bc8：会话排队只读快照（周期采集；卸载自动清）
+  ctx.effect(() => {
+    const intervalMs = Math.max(2000, Number(pluginConfig.snapshotIntervalMs) || 5000)
+    let stopped = false
+    const tick = () => {
+      if (stopped) return
+      Promise.resolve()
+        .then(() => collectSessionQueueSnapshot(ctx, pluginConfig))
+        .catch(() => { /* 采集失败不影响其它功能 */ })
+    }
+    tick()
+    const timer = setInterval(tick, intervalMs)
+    return () => { stopped = true; clearInterval(timer) }
+  })
 
   ctx.effect(() =>
     ctx.tools.register({
