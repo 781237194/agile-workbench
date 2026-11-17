@@ -1941,7 +1941,13 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
       item, remaining: readDispatchQueue(project).items.length,
     };
   }
-  const msg = notify({
+  // B-80bc（2026-11-17）：唤醒失败保留队列项后，到期重投必须复用原消息快照——不再调 notify，
+  // 否则每重投一次就往邮箱多塞一条重复消息。未到期则本拍不动它（等下一拍）。
+  const wakeRetryDueMs = Date.parse(String(item.wakeRetryAt || ''));
+  if (item.wakeMsg && item.wakeMsg.id && Number.isFinite(wakeRetryDueMs) && wakeRetryDueMs > Date.now()) {
+    return { ok: true, pumped: false, reason: 'WAKE_RETRY_WAIT', item, remaining: readDispatchQueue(project).items.length };
+  }
+  const msg = (item.wakeMsg && item.wakeMsg.id) ? item.wakeMsg : notify({
     from: String(item.from || 'pm'),
     to: String(item.to || ''),
     subject: String(item.subject || '(无主题)'),
@@ -1971,19 +1977,63 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
     try { appendEvent({ role: 'system', action: 'audit_write_failed', project, target: String(item.id || ''), note: `auto dispatch audit failed: ${String((e && (e.code || e.message)) || e).slice(0, 160)}` }); } catch { /* 事件也失败则放弃 */ }
   }
   const wake = await wakeSessionForMessage({ project, to: String(item.to || ''), msg, isDispatch: true });
+  // B-80bc（2026-11-17）：唤醒失败**不得静默出队**（缺陷单 §六 根因 2/3/4）。
+  // 口径：失败 → 保留队列项 + attempt+1 + 退避重投（复用消息快照，不重复 notify）；
+  // 达到 WAKE_RETRY_MAX_ATTEMPT 次仍失败 → 出队转 blocked + 结构化错误码 WAKE_FAILED_MAX_ATTEMPTS + 给 PM 发 wake_failed（不静默）。
+  // 沙盘（wakeSessionForMessage 返回 null）按「已跳过、不算失败」记，与既有 wakeFailed 判据同口径。
+  const atMs = Date.parse(String(item.at || ''));
+  const stallMs = Number.isFinite(atMs) ? Math.max(0, Date.now() - atMs) : 0;
+  const prevRow = readDeliveryState(project).items[item.id] || null;
+  const prevAttempt = Number((prevRow && prevRow.attempt) || item.attempt) || 1;
+  const prevState = String((prevRow && prevRow.state) || '');
+  const wakeSkipped = wake === null;
+  const wakeOk = wakeSkipped ? true : Boolean(wake && wake.ok === true);
+  const wakeCode = wakeOk ? '' : String((wake && (wake.code || wake.why)) || 'WAKE_NOT_OK');
+  if (!wakeOk) {
+    const role = String(item.to || '');
+    const nextAttempt = prevAttempt + 1;
+    if (nextAttempt >= WAKE_RETRY_MAX_ATTEMPT) {
+      // 重试耗尽：出队 → blocked + 审计 + PM 告警（markWakeFailed 会按 messageId 去重发 type=wake_failed）。
+      removeDispatchQueueItem(project, item.id);
+      try {
+        markDeliveryState(project, item.id, { state: 'blocked', attempt: nextAttempt, lastAt: nowIso(), lastCode: 'WAKE_FAILED_MAX_ATTEMPTS' });
+        appendDeliveryAudit(project, {
+          itemId: item.id, to: role, taskId: String(item.task || ''), attempt: nextAttempt,
+          result: 'blocked', code: 'WAKE_FAILED_MAX_ATTEMPTS', stallMs,
+          messageId: String(msg.id || ''), wakeOk: false, source: pumpSource,
+        });
+      } catch { /* 状态/审计写失败不阻断告警 */ }
+      markWakeFailed(project, role, { messageId: String(msg.id || ''), why: wakeCode, attempt: nextAttempt });
+      appendEvent({ role: 'system', action: 'dispatch_wake_exhausted', project, target: String(item.id),
+        note: `to=${role} attempts=${nextAttempt} code=WAKE_FAILED_MAX_ATTEMPTS why=${wakeCode.slice(0, 60)}` });
+      return { ok: false, pumped: true, reason: 'WAKE_FAILED_MAX_ATTEMPTS', item, wakeOk: false, code: wakeCode, attempts: nextAttempt, remaining: readDispatchQueue(project).items.length };
+    }
+    // 未耗尽：队列项保留 + 写回重投快照与到期时间；本次不外发新消息（复用 msg.id）。
+    const delayMs = WAKE_RETRY_STAGES_MS[Math.min(nextAttempt - 1, WAKE_RETRY_STAGES_MS.length - 1)] || 5000;
+    try {
+      const queue = readDispatchQueue(project);
+      const row = queue.items.find((it) => String(it.id) === String(item.id));
+      if (row) {
+        row.attempt = nextAttempt;
+        row.wakeRetryAt = new Date(Date.now() + delayMs).toISOString();
+        row.wakeMsg = { id: msg.id, from: msg.from, to: msg.to, subject: msg.subject, body: msg.body, task: msg.task, sessionId: msg.sessionId };
+        writeDispatchQueue(project, queue);
+      }
+      markDeliveryState(project, item.id, { state: 'stalled', attempt: nextAttempt, lastAt: nowIso(), lastCode: wakeCode || 'WAKE_RETRY_SCHEDULED' });
+      appendDeliveryAudit(project, {
+        itemId: item.id, to: role, taskId: String(item.task || ''), attempt: nextAttempt,
+        result: 'retry', code: 'WAKE_RETRY_SCHEDULED', stallMs,
+        messageId: String(msg.id || ''), wakeOk: false, source: pumpSource,
+      });
+      appendEvent({ role: 'system', action: 'dispatch_wake_retry', project, target: String(item.id),
+        note: `to=${role} attempt=${nextAttempt} code=${wakeCode.slice(0, 60)} retryInMs=${delayMs}` });
+    } catch { /* 写回失败也不阻断（下一拍整队重算） */ }
+    return { ok: false, pumped: true, reason: 'WAKE_RETRY_SCHEDULED', item, wakeOk: false, code: wakeCode, attempts: nextAttempt, retryInMs: delayMs, remaining: readDispatchQueue(project).items.length };
+  }
   removeDispatchQueueItem(project, item.id);
   appendEvent({ role: 'system', action: 'dispatch_pump', project, target: msg.id, note: `queue=${item.id} to=${item.to} task=${item.task || ''}` });
   // R-1dfb F1/F4：投递成功 → 状态 delivered + 12 键审计（wakeOk 记唤醒是否成功，失败码记 code）。
   try {
-    const atMs = Date.parse(String(item.at || ''));
-    const prevRow = readDeliveryState(project).items[item.id] || null;
-    const prevAttempt = Number((prevRow && prevRow.attempt) || item.attempt) || 1;
-    const prevState = String((prevRow && prevRow.state) || '');
-    // 沙盘（wakeSessionForMessage 返回 null）按「已跳过、不算失败」记，与既有 wakeFailed 判据同口径。
-    const wakeSkipped = wake === null;
-    const wakeOk = wakeSkipped ? true : Boolean(wake && wake.ok === true);
-    const wakeCode = wakeOk ? '' : String((wake && (wake.code || wake.why)) || 'WAKE_NOT_OK');
-    const stallMs = Number.isFinite(atMs) ? Math.max(0, Date.now() - atMs) : 0;
     // 到期/阻塞/升级后的再次投递：先留一行 retry（卷 §八 result 枚举；重投不算首次 delivered）。
     if (['stalled', 'blocked', 'upgraded'].includes(prevState)) {
       appendDeliveryAudit(project, {
