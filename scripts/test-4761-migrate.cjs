@@ -223,6 +223,18 @@ check('⑨ F4⑤ 改名时 activeProject 旧名 → --name 新名（dry-run 计�
   renameRebind.code === 0 && teamAfterRename.activeProject === '新名迁移项目'
   && (renameRebind.json.diffs || []).some((d) => d.key === 'activeProject' && d.to === '新名迁移项目')
   && /需重 boot/.test(String(renameRebind.json.message || '')), { activeProject: teamAfterRename.activeProject, diffs: renameRebind.json && renameRebind.json.diffs });
+// ⑨-b（PM 15:15 要求）：写前备份目录存在 + 迁移审计行 reason=activeProject_rename
+const backupRoot = path.join(REPO, '_backup');
+const activeBackups = fs.existsSync(backupRoot) ? fs.readdirSync(backupRoot).filter((n) => n.endsWith('-activeproject')) : [];
+const activeBackupFile = activeBackups.length ? path.join(backupRoot, activeBackups[0], '团队.json') : '';
+const migAudit = path.join(stateDir, '迁移审计.jsonl');
+const migAuditRows = fs.existsSync(migAudit)
+  ? fs.readFileSync(migAudit, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
+  : [];
+const activeRenameRow = migAuditRows.find((row) => row.reason === 'activeProject_rename');
+check('⑨-b 写前备份 团队.json 存在', activeBackups.length >= 1 && Boolean(activeBackupFile) && fs.existsSync(activeBackupFile), { activeBackups });
+check('⑨-b 迁移审计记 reason=activeProject_rename（from/to）', Boolean(activeRenameRow)
+  && activeRenameRow.action === 'rebind_active_project' && activeRenameRow.to === '新名迁移项目', activeRenameRow || migAuditRows.slice(-3));
 const passed = results.filter((r) => r.ok).length;
 console.log(`\nB-4761（b0ea 返工）断言：${passed}/${results.length} PASS`);
 if (process.env.TEAM_SB_KEEP !== '1') fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
