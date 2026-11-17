@@ -1,4 +1,10 @@
 'use strict';
+// B-47c0 沙盘根唤醒拦截未修好前**暂停跑**（PM 2026-11-17 15:51 处置；本脚本故意走真实唤醒路径验证拦截，
+// 拦截失效时会按名册直唤醒真实会话）。修复后：TEAM_3C03_UNPAUSE=1 node scripts/test-3c03-sandboxwake.cjs
+if (process.env.TEAM_3C03_UNPAUSE !== '1') {
+  console.log('SKIP  test-3c03-sandboxwake：B-47c0（沙盘根唤醒拦截失效）修复前暂停跑；修复后带 TEAM_3C03_UNPAUSE=1 再跑');
+  process.exit(0);
+}
 const { rmSandbox, uniqueSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 /** B-3c03 回归：沙盘根（TEAM_ROOT 非安装默认）不唤醒真实会话，但业务返回/文案口径不变。 */
 const fs = require('node:fs');
@@ -14,6 +20,14 @@ const PROJECT = '唤醒隔离沙盘';
 // 不设 TEAM_SELFTEST：走真实唤醒路径，用来验证沙盘根拦截确实生效（不会真连 DSH）。
 const baseEnv = { ...process.env, TEAM_ROOT, TEAM_PROJECTS_ROOT: PROJECTS };
 delete baseEnv.TEAM_SELFTEST;
+// 污染取证（PM 2026-11-17 15:51 要求）：真实 团队.json 与 唤醒.jsonl 必须前后 sha256+mtime+bytes 不变。
+const REAL_TEAM_JSON = path.join(ROOT, '团队', '状态', '团队.json');
+const REAL_WAKE_JSONL = path.join(ROOT, '团队', '状态', '项目', '工作台改造修复', '唤醒.jsonl');
+const crypto = require('node:crypto');
+const statOf = (file) => {
+  try { const st = fs.statSync(file); return { sha256: crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'), mtimeMs: st.mtimeMs, bytes: st.size }; } catch { return null; }
+};
+const realBefore = { team: statOf(REAL_TEAM_JSON), wake: statOf(REAL_WAKE_JSONL) };
 const results = [];
 function check(name, ok, detail) {
   results.push({ name, ok, detail: ok ? '' : detail });
@@ -58,6 +72,17 @@ check('② TEAM_ALLOW_SANDBOX_WAKE=1 → 不再标记 sandbox 跳过', forcedWak
 const injected = run(['send', '--boot', dev.token, '--to', 'pm', '--subject', '注入失败', '--body', 'x', '--json'], { ...baseEnv, TEAM_WAKE_TEST_FAIL: '1' });
 const injWake = injected.wake || {};
 check('③ TEAM_WAKE_TEST_FAIL 优先，仍返回 WAKE_TEST_FAIL', String(injWake.code || '') === 'WAKE_TEST_FAIL' || String(injWake.why || '').includes('TEAM_WAKE_TEST_FAIL'), injWake);
+
+// ④ 污染取证：真实 团队.json 前后不变（sha256+mtime+bytes）
+const realTeamAfter = statOf(REAL_TEAM_JSON);
+check('④ 真实 团队.json 前后 sha256+mtime+bytes 不变（沙盘名册假 id，未碰真实名册）',
+  Boolean(realBefore.team && realTeamAfter && realBefore.team.sha256 === realTeamAfter.sha256 && realBefore.team.mtimeMs === realTeamAfter.mtimeMs && realBefore.team.bytes === realTeamAfter.bytes),
+  { before: realBefore.team && { sha: realBefore.team.sha256.slice(0, 12), mtime: realBefore.team.mtimeMs }, after: realTeamAfter && { sha: realTeamAfter.sha256.slice(0, 12), mtime: realTeamAfter.mtimeMs } });
+// ⑤ 污染取证：真实 唤醒.jsonl 前后不变（两次真实唤醒污染就是写这个文件/直连真实会话）
+const realWakeAfter = statOf(REAL_WAKE_JSONL);
+check('⑤ 真实 唤醒.jsonl 前后 sha256+mtime+bytes 不变（没有真实唤醒落账）',
+  Boolean(realBefore.wake && realWakeAfter && realBefore.wake.sha256 === realWakeAfter.sha256 && realBefore.wake.mtimeMs === realWakeAfter.mtimeMs && realBefore.wake.bytes === realWakeAfter.bytes),
+  { before: realBefore.wake && { sha: realBefore.wake.sha256.slice(0, 12), bytes: realBefore.wake.bytes }, after: realWakeAfter && { sha: realWakeAfter.sha256.slice(0, 12), bytes: realWakeAfter.bytes }, 备注: '真实实例可能同时在写 → 若 mtime 前进需与静置观察区分（本脚本已暂停跑，待 47c0 修后按外部并发写者口径复核）' });
 
 const passed = results.filter((r) => r.ok).length;
 const failed = results.filter((r) => !r.ok).length;
