@@ -147,6 +147,18 @@ async function main() {
     pCarrier.action === 'develop' && carrierOf(REQ, [carrier], mkRow('ready', D(0))) === 'programmer1',
     { plan: pCarrier, carrier: carrierOf(REQ, [carrier], mkRow('ready', D(0))) });
 
+  // ③b AC4：镜像任务（type=requirement，带 owner）不算「在办」——G5/claim-watch/route 都不拦
+  const mirror = { id: REQ, type: 'requirement', requirementId: REQ, owner: 'product', status: 'open', title: '镜像任务', workflow: {} };
+  const gates = await import(pathToFileURL(path.join(ROOT, '团队', '工具', 'lib', 'gates.mjs')).href);
+  const claimWatch = await import(pathToFileURL(path.join(ROOT, '团队', '工具', 'lib', 'claim-watch.mjs')).href);
+  const g5 = gates.gateRoleBusy({ role: 'product', tasks: [mirror] });
+  const needs = claimWatch.needsClaim(mirror);
+  const dgate = claimWatch.dispatchGateFor(PROJECT, 'product', NOW);
+  const qHas = mod.queueStillHas(PROJECT, 'product', REQ, [mirror]);
+  check('③b 镜像任务带 owner 也不算在办：G5 放行 / claim-watch 不认领不拦派 / route 队列不认（AC4）',
+    g5 === null && needs === false && dgate.ok === true && qHas === false,
+    { g5, needs, dispatchGate: dgate, queueStillHas: qHas, isMirror: gates.isRequirementMirrorTask(mirror) });
+
   // ④ 其它 skip 仍去重：预置「1 分钟前已对 unknown_decision 告过警」的状态，再造一次同原因事件
   const NEXT = NOW + 20 * 60 * 1000;
   const statusFile = path.join(stateDir, '守护状态.json');
