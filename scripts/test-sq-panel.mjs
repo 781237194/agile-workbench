@@ -34,9 +34,9 @@ const identity = { pm: '项目经理', programmer1: '高级程序员 A', tester:
 
 // ① 四态
 check('① AC1① {ok:false}（无 skipped）→ fail', SRC.classifyRow(row({ ok: false, reason: 'WAKE_FAILED' })) === 'fail', SRC.classifyRow(row({ ok: false })));
-check('① AC1② {ok:true, skipped:\'ALREADY_DELIVERED\'} → skip（不得为 ok）', SRC.classifyRow(row({ ok: true, skipped: 'ALREADY_DELIVERED' })) === 'skip', SRC.classifyRow(row({ ok: true, skipped: 'ALREADY_DELIVERED' })));
+check('① AC1② {ok:true, skipped:"ALREADY_DELIVERED"} → skip（不得为 ok）', SRC.classifyRow(row({ ok: true, skipped: 'ALREADY_DELIVERED' })) === 'skip', SRC.classifyRow(row({ ok: true, skipped: 'ALREADY_DELIVERED' })));
 check('① AC1③ {ok:true}（无 skipped）→ ok', SRC.classifyRow(row({ ok: true })) === 'ok', SRC.classifyRow(row({ ok: true })));
-check('① AC7③ {ok:true, skipped:\'DEBOUNCED\'} → skip', SRC.classifyRow(row({ ok: true, skipped: 'DEBOUNCED' })) === 'skip', SRC.classifyRow(row({ ok: true, skipped: 'DEBOUNCED' })));
+check('① AC7③ {ok:true, skipped:"DEBOUNCED"} → skip', SRC.classifyRow(row({ ok: true, skipped: 'DEBOUNCED' })) === 'skip', SRC.classifyRow(row({ ok: true, skipped: 'DEBOUNCED' })));
 check('① 四态优先级 fail > skip > ok：三类行同角色 → fail', SRC.summarizeRows([row({ ok: false }), row({ ok: true, skipped: 'MERGED_PENDING' }), row({ ok: true })], { now }).state === 'fail');
 
 // 同一角色失败/跳过各自独立计数

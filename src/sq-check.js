@@ -139,6 +139,11 @@ async function runSqCheck(options = {}) {
   const rosterFile = path.join(stateDir, '团队.json');
   const realWakeFile = String(options.realWakeFile || '');
   const realBefore = realWakeFile ? statOf(realWakeFile) : { exists: false, mtimeMs: 0, sha256: '' };
+  // 真实唤醒日志会被团队实时追加：记前缀哈希，只断言「前缀没被改写」（只增不改才算没碰过）
+  const prefixOf = (file, bytes) => {
+    try { return crypto.createHash('sha256').update(fs.readFileSync(file).subarray(0, bytes)).digest('hex'); } catch { return ''; }
+  };
+  if (realBefore.exists) realBefore.prefixHash = prefixOf(realWakeFile, realBefore.size);
 
   // 沙盘夹具：名册（六角色）+ 空唤醒日志（用例逐个重写）
   writeJson(rosterFile, {
@@ -180,6 +185,35 @@ async function runSqCheck(options = {}) {
       return file;
     } catch { return ''; }
   };
+  // 拍面板专用：先把壳内 webview 藏起来（独立原生层会盖住右侧抽屉）、把面板滚进抽屉可视区，再截。
+  const shotOf = async (name, selector) => {
+    const ready = await evalJs(`(async () => {
+      const d = document.getElementById('team-drawer');
+      if (d && d.hidden) { const b = document.getElementById('team-pill'); if (b) b.click(); }
+      const v = document.getElementById('dsh-view');
+      if (v) { v.dataset.sqPrevDisplay = v.style.display || ''; v.style.display = 'none'; }
+      await new Promise((r) => setTimeout(r, 400));
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return { ok: false, why: 'no-element' };
+      let node = el.parentElement;
+      while (node && node !== document.body) {
+        const cs = getComputedStyle(node);
+        if (/(auto|scroll)/.test(cs.overflowY) && node.scrollHeight > node.clientHeight + 40) {
+          const r = el.getBoundingClientRect();
+          const nr = node.getBoundingClientRect();
+          node.scrollTop += (r.top - nr.top) - 40;
+          break;
+        }
+        node = node.parentElement;
+      }
+      await new Promise((r) => setTimeout(r, 350));
+      const box = el.getBoundingClientRect();
+      return { ok: true, top: Math.round(box.top), height: Math.round(box.height), vh: window.innerHeight };
+    })()`);
+    const file = await shot(name);
+    await evalJs("(() => { const v = document.getElementById('dsh-view'); if (v) { v.style.display = v.dataset.sqPrevDisplay || ''; delete v.dataset.sqPrevDisplay; } return true; })()");
+    return { file, ready };
+  };
   const refresh = async () => {
     await evalJs('(async () => { if (typeof window.__sqRefresh === "function") await window.__sqRefresh(); return true; })()');
     await wait(220);
@@ -212,7 +246,7 @@ async function runSqCheck(options = {}) {
   check('AC1③ {ok:true} → ok 且 last-ok 取该行 deliveredAt', rowOf(panel, 'product').state === 'ok' && /刚刚|分钟前/.test(rowOf(panel, 'product').lastOk || '') && String(rowOf(panel, 'product').lastOkTitle).includes(ago(40 * 1000).slice(0, 10)), rowOf(panel, 'product'));
   check('AC1④ 0 行 → none 且 last-ok「无记录」', rowOf(panel, 'pm').state === 'none' && rowOf(panel, 'pm').lastOk === '无记录', rowOf(panel, 'pm'));
   check('AC1 同角色混合（fail+skip+ok）→ fail，失败数 1 / 跳过数 1 各自独立', rowOf(panel, 'analyst').state === 'fail' && rowOf(panel, 'analyst').fail === '1' && rowOf(panel, 'analyst').skip === '1', rowOf(panel, 'analyst'));
-  const ac1Shot = await shot('sq-ac1-four-states.png');
+  const ac1Shot = (await shotOf('sq-ac1-four-states.png', '#session-queue-panel')).file;
 
   // ── AC2 积压 ≠ 失败 ───────────────────────────────────────
   writeJson(snapshotFile, snapshotOf(baseRoles, now));
@@ -230,7 +264,20 @@ async function runSqCheck(options = {}) {
   panel = await refresh();
   const productFail = rowOf(panel, 'product');
   check('AC2 追加 1 条 {ok:false} → state=fail 而排队数仍为 3（数值不被失败态改写）', productFail.state === 'fail' && productFail.queued === '3', productFail);
-  const ac2Shot = await shot('sq-ac2-backlog-not-fail.png');
+  const ac2Shot = (await shotOf('sq-ac2-backlog-not-fail.png', '#session-queue-panel')).file;
+
+  // ── AC8 沙盘原句：3 条排队 + 1 条真失败 + 2 条跳过 → 显示 3 / fail1 / skip2 ──
+  writeJson(snapshotFile, snapshotOf(baseRoles.map((row) => (row.role === 'product' ? { ...row, queued: 3 } : row)), now));
+  writeWake(wakeFile, [
+    { to: 'product', at: ago(15 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    { to: 'product', at: ago(25 * 1000), ok: true, skipped: 'ALREADY_DELIVERED' },
+    { to: 'product', at: ago(35 * 1000), ok: true, skipped: 'DEBOUNCED' },
+  ]);
+  panel = await refresh();
+  const ac8Row = rowOf(panel, 'product');
+  check('AC8 沙盘原句：3 条排队 + 1 真失败 + 2 跳过 → 排队 3 / fail 1 / skip 2（state=fail，积压不冒充失败）',
+    ac8Row.queued === '3' && ac8Row.fail === '1' && ac8Row.skip === '2' && ac8Row.state === 'fail', ac8Row);
+  const ac8Shot = (await shotOf('sq-ac8-3-1-2.png', '#session-queue-panel')).file;
 
   // ── AC4 未知 ≠ 0 ─────────────────────────────────────────
   const unknownRow = rowOf(panel, 'programmer2');
@@ -256,7 +303,7 @@ async function runSqCheck(options = {}) {
   check('AC3 排队=3 → [data-backpressure-hint] 存在且文案含「排队 3 条」「先别连发」',
     picked3 === 'product' && panel.hasHint === true && /排队\s*3\s*条/.test(panel.hintText) && /先别连发/.test(panel.hintText),
     { picked3, hasHint: panel.hasHint, hintText: panel.hintText });
-  const ac3Shot = await shot('sq-ac3-backpressure.png');
+  const ac3Shot = (await shotOf('sq-ac3-backpressure.png', '[data-dispatch-entry]')).file;
   // 改排队=2 → 节点必须不存在
   writeJson(snapshotFile, snapshotOf(baseRoles.map((row) => (row.role === 'product' ? { ...row, queued: 2 } : row)), now));
   await refresh();
@@ -272,7 +319,7 @@ async function runSqCheck(options = {}) {
   panel = await evalJs(READ_PANEL);
   check('AC6 快照 10 分钟前 → data-sq-degraded="true" 且黄条可见含原因', panel.degraded === 'true' && panel.bannerHidden === false && /过期/.test(panel.bannerText), { degraded: panel.degraded, bannerHidden: panel.bannerHidden, bannerText: panel.bannerText });
   check('AC6 黄条同时给出最近成功读取时间', /最近成功读取/.test(panel.bannerText || ''), panel.bannerText);
-  const ac6Shot = await shot('sq-ac6-degraded.png');
+  const ac6Shot = (await shotOf('sq-ac6-degraded.png', '#session-queue-panel')).file;
   writeJson(snapshotFile, snapshotOf(baseRoles, Date.now()));
   await refresh();
   await refresh();
@@ -304,7 +351,7 @@ async function runSqCheck(options = {}) {
   panel = await refresh();
   check('边界·空值：快照不存在 → degraded=true 且黄条含「未接入」', panel.degraded === 'true' && /未接入/.test(panel.bannerText || ''), { degraded: panel.degraded, bannerText: panel.bannerText });
   check('边界·空值：快照不存在时排队数全部「—」而不是 0', (panel.rows || []).every((row) => row.queued === '—' && row.known === 'false'), (panel.rows || []).map((row) => `${row.role}:${row.queued}/${row.known}`));
-  const missingShot = await shot('sq-missing.png');
+  const missingShot = (await shotOf('sq-missing.png', '#session-queue-panel')).file;
 
   // ── 边界：坏 JSON → 沿用上一份 + 黄条（不清空面板） ─────────
   writeJson(snapshotFile, snapshotOf(baseRoles, Date.now()));
@@ -314,7 +361,7 @@ async function runSqCheck(options = {}) {
   check('边界·异常：快照坏 JSON → 黄条说明并保留上一份数据（不清空、不崩）',
     panel.degraded === 'true' && /解析失败|沿用/.test(panel.bannerText || '') && (panel.rows || []).length === 6,
     { degraded: panel.degraded, bannerText: panel.bannerText, rows: (panel.rows || []).length });
-  const brokenShot = await shot('sq-broken.png');
+  const brokenShot = (await shotOf('sq-broken.png', '#session-queue-panel')).file;
 
   // 还原成健康快照，给最终截图
   writeJson(snapshotFile, snapshotOf(baseRoles, Date.now()));
@@ -324,7 +371,7 @@ async function runSqCheck(options = {}) {
     { to: 'product', at: ago(25 * 1000), ok: true, deliveredAt: ago(25 * 1000) },
   ]);
   panel = await refresh();
-  const finalShot = await shot('sq-final.png');
+  const finalShot = (await shotOf('sq-final.png', '#session-queue-panel')).file;
   check('还原后回到健康态（degraded=false、六行）', panel.degraded === 'false' && (panel.rows || []).length === 6, { degraded: panel.degraded, rows: (panel.rows || []).length });
 
   // ── 只读与隔离 ───────────────────────────────────────────
@@ -334,9 +381,12 @@ async function runSqCheck(options = {}) {
   check('只读：多次刷新后沙盘唤醒日志 sha256 未变', sha256Of(wakeFile) === wakeSha, { before: wakeSha.slice(0, 16), after: sha256Of(wakeFile).slice(0, 16) });
   if (realWakeFile) {
     const realAfter = statOf(realWakeFile);
-    check('隔离：真实 团队/状态/项目/<项目>/唤醒.jsonl 的 sha256 与 mtime 未被碰',
-      realAfter.exists === realBefore.exists && realAfter.sha256 === realBefore.sha256 && realAfter.mtimeMs === realBefore.mtimeMs,
-      { realWakeFile, before: realBefore.sha256.slice(0, 16), after: realAfter.sha256.slice(0, 16), exists: realAfter.exists });
+    const prefixSame = realBefore.exists
+      ? (realAfter.exists && realAfter.size >= realBefore.size && prefixOf(realWakeFile, realBefore.size) === realBefore.prefixHash)
+      : !realAfter.exists;
+    check('隔离：真实 团队/状态/项目/<项目>/唤醒.jsonl 前缀未被改写（团队自己追加属正常）',
+      prefixSame,
+      { realWakeFile, beforeBytes: realBefore.size, afterBytes: realAfter.size, beforePrefix: String(realBefore.prefixHash || '').slice(0, 16), afterPrefix: realAfter.exists ? prefixOf(realWakeFile, realBefore.size).slice(0, 16) : '', exists: realAfter.exists });
   } else {
     check('隔离：没有真实唤醒日志路径（沙盘自足，无需比对）', true);
   }
@@ -351,7 +401,7 @@ async function runSqCheck(options = {}) {
     sandbox: { teamRoot: sandboxTeamRoot, wakeFile, snapshotFile, dataRoot: sandboxRoot },
     checks,
     screenshots: {
-      ac1: ac1Shot, ac2: ac2Shot, ac3: ac3Shot, ac6: ac6Shot,
+      ac1: ac1Shot, ac2: ac2Shot, ac8: ac8Shot, ac3: ac3Shot, ac6: ac6Shot,
       missing: missingShot, broken: brokenShot, final: finalShot,
     },
   };
