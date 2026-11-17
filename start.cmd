@@ -34,7 +34,7 @@ if "%START_KILL_ORPHANS%"=="1" goto :kill_orphans
 if "%GUARD_RC%"=="3" (
   echo [提示] 本工作台已有「默认数据目录」的 electron 实例在运行（PID 见上）。
   echo   任务栏有窗口就切过去，不用重复启动。
-  echo   沙箱/长跑/自检实例（--no-wake / --remote-debugging-port / AWB_DATA_DIR=_tmp 等）不再算已有实例，不会挡启动。
+  echo   沙箱/长跑/自检实例（--remote-debugging-port / AWB_DATA_DIR=_tmp 等）不再算已有实例，不会挡启动。
   echo   没有窗口却起不来（黑屏/秒退）说明是残留进程占着单实例锁，执行： start.cmd --kill-orphans
   exit /b 2
 )

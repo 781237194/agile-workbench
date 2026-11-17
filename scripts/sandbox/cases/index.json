@@ -22,7 +22,7 @@
       "file": "03-message.cjs",
       "category": "③消息与唤醒",
       "needsSelftest": true,
-      "desc": "沙盘内 send 到 pm（--no-wake），消息只落沙盘邮箱"
+      "desc": "沙盘（TEAM_SELFTEST=1）内 send，消息只落沙盘邮箱"
     },
     {
       "name": "04-archive",

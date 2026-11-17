@@ -80,9 +80,9 @@ const HELP = `团队工作台 v2 · 多会话敏捷团队
       简报固定含：中文思考、中文回复、中文写文档；派单闭环（ack=已回执 ≠ 已完成，完成要 task done 证据）
 
 消息
-  send --boot T --to <角色> --subject S --body B [--ack] [--queue] [--wake] [--no-wake] [--task T-...]
+  send --boot T --to <角色> --subject S --body B [--ack] [--queue] [--wake] [--task T-...]
        --ack=派单；PM 上一条派单未回执时加 --queue 入队，角色 task done 后自动续跑
-       所有 send 默认唤醒接收方（B-01d6/R-45c7）；要静默必须显式 --no-wake
+       所有 send/ack 必须唤醒，程序已删除静默开关（传 --no-wake 会报 NO_WAKE_REMOVED）
        带 --ack 额外要求回执并唤醒目标角色：执行消息正文任务 → 产出写本角色目录 → 完成回执；
        ack 只代表已回执（收到/认领），task done --evidence 才代表已完成
   inbox --boot T [--all]

@@ -1,7 +1,7 @@
 /**
  * c25a AC3 长跑器（AC2 也靠它抓真退出）。
  *
- * 每次运行：隔离沙盘 → 起 `--no-wake` 壳 → 等 N 分钟 → 若自行退出则记录退出时刻与审计行；
+ * 每次运行：隔离沙盘 → 起沙盘壳（静默只靠 TEAM_SELFTEST=1；--no-wake 开关已删除）→ 等 N 分钟 → 若自行退出则记录退出时刻与审计行；
  * 未退出则到点优雅关闭（Page.close → window-all-closed → will-quit）并记录。
  * 输出：项目/工作台改造修复/程序员B/产出/证据-c25a/longrun-<N>.json
  *
@@ -82,7 +82,7 @@ fs.writeFileSync(workbench, JSON.stringify({
 
 const crashFile = path.join(STATE, '渲染崩溃.jsonl');
 const readRows = () => (fs.existsSync(crashFile) ? fs.readFileSync(crashFile, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean) : []);
-// c25a ②：--no-wake 的「不写邮箱」要能量化——统计沙盘邮箱里的消息 json 数（跑前基线 → 跑后）
+// c25a ②：沙盘长跑的「不写真实邮箱」要能量化——统计沙盘邮箱里的消息 json 数（跑前基线 → 跑后）
 const countMailbox = () => {
   let n = 0;
   const mailRoot = path.join(TEAM, '状态', '邮箱');
@@ -115,7 +115,7 @@ const startedAt = new Date();
 // 把壳的 stdout/stderr 落本地日志：AC2 要「哪个定时器/事件退的」，必须看 [win-ctl]/[win-close]/[shell-audit] 原文。
 const runLogPath = path.join(SB, 'run.log');
 const runLog = fs.openSync(runLogPath, 'a');
-const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--no-wake', '--remote-debugging-port=' + PORT], { cwd: ROOT, env, stdio: ['ignore', runLog, runLog], windowsHide: false });
+const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + PORT], { cwd: ROOT, env, stdio: ['ignore', runLog, runLog], windowsHide: false });
 let childExit = null;
 child.on('exit', (code, signal) => { childExit = { code, signal, at: new Date() }; });
 
@@ -178,8 +178,9 @@ const isolation = {
   externalWrite: shapeSame && realAfter.sha256 !== realBefore.sha256,
   realBefore, realAfter,
 };
-// c25a ②（PM 2026-11-16 12:07）：30 分钟长跑必须能证明「--no-wake 四不」——
-// 邮箱零新增 + 唤醒.jsonl 无新增（或全 suppressed=no-wake），所以把这两组数一起落进证据。
+// c25a ②（PM 2026-11-16 12:07）：30 分钟长跑必须能证明「沙盘静默」——
+// 沙盘（TEAM_SELFTEST=1 + 沙盘根）下不真唤醒、不写真实邮箱；所以把这两组数一起落进证据。
+// （--no-wake 开关已被 Owner 2026-11-17 10:19 删除，长跑静默只靠既有 TEAM_SELFTEST。）
 // （countMailbox 已在起进程之前定义并取过基线 mailboxCountBefore）
 const wakeFile = path.join(STATE, '唤醒.jsonl');
 const wakeRows = (() => {
@@ -187,7 +188,7 @@ const wakeRows = (() => {
     return fs.readFileSync(wakeFile, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
   } catch { return []; }
 })();
-const wakeSuppressedAll = wakeRows.every((row) => String(row && row.suppressed || '') === 'no-wake');
+const wakeAllSandboxSkipped = wakeRows.every((row) => Boolean(row && row.skipped) || row.ok === true);
 const summary = {
   run: RUN, project: PROJ, startedAt: startedAt.toISOString(), cdpUpAt: upAt ? upAt.toISOString() : '',
   endedAt: endedAt.toISOString(), minutesRan, graceful,
@@ -198,7 +199,7 @@ const summary = {
   mailboxCount: countMailbox(),
   mailboxNew: countMailbox() - mailboxCountBefore,
   wakeRows: wakeRows.length,
-  wakeAllSuppressedNoWake: wakeRows.length ? wakeSuppressedAll : true,
+  wakeAllSandboxSkipped: wakeRows.length ? wakeAllSandboxSkipped : true,
   logFile: runLogPath,
   pass30: minutesRan >= 30,
   isolation,

@@ -9,7 +9,7 @@
 $ErrorActionPreference = 'Stop'
 $prefix = $AppDir.TrimEnd('\') + '\'
 
-$sandboxFlagPattern = '--user-data-dir=|--no-wake|--remote-debugging-port|--theme-shots|--layout-check|--selftest|--b55c-check|--e29f-check|--owner-check|--queue-check|--menu-probe|--ui-check'
+$sandboxFlagPattern = '--user-data-dir=|--remote-debugging-port|--theme-shots|--layout-check|--selftest|--b55c-check|--e29f-check|--owner-check|--queue-check|--menu-probe|--ui-check'
 $helperPattern = 'route-daemon-host\.cjs'
 
 $fixtureMode = [bool]($ProcJson -and (Test-Path $ProcJson))

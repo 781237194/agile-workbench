@@ -248,7 +248,7 @@ const PANEL_LABELS_JS = `(function(){
   seedSandbox();
   console.log(`sandbox ready in ${((Date.now() - t0) / 1000).toFixed(1)}s · ${SB}`);
 
-  const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + PORT, '--no-wake'], {
+  const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + PORT], {
     cwd: ROOT, env: launchEnv(), stdio: 'ignore', windowsHide: false,
   });
   let inst = null;

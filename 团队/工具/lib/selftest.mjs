@@ -393,7 +393,8 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
 
     // Owner 2026-11-16 18:50（B-20261117-082720-6e7c，取代 11-14 09:10「纯回执不唤醒」）：
     // **回执必须唤醒原消息发送方**——DSH 是排队制、agent 无输入无输出，不唤醒对方就无法决策；
-    // 只有显式 --no-wake 才静默。这里三条都从返回值 + 唤醒.jsonl + 事件流取证（硬回归）。
+    // 发消息与回执一律唤醒，无静默开关（Owner 2026-11-17 10:19：--no-wake 已删除，传即拒）。
+    // 这里从返回值 + 唤醒.jsonl + 事件流取证（硬回归）。
     {
       const ackWakeFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl');
       const readWakeRows = () => (fs.existsSync(ackWakeFile)
@@ -422,16 +423,26 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       // ④ 回执类消息再被 ack 不得套娃（回执不再回执）
       const nested = (pmInbox2.messages || []).filter((m) => String(m.subject || '').startsWith('回执: 回执:'));
       if (nested.length) failStep('回执套娃（ack 回执消息又生成回执消息）', JSON.stringify(nested.slice(0, 2)).slice(0, 300));
-      // ⑤ --no-wake 静默分支仍有效：新派单 → B ack --no-wake → 不新增「to=pm 且非 skipped」的唤醒行
+      // ⑤ Owner 2026-11-17 10:19：--no-wake 已被删除——ack 传该参数必须 NO_WAKE_REMOVED，
+      // 且零投递（收件箱不变）、零唤醒（唤醒.jsonl 不新增）、零状态写入（原消息仍未回执）。
       const m2 = json(['send', '--boot', pmBoot.token, '--to', 'programmer1', '--subject', '静默回执用例', '--body', 'x', '--ack', '--json']);
+      if (!(m2.wake && m2.wake.ok === true)) failStep('⑤ 前置：不带 --no-wake 的 send 必须正常唤醒', JSON.stringify(m2.wake || null).slice(0, 300));
       json(['read', '--boot', pgBoot.token, '--id', m2.message.id, '--json']);
-      const wakeCountBeforeSilent = readWakeRows().length;
-      const silentAck = json(['ack', '--boot', pgBoot.token, '--id', m2.message.id, '--note', '静默测试', '--no-wake', '--json']);
-      if (silentAck.ackWake) failStep('--no-wake 下不该唤醒（ackWake 应为 null）', JSON.stringify(silentAck.ackWake).slice(0, 200));
-      const newWakeRows = readWakeRows().slice(wakeCountBeforeSilent);
-      const silentLeak = newWakeRows.filter((row) => String(row.to || '') === 'pm' && row.skipped !== 'SELFTEST' && row.skipped !== 'sandbox_wake_skipped');
-      if (silentLeak.length) failStep('--no-wake 仍唤醒了 pm', JSON.stringify(silentLeak).slice(0, 300));
-      pass('回执必唤醒发送方（Owner 11-16 18:50，取代 09:10 纯回执不唤醒）；--no-wake 才静默；回执不再回执');
+      const pmInboxBeforeNoWakeAck = json(['inbox', '--boot', pmBoot.token, '--all', '--json']).messages.length;
+      const wakeCountBeforeNoWakeAck = readWakeRows().length;
+      const rejectedAck = run(['ack', '--boot', pgBoot.token, '--id', m2.message.id, '--note', '静默测试', '--no-wake', '--json'], { expectFail: true });
+      let rejectedAckJson = null;
+      try { rejectedAckJson = JSON.parse(String(rejectedAck.stdout || '').trim()); } catch { rejectedAckJson = null; }
+      if (!rejectedAckJson || rejectedAckJson.ok !== false || rejectedAckJson.code !== 'NO_WAKE_REMOVED') {
+        failStep('⑤ ack --no-wake 必须返回 ok:false + code=NO_WAKE_REMOVED', String(rejectedAck.stdout || rejectedAck.stderr).slice(0, 300));
+      }
+      const pmInboxAfterNoWakeAck = json(['inbox', '--boot', pmBoot.token, '--all', '--json']).messages.length;
+      if (pmInboxAfterNoWakeAck !== pmInboxBeforeNoWakeAck) failStep('⑤ ack --no-wake 被拒后仍新增了收件箱消息（应零投递）', JSON.stringify({ pmInboxBeforeNoWakeAck, pmInboxAfterNoWakeAck }));
+      if (readWakeRows().length !== wakeCountBeforeNoWakeAck) failStep('⑤ ack --no-wake 被拒后仍新增了唤醒行（应零唤醒）', JSON.stringify({ wakeCountBeforeNoWakeAck, after: readWakeRows().length }));
+      // 收口：正常回执掉 m2，清掉 PM 派单锁（不带 --no-wake，唤醒发送方）
+      const m2Ack = json(['ack', '--boot', pgBoot.token, '--id', m2.message.id, '--note', '已回执（收口）', '--json']);
+      if (!(m2Ack.ackWake && m2Ack.ackWake.ok === true && m2Ack.ackWake.to === 'pm')) failStep('⑤ 收口：不带 --no-wake 的 ack 必须唤醒 pm', JSON.stringify(m2Ack.ackWake || null).slice(0, 300));
+      pass('回执必唤醒发送方（Owner 11-16 18:50，取代 09:10 纯回执不唤醒）；--no-wake 已被删除：ack 拒绝（NO_WAKE_REMOVED）且零投递零唤醒；回执不再回执');
     }
 
     // Owner 2026-11-14 07:44 最终口径：取消消息合并与分级——所有消息立即投递、立即唤醒，不攒批、不建池、不串台。
@@ -1854,10 +1865,24 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
         .filter((row) => row.to === 'pm' && Array.isArray(row.messageIds) && row.messageIds.some((id) => three.some((t) => t.message && t.message.id === id)));
       if (logRows.length < 3) failStep('连续 3 条消息未产生 3 次唤醒留痕', JSON.stringify(logRows.length));
     }
-    // ③ --no-wake 显式关闭
-    const wakeOff = json(['send', '--boot', anaBoot99.token, '--to', 'pm', '--subject', '不唤醒', '--body', 'x', '--no-wake', '--json']);
-    if (wakeOff.wake !== null) failStep('--no-wake 未关闭唤醒', JSON.stringify(wakeOff.wake).slice(0, 200));
-    // ③.1 B-01d6（R-45c7）：普通 send 默认唤醒——非 PM 收件人、不带 --wake 也要唤醒；--no-wake 仍静默
+    // ③ Owner 2026-11-17 10:19：--no-wake 已被删除——send 传该参数必须 NO_WAKE_REMOVED，
+    // 且零投递（收件箱不变）、零唤醒（唤醒.jsonl 不新增）、零状态写入。
+    {
+      const noWakeLog = path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl');
+      const noWakeRowCount = () => (fs.existsSync(noWakeLog) ? read(noWakeLog).split(/\r?\n/).filter(Boolean).length : 0);
+      const pmInboxBeforeNoWake = json(['inbox', '--boot', gatePm2.token, '--all', '--json']).messages.length;
+      const wakeCountBeforeNoWake = noWakeRowCount();
+      const noWakeSend = run(['send', '--boot', anaBoot99.token, '--to', 'pm', '--subject', '不唤醒', '--body', 'x', '--no-wake', '--json'], { expectFail: true });
+      let noWakeSendJson = null;
+      try { noWakeSendJson = JSON.parse(String(noWakeSend.stdout || '').trim()); } catch { noWakeSendJson = null; }
+      if (!noWakeSendJson || noWakeSendJson.ok !== false || noWakeSendJson.code !== 'NO_WAKE_REMOVED') {
+        failStep('③ send --no-wake 必须返回 ok:false + code=NO_WAKE_REMOVED', String(noWakeSend.stdout || noWakeSend.stderr).slice(0, 300));
+      }
+      const pmInboxAfterNoWake = json(['inbox', '--boot', gatePm2.token, '--all', '--json']).messages.length;
+      if (pmInboxAfterNoWake !== pmInboxBeforeNoWake) failStep('③ send --no-wake 被拒后仍新增收件箱消息（应零投递）', JSON.stringify({ pmInboxBeforeNoWake, pmInboxAfterNoWake }));
+      if (noWakeRowCount() !== wakeCountBeforeNoWake) failStep('③ send --no-wake 被拒后仍新增唤醒行（应零唤醒）', JSON.stringify({ wakeCountBeforeNoWake, after: noWakeRowCount() }));
+    }
+    // ③.1 B-01d6（R-45c7）：普通 send 默认唤醒——非 PM 收件人、不带 --wake 也要唤醒；--no-wake 已删除
     const wakeAnalyst = json(['send', '--boot', gateDev.token, '--to', 'analyst', '--subject', '默认唤醒-非PM', '--body', '发往队友也应唤醒', '--json']);
     if (!(wakeAnalyst.wake && wakeAnalyst.wake.to === 'analyst')) failStep('普通 send 未默认唤醒非 PM 收件人', JSON.stringify(wakeAnalyst).slice(0, 300));
     if (wakeAnalyst.wake.ok !== true || wakeAnalyst.wake.skipped === 'MERGED_PENDING') failStep('普通 send 唤醒未立即生效', JSON.stringify(wakeAnalyst.wake).slice(0, 200));
@@ -1875,8 +1900,22 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
         .filter((row) => row.to === 'analyst' && Array.isArray(row.messageIds) && row.messageIds.some((id) => threeDirect.some((t) => t.message && t.message.id === id)));
       if (directLog.length < 3) failStep('直连连发 3 条未产生 3 次唤醒留痕', JSON.stringify(directLog.length));
     }
-    const wakeOffDirect = json(['send', '--boot', gateDev.token, '--to', 'analyst', '--subject', '直连静默', '--body', 'x', '--no-wake', '--json']);
-    if (wakeOffDirect.wake !== null) failStep('--no-wake 未关闭直连唤醒', JSON.stringify(wakeOffDirect.wake).slice(0, 200));
+    // ③.2 Owner 2026-11-17 10:19：--no-wake 已被删除——直连 send 传该参数同样拒（零投递/零唤醒）。
+    {
+      const directWakeLog = path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl');
+      const directWakeRowCount = () => (fs.existsSync(directWakeLog) ? read(directWakeLog).split(/\r?\n/).filter(Boolean).length : 0);
+      const anaInboxBeforeNoWake = json(['inbox', '--boot', anaBoot99.token, '--all', '--json']).messages.length;
+      const directWakeBeforeNoWake = directWakeRowCount();
+      const noWakeDirect = run(['send', '--boot', gateDev.token, '--to', 'analyst', '--subject', '直连静默', '--body', 'x', '--no-wake', '--json'], { expectFail: true });
+      let noWakeDirectJson = null;
+      try { noWakeDirectJson = JSON.parse(String(noWakeDirect.stdout || '').trim()); } catch { noWakeDirectJson = null; }
+      if (!noWakeDirectJson || noWakeDirectJson.ok !== false || noWakeDirectJson.code !== 'NO_WAKE_REMOVED') {
+        failStep('③.2 直连 send --no-wake 必须返回 ok:false + code=NO_WAKE_REMOVED', String(noWakeDirect.stdout || noWakeDirect.stderr).slice(0, 300));
+      }
+      const anaInboxAfterNoWake = json(['inbox', '--boot', anaBoot99.token, '--all', '--json']).messages.length;
+      if (anaInboxAfterNoWake !== anaInboxBeforeNoWake) failStep('③.2 直连 send --no-wake 被拒后仍新增收件箱消息', JSON.stringify({ anaInboxBeforeNoWake, anaInboxAfterNoWake }));
+      if (directWakeRowCount() !== directWakeBeforeNoWake) failStep('③.2 直连 send --no-wake 被拒后仍新增唤醒行', JSON.stringify({ directWakeBeforeNoWake, after: directWakeRowCount() }));
+    }
     // ④ task done 自动发完成事件并尝试唤醒 PM
     const wakeTask = json(['task', 'create', '--boot', gatePm2.token, '--title', '唤醒用例任务', '--priority', 'P2', '--owner', 'programmer2', '--json']);
     json(['task', 'claim', '--boot', qDev.token, '--id', wakeTask.task.id, '--json']);
@@ -1888,7 +1927,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     const wakeLogFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl');
     const wakeLog = fs.existsSync(wakeLogFile) ? read(wakeLogFile) : '';
     if (!wakeLog.includes('TEAM_WAKE_TEST_FAIL')) failStep('唤醒失败未写 唤醒.jsonl', wakeLog.slice(0, 300));
-    pass('B-6818（T0）+ B-01d6（R-45c7）：send 默认唤醒（含非 PM 收件人）、取消合并（连续 3 条 3 次唤醒）、--no-wake 关闭、task done 完成事件唤醒、失败写 唤醒.jsonl');
+    pass('B-6818（T0）+ B-01d6（R-45c7）：send 默认唤醒（含非 PM 收件人）、取消合并（连续 3 条 3 次唤醒）、--no-wake 已被删除（传即拒且零投递零唤醒）、task done 完成事件唤醒、失败写 唤醒.jsonl');
 
     // ===== B-2736：ack 回执必达——「完成回执」被 ack 后给原发送者投一条静默 notice（只扩散一层）=====
     {
@@ -1919,7 +1958,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     }
     pass('B-2736：ack 完成回执 → 原发送者 +1 条静默 notice（含被 ack 消息/回执人/备注/时间），只一层不扩散，回执.jsonl 不重复');
 
-    // ===== B-1e4a（R-45c7，Owner 13:06）：任何消息类型都唤醒——receipt 不再例外；--no-wake 是唯一退出阀 =====
+    // ===== B-1e4a（R-45c7，Owner 13:06）：任何消息类型都唤醒——receipt 不再例外；--no-wake 已删除（传即拒） =====
     {
       const wakeAllFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒.jsonl');
       const wakeAllRows = () => (fs.existsSync(wakeAllFile) ? read(wakeAllFile).split(/\r?\n/).filter(Boolean)
@@ -1952,13 +1991,21 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
       if (!three2.every((row) => row.wake && row.wake.ok === true && row.wake.skipped !== 'MERGED_PENDING')) failStep('B-1e4a ③：连发 3 条未各自唤醒', JSON.stringify(three2.map((r) => r.wake && r.wake.skipped)).slice(0, 200));
       const threeWakes = wakeAllRows().filter((row) => (row.messageIds || []).map(String).some((id) => three2.some((t) => t.message && t.message.id === id)));
       if (threeWakes.length < 3) failStep('B-1e4a ③：连发 3 条未各自产生唤醒留痕', JSON.stringify(threeWakes.length));
-      // ④ --no-wake 是唯一退出阀
-      const silent2 = json(['send', '--boot', qDev.token, '--to', 'pm', '--subject', '静默', '--body', 'x', '--no-wake', '--json']);
-      if (silent2.wake !== null) failStep('B-1e4a ④：--no-wake 未关闭唤醒', JSON.stringify(silent2.wake).slice(0, 200));
-      const silentRows = wakeAllRows().filter((row) => (row.messageIds || []).map(String).includes(String(silent2.message.id)));
-      if (silentRows.length) failStep('B-1e4a ④：--no-wake 仍为该消息新增唤醒留痕', JSON.stringify(silentRows.length));
+      // ④ Owner 2026-11-17 10:19：--no-wake 已被删除——send 传该参数必须 NO_WAKE_REMOVED，
+      // 且零投递（pm 收件箱不变）、零唤醒（唤醒.jsonl 不新增）。
+      const pmInboxBeforeNoWake = json(['inbox', '--boot', gatePm2.token, '--all', '--json']).messages.length;
+      const wakeBeforeNoWake = wakeAllRows().length;
+      const silent2 = run(['send', '--boot', qDev.token, '--to', 'pm', '--subject', '静默', '--body', 'x', '--no-wake', '--json'], { expectFail: true });
+      let silent2Json = null;
+      try { silent2Json = JSON.parse(String(silent2.stdout || '').trim()); } catch { silent2Json = null; }
+      if (!silent2Json || silent2Json.ok !== false || silent2Json.code !== 'NO_WAKE_REMOVED') {
+        failStep('B-1e4a ④：--no-wake 必须返回 ok:false + code=NO_WAKE_REMOVED', String(silent2.stdout || silent2.stderr).slice(0, 300));
+      }
+      const pmInboxAfterNoWake = json(['inbox', '--boot', gatePm2.token, '--all', '--json']).messages.length;
+      if (pmInboxAfterNoWake !== pmInboxBeforeNoWake) failStep('B-1e4a ④：--no-wake 被拒后仍新增收件箱消息（应零投递）', JSON.stringify({ pmInboxBeforeNoWake, pmInboxAfterNoWake }));
+      if (wakeAllRows().length !== wakeBeforeNoWake) failStep('B-1e4a ④：--no-wake 被拒后仍新增唤醒留痕（应零唤醒）', JSON.stringify({ wakeBeforeNoWake, after: wakeAllRows().length }));
     }
-    pass('B-1e4a（R-45c7）：receipt 也唤醒、notice 被 ack 唤醒发送方（Owner 11-16 18:50 取代 09:10）、连发 3 条各唤醒、--no-wake 唯一退出阀');
+    pass('B-1e4a（R-45c7）：receipt 也唤醒、notice 被 ack 唤醒发送方（Owner 11-16 18:50 取代 09:10）、连发 3 条各唤醒、--no-wake 已被删除（传即拒且零投递零唤醒）');
 
     // ===== B-d111（已按 Owner 08:08 改口径）：不再有窗口合并；保留 delivered 去重、失败重试、兜底补发 =====
     const wakeQueueFile = path.join(teamRoot, '状态', '项目', '试点', '唤醒队列.json');

@@ -43,8 +43,8 @@ const pm = run(['boot', '--role', 'pm', '--project', PROJECT, '--session', 'sbx-
 const dev = run(['boot', '--role', 'programmer2', '--project', PROJECT, '--session', 'sbx-dev', '--json']);
 console.log(`沙盘就绪：${SB}`);
 
-// ① 未读消息（--no-wake 投递，停在 new）→ read 落 1 行 kind=read（mode=first/counted=true）
-const m1 = run(['send', '--boot', dev.token, '--to', 'pm', '--subject', '未读用例', '--body', 'x', '--no-wake', '--json']).message;
+// ① 未读消息（沙盘投递，TEAM_SELFTEST=1/沙盘根不真唤醒，停在 new）→ read 落 1 行 kind=read（mode=first/counted=true）
+const m1 = run(['send', '--boot', dev.token, '--to', 'pm', '--subject', '未读用例', '--body', 'x', '--json']).message;
 const r1 = run(['read', '--boot', pm.token, '--id', m1.id, '--json']);
 const rows1 = readRows(m1.id);
 check('① 未读消息 read 落 1 行 kind=read', rows1.length === 1, rows1.length);

@@ -2,7 +2,7 @@
  * B-20261116-105124-c25a AC4 自检：**退出必有审计行**。
  *
  * 做法（真窗口，不伪造）：
- *   ① 隔离数据根起一个 `--no-wake` 壳；
+ *   ① 隔离数据根起一个壳（沙盘静默只靠 TEAM_SELFTEST=1；--no-wake 开关已删除）；
  *   ② 等 CDP 可达后，用 `Page.close` 关掉唯一窗口（走真实 window-all-closed → quit 路径）；
  *   ③ 等进程退出，读 `团队/状态/项目/<项目>/渲染崩溃.jsonl`，断言：
  *      - 至少一行 `kind=shell-window-all-closed`（窗口全关）；
@@ -66,7 +66,7 @@ const env = {
   ...process.env, AWB_DATA_DIR: DATA, AWB_STORE: workbench,
   TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'), TEAM_WORKBENCH_JSON: workbench, TEAM_SELFTEST: '1',
 };
-const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--no-wake', '--remote-debugging-port=' + PORT], { cwd: ROOT, env, stdio: 'ignore', windowsHide: false });
+const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + PORT], { cwd: ROOT, env, stdio: 'ignore', windowsHide: false });
 
 const httpJson = (url) => new Promise((res) => {
   const req = http.get(url, (r) => { let b = ''; r.on('data', (c) => { b += c; }); r.on('end', () => { try { res(JSON.parse(b)); } catch { res(null); } }); });
@@ -82,7 +82,7 @@ for (let i = 0; i < 120; i += 1) {
   }
   await sleep(500);
 }
-ok('E1 --no-wake 实例已启动（拿到页面 target）', Boolean(target), {});
+ok('E1 沙盘实例已启动（拿到页面 target）', Boolean(target), {});
 
 const startedAt = Date.now();
 if (target) {

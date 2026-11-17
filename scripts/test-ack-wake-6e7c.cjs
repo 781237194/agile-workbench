@@ -6,7 +6,8 @@
  * 判据：
  *   ① A(pm) --ack 派单 → B(programmer1) ack → 返回 ackWake 必须 ok 且 to=A；唤醒.jsonl 有 to=A 且带回执消息 id 的行；
  *      事件流有 action=ack_wake、target=原消息 id 的审计行。
- *   ② --no-wake 才静默：再派一单，B ack --no-wake → 不产生「to=pm 且非 SELFTEST skipped」的唤醒行、ackWake 为 null。
+ *   ② --no-wake 已被删除（Owner 2026-11-17 10:19）：再派一单，B ack --no-wake → 必须被拒
+ *      （ok:false + code=NO_WAKE_REMOVED），且零唤醒/零投递（不产生任何新唤醒行、回执不落盘）。
  *   ③ 回执不再回执（回执类消息被 ack 不生成「回执: 回执:」套娃）。
  *
  * 跑法：node scripts/test-ack-wake-6e7c.cjs ｜ 沙盘：mkTempSandbox，TEAM_SELFTEST=1（唤醒走 SELFTEST 分支）
@@ -85,15 +86,17 @@ const pmInbox2 = run(['inbox', '--boot', pm.token, '--all', '--project', PROJECT
 const nested = (pmInbox2.messages || []).filter((m) => String(m.subject || '').startsWith('回执: 回执:'));
 check('③ 回执类消息被 ack 不再套娃（无「回执: 回执:」）', nested.length === 0, nested.slice(0, 2));
 
-// ── ② --no-wake 静默分支 ──
-const m2 = run(['send', '--boot', pm.token, '--to', 'programmer1', '--subject', '静默单', '--body', '请执行', '--ack', '--project', PROJECT, '--json'], true);
+// ── ② --no-wake 已被删除：传了必须被拒 + 零唤醒/零投递 ──
+const m2 = run(['send', '--boot', pm.token, '--to', 'programmer1', '--subject', '拒绝单', '--body', '请执行', '--ack', '--project', PROJECT, '--json'], true);
 run(['read', '--boot', p1.token, '--id', m2.message.id, '--project', PROJECT, '--json'], true);
 const wakeBefore = readRows(wakeFile).length;
-const silentAck = run(['ack', '--boot', p1.token, '--id', m2.message.id, '--note', '静默测试', '--no-wake', '--project', PROJECT, '--json'], true);
-check('② --no-wake 下 ackWake 为 null（不唤醒）', Boolean(silentAck && silentAck.ackWake == null), silentAck && silentAck.ackWake);
+const pmInboxBefore = (run(['inbox', '--boot', pm.token, '--all', '--project', PROJECT, '--json'], true).messages || []).length;
+const rejectedAck = run(['ack', '--boot', p1.token, '--id', m2.message.id, '--note', '拒绝测试', '--no-wake', '--project', PROJECT, '--json'], true);
+check('② ack --no-wake 被拒：ok=false 且 code=NO_WAKE_REMOVED', Boolean(rejectedAck && rejectedAck.ok === false && String(rejectedAck.code) === 'NO_WAKE_REMOVED'), rejectedAck);
 const newRows = readRows(wakeFile).slice(wakeBefore);
-const leak = newRows.filter((row) => String(row.to || '') === 'pm' && row.skipped !== 'SELFTEST' && row.skipped !== 'sandbox_wake_skipped');
-check('② --no-wake 不产生「to=pm 且非 skipped」唤醒行', leak.length === 0, leak);
+check('② 被拒后零唤醒（唤醒.jsonl 无新增行）', newRows.length === 0, newRows);
+const pmInboxAfter = (run(['inbox', '--boot', pm.token, '--all', '--project', PROJECT, '--json'], true).messages || []).length;
+check('② 被拒后零投递（PM 收件箱消息数不变，回执未落盘）', pmInboxAfter === pmInboxBefore, { before: pmInboxBefore, after: pmInboxAfter });
 
 const passed = results.filter((r) => r.ok).length;
 console.log(`\nB-6e7c 回执必唤醒断言：${passed}/${results.length} PASS`);

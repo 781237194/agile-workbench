@@ -1,6 +1,6 @@
 const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清理统一走重试助手
 // 认领硬门端到端（CLI 真跑）：沙盘造一条超时未认领单 → 真跑 team.mjs send --ack --task → 断言被拒且任务文件字节不变。
-// 隔离：TEAM_ROOT 复制到 _tmp（清空 sessionId）+ TEAM_SELFTEST=1 + --no-wake，绝不碰真实团队状态。
+// 隔离：TEAM_ROOT 复制到 _tmp（清空 sessionId）+ TEAM_SELFTEST=1（沙盘不真唤醒；--no-wake 开关已删除），绝不碰真实团队状态。
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
@@ -33,6 +33,11 @@ fs.cpSync(path.join(realTeam, '工具'), path.join(TEAM, '工具'), { recursive:
 const srcProj = path.join(realTeam, '状态', '项目', PROJECT);
 const dstProj = path.join(TEAM, '状态', '项目', PROJECT);
 fs.cpSync(srcProj, dstProj, { recursive: true });
+// 沙盘不继承真实「在途派单」运行态：真实守护进程会持续生成 PM→programmer1 的派单锁/队列，
+// 复制进沙盘后 send 会先被 PM_DISPATCH_PENDING 挡住（认领门根本走不到）。这三件是易变运行态、不是本用例夹具。
+for (const rel of ['派单锁.json', '派单队列.json', '派单队列滞留.json']) {
+  fs.rmSync(path.join(dstProj, rel), { force: true });
+}
 // 沙盘里只留 2 条任务：一条超时未认领（programmer2 名下）、一条待派给 programmer2 的新单
 const taskDir = path.join(dstProj, '任务');
 for (const f of fs.readdirSync(taskDir)) fs.rmSync(path.join(taskDir, f), { force: true });
@@ -84,7 +89,7 @@ const before = {
   fresh: fs.readFileSync(path.join(taskDir, fresh.id + '.json'), 'utf8'),
 };
 const send = run(['send', '--role', 'pm', '--project', PROJECT, '--boot', token, '--to', 'programmer2',
-  '--subject', '端到端派单', '--body', '这是一条应被认领门拒掉的派单', '--ack', '--task', fresh.id, '--no-wake']);
+  '--subject', '端到端派单', '--body', '这是一条应被认领门拒掉的派单', '--ack', '--task', fresh.id]);
 const after = {
   overdue: fs.readFileSync(path.join(taskDir, overdue.id + '.json'), 'utf8'),
   fresh: fs.readFileSync(path.join(taskDir, fresh.id + '.json'), 'utf8'),
@@ -102,7 +107,7 @@ claimed.claimedAt = new Date().toISOString();
 claimed.status = 'working';
 fs.writeFileSync(path.join(taskDir, overdue.id + '.json'), JSON.stringify(claimed, null, 2), 'utf8');
 const send2 = run(['send', '--role', 'pm', '--project', PROJECT, '--boot', token, '--to', 'programmer2',
-  '--subject', '端到端派单2', '--body', '认领后应放行', '--ack', '--task', fresh.id, '--no-wake']);
+  '--subject', '端到端派单2', '--body', '认领后应放行', '--ack', '--task', fresh.id]);
 check('e2e-4 认领后放行：不再报 DISPATCH_CLAIM_OVERDUE，且派单链路本身没坏（无 MODULE_NOT_FOUND）',
   !/DISPATCH_CLAIM_OVERDUE/.test(send2.out) && !/MODULE_NOT_FOUND/.test(send2.out),
   { code: send2.code, tail: String(send2.out).slice(-200) });

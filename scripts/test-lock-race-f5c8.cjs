@@ -50,7 +50,7 @@ const dev = run(['boot', '--role', 'programmer1', '--project', PROJECT, '--sessi
   // ① 锁目录被删除后，写事件/发送消息仍成功（acquireLock 重建 + appendLine 重建）
   const locksDir = path.join(TEAM_ROOT, '状态', '锁');
   fs.rmSync(locksDir, { recursive: true, force: true });
-  const sent = run(['send', '--boot', dev.token, '--to', 'pm', '--subject', '锁目录被删后发送', '--body', 'x', '--no-wake', '--json']);
+  const sent = run(['send', '--boot', dev.token, '--to', 'pm', '--subject', '锁目录被删后发送', '--body', 'x', '--json']);
   check('① 锁目录被删 → send 仍成功（无 ENOENT）', sent.ok === true, sent);
   check('① 锁目录已自动重建', fs.existsSync(locksDir), locksDir);
 
@@ -58,7 +58,7 @@ const dev = run(['boot', '--role', 'programmer1', '--project', PROJECT, '--sessi
   const ids = [];
   for (let i = 0; i < 6; i += 1) ids.push(`并发${i}`);
   const deleter = setInterval(() => { try { fs.rmSync(locksDir, { recursive: true, force: true }); } catch { /* ignore */ } }, 50);
-  const outs = await Promise.all(ids.map((s) => runAsync(['send', '--boot', dev.token, '--to', 'pm', '--subject', s, '--body', 'x', '--no-wake', '--json'])));
+  const outs = await Promise.all(ids.map((s) => runAsync(['send', '--boot', dev.token, '--to', 'pm', '--subject', s, '--body', 'x', '--json'])));
   clearInterval(deleter);
   const bad = outs.filter((o) => {
     const code = String((o.parsed && o.parsed.code) || '');

@@ -216,7 +216,7 @@ export function roleCard(projectName, role, mode = 'full') {
     + `## 通则（程序已挡的事不写卡）\n\n`
     + `- **被拒时把错误码原样贴出，去 \`团队/工具/lib\` 读该分支的条件与放行路径**。\n`
     + (role === 'pm' ? '' : `- **决策先入箱（9b）**：要 Owner 拍板的事先拿 \`D-xxx\` 再引用，⛔ 不裸问；选项给 2–3 方案+代价。\n`)
-    + `- **发消息必须唤醒**（\`--no-wake\` 仅纯通知）；**提交带任务号/缺陷号+需求号**。\n`
+    + `- **发消息与回执必须唤醒**（无静默开关，传 \`--no-wake\` 报 NO_WAKE_REMOVED）；**提交带任务号/缺陷号+需求号**。\n`
     + `- 铁律只记本项目避坑，按需读；优先级：宪法 > 流程 > 本卡 > 铁律。\n\n`
     + flowSection
     + `## 结构化输出\n\n`
@@ -359,9 +359,9 @@ export function projectInfo(projectName, desc = '', mode = 'full') {
     + `| 完成回执 | \`send --type receipt\` + \`task done --evidence\` | 两者都齐才算完成 | 必唤醒 |\n`
     + `| 问询 | \`ask --to --question\` / \`answer --id\` | 不占派单锁；问题 ≤600 字 | 必唤醒 |\n`
     + `| 决策箱（仅 PM ↔ Owner） | \`decision add ...\` | **只放非评审类拍板（取舍/优先级/口径/阻塞）；需求评审、缺陷评审、验收一律走评审列表/验收列表，禁止放进决策箱。** 其他角色不得放（\`DECISION_BOX_FORBIDDEN\`） | 默认静默，未读 ≥5 或超 2 小时升级唤醒一次 |\n`
-    + `| 显式静默 | \`send --no-wake\` | 仅限明确不打扰的场景，日常协作不用 | 不唤醒（唯一例外） |\n\n`
+    + `| 已删除静默 | ~~\`send --no-wake\`~~ | 程序已删除静默开关：发消息与回执必须唤醒（传 \`--no-wake\` 报 NO_WAKE_REMOVED） | 一律唤醒 |\n\n`
     + `**四条最容易踩的坑**：\n`
-    + `1. 唤醒：所有类型默认唤醒（\`--no-wake\` 唯一退出阀）；\n`
+    + `1. 唤醒：发消息与回执必须唤醒（无静默开关，传 \`--no-wake\` 报 NO_WAKE_REMOVED）；\n`
     + `2. 回执：\`ack\` 只是内部记账，系统会自动补静默 notice，不需要再手动补；\n`
     + `3. 证据：\`task done --evidence\` 路径按项目基准写、文件存在非空、mtime ≥ 任务开始（\`claimedAt\`）；\n`
     + `4. 决策箱：需要 Owner 拍板的放决策箱，不发消息催（PM 专用，其他角色不适用）。\n`

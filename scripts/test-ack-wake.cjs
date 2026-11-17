@@ -7,7 +7,7 @@ const { rmSandbox } = require('./lib/sandbox-dir.cjs'); // B-07b6 A：沙盘清�
  * 背景：此前 cmdAck 只落盘不唤醒（旧注释「纯回执不唤醒」），
  * 导致「角色回执给 PM，PM 收不到」。本脚本断言：
  *   AC1 普通回执 → 触发一次唤醒（唤醒.jsonl 出现 reason=receipt 行）
- *   AC2 ack --no-wake → 不唤醒（唯一退出阀）
+ *   AC2 ack --no-wake → 被拒（NO_WAKE_REMOVED）+ 零唤醒/零投递（Owner 2026-11-17 10:19 已删除静默开关）
  *   AC3 重复回执（already）→ 不重复唤醒
  *   AC4 唤醒目标 = 原消息发送方（此处为 pm）
  *   另：沙盘根（TEAM_ROOT 指 _tmp）不真发网络，只落留痕 + 文案。
@@ -125,14 +125,21 @@ if (msgId) {
   check('AC3 重复回执不重复唤醒', after === before, { before, after });
 }
 
-// AC2 --no-wake 不唤醒
-const sent2 = runJson(['send', '--project', PROJECT, '--boot', pm.token, '--to', 'tester', '--subject', 'AC2 no-wake', '--body', '带 --no-wake 回执不应唤醒']);
+// AC2 --no-wake 已被删除：传了必须被拒（NO_WAKE_REMOVED），且零唤醒/零投递
+const sent2 = runJson(['send', '--project', PROJECT, '--boot', pm.token, '--to', 'tester', '--subject', 'AC2 no-wake', '--body', '--no-wake 回执必须被拒']);
 const msgId2 = sent2.json && (sent2.json.message && sent2.json.message.id);
 if (msgId2) {
-  const before = receiptRows().length;
+  const wakeBefore = receiptRows().length;
+  const inboxJson = (args) => { const r = runJson(args); return r.json && Array.isArray(r.json.messages) ? r.json.messages.length : -1; };
+  const pmCountBefore = inboxJson(['inbox', '--boot', pm.token, '--all']);
   const acked2 = runJson(['ack', '--project', PROJECT, '--boot', tester.token, '--id', msgId2, '--note', 'AC2 静默回执', '--no-wake']);
-  const after = receiptRows().length;
-  check('AC2 ack --no-wake 不唤醒', after === before, { before, after, ackWake: acked2.json && acked2.json.ackWake });
+  const wakeAfter = receiptRows().length;
+  const pmCountAfter = inboxJson(['inbox', '--boot', pm.token, '--all']);
+  check('AC2 ack --no-wake 被拒：ok=false 且 code=NO_WAKE_REMOVED',
+    Boolean(acked2.json && acked2.json.ok === false && String(acked2.json.code) === 'NO_WAKE_REMOVED'), acked2.json || acked2.out.slice(-200));
+  check('AC2 被拒后零唤醒（reason=receipt 行数不变）', wakeAfter === wakeBefore, { before: wakeBefore, after: wakeAfter });
+  check('AC2 被拒后零投递（PM 收件箱消息数不变，回执未落盘）',
+    pmCountBefore >= 0 && pmCountAfter === pmCountBefore, { before: pmCountBefore, after: pmCountAfter });
 }
 
 

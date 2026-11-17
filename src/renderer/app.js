@@ -787,7 +787,7 @@ const toast = function toast(message, kind = '') {
   if (!el) return;
   const text = modeCopyText(humanError(message));
   // R-c1ed（卷2 §五）：toast 是唯一通知入口——每次自增 [data-toast-count]（压测前后差=0 的载体），
-  // 并落 通知审计.jsonl：被 --no-wake 压制掉的 toast **也必须写一行** suppressed='no-wake'，
+  // 并落 通知审计.jsonl：沙盘（TEAM_SELFTEST=1）下 toast 只落审计，**也必须写一行** suppressed='sandbox'，
   // 否则「没发」与「没记」分不清。
   const api = (typeof window !== 'undefined' && window.workbench) ? window.workbench : {};
   const audit = (suppressed) => {
@@ -797,7 +797,7 @@ const toast = function toast(message, kind = '') {
       }
     } catch { /* 审计失败不影响 toast 本身 */ }
   };
-  if (api.noWake) { audit('no-wake'); return; }
+  if (api.sandbox) { audit('sandbox'); return; }
   const nextCount = Number(el.getAttribute('data-toast-count') || 0) + 1;
   el.setAttribute('data-toast-count', String(nextCount));
   el.textContent = text;

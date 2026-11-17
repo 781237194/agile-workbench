@@ -13,9 +13,10 @@
  *          最小快照（团队.json + 工作流.json + 任务/*.json 三件必带；--full 才整目录复制），
  *          清空 members[].sessionId / activeProject，把项目快照指向沙盘目录（防 rotate 写真实 团队会话.json），
  *          写 sandbox.json（隔离根、真实文件基线、git 基线、沙盘标记）。
- *   run    --root .sandbox/<id> (--case <用例名> | -- <命令...>) [--no-selftest] [--no-wake]
+ *   run    --root .sandbox/<id> (--case <用例名> | -- <命令...>) [--no-selftest]
  *          [--in-worktree] [--timeout ms]
  *          在隔离环境执行：四类路径根 + TEAM_WORKBENCH_JSON 全部指向沙盘；剥离真实 DSH/AWB/TEAM 变量。
+ *          沙盘静默只靠既有 TEAM_SELFTEST=1（不新增任何静默开关；--no-wake 已被删除）。
  *          漏设 TEAM_SELFTEST（--no-selftest）时拒绝「会改状态/发消息」的用例（SANDBOX_SELFTEST_MISSING）。
  *          前后比对 git status/HEAD，代码工作树被改 → SANDBOX_CODE_DIRTY。
  *   verify --root .sandbox/<id> [--strict]
@@ -95,7 +96,7 @@ function emit(payload) {
 function parseArgs(argv) {
   const args = argv.slice(2);
   const cmd = args.shift() || '';
-  const out = { cmd, root: '', project: '', case: '', command: [], full: false, strict: false, assertCode: false, noSelftest: false, noWake: false, inWorktree: false, all: false, yes: false, dryRun: false, keep: 3, timeout: 120000 };
+  const out = { cmd, root: '', project: '', case: '', command: [], full: false, strict: false, assertCode: false, noSelftest: false, inWorktree: false, all: false, yes: false, dryRun: false, keep: 3, timeout: 120000 };
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a === '--') { out.command = args.slice(i + 1); break; }
@@ -107,7 +108,6 @@ function parseArgs(argv) {
       case '--strict': out.strict = true; break;
       case '--assert-code': out.assertCode = true; break;
       case '--no-selftest': out.noSelftest = true; break;
-      case '--no-wake': out.noWake = true; break;
       case '--in-worktree': out.inWorktree = true; break;
       case '--all': out.all = true; break;
       case '--yes': out.yes = true; break;
@@ -272,7 +272,7 @@ function snapshotCheck(root, meta) {
 
 /* ───────────────────────── 环境隔离 ───────────────────────── */
 
-function sandboxEnv(meta, { noSelftest = false, noWake = false } = {}) {
+function sandboxEnv(meta, { noSelftest = false } = {}) {
   const env = {};
   // 先剥离所有可能把子进程带回真实实例的变量（真实 DSH_SESSION_ID/DSH_WEB_URL/AWB_*/TEAM_* 都是漏点）。
   for (const [key, value] of Object.entries(process.env)) {
@@ -292,7 +292,6 @@ function sandboxEnv(meta, { noSelftest = false, noWake = false } = {}) {
   env.SANDBOX_MARKER = SANDBOX_MARKER;
   env.SANDBOX_MESSAGE_MARKER = MESSAGE_MARKER;
   if (!noSelftest) env.TEAM_SELFTEST = '1';
-  if (noWake) env.TEAM_NO_WAKE = '1';
   return env;
 }
 
@@ -535,7 +534,7 @@ function run(args) {
     process.exit(EXIT.SELFTEST_MISSING);
   }
 
-  const env = sandboxEnv(meta, { noSelftest: args.noSelftest, noWake: args.noWake });
+  const env = sandboxEnv(meta, { noSelftest: args.noSelftest });
   assertEnvInsideSandbox(env, root);
 
   const cwd = args.inWorktree ? path.join(root, 'code') : ROOT;

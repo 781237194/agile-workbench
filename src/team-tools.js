@@ -1794,7 +1794,7 @@ function createTeamTools(options = {}) {
   // ==========================================================================
   // 旧协议消息通道：派单/回执不再只写本地库，直接走 团队/工具/team.mjs
   //   boot --role R --project P  → 拿启动令牌（所有写操作都要带）
-  //   send --boot T --to R --subject S --body B --ack --no-wake
+  //   send --boot T --to R --subject S --body B --ack
   //   ack  --boot T --id M-... --note "..."
   //   project use --boot T --name P → 切换当前项目（= 切换工作区）
   // 令牌只缓存在内存里，不落盘；过期/规则变化自动重新 boot 一次。
@@ -2468,8 +2468,9 @@ function createTeamTools(options = {}) {
     return withBootToken(projectName, from, async (token) => {
       const args = ['send', '--boot', token, '--to', to, '--subject', subject, '--body', body, '--json'];
       if (input.ackRequired !== false) args.push('--ack');
-      // 唤醒由主进程用 DSH 适配层做（保留 DSH 离线/超时错误码），工具只记账。
-      args.push('--no-wake');
+      // Owner 2026-11-17 10:19：发消息与回执一律唤醒，无静默开关——不再传静默参数；
+      // 唤醒由主进程用 DSH 适配层做（保留 DSH 离线/超时错误码），工具侧按默认口径唤醒；
+      // 沙盘静默由子进程继承 TEAM_SELFTEST=1 保证（不新增开关）。
       if (task) args.push('--task', task);
       if (passType) args.push('--type', passType);
       const run = await runNode(layout.teamTool, args, { timeoutMs: TIMEOUTS.send });
@@ -8689,7 +8690,7 @@ async function applyOwnerDecisionToRequirement(input = {}) {
     if (!body) return failure('EMPTY_MESSAGE', '通知内容不能为空');
     const subject = String(input.subject || '工作流通知').slice(0, 80);
     const run = await runLegacyCommand(projectName, from, 'send', (token) => [
-      'send', '--boot', token, '--to', to, '--subject', subject, '--body', body, '--no-wake',
+      'send', '--boot', token, '--to', to, '--subject', subject, '--body', body,
       ...(input.task ? ['--task', String(input.task)] : []),
       ...(input.type ? ['--type', String(input.type)] : [])
     ], { sessionId: String(input.sessionId || '').trim() });

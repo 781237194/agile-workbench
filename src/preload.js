@@ -5,8 +5,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 // 看板浮窗复用同一个 preload，但只暴露旧版看板脚本认识的 window.boardWin。
 // main.js 创建看板 BrowserWindow 时通过 additionalArguments 传入 --awb-board。
 const IS_BOARD_WINDOW = process.argv.includes('--awb-board');
-// R-c1ed（卷2 §五）：压测长跑用 --no-wake 启动 → toast 只落审计、不自增计数（主进程会置 AWB_NO_WAKE=1 传下来）。
-const IS_NO_WAKE = process.argv.includes('--no-wake') || String(process.env.AWB_NO_WAKE || '') === '1';
+// Owner 2026-11-17 10:19：发消息与回执一律唤醒，无静默开关（静默参数已删除，传就由主进程报错退出）。
+// 沙盘静默只靠既有 TEAM_SELFTEST=1 环境（不新增开关）：沙盘下 toast 只落审计、不自增计数。
+const IS_SANDBOX = String(process.env.TEAM_SELFTEST || '') === '1';
 
 if (IS_BOARD_WINDOW) {
   contextBridge.exposeInMainWorld('boardWin', {
@@ -78,9 +79,9 @@ if (IS_BOARD_WINDOW) {
     mailboxSnapshot: (payload) => ipcRenderer.invoke('mailbox:snapshot', payload),
     mailboxWatchStart: (payload) => ipcRenderer.invoke('mailbox:watch-start', payload),
     mailboxState: () => ipcRenderer.invoke('mailbox:state'),
-    // R-c1ed（卷2 §五）：通知审计 + no-wake 压制。noWake 同步取自启动参数（--no-wake / AWB_NO_WAKE=1），
-    // 渲染层 toast() 据此决定「显示并自增计数」还是「只写一行 suppressed=no-wake 审计」。
-    noWake: IS_NO_WAKE,
+    // R-c1ed（卷2 §五）：通知审计 + 沙盘压制。sandbox 只表示「这是 TEAM_SELFTEST=1 沙盘」，不是静默开关；
+    // 渲染层 toast() 据此决定「显示并自增计数」还是「只写一行 suppressed=sandbox 审计」。
+    sandbox: IS_SANDBOX,
     notifyState: () => ipcRenderer.invoke('notify:state'),
     notifyAudit: (payload) => ipcRenderer.invoke('notify:audit', payload),
     // R-c4c7：邮箱/任务队列变化推送（主进程 fs.watch 去抖 300ms 后 send；渲染层只订阅，不轮询）。

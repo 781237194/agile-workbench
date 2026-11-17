@@ -25,7 +25,7 @@ function run(rows, extra = []) {
 const row = (pid, cmd) => ({ ProcessId: pid, ExecutablePath: EXE, CommandLine: cmd });
 
 // AC4 ①沙箱/长跑实例（B 的那种）→ 不计入，exit 0，启动照常
-const sandbox = run([row(173404, `"${EXE}" . --no-wake --remote-debugging-port=9570`)], ['-Kill']);
+const sandbox = run([row(173404, `"${EXE}" . --remote-debugging-port=9570`)], ['-Kill']);
 check('AC4-1 沙箱长跑实例不拦启动（exit 0，-Kill 也不动它）',
   sandbox.code === 0 && /沙箱实例：运行中/.test(sandbox.out) && /没有默认实例需要清理/.test(sandbox.out),
   { code: sandbox.code, out: sandbox.out.slice(-300) });
@@ -47,8 +47,8 @@ check('AC1 route-daemon-host 守护进程不计入（exit 0）',
   helper.code === 0 && /守护进程：PID 393268/.test(helper.out), { code: helper.code, out: helper.out.slice(-240) });
 
 // AC5 ⑤混乱场景：沙箱 + 默认同时存在 → 以默认实例判定（exit 3），两行都在；-Kill 夹具模式只模拟、绝不真杀
-const mixed = run([row(173404, `"${EXE}" . --no-wake --remote-debugging-port=9570`), row(338096, `"${EXE}" .`)]);
-const mixedKill = run([row(173404, `"${EXE}" . --no-wake --remote-debugging-port=9570`), row(338096, `"${EXE}" .`)], ['-Kill']);
+const mixed = run([row(173404, `"${EXE}" . --remote-debugging-port=9570`), row(338096, `"${EXE}" .`)]);
+const mixedKill = run([row(173404, `"${EXE}" . --remote-debugging-port=9570`), row(338096, `"${EXE}" .`)], ['-Kill']);
 check('AC5 沙箱+默认同存：exit 3、两行区分；-Kill 只模拟默认实例、不碰沙箱',
   mixed.code === 3 && /默认实例：运行中（PID 338096）/.test(mixed.out) && /沙箱实例：运行中（PID 173404/.test(mixed.out)
   && mixedKill.code === 0 && /只模拟：不会结束真实进程 PID 338096/.test(mixedKill.out) && !/PID 173404/.test(mixedKill.out.split('清理')[1] || ''),

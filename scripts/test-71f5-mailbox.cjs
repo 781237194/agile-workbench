@@ -49,7 +49,7 @@ const dev = run(['boot', '--role', 'programmer1', '--project', PROJECT, '--sessi
   const N = 8;
   const ids = [];
   for (let i = 0; i < N; i += 1) {
-    const sent = run(['send', '--boot', dev.token, '--to', 'pm', '--subject', `并发用例${i}`, '--body', 'x', '--no-wake', '--json']);
+    const sent = run(['send', '--boot', dev.token, '--to', 'pm', '--subject', `并发用例${i}`, '--body', 'x', '--json']);
     ids.push(sent.message.id);
   }
   const outcomes = [];

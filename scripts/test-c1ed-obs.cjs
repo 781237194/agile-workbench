@@ -4,7 +4,8 @@
  *   ① scripts/oom-stress.cjs --stress --turns 300 --tool-output-bytes 20480 真生成等价负载并实测回读
  *   ② #toast[data-toast-count] 每次 toast 自增（真窗口）
  *   ③ 主进程 notify:audit → 团队/状态/项目/<项目>/通知审计.jsonl {at,level,text,source,suppressed}
- *      被 --no-wake 压制的 toast 也写一行 suppressed='no-wake'，且计数不变（真窗口，两次启动）
+ *      沙盘（TEAM_SELFTEST=1）下 toast 只写一行 suppressed='sandbox'、计数不变；
+ *      传 --no-wake 启动必须被拒（NO_WAKE_REMOVED、不建窗口、零副作用）——静默开关已删除（Owner 2026-11-17 10:19）。
  *
  * 隔离：AWB_DATA_DIR + TEAM_ROOT + TEAM_PROJECTS_ROOT + TEAM_WORKBENCH_JSON 全指 _tmp/c1ed-obs；端口 9481/9482。
  */
@@ -88,8 +89,9 @@ class Cdp {
 function env() {
   return { ...process.env, AWB_DATA_DIR: DATA, TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'), TEAM_WORKBENCH_JSON: path.join(DATA, 'userdata', 'workbench.json'), TEAM_SELFTEST: '1' };
 }
-async function launch(port, extraArgs = []) {
-  const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + port, ...extraArgs], { cwd: ROOT, env: env(), stdio: 'ignore', windowsHide: false });
+async function launch(port, extraArgs = [], envOverride = null) {
+  const runEnv = envOverride || env();
+  const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + port, ...extraArgs], { cwd: ROOT, env: runEnv, stdio: 'ignore', windowsHide: false });
   const target = await waitTarget(port, 90000);
   if (!target) { try { child.kill(); } catch { /* ignore */ } return null; }
   const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -106,6 +108,33 @@ async function launch(port, extraArgs = []) {
 async function closeApp(app) {
   try { if (app && app.child) app.child.kill(); } catch { /* ignore */ }
   await sleep(700);
+}
+// 传 --no-wake 启动：壳必须立即拒绝（NO_WAKE_REMOVED）、不建窗口、零副作用
+async function launchRefused(port) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--no-wake', '--remote-debugging-port=' + port], { cwd: ROOT, env: env(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false });
+    let out = '';
+    child.stdout.on('data', (chunk) => { out += chunk; });
+    child.stderr.on('data', (chunk) => { out += chunk; });
+    let windowSeen = false;
+    let settled = false;
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      resolve({ ...payload, out, windowSeen });
+    };
+    const poll = setInterval(async () => {
+      const list = await httpJson(`http://127.0.0.1:${port}/json/list`);
+      if (Array.isArray(list) && list.some((target) => target && target.type === 'page')) windowSeen = true;
+    }, 250);
+    child.on('exit', (code, signal) => finish({ exited: true, code, signal }));
+    setTimeout(() => {
+      if (settled) return;
+      try { child.kill(); } catch { /* ignore */ }
+      finish({ exited: false, code: null, timedOut: true });
+    }, 60000);
+  });
 }
 function auditRows() {
   try { return fs.readFileSync(AUDIT, 'utf8').trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line)); } catch { return []; }
@@ -163,56 +192,88 @@ function seed() {
   const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
   const toastBlock = appSrc.slice(appSrc.indexOf('function toast(message'), appSrc.indexOf('function toast(message') + 1800);
   ok('B2 toast() 里自增 data-toast-count', /data-toast-count/.test(toastBlock) && /setAttribute\('data-toast-count'/.test(toastBlock), {});
-  ok('B3 toast() 里对被压制写 suppressed=\'no-wake\' 审计', /audit\('no-wake'\)/.test(toastBlock) && /notifyAudit/.test(toastBlock), {});
+  const shellFiles = ['src/renderer/app.js', 'src/preload.js', 'src/main.js'];
+  const shellSrc = Object.fromEntries(shellFiles.map((rel) => [rel, fs.readFileSync(path.join(ROOT, rel), 'utf8')]));
+  const noWakeLeft = shellFiles.filter((rel) => /IS_NO_WAKE|noWake/.test(shellSrc[rel]));
+  ok('B3 壳层已删除静默开关（app.js/preload.js/main.js 不再有 IS_NO_WAKE/noWake）', noWakeLeft.length === 0, noWakeLeft);
+  ok('B3b 沙盘压制改由 TEAM_SELFTEST 的 sandbox 标志承担（toast 用 api.sandbox、preload 暴露 sandbox）',
+    /api\.sandbox/.test(toastBlock) && /sandbox: IS_SANDBOX/.test(shellSrc['src/preload.js']), {});
   const mainSrc = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   ok('B4 主进程有 notify:audit 且写 通知审计.jsonl、字段五键齐', /ipcMain\.handle\('notify:audit'/.test(mainSrc) && /通知审计\.jsonl/.test(mainSrc) && ['at', 'level', 'text', 'source', 'suppressed'].every((key) => new RegExp('\\b' + key + ':').test(mainSrc.slice(mainSrc.indexOf("ipcMain.handle('notify:audit'"), mainSrc.indexOf("ipcMain.handle('notify:audit'") + 2000))), {});
   const preloadSrc = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
-  ok('B5 preload 暴露 noWake + notifyAudit', /noWake: IS_NO_WAKE/.test(preloadSrc) && /notifyAudit:/.test(preloadSrc), {});
+  ok('B5 preload 暴露 notifyAudit + sandbox（不再有 noWake 静默开关）',
+    /notifyAudit:/.test(preloadSrc) && /sandbox: IS_SANDBOX/.test(preloadSrc) && !/noWake/.test(preloadSrc), {});
 
-  // ── ② 真窗口：正常模式计数 + 审计 ───────────────────────────────────
-  const normal = await launch(9481);
-  ok('C0 正常模式实例已启动', Boolean(normal && normal.cdp), {});
-  if (normal) {
+  // ── ② 真窗口（沙盘 TEAM_SELFTEST=1）：toast 只落审计、计数不变 ───────────
+  const sandboxApp = await launch(9481);
+  ok('C0 沙盘实例已启动', Boolean(sandboxApp && sandboxApp.cdp), {});
+  if (sandboxApp) {
     try {
-      const before = await normal.cdp.evaluate("(function(){ const t=document.querySelector('#toast'); return { count: t? t.getAttribute('data-toast-count'): null, noWake: Boolean(window.workbench && window.workbench.noWake) }; })()");
-      ok('C1 启动时 data-toast-count=0、noWake=false', Boolean(before && before.count === '0' && before.noWake === false), before);
-      await normal.cdp.evaluate("(function(){ toast('观测测试一',''); toast('观测测试二','warn'); return true; })()");
+      const before = await sandboxApp.cdp.evaluate("(function(){ const t=document.querySelector('#toast'); return { count: t? t.getAttribute('data-toast-count'): null, sandbox: Boolean(window.workbench && window.workbench.sandbox) }; })()");
+      ok('C1 启动时 data-toast-count=0、sandbox=true（TEAM_SELFTEST=1）', Boolean(before && before.count === '0' && before.sandbox === true), before);
+      await sandboxApp.cdp.evaluate("(function(){ toast('观测测试一',''); toast('观测测试二','warn'); return true; })()");
       await sleep(800);
-      const after = await normal.cdp.evaluate("(function(){ const t=document.querySelector('#toast'); return { count: t? t.getAttribute('data-toast-count'): null, text: t? t.textContent: '' }; })()");
-      ok('C2 两次 toast → data-toast-count=2（且最后一条文案在）', Boolean(after && after.count === '2'), after);
+      const after = await sandboxApp.cdp.evaluate("(function(){ const t=document.querySelector('#toast'); return { count: t? t.getAttribute('data-toast-count'): null, text: t? t.textContent: '' }; })()");
+      ok('C2 沙盘下两次 toast → data-toast-count 仍为 0（toast 不弹、只落审计）', Boolean(after && after.count === '0'), after);
       await sleep(600);
       const rows = auditRows();
-      ok('C3 通知审计.jsonl 落两行、suppressed 为空、字段五键齐', rows.length >= 2 && rows.slice(-2).every((row) => row.suppressed === '' && ['at', 'level', 'text', 'source', 'suppressed'].every((key) => key in row)), rows.slice(-2));
+      ok('C3 通知审计.jsonl 落两行、suppressed=sandbox、字段五键齐',
+        rows.length >= 2 && rows.slice(-2).every((row) => row.suppressed === 'sandbox' && ['at', 'level', 'text', 'source', 'suppressed'].every((key) => key in row)), rows.slice(-2));
       ok('C4 审计行 level 跟随 toast kind（第二行 warn）', rows.length >= 2 && String(rows[rows.length - 1].level) === 'warn', rows.slice(-1));
       // 反向：删掉锚点后判据必须能判 FAIL（TOAST_ANCHOR_MISSING），证明判据不是恒真
-      const missing = await normal.cdp.evaluate("(function(){ const t=document.querySelector('#toast'); t.removeAttribute('data-toast-count'); const raw=t.getAttribute('data-toast-count'); return { raw, code: raw === null ? 'TOAST_ANCHOR_MISSING' : '' }; })()");
+      const missing = await sandboxApp.cdp.evaluate("(function(){ const t=document.querySelector('#toast'); t.removeAttribute('data-toast-count'); const raw=t.getAttribute('data-toast-count'); return { raw, code: raw === null ? 'TOAST_ANCHOR_MISSING' : '' }; })()");
       ok('C5 删掉 data-toast-count 后能判 TOAST_ANCHOR_MISSING（判据非恒真）', Boolean(missing && missing.code === 'TOAST_ANCHOR_MISSING'), missing);
     } catch (error) {
       ok('C 段执行无异常', false, String((error && error.message) || error).slice(0, 300));
     }
-    await closeApp(normal);
+    await closeApp(sandboxApp);
   }
 
-  // ── ③ 真窗口：--no-wake 压制 + 也写审计 ─────────────────────────────
+  // ── ③ 传 --no-wake 启动：必须被拒（NO_WAKE_REMOVED），不建窗口、零副作用 ────
   const auditBefore = auditRows().length;
-  const quiet = await launch(9482, ['--no-wake']);
-  ok('D0 --no-wake 实例已启动', Boolean(quiet && quiet.cdp), {});
-  if (quiet) {
-    try {
-      const state = await quiet.cdp.evaluate("(function(){ return { noWake: Boolean(window.workbench && window.workbench.noWake), count: (document.querySelector('#toast')||{}).getAttribute ? document.querySelector('#toast').getAttribute('data-toast-count') : null }; })()");
-      ok('D1 渲染层读到 noWake=true', Boolean(state && state.noWake === true), state);
-      await quiet.cdp.evaluate("(function(){ toast('压制测试一',''); toast('压制测试二','bad'); return true; })()");
-      await sleep(900);
-      const countAfter = await quiet.cdp.evaluate("(document.querySelector('#toast').getAttribute('data-toast-count'))");
-      ok('D2 --no-wake 下 data-toast-count 不自增（仍 0）', String(countAfter) === '0', { countAfter });
-      const rows = auditRows();
-      const fresh = rows.slice(auditBefore);
-      ok('D3 被压制的 toast 也写审计：新增 ≥2 行且 suppressed 全为 no-wake', fresh.length >= 2 && fresh.every((row) => row.suppressed === 'no-wake'), fresh);
-      ok('D4 审计仍带五键与 level', fresh.length >= 1 && ['at', 'level', 'text', 'source', 'suppressed'].every((key) => key in fresh[0]), fresh[0]);
-    } catch (error) {
-      ok('D 段执行无异常', false, String((error && error.message) || error).slice(0, 300));
+  const refused = await launchRefused(9482);
+  ok('D0 传 --no-wake 启动被拒：进程退出且 exit code 非 0', refused.exited && Number(refused.code) !== 0, refused);
+  ok('D1 拒绝时打印 NO_WAKE_REMOVED（静默开关已删除）', /NO_WAKE_REMOVED/.test(refused.out), String(refused.out).slice(-400));
+  const listAfter = await httpJson('http://127.0.0.1:9482/json/list');
+  ok('D2 被拒实例没有创建窗口（运行期从未出现页面目标 / 退出后 CDP 不可达）',
+    refused.windowSeen === false && (listAfter === null || (Array.isArray(listAfter) && !listAfter.some((target) => target && target.type === 'page'))),
+    { windowSeen: refused.windowSeen, listAfter });
+  ok('D3 零副作用：通知审计.jsonl 无新增行', auditRows().length === auditBefore, { before: auditBefore, after: auditRows().length });
+
+  // ── ④ 真窗口（非沙盘模式、仍用隔离根）：生产路径的 toast 计数自增 + suppressed='' ──
+  // Owner 2026-11-17 10:19 删除 --no-wake 后，沙盘压制只由 TEAM_SELFTEST=1 的 sandbox 标志承担；
+  // 要验「生产路径计数自增」就必须起一个非沙盘实例。隔离仍靠 AWB_DATA_DIR + TEAM_ROOT；
+  // 为免它拉起路由守护，这里把沙盘副本里的守护模块临时移走（壳自己 ROUTE_DAEMON_SKIP/DAEMON_MODULE_MISSING），
+  // 不用任何静默开关。
+  const daemonModule = path.join(TEAM, '工具', 'lib', 'route-daemon.mjs');
+  const daemonBak = daemonModule + '.c1ed-obs-bak';
+  let daemonMoved = false;
+  try { if (fs.existsSync(daemonModule)) { fs.renameSync(daemonModule, daemonBak); daemonMoved = true; } } catch { daemonMoved = false; }
+  if (daemonMoved) {
+    const normalEnv = { ...env() };
+    delete normalEnv.TEAM_SELFTEST;
+    const normalApp = await launch(9483, [], normalEnv);
+    ok('E0 非沙盘实例已启动（隔离根；守护模块已移走 → 壳自行跳过守护）', Boolean(normalApp && normalApp.cdp), {});
+    if (normalApp) {
+      try {
+        const before = await normalApp.cdp.evaluate("(function(){ const t=document.querySelector('#toast'); return { count: t? t.getAttribute('data-toast-count'): null, sandbox: Boolean(window.workbench && window.workbench.sandbox) }; })()");
+        ok('E1 启动时 data-toast-count=0、sandbox=false（非沙盘模式）', Boolean(before && before.count === '0' && before.sandbox === false), before);
+        await normalApp.cdp.evaluate("(function(){ toast('观测测试一',''); toast('观测测试二','warn'); return true; })()");
+        await sleep(800);
+        const after = await normalApp.cdp.evaluate("(function(){ const t=document.querySelector('#toast'); return { count: t? t.getAttribute('data-toast-count'): null, text: t? t.textContent: '' }; })()");
+        ok('E2 两次 toast → data-toast-count=2（生产路径计数自增、最后一条文案在）', Boolean(after && after.count === '2' && after.text), after);
+        await sleep(600);
+        const rows = auditRows();
+        ok('E3 审计两行 suppressed 为空、字段五键齐', rows.length >= 2 && rows.slice(-2).every((row) => row.suppressed === '' && ['at', 'level', 'text', 'source', 'suppressed'].every((key) => key in row)), rows.slice(-2));
+        ok('E4 审计行 level 跟随 toast kind（第二行 warn）', rows.length >= 2 && String(rows[rows.length - 1].level) === 'warn', rows.slice(-1));
+      } catch (error) {
+        ok('E 段执行无异常', false, String((error && error.message) || error).slice(0, 300));
+      }
+      await closeApp(normalApp);
     }
-    await closeApp(quiet);
+    try { fs.renameSync(daemonBak, daemonModule); } catch { /* 恢复失败不影响结论 */ }
+  } else {
+    ok('E 段跳过（无法临时移走守护模块，未起非沙盘实例）', false, { daemonModule });
   }
 
   console.log(`\nR-c1ed 三项可观测断言：${pass} 通过 / ${fail} 失败`);

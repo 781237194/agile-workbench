@@ -16,7 +16,7 @@ checks.add('沙盘内 boot tester 成功', first.ok, { rulesHash: first.rulesHas
 if (first.ok) {
   // 1) 规则变更：追加一行到沙盘 团队宪法.md
   fs.appendFileSync(lib.sandboxPath('团队', '团队宪法.md'), '\n> 沙盘规则变更探针（R-7841，仅沙盘副本）\n', 'utf8');
-  const stale = lib.teamJson(['send', '--project', lib.PROJECT, '--boot', first.token, '--to', 'pm', '--subject', '规则变更后', '--body', '应被 RULES_CHANGED 拒', '--type', 'notice', '--no-wake']);
+  const stale = lib.teamJson(['send', '--project', lib.PROJECT, '--boot', first.token, '--to', 'pm', '--subject', '规则变更后', '--body', '应被 RULES_CHANGED 拒', '--type', 'notice']);
   checks.add('改规则后旧令牌被拒（RULES_CHANGED）', stale.ok === false && String(stale.code) === 'RULES_CHANGED', { code: stale.code });
 
   // 2) 名册变更：改一个成员显示名

@@ -36,10 +36,17 @@ const IS_SELFTEST = process.argv.includes('--selftest');
 // T-c25a：压测/长跑实例不许弹窗——Owner 桌面上不该出现 c25a-runNN 这类沙盘窗口。
 // 只影响“是否显示窗口”，不影响渲染进程、定时器与 webview；仅测试脚本会设这个 env。
 const AWB_START_HIDDEN = process.env.AWB_START_HIDDEN === '1';
-// R-c1ed（卷2 §五）：压测长跑用 --no-wake 启动——不弹通知、不写邮箱、不唤醒，但**必须留审计**。
-// 这里把标记落到环境变量里，渲染进程（preload）据此决定 toast 只记审计还是显示并自增 data-toast-count。
-const IS_NO_WAKE = process.argv.includes('--no-wake') || String(process.env.AWB_NO_WAKE || '') === '1';
-if (IS_NO_WAKE) process.env.AWB_NO_WAKE = '1';
+// Owner 2026-11-17 10:19：发消息与回执一律唤醒，无静默开关（静默发送已删除，不留任何逃生口）。
+// 沙盘/冒烟场景的静默只靠既有 TEAM_SELFTEST=1 环境：沙盘不驱动 DSH、不弹通知（行为与原来一致）。
+// 仍有人传静默参数时：立即报错退出（非 0），零投递、零团队状态写入，不创建窗口、不拉起守护。
+if (process.argv.includes('--no-wake')) {
+  const removed = 'NO_WAKE_REMOVED：程序已删除静默发送：发消息与回执一律唤醒';
+  try { fs.writeSync(2, removed + '\n'); } catch { /* 控制台不可写时忽略 */ }
+  try { console.error(removed); } catch { /* 控制台不可写时忽略 */ }
+  try { app.exit(1); } catch { /* 未 ready 时退回 process.exit */ }
+  process.exit(1);
+}
+const IS_SANDBOX = String(process.env.TEAM_SELFTEST || '') === '1';
 // 布局自检（T-846e）：在真实窗口里量 1280/1680/2560 三档并截图；只在显式参数下跑，不影响正常启动。
 const IS_LAYOUT_CHECK = process.argv.includes('--layout-check');
 // R-fe90 AC1/AC6/AC12：5 档主题截图 + 每档 perf JSON 自检（独立数据根、真实窗口、走「更多→外观」入口点击）。
@@ -5572,9 +5579,9 @@ ipcMain.handle('theme:metrics', async () => {
     }
   });
   // ── R-c1ed（卷2 §五 / T-20261116-100355-9bda）：通知审计 ───────────────────────────────
-  // 每行固定 {at, level, text, source, suppressed}；被 --no-wake 压制掉的 toast **也写一行**
-  // （suppressed='no-wake'），否则「没发」与「没记」分不清。落点：团队/状态/项目/<项目>/通知审计.jsonl。
-  ipcMain.handle('notify:state', async () => ({ ok: true, noWake: Boolean(IS_NO_WAKE) }));
+  // 每行固定 {at, level, text, source, suppressed}；沙盘（TEAM_SELFTEST=1）下被压制的 toast **也写一行**
+  // （suppressed='sandbox'），否则「没发」与「没记」分不清。落点：团队/状态/项目/<项目>/通知审计.jsonl。
+  ipcMain.handle('notify:state', async () => ({ ok: true, sandbox: Boolean(IS_SANDBOX) }));
   ipcMain.handle('notify:audit', async (_e, payload) => {
     const p = payload || {};
     try {
@@ -8816,7 +8823,7 @@ ipcMain.handle('theme:metrics', async () => {
       }
     } catch { /* wake 结果落库失败不改变已发送事实；下次对账会补 */ }
     // R-1dfb（AC1① 事件驱动）：`send --ack --task` 成功即为该批次注册一次性 deadline 定时器
-    // （--no-wake 下不注册；后端 tick 按 deadline 判定，没产生队列项时返回 checked=0，安全）。
+    // （沙盘（TEAM_SELFTEST=1）下不注册；后端 tick 按 deadline 判定，没产生队列项时返回 checked=0，安全）。
     if (ackRequired && taskId) {
       try { scheduleDispatchDeadline(project.name); } catch (error) {
         console.warn('DISPATCH_DEADLINE_REGISTER_FAILED ' + JSON.stringify({ project: project.name, why: String((error && error.message) || error).slice(0, 200) }));
@@ -19406,12 +19413,12 @@ const dispatchDeadlineTimers = new Map();
  * R-1dfb（AC1①，卷 §九 AC1 事件驱动夹具）：send --ack --task / ack 成功后按批次注册一次性 deadline 定时器。
  * - 延迟 = min(AWB_STALL_TICK_MS, 剩余到期时间)；壳层拿不到 item 的 deadline 时按 tick 兜底（后端 tick 自己按 deadline 判）；
  * - 必须 unref()，定时器不得拖住进程退出；同一 project 已有 pending timer 就不重复注册；只触发一次，触发即清；
- * - --no-wake 不注册（压测口径：不驱动任何会写邮箱/改团队状态的链路）；
+ * - 沙盘（TEAM_SELFTEST=1）不注册（压测口径：不驱动任何会写邮箱/改团队状态的链路）；
  * - 该批次没产生队列项也安全：后端 tickDispatchDeadlines 返回 checked=0。
  */
 function scheduleDispatchDeadline(projectName, options = {}) {
   const name = String(projectName || '').trim();
-  if (!name || IS_NO_WAKE) return null;
+  if (!name || IS_SANDBOX) return null;
   if (dispatchDeadlineTimers.has(name)) return dispatchDeadlineTimers.get(name);
   const remainingRaw = Number(options && options.remainingMs);
   const remainingMs = Number.isFinite(remainingRaw) && remainingRaw > 0 ? remainingRaw : STALL_TICK_MS;
@@ -19500,9 +19507,9 @@ function runClaimScanTick(projectName) {
 }
 function queuePumpTick() {
   if (queuePumpState.running) return;
-  // B-20261116-105124-c5413：--no-wake 下壳不得驱动任何会写邮箱/改团队状态的链路。
+  // B-20261116-105124-c5413：沙盘（TEAM_SELFTEST=1）下壳不得驱动任何会写邮箱/改团队状态的链路。
   // 定时泵会把派单队列里的项真的投出去（写邮箱 new/ + 派单锁），压测口径要求「不写邮箱」。
-  if (IS_NO_WAKE) { queuePumpState.last = { ok: true, skipped: true, reason: 'NO_WAKE' }; return; }
+  if (IS_SANDBOX) { queuePumpState.last = { ok: true, skipped: true, reason: 'SANDBOX' }; return; }
   let store = null;
   let project = null;
   try {
@@ -19658,15 +19665,15 @@ function scheduleRouteSupervisorRetry(project) {
 }
 
 /** 拉起守护（幂等）：本壳已在管同一个项目、或别人的守护心跳正常时不重复启动。 */
-// B-20261116-105124-c5413：--no-wake 只允许壳「看」，不允许它动团队状态。
+// B-20261116-105124-c5413：沙盘（TEAM_SELFTEST=1）只允许壳「看」，不允许它动团队状态。
 // 压测/长跑口径是四不（不唤醒/不写邮箱/不弹通知/不触发路由守护）；守护一旦拉起就会写守护状态、
-// 并驱动派单/唤醒链路改邮箱，所以 no-wake 下整个守护直接不启动（只读也不做，避免半条状态）。
+// 并驱动派单/唤醒链路改邮箱，所以沙盘下整个守护直接不启动（只读也不做，避免半条状态）。
 function ensureRouteSupervisor(project) {
   if (routeSupervisor.quitting) return null;
-  if (IS_NO_WAKE) {
-    if (!ensureRouteSupervisor.noWakeLogged) {
-      ensureRouteSupervisor.noWakeLogged = true;
-      console.log('ROUTE_DAEMON_SKIP ' + JSON.stringify({ why: 'NO_WAKE', project: String((project && (project.teamName || project.name)) || '') }));
+  if (IS_SANDBOX) {
+    if (!ensureRouteSupervisor.sandboxSkipLogged) {
+      ensureRouteSupervisor.sandboxSkipLogged = true;
+      console.log('ROUTE_DAEMON_SKIP ' + JSON.stringify({ why: 'SANDBOX', project: String((project && (project.teamName || project.name)) || '') }));
     }
     return null;
   }
