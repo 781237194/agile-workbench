@@ -3924,7 +3924,7 @@ function createTeamTools(options = {}) {
   function roleCardTemplate(projectName, role) {
     return `# ${ROLE_NAMES[role] || role} · 角色卡\n\n`
       + `- 项目：${projectName}\n- 角色 id：${role}\n`
-      + `- 每轮必读：项目铁律、项目信息、角色卡、项目索引\n`
+      + `- 必读分层：宪法唯一最高（每轮）；项目铁律按需避坑；项目信息/角色卡/项目索引按需读\n`
       + `- 写入范围：${ROLE_NAMES[role] || role}/（程序员代码目录以项目信息为准）\n`;
   }
 
@@ -10288,6 +10288,19 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
    * 但必须说清“执行正文动作、按角色产出、完成后回执”，否则角色会把派单当成只需 ack 的通知。
    * 简报 ≤800 字，整条唤醒消息按角色输出上限（需求800/产品800/开发1200/测试1000）截断。
    */
+  /**
+   * T-20261117-204902-ca6b：通知类唤醒正文的唯一来源（`<teamToolRoot>/lib/wake-text.cjs`）。
+   * ESM 的 lib/dispatch.mjs 也 import 同一份；本函数只做定位 + 转发，缺文件时**抛错**（不许悄悄退回旧文案）。
+   */
+  function buildNoticeTextFromTool(opts) {
+    const file = path.join(layout.toolRoot, 'lib', 'wake-text.cjs');
+    const mod = require(file);
+    if (!mod || typeof mod.buildNoticePrompt !== 'function') {
+      throw new Error(`WAKE_TEXT_SOURCE_MISSING: ${file}`);
+    }
+    return mod.buildNoticePrompt(opts);
+  }
+
   function wakeMessageFor(input = {}) {
     const projectName = String(input.projectName || '').trim();
     const role = String(input.role || '').trim();
@@ -10307,25 +10320,17 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     const quote = (value) => '"' + String(value == null ? '' : value).replace(/"/g, '\\"') + '"';
     const tool = layout.teamTool;
     if (!isDispatch) {
-      const noticeHeader = `【团队消息 ${messageId || '(缺 id)'}】${subject}`;
-      // Owner 2026-11-17 19:5x：PM → 角色的消息不能一律标"回复/通知、不必新建任务"，
-      // 否则角色被叫醒也只回"收到"就停（产生"全员罢工"假象）。来自 pm 的按"需判断处理"呈现。
-      const pmInstruction = from === 'pm' && role !== 'pm';
-      const noticeText = pmInstruction
-        ? [
-          noticeHeader,
-          `${from ? from + ' → ' : ''}${role} · 项目：${projectName}`,
-          '这是 PM 下发给你的消息：先判断——需要你执行就立即按正文做、做完发完成回执（不要只回“收到”）；确属纯知悉才可只回“已读”；判断不了的回一行“需要明确”+卡点。',
-          `请按需读取：node ${quote(tool)} inbox --boot <令牌> --all，再 read --boot <令牌> --id ${messageId}。`,
-          `最后只回一行：已执行 <做了什么> / 需处理 <卡点> / 已读 + ${messageId}。`
-        ].join('\n')
-        : [
-          noticeHeader,
-          `${from ? from + ' → ' : ''}${role} · 项目：${projectName}`,
-          '这条是回复/通知，不是新派单；按需读取并按正常流程回执即可，不必为它新建任务。',
-          `请按需读取：node ${quote(tool)} inbox --boot <令牌> --all，再 read --boot <令牌> --id ${messageId}；需要回执时只 ack。`,
-          `只回一行：已读/已回执 + ${messageId}。`
-        ].join('\n');
+      // T-20261117-204902-ca6b：通知正文唯一来源＝团队/工具/lib/wake-text.cjs（与 lib/dispatch.mjs 共用同一份），
+      // 本地不再拼文案——两处各写一套就是 b6f9 发现「语义一致、非逐字一致」的根因。
+      const noticeText = buildNoticeTextFromTool({
+        to: role,
+        project: projectName,
+        messageId,
+        subject,
+        from,
+        teamTool: tool,
+        body: input.body,
+      });
       return {
         ok: Boolean(projectName && ROLE_IDS.includes(role) && messageId),
         text: noticeText,

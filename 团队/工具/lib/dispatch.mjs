@@ -2,6 +2,10 @@
 // 派单不是通知：唤醒后必须执行正文任务、把产出落盘、完成后回完成回执。
 // ack 只代表“已回执/已认领”，task done --evidence 才代表“已完成”。
 import path from 'node:path';
+// T-20261117-204902-ca6b：通知类唤醒正文的唯一来源（CJS，壳层 src/team-tools.js 也 require 同一份）。
+import wakeText from './wake-text.cjs';
+
+const buildNoticeText = wakeText.buildNoticePrompt;
 
 // selftest 与模板共用这些固定说法，防止文档、唤醒词、测试三套口径。
 export const DISPATCH_MARKERS = {
@@ -103,7 +107,7 @@ export function buildDispatchPrompt({
   return `这是派单，不是通知：${messageId}（${subject}）。\n`
     + `${taskLine}\n`
     + `AC 引用：见需求正文 §验收标准（写清路径 + sha256）；version/change 指回需求正文当前版本，不在任务/模板里复制 AC。\n`
-    + `中文思考、中文回复、中文写文档；先读 ${path.join(projectPath, '项目铁律.md')}（每轮都读），再读 项目信息.md / 项目索引.md / 你的 文件索引.md 与 角色卡.md。\n`
+    + `中文思考、中文回复、中文写文档；**每轮先读《团队宪法》（唯一最高优先级）**，项目铁律为按需避坑清单（不必每轮读），再按需读 项目信息.md / 项目索引.md / 你的 文件索引.md 与 角色卡.md。\n`
     + reading
     + `按顺序做完，不要只回“收到”：\n${numbered}\n`
     + `完成标准：有产出 + 完成回执 + ${taskId ? 'task done 证据' : '结果说明'}；已回执 ≠ 已完成，只 ack 不算完成。\n`
@@ -113,27 +117,10 @@ export function buildDispatchPrompt({
 /**
  * 非派单唤醒：只提示“有新消息，去 inbox 读”，绝不生成派单流水线。
  * 完成回执、通知、请求都走这里，避免把“回执”误当成“给自己派单”。
+ *
+ * T-20261117-204902-ca6b：正文唯一来源已抽到 `wake-text.cjs`（壳层 CJS 与这里共用同一份），
+ * 本函数只做参数转发，**不要在本地再拼文案**（两处各写一套就是 b6f9 发现的非逐字一致）。
  */
-export function buildNoticePrompt({ to, project, messageId, subject, from = '', teamTool = '', body = '' }) {
-  const tool = teamTool ? `node "${teamTool}" ` : '';
-  // Owner 2026-11-14 08:44：唤醒正文直接带消息内容（subject + body，截断 600 字），不再只给 messageId。
-  const excerpt = String(body || '').trim().slice(0, 600);
-  const head = `【团队消息 ${messageId}】${subject}\n`
-    + `${from ? from + ' → ' : ''}${to} · 项目：${project}\n`
-    + `AC 引用：见需求正文 §验收标准（路径 + sha256）；version/change 指回需求正文当前版本。\n`
-    + (excerpt ? `正文（已截断 600 字，全文用 read --id ${messageId}）：\n${excerpt}\n` : '');
-  // Owner 2026-11-17 19:5x：PM 下发给角色的消息不能一律标成"回复/通知，不必新建任务"——
-  // 否则角色被叫醒后只回"收到"就停，产生"全员罢工"假象，PM 只能手动逐条派单（临时解决）。
-  // 口径：来自 pm 且收件人是角色的消息=需要判断处理；确实纯知悉才允许只回"已读"。
-  if (from === 'pm' && to !== 'pm') {
-    return head
-      + `这是 PM 下发给你的消息：先判断——**需要你执行**就立即按正文做、做完发完成回执（不要只回“收到”）；\n`
-      + `确属纯知悉（无动作要求）才可只回“已读”。判断不了的，回一行“需要明确”并说明卡点。\n`
-      + `请按需读取：${tool}inbox --all，再 read --id ${messageId}。\n`
-      + `最后只回一行：已执行 <做了什么> / 需处理 <卡点> / 已读 + ${messageId}。`;
-  }
-  return head
-    + `这条是回复/通知，不是新派单；按需读取并按正常流程回执即可，不必为它新建任务。\n`
-    + `请按需读取：${tool}inbox --all，再 read --id ${messageId}；需要回执时只 ack。\n`
-    + `只回一行：已读/已回执 + ${messageId}。`;
+export function buildNoticePrompt(opts = {}) {
+  return buildNoticeText(opts);
 }
