@@ -275,7 +275,7 @@ Owner 决策箱（R-9db6 · 工具侧）
         off 只提示不阻断（缺插件不报错），error 才计入 doctor 问题；见 docs/可选插件.md
   lock acquire --boot T --key K [--ttl 60]   lock release --boot T --key K   lock status
   owner-approve --proposal P-... [--project X]   # 必须真实终端，无 TTY 拒绝
-  selftest [--keep] [--tmp 目录]   # 沙盘跑通：回执/签字/陈旧拒绝/锁争用/回滚/项目脚手架/评审/投票/迭代终止；默认落 工作台\_tmp
+  selftest [--keep] [--tmp 目录] [--step-timeout 毫秒]   # 沙盘跑通：回执/签字/陈旧拒绝/锁争用/回滚/项目脚手架/评审/投票/迭代终止；默认落 工作台\_tmp（单步超时默认 120s）
   tmp prune [--root <目录>] [--minutes 60] [--keep a,b] [--yes] [--json]
         # 测试沙盘治理：默认 dry-run；--yes 才删；只删 _tmp 顶层目录、不碰根下脚本；
         # 递归最新 mtime 超过 N 分钟才删；删除前写审计 团队/状态/项目/<项目>/沙盘清理.jsonl（见 docs/测试与沙盘.md）
@@ -375,7 +375,10 @@ async function main() {
     case 'doctor': cmdDoctor(args); break;
     case 'selftest': {
       const { runSelftest } = await import('./lib/selftest.mjs');
-      const r = await runSelftest({ keep: Boolean(args.keep), tmp: args.tmp ? String(args.tmp) : '', reset: Boolean(args.reset) });
+      // B-20261118-012138-06b6：单步超时（默认 120s）——某一步挂死时不再无限等。
+      const rawStep = Number(args['step-timeout']);
+      const stepTimeout = Number.isFinite(rawStep) && rawStep > 0 ? rawStep : 120000;
+      const r = await runSelftest({ keep: Boolean(args.keep), tmp: args.tmp ? String(args.tmp) : '', reset: Boolean(args.reset), stepTimeout });
       process.exitCode = r.ok ? 0 : 1;
       break;
     }

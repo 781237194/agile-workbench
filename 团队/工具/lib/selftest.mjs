@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { spawnSync } from 'node:child_process';
+import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { checkDocStructure } from './brief.mjs';
 import { OUTPUT_DOCS, LIMITS } from './roles.mjs';
@@ -34,7 +35,10 @@ function read(p) {
   return fs.readFileSync(p, 'utf8');
 }
 
-export async function runSelftest({ keep = false, tmp = '', reset = false } = {}) {
+export async function runSelftest({ keep = false, tmp = '', reset = false, stepTimeout = 120000 } = {}) {
+  // B-20261118-012138-06b6：单步超时（默认 120s）。子命令 spawnSync 到点强杀；另有 watchdog worker
+  // 在「主线程被某个永不返回的用例卡住」时负责打印 STEP_TIMEOUT、落 hang 现场并 exit(124)。
+  const STEP_TIMEOUT = Number.isFinite(Number(stepTimeout)) && Number(stepTimeout) > 0 ? Number(stepTimeout) : 120000;
   // 沙盘默认落在工作台 _tmp（HERE = 团队/工具/lib → 上三级 = 工作台），不污染系统临时目录；
   // 跑完自动删除，--keep 才保留。也可以 --tmp 指定其他目录。
   const baseTmp = tmp ? path.resolve(tmp) : path.resolve(HERE, '..', '..', '..', '_tmp');
@@ -73,18 +77,66 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
   // 门禁本身由 scripts/test-75ec-task-gate.cjs 独立覆盖（那里不设这个开关）。
   const env = { ...process.env, TEAM_ROOT: teamRoot, TEAM_PROJECTS_ROOT: projectsRoot, TEAM_SELFTEST: '1', TEAM_WORKBENCH_JSON: sandboxWorkbenchFile, TEAM_TASK_GATE_LEGACY: '1' };
   const results = [];
+  // ---- B-06b6 单步超时看门狗 ----
+  const stepStateFile = path.join(temp, '.step-state.json');
+  const hangFile = path.join(temp, 'hang现场.json');
+  let watchdog = null;
+  try {
+    watchdog = new Worker(new URL('./selftest-watchdog.mjs', import.meta.url), {
+      workerData: { stateFile: stepStateFile, hangFile, timeoutMs: STEP_TIMEOUT, sandbox: temp },
+    });
+    watchdog.unref();
+  } catch { watchdog = null; }
+  let currentCase = '（准备阶段）';
+  let stepCount = 0;
+  const markStep = (cmd = '', stdoutTail = '') => {
+    try {
+      fs.writeFileSync(stepStateFile, JSON.stringify({ at: Date.now(), case: currentCase, cmd: String(cmd || ''), stdoutTail: String(stdoutTail || '').slice(-2000) }), 'utf8');
+    } catch { /* 心跳写失败不阻断自检 */ }
+  };
+  /** 超时/挂死收尾：落 hang 现场 → 打印 → exit(124)（跳过 finally，沙盘保留）。 */
+  const hangExit = (detail = {}) => {
+    const payload = { at: new Date().toISOString(), kind: 'STEP_TIMEOUT', case: currentCase, timeoutMs: STEP_TIMEOUT, sandbox: temp, ...detail };
+    try { fs.writeFileSync(hangFile, JSON.stringify(payload, null, 2) + '\n', 'utf8'); } catch { /* ignore */ }
+    console.log(`\nSTEP_TIMEOUT  单步超过 ${STEP_TIMEOUT}ms 未返回：用例「${currentCase}」${payload.cmd ? `｜最后命令：${payload.cmd}` : ''}`);
+    if (payload.stdoutTail) console.log(`最后输出：${String(payload.stdoutTail).slice(-1200)}`);
+    console.log(`hang 现场：${hangFile}（沙盘 ${temp}）`);
+    process.exit(124);
+  };
+  markStep('准备阶段');
   const pass = (name, detail = '') => {
+    currentCase = String(name);
+    markStep(name);
     results.push({ ok: true, name, detail });
     console.log(`PASS  ${name}${detail ? ' · ' + detail : ''}`);
   };
   const failStep = (name, detail = '') => {
+    currentCase = String(name);
+    markStep(name);
     results.push({ ok: false, name, detail });
     console.log(`FAIL  ${name}${detail ? ' · ' + detail : ''}`);
     throw new Error(`${name}${detail ? '：' + detail : ''}`);
   };
   const run = (args, { expectFail = false, tool = TEAM_MJS, envOverride = null } = {}) => {
     const childEnv = envOverride ? { ...env, ...envOverride } : env;
-    const r = spawnSync(process.execPath, [tool, ...args], { cwd: work, env: childEnv, encoding: 'utf8', timeout: 60000 });
+    markStep(args.join(' '));
+    // B-06b6 测试专用注入：TEAM_SELFTEST_HANG_AT=<n> 时，第 n 次子命令执行前故意永不返回，
+    // 用来验证看门狗（到点 STEP_TIMEOUT + exit 非 0 + hang 现场）。生产不设该变量。
+    stepCount += 1;
+    const hangAt = Number(process.env.TEAM_SELFTEST_HANG_AT || 0);
+    if (Number.isFinite(hangAt) && hangAt > 0 && stepCount === hangAt) {
+      currentCase = `注入挂死用例（第 ${hangAt} 步）`;
+      markStep('（注入挂死：故意不返回）', 'TEAM_SELFTEST_HANG_AT 注入点');
+      for (;;) { /* 挂死，等 watchdog】 */ }
+    }
+    const r = spawnSync(process.execPath, [tool, ...args], {
+      cwd: work, env: childEnv, encoding: 'utf8', timeout: STEP_TIMEOUT, killSignal: 'SIGKILL',
+    });
+    const tail = String(r.stdout || '') + String(r.stderr || '');
+    markStep(args.join(' '), tail);
+    if (r.error && (r.error.code === 'ETIMEDOUT' || String(r.signal || '') === 'SIGKILL')) {
+      hangExit({ cmd: args.join(' '), stdoutTail: tail.slice(-2000) });
+    }
     if (expectFail) {
       if (r.status === 0) failStep('预期失败但成功', args.join(' '));
       return r;
@@ -3633,6 +3685,8 @@ export async function runSelftest({ keep = false, tmp = '', reset = false } = {}
     console.log(`\nSELFTEST FAIL: ${e.message}`);
     return { ok: false, results, temp, error: e.message };
   } finally {
+    // B-06b6：正常/异常结束都先停 watchdog（超时路径已 exit，不会到这里，沙盘现场因此保留）。
+    try { if (watchdog) watchdog.terminate(); } catch { /* ignore */ }
     if (!keep) {
       try { fs.rmSync(temp, { recursive: true, force: true }); } catch { /* ignore */ }
     } else {
