@@ -177,6 +177,26 @@ const wakeRows = (sb) => {
   check('④d 候选被 read 掉（new→cur）后 → 候选 0 不发唤醒',
     moved > 0 && r4d.ok === true && r4d.pending === 0 && after4d === before4d, { moved, r4d, before4d, after4d });
 
+  /* ④e 24h 过期清理：台账里 25 小时前的条目要被剪掉（不永久占位），1 分钟前的保留 */
+  {
+    const ledgerFile = path.join(sb.state, '邮箱摘要已通知.json');
+    const cur = readJson(ledgerFile, { ids: {} });
+    const oldIso = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+    const freshIso = new Date(Date.now() - 60 * 1000).toISOString();
+    cur.ids = {
+      ...(cur.ids || {}),
+      'M-old-25h': { at: oldIso, messageId: 'M-old-25h', type: 'escalation' },
+      'M-keep-1m': { at: freshIso, messageId: 'M-keep-1m', type: 'note' },
+    };
+    writeJson(ledgerFile, cur);
+    send(sb, { id: 'M-test-after-prune', type: 'escalation', subject: '触发一次写回，验证剪枝落盘' });
+    const r = await ops.pmMailboxDigest(PROJECT);
+    const after = readJson(ledgerFile, { ids: {} }).ids || {};
+    check('④e 台账 24h 过期清理：25 小时前条目被剪掉、1 分钟内条目保留（写回后生效）',
+      r.ok === true && !after['M-old-25h'] && Boolean(after['M-keep-1m']) && Boolean(after['M-test-after-prune']),
+      { woken: r.woken, pruned: !after['M-old-25h'], keep: Boolean(after['M-keep-1m']) });
+  }
+
   const pass = results.filter((r) => r.ok).length;
   console.log('');
   console.log(`${pass === results.length ? 'PM_MAILBOX_DIGEST_OK' : 'PM_MAILBOX_DIGEST_WARN'} ${JSON.stringify({ total: results.length, pass, red: results.length - pass })}`);
