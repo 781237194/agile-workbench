@@ -228,7 +228,7 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
       // 失败必须留痕且可操作：不写名册、不广播，审计行带手建降级命令。
       if (!dryRun) {
         appendAudit(auditFile, {
-          at: iso(now), stage: 'rotate', code, result: 'fail', role, project: projectName,
+          at: iso(now), stage: 'rotate_failed', code, result: 'fail', role, project: projectName,
           note: `自动建会话失败（${code}）：本轮不换人${command ? `；手建降级命令：${command}` : ''}`,
           reason: String(reason || 'context-full'),
           evidence: { mode: 'manual', created: false, code, manualCommand: command, oldSessionId: oldId, why: String((e && e.message) || e) },
@@ -273,7 +273,8 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
       }));
     } catch { /* 记录失败不影响换人；审计行仍带 from/to */ }
   }
-  const rotateRow = { at: iso(now), stage: 'rotate', code: 'ROTATED', result: 'ok', role, project: projectName, note: `已换人：${oldId || '未记录'} → ${newId}（${reason || 'context-full'}｜${mode}${created ? '/created' : ''}）`, evidence: { mode, created, oldSessionId: oldId, newSessionId: newId, reason: String(reason || 'context-full'), from: oldId, to: newId, rotatedAt: iso(now), ...(archiveDeferred ? { archiveDeferred } : { archive: 'pending-daily' }) } };
+  // 行级 mode/created 同时放在**顶层**（审查/验收脚本按 rot.mode / rot.created 读）与 evidence 内（明细），两处同值。
+  const rotateRow = { at: iso(now), stage: 'rotate', code: 'ROTATED', result: 'ok', role, project: projectName, mode, created, note: `已换人：${oldId || '未记录'} → ${newId}（${reason || 'context-full'}｜${mode}${created ? '/created' : ''}）`, evidence: { mode, created, oldSessionId: oldId, newSessionId: newId, reason: String(reason || 'context-full'), from: oldId, to: newId, rotatedAt: iso(now), ...(archiveDeferred ? { archiveDeferred } : { archive: 'pending-daily' }) } };
   if (!dryRun) appendAudit(auditFile, rotateRow);
 
   // 新会话 boot 指令（给本人）+ 其余角色重 boot 广播（名册变更=全员旧令牌失效）
