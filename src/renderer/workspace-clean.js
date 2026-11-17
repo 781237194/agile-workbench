@@ -78,9 +78,16 @@
     box.innerHTML = '';
     if (!plan) {
       box.hidden = true;
+      box.removeAttribute('data-extra-ids');
       return;
     }
     box.hidden = false;
+    // T-5d98 ①：把「被统计进来的 sid」明面上打出来，便于确认是「新 PM 会话被误分类」还是「旧会话残留」。
+    try {
+      const ids = (plan.extras || []).map((row) => String((row && row.sessionId) || '')).filter(Boolean);
+      box.setAttribute('data-extra-ids', ids.join(','));
+      if (ids.length) console.info('[extra-sessions]', ids.join(','));
+    } catch { /* 打印失败不影响渲染 */ }
     const count = Number(plan.extraCount || 0);
     const head = el('div', 'extra-head');
     const label = el('span', 'extra-label');
@@ -244,6 +251,8 @@
   else start();
 
   // 供自检/调试读取：当前这一处显示的数字（唯一来源）
+  // T-5d98：主进程对齐完 PM 身份后需要**立刻**重算一次（不能等 5 秒轮询，否则首屏会残留「额外会话 1 个」）。
+  window.__awbRefreshExtraSessions = () => refresh().catch(() => { /* ignore */ });
   window.__awbExtraSessions = () => ({
     projectId: state.projectId,
     extraCount: state.plan ? Number(state.plan.extraCount || 0) : null,

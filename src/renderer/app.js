@@ -2524,6 +2524,20 @@ function applyPmIdentityState(state) {
       banner.removeAttribute('data-code');
     }
   }
+  // T-5d98 ②：对齐后**立刻**重算额外会话（workspace-clean 有 5 秒轮询，等它会残留「额外会话 1 个」）。
+  if (mode === 'ok') {
+    try {
+      if (typeof window.__awbRefreshExtraSessions === 'function') window.__awbRefreshExtraSessions();
+      else window.dispatchEvent(new CustomEvent('awb:refresh'));
+    } catch { /* ignore */ }
+    setTimeout(() => {
+      try {
+        const box = document.querySelector('#extra-sessions');
+        const ids = box ? String(box.getAttribute('data-extra-ids') || '') : '';
+        console.info('[pm-identity] extra-sessions ids=', ids || '(none)');
+      } catch { /* ignore */ }
+    }, 300);
+  }
 }
 
 function renderTeamSessions() {  const box = $('#team-session-list');
