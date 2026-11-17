@@ -1,18 +1,23 @@
 {
   "schema": 1,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "approvedBy": "Owner",
   "approvedAt": "2026-11-17",
   "dir": "团队/skill/基础流程",
+  "previousVersion": {
+    "version": "1.0.0",
+    "archive": "团队/skill/归档/基础流程-1.0.0/"
+  },
+  "change": "新增「换人 / 交接」小节（六角色）：何时交接 / 交接文件八节 / 回执 / boot / 广播 / 失败回滚。依据 T-20261117-211626-c2b5（PM 派单 M-20261117-212341-65d24f）。",
   "files": {
-    "00-索引.md": "d4442d25010bce56cbab0297cc69b31681dbc9234056c59cafbb9bcd715d7566",
-    "analyst.md": "323c3b548e2e4ec591241cef1368a978ba2eb7dbe8c7cd75e7a87aa9f08e79fb",
+    "00-索引.md": "410a5dbc33abd16b2e50c05042e5e752a083205f41d4b45ab116a957df5a5a9b",
+    "analyst.md": "68bffb8deba4fa2d864728e49abd7963bc1d3a405c36e08e5322b40cbf0d9a8f",
     "index.md": "d50a9e7a5b7ce131e154e32ebbaaf152be87e38487725bfbe3f8cc2c06c90fbc",
-    "pm.md": "3d683117e11030fd909d796e22a256a91d30aaf7baad6f54d99abfba214b3940",
-    "product.md": "e92489d782821867c1970c74ca4dfee689c2f7c504e66f65911a2e0433a7d2d0",
-    "programmer1.md": "b4b0fe649fc471986b70d9382058b5d23b453236fe2524e7251f2a37b9245de5",
-    "programmer2.md": "84d13887c6a08e0d49aeb3acbe3b7fa57a9650038c833afa7ce30d460dac5f9a",
-    "tester.md": "97cf4cf5fe0fcafef1c0660f2865b9df7e16446e798469b872d059b8a5796a37"
+    "pm.md": "18e6563aec42db9c2709a0acff89f8f2c8a95e7d9f0e11cf3c9cd03104902054",
+    "product.md": "d775af95c970236aa97b24a4fada1afb997130f5111c91f2f7d1f62f01393f47",
+    "programmer1.md": "25fe3b8b6b1c7587485e270b20f6f013d1c928159168aeaf997c705435cd4899",
+    "programmer2.md": "93b2504ddd724d27a1c88f306f06281b984fc8429349d4b0d80bb94d92d578de",
+    "tester.md": "42e847fd93b145bf542d8463959df84a8200ec6111280489d7cdadcefd1742c7"
   },
   "note": "基础流程 skill 随仓库分发；任何文件 sha 与清单不一致即视为篡改（SKILL_TEMPLATE_TAMPERED）。改版须 Owner 批准新版本并归档旧版。"
 }
