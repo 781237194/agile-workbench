@@ -1585,7 +1585,9 @@ export async function runDaemon(projectName, { intervalMs = null, once = false, 
   try {
     while (!stopped && index < limit) {
       // R-fa0e（3a12）：先跑自动换人拍（配置关闭/未到间隔即跳过；同拍 busy 防重入；异常只记日志不拖垮守护）。
-      const ar = runAutoRotateBeat(name, { state: autoRotateState, source: 'route-daemon' });
+      // B-20261117-212500-a837：把 daemon 已解析的 DSH 地址传进去（daemon 子进程常没有 DSH_WEB_URL），
+      // 否则自动换人在生产里建会话会落到 ROTATE_MANUAL_REQUIRED。
+      const ar = runAutoRotateBeat(name, { state: autoRotateState, source: 'route-daemon', engineUrl: engineUrlOf(engineUrl) });
       if (ar && ar.ok === false) {
         try { appendRouteLog(name, { event: 'auto_rotate_error', source: 'auto-rotate', why: String(ar.message || ar.code || '').slice(0, 300), ok: false }); } catch { /* 日志失败不影响守护 */ }
       }

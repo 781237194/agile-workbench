@@ -188,7 +188,7 @@ function handoverDone({ projectDir, role, mailDir, sinceMs }) {
 }
 
 /* ── rotate：建会话（唯一出口 createTeamSession，禁自造 id）+ 写名册 + 写壳 store + 审计 + 广播 ── */
-async function rotateSession({ projectName, role, now, reason, auditFile, dryRun }) {
+async function rotateSession({ projectName, role, now, reason, auditFile, dryRun, engineUrl = '' }) {
   const team = loadTeam();
   const member = (team.members || []).find((m) => m && m.role === role);
   const oldId = String((member && member.sessionId) || '');
@@ -200,6 +200,7 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
   let newId = '';
   let created = false;
   let mode = 'auto';
+  let engine = '';
   if (dryRun) {
     newId = injectedNewSessionId || '(dry-run)';
     mode = 'dry-run';
@@ -213,6 +214,7 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
         role,
         oldId,
         reason,
+        engineUrl,
         createSession: selftest ? async ({ role: r }) => {
           if (failInjected) throw new Error('注入失败：createSession 不可用（__AR_CREATE_FAIL=1）');
           return { sessionId: `session-fake-${r}-${Date.now().toString(36)}` };
@@ -221,6 +223,7 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
       newId = String(info.sessionId || '');
       created = Boolean(info.created);
       mode = String(info.mode || 'auto');
+      engine = String(info.engine || '');
     } catch (e) {
       const code = String((e && e.code) || 'ROTATE_CREATE_FAILED');
       const details = (e && e.details) || {};
@@ -274,7 +277,7 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
     } catch { /* 记录失败不影响换人；审计行仍带 from/to */ }
   }
   // 行级 mode/created 同时放在**顶层**（审查/验收脚本按 rot.mode / rot.created 读）与 evidence 内（明细），两处同值。
-  const rotateRow = { at: iso(now), stage: 'rotate', code: 'ROTATED', result: 'ok', role, project: projectName, mode, created, note: `已换人：${oldId || '未记录'} → ${newId}（${reason || 'context-full'}｜${mode}${created ? '/created' : ''}）`, evidence: { mode, created, oldSessionId: oldId, newSessionId: newId, reason: String(reason || 'context-full'), from: oldId, to: newId, rotatedAt: iso(now), ...(archiveDeferred ? { archiveDeferred } : { archive: 'pending-daily' }) } };
+  const rotateRow = { at: iso(now), stage: 'rotate', code: 'ROTATED', result: 'ok', role, project: projectName, mode, created, note: `已换人：${oldId || '未记录'} → ${newId}（${reason || 'context-full'}｜${mode}${created ? '/created' : ''}）`, evidence: { mode, created, ...(engine ? { engine } : {}), oldSessionId: oldId, newSessionId: newId, reason: String(reason || 'context-full'), from: oldId, to: newId, rotatedAt: iso(now), ...(archiveDeferred ? { archiveDeferred } : { archive: 'pending-daily' }) } };
   if (!dryRun) appendAudit(auditFile, rotateRow);
 
   // 新会话 boot 指令（给本人）+ 其余角色重 boot 广播（名册变更=全员旧令牌失效）
@@ -473,7 +476,7 @@ function rotatedTodayRoles({ projectName, rows, todayDefer }) {
  *   · 同一进程内用传入的 state 记上次执行时间（不落盘，重启后重算）。
  * 返回 { ok, skipped?: 'disabled'|'interval', result? }。
  */
-export function runAutoRotateBeat(projectName, { now, state, source = 'route-daemon' } = {}) {
+export function runAutoRotateBeat(projectName, { now, state, source = 'route-daemon', engineUrl = '' } = {}) {
   const box = state && typeof state === 'object' ? state : {};
   let cfg;
   try {
@@ -490,7 +493,7 @@ export function runAutoRotateBeat(projectName, { now, state, source = 'route-dae
   box.lastAt = at;
   box.busy = true;
   try {
-    const result = runAutoRotateCycle(projectName, { now: at, dryRun: false, source });
+    const result = runAutoRotateCycle(projectName, { now: at, dryRun: false, source, engineUrl });
     return { ok: true, config: cfg, result };
   } catch (e) {
     return { ok: false, code: 'AUTO_ROTATE_FAILED', message: String((e && e.message) || e).slice(0, 300), config: cfg };
@@ -506,6 +509,8 @@ export async function runAutoRotateCycle(projectName, options = {}) {
   const now = resolveNow(options.now !== undefined ? options.now : (process.env.__AR_NOW ? Number(process.env.__AR_NOW) : undefined));
   const dryRun = options.dryRun === true;
   const source = String(options.source || 'auto-rotate');
+  // B-20261117-212500-a837：DSH 地址可由调用方（route-daemon）传入；为空时由 session.mjs 的统一解析链兜底。
+  const engineUrl = String(options.engineUrl || '');
   const auditFile = auditFileOf(name);
   const usage = readJsonSafe(usageFileOf(name), {}) || {};
   const rounds = readJsonSafe(roundsFileOf(name), {}) || {};
@@ -662,7 +667,7 @@ export async function runAutoRotateCycle(projectName, options = {}) {
       return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), actions, dryRun, source, note: '昨夜入队的角色都有在办任务：本轮不换（AC3 红线）' };
     }
     const head = eligible[0];
-    const rotated = await rotateSession({ projectName: name, role: head.role, now, reason: `next-day-queue-${head.level}`, auditFile, dryRun });
+    const rotated = await rotateSession({ projectName: name, role: head.role, now, reason: `next-day-queue-${head.level}`, auditFile, dryRun, engineUrl });
     if (rotated.failed) {
       actions.push({ stage: 'rotate', role: head.role, code: rotated.code, result: 'fail' });
       return { ok: false, code: rotated.code, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), rotated: [], actions, dryRun, source, manualCommand: rotated.manualCommand, note: `自动建会话失败（${rotated.code}）：本轮不换人，已留手建降级命令` };
@@ -709,7 +714,7 @@ export async function runAutoRotateCycle(projectName, options = {}) {
     if (pending) {
       const done = handoverDone({ projectDir, role: item.role, mailDir, sinceMs: pending.at });
       if (done.done) {
-        const rotated = await rotateSession({ projectName: name, role: item.role, now, reason: `handover:${done.source}`, auditFile, dryRun });
+        const rotated = await rotateSession({ projectName: name, role: item.role, now, reason: `handover:${done.source}`, auditFile, dryRun, engineUrl });
         if (rotated.failed) {
           actions.push({ stage: 'rotate', role: item.role, code: rotated.code, result: 'fail' });
           return { ok: false, code: rotated.code, project: name, at: nowIso, mode: 'day', actions, dryRun, source, manualCommand: rotated.manualCommand, note: `自动建会话失败（${rotated.code}）：本轮不换人，已留手建降级命令` };

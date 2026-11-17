@@ -27,6 +27,7 @@ import { ROLE_DIRS, ROLE_NAMES, rolesForMode, normalizeTeamMode } from './roles.
 import { DshClient } from './dsh-session.mjs';
 import { roundsQuery, exportTranscriptToProject, auditOutput, archiveSession, firstTurnUsage, writeBackRotated, listArchives } from './session-archive.mjs';
 import { requireBoot } from './store.mjs';
+import { resolveDshBaseUrl, dshUrlMissingHint } from './dsh-url.mjs';
 
 // R-2e6b AC18.4：双档水位——30 万预警（提示准备归档/换人）、50 万强制归档/换人（与 c0a6 口径一致）。
 export const DEFAULT_TOKEN_WARN = 300000;
@@ -105,7 +106,7 @@ function latestRotation(projectName, role) {
  */
 export async function createTeamSession({
   projectName = '', role = '', reason = '', oldId = '', sessionTitle = '',
-  createSession = null, list = null, project = null,
+  createSession = null, list = null, project = null, engineUrl = '',
 } = {}) {
   const name = String(projectName || '');
   const command = `node 团队\\工具\\team.mjs session rotate --role ${role} --project "${name}" --session <新会话id> --reason "${reason || '手建降级'}"`;
@@ -129,7 +130,14 @@ export async function createTeamSession({
     }
     return { sessionId: sid, created: true, mode: 'auto', injected: true };
   }
-  const info = list || await listDshSessions();
+  const engine = resolveDshBaseUrl({ override: engineUrl }).baseUrl;
+  if (!engine) {
+    fail('ROTATE_MANUAL_REQUIRED', `${dshUrlMissingHint()}，无法自动建会话：请手建一个会话后执行下面命令登记（mode=manual）：${command}`, {
+      role, project: name, from: oldId, mode: 'manual', command,
+      step: 'owner-create-session-then-rotate-with-session', downgradedFrom: 'auto-create',
+    });
+  }
+  const info = list || await listDshSessions(engine);
   if (!info.ok) {
     // AC2b：能自动建会话就建；不能就"手建降级"——不是 500 式失败，而是给出可复制的下一步。
     fail('ROTATE_MANUAL_REQUIRED', `DSH 不可达（${info.why}），无法自动建会话：请手建一个会话后执行下面命令登记（mode=manual）：${command}`, {
@@ -138,7 +146,7 @@ export async function createTeamSession({
     });
   }
   const proj = project || loadProject(name);
-  const client = new DshClient(process.env.DSH_WEB_URL);
+  const client = new DshClient(engine);
   const body = proj.dshWorkspaceId ? { workspaceId: proj.dshWorkspaceId } : { cwd: proj.path };
   let createdRes = null;
   try {
@@ -158,7 +166,7 @@ export async function createTeamSession({
   }
   const title = sessionTitle || `团队·${ROLE_NAMES[role] || role}`;
   try { await client.rename({ sessionId: sid, title }); } catch { /* 标题失败不阻断 */ }
-  return { sessionId: sid, created: true, mode: 'auto', injected: false };
+  return { sessionId: sid, created: true, mode: 'auto', injected: false, engine };
 }
 
 /** 四处映射一致性：每个角色四处取值必须相同；返回 6/6（fast 4/4）判定与不一致字段。 */
@@ -237,7 +245,7 @@ function usageOfSession(info) {
   return { uncachedInputTokens: uncached, cacheReadTokens: cacheRead, outputTokens: output, inputTokens: input, totalTokens: input + cacheRead + output };
 }
 
-function listDshSessions() {
+function listDshSessions(engineOverride = '') {
   // B-405f 用例注入：沙盘里没有真 DSH，用 TEAM_DSH_FAKE 提供会话列表（只允许 TEAM_SELFTEST=1 时生效）。
   const fake = process.env.TEAM_SELFTEST === '1' ? String(process.env.TEAM_DSH_FAKE || '') : '';
   if (fake) {
@@ -261,8 +269,10 @@ function listDshSessions() {
     }
   }
   return new Promise((resolve) => {
-    const engine = process.env.DSH_WEB_URL || '';
-    if (!engine) { resolve({ ok: false, why: '没有 DSH_WEB_URL' }); return; }
+    // B-20261117-212500-a837：地址不再只认 env——按 dsh-url.mjs 的统一解析链（env → dsh.json → 当前工作区.json），
+    // 这样在 route-daemon 里跑（没有 DSH_WEB_URL）也能连上真实 DSH。
+    const engine = resolveDshBaseUrl({ override: engineOverride }).baseUrl;
+    if (!engine) { resolve({ ok: false, why: dshUrlMissingHint() }); return; }
     const client = new DshClient(engine);
     client.list().then((r) => resolve({ ok: true, items: r.items || [] })).catch((e) => resolve({ ok: false, why: e.message }));
   });
@@ -743,7 +753,7 @@ function archiveGate(projectName, role, oldId) {
 
 export async function rotateSession({
   projectName, role, sessionId = '', force = false, offline = false, reason = '', by = 'owner',
-  failAt = '', sessionTitle = '', windowMinutes = 30, dryRun = false, createSession = null,
+  failAt = '', sessionTitle = '', windowMinutes = 30, dryRun = false, createSession = null, engineUrl = '',
 }) {
   const name = String(projectName || '');
   if (!name) fail('NO_PROJECT', '需要 --project');
@@ -756,7 +766,9 @@ export async function rotateSession({
   const gate = archiveGate(name, role, oldId);
   // 注入失败只用于沙盘自测，生产环境忽略，防止误用造半状态。
   if (failAt && !process.env.TEAM_SELFTEST) failAt = '';
-  const list = await listDshSessions();
+  // B-20261117-212500-a837：地址统一解析（env → dsh.json → 当前工作区.json；也可由调用方传 engineUrl）。
+  const engine = resolveDshBaseUrl({ override: engineUrl }).baseUrl;
+  const list = await listDshSessions(engine);
   // 双活跃窗口期：最近一次轮换换进来的会话仍是当前映射 → 视为双开风险，拒绝（--force 留痕）。
   // 首次轮换（无记录）不拦：rotate 本来就是替换当前会话。
   const latest = latestRotation(name, role);
@@ -819,7 +831,7 @@ export async function rotateSession({
   if (!newId) {
     // 离线（沙盘）模式：只有注入 createSession 工厂时才允许自动建会话；否则要求 --session（原行为不变）。
     if (offlineMode && typeof createSession !== 'function') fail('BAD_SESSION', '离线轮换必须用 --session 指定一个可用会话 id');
-    const info = await createTeamSession({ projectName: name, role, reason, oldId, sessionTitle, createSession, list, project });
+    const info = await createTeamSession({ projectName: name, role, reason, oldId, sessionTitle, createSession, list, project, engineUrl: engine });
     newId = info.sessionId;
     created = true;
   } else {
@@ -854,7 +866,7 @@ export async function rotateSession({
     // 归档旧会话（只读保留）；失败只记，不回滚映射
     if (oldId && !offlineMode && list.ok) {
       try {
-        const client = new DshClient(process.env.DSH_WEB_URL);
+        const client = new DshClient(engine);
         await client.workspaceArchiveSession({ sessionId: oldId, stopActivity: true });
         archived = { ok: true, sessionId: oldId };
       } catch (e) {
@@ -944,7 +956,7 @@ export async function rotateSession({
     }
     if (created) {
       try {
-        await new DshClient(process.env.DSH_WEB_URL).workspaceArchiveSession({ sessionId: newId, stopActivity: true });
+        await new DshClient(engine || undefined).workspaceArchiveSession({ sessionId: newId, stopActivity: true });
         rollback.newSessionArchived = true;
       } catch { rollback.errors.push('新会话归档失败'); }
     }
