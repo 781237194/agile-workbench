@@ -37,7 +37,7 @@ import { ensureProjectStructure, structureReport, readRequirementDocs, requireme
 // T-20261117-184114-4358（R-bcae）：skill 四要素校验 + 30 分钟评估提示（append-only skill评估.jsonl）。
 import { validateSkillContent, recordSkillEvaluation, readSkillEvaluations, skillPromptDue, skillPromptLineFor } from './skill.mjs';
 // T-20261117-211833-7a30（R-a4c7）：调度建议纯函数（三源 → 五类建议）。
-import { buildSchedAdvice } from './sched-advice.mjs';
+import { buildSchedAdvice, SCHED_ROTATE_ROUNDS_DEFAULT } from './sched-advice.mjs';
 // B-20261117-212853-3027：skill 清单内核（verify / template write 与脚本共用单源）。
 import { verifySkillSet, writeSkillStateFile, writeSkillTemplates } from './skill-manifest.mjs';
 import {
@@ -6883,6 +6883,10 @@ export function cmdSched(args) {
     now: nowMs, project: b.project, rotateRounds, queue, rounds: roundsRaw, usage,
     tasks, taskSourceAvailable, roleQueues,
   });
+  // B-6f3b：AC3 两处口径一致——>ROUNDS_MAX(10) 属于配置错，CLI 直接失败（与 auto-rotate 的 AUTO_ROTATE_CONFIG_INVALID 同码）。
+  if (advice && advice.ok === false && advice.code === 'AUTO_ROTATE_CONFIG_INVALID') {
+    fail(advice.code, advice.message, { rotateRounds, max: advice.maxRounds, hint: `上限 ${advice.maxRounds}，建议 ${SCHED_ROTATE_ROUNDS_DEFAULT}` }, 1);
+  }
   // ③ 每次决策落一行审计：输入快照 hash + 命中规则（decision）+ 结果；④ 幂等+节流：同输入 60 秒内不重复落行。
   const logFile = path.join(dir, '调度建议.jsonl');
   const inputHash = crypto.createHash('sha256').update(JSON.stringify({ queue: queue || null, rounds: roundsRaw || null, usage: usage || null, tasks, roleQueues: roleQueues || null, rotateRounds: rotateRounds || null })).digest('hex');

@@ -8,6 +8,7 @@
  */
 import { usageLevelOf } from './session.mjs';
 import { statusIsClosed } from './gates.mjs';
+import { ROUNDS_MAX } from './session-archive.mjs';
 
 export const SCHED_DECISIONS = ['HANDOVER_FIRST', 'STALE_ALERT', 'BUSY_HOLD', 'IDLE_DISPATCH', 'STANDBY'];
 export const SCHED_ROLES = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
@@ -35,6 +36,19 @@ export function buildSchedAdvice(input) {
   const now = Number.isFinite(input && input.now) ? input.now : Date.now();
   const staleMs = Number(input && input.staleMs) > 0 ? Number(input.staleMs) : SCHED_STALE_MS;
   const rotateRounds = Number(input && input.rotateRounds) > 0 ? Number(input.rotateRounds) : SCHED_ROTATE_ROUNDS_DEFAULT;
+  // B-20261117-214440-6f3b（AC3 两处口径一致）：与 auto-rotate 同判——>ROUNDS_MAX(10) 一律配置错，不静默照跑。
+  if (rotateRounds > ROUNDS_MAX) {
+    return {
+      ok: false,
+      code: 'AUTO_ROTATE_CONFIG_INVALID',
+      message: `rotateRounds=${rotateRounds} 超过上限 ${ROUNDS_MAX}（默认 ${SCHED_ROTATE_ROUNDS_DEFAULT}；上限 ${ROUNDS_MAX}；>上限视为配置错误，不静默照跑）`,
+      at: new Date(now).toISOString(),
+      project: String((input && input.project) || ''),
+      degraded: true,
+      roles: [],
+      maxRounds: ROUNDS_MAX,
+    };
+  }
   const queue = (input && input.queue) || null;
   const roundsMap = (input && input.rounds) || null;
   const usageMap = (input && input.usage) || null;

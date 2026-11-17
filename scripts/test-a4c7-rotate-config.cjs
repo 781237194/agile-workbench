@@ -75,6 +75,34 @@ function check(name, fn) {
     return '文案在';
   });
 
+  // B-6f3b：第二处（sched）也必须拦 >10，两处同码口径。
+  const sched = await import('file:///' + path.join(LIB, 'sched-advice.mjs').replace(/\\/g, '/'));
+  check('R7 sched 纯函数：rotateRounds=11 → ok:false/AUTO_ROTATE_CONFIG_INVALID；10 正常', () => {
+    const bad = sched.buildSchedAdvice({ now: Date.now(), project: 'x', rotateRounds: 11, tasks: [], taskSourceAvailable: true });
+    assert.strictEqual(bad.ok, false);
+    assert.strictEqual(bad.code, 'AUTO_ROTATE_CONFIG_INVALID');
+    assert.strictEqual(bad.maxRounds, 10);
+    const good = sched.buildSchedAdvice({ now: Date.now(), project: 'x', rotateRounds: 10, tasks: [], taskSourceAvailable: true, queue: null });
+    assert.strictEqual(good.ok, true);
+    return '11 拒 / 10 过';
+  });
+
+  check('R8 CLI：sched advice --rotate-rounds 11 非 0 退出且带同码；10 正常', () => {
+    const { execFileSync } = require('node:child_process');
+    const team = path.join(ROOT, '团队', '工具', 'team.mjs');
+    const run = (extra) => {
+      try {
+        return { code: 0, out: execFileSync(process.execPath, [team, 'sched', 'advice', '--project', '工作台改造修复', '--json', ...extra], { encoding: 'utf8', timeout: 120000 }) };
+      } catch (e) { return { code: e.status == null ? 1 : e.status, out: String(e.stdout || '') + String(e.stderr || '') }; }
+    };
+    const bad = run(['--rotate-rounds', '11']);
+    assert.notStrictEqual(bad.code, 0, '11 竟然成功');
+    assert.ok(/AUTO_ROTATE_CONFIG_INVALID/.test(bad.out), bad.out.slice(0, 200));
+    const good = run(['--rotate-rounds', '10']);
+    assert.strictEqual(good.code, 0);
+    return 'CLI 同码拦截';
+  });
+
   const pass = results.filter((r) => r.ok).length;
   console.log(`\nA4C7_ROTATE_CFG ${JSON.stringify({ total: results.length, pass, red: results.length - pass })}`);
   if (pass !== results.length) process.exit(1);
