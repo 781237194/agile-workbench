@@ -4621,7 +4621,22 @@ export async function cmdBoot(args) {
     } else {
       lines.push(`skill: 未建 skill（创建路径 团队/skill/基础流程/00-索引.md + 本人 ${role}.md；模板格式见需求 R-bcae）`);
     }
-    if (role === 'pm' && skillExists) lines.push('skill 提示: 基础流程 skill 为 Owner 批准版本，不可更改（改版须 Owner 批准 + manifest 归档）。');
+    if (role === 'pm' && skillExists) {
+      // AC8：新 PM 首次 boot 的强提示；按 sessionId 去重（同会话二次 boot 不再出，换会话会再提示）。
+      let notice = false;
+      try {
+        const noticeFile = path.join(projectStatePaths(projectName).dir, '技能提示.json');
+        const st = readJson(noticeFile, {}) || {};
+        if (String(st.pmSkillNoticeSessionId || '') !== String(sessionId || '')) {
+          notice = true;
+          st.pmSkillNoticeSessionId = String(sessionId || '');
+          st.pmSkillNoticeAt = nowIso();
+          fs.mkdirSync(path.dirname(noticeFile), { recursive: true });
+          fs.writeFileSync(noticeFile, JSON.stringify(st, null, 2) + '\n', 'utf8');
+        }
+      } catch { notice = true; }
+      if (notice) lines.push('[data-skill-pm-notice] 基础流程 skill 为 Owner 批准版本，不可更改（改版须 Owner 批准 + manifest 归档；本提示每会话只出一次）。');
+    }
   } catch { /* skill 提示失败不阻断 boot */ }
   if (taskDocs.length) {
     lines.push(`必读-任务相关（${taskDocs.length}）: ${taskDocs.map((d) => d.rel).join(' ')}`);
@@ -6770,6 +6785,87 @@ function cmdReqSync(args) {
  *   skill verify [--json] [--write-state] 校验 manifest+sha+格式，并（可选）派生 团队/状态/技能清单.json
  *   skill template write [--out <目录>] [--force]  把六主题模板写到项目内 skill/（或指定目录）
  */
+/**
+ * R-bcae AC3/AC4：`skill build`——盘点先行（≥3 条四列齐全，空单元格不算）+ 四条件判定。
+ * 全部满足才建 <角色>/skill/<kebab>.md 并追加 00-索引；否则 skip（必须 --reason），审计写 技能提示.jsonl。
+ */
+function cmdSkillBuild(args, b) {
+  const roleDir = ROLE_DIRS[b.role] || '';
+  if (!roleDir) fail('BAD_ROLE', `未知角色：${b.role}`, {}, 1);
+  const targetRole = String(args['for-role'] || b.role);
+  if (targetRole !== b.role) fail('SKILL_CROSS_ROLE_DENIED', `只能给本人建 skill（本人 ${b.role}，目标 ${targetRole}）`, { role: b.role, target: targetRole }, 1);
+  const name = String(args.name || '').trim();
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) fail('BAD_SKILL_NAME', 'skill 文件名必须是 kebab-case（类级名称，非一次性任务名）', { name }, 1);
+  const project = loadProject(b.project);
+  const outDir = path.join(project.path, roleDir, '产出');
+  const invFiles = exists(outDir) ? fs.readdirSync(outDir).filter((n) => /^skill盘点-.*\.md$/.test(n)) : [];
+  if (!invFiles.length) {
+    fail('SKILL_INVENTORY_REQUIRED', `建 skill 前先出盘点：${roleDir}/产出/skill盘点-YYYYMMDD.md（≥3 条，四列：触发场景/步骤/判据/反例）`, { role: b.role, dir: outDir, rows: 0, validRows: 0 }, 1);
+  }
+  const invFile = path.join(outDir, invFiles.sort().pop());
+  const lines = fs.readFileSync(invFile, 'utf8').split(/\r?\n/);
+  let headerIdx = -1;
+  for (let i = 0; i < lines.length; i += 1) if (/触发场景/.test(lines[i]) && /判据/.test(lines[i])) { headerIdx = i; break; }
+  const dataRows = [];
+  for (let i = (headerIdx < 0 ? 0 : headerIdx + 1); i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (!line.startsWith('|')) continue;
+    if (/^\|[\s:|-]+\|$/.test(line)) continue;
+    const cells = line.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+    if (cells.length >= 4) dataRows.push(cells);
+  }
+  const validRows = dataRows.filter((c) => c.slice(0, 4).every((x) => x && x !== '-' && x !== '—')).length;
+  const inventory = { file: invFile, rows: dataRows.length, validRows };
+  if (validRows < 3) {
+    fail('SKILL_INVENTORY_REQUIRED', `盘点不足：需 ≥3 条四列齐全，当前有效 ${validRows}/${dataRows.length}（空单元格不计）`, { file: invFile, rows: dataRows.length, validRows }, 1);
+  }
+  const boolOf = (v) => {
+    if (v === undefined || v === null || v === '') return null;
+    const s = String(v).toLowerCase();
+    if (s === 'true' || s === '1' || s === 'yes') return true;
+    if (s === 'false' || s === '0' || s === 'no') return false;
+    return null;
+  };
+  const cond = { repeatable: boolOf(args.repeatable), steps: boolOf(args.steps), testable: boolOf(args.testable), costly: boolOf(args.costly) };
+  const missing = Object.entries(cond).filter(([, v]) => v === null).map(([k]) => k);
+  if (missing.length) {
+    fail('SKILL_CONDITION_ARGS_REQUIRED', `缺四条件参数：${missing.join('、')}（--repeatable true|false --steps … --testable … --costly …）`, { missing }, 1);
+  }
+  const allTrue = cond.repeatable && cond.steps && cond.testable && cond.costly;
+  const reason = String(args.reason || '').trim();
+  const auditFile = path.join(projectStatePaths(b.project).dir, '技能提示.jsonl');
+  const appendAudit = (action, extra = {}) => {
+    try {
+      fs.appendFileSync(auditFile, JSON.stringify({ at: nowIso(), role: b.role, action, name, conditions: cond, reason: reason || '', inventory: { file: invFile, validRows }, ...extra }) + '\n', 'utf8');
+    } catch { /* 审计失败不阻断 */ }
+  };
+  if (!allTrue) {
+    if (reason.length < 2) fail('SKIP_REASON_REQUIRED', '不满足四条件 → 不建 skill，但必须 --reason（小问题只进经验教训）', { conditions: cond }, 1);
+    appendAudit('skip');
+    out(args, `跳过建 skill：四条件未全满足（${Object.entries(cond).filter(([, v]) => !v).map(([k]) => k).join('、')}）；reason=${reason}`, { ok: true, action: 'skip', conditions: cond, reason, inventory });
+    return;
+  }
+  const skillDir = path.join(project.path, roleDir, 'skill');
+  fs.mkdirSync(skillDir, { recursive: true });
+  const file = path.join(skillDir, `${name}.md`);
+  if (exists(file)) fail('SKILL_EXISTS', `skill 已存在：${roleDir}/skill/${name}.md`, { file }, 1);
+  const body = [
+    `# ${name}`, '',
+    '## 适用场景', String(args.scenario || '（按盘点填写：会重复发生的场景）').trim(), '',
+    '## 步骤', String(args['steps-text'] || '1. …').trim(), '',
+    '## 判据', String(args.criteria || '（可复跑断言/命令）').trim(), '',
+    '## 反例', String(args.counter || '（反例 / 出错代价）').trim(), '',
+    '## 不适用范围', String(args['not-scope'] || '（本项目特有内容不写进类级 skill）').trim(), '',
+  ].join('\n');
+  fs.writeFileSync(file, body, 'utf8');
+  const idxFile = path.join(skillDir, '00-索引.md');
+  const idxRow = `- ${name}（盘点 ${path.basename(invFile)} · ${validRows} 条）\n`;
+  if (exists(idxFile)) fs.appendFileSync(idxFile, idxRow, 'utf8');
+  else fs.writeFileSync(idxFile, `# ${roleDir} · skill 索引\n\n> 每条 skill 一个文件；建/更新前必须有盘点（≥3 条四列齐全）。\n\n${idxRow}`, 'utf8');
+  appendAudit('build', { file });
+  out(args, `已建 skill：${roleDir}/skill/${name}.md（盘点 ${validRows} 条有效）`, { ok: true, action: 'build', file, index: idxFile, conditions: cond, inventory });
+}
+
 export function cmdSkill(args) {
   const sub0 = String(args._[1] || 'status');
   // B-214842-d138：`skill check --selftest` 是只读自检入口（AC10），不写任何状态 → 允许免令牌运行；
@@ -6817,10 +6913,12 @@ export function cmdSkill(args) {
     out(args, `skill 模板：${result.written.length} 个写出、${result.skipped.length} 个跳过（${result.dir}）`, payload);
     return;
   }
+  if (sub === 'build') {
+    return cmdSkillBuild(args, b);
+  }
   if (sub === 'check') {
     // B-20261117-214842-d138（bcae AC10）：`skill check --selftest` ——沙盘跑 AC1–AC8，输出 SKILL_CHECK_OK，真实状态零写入。
-    if (args.selftest) {
-      const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+    if (args.selftest) {      const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
       const r = runSkillSelfCheck({ root });
       const payload = { ok: r.ok, entry: 'skill check --selftest', checks: r.checks, realBefore: r.realBefore };
       if (!r.ok) fail('SKILL_SELFTEST_FAILED', `skill 自检未通过：${r.checks.filter((c) => !c.ok).map((c) => `${c.ac}（${c.detail}）`).join('；')}`, payload, 1);
