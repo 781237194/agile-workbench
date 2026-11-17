@@ -42,9 +42,9 @@ function env() {
   };
 }
 
-function run(args) {
+function run(args, opts = {}) {
   try {
-    const out = execFileSync(process.execPath, [path.join(ROOT, '团队', '工具', 'team.mjs'), ...args], { encoding: 'utf8', env: env(), timeout: 90000 });
+    const out = execFileSync(process.execPath, [path.join(ROOT, '团队', '工具', 'team.mjs'), ...args], { encoding: 'utf8', env: { ...env(), ...(opts.env || {}) }, timeout: 90000 });
     return { code: 0, out, err: '' };
   } catch (error) {
     return { code: error.status == null ? 1 : error.status, out: String(error.stdout || ''), err: String(error.stderr || '') };
@@ -196,12 +196,15 @@ check('S8 AC4③ 文件改动后再评审 → 又 LESSONS_UNREAD（比当前版�
   reviewStale.code !== 0 && /LESSONS_UNREAD/.test(reviewStale.out + reviewStale.err),
   { code: reviewStale.code, out: (reviewStale.out + reviewStale.err).slice(0, 300) });
 
-// AC4⑤：Owner 通道豁免 —— channel=ui 时门禁不检查（未读也能过）
-const reviewOwner = run(['req', 'review', '--boot', pmToken, '--id', 'R-20261116-000000-less', '--verdict', 'approve', '--channel', 'ui', '--comments', '空值=Owner通道豁免；异常=文件缺失报码；权限=Owner不检查；并发=同版本不重复落行；降级=CLI不可用报未读；模式=fast缺段不算损坏']);
-check('S9 AC4⑤ Owner 通道（channel=ui）未读也不拦',
-  !/LESSONS_UNREAD/.test(reviewOwner.out + reviewOwner.err),
-  { code: reviewOwner.code, out: (reviewOwner.out + reviewOwner.err).slice(0, 300) });
-
+// AC4⑤（B-20261116-055128-ffe5 新口径）：豁免不得由调用方自证。
+// ① 仅 --channel ui（无可信来源 env）→ 仍 LESSONS_UNREAD，并留「自证豁免被拒」审计行；
+// ② 进程注入 AWB_OWNER_CHANNEL=ui（可信来源，CLI 无法伪造）→ 放行。
+const reviewSelfClaim = run(['req', 'review', '--boot', pmToken, '--id', 'R-20261116-000000-less', '--verdict', 'approve', '--channel', 'ui', '--comments', '自证豁免应被拒'], { env: { AWB_OWNER_CHANNEL: '' } });
+check('S9a ffe5 自证 --channel ui 不再豁免（LESSONS_UNREAD）', /LESSONS_UNREAD/.test(reviewSelfClaim.out + reviewSelfClaim.err),
+  { code: reviewSelfClaim.code, out: (reviewSelfClaim.out + reviewSelfClaim.err).slice(0, 300) });
+const reviewTrusted = run(['req', 'review', '--boot', pmToken, '--id', 'R-20261116-000000-less', '--verdict', 'approve', '--channel', 'ui', '--comments', '可信来源豁免'], { env: { AWB_OWNER_CHANNEL: 'ui' } });
+check('S9b ffe5 可信来源 AWB_OWNER_CHANNEL=ui → 豁免放行（无 LESSONS_UNREAD）', !/LESSONS_UNREAD/.test(reviewTrusted.out + reviewTrusted.err),
+  { code: reviewTrusted.code, out: (reviewTrusted.out + reviewTrusted.err).slice(0, 300) });
 // 派单门禁：--ack --task（PM 未读当前版本 → LESSONS_UNREAD）
 const dispatch = run(['send', '--boot', pmToken, '--to', 'programmer1', '--subject', '沙盘派单', '--body', '沙盘派单正文', '--ack', '--task', 'T-沙盘']);
 check('S10 派单（--ack --task）未读当前版本 → LESSONS_UNREAD',

@@ -185,12 +185,33 @@ function runLessonGate(role, projectDir, options = {}) {
   return { ok: true, staleSha12, currentSha12 };
 }
 
-/** Owner 通道豁免：channel ∈ {ui,tty} 或 actor=owner → 不检查 */
+/**
+ * Owner 通道豁免（B-20261116-055128-ffe5：豁免不得由调用方自证）。
+ * 以前只看 args.channel/args.actor —— 而 args 就是 CLI 实参，任何角色 `--channel ui` 即可绕过 lessons 门禁。
+ * 现口径：
+ *   ① 可信来源 = 进程注入的 AWB_OWNER_CHANNEL=ui|tty（IPC/终端入口设置，CLI 无法伪造来源）；
+ *      或令牌身份 role === 'owner'（boot 令牌校验过的 owner 身份）；
+ *   ② 仅当调用方显式声明 channel/actor 但无 AWB_OWNER_CHANNEL 时：不豁免，记审计行（LESSONS_EXEMPT_SELF_CLAIM_DENIED）。
+ * `--channel ui` 只是声明，不再等于可信来源。
+ */
 function isOwnerChannel(args) {
   const src = args && typeof args === 'object' ? args : {};
-  const channel = String(src.channel || src['owner-channel'] || '').trim().toLowerCase();
-  const actor = String(src.actor || '').trim().toLowerCase();
-  return channel === 'ui' || channel === 'tty' || actor === 'owner';
+  const trusted = String(process.env.AWB_OWNER_CHANNEL || '').trim().toLowerCase();
+  if (trusted === 'ui' || trusted === 'tty') return true;
+  // 令牌身份：extra.role 由 boot 令牌解出（非调用方可自证）
+  const role = String(src.role || '').trim().toLowerCase();
+  if (role === 'owner') return true;
+  const claimed = String(src.channel || src['owner-channel'] || src.actor || '').trim().toLowerCase();
+  if (claimed === 'ui' || claimed === 'tty' || claimed === 'owner') {
+    // 自证豁免被拒：留痕（不阻断调用方逻辑，但审计可查谁在自证）
+    try {
+      const audit = path.join(src.teamRoot || process.cwd(), '团队', '状态', '经验教训-自证豁免.jsonl');
+      fs.mkdirSync(path.dirname(audit), { recursive: true });
+      fs.appendFileSync(audit, JSON.stringify({ at: new Date().toISOString(), role, claimed, note: 'LESSONS_EXEMPT_SELF_CLAIM_DENIED' }) + '\n', 'utf8');
+    } catch { /* 审计失败不阻断 */ }
+    return false;
+  }
+  return false;
 }
 
 /* ==========================================================================
