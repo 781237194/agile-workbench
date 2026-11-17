@@ -1269,6 +1269,12 @@ function requirementRowOf(project, requirementId) {
 export function claimTask(project, id, role, sessionId) {
   return withLock(`task:${project}:${id}`, { role, sessionId, ttlMs: 15000, waitMs: 5000, reason: 'claim task' }, () => {
     const task = loadTask(project, id);
+    // B-20261117-103902-9436：终态任务不得被静默重开（以前只拦 done；accepted/cancelled/terminated 可被 claim 回 working，
+    // 导致「已验收」与在办分叉、G5 把它算在办、路由继续催）。重开只能走显式返工流程，不走 claim。
+    const closedStatuses = ['accepted', 'cancelled', 'terminated'];
+    if (closedStatuses.includes(String(task.status || ''))) {
+      fail('TASK_CLOSED', `任务已闭环（${task.status}），不得认领重开：${id}`, { status: task.status });
+    }
     if (task.status === 'done') fail('TASK_DONE', `任务已完成：${id}`);
     if (task.owner && task.owner !== role) fail('TASK_OWNED', `任务已被 ${task.owner} 认领`, { owner: task.owner });
     // R-75ec：Owner 门未过 → 拒 claim（零副作用 + 审计）；blocked 且门已过 → 先兜底解冻再继续。
