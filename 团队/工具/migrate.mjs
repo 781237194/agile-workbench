@@ -318,6 +318,21 @@ function cmdRebind(argv) {
       for (const r of refs.filter((x) => x.key === '项目信息.md 盘符路径')) text = text.split(r.value).join(to);
       fs.writeFileSync(info, text, 'utf8');
     }
+    // F4⑤：项目改名时同步 团队.json 的 activeProject（旧名 → 当前项目名，--from-name 给出旧名）
+    const teamFile = path.join(repoRoot, '团队', '状态', '团队.json');
+    const fromName = String(argv['from-name'] || '').trim();
+    if (fromName && fs.existsSync(teamFile)) {
+      const team = readJsonSafe(teamFile);
+      if (team && String(team.activeProject || '') === fromName) {
+        team.activeProject = project;
+        writeJsonFile(teamFile, team);
+        try {
+          const audit = path.join(repoRoot, '团队', '状态', '项目', project, '迁移审计.jsonl');
+          fs.mkdirSync(path.dirname(audit), { recursive: true });
+          fs.appendFileSync(audit, JSON.stringify({ at: new Date().toISOString(), project, action: 'rebind_active_project', from: fromName, to: project, reason: 'rename' }) + '\n', 'utf8');
+        } catch { /* 审计失败不阻断 */ }
+      }
+    }
   }
   return out({ ok: true, dryRun, diffs, message: dryRun ? `[dry-run] ${diffs.length} 处路径待重写（加 --yes 才写）` : `已重写 ${diffs.length} 处路径 → ${to}` }, argv.json);
 }

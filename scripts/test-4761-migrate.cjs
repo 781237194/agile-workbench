@@ -211,6 +211,16 @@ const liveRs = run(['rebind-sessions', '--root', ROOT, '--project', '护栏反�
 check('⑧ 对真实仓库根 rebind-sessions 被拒（MIGRATION_LIVE_ROOT_REFUSED，exit 2）',
   liveRs.code === 2 && liveRs.json && liveRs.json.code === 'MIGRATION_LIVE_ROOT_REFUSED', liveRs.json || liveRs.stderr);
 check('⑧ 真实名册 sha256 前后不变（零写入）', shaOf(REAL_TEAM_FILE) === realShaBefore, { before: realShaBefore, after: shaOf(REAL_TEAM_FILE) });
+
+// ⑨ F4⑤：改名时 rebind 同步 团队.json activeProject（--from-name）
+const teamJson = path.join(REPO, '团队', '状态', '团队.json');
+const teamBefore = JSON.parse(fs.readFileSync(teamJson, 'utf8'));
+teamBefore.activeProject = '旧名迁移项目';
+fs.writeFileSync(teamJson, JSON.stringify(teamBefore, null, 2) + '\n', 'utf8');
+const renameRebind = run(['rebind', '--root', REPO, '--project', PROJ, '--from-name', '旧名迁移项目', '--to', TO, '--yes', '--json']);
+const teamAfterRename = JSON.parse(fs.readFileSync(teamJson, 'utf8'));
+check('⑨ F4⑤ 改名前 activeProject 指向旧名 → rebind 后指向当前项目',
+  renameRebind.code === 0 && teamAfterRename.activeProject === PROJ, { activeProject: teamAfterRename.activeProject });
 const passed = results.filter((r) => r.ok).length;
 console.log(`\nB-4761（b0ea 返工）断言：${passed}/${results.length} PASS`);
 if (process.env.TEAM_SB_KEEP !== '1') fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
