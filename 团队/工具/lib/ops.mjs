@@ -6483,11 +6483,12 @@ function cmdReqReopen(args) {
   // 这里按最小字段补一条需求任务文件（不写假结论，只承载 workflow 元数据），再走原逻辑。
   if (!reqTask) {
     reqTask = {
-      id: requirementId, project: projectName, type: 'requirement', requirementId: '',
+      id: requirementId, project: projectName, type: 'requirement', requirementId: requirementId,
       title: truncate(String(row.title || requirementId), 120),
       detail: '需求行存在但缺需求任务文件：req reopen 时补齐（R-9fbe）',
       acceptance: '', story: '', priority: String(row.priority || 'P2'), priorityBy: b.role, priorityReason: '',
-      owner: null, status: 'open', createdBy: b.role, createdAt: at, claimedAt: null, due: '',
+      // B-f73f AC1：镜像任务必须带默认负责人（需求评审角色）——owner=null 会让路由 skip+告警、工作静默丢失。
+      owner: requirementReviewer(projectTeamMode(loadProject(projectName))), status: 'open', createdBy: b.role, createdAt: at, claimedAt: null, due: '',
       doneAt: null, evidence: '', rev: 0, history: [], workflow: {},
     };
     reqTask._by = b.role;
@@ -6693,11 +6694,12 @@ function registerOneRequirement(args, b, spec) {
   try { task = loadTask(b.project, id); } catch { task = null; }
   if (!task) {
     task = {
-      id, project: b.project, type: 'requirement', requirementId: '',
+      id, project: b.project, type: 'requirement', requirementId: id,
       title: truncate(title, 120), detail: truncate(String(args.detail || '从工作台本地缓存登记（无需求正文）'), 1000),
       acceptance: truncate(String(spec.acceptance || args.acceptance || ''), 1000), story: '',
       priority: String(spec.priority || args.priority || 'P2'), priorityBy: b.role, priorityReason: '',
-      owner: null, status: 'open', createdBy: b.role, createdAt: at, claimedAt: null, due: '',
+      // B-f73f AC1：镜像任务默认负责人=需求评审角色，不得 owner=null。
+      owner: requirementReviewer(projectTeamMode(loadProject(b.project))), status: 'open', createdBy: b.role, createdAt: at, claimedAt: null, due: '',
       doneAt: null, evidence: '', rev: 0,
       history: [],
       workflow: { requirementStatus: 'review', registeredFrom: 'cache', registeredAt: at, registeredBy: b.role },
@@ -7316,6 +7318,11 @@ export function cmdReq(args) {
       priorityBy: args['priority-by'] || b.role, createdBy: b.role, owner: args.owner || null, due: args.due || '',
       type: 'requirement', requirementId: '', acceptance: args.acceptance || '', story: args.story || '',
     });
+    // B-f73f AC1：镜像任务建完立即补 requirementId（自身）与默认负责人（需求评审角色），不得 owner=null。
+    task.requirementId = String(task.id);
+    if (!String(task.owner || '').trim()) task.owner = requirementReviewer(projectTeamMode(loadProject(b.project)));
+    task.status = 'open';
+    saveTask(b.project, task);
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'req_create', project: b.project, target: task.id, note: `${task.priority} ${task.title}`, data: { task } });
     // B-20261117-181529-7b49：建需求必须同时在 工作流.json 建行——否则新需求在工作流/面板/评审里静默消失，
     // 只能靠 PM 记忆手工补登记。幂等：已有同 id 行则不动（不覆盖已有状态）。

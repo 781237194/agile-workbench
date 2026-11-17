@@ -177,6 +177,41 @@ async function main() {
   const realAfter = sha(REAL_TEAM_FILE);
   check('⑤ 真实 团队.json sha256 不变（沙盘零写入）', Boolean(realBefore) && realBefore === realAfter, { before: realBefore.slice(0, 12), after: realAfter.slice(0, 12) });
 
+  // ===== AC1：镜像任务（R-*）自动带 requirementId 与默认负责人 =====
+  const readTaskFile = (proj, id) => JSON.parse(fs.readFileSync(path.join(TEAM_ROOT, '状态', '项目', proj, '任务', `${id}.json`), 'utf8'));
+  const bootTok = (proj, role, session) => {
+    const r = runCli(['boot', '--role', role, '--project', proj, '--session', session, '--json']);
+    return r.json && r.json.token ? r.json.token : '';
+  };
+  // (a) full 模式：pm 建需求 → 镜像 owner=product（需求评审角色）
+  const pmTok = bootTok(PROJECT, 'pm', 'f73f-pm');
+  const reqCreate = runCli(['req', 'create', '--boot', pmTok, '--project', PROJECT, '--title', 'f73f 镜像需求-full', '--priority', 'P2', '--acceptance', 'AC', '--json']);
+  const reqId = reqCreate.json && reqCreate.json.requirement && reqCreate.json.requirement.id;
+  const mirrorFull = reqId ? readTaskFile(PROJECT, reqId) : null;
+  check('A1 full 模式 req create → 镜像任务 requirementId=自身、owner=product（评审角色）、status=open',
+    Boolean(mirrorFull) && String(mirrorFull.requirementId) === String(reqId) && String(mirrorFull.owner) === 'product' && String(mirrorFull.status) === 'open',
+    { id: reqId, json: reqCreate.json, human: String(reqCreate.human || '').slice(0, 400), err: reqCreate.err, mirror: mirrorFull && { requirementId: mirrorFull.requirementId, owner: mirrorFull.owner, status: mirrorFull.status } });
+
+  // (b) fast 模式：analyst 建需求 → 镜像 owner=analyst
+  const FAST = 'f73f-fast-sandbox';
+  const addFast = runCli(['project', 'add', '--name', FAST, '--team-mode', 'fast', '--json']);
+  const analystTok = bootTok(FAST, 'analyst', 'f73f-analyst');
+  const reqFast = runCli(['req', 'create', '--boot', analystTok, '--project', FAST, '--title', 'f73f 镜像需求-fast', '--priority', 'P2', '--acceptance', 'AC', '--json']);
+  const reqFastId = reqFast.json && reqFast.json.requirement && reqFast.json.requirement.id;
+  const mirrorFast = reqFastId ? readTaskFile(FAST, reqFastId) : null;
+  check('A2 fast 模式 req create → 镜像任务 owner=analyst（模式对应评审角色）',
+    Boolean(addFast.json && addFast.json.ok === true) && Boolean(mirrorFast) && String(mirrorFast.owner) === 'analyst' && String(mirrorFast.requirementId) === String(reqFastId),
+    { fastAdd: addFast.err, id: reqFastId, mirror: mirrorFast && { requirementId: mirrorFast.requirementId, owner: mirrorFast.owner }, err: reqFast.err });
+
+  // (c) 另两处创建点（req reopen 补齐 / req register）用源码锚点守：字面量必须同时带 requirementId 与 owner
+  const opsSrc = fs.readFileSync(path.join(TEAM_ROOT, '工具', 'lib', 'ops.mjs'), 'utf8');
+  const reopenOk = /id: requirementId, project: projectName, type: 'requirement', requirementId: requirementId/.test(opsSrc)
+    && /owner: requirementReviewer\(projectTeamMode\(loadProject\(projectName\)\)\), status: 'open'/.test(opsSrc);
+  const registerOk = /id, project: b\.project, type: 'requirement', requirementId: id/.test(opsSrc)
+    && /owner: requirementReviewer\(projectTeamMode\(loadProject\(b\.project\)\)\), status: 'open'/.test(opsSrc);
+  check('A3 req reopen 补齐 / req register 两处也带 requirementId+owner（源码锚点）',
+    reopenOk && registerOk, { reopenOk, registerOk });
+
   const total = results.length;
   const pass = results.filter((x) => x.ok).length;
   const evDir = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '证据-f73f');

@@ -14,7 +14,7 @@
  *   - 重复冻结/解冻 NOOP（不写审计）；done 任务不动。
  */
 import { listTasks, loadTask, saveTask, sendMessage } from './store.mjs';
-import { auditGate } from './gates.mjs';
+import { auditGate, isRequirementMirrorTask } from './gates.mjs';
 
 const FREEZE_CODES = { rejected: 'OWNER_REJECTED', iteration: 'OWNER_ITERATION', terminated: 'OWNER_TERMINATED' };
 const PASS_STATUSES = ['approved', 'skipped', 'accepted'];
@@ -39,7 +39,10 @@ export function decisionEffect(row = null, decisionStatus = '') {
 
 function tasksOfRequirement(project, requirementId) {
   const id = String(requirementId || '');
-  return listTasks(project).filter((task) => String(task.requirementId || '') === id);
+  return listTasks(project).filter((task) => String(task.requirementId || '') === id
+    // B-f73f AC1/AC4：镜像任务（type=requirement，随需求行永久存在）不是「未完成的活」，
+    // 不参与冻结/解冻（它跟着需求行走，冻结它只会把镜像状态与需求行搞分叉）。
+    && !isRequirementMirrorTask(task));
 }
 
 /**
