@@ -26,7 +26,7 @@ const FILE_WHITELIST = [
   'assets/pm-workbench.ico', 'assets/pm-workbench.png',
   'scripts/run-electron.cjs', 'scripts/test-entrypoints.cjs',
 ];
-const DIR_WHITELIST = ['src', '团队/工具', '团队/角色', '团队/模板', '团队/协议'];
+const DIR_WHITELIST = ['src', '团队/工具', '团队/角色', '团队/模板', '团队/协议', '团队/skill'];
 
 // 团队/工具 里的旧导出脚本已被 scripts/export-open-source.mjs 取代，且引用了旧壳路径，不导出
 const EXCLUDED_FILES = new Set(['团队/工具/export-open-source.mjs']);
@@ -44,6 +44,8 @@ const REQUIRED_FILES = [
   'scripts/run-electron.cjs', 'scripts/test-entrypoints.cjs',
   'src/main.js', 'src/preload.js', 'src/dsh-adapter.js', 'src/team-tools.js', 'src/renderer/index.html',
   '团队/工具/team.mjs', '团队/角色/pm.md', '团队/模板/提案.md', '团队/协议/01-会话与必读.md',
+  // B-20261117-215444-1f8b：开源包必须带基础流程 skill（六角色 + 索引 + manifest），否则下载用户 boot 无 skill。
+  '团队/skill/基础流程/00-索引.md', '团队/skill/基础流程/skill-manifest.json', '团队/skill/基础流程/programmer1.md',
 ];
 
 const TEXT_EXT = new Set([
