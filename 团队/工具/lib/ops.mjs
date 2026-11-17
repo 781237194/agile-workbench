@@ -2628,6 +2628,59 @@ function roleWorkingAt(project, role, tasks = null) {
   return latest ? new Date(latest).toISOString() : '';
 }
 
+/**
+ * B-20261117-110240-1d90：角色「在办任务」的产出 mtime 信号。
+ * 只看「10 分钟无文件写入/无回执」会误判：角色 claim 了 working 任务、一直在写产出/证据，
+ * 但角色目录里没有新文件时仍被判 idle（1dfb F6 回归，PM 实测 53 条 Q-STALL 里 1 条是角色在办任务自身）。
+ * 取角色名下未闭环、非镜像任务的：①任务 JSON 文件 mtime ②evidenceFiles 顶层文件 mtime。
+ */
+function roleTaskProgressAt(project, role, tasks = null) {
+  const name = String(project || '');
+  const roleKey = String(role || '');
+  const rows = Array.isArray(tasks) ? tasks : listTasks(name);
+  let projectPath = '';
+  try { projectPath = String((loadProject(name) || {}).path || ''); } catch { projectPath = ''; }
+  let taskDir = '';
+  try { taskDir = projectStatePaths(name).tasks; } catch { taskDir = ''; }
+  let latest = 0;
+  const consider = (file) => {
+    if (!file) return;
+    try { const st = fs.statSync(file); if (st.mtimeMs > latest) latest = st.mtimeMs; } catch { /* 文件不在不影响判定 */ }
+  };
+  for (const task of rows) {
+    if (!task || String(task.owner || '') !== roleKey) continue;
+    if (isRequirementMirrorTask(task) || statusIsClosed(task.status)) continue;
+    if (taskDir) consider(path.join(taskDir, `${String(task.id)}.json`));
+    const files = Array.isArray(task.evidenceFiles) ? task.evidenceFiles : [];
+    for (const file of files) {
+      const rel = String((file && (file.path || file.rel || file.name)) || '').replace(/\\/g, '/').trim();
+      if (!rel) continue;
+      const base = file && file.scope === 'workspace' ? PATHS.workspace : projectPath;
+      if (!base) continue;
+      consider(path.resolve(String(base), rel));
+    }
+  }
+  return latest ? new Date(latest).toISOString() : '';
+}
+
+/**
+ * B-1d90：该角色当前是否正 claim 着这条任务（claim 后未 done/release）。
+ * 用于空闲重派入队前的兜底：角色自己手上的在办任务不再「重派给它自己」。
+ */
+function taskClaimedByRole(task, role) {
+  const roleKey = String(role || '');
+  if (!task || !roleKey) return false;
+  if (String(task.status || '') === 'working' && String(task.owner || '') === roleKey) return true;
+  const hist = Array.isArray(task.history) ? task.history : [];
+  for (let i = hist.length - 1; i >= 0; i -= 1) {
+    const row = hist[i] || {};
+    const action = String(row.action || '');
+    if (action === 'claim' && String(row.by || '') === roleKey) return true;
+    if (action === 'done' || action === 'release' || action === 'cancel') return false;
+  }
+  return false;
+}
+
 function roleSignalsOf(project, role, { tasks = null } = {}) {
   return {
     fileAt: roleFileWriteAt(project, role),
@@ -2672,6 +2725,8 @@ function scanActivityRoles(project, { now = Date.now() } = {}) {
       fileAt: scan.fileAt,
       ackAt: roleLastAckAt(name, role),
       workingAt: roleWorkingAt(name, role, tasks),
+      // B-1d90：在办任务的产出 mtime（任务文件/证据文件）——「人还在写东西」也是活跃信号。
+      progressAt: roleTaskProgressAt(name, role, tasks),
     };
     // B-4c66 ②：镜像任务（type=requirement / id===requirementId）不是「在办的活」——否则角色被永久判 idle+有活，
     // 看门狗每拍唤起一次（分析师实测 10:24/10:25/10:26 各一次，reason=stalled）；终态判断统一走 statusIsClosed。
@@ -2684,7 +2739,8 @@ function scanActivityRoles(project, { now = Date.now() } = {}) {
     if (!signals.fileAt) missingSignals.push('file');
     if (!signals.ackAt) missingSignals.push('ack');
     if (!signals.workingAt) missingSignals.push('working');
-    const times = [signals.fileAt, signals.ackAt, signals.workingAt]
+    if (!signals.progressAt) missingSignals.push('progress');
+    const times = [signals.fileAt, signals.ackAt, signals.workingAt, signals.progressAt]
       .map((ts) => Date.parse(String(ts || '')))
       .filter((ms) => Number.isFinite(ms));
     const latest = times.length ? Math.max(...times) : NaN;
@@ -2922,6 +2978,28 @@ export function tickDispatchDeadlines(project, { now = Date.now(), source = 'tic
     const atMs = Date.parse(String(item.at || ''));
     if (!Number.isFinite(atMs)) continue;
     const stallMs = Math.max(0, nowMs - atMs);
+    // T-1dfb 收口前置（PM 2026-11-17 10:17）：任务已闭环（done/accepted/cancelled/terminated）
+    // 时该投递项必须就地 blocked，不得再升级/不再交给泵重投——否则已验收任务会被反复派出去。
+    // 判定统一 gates.statusIsClosed 单源；任务文件不存在同样视为不可投。
+    if (taskId) {
+      const boundTask = (() => { try { return loadTask(name, taskId); } catch { return null; } })();
+      if (!boundTask || statusIsClosed(boundTask.status)) {
+        if (!state.items[itemId]) { state.items[itemId] = { ...emptyDeliveryItem(Number(item.attempt) || 1), lastAt: at }; dirty = true; }
+        const curItem = state.items[itemId];
+        if (curItem && String(curItem.state || '') !== 'blocked') {
+          curItem.state = 'blocked';
+          curItem.lastAt = at;
+          curItem.lastCode = boundTask ? 'TASK_CLOSED' : 'TASK_MISSING';
+          dirty = true;
+          appendDeliveryAudit(name, {
+            itemId, to, taskId, attempt: Number(curItem.attempt) || 1,
+            result: 'blocked', code: curItem.lastCode, stallMs, messageId: '', wakeOk: false, source: src,
+          });
+          rows.push({ itemId, to, taskId, result: 'blocked', level: '', messageId: '', code: curItem.lastCode });
+        }
+        continue;
+      }
+    }
     if (!state.items[itemId]) {
       state.items[itemId] = { ...emptyDeliveryItem(Number(item.attempt) || 1), lastAt: at };
       dirty = true;
