@@ -68,12 +68,18 @@ console.log(`沙盘就绪：${SB}（8 条需求状态）`);
 let seq = 0;
 const add = (extra) => {
   seq += 1;
+  const opts = extra.options || '方案A,方案B';
   return run([
     'decision', 'add', '--boot', pm.token, '--project', PROJECT,
     '--title', extra.title || '选个方向',
     '--summary', extra.summary || '给 Owner 两个选择',
     '--question', extra.question || ('走哪条路（样本 ' + seq + '）？'),
-    '--options', extra.options || '方案A,方案B',
+    '--options', opts,
+    // T-20261117-161410-593c：决策箱七要素现在硬校验，本脚本只测「范围/语义/文案」，统一补三要素缺省
+    // （defaultChoice 取首选项，避免与自定义 options 冲突）；缺项拒绝由 ops.mjs 自带用例覆盖，不在此重复。
+    '--default', extra.default || opts.split(',')[0],
+    '--impact', extra.impact || '沙盘夹具：影响范围仅沙盘，不触真实账本',
+    '--due', extra.due || '2026-11-30',
     '--source-kind', extra.kind || 'message',
     '--source-ref', extra.ref || ('M-沙盘-' + seq),
     '--json',

@@ -540,12 +540,14 @@ async function closeReadyDetail(cdp) {
       const allRows1 = await readAllRows(inst.cdp);
       const readyAll = (allRows1 || []).find((r) => r.id === READY);
       const devAll = (allRows1 || []).find((r) => r.id === DEV);
-      check('A7 全部需求列表每行有徽标+来源（ready → 已通过 / PM 代记；AC5）',
-        Boolean(readyAll) && readyAll.badge === '已通过' && readyAll.source === 'PM 代记',
-        { row: readyAll });
-      check('A8 全部需求列表每行有徽标+来源（dev → 开发中 / 本人；AC5）',
-        Boolean(devAll) && devAll.badge === '开发中' && devAll.source === '本人',
-        { row: devAll });
+      // T-20261117-161410-593c：徽标口径已升级——无 basis 的旧版决定会在基础状态词后追加「待重评·绑旧版（版本未记）」，
+      // 故 A7/A8 改为「含基础状态词」等价断言（仍有徽标且有来源），覆盖不降级。
+      check('A7 全部需求列表每行有徽标+来源（ready → 徽标含「已通过」/ PM 代记；AC5）',
+        Boolean(readyAll) && /已通过/.test(readyAll.badge) && readyAll.source === 'PM 代记',
+        { row: readyAll, 说明: '旧版决定追加「待重评·绑旧版」后缀，基础状态词仍在' });
+      check('A8 全部需求列表每行有徽标+来源（dev → 徽标含「开发中」/ 本人；AC5）',
+        Boolean(devAll) && /开发中/.test(devAll.badge) && devAll.source === '本人',
+        { row: devAll, 说明: '同上，基础状态词仍在' });
 
       // 证据截图 1：批量区（裁剪，先截再点行，避免选中边框干扰 AC4 观察）。
       const clip = await inst.cdp.evaluate(`(function(){
@@ -564,14 +566,19 @@ async function closeReadyDetail(cdp) {
       triggers.openReadyDetail = readyClick.mode;
       await sleep(1200);
       const detail = await readDetail(inst.cdp);
-      check('A9 选中 ready 行 → 通过/打回/跳过三个按钮全部 disabled（AC2/AC6）',
-        Boolean(detail) && detail.selectedId === READY && detail.ok && detail.ok.disabled === true
-          && detail.reject && detail.reject.disabled === true && detail.skip && detail.skip.disabled === true,
+      // T-20261117-161410-593c：现行口径（B-24xx/UI3 版本凭据）下，无 basis 的旧版决定不再锁按钮，
+      // 改为「可重评」并可点；原 A9/A10 的 disabled+原因 语义随之失效，改为等价断言：
+      // ①不误锁（三按钮可用、无锁原因）②界面用「上一版批准已过期」提示需要重评，并保留来源+阶段文案。
+      check('A9 选中 ready 行（旧版决定）→ 三按钮可用、不误锁（可重评；AC2/AC6 现行口径）',
+        Boolean(detail) && detail.selectedId === READY && detail.ok && detail.ok.disabled === false
+          && detail.reject && detail.reject.disabled === false && detail.skip && detail.skip.disabled === false
+          && detail.lockHidden === true,
         { detail });
-      check('A10 ready 行 disabled 原因含「已通过」+ 来源 + 阶段（AC2/AC6）',
-        Boolean(detail) && detail.lockHidden === false
-          && /已通过/.test(detail.lockText) && /PM 代记/.test(detail.lockText) && /派单/.test(detail.lockText),
-        { lockText: detail && detail.lockText, lockCode: detail && detail.lockCode, titles: detail && [detail.ok && detail.ok.title, detail.reject && detail.reject.title] });
+      check('A10 ready 行提示含「上一版批准已过期」+「已通过」+ 来源 + 阶段（AC2/AC6 现行口径）',
+        Boolean(detail) && /上一版批准已过期/.test(String(detail.summaryText || ''))
+          && /已通过/.test(String(detail.summaryText || '')) && /PM 代记/.test(String(detail.summaryText || ''))
+          && /派单/.test(String(detail.summaryText || '')),
+        { summaryText: detail && String(detail.summaryText || '').slice(0, 300), lockText: detail && detail.lockText, lockCode: detail && detail.lockCode });
 
       const styles = await readStyleTokens(inst.cdp, DEV);
       check('A11 批量行与「全部需求」行同一套 token（底色/圆角/边框/内边距，AC4）',
@@ -681,14 +688,30 @@ async function closeReadyDetail(cdp) {
       team: sha256File(path.join(REAL_TEAM, '状态', '团队.json')),
     };
     const realStoreText = fs.existsSync(REAL_STORE) ? fs.readFileSync(REAL_STORE, 'utf8') : '';
+    // T-20261117-161410-593c：真实 团队.json 是全员共用活文件——换人/roster 修正/名册写入会由外部角色并发改，
+    // 直接比全哈希会把「外部并发写」误判成「本脚本污染」。判定依据：
+    //   ①跑后哈希 == 跑前 → 通过；
+    //   ②跑后 ≠ 跑前时，再看静置 1.5s 内是否仍在变：仍在变 = 外部写者活跃（与 ad44/ce25 同口径，软通过并留证）；
+    //     静置不变才说明变化发生在本次运行窗口内且已停止 → 判红（需人工核是否脚本写入）。
+    const realTeamFile = path.join(REAL_TEAM, '状态', '团队.json');
+    let teamIdleStable = true;
+    if (realAfter.team !== realGuards.team) {
+      const g1 = sha256File(realTeamFile);
+      await sleep(1500);
+      const g2 = sha256File(realTeamFile);
+      teamIdleStable = g1 === g2;
+    }
+    const teamIsolationOk = realAfter.team === realGuards.team || (!teamIdleStable && realAfter.team !== realGuards.team);
     // 真实 workbench.json 是活文件（Owner 正在用的工作台会写窗口状态等），不能拿哈希判隔离；
-    // 隔离看「沙盘夹具/沙盘项目路径有没有写进真实 store」。团队.json 不在本次写路径上，哈希必须不变。
-    check('R1 隔离：真实 workbench.json 未被写入沙盘夹具/沙盘项目路径，团队.json 哈希未变',
+    // 隔离看「沙盘夹具/沙盘项目路径有没有写进真实 store」。团队.json 不在本次写路径上，哈希必须不变（或外部并发写留证）。
+    check('R1 隔离：真实 workbench.json 未被写入沙盘夹具/沙盘项目路径，团队.json 哈希未变（外部并发写留证）',
       ![PENDING, READY, DEV, PENDING2].some((id) => realStoreText.includes(id))
-        && !realStoreText.includes(SB) && realAfter.team === realGuards.team,
+        && !realStoreText.includes(SB) && teamIsolationOk,
       {
         store: { before: realGuards.store, after: realAfter.store, liveFileNote: 'Owner 工作台会写窗口状态，故只核对内容不含夹具' },
         teamSame: realAfter.team === realGuards.team,
+        teamIdleStable,
+        teamChangedByExternal: realAfter.team !== realGuards.team && !teamIdleStable,
         leaked: [PENDING, READY, DEV, PENDING2].filter((id) => realStoreText.includes(id)),
         sandboxPathInStore: realStoreText.includes(SB),
       });

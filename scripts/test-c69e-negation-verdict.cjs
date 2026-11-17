@@ -26,7 +26,9 @@ const SB = uniqueSandbox('c69e');
 const TEAM = path.join(SB, '团队');
 const PROJECTS = path.join(SB, '项目');
 const TOOL = path.join(TEAM, '工具', 'team.mjs');
-const STAGED = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '提案暂存-c69e', 'ops.mjs');
+// T-20261117-161410-593c：旧「提案暂存版」ops.mjs 与现行 team.mjs 不匹配（缺 cmdClaim 导出），
+// 改用 HEAD 现行实现（只复制不修改）；判定逻辑仍走真实函数，不碰工作树。
+const STAGED = path.join(ROOT, '团队', '工具', 'lib', 'ops.mjs');
 const PROJECT = 'c69e报告门沙盘';
 const env = { ...process.env, TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: PROJECTS, TEAM_SELFTEST: '1' };
 
@@ -42,7 +44,7 @@ rmSandbox(SB, { recursive: true, force: true, maxRetries: 8, retryDelay: 300 });
 fs.mkdirSync(PROJECTS, { recursive: true });
 fs.cpSync(path.join(ROOT, '团队'), TEAM, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
 fs.copyFileSync(STAGED, path.join(TEAM, '工具', 'lib', 'ops.mjs'));
-check('沙盘 ops.mjs = 提案暂存版（不碰工作树）', sha(path.join(TEAM, '工具', 'lib', 'ops.mjs')) === sha(STAGED), { staged: sha(STAGED).slice(0, 16) });
+check('沙盘 ops.mjs = HEAD 现行实现（不碰工作树）', sha(path.join(TEAM, '工具', 'lib', 'ops.mjs')) === sha(STAGED), { staged: sha(STAGED).slice(0, 16) });
 
 const teamFile = path.join(TEAM, '状态', '团队.json');
 const team = JSON.parse(fs.readFileSync(teamFile, 'utf8'));

@@ -23,7 +23,9 @@ const BOX_FILE = path.join(STATE_DIR, '决策箱.json');
 const PORT = Number(process.env.AWB_UI3_PORT || 9433);
 const EVID = path.join(ROOT, '项目', PROJECT, '程序员B', '产出', '证据-ui3bugs');
 const REQ_OK = 'R-20261115-121640-9f3e';
-const REQ_GHOST = 'R-20261115-133827-253b';
+// T-20261117-161410-593c：ghost 改用项目内不存在的假 id——原 253b 与真实 需求/作废登记.jsonl 撞号，
+// 快照会按「作废优先」把它从 task-only 兜底里排除（=A a17d 正确行为），导致②恒红（夹具过时）。
+const REQ_GHOST = 'R-20261116-999903-ghost';
 // PM 2026-11-16 06:31：无门保护区两条夹具（造数据，不依赖真实库）——
 // S7 真待决不能被静默隐藏；S8 approved 但 decisions=[] 走 ownerReview 回退口径。
 const REQ_WAIT = 'R-20261116-999901-wait';
@@ -97,6 +99,13 @@ function seed() {
   const project = (store.projects || []).find((p) => p && String(p.teamName || p.name || '') === PROJECT);
   if (!project) throw new Error('真实 workbench.json 里没有项目 ' + PROJECT);
   store.projects = [project]; store.activeProjectId = project.id;
+  // T-20261117-161410-593c：夹具项目路径指到沙盘内（原用真实项目路径 → 快照按真实 需求/ 目录扫出 90+ legacy-doc 行，
+  // 还会命中真实 作废登记 → 未登记行被排除，②恒红；项目路径隔离后只剩本夹具的注册行 + 未登记兜底行）。
+  const SANDBOX_PROJECT_PATH = path.join(BASE, '项目', PROJECT);
+  fs.mkdirSync(path.join(SANDBOX_PROJECT_PATH, '需求'), { recursive: true });
+  project.path = SANDBOX_PROJECT_PATH;
+  project.workspacePath = SANDBOX_PROJECT_PATH;
+  if (project.workspace && typeof project.workspace === 'object') project.workspace.path = SANDBOX_PROJECT_PATH;
   fs.writeFileSync(path.join(DATA, 'userdata', 'workbench.json'), JSON.stringify(store, null, 2) + '\n', 'utf8');
   copyDir(path.join(ROOT, '团队'), TEAM, (f) => /[\\/]锁([\\/]|$)/.test(f) || /[\\/]邮箱[\\/]/.test(f));
   const teamFile = path.join(TEAM, '状态', '团队.json');
@@ -116,8 +125,12 @@ function seed() {
     requirements: {
       [REQ_OK]: {
         id: REQ_OK, title: '取消提案 B 案', status: 'approved', createdAt: nowIso,
+        // T-20261117-161410-593c：现行口径「决定必须绑当前正文版本」——旧夹具 decisions 无 basis 会被判「绑旧版→待重评→等你决定」，
+        // 与 dfe6 原意（已通过不得落等你决定）冲突。这里补齐版本三元组（行 requirementHash 与 decision basis 一致），
+        // 保持原断言口径不变、只修夹具数据。
+        requirementHash: 'a'.repeat(64),
         ownerReview: { status: 'approved', at: '2026-11-15T04:55:08.986Z', channel: 'ui', actor: 'owner', decidedBy: 'owner', by: 'Owner' },
-        decisions: [{ status: 'approved', at: '2026-11-15T04:55:08.986Z', channel: 'ui', actor: 'owner', by: 'Owner' }],
+        decisions: [{ status: 'approved', at: '2026-11-15T04:55:08.986Z', channel: 'ui', actor: 'owner', by: 'Owner', basis: { requirement: { sha256: 'a'.repeat(64) } } }],
       },
       // S7：owner_review + ownerReview.status=pending + decisions=[] → 必须仍进「等你决定」（防「有 ownerReview 就 return running」的回归）。
       [REQ_WAIT]: {
@@ -200,7 +213,8 @@ async function launch(port) {
 
     const ghost = await cdp.evaluate(`(function(){
       const row=document.querySelector('[data-owner-all-item][data-or-req="${REQ_GHOST}"]');
-      if(!row) return {missing:true};
+      const all=[...document.querySelectorAll('[data-owner-all-item]')].map(n=>n.getAttribute('data-or-req'));
+      if(!row) return {missing:true, allCount: all.length};
       return { unregistered: row.getAttribute('data-or-unregistered'), text: row.textContent || '' };
     })()`);
     check('② 未登记需求在弹窗内可见并标「未登记·不可评审」', Boolean(ghost && /未登记/.test(ghost.text || '')), ghost);
