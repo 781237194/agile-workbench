@@ -5794,6 +5794,16 @@ ipcMain.handle('theme:metrics', async () => {
       let snapshotError = '';
       if (!fs.existsSync(snapshotFile)) {
         snapshotError = 'missing';
+      } else if (fs.statSync(snapshotFile).size > SessionQueue.SNAPSHOT_MAX_BYTES) {
+        // B-c971：超过需求 §5.2 的 64KB 硬上限 → 不整份读入（防炸内存），按 oversize 降级；
+        // 有上一份可用快照则沿用（面板显示「超限拒绝读取」而不是 missing/解析失败）。
+        snapshotError = 'oversize';
+        console.warn('SESSION_QUEUE_OVERSIZE ' + JSON.stringify({
+          file: snapshotFile,
+          bytes: fs.statSync(snapshotFile).size,
+          limit: SessionQueue.SNAPSHOT_MAX_BYTES,
+        }));
+        if (sqLastGood.file === snapshotFile && sqLastGood.snapshot) snapshot = sqLastGood.snapshot;
       } else {
         try {
           const parsed = JSON.parse(fs.readFileSync(snapshotFile, 'utf8').replace(/^\uFEFF/, ''));

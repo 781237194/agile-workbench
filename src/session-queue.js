@@ -25,6 +25,8 @@ const ROLE_LABELS = {
 
 const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000; // 统计窗口默认最近 24 小时
 const DEFAULT_STALE_MS = 120 * 1000; // 快照过期阈值 120 秒
+// R-6bc8 §5.2：快照硬上限 64KB（B-c971：壳层读过大的快照会整份读入内存，必须拒读/降级）。
+const SNAPSHOT_MAX_BYTES = 65536;
 const BACKPRESSURE_THRESHOLD = 3; // 排队 ≥3 才提示
 
 /** skipped 的三种真实取值（正文 §5.3 实测：MERGED_PENDING / ALREADY_DELIVERED / DEBOUNCED）。 */
@@ -195,6 +197,20 @@ function degradationOf(options = {}) {
       }`
       : '',
   });
+  // B-c971①：超过需求 §5.2 的 64KB 硬上限 → 不读入、不按解析失败；单独给 oversize 文案。
+  if (snapshotError === 'oversize') {
+    return build(true, 'oversize', '会话排队快照超过 64KB 硬上限，已拒绝整份读取（写入侧应拒写超限快照，检查插件 writer 输出）', '');
+  }
+  // B-c971②：首份即坏（无上一份可用快照）时，之前落进「未接入 missing」文案；现在先判 broken，
+  // 并按「有没有上一份可用快照」区分「沿用上一份」与「损坏（解析失败）」两种文案。
+  if (snapshotError === 'broken') {
+    return build(
+      true,
+      'broken',
+      snapshot ? '会话排队快照解析失败：沿用上一份可用数据' : '会话排队快照损坏（解析失败），暂无可用快照；请检查插件 writer 输出',
+      '',
+    );
+  }
   if (snapshotError === 'missing' || !snapshot) {
     return build(true, 'missing', '会话排队快照未接入（插件还没写过 团队/状态/会话排队.json）', '');
   }
@@ -215,9 +231,6 @@ function degradationOf(options = {}) {
       text: `插件采集异常（${code}）：${message}；最近尝试：${lastAttemptAt || '未记'}`
         + `；上次成功：${lastSuccessAt || '无'}。修复：检查 DSH 插件配置 teamRoot（应为 …/团队 目录，需存在 状态/ 子目录）。`,
     };
-  }
-  if (snapshotError === 'broken') {
-    return build(true, 'broken', '会话排队快照解析失败：沿用上一份可用数据', '');
   }
   const at = String(snapshot.at || '');
   const atMs = toMs(at);
@@ -312,6 +325,7 @@ module.exports = {
   ROLE_LABELS,
   DEFAULT_WINDOW_MS,
   DEFAULT_STALE_MS,
+  SNAPSHOT_MAX_BYTES,
   BACKPRESSURE_THRESHOLD,
   SKIP_VALUES,
   rowAt,

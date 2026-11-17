@@ -97,6 +97,18 @@ check('⑧ 快照原子写落盘（团队/状态/会话排队.json）且字段�
   && typeof disk.staleMs === 'number' && disk.roles[0].queued === 3 && disk.roles[0].byPlacement.context === 1,
   { file: written.file, via: written.via, disk: disk.roles && disk.roles[0] });
 
+// ⑨ B-c971①：需求 §5.2 的 64KB 硬保护——超限拒写（磁盘上一份保留），并回 SNAPSHOT_TOO_LARGE 告警载荷。
+const bytesBefore = fs.statSync(written.file).size;
+const hugeSnapshot = { schema: 1, at: new Date(now).toISOString(), project: '沙盘', roles: [{ role: 'pm', note: 'x'.repeat(70000) }] };
+const hugeResult = SQ.writeSnapshot(teamRoot, hugeSnapshot);
+check('⑨ B-c971 快照 >64KB → 拒写（skipped / code=SNAPSHOT_TOO_LARGE / 磁盘上一份未被覆盖）',
+  hugeResult.skipped === true && hugeResult.code === 'SNAPSHOT_TOO_LARGE'
+  && hugeResult.bytes > SQ.SNAPSHOT_MAX_BYTES && hugeResult.limit === SQ.SNAPSHOT_MAX_BYTES
+  && fs.statSync(written.file).size === bytesBefore,
+  { result: hugeResult, diskBytes: fs.statSync(written.file).size, bytesBefore });
+const rewrite = SQ.writeSnapshot(teamRoot, snap);
+check('⑨ B-c971 超限拒写后正常快照仍可写（护栏不粘滞）', rewrite.skipped !== true && fs.statSync(written.file).size > 0, rewrite);
+
 const passed = results.filter((r) => r.ok).length;
 console.log(`\nR-6bc8 host half 数据通道断言：${passed}/${results.length} PASS`);
 const evDir = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '证据-37f5');

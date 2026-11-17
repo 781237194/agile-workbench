@@ -24,6 +24,9 @@ const jsonAtomic = (() => {
 })();
 
 const SNAPSHOT_FILE = '会话排队.json';
+// R-6bc8 需求正文 §5.2：快照 ≤64KB 是硬契约（面板/排查工具会整份读入，超大快照有炸内存风险）。
+// B-c971：序列化后超限 → 拒写 + 告警（不覆盖上一份可用快照；面板 degraded 不计为解析失败）。
+const SNAPSHOT_MAX_BYTES = 65536;
 const WRITE_SIDE_METHODS = ['updateQueue', 'prompt', 'cancel', 'selectModel', 'rename', 'fork', 'create', 'openWorkspacePath', 'initializeDefaultModel'];
 
 /** 排队条数：只算 placement==='queued'。 */
@@ -112,18 +115,26 @@ function snapshotPath(teamRoot) {
   return path.join(root, '状态', SNAPSHOT_FILE);
 }
 
-/** 原子写快照；无 json-atomic 时退化为 tmp+rename（同样不直写目标文件）。 */
+/** 原子写快照；无 json-atomic 时退化为 tmp+rename（同样不直写目标文件）。
+ * B-c971：写前按 §5.2 的 64KB 硬上限校验——超限直接拒写（保留上一份），并打一条告警。 */
 function writeSnapshot(teamRoot, snapshot, opts = {}) {
   const file = opts.file || snapshotPath(teamRoot);
+  const text = JSON.stringify(snapshot, null, 2) + '\n';
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes > SNAPSHOT_MAX_BYTES) {
+    const payload = { file, bytes, limit: SNAPSHOT_MAX_BYTES, code: 'SNAPSHOT_TOO_LARGE' };
+    console.warn('SESSION_QUEUE_SNAPSHOT_TOO_LARGE ' + JSON.stringify(payload));
+    return { ...payload, via: 'skipped', skipped: true };
+  }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   if (jsonAtomic && typeof jsonAtomic.writeJsonAtomic === 'function') {
     jsonAtomic.writeJsonAtomic(file, snapshot, { case: 'sessionQueueSnapshot', ...(opts.atomicOpts || {}) });
-    return { file, via: 'json-atomic' };
+    return { file, via: 'json-atomic', bytes };
   }
   const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(tmp, text, 'utf8');
   fs.renameSync(tmp, file);
-  return { file, via: 'rename' };
+  return { file, via: 'rename', bytes };
 }
 
 /** 静态度量：写侧方法命中数（AC5①），供自检与 CI 用。 */
@@ -143,6 +154,7 @@ function writeSideHits(files) {
 
 export {
   SNAPSHOT_FILE,
+  SNAPSHOT_MAX_BYTES,
   WRITE_SIDE_METHODS,
   queuedCount,
   wakeStateOf,

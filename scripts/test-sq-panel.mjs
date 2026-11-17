@@ -124,6 +124,13 @@ const missing = SRC.degradationOf({ now, snapshotError: 'missing', snapshot: nul
 check('⑤ 边界·空值：快照不存在 → degraded 且文案含「未接入」（不显示 0）', missing.degraded === true && /未接入/.test(missing.text), missing);
 const broken = SRC.degradationOf({ now, snapshotError: 'broken', snapshot: { at: iso(5000) } });
 check('⑤ 边界·异常：快照解析失败 → degraded + 沿用上一份（文案含沿用）', broken.degraded === true && /沿用/.test(broken.text), broken);
+// B-c971②：首份即坏（没有上一份可用快照）时，以前会落进「未接入 missing」；现在必须给 broken 文案。
+const brokenFirst = SRC.degradationOf({ now, snapshotError: 'broken', snapshot: null });
+check('⑤ B-c971 首份即坏（无上一份可用）→ code=broken 且文案含「损坏/解析失败」，不得写「未接入」',
+  brokenFirst.degraded === true && brokenFirst.code === 'broken' && /损坏|解析失败/.test(brokenFirst.text) && !/未接入/.test(brokenFirst.text), brokenFirst);
+// B-c971①：超过 64KB 硬上限的快照按 oversize 降级（不是解析失败、不是未接入）。
+const oversize = SRC.degradationOf({ now, snapshotError: 'oversize', snapshot: null });
+check('⑤ B-c971 快照超 64KB → code=oversize 且文案注明 64KB 上限', oversize.degraded === true && oversize.code === 'oversize' && /64KB/.test(oversize.text), oversize);
 const badAt = SRC.degradationOf({ now, snapshot: { at: 'not-a-date' } });
 check('⑤ 边界·空值：at 非 ISO → 按过期处理', badAt.degraded === true && badAt.code === 'bad-at', badAt);
 
