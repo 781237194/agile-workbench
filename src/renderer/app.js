@@ -10833,6 +10833,119 @@ function renderLegacyRequirements() {
   syncLegacyGlobalReqButtons(Boolean(wf && wf.phase === 'terminated'));
 }
 
+// ── R-1dfb（卷 §六）：团队台活跃度三列 —— 只显示 team:role-activity 的返回值 ─────────────
+// 口径：主进程统一算（团队/工具/lib/ops.mjs → computeRoleActivity）+ 5 分钟缓存；
+// 渲染层**不读文件、不调 git、不自己推活跃度**（AC5 静态断言），只把返回字段按 HH:MM 显示。
+// 刷新：团队台每次渲染调一次；返回 cached 时不再另起定时轮询（沿用团队台既有刷新节奏）。
+const LEGACY_ACTIVITY_COLUMNS = [
+  { key: 'commit', label: '最近提交', field: 'commitAt', fallbackReason: 'no-submit-record', hint: '团队提交记录（提交/*.json），非 git 代码提交' },
+  { key: 'file', label: '最近文件写入', field: 'fileAt', fallbackReason: 'no-write-in-window', hint: '角色目录内文件 max mtime（排除索引/审计/备份/派单生成物）' },
+  { key: 'wake', label: '最后成功唤醒', field: 'wakeAt', fallbackReason: 'no-wake-ok', hint: '唤醒.jsonl 里 to=<角色> 且 ok:true 的最后一条' }
+];
+const LEGACY_ACTIVITY_STATE = { roles: {}, readAt: '', cached: false, loading: false, pending: null, error: null, lastCallAt: 0 };
+
+function legacyActivityTimeText(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) return '';
+  const date = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  const today = new Date();
+  const sameDay = date.getFullYear() === today.getFullYear()
+    && date.getMonth() === today.getMonth() && date.getDate() === today.getDate();
+  return sameDay
+    ? `${pad(date.getHours())}:${pad(date.getMinutes())}`
+    : `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+// 行状态：idle 黄标 / unknown 灰 / active 正常；红标只认后端 escalation 级（返回里没有就不假装）。
+function legacyActivityRoleView(roleId) {
+  const role = String(roleId || '');
+  const row = (LEGACY_ACTIVITY_STATE.roles && LEGACY_ACTIVITY_STATE.roles[role]) || null;
+  const verdict = row ? String(row.verdict || '') : '';
+  const state = verdict === 'active' ? 'active' : (verdict === 'idle' ? 'idle' : 'unknown');
+  const levelRaw = row ? String(row.level || (row.escalated === true ? 'escalate' : 'none')) : 'none';
+  const level = ['notice', 'escalate', 'force'].includes(levelRaw) ? levelRaw : 'none';
+  const reasons = row && Array.isArray(row.unknownReasons) ? row.unknownReasons.map((item) => String(item)) : [];
+  if (!row) reasons.push(LEGACY_ACTIVITY_STATE.error ? `activity-error:${LEGACY_ACTIVITY_STATE.error}` : 'activity-not-loaded');
+  const cellClass = (level === 'escalate' || level === 'force')
+    ? 'bad'
+    : (state === 'idle' ? 'warn' : (state === 'unknown' ? 'muted' : 'ok'));
+  const cells = {};
+  for (const col of LEGACY_ACTIVITY_COLUMNS) {
+    const iso = row ? String(row[col.field] || '') : '';
+    const text = legacyActivityTimeText(iso);
+    if (text) {
+      cells[col.key] = { text, title: `${col.label}：${iso} · ${col.hint}`, cls: cellClass };
+      continue;
+    }
+    const why = new Set([col.fallbackReason]);
+    if (state !== 'active') for (const reason of reasons) why.add(reason);
+    cells[col.key] = { text: '未知', title: `${col.label}：未知 · ${Array.from(why).join('、')} · ${col.hint}`, cls: cellClass };
+  }
+  return { state, level, cells, reasons };
+}
+
+function legacyActivityPaint() {
+  if (typeof document === 'undefined') return;
+  const rows = document.querySelectorAll('[data-activity-role]');
+  for (const rowEl of rows) {
+    const view = legacyActivityRoleView(String(rowEl.dataset.activityRole || ''));
+    rowEl.setAttribute('data-activity-state', view.state);
+    rowEl.setAttribute('data-activity-level', view.level);
+    for (const col of LEGACY_ACTIVITY_COLUMNS) {
+      const cell = rowEl.querySelector(`[data-activity-${col.key}]`);
+      if (!cell) continue;
+      const value = view.cells[col.key];
+      cell.textContent = value.text;
+      cell.title = value.title;
+      cell.className = value.cls;
+    }
+  }
+}
+
+function legacyActivityRefresh(force) {
+  const bridge = (typeof window !== 'undefined' && window.workbench)
+    ? window.workbench
+    : ((typeof window !== 'undefined' && window.api) ? window.api : null);
+  if (!bridge || typeof bridge.teamRoleActivity !== 'function') {
+    LEGACY_ACTIVITY_STATE.error = 'NO_IPC';
+    return Promise.resolve(null);
+  }
+  if (LEGACY_ACTIVITY_STATE.loading && LEGACY_ACTIVITY_STATE.pending) return LEGACY_ACTIVITY_STATE.pending;
+  const hasData = Object.keys(LEGACY_ACTIVITY_STATE.roles || {}).length > 0;
+  // 渲染很频繁时最多 3 秒问一次 IPC（主进程侧另有 5 分钟缓存），不引入任何定时器。
+  if (!force && hasData && (Date.now() - LEGACY_ACTIVITY_STATE.lastCallAt) < 3000) return Promise.resolve(null);
+  const project = (typeof activeProject === 'function') ? activeProject() : null;
+  LEGACY_ACTIVITY_STATE.loading = true;
+  LEGACY_ACTIVITY_STATE.lastCallAt = Date.now();
+  const pending = Promise.resolve(bridge.teamRoleActivity({ projectId: project ? project.id : '', force: Boolean(force) }))
+    .then((result) => {
+      const res = result || {};
+      if (res.ok === false) {
+        LEGACY_ACTIVITY_STATE.error = `${res.code || 'ROLE_ACTIVITY_FAILED'}${res.message ? '：' + res.message : ''}`;
+        return res;
+      }
+      LEGACY_ACTIVITY_STATE.error = null;
+      LEGACY_ACTIVITY_STATE.roles = (res.roles && typeof res.roles === 'object') ? res.roles : {};
+      LEGACY_ACTIVITY_STATE.readAt = String(res.readAt || '');
+      LEGACY_ACTIVITY_STATE.cached = Boolean(res.cached);
+      return res;
+    })
+    .catch((error) => {
+      LEGACY_ACTIVITY_STATE.error = String((error && error.message) || error).slice(0, 200);
+      return null;
+    })
+    .finally(() => {
+      LEGACY_ACTIVITY_STATE.loading = false;
+      LEGACY_ACTIVITY_STATE.pending = null;
+      legacyActivityPaint();
+    });
+  LEGACY_ACTIVITY_STATE.pending = pending;
+  return pending;
+}
+
 function renderLegacyTeamGate() {
   const box = $('#team-legacy-gate');
   if (!box) return;
@@ -10855,7 +10968,14 @@ function renderLegacyTeamGate() {
     const session = sessions[role.id];
     const boot = legacyBootFor(role.id);
     const bootCtl = legacyBootControl(role.id);
-    return `<div class="legacy-team-row">
+    // R-1dfb（卷 §六）：三列值只取 team:role-activity 的返回（缓存里的那份），渲染层不自算；
+    // 行上 data-activity-state ∈ idle|active|unknown；红标只认后端 escalation 级（data-activity-level）。
+    const act = legacyActivityRoleView(role.id);
+    const actCells = LEGACY_ACTIVITY_COLUMNS.map((col) => {
+      const cell = act.cells[col.key];
+      return `<span class="${esc(cell.cls)}" data-activity-${esc(col.key)} style="flex:0 0 auto;min-width:56px;text-align:right;white-space:nowrap" title="${esc(cell.title)}">${esc(cell.text)}</span>`;
+    }).join('');
+    return `<div class="legacy-team-row" data-activity-role="${esc(role.id)}" data-activity-state="${esc(act.state)}" data-activity-level="${esc(act.level)}">
       <span class="legacy-team-dot" style="--role-color:${esc(role.color)}"></span>
       <b>${esc(role.name)}</b>
       <code>${esc(legacyRoleDirName(role))}/</code>
@@ -10863,12 +10983,15 @@ function renderLegacyTeamGate() {
       <span class="${index ? 'ok' : 'bad'}">索引 ${index ? '有' : '缺'}</span>
       <span class="${session ? 'ok' : 'warn'}">${session ? '会话已映射' : '无会话'}</span>
       <span class="${boot.ready ? 'ok' : (boot.roundMismatch ? 'warn' : 'muted')}" title="${esc(boot.missing.join('、') || boot.at || '')}">${esc(boot.label)}</span>
+      ${actCells}
       <button type="button" class="legacy-boot-mini" data-legacy-boot="${esc(role.id)}" ${bootCtl.disabled ? 'disabled' : ''} title="${esc(bootCtl.title)}">${esc(bootCtl.text)}</button>
     </div>`;
   }).join('');
+  // 列头（卷 §六写死文案）；tooltip 明说「提交」是团队提交记录，不是 git 代码提交（卷 §二）。
+  const activityHead = `<div class="legacy-team-activity-head" style="display:flex;gap:5px;justify-content:flex-end;padding:0 4px;color:var(--muted);font-size:8px" title="团队提交记录（提交/*.json），非 git 代码提交">${LEGACY_ACTIVITY_COLUMNS.map((col) => `<span data-activity-head="${esc(col.key)}" style="flex:0 0 auto;min-width:56px;text-align:right;white-space:nowrap">${esc(col.label)}</span>`).join('')}</div>`;
   box.innerHTML = `<div class="legacy-read-order">每次必读：<b>铁律 → 项目信息 → 角色卡 → 其他人文档</b>（角色目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 文件索引 ${ready.indexes}/${ready.total} · 其他文档 ${ready.others} 份 · 项目索引 ${ready.index ? '有' : '缺'}）</div>
     <div class="legacy-team-docs">${LEGACY_PROJECT_DOCS.map((doc) => `<button type="button" class="${legacyHas(doc.rel) ? 'ok' : 'bad'}" data-legacy-doc="${esc(doc.key)}" title="${esc(doc.rel)} · ${legacyHas(doc.rel) ? '存在' : '缺失'}">${esc(doc.label)} ${legacyHas(doc.rel) ? '有' : '缺'}</button>`).join('')}</div>
-    <div class="legacy-team-list">${rows}</div>
+    <div class="legacy-team-list">${activityHead}${rows}</div>
     <div class="legacy-team-result">${(() => {
       // F-9fbe-1/F-2：团队台红橙与项目面板同一判定（只有 block 才红、才写拦截词）。
       const gate = legacyGateState();
@@ -10882,6 +11005,8 @@ function renderLegacyTeamGate() {
         : '<span>逐条补齐入口在项目面板「本轮必读」。</span>';
       return `${text}${more}`;
     })()} <button id="team-boot-all" class="ghost small" type="button" title="依次调用 workflow:boot；界面发起不冒充角色本人">全队 boot</button></div>`;
+  // R-1dfb（AC5）：团队台渲染时调一次只读 IPC；返回 cached 时不再另起定时轮询（沿用既有刷新节奏）。
+  legacyActivityRefresh();
   if (badge) {
     const gate = legacyGateState();
     badge.textContent = gate.label;

@@ -19,6 +19,8 @@ const crypto = require('node:crypto');
 // R-ad44（T-b7dd）：JSON 状态写的唯一实现已收编到 团队/工具/lib/json-atomic.cjs（F1：Node20 不支持 require(ESM)，故实现是 CJS）。
 const jsonAtomicCore = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'json-atomic.cjs'));
 const { execFile } = require('node:child_process');
+// R-1dfb：把 团队/工具/lib/ops.mjs（ESM）桥接进 CJS 壳层，动态 import 需要 file:// URL。
+const { pathToFileURL } = require('node:url');
 
 const ROLE_IDS = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
 const ROLE_NAMES = {
@@ -696,6 +698,41 @@ function mergeOwnerAuthFields(...sources) {
     };
   }
   return out;
+}
+
+// ── R-1dfb（派单必达 + 真实活跃度看板）壳层桥接 ────────────────────────────────
+// 权威实现在 团队/工具/lib/ops.mjs（并行实现中）。壳层只做三件事：桥接、5 分钟进程内缓存、把
+// 结构化结果原样交回主进程 —— 绝不在壳里再算一遍活跃度/卡住判定（卷 §六：主进程统一算，渲染层只显示）。
+// 契约（派单 §三）：
+//   computeRoleActivity(project,{now}) → {ok,readAt,project,roles:{<roleId>:{commitAt,fileAt,wakeAt,verdict,unknownReasons[]}}}
+//   tickDispatchDeadlines(project,{now,source}) → {ok,source,now,checked,rows,escalated,retried}，source ∈ {deadline,tick}
+//   recoverStalledRoles(project,{now,write}) → {ok,rows,cleared,escalated}
+const ROLE_ACTIVITY_CACHE_MS = 5 * 60 * 1000;
+const roleActivityCache = new Map(); // project → { at, readAt, value }
+const opsModuleCache = new Map(); // ops.mjs 绝对路径 → Promise<module>
+
+/**
+ * 动态 import ops.mjs（ESM）。只 import 一次；ops.mjs 在 import 时按 process.env.TEAM_ROOT 落 PATHS，
+ * 而 layout.root 本身就来自 TEAM_ROOT（见 createTeamTools 首行），两者同源，不会指向不同团队根。
+ * 仅自检用：AWB_OPS_MODULE 可指向夹具模块，验证壳层桥接/缓存/渲染而不改 团队/工具/**（沙盘脚本口径）。
+ */
+function loadOpsModule(layout) {
+  const override = String(process.env.AWB_OPS_MODULE || '').trim();
+  const file = path.resolve(override || path.join(layout.toolRoot, 'lib', 'ops.mjs'));
+  if (opsModuleCache.has(file)) return opsModuleCache.get(file);
+  const promise = (async () => {
+    if (!fs.existsSync(file)) {
+      return { ok: false, code: 'OPS_MODULE_MISSING', message: `操作模块不存在：${file}` };
+    }
+    try {
+      const mod = await import(pathToFileURL(file).href);
+      return { ok: true, ops: mod };
+    } catch (error) {
+      return { ok: false, code: 'OPS_MODULE_IMPORT_FAILED', message: String((error && error.message) || error).slice(0, 300) };
+    }
+  })();
+  opsModuleCache.set(file, promise);
+  return promise;
 }
 
 function createTeamTools(options = {}) {
@@ -2272,6 +2309,112 @@ function createTeamTools(options = {}) {
       remaining: Number.isFinite(value.remaining) ? value.remaining : null,
       reason: String(value.reason || ''),
     };
+  }
+
+  // ── R-1dfb：活跃度三列（只读，卷 §六）────────────────────────────────────────
+  // 5 分钟进程内缓存：key=project，记录后端 readAt；force=true 或超 5 分钟才重算。
+  // 返回对象带 cached:boolean（缓存命中 true）。壳层不补算任何字段。
+  async function roleActivity(project, roleOptions = {}) {
+    const projectName = String(project || '').trim();
+    if (!projectName) return { ok: false, code: 'BAD_PROJECT', message: '缺少项目名', project: '', readAt: '', roles: {}, cached: false };
+    const force = Boolean(roleOptions && roleOptions.force);
+    const nowMs = Date.now();
+    const memo = roleActivityCache.get(projectName);
+    if (memo && !force) {
+      const readAtMs = Date.parse(String(memo.readAt || ''));
+      const ageMs = Number.isFinite(readAtMs) ? nowMs - readAtMs : nowMs - memo.at;
+      if (ageMs >= 0 && ageMs < ROLE_ACTIVITY_CACHE_MS) return { ...memo.value, cached: true };
+    }
+    const loaded = await loadOpsModule(layout);
+    if (!loaded.ok) {
+      return { ok: false, code: loaded.code, message: loaded.message, project: projectName, readAt: '', roles: {}, cached: false };
+    }
+    const ops = loaded.ops || {};
+    if (typeof ops.computeRoleActivity !== 'function') {
+      return {
+        ok: false, code: 'OPS_NOT_READY', project: projectName, readAt: '', roles: {}, cached: false,
+        message: '团队工具尚未提供 computeRoleActivity()：活跃度三列暂不可用（不猜、不前端自算）'
+      };
+    }
+    try {
+      const value = await Promise.resolve(ops.computeRoleActivity(projectName, { now: nowMs }));
+      const record = (value && typeof value === 'object') ? { ...value } : { ok: false, code: 'BAD_BACKEND_RESULT', message: '活跃度返回不是对象' };
+      const readAt = String(record.readAt || new Date(nowMs).toISOString());
+      const out = {
+        ...record,
+        ok: record.ok !== false,
+        project: String(record.project || projectName),
+        readAt,
+      };
+      if (out.ok) roleActivityCache.set(projectName, { at: nowMs, readAt, value: out });
+      return { ...out, cached: false };
+    } catch (error) {
+      return {
+        ok: false, code: 'ROLE_ACTIVITY_FAILED', project: projectName, readAt: '', roles: {}, cached: false,
+        message: String((error && error.message) || error).slice(0, 300)
+      };
+    }
+  }
+
+  /** R-1dfb（AC1①）：deadline 到期泵。source ∈ {deadline,tick}，由调用方给（审计第 12 键）。 */
+  async function dispatchDeadlineTick(project, tickOptions = {}) {
+    const projectName = String(project || '').trim();
+    const source = tickOptions && tickOptions.source === 'tick' ? 'tick' : 'deadline';
+    const now = Number(tickOptions && tickOptions.now) > 0 ? Number(tickOptions.now) : Date.now();
+    const empty = { ok: false, source, now, checked: 0, rows: [], escalated: [], retried: [] };
+    if (!projectName) return { ...empty, code: 'BAD_PROJECT', message: '缺少项目名' };
+    const loaded = await loadOpsModule(layout);
+    if (!loaded.ok) return { ...empty, code: loaded.code, message: loaded.message };
+    const ops = loaded.ops || {};
+    if (typeof ops.tickDispatchDeadlines !== 'function') {
+      return { ...empty, code: 'OPS_NOT_READY', message: '团队工具尚未提供 tickDispatchDeadlines()' };
+    }
+    try {
+      const value = await Promise.resolve(ops.tickDispatchDeadlines(projectName, { now, source }));
+      const record = (value && typeof value === 'object') ? { ...value } : {};
+      return {
+        ...empty,
+        ...record,
+        ok: record.ok !== false,
+        source: String(record.source || source),
+        now: Number(record.now) > 0 ? Number(record.now) : now,
+        checked: Number.isFinite(Number(record.checked)) ? Number(record.checked) : 0,
+        rows: Array.isArray(record.rows) ? record.rows : [],
+        escalated: Array.isArray(record.escalated) ? record.escalated : [],
+        retried: Array.isArray(record.retried) ? record.retried : [],
+      };
+    } catch (error) {
+      return { ...empty, code: 'DEADLINE_TICK_FAILED', message: String((error && error.message) || error).slice(0, 300) };
+    }
+  }
+
+  /** R-1dfb（AC4）：停滞角色恢复/分级。壳层只传 now/write，判定与写审计在后端。 */
+  async function recoverStalledRoles(project, recoverOptions = {}) {
+    const projectName = String(project || '').trim();
+    const now = Number(recoverOptions && recoverOptions.now) > 0 ? Number(recoverOptions.now) : Date.now();
+    const empty = { ok: false, now, rows: [], cleared: [], escalated: [] };
+    if (!projectName) return { ...empty, code: 'BAD_PROJECT', message: '缺少项目名' };
+    const loaded = await loadOpsModule(layout);
+    if (!loaded.ok) return { ...empty, code: loaded.code, message: loaded.message };
+    const ops = loaded.ops || {};
+    if (typeof ops.recoverStalledRoles !== 'function') {
+      return { ...empty, code: 'OPS_NOT_READY', message: '团队工具尚未提供 recoverStalledRoles()' };
+    }
+    try {
+      const value = await Promise.resolve(ops.recoverStalledRoles(projectName, { now, write: recoverOptions.write !== false }));
+      const record = (value && typeof value === 'object') ? { ...value } : {};
+      return {
+        ...empty,
+        ...record,
+        ok: record.ok !== false,
+        now: Number(record.now) > 0 ? Number(record.now) : now,
+        rows: Array.isArray(record.rows) ? record.rows : [],
+        cleared: Array.isArray(record.cleared) ? record.cleared : [],
+        escalated: Array.isArray(record.escalated) ? record.escalated : [],
+      };
+    } catch (error) {
+      return { ...empty, code: 'STALL_RECOVERY_FAILED', message: String((error && error.message) || error).slice(0, 300) };
+    }
   }
 
   async function sendDispatch(input = {}) {
@@ -10311,6 +10454,10 @@ async function applyOwnerDecisionToRequirement(input = {}) {
     sendWorkflowNotice,
     // B-20261113-005705-a577：派单队列兜底泵（全队空闲时由工作台定时器触发）
     pumpDispatchQueue,
+    // R-1dfb（F3/F7/AC1/AC4/AC5）：deadline 到期泵 / 停滞恢复 / 活跃度三列（后端 ops.mjs，壳层只桥接 + 5 分钟缓存）
+    dispatchDeadlineTick,
+    recoverStalledRoles,
+    roleActivity,
     ackDispatch,
     inboxFor,
     readFor,
@@ -10961,6 +11108,11 @@ module.exports = {
   // R-ea86：PM 代验收证据校验（纯函数，供 ownerAccept 与可复跑测试共用同一份判据）
   acceptEvidenceCheck,
   acceptEvidenceStaleness,
+  // R-1dfb：派单 deadline tick / 停滞恢复 / 活跃度三列（实例能力，同时经 createTeamTools 返回对象暴露；
+  // 这里显式列出是让 require('./team-tools').roleActivity 这类直取调用方也拿得到，别只藏在 defaultTools 里）
+  roleActivity: defaultTools.roleActivity,
+  dispatchDeadlineTick: defaultTools.dispatchDeadlineTick,
+  recoverStalledRoles: defaultTools.recoverStalledRoles,
   // R-dba4：需求行大白话 copy 的白名单与纯函数（供壳层 IPC 与 scripts/test-requirement-copy.cjs 共用）
   REQUIREMENT_COPY_BLOCKS,
   REQUIREMENT_COPY_SOURCES,

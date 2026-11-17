@@ -1853,7 +1853,9 @@ async function wakeSessionForMessage({ project, to, msg, isDispatch = true, engi
  * 队列续跑：角色完成后自动取该角色下一条排队派单（send --ack --queue 入队）。
  * 目标角色仍忙（G5）则保留队列并返回 blocked；working 幽灵满 30 分钟不占名额。
  */
-export async function pumpDispatchQueue(project, { role = '' } = {}) {
+export async function pumpDispatchQueue(project, { role = '', source = 'tick' } = {}) {
+  // R-1dfb：审计第 12 键 source ∈ {deadline,tick}（deadline=到期定时器，tick=60 秒兜底）；非法值按 tick 记。
+  const pumpSource = source === 'deadline' ? 'deadline' : 'tick';
   // B-384e：队列泵不受已过期派单锁影响——先释放过期锁再判角色忙闲。
   const expiredLock = releaseExpiredDispatchLock(project, { source: 'pump' });
   // B-405f ②：目标会话无活性的 pending 锁也在这里清（泵是定时入口，覆盖 PM 不操作的时间段）。
@@ -1876,7 +1878,9 @@ export async function pumpDispatchQueue(project, { role = '' } = {}) {
       tasks: listTasks(project),
       locks: listLocks().filter((lock) => !lock.stale),
       excludeTaskIds: candidate.task ? [String(candidate.task)] : [],
-      staleWorkingMs: STALE_WORKING_MS,
+      // R-1dfb F3（忙判定分层）：泵只处理「有队列项等待的角色」——忙上限降为投递 deadline（5 分钟）；
+      // 无队列项时的角色忙判定（G5 / runDispatchGates）仍走 STALE_WORKING_MS(30 分钟)，门禁一行不改。
+      staleWorkingMs: DISPATCH_QUEUE_IDLE_BACKFILL_MS,
     });
     if (busy) {
       // B-20261116-104231-4c6f：滞留超阈值 + 目标角色确实空闲（无提交/无文件写入/无 ack/无近期 working）
@@ -1917,6 +1921,19 @@ export async function pumpDispatchQueue(project, { role = '' } = {}) {
       role: 'system', action: 'dispatch_queue_blocked', project, target: String(item.id),
       note: `${e.code || 'TARGET_UNREACHABLE'} ${String(e.message || '').slice(0, 120)}`,
     });
+    // R-1dfb 卷 §三 blocked：探活失败/会话不可用 → 状态 blocked + 12 键审计（队列项原样保留，不丢单）。
+    try {
+      const blockedCode = String(e.code || 'TARGET_SESSION_UNREACHABLE');
+      const prevAttempt = Number((readDeliveryState(project).items[item.id] || {}).attempt) || Number(item.attempt) || 1;
+      markDeliveryState(project, item.id, { state: 'blocked', attempt: prevAttempt, lastAt: nowIso(), lastCode: blockedCode });
+      const atMs = Date.parse(String(item.at || ''));
+      appendDeliveryAudit(project, {
+        itemId: item.id, to: String(item.to || ''), taskId: String(item.task || ''), attempt: prevAttempt,
+        result: 'blocked', code: blockedCode,
+        stallMs: Number.isFinite(atMs) ? Math.max(0, Date.now() - atMs) : 0,
+        messageId: '', wakeOk: false, source: pumpSource,
+      });
+    } catch { /* 状态/审计写失败不阻断重泵 */ }
     return {
       ok: true, pumped: false, reason: e.code || 'TARGET_SESSION_UNREACHABLE',
       blocked: { code: e.code || 'TARGET_SESSION_UNREACHABLE', message: String(e.message || '') },
@@ -1938,6 +1955,35 @@ export async function pumpDispatchQueue(project, { role = '' } = {}) {
   const wake = await wakeSessionForMessage({ project, to: String(item.to || ''), msg, isDispatch: true });
   removeDispatchQueueItem(project, item.id);
   appendEvent({ role: 'system', action: 'dispatch_pump', project, target: msg.id, note: `queue=${item.id} to=${item.to} task=${item.task || ''}` });
+  // R-1dfb F1/F4：投递成功 → 状态 delivered + 12 键审计（wakeOk 记唤醒是否成功，失败码记 code）。
+  try {
+    const atMs = Date.parse(String(item.at || ''));
+    const prevRow = readDeliveryState(project).items[item.id] || null;
+    const prevAttempt = Number((prevRow && prevRow.attempt) || item.attempt) || 1;
+    const prevState = String((prevRow && prevRow.state) || '');
+    // 沙盘（wakeSessionForMessage 返回 null）按「已跳过、不算失败」记，与既有 wakeFailed 判据同口径。
+    const wakeSkipped = wake === null;
+    const wakeOk = wakeSkipped ? true : Boolean(wake && wake.ok === true);
+    const wakeCode = wakeOk ? '' : String((wake && (wake.code || wake.why)) || 'WAKE_NOT_OK');
+    const stallMs = Number.isFinite(atMs) ? Math.max(0, Date.now() - atMs) : 0;
+    // 到期/阻塞/升级后的再次投递：先留一行 retry（卷 §八 result 枚举；重投不算首次 delivered）。
+    if (['stalled', 'blocked', 'upgraded'].includes(prevState)) {
+      appendDeliveryAudit(project, {
+        itemId: item.id, to: String(item.to || ''), taskId: String(item.task || ''), attempt: prevAttempt,
+        result: 'retry', code: prevState === 'blocked' ? 'RETRY_AFTER_BLOCKED'
+          : (prevState === 'upgraded' ? 'RETRY_AFTER_UPGRADED' : 'RETRY_AFTER_STALL'),
+        stallMs, messageId: '', wakeOk: false, source: pumpSource,
+      });
+    }
+    markDeliveryState(project, item.id, { state: 'delivered', attempt: prevAttempt, lastAt: nowIso(), lastCode: wakeCode });
+    appendDeliveryAudit(project, {
+      itemId: item.id, to: String(item.to || ''), taskId: String(item.task || ''), attempt: prevAttempt,
+      result: 'delivered', code: wakeCode, stallMs,
+      messageId: String(msg.id || ''), wakeOk, source: pumpSource,
+    });
+  } catch { /* 状态/审计写失败不阻断投递 */ }
+  // 卷 §十：出队即清该 item 的全部告警 level 键（避免 24 小时去重被旧键长期占用）。
+  try { clearQueueAlertLevels(project, item.id); } catch { /* 清标失败不影响投递 */ }
   // B-4c6f：补投留审计（append-only，含活跃度证据；重复投递由「投递成功即移除队列项」天然避免）。
   if (idleBackfill) {
     const row = {
@@ -2053,56 +2099,38 @@ const DISPATCH_QUEUE_STALE_MS = (() => {
   const raw = Number(process.env.TEAM_DISPATCH_QUEUE_STALE_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 5 * 60 * 1000;
 })();
-const DISPATCH_QUEUE_ALERT_DEDUPE_MS = 10 * 60 * 1000;
+// 卷 §四：告警去重键统一为 itemId+level，同 item 同 level 24 小时内只发一次
+// （去重窗口常量 QUEUE_ALERT_LEVEL_DEDUPE_MS 见下方 1dfb 段；旧 10 分钟常量不再使用）。
 
 function dispatchQueueStaleFile(project) {
   return path.join(projectStatePaths(project).dir, '派单队列滞留.json');
 }
 
 /**
- * 队列项滞留告警：>5 分钟未投递 → PM 收一条 escalation（含 role/queueId/滞留分钟/卡住原因提示）。
- * 同一队列项 10 分钟内只告警一次；项被投递/作废后自然不再命中。
+ * 队列项滞留告警（R-1dfb：单链三层的**链首 notice**，阈值/文案与人话保留既有行为）。
+ * >5 分钟未投递 → PM 收一条 escalation（含 role/queueId/滞留分钟/attempt/三信号多旧/最后回执）。
+ * 去重键 itemId+notice（卷 §四；`派单队列滞留.json → alerted[itemId] = {notice: at}`，兼容旧字符串值）。
+ * 同一 item+level 24 小时内只发一次；项被投递/作废/恢复后由入口清 alerted。
  */
 export function queueStaleCheck(project, { now = Date.now() } = {}) {
   const name = String(project || '');
   if (!name) return { ok: false, code: 'BAD_PROJECT' };
-  const file = dispatchQueueStaleFile(name);
-  const state = (() => { try { return readJson(file, {}) || {}; } catch { return {}; } })();
-  const alerted = state.alerted && typeof state.alerted === 'object' ? state.alerted : {};
+  const nowMs = Number(now) || Date.now();
   const queue = readDispatchQueue(name);
   const hits = [];
   for (const item of queue.items) {
     if (!item || !item.id) continue;
     const at = Date.parse(String(item.at || ''));
     if (!Number.isFinite(at)) continue;
-    const age = now - at;
+    const age = nowMs - at;
     if (age < DISPATCH_QUEUE_STALE_MS) continue;
-    const last = Date.parse(String(alerted[item.id] || ''));
-    if (Number.isFinite(last) && now - last < DISPATCH_QUEUE_ALERT_DEDUPE_MS) continue;
-    const minutes = Math.round(age / 60000);
-    const to = String(item.to || '');
-    const roleName = ROLE_NAMES[to] || to || '（无目标角色）';
-    // B-4c6f：告警必须带「目标角色是否真在动」的证据（最近提交/文件 mtime/ack/working），只报分钟数不算。
-    let activity = null;
-    try { activity = roleActivityEvidence(name, to); } catch { activity = null; }
-    const activityLine = activity
-      ? `活跃度证据：${activity.detail}\n判定：${activity.idle ? `空闲（${Math.round(activity.windowMs / 60000)} 分钟内无任何动静）` : '仍在动（不应补投，先看它在做什么）'}`
-      : '活跃度证据：读取失败（按「不确定」处理，不自动补投）';
-    try {
-      const msg = sendMessage({
-        from: 'system', to: 'pm', type: 'escalation', project: name,
-        subject: `派单队列滞留 ${minutes} 分钟：发给${roleName}`,
-        body: `${item.id} 在队列里挂了 ${minutes} 分钟还没投出去。\n目标角色：${to || '-'}\n队列项创建时间：${item.at || '-'}\n主题：${String(item.subject || '').slice(0, 60)}\n${activityLine}\n可能原因：目标角色的派单锁未释放 / 角色名册无活会话 / 唤醒失败 / 角色身上挂了未 done 任务。\n请 PM 过问（可跑 team.mjs queue status 看现场，queue pump 手动泵一次）。`,
-        ackRequired: false,
-      });
-      alerted[item.id] = nowIso();
-      hits.push({ queueId: item.id, to, minutes, messageId: msg.id });
-      appendEvent({ role: 'system', sessionId: '', action: 'dispatch_queue_stale_alert', project: name, target: String(item.id), note: `to=${to} age=${minutes}min message=${msg.id}` });
-    } catch (e) {
-      hits.push({ queueId: item.id, to, error: String((e && e.message) || e) });
-    }
+    const sent = raiseQueueEscalation(name, {
+      itemId: String(item.id), to: String(item.to || ''), taskId: String(item.task || ''),
+      attempt: Number(item.attempt) || 1, stallMs: age, level: 'notice', now: nowMs,
+    });
+    if (!sent) continue;
+    hits.push({ queueId: item.id, to: String(item.to || ''), minutes: Math.round(age / 60000), level: 'notice', messageId: sent.messageId });
   }
-  try { writeJson(file, { schema: 1, project: name, staleMs: DISPATCH_QUEUE_STALE_MS, alerted, updatedAt: nowIso() }); } catch { /* 状态写失败不阻断 */ }
   return { ok: true, staleMs: DISPATCH_QUEUE_STALE_MS, alerted: hits.length, hits, remaining: queue.items.length };
 }
 
@@ -2232,6 +2260,1031 @@ export function roleActivityEvidence(projectName, role, { now = Date.now() } = {
   return evidence;
 }
 
+// ============================================================================
+// R-20261116-104535-1dfb（P0）派单必达 + 空闲唤醒 + 活跃度看板 —— 团队工具层
+// 卷 §三（六态状态机）/§四（单链三层升级）/§五（三信号）/§七（活跃度审计 10 键）
+// /§八（投递审计 12 键）/§十三（source 枚举与回执信号唯一化）
+// 边界：不改投递语义（归缺陷 B-4c6f / 0a7e5bb）、不改 G1–G5 门禁、不改 runDispatchGates。
+// ============================================================================
+
+/** tick 泵周期；沙盘可设 1000 驱动 source=tick（卷 §(六)1）。 */
+const AWB_STALL_TICK_MS = (() => {
+  const raw = Number(process.env.AWB_STALL_TICK_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60000;
+})();
+/** escalate / force 两层的时间口径（卷 §(三)2）：默认 15 / 30 分钟，可注入压缩。 */
+const AWB_STALL_ESCALATE_MS = (() => {
+  const raw = Number(process.env.AWB_STALL_ESCALATE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15 * 60 * 1000;
+})();
+const AWB_STALL_FORCE_MS = (() => {
+  const raw = Number(process.env.AWB_STALL_FORCE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60 * 1000;
+})();
+/** 连续多少次 idle 转红标 + PM 升级（卷 §五 / F6，默认 2）。 */
+const AWB_STALL_IDLE_CONSECUTIVE = (() => {
+  const raw = Number(process.env.AWB_STALL_IDLE_CONSECUTIVE);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 2;
+})();
+/** 同 item 同 level 24 小时内只发一次（卷 §四；兼容旧字符串值 = notice）。 */
+const QUEUE_ALERT_LEVEL_DEDUPE_MS = 24 * 60 * 60 * 1000;
+/** 同 itemId 连续唤醒失败升级阈值（卷 §(六)2 唯一的「3 次」计数）。 */
+const STALL_WAKE_FAIL_UPGRADE = 3;
+/** 角色目录扫描时跳过的目录（卷 §五：_backup/**、_tmp/** 不算活动）。 */
+const ACTIVITY_SKIP_DIRS = new Set(['.git', 'node_modules', '_backup', '_tmp']);
+/** 投递审计 12 键（卷 §八：键顺序固定，多键/缺键即不合格）。 */
+const DELIVERY_AUDIT_KEYS = ['at', 'project', 'itemId', 'to', 'taskId', 'attempt', 'result', 'code', 'stallMs', 'messageId', 'wakeOk', 'source'];
+/** 活跃度审计 10 键（卷 §七：键顺序固定）。 */
+const ROLE_ACTIVITY_AUDIT_KEYS = ['at', 'project', 'role', 'action', 'verdict', 'idleMs', 'signals', 'wake', 'level', 'detail'];
+/** 投递审计 result 枚举（卷 §八）。 */
+const DELIVERY_RESULTS = ['delivered', 'blocked', 'timeout', 'retry', 'upgraded', 'forced', 'recovered'];
+/** 活跃度审计 action 枚举（卷 §七）。 */
+const ROLE_ACTIVITY_ACTIONS = ['stalled', 'woken', 'escalated', 'recovered', 'unknown'];
+/** 单链三层（卷 §四）。 */
+const QUEUE_ALERT_LEVELS = ['notice', 'escalate', 'force'];
+
+function orderedRow(order, values) {
+  const row = {};
+  for (const key of order) row[key] = values[key];
+  return row;
+}
+
+/** 投递状态文件（卷 §三：只读消费方不得改）。 */
+export function dispatchDeliveryStateFile(project) {
+  return path.join(projectStatePaths(String(project || '')).dir, '派单投递状态.json');
+}
+
+/** 投递审计（12 键，append-only）。 */
+export function dispatchDeliveryAuditFile(project) {
+  return path.join(projectStatePaths(String(project || '')).dir, '派单投递审计.jsonl');
+}
+
+/** 角色活跃度审计（10 键，append-only）。 */
+export function roleActivityAuditFile(project) {
+  return path.join(projectStatePaths(String(project || '')).dir, '活跃度审计.jsonl');
+}
+
+function emptyDeliveryItem(attempt = 1) {
+  const n = Number(attempt);
+  return {
+    state: 'queued',
+    attempt: Number.isFinite(n) && n > 0 ? Math.floor(n) : 1,
+    lastAt: '',
+    lastCode: '',
+    stalledAt: '',
+    upgradedAt: '',
+  };
+}
+
+/** 读 派单投递状态.json（缺文件/坏文件退化为空表，绝不抛）。 */
+export function readDeliveryState(project) {
+  const name = String(project || '');
+  const file = dispatchDeliveryStateFile(name);
+  let data = {};
+  try { data = readJson(file) || {}; } catch { data = {}; }
+  const rawItems = data && typeof data.items === 'object' && data.items ? data.items : {};
+  const items = {};
+  for (const [itemId, row] of Object.entries(rawItems)) {
+    if (!row || typeof row !== 'object') continue;
+    items[String(itemId)] = {
+      state: String(row.state || 'queued'),
+      attempt: Number(row.attempt) > 0 ? Math.floor(Number(row.attempt)) : 1,
+      lastAt: String(row.lastAt || ''),
+      lastCode: String(row.lastCode || ''),
+      stalledAt: String(row.stalledAt || ''),
+      upgradedAt: String(row.upgradedAt || ''),
+    };
+  }
+  return { schema: 1, project: name || String((data && data.project) || ''), items };
+}
+
+function writeDeliveryState(project, state) {
+  const name = String(project || '');
+  const items = {};
+  for (const [itemId, row] of Object.entries((state && state.items) || {})) {
+    const base = emptyDeliveryItem(row && row.attempt);
+    items[String(itemId)] = {
+      state: String((row && row.state) || base.state),
+      attempt: Number(row && row.attempt) > 0 ? Math.floor(Number(row.attempt)) : base.attempt,
+      lastAt: String((row && row.lastAt) || ''),
+      lastCode: String((row && row.lastCode) || ''),
+      stalledAt: String((row && row.stalledAt) || ''),
+      upgradedAt: String((row && row.upgradedAt) || ''),
+    };
+  }
+  writeJson(dispatchDeliveryStateFile(name), { schema: 1, project: name, items });
+  return { schema: 1, project: name, items };
+}
+
+/** 单条 item 状态打补丁（读-改-写；只用于状态机入口，不用于只读链路）。 */
+function markDeliveryState(project, itemId, patch = {}) {
+  const name = String(project || '');
+  const id = String(itemId || '');
+  if (!name || !id) return null;
+  const state = readDeliveryState(name);
+  const base = emptyDeliveryItem((state.items[id] && state.items[id].attempt) || patch.attempt);
+  state.items[id] = { ...base, ...(state.items[id] || {}), ...patch, attempt: Number((state.items[id] && state.items[id].attempt) || patch.attempt || base.attempt) || 1 };
+  writeDeliveryState(name, state);
+  return state.items[id];
+}
+
+/** 追加一行 12 键投递审计；result 不在枚举里直接拒写（防止枚举污染）。 */
+function appendDeliveryAudit(project, row = {}) {
+  const name = String(project || '');
+  if (!name) return null;
+  const result = String(row.result || '');
+  if (!DELIVERY_RESULTS.includes(result)) fail('BAD_DELIVERY_RESULT', `投递审计 result 不在枚举内：${result}`, { allowed: DELIVERY_RESULTS });
+  const n = Number(row.attempt);
+  const stall = Number(row.stallMs);
+  const out = orderedRow(DELIVERY_AUDIT_KEYS, {
+    at: String(row.at || nowIso()),
+    project: name,
+    itemId: String(row.itemId || ''),
+    to: String(row.to || ''),
+    taskId: String(row.taskId || ''),
+    attempt: Number.isFinite(n) && n > 0 ? Math.floor(n) : 1,
+    result,
+    code: String(row.code || ''),
+    stallMs: Number.isFinite(stall) && stall > 0 ? Math.round(stall) : 0,
+    messageId: String(row.messageId || ''),
+    wakeOk: row.wakeOk === true,
+    source: String(row.source || 'tick'),
+  });
+  try { appendLine(dispatchDeliveryAuditFile(name), JSON.stringify(out)); } catch { /* 审计写失败不阻断主流程 */ }
+  return out;
+}
+
+function readDeliveryAuditRows(project) {
+  try { return readJsonl(dispatchDeliveryAuditFile(project)) || []; } catch { return []; }
+}
+
+/** 追加一行 10 键活跃度审计（缺键/多键即不合格 → 这里用固定键序重建）。 */
+function appendRoleActivityAudit(project, row = {}) {
+  const name = String(project || '');
+  if (!name) return null;
+  const action = String(row.action || '');
+  if (!ROLE_ACTIVITY_ACTIONS.includes(action)) fail('BAD_ACTIVITY_ACTION', `活跃度审计 action 不在枚举内：${action}`, { allowed: ROLE_ACTIVITY_ACTIONS });
+  const idleMs = Number(row.idleMs);
+  const signals = row.signals && typeof row.signals === 'object' ? row.signals : {};
+  const wake = row.wake && typeof row.wake === 'object' ? row.wake : {};
+  const out = orderedRow(ROLE_ACTIVITY_AUDIT_KEYS, {
+    at: String(row.at || nowIso()),
+    project: name,
+    role: String(row.role || ''),
+    action,
+    verdict: String(row.verdict || ''),
+    idleMs: Number.isFinite(idleMs) ? Math.round(idleMs) : -1,
+    signals: {
+      fileAt: String(signals.fileAt || ''),
+      ackAt: String(signals.ackAt || ''),
+      workingAt: String(signals.workingAt || ''),
+    },
+    wake: {
+      ok: wake.ok === true,
+      messageId: String(wake.messageId || ''),
+      code: String(wake.code || ''),
+    },
+    level: QUEUE_ALERT_LEVELS.includes(String(row.level || '')) || String(row.level || '') === 'none' ? String(row.level || 'none') : 'none',
+    detail: String(row.detail || ''),
+  });
+  try { appendLine(roleActivityAuditFile(name), JSON.stringify(out)); } catch { /* 审计写失败不阻断主流程 */ }
+  return out;
+}
+
+function readRoleActivityAuditRows(project) {
+  try { return readJsonl(roleActivityAuditFile(project)) || []; } catch { return []; }
+}
+
+// ---------- 三信号（卷 §五：不用 git、不用邮箱口径） ----------
+
+/** 项目内角色目录（不存在返回 ''）。 */
+function roleDirOf(project, role) {
+  const roleKey = String(role || '');
+  if (!roleKey) return '';
+  let base = '';
+  try { base = String((loadProject(String(project || '')) || {}).path || ''); } catch { base = ''; }
+  if (!base) return '';
+  return path.join(base, ROLE_DIRS[roleKey] || roleKey);
+}
+
+/** 卷 §五文件写入排除项：文件索引.md / 项目索引*.md / *.jsonl / 派单*。 */
+function activityFileExcluded(name) {
+  const n = String(name || '');
+  if (!n) return true;
+  if (n === '文件索引.md') return true;
+  if (/^项目索引.*\.md$/.test(n)) return true;
+  if (/\.jsonl$/i.test(n)) return true;
+  if (/^派单/.test(n)) return true;
+  return false;
+}
+
+/**
+ * 角色目录内文件 max mtime（递归 ≤3 层，排除生成物）。AC8 性能优化（R-1dfb）：
+ * ① 子目录按**目录 mtime 降序**遍历（最新目录优先），命中「窗口内文件」即提前结束：
+ *    idle 判定只需要「有没有窗口内写入」，找到即必为 active（**声音**，不会把在动的角色误判 idle）；
+ *    此时回的是「命中时那个窗口内文件」的时间，不保证是全局 max（仅展示列，偏差 ≤ 空闲窗口）；
+ *    没命中（真 idle 时）会走完整遍历 → fileAt 为精确 max。
+ * ② 每角色扫描上限 ACTIVITY_SCAN_CAP 个文件（达到即停并回 truncated:true，结果里可观测，不静默少扫）。
+ */
+const ACTIVITY_SCAN_CAP = 1500;
+function roleFileWriteScan(project, role, { cutoffMs = 0, cap = ACTIVITY_SCAN_CAP } = {}) {
+  const base = roleDirOf(project, role);
+  if (!base) return { fileAt: '', scanned: 0, truncated: false, earlyExit: false };
+  let latest = 0;
+  let scanned = 0;
+  let truncated = false;
+  let earlyExit = false;
+  const walk = (dir, depth) => {
+    if (earlyExit || depth > 3 || (cap > 0 && scanned >= cap)) return;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    const subdirs = [];
+    for (const entry of entries) {
+      const name = String(entry.name || '');
+      if (entry.isDirectory()) {
+        if (!ACTIVITY_SKIP_DIRS.has(name)) subdirs.push(name);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (activityFileExcluded(name)) continue;
+      if (cap > 0 && scanned >= cap) { truncated = true; break; }
+      scanned += 1;
+      try {
+        const stat = fs.statSync(path.join(dir, name));
+        if (stat.mtimeMs > latest) latest = stat.mtimeMs;
+      } catch { /* 单文件读不到不影响 */ }
+      // 声音早退：命中窗口内写入 → 该角色必为 active，无需继续扫（只影响展示值精度，不影响判定）。
+      if (cutoffMs > 0 && latest >= cutoffMs) { earlyExit = true; return; }
+    }
+    const subs = [];
+    for (const name of subdirs) {
+      try { subs.push({ name, mtimeMs: fs.statSync(path.join(dir, name)).mtimeMs }); } catch { /* 子目录读不到跳过 */ }
+    }
+    subs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const sub of subs) {
+      if (earlyExit) return;
+      if (cap > 0 && scanned >= cap) { truncated = true; return; }
+      walk(path.join(dir, sub.name), depth + 1);
+    }
+  };
+  walk(base, 0);
+  return { fileAt: latest ? new Date(latest).toISOString() : '', scanned, truncated, earlyExit };
+}
+
+function roleFileWriteAt(project, role) {
+  // 升级文案用：不带 cutoff、不限量 → 尽量给精确 max（低频路径，代价可接受）。
+  return roleFileWriteScan(project, role, { cutoffMs: 0, cap: 0 }).fileAt;
+}
+
+/** 日志文件名（YYYY-MM-DD.md）里的本地日期 + 行内 HH:MM:SS → 毫秒（与 core.hhmmss/dayKey 同口径）。 */
+function localLogMs(day, hms) {
+  const d = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day || ''));
+  const t = /^(\d{2}):(\d{2}):(\d{2})$/.exec(String(hms || ''));
+  if (!d || !t) return NaN;
+  return new Date(Number(d[1]), Number(d[2]) - 1, Number(d[3]), Number(t[1]), Number(t[2]), Number(t[3])).getTime();
+}
+
+/** 进程内只读缓存（AC8）：文件签名（mtimeMs+size）没变就不重读；上限 40 个文件，超了整表清空。 */
+const ACTIVITY_FILE_CACHE = new Map();
+function cachedFileText(file) {
+  let sig = '';
+  try {
+    const st = fs.statSync(file);
+    sig = `${st.mtimeMs}|${st.size}`;
+  } catch { return null; }
+  const hit = ACTIVITY_FILE_CACHE.get(file);
+  if (hit && hit.sig === sig) return hit.value;
+  let value = null;
+  try { value = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  if (ACTIVITY_FILE_CACHE.size > 40) ACTIVITY_FILE_CACHE.clear();
+  ACTIVITY_FILE_CACHE.set(file, { sig, value });
+  return value;
+}
+
+/**
+ * 回执信号（卷 §十三(二)：唯一来源 = 团队/日志/<date>.md 的 ack 事件行，行首时间取最新一条）。
+ * 格式：`- 09:09:10 [programmer1] ack · M-… — …`；`auto` 不算。日期取文件名。
+ */
+function roleLastAckAt(project, role, { maxDays = 7 } = {}) {
+  const roleKey = String(role || '');
+  if (!roleKey || roleKey === 'auto') return '';
+  let files = [];
+  try { files = fs.readdirSync(PATHS.logs).filter((n) => /^\d{4}-\d{2}-\d{2}\.md$/.test(n)).sort().reverse(); } catch { return ''; }
+  const escaped = roleKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^- (\\d{2}:\\d{2}:\\d{2}) \\[${escaped}\\] ack · `);
+  for (const file of files.slice(0, maxDays)) {
+    const day = file.replace(/\.md$/, '');
+    const text = cachedFileText(path.join(PATHS.logs, file));
+    if (!text) continue;
+    let bestMs = 0;
+    for (const line of text.split(/\r?\n/)) {
+      const m = re.exec(line);
+      if (!m) continue;
+      const ms = localLogMs(day, m[1]);
+      if (Number.isFinite(ms) && ms > bestMs) bestMs = ms;
+    }
+    // 文件已按日期倒序：命中即该角色最新回执，无需再翻更早的日志。
+    if (bestMs) return new Date(bestMs).toISOString();
+  }
+  return '';
+}
+
+/** 近期 working 信号（卷 §五：该角色名下未 done/cancelled 任务的 claimedAt/updatedAt 最大值）。 */
+function roleWorkingAt(project, role, tasks = null) {
+  const roleKey = String(role || '');
+  const rows = Array.isArray(tasks) ? tasks : listTasks(String(project || ''));
+  let latest = 0;
+  for (const task of rows) {
+    if (!task || String(task.owner || '') !== roleKey) continue;
+    if (['done', 'cancelled'].includes(String(task.status || ''))) continue;
+    for (const ts of [task.claimedAt, task.updatedAt]) {
+      const ms = Date.parse(String(ts || ''));
+      if (Number.isFinite(ms) && ms > latest) latest = ms;
+    }
+  }
+  return latest ? new Date(latest).toISOString() : '';
+}
+
+function roleSignalsOf(project, role, { tasks = null } = {}) {
+  return {
+    fileAt: roleFileWriteAt(project, role),
+    ackAt: roleLastAckAt(project, role),
+    workingAt: roleWorkingAt(project, role, tasks),
+  };
+}
+
+/** 某个时间比 now 旧多久的人话（升级文案必带，卷 §四）。 */
+function agoText(iso, now) {
+  const ms = Date.parse(String(iso || ''));
+  if (!Number.isFinite(ms)) return '无记录';
+  const sec = Math.max(0, Math.round((Number(now) - ms) / 1000));
+  if (sec < 90) return `${sec} 秒前`;
+  if (sec < 5400) return `${Math.round(sec / 60)} 分钟前`;
+  return `${Math.round(sec / 3600)} 小时前`;
+}
+
+/** 角色集合：优先项目 roleIds，回退名册 active 成员（与团队台同口径）。 */
+function activityRoleIds(project) {
+  try {
+    const ids = projectRoleIds(loadProject(String(project || '')));
+    if (ids.length) return ids.map(String);
+  } catch { /* 项目未登记：回退名册 */ }
+  try { return activeMembers(loadTeam()).map((m) => String((m && m.role) || '')).filter(Boolean); } catch { return []; }
+}
+
+/**
+ * 一次扫描算全部角色的三信号（AC8：detectStalledRoles 与 computeRoleActivity 共用，不重复扫目录）。
+ * 规则：三源全取不到 → unknown；任一在窗口内 → active；三信号全旧且该角色有未闭环任务 → idle。
+ */
+function scanActivityRoles(project, { now = Date.now() } = {}) {
+  const name = String(project || '');
+  const nowMs = Number(now) || Date.now();
+  const cutoff = nowMs - ROLE_IDLE_WINDOW_MS;
+  const tasks = (() => { try { return listTasks(name); } catch { return []; } })();
+  const roles = {};
+  for (const role of activityRoleIds(name)) {
+    // 带 cutoff 的扫描：命中窗口内写入即早退（verdict 必 active，声音）；真 idle 时走完整遍历给精确 max。
+    const scan = roleFileWriteScan(name, role, { cutoffMs: cutoff });
+    const signals = {
+      fileAt: scan.fileAt,
+      ackAt: roleLastAckAt(name, role),
+      workingAt: roleWorkingAt(name, role, tasks),
+    };
+    const openTaskIds = tasks
+      .filter((task) => task && String(task.owner || '') === String(role) && !['done', 'cancelled'].includes(String(task.status || '')))
+      .map((task) => String(task.id));
+    const missingSignals = [];
+    if (!signals.fileAt) missingSignals.push('file');
+    if (!signals.ackAt) missingSignals.push('ack');
+    if (!signals.workingAt) missingSignals.push('working');
+    const times = [signals.fileAt, signals.ackAt, signals.workingAt]
+      .map((ts) => Date.parse(String(ts || '')))
+      .filter((ms) => Number.isFinite(ms));
+    const latest = times.length ? Math.max(...times) : NaN;
+    let verdict = 'active';
+    if (!times.length) verdict = 'unknown'; // 三源全缺：绝不当 idle
+    else if (latest >= cutoff) verdict = 'active';
+    else if (openTaskIds.length) verdict = 'idle';
+    const row = {
+      verdict,
+      idleMs: Number.isFinite(latest) ? Math.max(0, nowMs - latest) : -1,
+      signals,
+      missingSignals,
+      openTaskIds,
+    };
+    // 扫描触到文件上限时显式标注（不静默少扫）。
+    if (scan.truncated) row.truncated = true;
+    roles[role] = row;
+  }
+  return { nowMs, windowMs: ROLE_IDLE_WINDOW_MS, roles };
+}
+
+/**
+ * F5 三信号卡住判定（卷 §五 / §十三；只读，不写任何文件）。
+ */
+export function detectStalledRoles(project, { now = Date.now() } = {}) {
+  const name = String(project || '');
+  const nowMs = Number(now) || Date.now();
+  const scan = scanActivityRoles(name, { now: nowMs });
+  return { ok: true, now: nowMs, windowMs: scan.windowMs, project: name, roles: scan.roles };
+}
+
+// ---------- 单链三层升级（卷 §四 / §十：一条链、去重键 itemId+level） ----------
+
+function readQueueAlertState(project) {
+  const name = String(project || '');
+  const file = dispatchQueueStaleFile(name);
+  let data = {};
+  try { data = readJson(file) || {}; } catch { data = {}; }
+  return {
+    schema: 1,
+    project: name,
+    staleMs: DISPATCH_QUEUE_STALE_MS,
+    alerted: normalizeQueueAlerted(data && data.alerted),
+    updatedAt: String((data && data.updatedAt) || ''),
+  };
+}
+
+/** 旧结构是 `alerted[itemId] = "<iso>"`（视为 notice）；新结构 `{itemId: {level: at}}`。 */
+function normalizeQueueAlerted(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [itemId, value] of Object.entries(raw)) {
+    if (typeof value === 'string') {
+      if (value) out[String(itemId)] = { notice: value };
+      continue;
+    }
+    if (value && typeof value === 'object') {
+      const levels = {};
+      for (const [level, at] of Object.entries(value)) {
+        if (QUEUE_ALERT_LEVELS.includes(level) && typeof at === 'string' && at) levels[level] = at;
+      }
+      if (Object.keys(levels).length) out[String(itemId)] = levels;
+    }
+  }
+  return out;
+}
+
+function writeQueueAlertState(project, state) {
+  writeJson(dispatchQueueStaleFile(project), {
+    schema: 1,
+    project: String(project || ''),
+    staleMs: DISPATCH_QUEUE_STALE_MS,
+    alerted: normalizeQueueAlerted(state && state.alerted),
+    updatedAt: nowIso(),
+  });
+}
+
+function queueAlertLevelAt(alerted, itemId, level) {
+  const row = (alerted && alerted[String(itemId)]) || {};
+  const ms = Date.parse(String(row[String(level)] || ''));
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+/** 出队/恢复：清该 item 的全部 level 键（卷 §十）。 */
+function clearQueueAlertLevels(project, itemId) {
+  const name = String(project || '');
+  const id = String(itemId || '');
+  if (!name || !id) return false;
+  const state = readQueueAlertState(name);
+  if (!state.alerted[id]) return false;
+  delete state.alerted[id];
+  writeQueueAlertState(name, state);
+  return true;
+}
+
+/**
+ * 发一条单链升级消息（notice/escalate/force 共用；去重键 itemId+level，24h 内只发一次）。
+ * 文案写死带三样：attempt / 三信号各自多旧 / 最后回执时间（卷 §四）。
+ */
+function raiseQueueEscalation(project, { itemId, to, taskId = '', attempt = 1, stallMs = 0, level = 'notice', now = Date.now() } = {}) {
+  const name = String(project || '');
+  const id = String(itemId || '');
+  const lv = String(level || '');
+  const nowMs = Number(now) || Date.now();
+  if (!name || !id || !QUEUE_ALERT_LEVELS.includes(lv)) return null;
+  const state = readQueueAlertState(name);
+  const last = queueAlertLevelAt(state.alerted, id, lv);
+  if (last && nowMs - last < QUEUE_ALERT_LEVEL_DEDUPE_MS) return null;
+  const roleKey = String(to || '');
+  const ageMin = Math.max(0, Math.round(Number(stallMs || 0) / 60000));
+  const signals = (() => {
+    try { return roleSignalsOf(name, roleKey); } catch { return { fileAt: '', ackAt: '', workingAt: '' }; }
+  })();
+  const roleName = roleCnName(roleKey) || roleKey || '（无目标角色）';
+  const subject = lv === 'notice'
+    ? `派单队列滞留 ${ageMin} 分钟（notice）：发给${roleName}`
+    : `派单队列滞留 ${ageMin} 分钟（${lv}）：发给${roleName}`;
+  // 链首 notice 保留既有 B-4c6f 的「活跃度证据 / 判定：仍在动|空闲」段（既有断言与 PM 阅读习惯不破）；
+  // 升级层同样带上它，PM 不必再翻别的文件。
+  let activityLine = '';
+  try {
+    const activity = roleActivityEvidence(name, roleKey);
+    activityLine = activity
+      ? `活跃度证据：${activity.detail}\n判定：${activity.idle ? `空闲（${Math.round(activity.windowMs / 60000)} 分钟内无任何动静）` : '仍在动（不应补投，先看它在做什么）'}`
+      : '活跃度证据：读取失败（按「不确定」处理，不自动补投）';
+  } catch { activityLine = '活跃度证据：读取失败（按「不确定」处理，不自动补投）'; }
+  const body = [
+    `${id} 在派单队列里挂了 ${ageMin} 分钟还没投出去（level=${lv}）。`,
+    `目标角色：${roleKey || '-'}`,
+    `关联任务：${String(taskId || '') || '-'}`,
+    `最新 attempt：${Number(attempt) || 1}（同一 attempt 不重复升级）`,
+    `三信号：文件写入=${signals.fileAt || '无'}（${agoText(signals.fileAt, nowMs)}）；ack 回执=${signals.ackAt || '无'}（${agoText(signals.ackAt, nowMs)}）；近期 working=${signals.workingAt || '无'}（${agoText(signals.workingAt, nowMs)}）`,
+    `最后回执：${signals.ackAt || '无'}`,
+    activityLine,
+    lv === 'force'
+      ? '这是最高级通知（force），仍需 PM 显式决定是否强投；系统不会自动强投。'
+      : '请 PM 过问（queue status 看现场 / queue pump 手动泵一次）。',
+  ].join('\n');
+  try {
+    const msg = sendMessage({
+      from: 'system', to: 'pm', type: 'escalation', project: name,
+      subject: clipMessage(subject, 80), body: clipMessage(body), ackRequired: false,
+    });
+    state.alerted[id] = { ...(state.alerted[id] || {}), [lv]: nowIso() };
+    writeQueueAlertState(name, state);
+    appendEvent({
+      role: 'system', sessionId: '', action: 'dispatch_queue_stale_alert', project: name,
+      target: id, note: `level=${lv} to=${roleKey} attempt=${Number(attempt) || 1} age=${ageMin}min message=${msg.id}`,
+    });
+    return { itemId: id, level: lv, messageId: msg.id, ageMin, at: nowIso() };
+  } catch (e) {
+    return null;
+  }
+}
+
+// ---------- F1/F4：deadline 状态机 + 12 键投递审计（卷 §三 / §八 / §十三） ----------
+
+/**
+ * 状态机到期检查（卷 §三；同步、不投递——投递仍由既有泵负责）。
+ * 进入条件：队列项滞留 ≥ DISPATCH_QUEUE_IDLE_BACKFILL_MS。
+ * 动作：queued → stalled（写 timeout，同一 item+attempt 只写一次）；按滞留时长走单链升级
+ *       （notice 由 queueStaleCheck 链首保留，本函数补 escalate/force 并写 upgraded）。
+ * source ∈ {deadline,tick}：deadline=到期定时器，tick=60 秒 tick 兜底；写进审计第 12 键。
+ */
+export function tickDispatchDeadlines(project, { now = Date.now(), source = 'tick' } = {}) {
+  const name = String(project || '');
+  if (!name) fail('BAD_PROJECT', '需要项目名');
+  const src = String(source || '');
+  if (src !== 'deadline' && src !== 'tick') {
+    fail('BAD_SOURCE', `source 只能是 deadline 或 tick（触发本轮泵的来源）：${src}`, { allowed: ['deadline', 'tick'] });
+  }
+  const nowMs = Number(now) || Date.now();
+  const at = new Date(nowMs).toISOString();
+  const queue = readDispatchQueue(name);
+  const state = readDeliveryState(name);
+  const rows = [];
+  const escalated = [];
+  const retried = [];
+  let checked = 0;
+  let dirty = false;
+  for (const item of queue.items) {
+    if (!item || !item.id) continue;
+    checked += 1;
+    const itemId = String(item.id);
+    const to = String(item.to || '');
+    const taskId = String(item.task || '');
+    const atMs = Date.parse(String(item.at || ''));
+    if (!Number.isFinite(atMs)) continue;
+    const stallMs = Math.max(0, nowMs - atMs);
+    if (!state.items[itemId]) {
+      state.items[itemId] = { ...emptyDeliveryItem(Number(item.attempt) || 1), lastAt: at };
+      dirty = true;
+    }
+    const cur = state.items[itemId];
+    const attempt = Number(cur.attempt) || 1;
+    if (String(cur.state || '') === 'forced') continue; // forced 是终态：不再参与超时统计
+    if (stallMs < DISPATCH_QUEUE_IDLE_BACKFILL_MS) continue;
+    // ① 到期：queued → stalled（同一 item+attempt 只写一次 timeout）
+    if (!['stalled', 'upgraded'].includes(String(cur.state || ''))) {
+      cur.state = 'stalled';
+      cur.stalledAt = at;
+      cur.lastAt = at;
+      cur.lastCode = 'DEADLINE_EXCEEDED';
+      dirty = true;
+      appendDeliveryAudit(name, {
+        itemId, to, taskId, attempt, result: 'timeout', code: 'DEADLINE_EXCEEDED',
+        stallMs, messageId: '', wakeOk: false, source: src,
+      });
+      rows.push({ itemId, to, taskId, result: 'timeout', level: '', messageId: '' });
+      // 交给调用方泵（deadline 定时器 / 60 秒 tick）——本函数不投递
+      retried.push({ itemId, to, taskId, attempt });
+    }
+    // ② 单链三层：链首 notice（queueStaleCheck 的既有行为）→ escalate → force
+    const levels = ['notice'];
+    if (stallMs >= AWB_STALL_ESCALATE_MS) levels.push('escalate');
+    if (stallMs >= AWB_STALL_FORCE_MS) levels.push('force');
+    for (const level of levels) {
+      const sent = raiseQueueEscalation(name, { itemId, to, taskId, attempt, stallMs, level, now: nowMs });
+      if (!sent) continue;
+      escalated.push({ itemId, level, messageId: sent.messageId });
+      if (level === 'notice') continue; // 链首只发通知，不迁移状态、不写投递审计
+      rows.push({ itemId, to, taskId, result: 'upgraded', level, messageId: sent.messageId });
+      cur.state = 'upgraded';
+      cur.upgradedAt = at;
+      cur.lastAt = at;
+      cur.lastCode = `UPGRADED_${level.toUpperCase()}`;
+      dirty = true;
+      appendDeliveryAudit(name, {
+        itemId, to, taskId, attempt, result: 'upgraded', code: `STALL_${level.toUpperCase()}`,
+        stallMs, messageId: sent.messageId, wakeOk: false, source: src,
+      });
+    }
+  }
+  if (dirty) writeDeliveryState(name, state);
+  return { ok: true, source: src, now: nowMs, checked, rows, escalated, retried };
+}
+
+// ---------- F6：idle 角色恢复（重新入队 + 自动唤醒 + 分级 + 恢复清标） ----------
+
+function stalledQueueItemId(role, taskId) {
+  return `Q-STALL-${String(role || '')}-${String(taskId || '').replace(/[^\w-]/g, '') || 'NO_TASK'}`;
+}
+
+function taskIdFromStalledItemId(itemId) {
+  const m = /^Q-STALL-[^-]+-(.+)$/.exec(String(itemId || ''));
+  return m ? String(m[1] || '') : '';
+}
+
+function lastRoleActivityRow(rows, role) {
+  const key = String(role || '');
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    if (row && String(row.role || '') === key) return row;
+  }
+  return null;
+}
+
+function lastRoleAuditAt(rows, role, action) {
+  const key = String(role || '');
+  let latest = 0;
+  for (const row of rows) {
+    if (!row || String(row.role || '') !== key) continue;
+    if (String(row.action || '') !== String(action || '')) continue;
+    const ms = Date.parse(String(row.at || ''));
+    if (Number.isFinite(ms) && ms > latest) latest = ms;
+  }
+  return latest;
+}
+
+function itemIdsFromActivityRow(row) {
+  const detail = String((row && row.detail) || '');
+  const m = /itemIds=([^;]*)/.exec(detail);
+  if (!m) return [];
+  return String(m[1] || '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * 从活跃度审计里读回「上次连续 idle 次数 / 连续唤醒失败次数」（detail 自带计数，跨进程可复算）。
+ * 遇到 recovered 行即清零（一轮空闲结束，下一次重新从 1 计）。
+ */
+function lastIdleEpisodeCounters(rows, role) {
+  const key = String(role || '');
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    if (!row || String(row.role || '') !== key) continue;
+    const action = String(row.action || '');
+    if (action === 'recovered') return { consecutive: 0, wakeFailures: 0 };
+    if (action !== 'stalled' && action !== 'woken' && action !== 'escalated') continue;
+    const detail = String(row.detail || '');
+    const c = /consecutive=(\d+)/.exec(detail);
+    const w = /wakeFailures=(\d+)/.exec(detail);
+    return { consecutive: c ? Number(c[1]) || 0 : 0, wakeFailures: w ? Number(w[1]) || 0 : 0 };
+  }
+  return { consecutive: 0, wakeFailures: 0 };
+}
+
+/** 空闲角色自动唤醒（走既有唤醒链；失败只记 code，不直接升级）。 */
+async function wakeStalledRole(project, role) {
+  const name = String(project || '');
+  const roleKey = String(role || '');
+  const messageId = `WAKE-STALL-${stamp()}-${randomHex(2)}`;
+  try {
+    const wake = await wakeWithGuard({
+      project: name, to: roleKey, isDispatch: false,
+      msg: {
+        id: messageId, from: 'system', to: roleKey, type: 'notice',
+        subject: `空闲唤醒：${roleCnName(roleKey)}`, project: name, task: '',
+      },
+      reason: 'stalled', dedupeKey: '',
+    });
+    const ok = Boolean(wake && wake.ok === true);
+    return {
+      ok,
+      messageId: ok ? messageId : '',
+      code: ok ? '' : String((wake && (wake.code || wake.why)) || 'WAKE_FAILED'),
+    };
+  } catch (e) {
+    return { ok: false, messageId: '', code: String((e && (e.code || e.message)) || 'WAKE_FAILED') };
+  }
+}
+
+/**
+ * 把 idle 角色的未闭环任务重新入队（幂等键 itemId+attempt：已存在同 id 项或同 attempt 近期已入队 → 不新增、不自增）。
+ * 返回 true 表示本次真的新增了队列项。
+ */
+function requeueStalledItem(project, { itemId, role, taskId, now, attempt }) {
+  const name = String(project || '');
+  const id = String(itemId || '');
+  if (!name || !id) return false;
+  const queue = readDispatchQueue(name);
+  if (queue.items.some((row) => String((row && row.id) || '') === id)) return false;
+  const state = readDeliveryState(name);
+  const rec = state.items[id] || null;
+  const lastMs = rec ? Date.parse(String(rec.lastAt || '')) : NaN;
+  if (rec && String(rec.state || '') === 'stalled' && Number.isFinite(lastMs)) {
+    if ((Number(now) || Date.now()) - lastMs < Math.max(ROLE_IDLE_WINDOW_MS, 1000)) return false;
+  }
+  const at = new Date(Number(now) || Date.now()).toISOString();
+  const roleName = roleCnName(role) || role;
+  const body = [
+    `空闲重派：检测到 ${roleName}（${role}）连续 ${Math.max(1, Math.round(ROLE_IDLE_WINDOW_MS / 60000))} 分钟窗口内无文件写入、无回执、无工作更新，但其名下还有未闭环任务。`,
+    `任务：${String(taskId || '') || '（未绑定任务）'}`,
+    `attempt：${Number(attempt) || 1}（同一 item+attempt 不重复入队，也不自增 attempt）`,
+    '请继续推进；若确实卡住，请回执说明卡在哪一步（不改任务状态、不重派他人）。',
+  ].join('\n');
+  queue.items.push({
+    id, at, from: 'system', to: String(role || ''),
+    subject: `空闲重派：${roleName} 有未闭环任务`,
+    body: clipMessage(body),
+    task: String(taskId || ''), project: name, reason: 'stalled',
+    attempt: Number(attempt) || 1, ackRequired: true,
+  });
+  writeDispatchQueue(name, queue);
+  return true;
+}
+
+/**
+ * F6 stalled 路径（卷 §五 / §(五)）：idle 角色 → 重新入队 + 自动唤醒 + 写活跃度审计 + 分级；
+ * 恢复（任一信号进窗口）→ 写 recovered 审计并清标。不改任务状态、不重派他人。
+ * write=false 时只算不写（演练）。
+ */
+export async function recoverStalledRoles(project, { now = Date.now(), write = true } = {}) {
+  const name = String(project || '');
+  if (!name) fail('BAD_PROJECT', '需要项目名');
+  const nowMs = Number(now) || Date.now();
+  const at = new Date(nowMs).toISOString();
+  const detection = detectStalledRoles(name, { now: nowMs });
+  const rows = [];
+  const cleared = [];
+  const escalated = [];
+  const auditRows = readRoleActivityAuditRows(name);
+  const state = readDeliveryState(name);
+  const alertState = readQueueAlertState(name);
+  let stateDirty = false;
+  let alertDirty = false;
+
+  // ① 恢复清标：上次判定 stalled/escalated/woken，但现在有信号在窗口内（或三源全缺 → unknown 不动）
+  for (const [role, info] of Object.entries(detection.roles || {})) {
+    const last = lastRoleActivityRow(auditRows, role);
+    if (!last) continue;
+    if (!['stalled', 'escalated', 'woken'].includes(String(last.action || ''))) continue;
+    if (info.verdict === 'idle' || info.verdict === 'unknown') continue;
+    const itemIds = itemIdsFromActivityRow(last);
+    if (write) {
+      for (const itemId of itemIds) {
+        if (alertState.alerted[itemId]) { delete alertState.alerted[itemId]; alertDirty = true; }
+        const rec = state.items[itemId];
+        const attempt = Number(rec && rec.attempt) || 1;
+        if (rec) {
+          rec.state = 'delivered';
+          rec.lastAt = at;
+          rec.lastCode = 'RECOVERED';
+          rec.stalledAt = '';
+          rec.upgradedAt = '';
+          stateDirty = true;
+        }
+        appendDeliveryAudit(name, {
+          itemId, to: role, taskId: taskIdFromStalledItemId(itemId), attempt,
+          result: 'recovered', code: '', stallMs: 0, messageId: '', wakeOk: false, source: 'tick',
+        });
+      }
+      appendRoleActivityAudit(name, {
+        at, project: name, role, action: 'recovered', verdict: info.verdict, idleMs: info.idleMs,
+        signals: info.signals, wake: { ok: false, messageId: '', code: '' }, level: 'none',
+        detail: `reason=signal_active;itemIds=${itemIds.join(',')}`,
+      });
+    }
+    cleared.push({ role, itemIds });
+  }
+
+  // ② idle 角色：重新入队 + 自动唤醒 + 分级
+  for (const [role, info] of Object.entries(detection.roles || {})) {
+    if (info.verdict !== 'idle') continue;
+    const openTaskIds = Array.isArray(info.openTaskIds) ? info.openTaskIds.slice() : [];
+    const targetTaskIds = openTaskIds.length ? openTaskIds : [''];
+    const attempt = Number(
+      (state.items[stalledQueueItemId(role, targetTaskIds[0] || '')] || {}).attempt,
+    ) || 1; // attempt 取现值：重投不自增（自增只由「投递成功后再失败」触发）
+    const itemIds = targetTaskIds.map((taskId) => stalledQueueItemId(role, taskId));
+    const wake = write ? await wakeStalledRole(name, role) : { ok: false, messageId: '', code: 'DRY_RUN' };
+    const prevCounters = lastIdleEpisodeCounters(auditRows, role);
+    const wakeFailures = wake.ok === true ? 0 : (prevCounters.wakeFailures + (write ? 1 : 0));
+    const consecutive = prevCounters.consecutive + 1;
+    const level = (consecutive >= AWB_STALL_IDLE_CONSECUTIVE || wakeFailures >= STALL_WAKE_FAIL_UPGRADE) ? 'escalate' : 'notice';
+    const requeued = [];
+    if (write) {
+      for (let i = 0; i < itemIds.length; i += 1) {
+        const itemId = itemIds[i];
+        const taskId = targetTaskIds[i] || '';
+        if (!requeueStalledItem(name, { itemId, role, taskId, now: nowMs, attempt })) continue;
+        requeued.push(itemId);
+        const rec = state.items[itemId] || null;
+        state.items[itemId] = {
+          ...emptyDeliveryItem(attempt),
+          ...(rec || {}),
+          state: 'stalled', attempt, lastAt: at, lastCode: 'STALLED', stalledAt: at,
+          upgradedAt: String((rec && rec.upgradedAt) || ''),
+        };
+        stateDirty = true;
+        appendDeliveryAudit(name, {
+          itemId, to: role, taskId, attempt, result: 'retry', code: 'STALLED_REQUEUE',
+          stallMs: Math.max(0, Number(info.idleMs) || 0), messageId: wake.messageId || '',
+          wakeOk: wake.ok === true, source: 'tick',
+        });
+      }
+      appendRoleActivityAudit(name, {
+        at, project: name, role, action: 'stalled', verdict: 'idle', idleMs: info.idleMs,
+        signals: info.signals, wake, level,
+        detail: `reason=stalled;itemIds=${itemIds.join(',')};attempt=${attempt};consecutive=${consecutive};wakeFailures=${wakeFailures}`,
+      });
+      // 卷 §七 action 枚举里的 woken：本轮确实把角色叫醒了 → 另写一行（与 stalled 同轮各一行，
+      // stalled=「判定 stalled 并重新入队」，woken=「自动唤醒成功」；唤醒失败只留 stalled 行 + wake.code）。
+      if (wake.ok === true) {
+        appendRoleActivityAudit(name, {
+          at: new Date(nowMs + 1).toISOString(), project: name, role, action: 'woken', verdict: 'idle', idleMs: info.idleMs,
+          signals: info.signals, wake, level,
+          detail: `reason=woken;wakeMessageId=${wake.messageId || ''};itemIds=${itemIds.join(',')};attempt=${attempt};consecutive=${consecutive};wakeFailures=0`,
+        });
+      }
+    }
+    // 连续 2 次 idle → 红标 + PM escalation（30 分钟去重）
+    let escalation = null;
+    if (level === 'escalate') {
+      const lastEscalatedMs = lastRoleAuditAt(auditRows, role, 'escalated');
+      const canEscalate = !lastEscalatedMs || nowMs - lastEscalatedMs >= 30 * 60 * 1000;
+      if (write && canEscalate) {
+        try {
+          const msg = sendMessage({
+            from: 'system', to: 'pm', type: 'escalation', project: name,
+            subject: clipMessage(`角色连续 ${consecutive} 次空闲未动：${roleCnName(role) || role}`, 80),
+            body: clipMessage([
+              `${roleCnName(role) || role}（${role}）已连续 ${consecutive} 次判定为空闲（窗口 ${Math.round(detection.windowMs / 60000)} 分钟）。`,
+              `未闭环任务：${openTaskIds.join(',') || '无'}`,
+              `三信号：文件写入=${info.signals.fileAt || '无'}（${agoText(info.signals.fileAt, nowMs)}）；ack 回执=${info.signals.ackAt || '无'}（${agoText(info.signals.ackAt, nowMs)}）；近期 working=${info.signals.workingAt || '无'}（${agoText(info.signals.workingAt, nowMs)}）`,
+              `最后回执：${info.signals.ackAt || '无'}`,
+              `自动唤醒：ok=${wake.ok === true}${wake.ok === true ? '' : `（${wake.code || '失败'}）`}；已重新入队 ${requeued.length} 项。`,
+              '系统不会自动强投；请 PM 决定是否介入（催办/换人/拆任务）。',
+            ].join('\n')),
+            ackRequired: false,
+          });
+          escalation = { role, messageId: msg.id, consecutive };
+          appendRoleActivityAudit(name, {
+            at: nowIso(), project: name, role, action: 'escalated', verdict: 'idle', idleMs: info.idleMs,
+            signals: info.signals, wake, level: 'escalate',
+            detail: `reason=consecutive_idle;consecutive=${consecutive};wakeFailures=${wakeFailures};itemIds=${itemIds.join(',')}`,
+          });
+          for (const itemId of itemIds) {
+            const rec = state.items[itemId];
+            if (!rec) continue;
+            rec.state = 'upgraded';
+            rec.upgradedAt = at;
+            rec.lastAt = at;
+            rec.lastCode = 'UPGRADED_IDLE';
+            stateDirty = true;
+          }
+          appendDeliveryAudit(name, {
+            itemId: itemIds[0] || '', to: role, taskId: targetTaskIds[0] || '', attempt,
+            result: 'upgraded', code: 'STALL_IDLE_CONSECUTIVE', stallMs: Math.max(0, Number(info.idleMs) || 0),
+            messageId: msg.id, wakeOk: wake.ok === true, source: 'tick',
+          });
+          escalated.push(escalation);
+        } catch (e) {
+          escalation = { role, error: String((e && e.message) || e) };
+        }
+      }
+    }
+    rows.push({
+      role, verdict: 'idle', action: level === 'escalate' ? 'escalated' : 'stalled',
+      itemIds, wake, level,
+    });
+  }
+
+  if (write && stateDirty) writeDeliveryState(name, state);
+  if (write && alertDirty) writeQueueAlertState(name, alertState);
+  return { ok: true, now: nowMs, rows, cleared, escalated };
+}
+
+/**
+ * F7 取数：团队台三列（卷 §六）。
+ * commitAt = 提交/*.json 中 author===roleId 的 createdAt 最大值（不是 createdBy/at）；
+ * fileAt   = 角色目录内文件 max mtime（同 §五）；
+ * wakeAt   = 唤醒.jsonl 中 to===roleId && ok===true 的最后 at；
+ * 无值给 '' 并在 unknownReasons 记原因（no-submit-record / no-write-in-window / no-wake-ok）。
+ */
+export function computeRoleActivity(project, { now = Date.now() } = {}) {
+  const name = String(project || '');
+  if (!name) fail('BAD_PROJECT', '需要项目名');
+  const nowMs = Number(now) || Date.now();
+  // AC8：与 detectStalledRoles 共用同一次三源扫描（不再重复扫目录）；提交/唤醒按文件签名做进程内缓存。
+  const scan = scanActivityRoles(name, { now: nowMs });
+  const commits = readCommitRows(name);
+  const wakes = readWakeRowsNewestFirst(name);
+  const roles = {};
+  for (const [role, info] of Object.entries(scan.roles || {})) {
+    const commitAt = latestCommitAt(commits, role);
+    const fileAt = String((info.signals || {}).fileAt || '');
+    const wakeAt = latestWakeOkAt(wakes, role);
+    const unknownReasons = [];
+    if (!commitAt) unknownReasons.push('no-submit-record');
+    if (!fileAt) unknownReasons.push('no-write-in-window');
+    if (!wakeAt) unknownReasons.push('no-wake-ok');
+    roles[role] = { commitAt, fileAt, wakeAt, verdict: info.verdict, unknownReasons };
+  }
+  return { ok: true, readAt: nowIso(), project: name, roles };
+}
+
+/** 提交记录（68 份级）：目录签名（mtimeMs+文件数）没变就复用进程内缓存（AC8）。 */
+const COMMIT_ROWS_CACHE = new Map();
+function readCommitRows(project) {
+  const dir = projectStatePaths(String(project || '')).commits;
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return []; }
+  let sig = `${files.length}`;
+  try { sig += `|${fs.statSync(dir).mtimeMs}`; } catch { /* 目录 stat 失败就只按文件数判 */ }
+  const hit = COMMIT_ROWS_CACHE.get(dir);
+  if (hit && hit.sig === sig) return hit.rows;
+  const rows = [];
+  for (const file of files) {
+    try {
+      const row = readJson(path.join(dir, file));
+      if (row && typeof row === 'object') rows.push(row);
+    } catch { /* 单份坏文件跳过 */ }
+  }
+  COMMIT_ROWS_CACHE.set(dir, { sig, rows });
+  return rows;
+}
+
+function latestCommitAt(commits, role) {
+  const key = String(role || '');
+  let latest = '';
+  let latestMs = 0;
+  for (const row of commits) {
+    if (!row || String(row.author || '') !== key) continue;
+    const ts = String(row.createdAt || '');
+    const ms = Date.parse(ts);
+    if (Number.isFinite(ms) && ms > latestMs) { latestMs = ms; latest = ts; }
+  }
+  return latest;
+}
+
+/** 唤醒.jsonl 体积大（数千行）：按文件签名缓存文本与解析结果（AC8）；返回「最新在前」的行。 */
+const WAKE_ROWS_CACHE = new Map();
+function readWakeRowsNewestFirst(project) {
+  const file = path.join(projectStatePaths(String(project || '')).dir, '唤醒.jsonl');
+  let sig = '';
+  try {
+    const st = fs.statSync(file);
+    sig = `${st.mtimeMs}|${st.size}`;
+  } catch { return []; }
+  const hit = WAKE_ROWS_CACHE.get(file);
+  if (hit && hit.sig === sig) return hit.rows;
+  const text = cachedFileText(file) || '';
+  const lines = text.split(/\r?\n/);
+  const rows = [];
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const s = String(lines[i] || '').trim();
+    if (!s) continue;
+    try {
+      const row = JSON.parse(s);
+      if (row && typeof row === 'object') rows.push(row);
+    } catch { /* 坏行跳过 */ }
+  }
+  WAKE_ROWS_CACHE.set(file, { sig, rows });
+  return rows;
+}
+
+function latestWakeOkAt(wakeRowsNewestFirst, role) {
+  const key = String(role || '');
+  for (const row of wakeRowsNewestFirst) {
+    if (!row) continue;
+    if (String(row.to || '') !== key) continue;
+    if (row.ok !== true) continue;
+    const ts = String(row.at || row.time || '');
+    if (ts) return ts;
+  }
+  return '';
+}
+
+/**
+ * 只读入口（CLI）：跑 detectStalledRoles，不写任何审计，返回同构结果（卷 §九 free/idle 夹具）。
+ */
+export function queueIdleCheck(project, { now = Date.now() } = {}) {
+  const name = String(project || '');
+  if (!name) fail('BAD_PROJECT', '需要项目名');
+  return detectStalledRoles(name, { now });
+}
+
 
 /**
  * 队列项会话对齐（B-bbf6 ③）：换人/rotate 后旧 `sessionId` 的队列项不能永久悬挂。
@@ -2347,6 +3400,32 @@ export async function cmdQueue(args) {
   const sub = String((args._ && args._[1]) || 'pump');
   const project = String(args.project || '');
   if (!project) fail('BAD_PROJECT', '需要 --project');
+  if (sub === 'idle-check') {
+    // R-1dfb 卷 §九：专用只读入口——跑一次 detectStalledRoles 并按 §七 同构输出，**不写任何审计**。
+    // 沙盘用 --now 前进时间，压缩 10 分钟等待（不许真等）。
+    let nowMs = Date.now();
+    if (args.now !== undefined && args.now !== true) {
+      const raw = String(args.now).trim();
+      const numeric = Number(raw);
+      const parsed = Number.isFinite(numeric) && raw !== '' ? numeric : Date.parse(raw);
+      if (!Number.isFinite(parsed)) fail('BAD_NOW', `--now 需要 ISO 时间或毫秒时间戳：${raw}`);
+      nowMs = parsed;
+    }
+    const result = queueIdleCheck(project, { now: nowMs });
+    const rows = Object.entries(result.roles || {}).map(([role, info]) => ({
+      角色: roleCnName(role) || role,
+      verdict: info.verdict,
+      静止分钟: Number.isFinite(info.idleMs) && info.idleMs >= 0 ? Math.round(info.idleMs / 60000) : '—',
+      缺信号: (info.missingSignals || []).join(',') || '—',
+      未闭环: (info.openTaskIds || []).length,
+    }));
+    if (args.json) { process.stdout.write(JSON.stringify(result) + '\n'); return; }
+    textOut(`空闲判定（窗口 ${Math.round(result.windowMs / 60000)} 分钟，只读，不写审计）\n` + table(rows, [
+      { key: '角色', label: '角色' }, { key: 'verdict', label: '判定' }, { key: '静止分钟', label: '静止(分)' },
+      { key: '缺信号', label: '缺信号' }, { key: '未闭环', label: '未闭环任务' },
+    ]));
+    return;
+  }
   if (sub === 'status') {
     const queue = readDispatchQueue(project);
     out(args, `派单队列：${queue.items.length} 条`, { ok: true, project, items: queue.items, remaining: queue.items.length });
@@ -2369,7 +3448,7 @@ export async function cmdQueue(args) {
       { ok: true, project, ...prune });
     return;
   }
-  if (sub !== 'pump') fail('BAD_ARGS', `未知的 queue 子命令：${sub}（用法：queue pump|status|reconcile|prune --project P [--apply]）`);
+  if (sub !== 'pump') fail('BAD_ARGS', `未知的 queue 子命令：${sub}（用法：queue pump|status|reconcile|prune|idle-check --project P [--apply] [--now ISO] [--json]）`);
   // B-bbf6：泵之前先对齐会话（换人后旧 sessionId 会让投递永远失败 → 队列静默悬挂）。
   let recon = null;
   try { recon = reconcileDispatchQueueSessions(project, { reason: 'pump', by: 'system' }); } catch (e) { recon = { ok: false, why: String((e && e.message) || e) }; }
@@ -3266,6 +4345,8 @@ export async function cmdSend(args) {
           sessionId: b.sessionId,
         });
         appendEvent({ role: b.role, sessionId: b.sessionId, action: 'dispatch_queue_add', project: b.project, target: item.id, note: `to=${to} task=${item.task || ''}` });
+        // R-1dfb 卷 §三：入队即登记 queued 状态（attempt=1），供 tickDispatchDeadlines 到期检查。
+        try { markDeliveryState(b.project, item.id, { state: 'queued', attempt: 1, lastAt: nowIso(), lastCode: '' }); } catch { /* 状态写失败不阻断入队 */ }
         out(args, `已入队 ${item.id} → ${to}（上一条派单 ${lock.messageId} 未回执；角色完成后自动续跑）`, {
           ok: true, queued: true, item, pending: lock, queue: readDispatchQueue(b.project),
         });
