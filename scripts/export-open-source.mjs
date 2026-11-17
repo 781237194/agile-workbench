@@ -25,6 +25,8 @@ const FILE_WHITELIST = [
   'install.ps1', '安装PM工作台.cmd',
   'assets/pm-workbench.ico', 'assets/pm-workbench.png',
   'scripts/run-electron.cjs', 'scripts/test-entrypoints.cjs',
+  // B-20261117-224827-2636：下载用户要跑 `node scripts/skill-check.cjs` 自检基础流程 skill（依赖 团队/工具/lib/skill-manifest.mjs，已随 团队/工具 分发）。
+  'scripts/skill-check.cjs',
 ];
 const DIR_WHITELIST = ['src', '团队/工具', '团队/角色', '团队/模板', '团队/协议', '团队/skill'];
 
@@ -41,7 +43,7 @@ const REQUIRED_FILES = [
   'package.json', 'LICENSE', 'README.md', 'NOTICE.md', 'start.cmd', 'launch.vbs',
   'install.ps1', '安装PM工作台.cmd',
   'assets/pm-workbench.ico', 'assets/pm-workbench.png',
-  'scripts/run-electron.cjs', 'scripts/test-entrypoints.cjs',
+  'scripts/run-electron.cjs', 'scripts/test-entrypoints.cjs', 'scripts/skill-check.cjs',
   'src/main.js', 'src/preload.js', 'src/dsh-adapter.js', 'src/team-tools.js', 'src/renderer/index.html',
   '团队/工具/team.mjs', '团队/角色/pm.md', '团队/模板/提案.md', '团队/协议/01-会话与必读.md',
   // B-20261117-215444-1f8b：开源包必须带基础流程 skill（六角色 + 索引 + manifest），否则下载用户 boot 无 skill。

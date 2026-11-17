@@ -13,6 +13,7 @@
     "assets/**",
     "scripts/run-electron.cjs",
     "scripts/test-entrypoints.cjs",
+    "scripts/skill-check.cjs",
     "团队/skill/",
     "团队/工具/",
     "团队/角色/",

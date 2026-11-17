@@ -67,10 +67,19 @@ check('E3 导出 manifest 的 sha 与导出文件一致', () => {
   return `${Object.keys(mf.files).length} 文件一致`;
 });
 
-check('E4 package.json files 含 团队/skill/', () => {
+check('E4 package.json files 含 团队/skill/ 与 scripts/skill-check.cjs', () => {
   const j = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   assert.ok((j.files || []).includes('团队/skill/'), 'package.json files 缺 团队/skill/');
+  assert.ok((j.files || []).includes('scripts/skill-check.cjs'), 'package.json files 缺 scripts/skill-check.cjs');
   return 'files 一致';
+});
+
+check('E5 导出含 scripts/skill-check.cjs，且解压后可跑出 SKILL_CHECK_OK', () => {
+  const script = path.join(OUT, 'scripts', 'skill-check.cjs');
+  assert.ok(fs.existsSync(script), '导出缺 scripts/skill-check.cjs');
+  const out = execFileSync(process.execPath, [script], { cwd: OUT, encoding: 'utf8', timeout: 120000 });
+  assert.ok(/SKILL_CHECK_OK/.test(String(out)), `导出树里 skill-check 未输出 OK：${String(out).slice(0, 300)}`);
+  return 'SKILL_CHECK_OK';
 });
 
 fs.rmSync(OUT, { recursive: true, force: true });

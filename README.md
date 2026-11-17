@@ -335,7 +335,9 @@ src/team-tools.js               团队工具入口与工作流封装
 src/renderer/                   独立界面（index.html / app.js / style.css）
 scripts/run-electron.cjs        Electron 启动器（先清 ELECTRON_RUN_AS_NODE）
 scripts/test-entrypoints.cjs    入口脚本测试（不打开窗口）
+scripts/skill-check.cjs         基础流程 skill 清单自检（下载后可直接跑，输出 SKILL_CHECK_OK）
 团队/工具/                       团队命令行：team / workspace / launch 及 lib
+团队/skill/基础流程/             六角色基础流程 skill + 00-索引 + skill-manifest（Owner 批准版本）
 团队/角色/                       六个角色卡 + 启动卡 + 索引
 团队/模板/                       提案、评审、签字、授权、对账、需求模板
 团队/协议/                       六份协作细则
@@ -357,8 +359,8 @@ start.cmd                       Windows 一键启动
 
 - `src/`
 - `assets/pm-workbench.ico`、`assets/pm-workbench.png`
-- `scripts/run-electron.cjs`、`scripts/test-entrypoints.cjs`
-- `团队/工具/`、`团队/角色/`、`团队/模板/`、`团队/协议/`
+- `scripts/run-electron.cjs`、`scripts/test-entrypoints.cjs`、`scripts/skill-check.cjs`
+- `团队/工具/`、`团队/角色/`、`团队/模板/`、`团队/协议/`、`团队/skill/`
 - `install.ps1`、`安装PM工作台.cmd`
 - `LICENSE`、`NOTICE.md`、`README.md`、`start.cmd`
 
@@ -367,6 +369,14 @@ start.cmd                       Windows 一键启动
 ```powershell
 npm pack --dry-run
 ```
+
+下载包解压后的最小自检（不需要安装依赖、不需要 DSH）：
+
+```powershell
+node scripts\skill-check.cjs    # 期望输出：基础流程 skill 清单校验：SKILL_CHECK_OK（0 个 finding）
+```
+
+> 依赖：该脚本只读 `团队/skill/基础流程/` 与 `团队/工具/lib/skill-manifest.mjs`，两者都在上面的白名单里；若报文件不存在，说明包不完整（请提 issue）。
 
 ---
 
