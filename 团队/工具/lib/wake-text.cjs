@@ -15,7 +15,7 @@
  *   · 其它：回复/通知，不必新建任务。
  */
 
-const AC_LINE = 'AC 引用：见需求正文 §验收标准（路径 + sha256）；version/change 指回需求正文当前版本。';
+const AC_LINE = 'AC 引用：见需求正文 §验收标准（写清路径 + sha256）；version/change 指回需求正文当前版本。';
 const BODY_LIMIT = 600;
 
 function buildNoticePrompt({ to, project, messageId, subject, from = '', teamTool = '', body = '' }) {
