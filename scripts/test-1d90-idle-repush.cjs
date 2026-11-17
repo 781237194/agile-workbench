@@ -38,7 +38,15 @@ function check(name, ok, detail) {
   const env = { ...process.env, TEAM_ROOT, TEAM_PROJECTS_ROOT: PROJECTS, TEAM_SELFTEST: '1', TEAM_WORKBENCH_JSON: path.join(SB, 'data', 'userdata', 'workbench.json') };
   fs.mkdirSync(path.join(SB, 'data', 'userdata'), { recursive: true });
   fs.mkdirSync(PROJECTS, { recursive: true });
-  fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => !/[\\/]锁([\\/]|$)/.test(src) });
+  // PM 2026-11-17 12:41 确认真因：cpSync 直复制真团队会在其被并发写时撞 tmp+rename 竞态（随机红）。
+  // 改为白名单只复制稳定内容（工具/协议/宪法/铁律/团队.json），其余状态、邮箱、启动、会话、路由、日志全部不复制；失败重试 3 次。
+  const KEEP_RE = /^团队(\/?$|\/状态\/?$|\/状态\/团队\.json$|\/(工具|协议)(\/|$)|\/(团队宪法\.md|项目铁律\.md)$)/;
+  const copyTeam = () => fs.cpSync(path.join(ROOT, '团队'), TEAM_ROOT, { recursive: true, filter: (src) => KEEP_RE.test(path.relative(ROOT, src).replace(/\\/g, '/')) });
+  let copied = false;
+  for (let attempt = 1; attempt <= 3 && !copied; attempt += 1) {
+    try { fs.rmSync(TEAM_ROOT, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); copyTeam(); copied = true; }
+    catch (e) { if (attempt === 3) throw e; await new Promise((r) => setTimeout(r, 200 * attempt)); }
+  }
   const teamFile = path.join(TEAM_ROOT, '状态', '团队.json');
   const teamData = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
   (teamData.members || []).forEach((m) => { m.sessionId = ''; });
@@ -181,6 +189,66 @@ function check(name, ok, detail) {
   const overLimit = Object.entries(perItem).filter(([, n]) => n > 1);
   check('F 过滤码审计每 itemId 每天 ≤1 行（不刷屏）', overLimit.length === 0, { overLimit, rows: filteredAudit.length });
 
+
+  // ── 第 8 组（B-0868 收口面，PM 2026-11-17 12:06 裁定「选 b 变体」）：只改夹具构造，不改 1d90 判据 ──
+  // 1d90 语义：窗口内有进度=active 不重派；窗口内无进度=idle 重派。因此用同一条 working 任务拨产出 mtime 做双向用例。
+  const pmOutDir = path.join(projectDir, '产出');
+  fs.mkdirSync(pmOutDir, { recursive: true });
+  const pmFreshFile = path.join(pmOutDir, 'pm-fresh.txt');
+  fs.writeFileSync(pmFreshFile, '近期产出\n', 'utf8'); // 刚写 → 窗口内
+  writeTask('T-1d90-pm-working', {
+    owner: 'pm', status: 'working', claimedAt: oldIso,
+    evidence: '产出/pm-fresh.txt',
+    evidenceFiles: [{ path: '产出/pm-fresh.txt', scope: 'project', kind: 'file' }],
+    history: [{ ts: oldIso, by: 'pm', action: 'claim', note: '' }],
+  });
+  const agePmTasks = () => {
+    for (const name of fs.readdirSync(taskDir)) {
+      if (!/-pm-/.test(name)) continue;
+      try { fs.utimesSync(path.join(taskDir, name), new Date(oldMs), new Date(oldMs)); } catch { /* 忽略 */ }
+    }
+  };
+  agePmTasks();
+  const pmStallCount = () => readQueue().filter((row) => String(row && row.id || '').startsWith('Q-STALL-pm-')).length;
+  const pmQueueBeforeFresh = pmStallCount();
+  const detFresh = ops.detectStalledRoles(PROJECT, { now: Date.now() });
+  const pmFreshRow = (detFresh.roles || {}).pm || {};
+  await ops.recoverStalledRoles(PROJECT, { now: Date.now() + 2000, write: true });
+  check('J working + 产出在窗口内 → verdict active 且不重派（反向用例）',
+    pmFreshRow.verdict === 'active' && pmStallCount() === pmQueueBeforeFresh,
+    { verdict: pmFreshRow.verdict, before: pmQueueBeforeFresh, after: pmStallCount(), signals: pmFreshRow.signals });
+  // 同一条 working 任务：把产出 mtime 拨到超窗口 → 应判 idle 并重派入队
+  try { fs.utimesSync(pmFreshFile, new Date(oldMs), new Date(oldMs)); } catch { /* 忽略 */ }
+  agePmTasks();
+  const detStale = ops.detectStalledRoles(PROJECT, { now: Date.now() });
+  const pmStaleRow = (detStale.roles || {}).pm || {};
+  const pmQueueBeforeStale = pmStallCount();
+  await ops.recoverStalledRoles(PROJECT, { now: Date.now() + 4000, write: true });
+  // 口径（PM 2026-11-17 12:04 裁定 working 双向 + 1d90 self_claimed 设计）：
+  // working 且 owner=角色 → requeueStalledItem 判 self_claimed，**不重派给自己**；因此超窗口后应 idle 但不新增 Q-STALL。
+  // 若将来放开 self_claimed（选项 b），本条应改为「idle 且重派入队」。
+  check('K working + 产出超窗口 → verdict idle 且按 self_claimed 不重派（1d90 设计）',
+    pmStaleRow.verdict === 'idle' && pmStallCount() === pmQueueBeforeStale,
+    { verdict: pmStaleRow.verdict, before: pmQueueBeforeStale, after: pmStallCount(), signals: pmStaleRow.signals });
+
+  // 3 accepted + 1 open：accepted 不得进 openTaskIds、不得入队；open 仍算在办
+  writeTask('T-1d90-pm-acc-1', { owner: 'pm', status: 'accepted', acceptedAt: oldIso });
+  writeTask('T-1d90-pm-acc-2', { owner: 'pm', status: 'accepted', acceptedAt: oldIso });
+  writeTask('T-1d90-pm-acc-3', { owner: 'pm', status: 'accepted', acceptedAt: oldIso });
+  writeTask('T-1d90-pm-open-1', { owner: 'pm', status: 'open' });
+  agePmTasks();
+  const detMix = ops.detectStalledRoles(PROJECT, { now: Date.now() });
+  const pmMixRow = (detMix.roles || {}).pm || {};
+  const pmMixOpen = Array.isArray(pmMixRow.openTaskIds) ? pmMixRow.openTaskIds.slice() : [];
+  await ops.recoverStalledRoles(PROJECT, { now: Date.now() + 6000, write: true });
+  const pmQueuedTasks = readQueue()
+    .filter((row) => String(row && row.id || '').startsWith('Q-STALL-pm-'))
+    .map((row) => String(row.task || ''));
+  const acceptedLeaked = ['T-1d90-pm-acc-1', 'T-1d90-pm-acc-2', 'T-1d90-pm-acc-3']
+    .filter((id) => pmMixOpen.includes(id) || pmQueuedTasks.includes(id));
+  check('L 3 accepted + 1 open → openTaskIds 只剩 open、accepted 不入队',
+    acceptedLeaked.length === 0 && pmMixOpen.includes('T-1d90-pm-open-1'),
+    { openTaskIds: pmMixOpen, queued: pmQueuedTasks, acceptedLeaked });
   const passed = results.filter((r) => r.ok).length;
   console.log(`\nB-1d90 空闲重派生产端断言：${passed}/${results.length} PASS`);
   const evDir = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '证据-1d90');
