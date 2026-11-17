@@ -146,15 +146,17 @@ const rowDevCurrent = {
 const rowDevNoDecision = { id: 'R-FIXTURE-dev-none', status: 'dev', ownerReview: { status: 'pending' } };
 const rowClosedStale = { ...rowDevStale, id: 'R-FIXTURE-closed-stale', status: 'accepted' };
 // 范围收窄（PM 2026-11-16 12:02）：dev_done / test_done 之后活已干完，旧批准过期不再挡事，不浮出。
+// **2026-11-17 覆写（B-20261117-090155-9b2a，Owner 报「无法重落」）**：决定绑旧正文时，这两阶段
+// 正是 Owner 需要重新通过的地方 → 恢复浮出；决定绑当前正文的行依旧不浮（S10 的 devCurrent 用例）。
 const rowDevDoneStale = { ...rowDevStale, id: 'R-FIXTURE-dev-done-stale', status: 'dev_done' };
 const rowTestDoneStale = { ...rowDevStale, id: 'R-FIXTURE-test-done-stale', status: 'test_done' };
-check('S10 dev 阶段 + 决定过期 → isPending=true（不再「界面判未决但不列」）；当前版本/无决定/终态/干完阶段均不列',
+check('S10 dev 阶段 + 决定过期 → isPending=true；当前版本/无决定/终态不列；dev_done/test_done 的**过期**决定也列（9b2a 覆写 12:02 收窄）',
   OR_STATE.isPending(rowDevStale) === true
   && OR_STATE.isPending(rowDevCurrent) === false
   && OR_STATE.isPending(rowDevNoDecision) === false
   && OR_STATE.isPending(rowClosedStale) === false
-  && OR_STATE.isPending(rowDevDoneStale) === false
-  && OR_STATE.isPending(rowTestDoneStale) === false,
+  && OR_STATE.isPending(rowDevDoneStale) === true
+  && OR_STATE.isPending(rowTestDoneStale) === true,
   {
     devStale: OR_STATE.isPending(rowDevStale),
     devCurrent: OR_STATE.isPending(rowDevCurrent),

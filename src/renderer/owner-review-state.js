@@ -215,7 +215,11 @@
    * 范围口径（PM 2026-11-16 12:02 收窄）：`dev_done/test_done` 之后活已干完，旧批准过期不再挡事，
    * 浮出来只会让 Owner 白点；`accepted/terminated/rejected` 属终态，一律不浮。
    */
-  const STALE_PENDING_STATUSES = ['ready', 'approved', 'owner_review', 'dispatched', 'dev', 'dev_review', 'iteration'];
+  // PM 2026-11-16 12:02 曾把 dev_done/test_done 收窄掉（担心 Owner 白点）；但 2026-11-17 的
+  // B-20261117-090155-9b2a（Owner 报「正文更新后旧决定失效、等你决定=0、无法重落」）证明：
+  // 决定绑旧正文时，这两个阶段恰恰是 Owner 最需要重新通过的地方。故对「决定已过期」的行恢复浮出，
+  // 决定绑当前正文的行仍按 12:02 口径不浮（见 stalePendingOf：只有 !isDecisionCurrent 才到这里）。
+  const STALE_PENDING_STATUSES = ['ready', 'approved', 'owner_review', 'dispatched', 'dev', 'dev_review', 'iteration', 'dev_done', 'test', 'test_done'];
 
   /** 该行是否「决定绑的是过期版本、且阶段还没到 dev_done」——列表与徽标共用这一个判据。 */
   function stalePendingOf(req) {

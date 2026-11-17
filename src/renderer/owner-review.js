@@ -583,7 +583,7 @@
   // 需重新评审」显式画出来（禁止静默）。口径与后端 owner-review-projection 同判据：
   //   ① 优先读需求行上由 ops 落盘的投影字段（ownerReview.stale）；
   //   ② 没有落盘投影时，按 decisions 真值 + 当前正文 hash 现算（OR_STATE.stalePendingOf，与三界面同源）。
-  const STALE_BADGE_TEXT = '待重评·绑旧版';
+  const STALE_BADGE_TEXT = '正文已更新，需重新通过';
   function staleInfoOf(req) {
     const owner = (req && req.ownerReview && typeof req.ownerReview === 'object') ? req.ownerReview : {};
     const currentHash = String(
@@ -2509,6 +2509,10 @@
       ? decidedInfo.status
       : String((decidedRow && (decidedRow.status || decidedRow.decision))
         || (req && req.ownerReview && req.ownerReview.status) || '');
+    // B-20261117-090155-9b2a：末条决定绑的是**旧正文**时，同状态按钮不得再锁——
+    // 否则「上一次通过的是旧版」这条需求的【通过】是灰的、Owner 只看到「已决定：已通过」，
+    // 就是他报的「无档位无按钮、等你决定=0、无法重落」。后端对旧版决定不判 DUPLICATE，允许重落。
+    const staleDecision = Boolean(OR_STATE && typeof OR_STATE.decidedOnlyOnStaleVersion === 'function' && OR_STATE.decidedOnlyOnStaleVersion(req));
     for (const [selector, targetStatus, verb] of [
       ['[data-or-approve]', 'approved', '通过'],
       ['[data-or-reject]', 'rejected', '打回'],
@@ -2516,14 +2520,19 @@
     ]) {
       const btn = dialog.querySelector(selector);
       if (!btn) continue;
-      const sameDone = Boolean(req && decidedRow && decidedStatus === targetStatus);
+      const sameDone = Boolean(req && decidedRow && decidedStatus === targetStatus && !staleDecision);
       const disabled = Boolean(actionLock) || sameDone;
       btn.disabled = disabled;
       btn.setAttribute('data-or-decided', disabled ? '1' : '0');
       btn.setAttribute('data-or-lock-code', actionLock ? actionLock.code : '');
+      btn.setAttribute('data-or-redecide', staleDecision ? '1' : '0');
       btn.title = actionLock
         ? `已决定：${actionLock.text}；这条不再重复落账`
-        : (sameDone ? `已决定：${STATUS_TEXT[targetStatus] || targetStatus}；同一决定不重复落账` : `提交${verb}`);
+        : (sameDone
+          ? `已决定：${STATUS_TEXT[targetStatus] || targetStatus}；同一决定不重复落账`
+          : (staleDecision
+            ? `上一版正文的${STATUS_TEXT[targetStatus] || targetStatus}已过期：请对当前正文重新落决定（提交${verb}）`
+            : `提交${verb}`));
     }
     const lockReason = dialog.querySelector('[data-or-lock-reason]');
     if (lockReason) {
