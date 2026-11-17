@@ -1924,7 +1924,13 @@ export async function pmMailboxDigest(project, { now = Date.now(), maxAgeMs = 15
   // 这里落盘 邮箱摘要已通知.json：同一 messageId 24h 内只进摘要一次；已 read（有 readAt）的不再进摘要。
   const notifiedFile = path.join(projectStatePaths(name).dir, '邮箱摘要已通知.json');
   let notified = {};
-  try { const raw = readJson(notifiedFile, {}); notified = (raw && typeof raw === 'object' && raw.ids) ? raw.ids : {}; } catch { notified = {}; }
+  let notifiedLastAt = '';
+  try {
+    const raw = readJson(notifiedFile, {});
+    notified = (raw && typeof raw === 'object' && raw.ids) ? raw.ids : {};
+    // B-0c49 补充：节流需要「上次摘要时间」——存台账里（ISO 或毫秒都兼容）。
+    notifiedLastAt = (raw && typeof raw === 'object') ? (raw.lastDigestAt || '') : '';
+  } catch { notified = {}; }
   const pruneBefore = now - 24 * 3600 * 1000;
   for (const [id, entry] of Object.entries(notified)) {
     // B-3c45：台账条目是 { at, messageId, type }，同时兼容上一版直接写 ISO 字符串的形状。
@@ -1945,6 +1951,29 @@ export async function pmMailboxDigest(project, { now = Date.now(), maxAgeMs = 15
     fresh.push(msg);
   }
   if (!fresh.length) return { ok: true, project: name, pending: 0, woken: 0, reason: 'mailbox_digest' };
+  // B-0c49（PM 2026-11-17 22:11 补充）：摘要节流——PM 会話排队积压 32 条，说明摘要比 PM 处理得快。
+  // 规则：①高优先类型（wake_failed/boot_failed/escalation）立即叫，不受节流；
+  //      ②普通候选 <3 条且距上次摘要 <5 分钟 → 并入下一次（不发）；
+  //      ③同一项目 5 分钟内最多 1 次普通摘要。
+  const DIGEST_HIGH_TYPES = new Set(['wake_failed', 'boot_failed', 'escalation']);
+  const DIGEST_THROTTLE_MS = (() => {
+    const raw = Number(process.env.TEAM_PM_DIGEST_THROTTLE_MS);
+    return Number.isFinite(raw) && raw >= 0 ? raw : 5 * 60 * 1000;
+  })();
+  const lastDigestMs = (() => {
+    const raw = Number(notifiedLastAt);
+    return Number.isFinite(raw) && raw > 0 ? raw : Date.parse(String(notifiedLastAt || ''));
+  })();
+  const highFresh = fresh.filter((msg) => DIGEST_HIGH_TYPES.has(String(msg.type || msg.kind || '')));
+  const withinThrottle = Number.isFinite(lastDigestMs) && lastDigestMs > 0 && (now - lastDigestMs) < DIGEST_THROTTLE_MS;
+  if (!highFresh.length) {
+    if (fresh.length < 3 && withinThrottle) {
+      return { ok: true, project: name, pending: fresh.length, woken: 0, reason: 'mailbox_digest', throttled: 'TOO_FEW_AND_RECENT', throttleMs: DIGEST_THROTTLE_MS };
+    }
+    if (withinThrottle) {
+      return { ok: true, project: name, pending: fresh.length, woken: 0, reason: 'mailbox_digest', throttled: 'WITHIN_WINDOW', throttleMs: DIGEST_THROTTLE_MS };
+    }
+  }
   fresh.sort((a, b) => Date.parse(String(a.ts || '')) - Date.parse(String(b.ts || '')));
   const picked = fresh.slice(0, limit);
   const byType = {};
@@ -1989,7 +2018,7 @@ export async function pmMailboxDigest(project, { now = Date.now(), maxAgeMs = 15
     for (const msg of picked) {
       notified[String(msg.id)] = { at, messageId: String(msg.id), type: String(msg.type || msg.kind || 'note') };
     }
-    try { writeJson(notifiedFile, { updatedAt: at, ids: notified }); } catch { /* 写失败下次仍会去重失败，但不阻断唤醒 */ }
+    try { writeJson(notifiedFile, { updatedAt: at, lastDigestAt: at, ids: notified }); } catch { /* 写失败下次仍会去重失败，但不阻断唤醒 */ }
   }
   return { ok: true, project: name, pending: fresh.length, woken: picked.length, messageIds: ids.slice(0, 5), byType, wake };
 }

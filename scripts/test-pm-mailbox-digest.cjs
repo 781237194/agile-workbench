@@ -197,6 +197,34 @@ const wakeRows = (sb) => {
       { woken: r.woken, pruned: !after['M-old-25h'], keep: Boolean(after['M-keep-1m']) });
   }
 
+  /* ⑦ B-0c49 补充：摘要节流——5 分钟内 10 条普通 note 只叫 1 次 */
+  {
+    const ledgerFile = path.join(sb.state, '邮箱摘要已通知.json');
+    const cur = readJson(ledgerFile, { ids: {} });
+    cur.lastDigestAt = new Date(Date.now() - 10 * 60 * 1000).toISOString(); // 模拟上次摘要已过 10 分钟
+    writeJson(ledgerFile, cur);
+    for (let i = 0; i < 10; i += 1) send(sb, { id: `M-throttle-note-${i}`, type: 'note', subject: `普通通知 ${i}` });
+    const before7 = wakeRows(sb).filter((r) => String(r.reason) === 'mailbox_digest').length;
+    const t1 = await ops.pmMailboxDigest(PROJECT);
+    const t2 = await ops.pmMailboxDigest(PROJECT);
+    const t3 = await ops.pmMailboxDigest(PROJECT);
+    const after7 = wakeRows(sb).filter((r) => String(r.reason) === 'mailbox_digest').length;
+    check('⑦ 节流：5 分钟内 10 条普通 note → 只 1 次摘要唤醒（其余拍不再叫）',
+      t1.woken === 10 && after7 - before7 === 1 && t2.woken === 0 && t3.woken === 0,
+      { t1: t1.woken, added: after7 - before7, t2: { woken: t2.woken, throttled: t2.throttled || null }, t3: { woken: t3.woken, throttled: t3.throttled || null } });
+  }
+
+  /* ⑧ 高优先类型不受节流：1 条 wake_failed 在节流窗口内也立即叫 */
+  {
+    send(sb, { id: 'M-throttle-wakefailed', type: 'wake_failed', subject: '唤醒失败：立即叫醒夹具' });
+    const before8 = wakeRows(sb).filter((r) => String(r.reason) === 'mailbox_digest').length;
+    const w = await ops.pmMailboxDigest(PROJECT);
+    const after8 = wakeRows(sb).filter((r) => String(r.reason) === 'mailbox_digest').length;
+    check('⑧ 高优先类型（wake_failed）在节流窗口内仍立即唤醒 1 次',
+      w.woken === 1 && after8 - before8 === 1 && !w.throttled,
+      { woken: w.woken, added: after8 - before8, throttled: w.throttled || null });
+  }
+
   const pass = results.filter((r) => r.ok).length;
   console.log('');
   console.log(`${pass === results.length ? 'PM_MAILBOX_DIGEST_OK' : 'PM_MAILBOX_DIGEST_WARN'} ${JSON.stringify({ total: results.length, pass, red: results.length - pass })}`);
