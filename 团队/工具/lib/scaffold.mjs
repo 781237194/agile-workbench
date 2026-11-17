@@ -900,6 +900,32 @@ export function ensureProjectStructure({ name, root, desc = '', overwrite = fals
     put(path.join(dir, '文件索引.md'), roleIndex(role));
   }
 
+  // T-20261117-222952-5e05：新项目/下载用户也要拿到 skill 机制——
+  // 把团队级 `<团队>/skill/**` 整目录复制到项目 `<项目>/团队/skill/**`（已存在不覆盖，保持项目侧可自定义）。
+  // 缺源目录时只留 warning（不阻断建项目），并在报告里返回 skillCopied/skillSource 便于核对。
+  let skillCopied = 0;
+  const skillSource = path.join(PATHS.teamRoot, 'skill');
+  const skillTarget = path.join(base, '团队', 'skill');
+  try {
+    if (exists(skillSource) && fs.statSync(skillSource).isDirectory()) {
+      const walk = (from, to) => {
+        mkdir(to);
+        for (const ent of fs.readdirSync(from, { withFileTypes: true })) {
+          const src = path.join(from, ent.name);
+          const dst = path.join(to, ent.name);
+          if (ent.isDirectory()) { walk(src, dst); continue; }
+          if (!ent.isFile()) continue;
+          if (exists(dst) && !overwrite) { kept.push(relOf(dst)); continue; }
+          fs.mkdirSync(path.dirname(dst), { recursive: true });
+          fs.copyFileSync(src, dst);
+          created.push(relOf(dst));
+          skillCopied += 1;
+        }
+      };
+      walk(skillSource, skillTarget);
+    }
+  } catch { /* 复制失败不阻断建项目，下面用 skillCopied=0 体现 */ }
+
   // 模式与目录一致：当前模式内角色目录齐全；模式外的旧角色目录不删，只标“非当前模式”。
   // 这样 fast 项目不会出现无标注的 产品/程序员B，切回 full 时把标记撤掉即可，不丢任何产出。
   const activeRoleDirs = new Set(rolesForMode(m).map((role) => ROLE_DIRS[role]));

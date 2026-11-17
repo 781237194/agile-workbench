@@ -60,6 +60,9 @@ const readText = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { ret
     'README.md', '项目信息.md', '协作准则.md', '项目铁律.md', '项目索引.md', '经验教训登记册.md',
     '需求/README.md', '需求/00-需求总览.md', '需求/需求模板.md', '需求/文件索引.md', 'site/README.md',
     ...['项目经理', '产品', '需求分析师', '程序员A', '程序员B', '测试人员'].flatMap((d) => [`${d}/角色卡.md`, `${d}/文件索引.md`]),
+    // T-5e05：新项目/下载用户必须拿到 skill 机制（团队级 团队/skill 整目录复制过来）
+    '团队/skill/基础流程/00-索引.md',
+    '团队/skill/基础流程/skill-manifest.json',
   ];
   const missing = required.filter((rel) => !fs.existsSync(path.join(OUT, rel)));
   check('① 沙盘 full 项目生成物齐全（22 项：六角色卡/六文件索引/需求四件/铁律/协作准则/经验教训/site）',
