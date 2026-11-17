@@ -105,6 +105,13 @@ function guardLiveRoot(argv, root, project) {
 }
 
 /* ───────── export ───────── */
+/** AC7③：7aa8 证据导出能力探测——缺依赖/缺导出时返回 false，由 cmdExport 报 EVIDENCE_EXPORT_UNAVAILABLE 而非崩。 */
+function evidenceExportCapable() {
+  try {
+    return typeof bsdtarZip === 'function' && typeof writeTarList === 'function' && typeof packKindOf === 'function';
+  } catch { return false; }
+}
+
 function cmdExport(argv) {
   const { repoRoot, project, projectDir, stateDir, teamFile, wbFile } = resolveRoots(argv);
   const outDir = path.resolve(String(argv.out || path.join(repoRoot, '_tmp', `migrate-${project}-${Date.now()}`)));
@@ -112,6 +119,12 @@ function cmdExport(argv) {
   const withNoise = argv['with-noise'] === true;
   const withEvidence = argv['no-evidence'] !== true;
   if (!fs.existsSync(projectDir)) fail('PROJECT_NOT_FOUND', `项目目录不存在：${projectDir}`);
+  // AC2④/卷§二：默认 512MB 体量上限与 --all 分离；--max-bytes 可覆盖默认上限。
+  const exportAll = argv.all === true;
+  const maxBytes = Number(argv['max-bytes'] || 0) > 0 ? Number(argv['max-bytes']) : 512 * 1024 * 1024;
+  if (withEvidence && !evidenceExportCapable()) {
+    return fail('EVIDENCE_EXPORT_UNAVAILABLE', '证据导出能力（7aa8 evidence-pack）不可用：导出已被拒绝（不崩溃、不留半成品）', { probe: 'evidence-pack', withEvidence });
+  }
   const projectFiles = walk(projectDir, '', [], { withNoise, withEvidence });
   const stateFiles = walk(stateDir, '', [], { withNoise, withEvidence });
   // AC1：名册与 workbench 登记随包（scope=meta）
@@ -131,34 +144,64 @@ function cmdExport(argv) {
     }),
     ...metaFiles.map((f) => ({ scope: f.scope, path: f.pack, ...sha256File(f.abs), src: f.abs, pack: f.pack })),
   ];
+  // AC8②/F2：totals 只计项目数据（project+state），元数据（名册/workbench）落 assets.meta；flags 记体量口径。
+  const dataEntries = entries.filter((e) => e.scope !== 'meta');
+  const metaEntries = entries.filter((e) => e.scope === 'meta');
+  const c10BytesAtExport = dataEntries.reduce((n, e) => n + e.bytes, 0);
+  let keptEntries = entries;
+  let truncated = false;
+  if (!exportAll && dataEntries.length) {
+    let sum = 0;
+    const kept = [];
+    for (const e of entries) {
+      if (e.scope === 'meta') { kept.push(e); continue; }
+      if (sum + e.bytes > maxBytes) continue;
+      sum += e.bytes;
+      kept.push(e);
+    }
+    if (kept.length < entries.length) {
+      truncated = true;
+      keptEntries = kept;
+    }
+  }
+  const keptData = keptEntries.filter((e) => e.scope !== 'meta');
+  const measuredBytes = keptData.reduce((n, e) => n + e.bytes, 0);
+  const deltaPct = measuredBytes > 0 ? Number((Math.abs(c10BytesAtExport - measuredBytes) / measuredBytes * 100).toFixed(2)) : 0;
+  const exportFlags = { truncated, all: exportAll, maxBytes, c10BytesAtExport, measuredBytes, deltaPct };
   const manifest = {
-    version: 2, kind: 'pm-workbench-migration', project, at: new Date().toISOString(),
+    version: 1, kind: 'pm-workbench-migration', project, at: new Date().toISOString(),
     source: { repoRoot, projectDir, stateDir }, excludesNoise: !withNoise, includesEvidence: withEvidence,
-    items: entries.map((e) => ({ scope: e.scope, path: e.path, bytes: e.bytes, sha256: e.sha256 })),
+    items: keptEntries.map((e) => ({ scope: e.scope, path: e.path, bytes: e.bytes, sha256: e.sha256 })),
+    flags: exportFlags,
   };
   const outIsZip = /\.zip$/i.test(outDir);
-  if (dryRun) return out({ ok: true, dryRun: true, out: outDir, zip: outIsZip, files: entries.length, name: MANIFEST_NAME, message: `[dry-run] 将导出 ${entries.length} 个文件到 ${outDir}${outIsZip ? '（zip 单文件包）' : ''}（加 --yes 才写盘）` }, argv.json);
+  if (dryRun) return out({ ok: true, dryRun: true, out: outDir, zip: outIsZip, files: keptEntries.length, flags: exportFlags, name: MANIFEST_NAME, message: `[dry-run] 将导出 ${keptEntries.length} 个文件到 ${outDir}${outIsZip ? '（zip 单文件包）' : ''}（加 --yes 才写盘）` }, argv.json);
   if (outIsZip) {
     // F1/F2/AC1：zip 单文件包——包根 迁移清单.json（files 四键 path/bytes/sha256/kind + totals{files,bytes} + assets + warnings）
     const stage = path.join(repoRoot, '_tmp', `migrate-stage-${Date.now()}`);
     try {
-      for (const e of entries) {
+      for (const e of keptEntries) {
         const dst = path.join(stage, e.path);
         fs.mkdirSync(path.dirname(dst), { recursive: true });
         fs.copyFileSync(e.src, dst);
       }
-      const totalBytes = entries.reduce((n, e) => n + e.bytes, 0);
-      const assets = entries.filter((e) => packKindOf(e.path) === 'screenshot').map((e) => ({ path: e.path, bytes: e.bytes }));
+      const totalBytes = keptData.reduce((n, e) => n + e.bytes, 0);
+      const assets = {
+        meta: metaEntries.map((e) => ({ path: e.path, bytes: e.bytes, sha256: e.sha256 })),
+        screenshots: keptEntries.filter((e) => packKindOf(e.path) === 'screenshot').map((e) => ({ path: e.path, bytes: e.bytes })),
+      };
+      const warnings = truncated ? [`体量超过默认上限 ${maxBytes} 字节：已截断 ${entries.length - keptEntries.length} 个文件（--all 可导出全部）`] : [];
       const zipManifest = {
-        version: 2, kind: 'pm-workbench-migration', project, at: new Date().toISOString(),
+        version: 1, kind: 'pm-workbench-migration', project, at: new Date().toISOString(),
         source: { repoRoot, projectDir, stateDir }, excludesNoise: !withNoise, includesEvidence: withEvidence,
-        files: entries.map((e) => ({ path: e.path, bytes: e.bytes, sha256: e.sha256, kind: packKindOf(e.path) })),
-        totals: { files: entries.length, bytes: totalBytes },
+        files: keptEntries.map((e) => ({ path: e.path, bytes: e.bytes, sha256: e.sha256, kind: packKindOf(e.path) })),
+        totals: { files: keptData.length, bytes: totalBytes },
         assets,
-        warnings: [],
+        flags: exportFlags,
+        warnings,
       };
       writeJsonFile(path.join(stage, MANIFEST_NAME), zipManifest);
-      const listInfo = writeTarList([...entries.map((e) => e.path), MANIFEST_NAME]);
+      const listInfo = writeTarList([...keptEntries.map((e) => e.path), MANIFEST_NAME]);
       const listFile = listInfo.file;
       const listExtras = listInfo.extra || [];
       const packed = bsdtarZip({ out: outDir, listFile, cwd: stage });
@@ -167,13 +210,13 @@ function cmdExport(argv) {
         fail('MIGRATION_EXPORT_FAILED', `bsdtar 打包失败（exit=${packed.result.status}），已删半成品`, { status: packed.result.status, stderr: packed.stderr.slice(-1200) });
       }
       for (const f of [listFile, ...listExtras]) { try { fs.unlinkSync(f); } catch { /* 忽略 */ } }
-      return out({ ok: true, out: outDir, zip: true, files: entries.length, totals: zipManifest.totals, name: MANIFEST_NAME }, argv.json);
+      return out({ ok: true, out: outDir, zip: true, files: keptData.length, totals: zipManifest.totals, assets: zipManifest.assets, flags: exportFlags, name: MANIFEST_NAME }, argv.json);
     } finally {
       try { fs.rmSync(stage, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* staging 清理失败不阻断 */ }
     }
   }
   fs.mkdirSync(outDir, { recursive: true });
-  for (const e of entries) {
+  for (const e of keptEntries) {
     const dst = path.join(outDir, '包', e.pack);
     fs.mkdirSync(path.dirname(dst), { recursive: true });
     fs.copyFileSync(e.src, dst);
@@ -227,11 +270,15 @@ function cmdImport(argv) {
   }
   if (!outDir) fail('OUT_REQUIRED', '需要 --out <导出目录>');
   const mf = verifyManifest(outDir);
+  // AC8②/F2：files 口径与 export 的 totals.files 同源——只计项目数据（项目/ 与 团队/状态/项目/），
+  // 元数据两件（状态/团队.json、data/userdata/workbench.json）落 assets.meta，不计入 files。
+  const isDataPath = (p) => p.startsWith('项目/') || p.startsWith('团队/状态/项目/');
+  const dataCount = mf.items.filter((it) => isDataPath(it.path)).length;
   const dryRun = argv.yes !== true;
   const force = argv.force === true;
   const exists = fs.existsSync(projectDir) || fs.existsSync(stateDir);
   const backupDir = path.join(repoRoot, '_backup', `${new Date().toISOString().replace(/[:.]/g, '-')}-import-${mf.project}`);
-  if (dryRun) return out({ ok: true, dryRun: true, project: mf.project, files: mf.items.length, exists, wouldFail: exists && !force }, argv.json);
+  if (dryRun) return out({ ok: true, dryRun: true, project: mf.project, files: dataCount, exists, wouldFail: exists && !force }, argv.json);
   if (exists && !force) fail('MIGRATION_EXISTS', `目标已存在（项目或状态目录），加 --force 才覆盖：${projectDir}`);
   if (exists) {
     for (const [dir, label] of [[projectDir, '项目'], [stateDir, '状态']]) {
@@ -251,7 +298,7 @@ function cmdImport(argv) {
     fs.mkdirSync(path.dirname(dst), { recursive: true });
     fs.copyFileSync(src, dst);
   }
-  return out({ ok: true, project: mf.project, files: mf.items.length, backup: exists ? backupDir : '' }, argv.json);
+  return out({ ok: true, project: mf.project, files: dataCount, backup: exists ? backupDir : '' }, argv.json);
 }
 
 /* ───────── rebind ───────── */
@@ -481,7 +528,7 @@ function cmdCheck(argv) {
 }
 
 /* ───────── CLI ───────── */
-const BOOL_FLAGS = ['yes', 'dry-run', 'force', 'with-noise', 'no-evidence', 'clear', 'json'];
+const BOOL_FLAGS = ['yes', 'dry-run', 'force', 'with-noise', 'no-evidence', 'clear', 'json', 'all', 'allow-live-root'];
 function parseArgs(argv) {
   const args = {};
   const rest = [];
