@@ -160,6 +160,13 @@ function latestReadRecord(teamRoot, role) {
  */
 function runLessonGate(role, projectDir, options = {}) {
   const opts = options && typeof options === 'object' ? options : {};
+  // B-20261117-082720-6e7c（同 B-4875 口径）：selftest/沙盘默认豁免经验教训门禁——
+  // 沙盘角色从未读过登记册，且自检过程自身会改写登记册（读一次立刻失效），硬拦只会让每次自检先读一次、
+  // 并在多轮之间级联红（Electron selftest 第 10-14 轮即此根因）。需要验证门禁本体的测试用
+  // TEAM_LESSONS_ENFORCE=1 强制开启（test-lessons-gate.cjs 即如此）。
+  const sandbox = String((process.env && process.env.TEAM_SELFTEST) || '') === '1';
+  const enforce = String((process.env && process.env.TEAM_LESSONS_ENFORCE) || '') === '1';
+  if (sandbox && !enforce) return { ok: true, exempt: true, reason: 'SELFTEST', staleSha12: '', currentSha12: '' };
   const parsed = loadLessons(projectDir);
   if (parsed.missing) return { ok: false, code: 'LESSONS_FILE_MISSING', message: `经验教训登记册缺失：${lessonsPath(projectDir)}` };
   if (parsed.broken) return { ok: false, code: 'LESSONS_PARSE_BROKEN', message: '经验教训登记册无法解析（缺 `## <角色名>` 段）', parseWarn: parsed.parseWarn.slice(0, 5) };

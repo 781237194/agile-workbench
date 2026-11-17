@@ -36,6 +36,9 @@ function env() {
     TEAM_PROJECTS_ROOT: PROJECTS,
     TEAM_WORKBENCH_JSON: STORE,
     TEAM_SELFTEST: '1',
+    // B-20261117-082720-6e7c / B-4875：沙盘默认豁免经验教训门禁（避免自检级联红）；
+    // 本脚本要验证门禁本体，所以显式强制开启。
+    TEAM_LESSONS_ENFORCE: '1',
   };
 }
 
