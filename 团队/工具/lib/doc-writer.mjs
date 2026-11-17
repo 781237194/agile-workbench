@@ -14,12 +14,13 @@ import crypto from 'node:crypto';
 import { fail, nowIso, sha256, hashFile, exists, ensureDir, appendLine, readJson, writeText } from './core.mjs';
 import { loadProject, projectStatePaths } from './store.mjs';
 import { readWorkflowState } from './lifecycle.mjs';
+import { requirementContentText } from './scaffold.mjs';
 
 export const DOC_REGISTRY_FILE = '文档登记.jsonl';
 export const DOC_LOCK_FILE = '.doc-write.lock';
 export const DOC_WRITER_DEFAULT = 'analyst';
 export const DOC_AUDIT_STATES = ['ok', 'untracked', 'mismatch', 'missing', 'registry_broken'];
-export const DOC_AUDIT_CODES = ['DOC_UNTRACKED_WRITE', 'DOC_BINDING_MISMATCH', 'DOC_BINDING_STALE', 'DOC_MISSING', 'REGISTRY_BROKEN'];
+export const DOC_AUDIT_CODES = ['DOC_UNTRACKED_WRITE', 'DOC_BINDING_MISMATCH', 'DOC_BINDING_STALE', 'DOC_MISSING', 'REGISTRY_BROKEN', 'DOC_CONTENT_DRIFT'];
 export const REGISTRY_ACTIONS = ['baseline', 'write', 'freeze', 'unfreeze', 'unlock_lock', 'unlock_write', 'rollback', 'reassign', 'writer'];
 export const REGISTRY_KEYS = ['at', 'requirementId', 'path', 'action', 'sha256', 'bytes', 'writer', 'actor', 'prevSha', 'reason', 'transactionId'];
 
@@ -503,6 +504,23 @@ export function auditRequirementDocs(opts = {}) {
     }
     const row = requirementRowOf(projectName, doc.requirementId);
     const trqHash = (row && row.trq && (row.trq.checkHash || row.trq.requirementHash)) || null;
+    // b75c 自检：登记 sha 与磁盘 sha 不等时，必须区分「仅元数据差异」与「实质改文」——
+    // 程序自己维护 `## 状态记录` / `- 状态：` 只改 sha256、不改 contentHash，这种漂移不影响决定有效性。
+    const diskContentHash = (() => {
+      try { return sha256(requirementContentText(fs.readFileSync(path.join(project.path, doc.rel), 'utf8'))); } catch { return ''; }
+    })();
+    const boundContentHash = String((row && row.requirementReview && row.requirementReview.contentHash) || (row && row.contentHash) || '');
+    let contentDrift = null;
+    if (String(registrySha || '') !== String(doc.diskSha || '')) {
+      const metaOnly = Boolean(diskContentHash && boundContentHash && diskContentHash === boundContentHash);
+      contentDrift = {
+        metaOnly,
+        note: metaOnly ? '仅元数据差异，不影响决定有效性' : '实质内容与绑定版本不一致，需要重评或用 req doc repair 恢复',
+        boundContentHash: boundContentHash ? boundContentHash.slice(0, 12) : null,
+        diskContentHash: diskContentHash ? diskContentHash.slice(0, 12) : null,
+      };
+      codes.push('DOC_CONTENT_DRIFT');
+    }
     // 卷：只比登记，不比 RR
     const supplements = supplementsOf(project.path, doc.shortKey).map((sup) => {
       const supReg = latestDocRegistryRow(rows, sup.rel, ['baseline', 'write', 'rollback']);
@@ -531,6 +549,8 @@ export function auditRequirementDocs(opts = {}) {
         matched, rrHash: currentHash || null, trqHash: trqHash || null,
       },
       codes,
+      diskContentHash: diskContentHash || null,
+      contentDrift,
       supplements,
     });
   }
@@ -552,7 +572,9 @@ export function auditRequirementDocs(opts = {}) {
     summary[row.state] = (summary[row.state] || 0) + 1;
     for (const code of row.codes || []) topCodes.add(code);
   }
-  const hasProblem = requirements.some((row) => row.state !== 'ok' || (row.codes || []).some((c) => c !== 'DOC_BINDING_STALE'));
+  // b75c：仅元数据漂移（DOC_CONTENT_DRIFT 且 metaOnly）是提示，不算问题、不让 selftest 误红。
+  const hasProblem = requirements.some((row) => row.state !== 'ok'
+    || (row.codes || []).some((c) => c !== 'DOC_BINDING_STALE' && !(c === 'DOC_CONTENT_DRIFT' && row.contentDrift && row.contentDrift.metaOnly)));
   const exitCode = hasProblem ? 1 : 0;
   return {
     ok: exitCode === 0, project: projectName, generatedAt, registryFile: reg.file,

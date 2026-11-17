@@ -30,7 +30,7 @@ import {
   isTeamMode, normalizeTeamMode, rolesForMode, roleInMode, teamModeDescription,
   requirementReviewer, techReviewers, votersForMode, VOTE_RULE_TEXT,
 } from './roles.mjs';
-import { ensureProjectStructure, structureReport, readRequirementDocs } from './scaffold.mjs';
+import { ensureProjectStructure, structureReport, readRequirementDocs, requirementContentText } from './scaffold.mjs';
 import {
   auditGate, detectPhaseEdit, gateDesign, gateIteration, gateRequirementFinal, gateRequirementDoc,
   gateRequirementReview, gateStageRole, gateTestReport, gateTestability, gateConfig,
@@ -6508,6 +6508,7 @@ export function cmdReq(args) {
   // R-c6dc：唯一写入口 / 审计 / 冻结解冻 / 清锁（共享层：写需求正文只走这条）
   if (sub === 'write') return cmdReqWrite(args);
   if (sub === 'audit') return cmdReqAudit(args);
+  if (sub === 'doc') return cmdReqDoc(args);
   if (sub === 'unlock-write') return cmdReqUnlockWrite(args);
   if (sub === 'freeze' || sub === 'unfreeze') return cmdReqFreeze(args, sub);
   if (sub === 'writer') return cmdReqWriter(args);
@@ -6780,8 +6781,87 @@ function cmdReqAudit(args) {
   if (result.exitCode) process.exitCode = result.exitCode;
 }
 
-/** req unlock-write：PM 清写锁（by=pm + reason 非空；锁不存在 → LOCK_NOT_FOUND 幂等）。 */
-function cmdReqUnlockWrite(args) {
+/**
+ * req doc repair（b75c 口径 §二.3）：备份 → 校验 → 恢复 → append-only 审计。
+ *
+ * 两种模式：
+ *   ① `--from-backup <路径>`：把指定内容的正文写回目标文件（备份当前版本到 需求/_backup/ 后再写）；
+ *   ② 不带 --from-backup：只做「登记对齐」——仅当磁盘 contentHash == 绑定 contentHash（纯元数据漂移，
+ *      典型是程序自己追加了 `## 状态记录`）才允许；实质改文一律 DOC_DRIFT_REAL 拒绝并提示走 ①。
+ *
+ * 写盘复用 appendDocRegistry（action='repair'，prevSha 成链），并写 req_doc_repair 事件（who/why/来源）。
+ */
+function cmdReqDoc(args) {
+  const action = String(args._[2] || '').trim();
+  if (action !== 'repair') fail('BAD_ACTION', `req doc 只支持 repair（收到：${action || '(空)'}）`, {}, 1);
+  const b = bootFor(args, 'req doc repair');
+  const requirementId = String(args.requirement || '').trim();
+  if (!requirementId) fail('REQUIREMENT_REQUIRED', '需要 --requirement', {}, 1);
+  const reason = String(args.reason || '').trim();
+  if (reason.length < 4) fail('REASON_REQUIRED', 'repair 必须带 --reason（写入审计）', {}, 1);
+  const project = loadProject(b.project);
+  const reqDir = path.join(project.path, '需求');
+  const names = fs.existsSync(reqDir) ? fs.readdirSync(reqDir).filter((n) => /^R-.*\.md$/i.test(n)) : [];
+  const hit = names.find((n) => n.toLowerCase().startsWith(requirementId.toLowerCase() + '-'))
+    || names.find((n) => n.toLowerCase().startsWith(requirementId.toLowerCase()));
+  if (!hit) fail('DOC_MISSING', `找不到需求正文：${requirementId}`, { requirementId }, 1);
+  const rel = '需求/' + hit;
+  const abs = path.join(project.path, rel);
+  const before = fs.readFileSync(abs);
+  const beforeSha = sha256(before);
+  const beforeContent = sha256(requirementContentText(before.toString('utf8')));
+  const wf = readWorkflowState(b.project, { fresh: true }).state || {};
+  const row = (wf.requirements && wf.requirements[requirementId]) || {};
+  const boundContent = String((row.requirementReview && row.requirementReview.contentHash) || row.contentHash || '');
+  // ① 备份当前正文（只复制将被写的这一个文件，带时间戳）
+  const backupDir = path.join(reqDir, '_backup');
+  ensureDir(backupDir);
+  const stamp = nowIso().replace(/[:.]/g, '-');
+  const backupAbs = path.join(backupDir, `${hit}.${stamp}.md`);
+  fs.writeFileSync(backupAbs, before);
+  const backupRel = path.relative(project.path, backupAbs);
+  // ② 目标内容
+  const fromBackup = String(args['from-backup'] || '').trim();
+  let nextContent = null;
+  let source = 'registry-align';
+  if (fromBackup) {
+    const srcAbs = path.isAbsolute(fromBackup) ? fromBackup : path.join(project.path, fromBackup);
+    if (!fs.existsSync(srcAbs)) fail('BACKUP_MISSING', `恢复来源不存在：${fromBackup}`, { file: fromBackup }, 1);
+    const raw = fs.readFileSync(srcAbs);
+    if (!raw.length) fail('BACKUP_EMPTY', `恢复来源为空：${fromBackup}`, { file: fromBackup }, 1);
+    nextContent = raw.toString('utf8');
+    source = 'from-backup';
+  } else {
+    if (!boundContent) {
+      fail('DOC_BINDING_UNKNOWN', '没有可用的绑定 contentHash，无法证明只差元数据；请用 --from-backup', { requirementId }, 1);
+    }
+    if (beforeContent !== boundContent) {
+      fail('DOC_DRIFT_REAL', `正文内容与绑定版本不一致（${beforeContent.slice(0, 12)} ≠ ${boundContent.slice(0, 12)}）：这是实质改文；请用 --from-backup 指定要恢复的内容，或由 Owner/PM 重落决定（重评后新决定即绑当前版本）`, {
+        requirementId, diskContentHash: beforeContent, boundContentHash: boundContent, hint: 'req doc repair --from-backup <路径> --reason ...',
+      }, 1);
+    }
+  }
+  if (nextContent !== null) fs.writeFileSync(abs, nextContent, 'utf8');
+  const after = fs.readFileSync(abs);
+  const afterSha = sha256(after);
+  const afterContent = sha256(requirementContentText(after.toString('utf8')));
+  // ③ append-only 登记（prevSha 成链）+ 事件审计
+  appendDocRegistry(b.project, {
+    at: nowIso(), requirementId, path: rel, action: 'repair', sha256: afterSha, bytes: after.length,
+    writer: String(b.role), actor: String(b.role), prevSha: beforeSha, reason, transactionId: null,
+  });
+  appendEvent({
+    role: b.role, sessionId: b.sessionId, action: 'req_doc_repair', project: b.project, target: rel,
+    note: `source=${source} ${beforeSha.slice(0, 12)}->${afterSha.slice(0, 12)} reason=${reason.slice(0, 80)}`,
+    data: { requirementId, path: rel, source, beforeSha, afterSha, beforeContentHash: beforeContent, afterContentHash: afterContent, backup: backupRel },
+  });
+  out(args, `已修复 ${rel}（source=${source}，sha ${beforeSha.slice(0, 12)}→${afterSha.slice(0, 12)}，备份 ${backupRel}）`, {
+    ok: true, requirementId, path: rel, source, beforeSha, afterSha,
+    beforeContentHash: beforeContent, afterContentHash: afterContent, backup: backupRel,
+  });
+}
+
+/** req unlock-write：PM 清写锁（by=pm + reason 非空；锁不存在 → LOCK_NOT_FOUND 幂等）。 */function cmdReqUnlockWrite(args) {
   const b = bootFor(args, 'req unlock-write');
   if (!['pm', 'owner'].includes(String(b.role))) fail('PERMISSION_DENIED', '只有 PM 能清写锁', { role: b.role }, 1);
   const project = loadProject(b.project);

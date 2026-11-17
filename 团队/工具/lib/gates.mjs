@@ -423,12 +423,23 @@ export function taskGateOf({ task, row = null, readFailed = false } = {}) {
   const staleHint = ownerReviewStale
     ? `；ownerReview 上次决定绑旧版正文（${ownerReviewStale.staleSha12 || '无版本凭据'}），需重新评审`
     : '';
+  // B-20261117-190411-b75c：失效时必须「可操作」——给差异摘要 + 修复命令示例，不能只说「决定失效」。
+  const repair = cause === 'stale' ? {
+    summary: `决定绑的正文版本与当前不一致（sha ${ownerReviewStale && ownerReviewStale.staleSha12 ? ownerReviewStale.staleSha12 : '无凭据'} → 当前 ${currentRequirementVersionOf(row).slice(0, 12) || '未知'}）`,
+    // 只差程序维护行（## 状态记录 / - 状态：）时 contentHash 相同，本不该拦：先 audit 区分「仅元数据」与「实质改文」。
+    auditCommand: `node 团队/工具/team.mjs req audit --project <项目> --requirement ${requirementId}`,
+    auditHint: '审计里出现 DOC_CONTENT_DRIFT 且标注「仅元数据差异」= 不该拦，属判定口径问题；实质改文才是真旧版',
+    repairCommand: `node 团队/工具/team.mjs req doc repair --project <项目> --requirement ${requirementId} --from-backup <备份文件路径> --reason "恢复正文到决定绑定版本"`,
+  } : null;
   return {
     ...base, code: 'TASK_GATE_NOT_APPROVED', cause,
     missing: [cause === 'missing' ? 'Owner 决定未落账' : 'Owner 未通过（' + (status || rowStatus) + '）'],
-    next: '先让需求过 Owner 门（owner confirm / 代管落账），未通过不许开工',
+    next: cause === 'stale'
+      ? '先跑 req audit 区分「仅元数据差异」与「实质改文」；实质改文需 Owner/PM 重落决定，或用 req doc repair 恢复正文'
+      : '先让需求过 Owner 门（owner confirm / 代管落账），未通过不许开工',
     ...(ownerReviewStale ? { ownerReviewStale } : {}),
-    message: `需求 ${requirementId} 未过 Owner 门（${cause}）${staleHint}；任务 ${taskId} 不许开工/收工`,
+    ...(repair ? { repair } : {}),
+    message: `需求 ${requirementId} 未过 Owner 门（${cause}）${staleHint}；任务 ${taskId} 不许开工/收工${repair ? `\n差异摘要：${repair.summary}\n排查：${repair.auditCommand}（${repair.auditHint}）\n修复示例：${repair.repairCommand}` : ''}`,
   };
 }
 
