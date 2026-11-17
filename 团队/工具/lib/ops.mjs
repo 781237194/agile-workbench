@@ -2754,6 +2754,43 @@ function clearQueueAlertLevels(project, itemId) {
 }
 
 /**
+ * R-1dfb 热修：升级/告警「检查去重 → 发消息 → 写 alerted」必须原子，
+ * 否则多个泵进程（60 秒 tick + CLI pump + 每次 send/ack 顺带泵）同时读到旧状态，
+ * 各自判定「没发过」→ 同一条 notice 在数秒内被重复发多次（实测 6 秒 6 条）。
+ * 用 O_EXCL 锁文件做「抢占」：抢到的进程才发；抢不到直接跳过（下一轮若仍未发会再抢）。
+ */
+function dispatchAlertLockFile(project) {
+  return path.join(projectStatePaths(project).dir, '派单告警.lock');
+}
+
+function acquireDispatchAlertLock(project) {
+  const file = dispatchAlertLockFile(project);
+  const tryOnce = () => {
+    try {
+      const fd = fs.openSync(file, 'wx');
+      try { fs.writeSync(fd, String(process.pid)); } catch { /* 写 pid 失败不影响锁 */ }
+      fs.closeSync(fd);
+      return true;
+    } catch { return false; }
+  };
+  if (tryOnce()) return { ok: true, file };
+  // 陈旧锁（进程崩溃残留）：超过 60 秒视为失效，清一次再抢。
+  try {
+    const ageMs = Date.now() - fs.statSync(file).mtimeMs;
+    if (Number.isFinite(ageMs) && ageMs > 60 * 1000) {
+      try { fs.unlinkSync(file); } catch { /* 别人已清 */ }
+      if (tryOnce()) return { ok: true, file };
+    }
+  } catch { /* 锁可能刚被释放 */ }
+  return { ok: false, file };
+}
+
+function releaseDispatchAlertLock(lock) {
+  if (!lock || !lock.ok) return;
+  try { fs.unlinkSync(lock.file); } catch { /* 已被清不影响 */ }
+}
+
+/**
  * 发一条单链升级消息（notice/escalate/force 共用；去重键 itemId+level，24h 内只发一次）。
  * 文案写死带三样：attempt / 三信号各自多旧 / 最后回执时间（卷 §四）。
  */
@@ -2763,6 +2800,17 @@ function raiseQueueEscalation(project, { itemId, to, taskId = '', attempt = 1, s
   const lv = String(level || '');
   const nowMs = Number(now) || Date.now();
   if (!name || !id || !QUEUE_ALERT_LEVELS.includes(lv)) return null;
+  // 原子抢占：抢占失败 = 别的泵进程正在处理这一轮，本进程直接跳过（不重复发）。
+  const lock = acquireDispatchAlertLock(name);
+  if (!lock.ok) return null;
+  try {
+    return sendQueueEscalationLocked(name, { id, lv, nowMs, to, taskId, attempt, stallMs });
+  } finally {
+    releaseDispatchAlertLock(lock);
+  }
+}
+
+function sendQueueEscalationLocked(name, { id, lv, nowMs, to, taskId = '', attempt = 1, stallMs = 0 }) {
   const state = readQueueAlertState(name);
   const last = queueAlertLevelAt(state.alerted, id, lv);
   if (last && nowMs - last < QUEUE_ALERT_LEVEL_DEDUPE_MS) return null;
