@@ -85,6 +85,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     Number(s5.healthChecks) > Number(s1.healthChecks) && s5.healthCheckMs === 800,
     { before: s1.healthChecks, after: s5.healthChecks, ms: s5.healthCheckMs });
 
+  // R6：口径落地要求 ⑤（PM 口径-周期存活探测与轮询边界-20261118 §落地要求）
+  // 「只 stat、不读内容」必须在自检里断言：探测函数体内不得出现 readFile/readdir/readFileSync/readdirSync。
+  const qwSrc = fs.readFileSync(path.join(ROOT, 'src', 'queue-watch.js'), 'utf8');
+  const fnBody = (() => {
+    const i = qwSrc.indexOf('const scheduleHealthCheck');
+    if (i < 0) return '';
+    const j = qwSrc.indexOf('const start = () =>', i);
+    return j > i ? qwSrc.slice(i, j) : qwSrc.slice(i, i + 2000);
+  })();
+  ok('R6 探测函数「只 stat 不读内容」（无 readFile/readdir）+ 默认间隔 30000 + stop 清 timer',
+    fnBody.includes('fs.statSync') && !/readFile|readdir/.test(fnBody)
+    && /DEFAULT_HEALTH_MS = 30000/.test(qwSrc) && /clearTimeout\(timers\.health\)/.test(qwSrc)
+    && /healthCheckMs: healthMs/.test(qwSrc) && /healthChecks,/.test(qwSrc),
+    { hasStat: fnBody.includes('fs.statSync'), reads: /readFile|readdir/.test(fnBody) });
+
   w.stop();
   fs.rmSync(SB, { recursive: true, force: true });
   console.log(`\nC7A1_ROOT_RENAME ${JSON.stringify({ total: pass + fail, pass, fail })}`);
