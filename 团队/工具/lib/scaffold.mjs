@@ -652,10 +652,14 @@ export function reqPoolReadme(mode = 'full') {
   return `# 需求池\n\n**一个需求一个 R-...md，不要把所有需求堆进一个文件。** ${m === 'fast' ? '需求分析师维护需求正文、验收标准与需求评审；' : '需求分析师维护需求正文与验收标准；产品维护优先级建议；'}PM 维护需求总览和项目索引。\n`;
 }
 
+/** AC3 共享常量：铁律定位句与首读顺序句（index 生成器与 root 文档同源；只认这两句，不要求逐字相同）。 */
+export const IRON_POLICY_LINE = '项目铁律按需避坑（不必每轮读）';
+export const READ_ORDER_LINE = '先读团队宪法（唯一最高优先级） → 项目信息 → 项目索引';
+
 export function rootReadme(projectName, desc = '', mode = 'full') {
   const m = normalizeTeamMode(mode);
   return `# ${projectName}\n\n${desc || `${TEAM_MODE_LABELS[m]}协同项目（团队工作台创建）。`}\n\n`
-    + `先读顺序：\`团队/团队宪法.md\`（唯一最高优先级） → [项目信息.md](项目信息.md) → [项目索引.md](项目索引.md) → [协作准则.md](协作准则.md) → 各角色目录的 文件索引.md；[项目铁律.md](项目铁律.md) 按需（开工/接手读一次）。\n\n`
+    + `先读顺序：${READ_ORDER_LINE} → [协作准则.md](协作准则.md) → 各角色目录的 文件索引.md；${IRON_POLICY_LINE}。\n\n`
     + `- 团队模式：${TEAM_MODE_LABELS[m]}（${teamModeDescription(m)}）。\n`
     + `- 代码写 \`site/\`（或项目信息指定目录）；临时文件放 \`_tmp/\`，交付前清理。\n`
     + `- 变更只走 propose → show → review → sign → apply；没有回执 = 没发生。\n`;
@@ -666,7 +670,7 @@ export function rootIndex(projectName, mode = 'full') {
   const dirs = rolesForMode(m).map((r) => ROLE_DIRS[r]);
   return `# ${projectName} · 项目索引（目录）\n\n`
     + `> 由 \`team.mjs index\` 自动重建；**这是目录，不是项目介绍或需求正文**。\n`
-    + `> 先读顺序：团队宪法（唯一最高优先级） → 项目信息 → 项目索引 → 角色卡/文件索引 → 任务指定文件；项目铁律按需。\n\n`
+    + `> ${READ_ORDER_LINE} → 角色卡/文件索引 → 任务指定文件；${IRON_POLICY_LINE}。\n\n`
     + `<!-- 人工说明:BEGIN -->\n`
     + `- 项目信息：[项目信息.md](项目信息.md)（PM 先填，角色后读）\n`
     + `- 项目铁律：[项目铁律.md](项目铁律.md)（按需避坑清单，不每轮读）\n`

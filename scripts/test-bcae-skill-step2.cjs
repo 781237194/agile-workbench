@@ -67,11 +67,12 @@ function seed() {
 }
 function cli(args, envExtra = {}) {
   const env = { ...process.env, TEAM_ROOT: SB_TEAM, TEAM_PROJECTS_ROOT: SB_PROJECTS, TEAM_SELFTEST: '1', ...envExtra };
-  try {
-    return { ok: true, out: execFileSync(process.execPath, [path.join(SB_TEAM, '工具', 'team.mjs'), ...args], { cwd: ROOT, encoding: 'utf8', timeout: 120000, env }) };
-  } catch (e) {
-    return { ok: false, out: String(e.stdout || ''), err: String(e.stderr || '') };
-  }
+  // skill 提示走 stderr（不写进简报正文，避免破坏简报字节基线）；夹具按 stdout+stderr 合并判断。
+  const { spawnSync } = require('node:child_process');
+  const r = spawnSync(process.execPath, [path.join(SB_TEAM, '工具', 'team.mjs'), ...args], { cwd: ROOT, encoding: 'utf8', timeout: 120000, env });
+  const out = `${r.stdout || ''}${r.stderr || ''}`;
+  if (r.status === 0) return { ok: true, out };
+  return { ok: false, out, err: String(r.stderr || '') };
 }
 const realSkillBefore = (() => {
   const dir = path.join(ROOT, '团队', 'skill', '基础流程');

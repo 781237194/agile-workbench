@@ -11296,7 +11296,7 @@ function renderBoard() {
 /* ── 旧流程：需求 → 产品评审 → Owner → PM 派单 → 开发互审 → 测试 → Owner 验收 → 迭代/终止 ── */
 
 const LEGACY_FLOW_STEPS = {
-  requirement: { label: '需求', owner: '需求分析师', gate: '先读铁律 → 项目信息 → 角色卡 → 其他人文档；未 boot 不写需求' },
+  requirement: { label: '需求', owner: '需求分析师', gate: '先读团队宪法（唯一最高优先级）→ 项目信息 → 角色卡 → 其他人文档；铁律按需；未 boot 不写需求' },
   product: { label: '产品评审', owner: '产品设计师', gate: '需求回执到齐后评审；通过之后才进入可测性评审' },
   trq: { label: '可测性评审', owner: '测试人员', gate: 'G2.5：需求评审 approve 后、Owner 之前；只评 AC 可判定性，结论“可测”才开 Owner 门；不写测试计划' },
   owner: { label: 'Owner', owner: 'Owner', gate: '需求评审通过 + TR-Q 可测后，Owner 明确通过/跳过/打回；跳过也要记录，PM 派单只认需求级 ownerReview.decisions' },

@@ -33,7 +33,7 @@ import {
   isTeamMode, normalizeTeamMode, rolesForMode, roleInMode, teamModeDescription,
   requirementReviewer, techReviewers, votersForMode, VOTE_RULE_TEXT,
 } from './roles.mjs';
-import { ensureProjectStructure, structureReport, readRequirementDocs, requirementContentText } from './scaffold.mjs';
+import { ensureProjectStructure, structureReport, readRequirementDocs, requirementContentText, IRON_POLICY_LINE, READ_ORDER_LINE } from './scaffold.mjs';
 // T-20261117-184114-4358（R-bcae）：skill 四要素校验 + 30 分钟评估提示（append-only skill评估.jsonl）。
 import { validateSkillContent, recordSkillEvaluation, readSkillEvaluations, skillPromptDue, skillPromptLineFor } from './skill.mjs';
 // T-20261117-211833-7a30（R-a4c7）：调度建议纯函数（三源 → 五类建议）。
@@ -4604,7 +4604,9 @@ export async function cmdBoot(args) {
   // T-20261117-184114-4358（R-bcae）第二步：30 分钟 skill 评估提示（同窗口只一次；可 skip 但必须写 reason）。
   try {
     const skillPrompt = skillPromptLineFor(projectName, role);
-    if (skillPrompt) lines.push(skillPrompt);
+    // 不写进简报正文：简报要保持「同会话连跑两次字节相同」（R-5b14 AC9 的基线口径）。
+    // 提示走 stderr（CLI 输出仍可见、唤醒/终端都能看到），评估记录照常 append。
+    if (skillPrompt) console.warn(skillPrompt);
   } catch (e) { console.warn('[skill] prompt line failed:', String((e && e.message) || e)); }
   lines.push(`read 回执: ${PATHS.reads}（kind=boot；需求/任务文档哈希随令牌落盘，评审与派单前复核）`);
   if (bootQueue && bootQueue.consumed) {
@@ -9843,7 +9845,7 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
   lines.push('');
   lines.push(`> 自动生成：${nowIso()} ｜ 由 \`team.mjs index\` 维护，**这是目录，不是项目介绍或需求正文**。`);
   lines.push(`> 团队模式：${TEAM_MODE_LABELS[teamMode]}（${teamModeDescription(teamMode)}）。`);
-  lines.push('> 先读顺序：**项目铁律 → 项目信息 → 本索引 → 角色卡/文件索引 → 任务指定文件**。');
+  lines.push(`> ${READ_ORDER_LINE} → 角色卡/文件索引 → 任务指定文件；${IRON_POLICY_LINE}。`);
   lines.push('');
   lines.push(INDEX_MANUAL_BEGIN);
   lines.push(manual || '- （PM 临时说明；index 会保留这段，不要在这里写长需求）');
@@ -9901,7 +9903,7 @@ export function generateIndex(project, { by = 'system', sessionId = 'system', si
   lines.push('');
   lines.push('## 六、避雷铁律（按需查，不必每轮读）');
   lines.push('');
-  lines.push('- 每次先读《项目铁律.md》，再读项目信息/本索引/角色卡；不要凭上一次记忆开工。');
+  lines.push(`- ${READ_ORDER_LINE}；${IRON_POLICY_LINE}——不要凭上一次记忆开工。`);
   lines.push('- 只读任务需要的文件；不要每次把 `需求/`、角色目录全量读一遍。');
   lines.push('- 一个需求一个 `R-...md`；新需求新建，澄清更新原文件；单文件 ≤ 16KB，超了拆分。');
   lines.push('- 写文件只走 `propose → review → sign → apply`；不直接改目标文件。');
@@ -10109,7 +10111,7 @@ export function cmdIndex(args) {
     lines.push(`正文巡检：${docs.length} 份（超限 ${docSplit.summary.over} ｜ 贴线 ${docSplit.summary.near} ｜ 正常 ${docSplit.summary.ok} ｜ 白名单 ${docSplit.summary.whitelisted}）`);
     if (!wantSplit && candidates.length) {
       lines.push('待处理（index 默认零写入；加 --split 执行，--split --dry-run 只看计划）：');
-      for (const c of candidates.slice(0, 12)) lines.push(`  ${c.requirementId}  ${c.bytes}B  ${c.level}  可搬：${c.movedSections.join('、') || '（无）'}`);
+      for (const c of candidates.slice(0, 12)) lines.push(`  ${c.requirementId}  ${c.bytes}B  ${c.level}  可搬：${(c.movedSections || []).join('、') || '（无）'}`);
     }
     for (const a of docSplit.actions) {
       const head = `${a.requirementId}  ${a.action}${a.reason ? '(' + a.reason + ')' : ''}  ${a.beforeBytes}→${a.afterBytes}B`;

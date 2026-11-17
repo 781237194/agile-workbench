@@ -118,9 +118,14 @@ function boot(role, session = `${role}-ho`) {
   const rules = (r.out.match(/哈希 rules\s+([a-f0-9]+)/i) || [])[1] || '';
   return { ...r, token, rules };
 }
-/** AC9 口径：去掉「令牌:」与「read 回执:」两行后整份 UTF-8 字节 */
+/**
+ * AC9 口径：去掉「令牌:」与「read 回执:」两行后整份 UTF-8 字节。
+ * 口径变更说明（2026-11-17，R-bcae 4358 接入 30 分钟 skill 提示）：boot 简报里会按需出现
+ * 「skill 提示: 距上次…」这一行动态提示（到点才出现、写入评估记录后同窗口消失），
+ * 属主动提示而非交接发现项；为保持「交接提示增量」的可比性，本口径一并剔除 skill 提示行。
+ */
 function briefBytes(out) {
-  const kept = String(out || '').split('\n').filter((line) => !/^令牌[:：]/.test(line) && !/^read 回执[:：]/.test(line));
+  const kept = String(out || '').split('\n').filter((line) => !/^令牌[:：]/.test(line) && !/^read 回执[:：]/.test(line) && !/^skill 提示[:：]/.test(line));
   return Buffer.byteLength(kept.join('\n'), 'utf8');
 }
 function hintLines(out) {
