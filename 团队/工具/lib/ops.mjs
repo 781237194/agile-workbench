@@ -8745,7 +8745,7 @@ function acceptDefectTask(args, { project, projectName, task, decision, opinion,
     data: { taskId: saved.id, status: decision, channel, testReport: record.testReport, evidence: record.evidence, reopenCount: saved.reopenCount || 0 },
   });
   out(args, [
-    `${saved.id}（${saved.type}）验收${accepted ? '通过' : '打回'}（${proxyMode ? 'PM 代记' : 'Owner'}，通道 ${channel}）`,
+    `${saved.id}（${saved.type}）验收${accepted ? '通过' : '打回'}（${proxyMode ? 'PM 代记' : (byRole === 'pm' ? 'PM' : byRole === 'tester' ? '测试' : 'Owner')}，通道 ${channel}）`,
     `测试报告：${record.testReport}`,
     `证据 ${record.evidence.length} 件：${record.evidence.map((item) => `${item.kind}:${item.path}`).join('，')}`,
     accepted ? '任务已置 accepted（不再进开发队列）' : `已打回 → ${saved.owner || '待认领'}（reopenCount=${saved.reopenCount}）`,
