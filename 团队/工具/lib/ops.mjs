@@ -3163,11 +3163,45 @@ function lastIdleEpisodeCounters(rows, role) {
   return { consecutive: 0, wakeFailures: 0 };
 }
 
+/** B-27ca：idle episode 状态文件（持久化，重启不重置；verdict 转 active 时清空该角色条目）。 */
+function idleEpisodeFile(project) {
+  return path.join(projectStatePaths(project).dir, '唤醒-空闲episode.json');
+}
+function readIdleEpisodes(project) {
+  try { return readJson(idleEpisodeFile(project)) || {}; } catch { return {}; }
+}
+function writeIdleEpisodes(project, data) {
+  try { writeJson(idleEpisodeFile(project), data || {}); } catch { /* 状态写失败不影响唤醒判定 */ }
+}
+
 /** 空闲角色自动唤醒（走既有唤醒链；失败只记 code，不直接升级）。 */
 async function wakeStalledRole(project, role) {
   const name = String(project || '');
   const roleKey = String(role || '');
   const messageId = `WAKE-STALL-${stamp()}-${randomHex(2)}`;
+  // B-27ca：同一 idle episode 只唤醒一次。episode 由「首次判 idle 的时间戳」界定并持久化：
+  //  - 首次 idle：写入 {startAt} 并正常唤醒；
+  //  - 同 episode 再拍：跳过唤醒（返回 skipped=IDLE_EPISODE_DEDUP），只写审计，不重发；
+  //  - verdict 转 active 时由 recoverStalledRoles 清空该角色条目 → 下次 idle 是新 episode。
+  const episodes = readIdleEpisodes(name);
+  const nowIso = new Date().toISOString();
+  let episode = episodes[roleKey];
+  if (!episode || !episode.startAt) {
+    episode = { startAt: nowIso, wokeAt: '', escalatedAt: '' };
+    episodes[roleKey] = episode;
+    writeIdleEpisodes(name, episodes);
+  }
+  if (episode.wokeAt) {
+    // 同 episode 已唤醒过：只落审计（唤醒日志 + 事件），不再真唤醒。
+    try {
+      appendEvent({ role: 'system', action: 'wake_skipped', project: name, target: roleKey,
+        note: `reason=stalled;skipped=IDLE_EPISODE_DEDUP;episode=${episode.startAt}` });
+    } catch { /* 审计失败不阻断 */ }
+    return { ok: true, skipped: 'IDLE_EPISODE_DEDUP', episodeStart: episode.startAt, messageId: '', code: '' };
+  }
+  episode.wokeAt = nowIso;
+  episodes[roleKey] = episode;
+  writeIdleEpisodes(name, episodes);
   try {
     const wake = await wakeWithGuard({
       project: name, to: roleKey, isDispatch: false,
@@ -3175,7 +3209,7 @@ async function wakeStalledRole(project, role) {
         id: messageId, from: 'system', to: roleKey, type: 'notice',
         subject: `空闲唤醒：${roleCnName(roleKey)}`, project: name, task: '',
       },
-      reason: 'stalled', dedupeKey: '',
+      reason: 'stalled', dedupeKey: `idle-episode:${roleKey}:${episode.startAt}`,
     });
     const ok = Boolean(wake && wake.ok === true);
     return {
@@ -3292,6 +3326,10 @@ export async function recoverStalledRoles(project, { now = Date.now(), write = t
         detail: `reason=signal_active;itemIds=${itemIds.join(',')}`,
       });
     }
+    // B-27ca：角色恢复活跃 → 结束本 idle episode（下次 idle 是新 episode，可再唤醒一次）。
+    const episodesNow = readIdleEpisodes(name);
+    if (episodesNow[role]) { delete episodesNow[role]; writeIdleEpisodes(name, episodesNow); }
+
     cleared.push({ role, itemIds });
   }
 
