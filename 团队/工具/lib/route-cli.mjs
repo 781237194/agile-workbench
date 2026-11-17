@@ -143,6 +143,7 @@ export async function cmdRoute(args) {
       `路由守护（${project}）：${s.alive ? '曾心跳' : '未启动'} ｜ 最近心跳 ${s.lastBeatAt || '-'}${s.beatAgeMs === null ? '' : `（${Math.round(s.beatAgeMs / 1000)} 秒前）`}${s.stale ? ' ｜ ⚠ 疑似已停' : ''}`,
       `锁：${s.lock ? `被 ${s.lock.owner || s.lock.role || 'unknown'} 持有${s.lock.stale ? '（已过期）' : ''}` : '无'}`,
       `快照：${s.hasSnapshot ? '有' : '无'} ｜ 日志 ${s.log.rows} 行（${Object.entries(s.log.counts).map(([k, v]) => `${k}=${v}`).join(' ') || '空'}）`,
+      `无载体 ${s.noCarrier ? s.noCarrier.count : 0} 条${s.noCarrier && s.noCarrier.requirementIds.length ? `（${s.noCarrier.requirementIds.slice(0, 5).join('、')}${s.noCarrier.requirementIds.length > 5 ? ' 等' : ''}）` : ''}`,
       `待重试 ${s.pendingWakes} ｜ 待复查 ${s.followUps} ｜ 版本 ${s.version || '-'} ｜ pid ${s.pid || '-'} ｜ 拍数 ${s.ticks}`,
     ].join('\n');
     out(args, human, { ok: true, ...s });

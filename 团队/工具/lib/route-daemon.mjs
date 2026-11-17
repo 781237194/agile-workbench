@@ -1028,11 +1028,20 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
         const code = codeMap[plan.skip] || 'NO_DISPATCHABLE_TASK';
         const stage = currentStatus || 'unknown';
         const alarmKey = `no_task|${event.requirementId}|${code}`;
-        const lastAlarm = Date.parse(String((status.noTaskAlerts || {})[alarmKey] || ''));
-        if (!Number.isNaN(lastAlarm) && now - lastAlarm < 10 * 60 * 1000) {
-          appendRouteLog(name, { ...base, event: 'skip', why: `alert_deduped(${code})`, ok: true });
-          out.skips.push({ ...base, why: `alert_deduped(${code})` });
-          continue;
+        // B-f73f AC2：NO_CARRIER_TASK（需求没有可派的载体任务）是**工作静默丢失**风险，
+        // 不参与 10 分钟去重（去重会把连续漏派吞掉），单独计数并在 route status 里给出「无载体 N 条」。
+        if (code !== 'NO_CARRIER_TASK') {
+          const lastAlarm = Date.parse(String((status.noTaskAlerts || {})[alarmKey] || ''));
+          if (!Number.isNaN(lastAlarm) && now - lastAlarm < 10 * 60 * 1000) {
+            appendRouteLog(name, { ...base, event: 'skip', why: `alert_deduped(${code})`, ok: true });
+            out.skips.push({ ...base, why: `alert_deduped(${code})` });
+            continue;
+          }
+        } else {
+          out.noCarrier = Array.isArray(out.noCarrier) ? out.noCarrier : [];
+          if (!out.noCarrier.some((row) => row.requirementId === event.requirementId)) {
+            out.noCarrier.push({ requirementId: event.requirementId, stage, at: nowIso() });
+          }
         }
         status.noTaskAlerts = { ...(status.noTaskAlerts || {}), [alarmKey]: nowIso() };
         alertPm(name, {
@@ -1493,6 +1502,17 @@ export function routeDaemonStatus(projectName, { now = Date.now() } = {}) {
   const rows = readRouteLog(name);
   const counts = {};
   for (const row of rows) counts[String(row.event || 'unknown')] = (counts[String(row.event || 'unknown')] || 0) + 1;
+  // B-f73f AC2：无载体（no_carrier_task）单独计数——幂等窗口内按需求 id 去重，供 status 显示「无载体 N 条」。
+  const noCarrierWindowMs = idempotentWindowMs();
+  const noCarrierIds = [];
+  for (const row of rows) {
+    if (String(row.event || '') !== 'skip') continue;
+    if (!/no_carrier_task/.test(String(row.why || ''))) continue;
+    const at = Date.parse(String(row.at || ''));
+    if (!Number.isNaN(at) && now - at > noCarrierWindowMs) continue;
+    const rid = String(row.requirementId || '');
+    if (rid && !noCarrierIds.includes(rid)) noCarrierIds.push(rid);
+  }
   return {
     project: name,
     files: { log: paths.log, status: paths.status, snapshot: paths.snapshot, queue: paths.queue },
@@ -1509,6 +1529,7 @@ export function routeDaemonStatus(projectName, { now = Date.now() } = {}) {
     pendingWakes: Object.keys(status.retries || {}).length,
     followUps: Object.keys(status.followUps || {}).length,
     lock,
+    noCarrier: { count: noCarrierIds.length, requirementIds: noCarrierIds, windowMs: noCarrierWindowMs },
     log: { rows: rows.length, counts, tail: rows.slice(-10) },
     hasSnapshot: exists(paths.snapshot),
   };
