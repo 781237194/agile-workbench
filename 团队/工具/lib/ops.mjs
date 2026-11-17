@@ -55,6 +55,7 @@ import { buildDispatchPrompt, buildNoticePrompt, buildWakeHeader, buildWakeLine,
 import { assertNoPendingSubagent, subagentAudit } from './subagent.mjs';
 import {
   handoverForBoot, validateHandover, assertSessionMapConsistent, probeRoleSession, nudgeRoleBoot, consumeBootQueue,
+  listDshSessions,
 } from './session.mjs';
 import { validatePmAcceptEvidence, parseEvidenceArg, validateAcceptGates } from './pm-accept-evidence.mjs';
 import { detectOptionalPlugins, optionalPluginMarks, pluginStatusLines } from './plugins.mjs';
@@ -4473,6 +4474,29 @@ function writeWorkflowBootState(projectName, roleId, records, meta) {
   return { ok: true, file, docs: Object.keys(docsMap).length, complete: next.boots[roleId].complete };
 }
 
+/** B-20261117-224146-7b01：boot 校验名册 sessionId 是否真在 DSH 会话列表。
+ *  返回 {status: 'ok'|'missing'|'skipped'|'absent'}；DSH 不可用时 skipped（显式标注，不静默放行）。 */
+async function verifyBootSessionExists(role, sessionId) {
+  const sid = String(sessionId || '');
+  if (!sid) return { status: 'absent' };
+  try {
+    // 沙盘策略：TEAM_SELFTEST=1 且未显式给 TEAM_DSH_FAKE 时按策略豁免（显式 skipped，不静默）；
+    // 给了 fake 列表则照常校验（夹具可测「不存在会话必失败」）。
+    const selftest = String(process.env.TEAM_SELFTEST || '') === '1';
+    if (selftest && !String(process.env.TEAM_DSH_FAKE || '').trim()) {
+      return { status: 'skipped', reason: 'TEAM_SELFTEST=1（沙盘按策略豁免 DSH 会话存在性校验）' };
+    }
+    const res = await listDshSessions();
+    if (!res || res.ok !== true) return { status: 'skipped', reason: String((res && res.why) || 'DSH 会话列表不可用（离线/未连 DSH）') };
+    const ids = new Set((res.items || []).map((x) => String((x && x.sessionId) || '')).filter(Boolean));
+    const fake = Boolean(res.fake);
+    if (ids.has(sid)) return { status: 'ok', count: ids.size, fake };
+    return { status: 'missing', count: ids.size, fake };
+  } catch (e) {
+    return { status: 'skipped', reason: `会话列表读取失败：${String((e && e.message) || e)}` };
+  }
+}
+
 export async function cmdBoot(args) {
   const team = loadTeam();
   const role = String(args.role || '');
@@ -4484,6 +4508,14 @@ export async function cmdBoot(args) {
   const docs = readDocSet(role, project);
   const teamMode = docs.teamMode || projectTeamMode(project);
   const sessionId = sessionOf(args);
+  // B-7b01：名册会话必须真实存在于 DSH（否则换人失败被假绿掩盖）；先校验、后发令牌。
+  const sessionExistence = await verifyBootSessionExists(role, sessionId);
+  if (sessionExistence.status === 'missing') {
+    fail('SESSION_NOT_FOUND_IN_DSH', `名册里 ${role} 的会话 ${sessionId} 不在 DSH 会话列表中（DSH 现有 ${sessionExistence.count} 个会话${sessionExistence.fake ? '，当前为沙盘 fake 列表' : ''}）：疑似换人失败/手工改名册。处理：先 session rotate 生成真实会话再重 boot，或联系 PM 修正 团队/状态/团队.json。`, {
+      role, sessionId, dshCount: sessionExistence.count, fake: sessionExistence.fake,
+      hint: `node 团队\\工具\\team.mjs session rotate --role ${role} --project "${projectName}"`,
+    }, 1);
+  }
   const token = createBootToken({ role, project: projectName, sessionId, docs });
   addReadReceipt({ role, sessionId, kind: 'index', project: projectName, proposalId: '', proposalHash: '', baseHash: docs.hashes.projectIndex });
   const records = docs.docs.map((d) => ({
@@ -4583,6 +4615,12 @@ export async function cmdBoot(args) {
   // expiresAt 只作审计/展示）。旧文案写「480 分钟 = 8 小时」会让 Owner 与 PM 误以为要重 boot——改成不限时。
   lines.push(`令牌: ${token.token}（**不限时**，expiresAt 仅审计展示、不作拒绝依据；当前所有写操作都要带 --boot）｜ 哈希 rules ${shortHash(docs.rulesHash)} / index ${shortHash(docs.hashes.projectIndex)}`);
   lines.push(`身份: ${member.name}（${role}）｜ 会话: ${sessionId}`);
+  // B-7b01：会话存在性校验结果必须可见（skipped 也要显式，不能静默放行）。
+  if (sessionExistence.status === 'ok') lines.push(`会话校验: ok（名册会话存在于 DSH，共 ${sessionExistence.count} 个${sessionExistence.fake ? ' · fake 列表' : ''}）`);
+  else if (sessionExistence.status === 'skipped') {
+    console.warn(`[session] 会话存在性校验 skipped：${sessionExistence.reason}`);
+    lines.push(`会话校验: skipped（${sessionExistence.reason}；离线/沙盘不阻断，但已在 stderr 告警）`);
+  } else if (sessionExistence.status === 'absent') lines.push('会话校验: skipped（名册无 sessionId，未校验）');
   lines.push(`团队模式: ${TEAM_MODE_LABELS[teamMode]}（${teamModeDescription(teamMode)}）｜ 角色集: ${rolesForMode(teamMode).join(' / ')}`);
   lines.push(teamMode === 'fast'
     ? '快速模式: 需求评审=需求分析师 ｜ 技术评审记录=程序员A ｜ 投票=vote start/cast/status'
