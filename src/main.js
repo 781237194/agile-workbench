@@ -13482,7 +13482,10 @@ async function runReviewCheck() {
       whats: items.map((n) => n.getAttribute('data-what')),
       blocked: items.map((n) => n.getAttribute('data-blocked')),
       advice: items.map((n) => n.getAttribute('data-advice')),
-      chips: box ? [...box.querySelectorAll('[data-owner-all-filter]')].map((n) => n.getAttribute('data-owner-all-filter')) : []
+      chips: box ? [...box.querySelectorAll('[data-owner-all-filter]')].map((n) => n.getAttribute('data-owner-all-filter')) : [],
+      shortIds: items.map((n) => { const el2 = n.querySelector('[data-or-short-id]'); return el2 ? el2.textContent : ''; }),
+      names: items.map((n) => { const el2 = n.querySelector('[data-or-name]'); return el2 ? el2.textContent : ''; }),
+      badgeCounts: items.map((n) => n.querySelectorAll('[data-or-status-badge], [data-or-source-badge]').length)
     });
   })()`));
   report.allBefore = all1;
@@ -13493,12 +13496,18 @@ async function runReviewCheck() {
     all1);
   check('默认三组（等决定/进行中/待验收）', new Set(all1.buckets).size === 3
     && all1.buckets.every((b) => b !== 'closed'), all1.buckets);
-  check('每条都有大标题 + 三要素（这是什么/卡在哪/建议你拍什么）',
+  // R-a64f（T-d08e）：左栏行精简为「短号 + 需求名 + 徽标」，长文本移到右侧详情 →
+  // 这里改断言：三要素仍以 data-* 属性在行上（供读屏/自检取），但**不再**渲染行内文本；
+  // 另正向断言短号/名称/徽标在行内，负向断言「这是什么/卡在哪/建议你拍什么」不出现在行内文本。
+  check('每行有短号 + 需求名 + 状态徽标，三要素以 data-* 保留（长文本不再进行内）',
     all1.whats.every((v) => Boolean(String(v || '').trim()))
     && all1.blocked.every((v) => Boolean(String(v || '').trim()))
     && all1.advice.every((v) => Boolean(String(v || '').trim()))
-    && /这是什么/.test(String(all1.texts[0] || '')) && /卡在哪/.test(String(all1.texts[0] || ''))
-    && /建议你拍什么/.test(String(all1.texts[0] || '')), { whats: all1.whats, texts: all1.texts });
+    && /这是什么|卡在哪|建议你拍什么/.test(String(all1.texts[0] || '')) === false
+    && Boolean(all1.shortIds && all1.shortIds.every((v) => Boolean(String(v || '').trim())))
+    && Boolean(all1.names && all1.names.every((v) => Boolean(String(v || '').trim())))
+    && Boolean(all1.badgeCounts && all1.badgeCounts.every((n) => Number(n) >= 2)),
+    { whats: all1.whats, texts: all1.texts, shortIds: all1.shortIds, names: all1.names, badgeCounts: all1.badgeCounts });
   check('有分组筛选（全部 + 四个状态）', Array.isArray(all1.chips) && all1.chips.length === 5, all1.chips);
 
   // 点行展开详情：正文摘要 + 分析师建议拍板 + 证据链接

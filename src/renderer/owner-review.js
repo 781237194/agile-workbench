@@ -3,8 +3,28 @@
   const STATUS_TEXT = { approved: '已通过', rejected: '已打回', skipped: '已先跳过', pending: '等你决定', optional: '等你决定' };
   // B-4baa（R-1cee）：看板与待评估清单默认各展示前 5 条，其余折叠在 DOM 里（不删、不裁切），可展开全部。
   const PREVIEW_ROWS = 5;
-  const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', batchResult: null, reject: null, listFilter: 'all', listOpen: new Set(), closedCollapsed: true, proxyAllActive: false, proxyAllRecord: null, proxyAllExpiresAt: '', proxyReadError: '', decisionBox: [] };
+  const state = { projectId: '', data: null, selected: '', draft: '', timer: null, skipOpen: false, skipDraft: { analyst: '', product: '', dev: '' }, materials: null, materialsFor: '', boardExpanded: false, evalExpanded: false, suggestions: [], batchSelected: new Set(), batchError: '', batchResult: null, reject: null, listFilter: 'all', listOpen: new Set(), closedCollapsed: true, proxyAllActive: false, proxyAllRecord: null, proxyAllExpiresAt: '', proxyReadError: '', decisionBox: [], searchText: '', searchTimer: null, searchBox: null };
   const KEY_LATER = 'awb.ownerReview.laterUntil';
+  // R-a64f（T-20261118-095703-d08e）：左栏精简 + 搜索。行只留「短号 + 需求名 + 徽标」，
+  // 顶部搜索按 编号 / 需求名 / 正文关键词 实时过滤（去抖 ≤300ms），组头计数随筛选变化、0 条组头隐藏。
+  const SEARCH_DEBOUNCE_MS = 200; // ≤300ms
+  /* A64F-SEARCH-BEGIN */
+  const A64F_SHORT_LEN = 4;
+  function orShortId(id) {
+    const s = String(id == null ? '' : id);
+    const tail = s.split('-').pop() || s;
+    return tail.slice(-A64F_SHORT_LEN).toLowerCase();
+  }
+  function orSearchMatches(text, query) {
+    const q = String(query == null ? '' : query).trim().toLowerCase();
+    if (!q) return true;
+    return String(text == null ? '' : text).toLowerCase().indexOf(q) !== -1;
+  }
+  function orSearchTextOf(parts) {
+    const list = Array.isArray(parts) ? parts : [parts];
+    return list.map((v) => String(v == null ? '' : v)).join(' \u0000 ');
+  }
+  /* A64F-SEARCH-END */
   const KEY_NO_AUTO = 'awb.ownerReview.noAuto';
   // B-d100：打回后复审的判定收在 owner-review-state.js（Node 可单测）；脚本缺失时退回本文件旧逻辑。
   const OR_STATE = (typeof window !== 'undefined' && window.OwnerReviewState) ? window.OwnerReviewState : null;
@@ -991,6 +1011,60 @@
       })
       .slice(0, 4);
   }
+  /** R-a64f：搜索条只建一次、跨重绘复用（输入框不失焦），计数/空态随筛选更新。 */
+  let orSearchEls = null;
+  function orEnsureSearchBar() {
+    if (orSearchEls) return orSearchEls;
+    const bar = el('div', 'or-all-search');
+    bar.setAttribute('data-or-search-bar', '1');
+    const input = el('input', 'or-all-search-input');
+    input.type = 'search';
+    input.placeholder = '搜编号 / 需求名 / 正文关键词（输入即筛，清空恢复全部）';
+    input.setAttribute('data-or-search', '1');
+    input.setAttribute('aria-label', '搜索需求');
+    input.value = String(state.searchText || '');
+    input.addEventListener('input', orOnSearchInput);
+    const count = el('span', 'or-all-count', '0 条');
+    count.setAttribute('data-or-count', '1');
+    bar.appendChild(input);
+    bar.appendChild(count);
+    orSearchEls = { bar, input, count };
+    return orSearchEls;
+  }
+  function orOnSearchInput(event) {
+    state.searchText = String((event && event.target && event.target.value) || '');
+    if (state.searchTimer) clearTimeout(state.searchTimer);
+    // 去抖 ≤300ms：输入停手后再过滤，避免每敲一个字就重排整棵列表。
+    state.searchTimer = setTimeout(() => { state.searchTimer = null; orApplySearch(); }, SEARCH_DEBOUNCE_MS);
+  }
+  /** 就地过滤：隐藏不匹配的行 / 更新计数 / 0 条的组头隐藏（不重建 DOM，输入框不失焦）。 */
+  function orApplySearch() {
+    const box = state.searchBox;
+    if (!box) return;
+    const q = String(state.searchText || '');
+    let total = 0;
+    for (const group of Array.from(box.querySelectorAll('[data-owner-all-group]'))) {
+      let shown = 0;
+      for (const row of Array.from(group.querySelectorAll('[data-owner-all-item]'))) {
+        const hit = orSearchMatches(row.getAttribute('data-or-search-text') || '', q);
+        row.hidden = !hit;
+        if (hit) shown += 1;
+      }
+      const title = group.querySelector('[data-or-group-title]');
+      const label = String((title && title.getAttribute('data-or-group-label')) || '');
+      const collapsed = group.getAttribute('data-owner-closed-collapsed') === '1';
+      if (title) title.textContent = `${label} · ${shown} 条${collapsed ? '（已折叠，点开看）' : ''}`;
+      group.hidden = Boolean(q) && shown === 0;
+      total += shown;
+    }
+    if (orSearchEls && orSearchEls.count) orSearchEls.count.textContent = `${total} 条`;
+    const empty = box.querySelector('[data-or-empty]');
+    if (empty) {
+      empty.hidden = total !== 0;
+      empty.textContent = '没有匹配的需求：换个关键词，或清空搜索恢复全部';
+    }
+  }
+
   function renderAllRequirements(list, allRows) {
     const box = el('div', 'or-all');
     box.setAttribute('data-owner-all', '1');
@@ -1008,6 +1082,14 @@
       : '';
     head.appendChild(el('span', 'or-muted', `（工作流 ${reqSet.registered} 条${fallbackNote} · 按状态六档分组；点一行展开正文、分析师建议与证据）`));
     box.appendChild(head);
+    // R-a64f：搜索框 + 结果计数 + 空态（锚点 data-or-search / data-or-count / data-or-empty）。
+    const search = orEnsureSearchBar();
+    box.appendChild(search.bar);
+    const emptyHint = el('p', 'or-empty or-all-empty', '没有匹配的需求：换个关键词，或清空搜索恢复全部');
+    emptyHint.setAttribute('data-or-empty', '1');
+    emptyHint.hidden = true;
+    box.appendChild(emptyHint);
+    state.searchBox = box;
 
     const counts = { all: allRows.length, draft: 0, product_review: 0, pending: 0, running: 0, test_done: 0, closed: 0 };
     for (const row of allRows) counts[listBucketOf(row)] = (counts[listBucketOf(row)] || 0) + 1;
@@ -1046,6 +1128,9 @@
           `${group.label} · ${group.rows.length} 条${collapsed ? '（已折叠，点开看）' : ''}`);
         titleBtn.type = 'button';
         titleBtn.setAttribute('data-owner-closed-toggle', '1');
+        // R-a64f：组头计数随搜索变化（标签单独存，计数现算）。
+        titleBtn.setAttribute('data-or-group-title', '1');
+        titleBtn.setAttribute('data-or-group-label', String(group.label));
         titleBtn.addEventListener('click', () => {
           state.closedCollapsed = !collapsed;
           renderDialog();
@@ -1055,12 +1140,16 @@
         box.appendChild(groupBox);
         continue;
       }
-      groupBox.appendChild(el('div', 'or-all-group-title', `${group.label} · ${group.rows.length} 条`));
+      const groupTitle = el('div', 'or-all-group-title', `${group.label} · ${group.rows.length} 条`);
+      groupTitle.setAttribute('data-or-group-title', '1');
+      groupTitle.setAttribute('data-or-group-label', String(group.label));
+      groupBox.appendChild(groupTitle);
       for (const req of group.rows) {
         groupBox.appendChild(renderAllRow(req));
       }
       box.appendChild(groupBox);
     }
+    orApplySearch();
     list.appendChild(box);
   }
 
@@ -1153,6 +1242,8 @@
     const board = boardFieldsFor(req);
     const acBoard = board.acBoard;
     const what = acBoard ? clip60(acBoard.what, 80) : clip60(humanizeTitle(req.title), 80);
+    // R-a64f：行内只显示短号 + 需求名（单行 ellipsis）；名称走 humanizeTitle，与看板同口径。
+    const rowName = humanizeTitle(req.title);
     const blocked = acBoard ? clip60(acBoard.blocked, 120) : clip60(blockedTextOf(req, pending, proxyActive));
     // B-d1e5：这里以前是三段硬编码（通过/打回、验收通过/打回、先不动），Owner 看到的「清一色」就是它。
     // 现在统一走 adviceTextOf：按这条需求的状态、证据、验收标准、正文取舍点给一句具体动作。
@@ -1189,6 +1280,9 @@
     const rework = reworkInfoOf(req);
     if (rework.isRework) item.setAttribute('data-or-rework', '1');
     item.setAttribute('data-or-expanded', open ? '1' : '0');
+    // R-a64f：搜索用的整行文本（编号 + 短号 + 需求名 + 正文摘要 + 三要素），行内不再渲染长文本。
+    item.setAttribute('data-or-search-text',
+      orSearchTextOf([id, orShortId(id), humanizeTitle(req.title), listDetailTextOf(req), what, blocked, adviseFull]));
     // 三要素同时挂在行上（便于自检/读屏按行取），文案仍写在行内三行里。
     item.setAttribute('data-what', what);
     item.setAttribute('data-blocked', blocked);
@@ -1212,22 +1306,19 @@
       headRow.setAttribute('data-how', clip60(acBoard.how, 200));
       headRow.setAttribute('data-impact', clip60(acBoard.impact, 120));
     }
-    headRow.innerHTML = `<b>${esc(what)}</b>` + reworkChipHtml(req)
-      + `<span class="or-all-k">这是什么</span><span class="or-all-v">${esc(what)}</span>`
-      + `<span class="or-all-k">卡在哪</span><span class="or-all-v">${esc(blocked)}</span>`
-      + `<span class="or-all-k">建议你拍什么</span><span class="or-all-v">${esc(advise)}</span>`
-      + `<em>${esc(open ? '收起' : '展开')}</em>`;
+    headRow.innerHTML = `<span class="or-all-id" data-or-short-id="1" title="${esc(id)}">${esc(orShortId(id))}</span>`
+      + `<span class="or-all-name" data-or-name="1" title="${esc(rowName)}">${esc(rowName)}</span>`
+      + reworkChipHtml(req)
+      + `<em class="or-all-toggle">${esc(open ? '收起' : '展开')}</em>`;
+    // R-a64f AC1：徽标并入行（保留 data-or-status-badge / data-or-source-badge），删掉独立的 .or-all-meta 行。
+    headRow.appendChild(statusBadgeEl(req));
+    headRow.appendChild(sourceBadgeEl(req));
     headRow.addEventListener('click', () => {
       if (state.listOpen.has(id)) state.listOpen.delete(id); else state.listOpen.add(id);
       selectRequirement(id);
     });
     item.appendChild(headRow);
-    // B-3065 AC5：每条需求都带状态徽标 + ownerReview 来源（PM 代记 / 本人 / 来源未记）。
-    const metaRow = el('div', 'or-all-meta');
-    metaRow.setAttribute('data-or-meta', '1');
-    metaRow.appendChild(statusBadgeEl(req));
-    metaRow.appendChild(sourceBadgeEl(req));
-    item.appendChild(metaRow);
+    // R-a64f：状态/来源徽标已并入 headRow（见上），独立的 .or-all-meta 行按需求删除。
 
     if (open) {
       const detail = el('div', 'or-all-detail');
