@@ -48,6 +48,8 @@
   </style>
 </head>
 <body>
+  <!-- R-b34a AC8③（T-20261118-195239-0d3b）：慢 IPC 可查锚点（默认隐藏，不占布局；由 perf-log-anchor.js 填充）。 -->
+  <div id="perf-log" data-perf-log data-perf-log-state="idle" hidden><span data-perf-log-count>0</span><span data-perf-log-last></span></div>
   <!-- T-5d98（R-fd42）：PM 身份绑定失败横幅（WB_UNREADABLE / 待写入；默认隐藏，失败时可见，不静默）。 -->
   <div id="binding-error-banner" role="alert" data-code="" hidden style="position:fixed;left:8px;right:8px;top:8px;z-index:9999;padding:8px 12px;border-radius:6px;background:#b3261e;color:#fff;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.35)"></div>
   <header id="titlebar">
@@ -947,5 +949,7 @@
 <script src="mailbox-panel.js"></script>
 <!-- R-6bc8（T-37f5）：会话排队面板（只读：排队数 + 四态 + 失败/跳过两列 + 背压提示） -->
 <script src="session-queue-panel.js"></script>
+<!-- R-b34a AC8③（T-20261118-195239-0d3b）：慢 IPC 锚点 [data-perf-log] 填充（只读 perf:recent） -->
+<script src="perf-log-anchor.js"></script>
 </body>
 </html>

@@ -335,6 +335,52 @@ async function main() {
         && report.pass.coldWindowUnder && report.pass.coldSkeletonUnder && report.pass.contentLoaded ? 0 : 1;
       return;
     }
+    // ── R-b34a IPC 二轮（T-20261118-195239-0d3b）：A7 慢 IPC 实测（同实例，各 6 次取 p50/max） ──
+    if (ARGS.includes('--ipc-perf')) {
+      const wbFile2 = path.join(DATA, 'userdata', 'workbench.json');
+      const wb2 = JSON.parse(fs.readFileSync(wbFile2, 'utf8'));
+      const projectId2 = String(wb2.activeProjectId || ((wb2.projects || [])[0] || {}).id || '');
+      const cases = [
+        { name: 'app:state', expr: 'window.workbench.state()' },
+        { name: 'system:metrics', expr: 'window.workbench.metrics()' },
+        { name: 'team:presence', expr: 'window.workbench.teamPresence(' + JSON.stringify({ projectId: projectId2 }) + ')' },
+        { name: 'workflow:state', expr: 'window.workbench.workflowState(' + JSON.stringify({ projectId: projectId2 }) + ')' },
+      ];
+      const results = [];
+      for (const c of cases) {
+        const samples = [];
+        let lastOk = null;
+        for (let i = 0; i < 6; i += 1) {
+          const t0 = Date.now();
+          try { lastOk = await evalJs(c.expr, 120000, true); } catch (e) { lastOk = { error: String((e && e.message) || e).slice(0, 120) }; }
+          samples.push(Date.now() - t0);
+          await sleep(60);
+        }
+        const sorted = samples.slice().sort((a, b) => a - b);
+        const p50 = sorted[Math.floor((sorted.length - 1) * 0.5)];
+        const p95 = sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)];
+        results.push({ name: c.name, samples, p50, p95, max: sorted[sorted.length - 1], ok: Boolean(lastOk && (lastOk.ok !== false)) });
+        put({ kind: 'ipc-perf', name: c.name, p50, p95, max: sorted[sorted.length - 1], samples });
+      }
+      const report = {
+        task: 'T-20261118-195239-0d3b', requirement: 'R-20261118-170937-b34a', at: new Date().toISOString(),
+        note: '开发侧预检（非验收证据）；A7 目标：presence/workflow:state/metrics 降 ≥80% 或 ≤100ms',
+        head: (() => { try { return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { return ''; } })(),
+        results,
+        pass: {
+          appState: results[0].max <= 200,
+          metrics: results[1].p95 <= 100,
+          presence: results[2].p95 <= 100,
+          workflowState: results[3].p95 <= 100,
+        },
+        isolation: { realTeamSame: sha(realTeamFile) === beforeReal.team, realWbSame: sha(realWb) === beforeReal.wb },
+        jsonl,
+      };
+      fs.writeFileSync(path.join(EVID, 'run-0d3b-ipc.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
+      console.log('\nIPC_PERF ' + JSON.stringify(results.map((r) => ({ n: r.name, p50: r.p50, p95: r.p95, max: r.max }))));
+      process.exitCode = report.pass.metrics && report.pass.presence && report.pass.workflowState && report.pass.appState ? 0 : 1;
+      return;
+    }
     // 等真实输入框
     let selector = null;
     for (let i = 0; i < 40; i += 1) {

@@ -19,6 +19,12 @@ const StoreAudit = require('./store-audit.js');
 const FolderOpen = require('./folder-open.js');
 // R-20261118-170937-b34a（T-e2d8 R2）：读盘缓存 + 慢操作日志（性能-YYYYMMDD.jsonl）+ IPC 计时包装的 CJS 单源。
 const perfCache = require('./perf-cache.js');
+// T-0d3b AC8③：注册只读 perf:recent（最近慢 IPC，供界面 data-perf-log 展示）。
+// 用 rawIpcHandle 注册，避免再被计时包装重复计一次。
+try {
+  const registerPerfIpc = perfCache && perfCache.registerPerfIpc;
+  if (typeof registerPerfIpc === 'function') registerPerfIpc(rawIpcHandle, activeTeamProjectNameForPerf);
+} catch (e) { try { console.warn('PERF_IPC_REGISTER_FAILED ' + String((e && e.message) || e)); } catch { /* ignore */ } }
 // B-20261118-191527-c437（P1 稳定性）：崩溃后「复活主窗 / 恢复 webview / 不误退」的纯判定逻辑（Node 可测）。
 const CrashGuard = require('./crash-guard.js');
 // R-b34a 批5：目录扫描结果缓存（files:list 等递归扫描用；键=目录 mtime+size，3s TTL 兜底）
@@ -52,6 +58,20 @@ const rawIpcHandle = ipcMain.handle.bind(ipcMain);
 // 热点只读 IPC 加 5–10s 短 TTL 缓存（PM 2026-11-18 17:57 优先序 b/c）。写路径 writeStore 会清空该缓存，
 // 保证「写完立刻可见」；TTL 只是重复刷新时的降本，不改变 handler 返回值。
 // T-0d3b：system:metrics 的 GPU 采样缓存（nvidia-smi 每次 ~1.5s，不能放在 IPC 同步路径里）。
+// T-0d3b：workflow:state 的 mtime 指纹缓存（工作流/tasks/启动目录/store 任一变化即重算）。
+// T-0d3b：app:state 的 store 指纹缓存（2s 下限，保证对账/收件箱最多滞后 2s）。
+const appStateCache = { key: '', at: 0, value: null };
+const appStateStats = { hits: 0, misses: 0 };
+function storeFileFingerprint() {
+  try {
+    const f = (typeof storeFile === 'function') ? String(storeFile() || '') : '';
+    if (!f) return '';
+    const st = fs.statSync(f);
+    return st.mtimeMs + ':' + st.size;
+  } catch { return ''; }
+}
+const workflowStateCache = new Map();
+const workflowStateStats = { hits: 0, misses: 0 };
 const METRICS_GPU_TTL_MS = 10000;
 const metricsGpuCache = { at: 0, value: null };
 let metricsGpuSampling = false;
@@ -71,6 +91,21 @@ const hotIpcStats = { hits: 0, misses: 0 };
 // 这些通道的结果**不依赖本进程 store**（外部进程写文件 / 系统指标），writeStore 清缓存时保留它们，
 // 否则每次写盘都把 metrics/presence 缓存打掉，导致每次都重跑 nvidia-smi / 子进程（tester v256 实测 1.7s/5.7s）。
 const HOT_IPC_STORE_INDEPENDENT = new Set(['system:metrics', 'team:presence', 'dsh:team-status', 'team:status']);
+/** 工作流快照的 mtime 指纹：工作流.json / 任务目录 / 状态/启动 / store 文件（缺一不可，缺则返回空串=不缓存）。 */
+function workflowStateFingerprint(teamName) {
+  try {
+    const name = String(teamName || '').trim();
+    if (!name) return '';
+    const projDir = path.join(resolveTeamRoot(), '状态', '项目', name);
+    const parts = [];
+    const add = (p) => { try { const st = fs.statSync(p); parts.push(st.mtimeMs + ':' + (st.size || 0)); } catch { parts.push('-'); } };
+    add(path.join(projDir, '工作流.json'));
+    add(path.join(projDir, '任务'));
+    // 启动目录（PM 令牌）变化很频繁且只影响 ledgerActions，单独 10s 缓存；不放进快照指纹，避免快照反复失效。
+    add(path.join(resolveTeamRoot(), '状态', '团队.json'));
+    return parts.join('|');
+  } catch { return ''; }
+}
 function hotIpcCacheClear() {
   for (const key of Array.from(hotIpcCache.keys())) {
     const channel = String(key).split('|')[0];
@@ -5151,7 +5186,17 @@ function readGateAudit(project, limit = 20) {
 
 
 function registerIpc() {
-  ipcMain.handle('app:state', () => statePayload());
+  // T-0d3b（IPC 二轮）：app:state 原每次 ~0.4-1.8s（statePayload 里对账/收件箱尾部/会话映射）。
+  // 改为 mtime 指纹缓存：store 文件未变 → 直接复用上次结果；但有 2s 下限，保证对账/收件箱状态最多滞后 2s。
+  ipcMain.handle('app:state', () => {
+    const fp = storeFileFingerprint();
+    const nowMs = Date.now();
+    if (fp && appStateCache.key === fp && nowMs - appStateCache.at < 2000) { appStateStats.hits += 1; return appStateCache.value; }
+    const value = statePayload();
+    appStateStats.misses += 1;
+    appStateCache.key = fp; appStateCache.at = nowMs; appStateCache.value = value;
+    return value;
+  });
   ipcMain.handle('app:version', () => APP_VERSION);
   ipcMain.handle('files:list', async (_e, projectId) => {
     const store = readStore();
@@ -7836,11 +7881,25 @@ ipcMain.handle('theme:metrics', async () => {
   });
 
   ipcMain.handle('workflow:state', runWorkflowIpc(async (ctx) => {
+    // T-0d3b（IPC 二轮）：mtime 指纹缓存（比 5s TTL 更准也更省）——
+    // 工作流.json / 任务目录 / 状态/启动 目录 / store 文件 任一变化即重算；未变直接复用上次结果。
+    const fp = workflowStateFingerprint(ctx.teamName);
+    const cacheKey = `${ctx.project.id}|${fp}`;
+    if (fp) {
+      const hit = workflowStateCache.get(cacheKey);
+      if (hit) { workflowStateStats.hits += 1; return hit; }
+    }
     const snapshot = workflowSnapshot(ctx.project);
     // R-9fbe F-9fbe-5：把两个账本处置通道的可用性一起下发（只读、不含令牌值）——
     // 面板据此给按钮禁用原因；真点下去仍由 owner:ledger-* 复核（PM_TOKEN_REQUIRED 等）。
     // R-4657：附带缺陷自动验收开关与撤回窗口（池行只看这两项，不再自己猜）。
-    return { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName), autoAccept: autoAcceptUiConfig() };
+    const value = { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName), autoAccept: autoAcceptUiConfig() };
+    if (fp) {
+      workflowStateStats.misses += 1;
+      workflowStateCache.set(cacheKey, value);
+      if (workflowStateCache.size > 8) workflowStateCache.delete(workflowStateCache.keys().next().value);
+    }
+    return value;
   }));
   ipcMain.handle('workflow:boot', runWorkflowIpc(async (ctx, p, meta) => {
     if (!ROLES.some((role) => role.id === meta.role)) throw codedError('BAD_ROLE', `角色无效：${meta.role || '(空)'}`);

@@ -21,6 +21,8 @@ if (IS_BOARD_WINDOW) {
     state: () => ipcRenderer.invoke('app:state'),
     version: () => ipcRenderer.invoke('app:version'),
     metrics: () => ipcRenderer.invoke('system:metrics'),
+    // R-b34a AC8③：最近慢 IPC（只读，供 [data-perf-log] 展示）
+    perfRecent: (payload) => ipcRenderer.invoke('perf:recent', payload),
     filesList: (projectId) => ipcRenderer.invoke('files:list', projectId),
     // 只读文件预览：文本/Markdown/图片，主进程做路径越界与大小上限校验。
     filesRead: (payload) => ipcRenderer.invoke('files:read', payload),
