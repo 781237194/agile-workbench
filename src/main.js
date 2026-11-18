@@ -8308,11 +8308,9 @@ ipcMain.handle('theme:metrics', async () => {
       };
       return { ok: true, path: teamBoardLastBuild.path, projectId: project.id, reused: true, reloaded: false, theme, style: boardStyle, themeId: payloadThemeId, timings };
     }
-    // PM 2026-11-18 19:56：cold T3 门槛 ≤4938（基线 4489×1.10）。冷开临界路径 =
-    // 骨架导航(~200ms) + generateBoard(~1020ms) + loadFile(9.45MB ~3.4s) 串行；
-    // 把 **generateBoard 与骨架导航并行**（generation 基本是 IO/拼串，不阻塞渲染进程），
-    // 可省掉骨架那 ~200–400ms → 中位/max 都落回 4938/5000 内；内容与语义不变。
-    const boardPromise = teamTools.generateBoard(project);
+    // PM 2026-11-18 20:09：干净实例 cold T3 从 4952 涨到 6879 → 回退「并行」与「生成后立即读 9.45MB 进内存」，
+    // 冷开回到**串行最简版**：先骨架 → generateBoard → loadFile（三项顺序执行，不抢主线程/不做额外拷贝）。
+    // htmlCache 改为**懒加载**（只在「窗口销毁后重建」首次用到时读文件+编码一次），冷开路径零额外开销。
     const ensured = await ensureBoardWindowWithSkeleton({ theme, style: boardStyle, title: project.name });
     // 口径拆分（A4）：windowMs=窗口创建（一次性）、skeletonVisibleMs=骨架可见（AC4 的 ≤200ms 指这个）。
     const windowMs = ensured.windowMs || 0;
@@ -8326,24 +8324,29 @@ ipcMain.handle('theme:metrics', async () => {
     if (warm) {
       result = { ok: true, boardPath: teamBoardLastBuild.path };
     } else {
-      result = await boardPromise;
+      result = await teamTools.generateBoard(project);
       if (!result.ok) throw new Error(result.message || result.why || '看板生成失败');
       teamBoardLastBuild = { projectId: project.id, at: Date.now(), path: result.boardPath };
-      // 生成后立刻把 HTML 读进内存缓存（≤12MB），供「窗口销毁后重建」路径用 dataURL 加载。
-      try {
-        const size = fs.statSync(result.boardPath).size;
-        teamBoardHtmlCache = size > 0 && size <= 12 * 1024 * 1024
-          ? { projectId: project.id, at: Date.now(), bytes: size, html: fs.readFileSync(result.boardPath, 'utf8') }
-          : null;
-      } catch { teamBoardHtmlCache = null; }
+      // 只记元信息（不读文件）；html/bytes/dataUrl 在重建路径首次使用时懒加载。
+      teamBoardHtmlCache = { projectId: project.id, at: Date.now(), path: result.boardPath, html: null, bytes: null, dataUrl: null };
     }
     teamBoardProjectId = project.id;
     teamBoardProjectPath = path.resolve(String(project.path));
     teamBoardFilePath = result.boardPath;
     teamBoardTheme = theme;
     // 复用窗也必须重新加载：generateBoard 每次都会重写 看板.html。
-    // PM 2026-11-18 19:57：热开门禁=窗口销毁后重建，content≤800。重建时优先走**内存缓存 HTML + dataURL**
-    // （避免每次重新解析 9.45MB 磁盘文件）；缓存缺失/项目不符/超大文件才回落 loadFile。
+    // 重建（窗口销毁后）路径：内存 HTML + dataURL（懒加载：首次用到才读+编码一次），缺失/超大回落 loadFile。
+    if (teamBoardHtmlCache && teamBoardHtmlCache.projectId === project.id && !teamBoardHtmlCache.html) {
+      try {
+        const size = fs.statSync(teamBoardLastBuild.path).size;
+        if (size > 0 && size <= 12 * 1024 * 1024) {
+          teamBoardHtmlCache.bytes = size;
+          teamBoardHtmlCache.html = fs.readFileSync(teamBoardLastBuild.path, 'utf8');
+        } else {
+          teamBoardHtmlCache = null;
+        }
+      } catch { teamBoardHtmlCache = null; }
+    }
     const useMemoryHtml = Boolean(teamBoardHtmlCache && teamBoardHtmlCache.projectId === project.id
       && teamBoardHtmlCache.html && teamBoardHtmlCache.bytes > 0);
     if (useMemoryHtml) {
