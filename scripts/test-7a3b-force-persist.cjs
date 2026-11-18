@@ -85,7 +85,7 @@ async function close(inst) { if (!inst) return; try { inst.cdp.send('Browser.clo
     await inst.cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
     await inst.cdp.evaluate('window.AWB_FX.sync(); true');
     await sleep(600);
-    const after = await inst.cdp.evaluate('(async () => { const c = document.querySelector("#fx-layer canvas"); return { mode: window.AWB_FX.mode().level, reasons: window.AWB_FX.mode().reasons, attr: document.documentElement.getAttribute("data-fx-force"), particles: c ? Number(c.getAttribute("data-fx-particles") || 0) : 0 }; })()');
+    const after = await inst.cdp.evaluate('(async () => { let pc = 0; for (let i = 0; i < 8; i += 1) { await new Promise((r) => setTimeout(r, 250)); const c = document.querySelector("#fx-layer canvas"); pc = c ? Number(c.getAttribute("data-fx-particles") || 0) : 0; if (pc > 0) break; } return { mode: window.AWB_FX.mode().level, reasons: window.AWB_FX.mode().reasons, attr: document.documentElement.getAttribute("data-fx-force"), particles: pc }; })()');
     check('P6 重启后 reduced 系统下仍 full + forced + 粒子>0', after && after.mode === 'full' && (after.reasons || []).some((x) => String(x).includes('forced')) && after.particles > 0, after);
     const cleared = await inst.cdp.evaluate('(async () => { const b = document.querySelector("[data-fx-force-off]"); if (!b) return { noBtn: true }; b.click(); await new Promise((r) => setTimeout(r, 900)); return { attr: document.documentElement.getAttribute("data-fx-force"), mode: window.AWB_FX.mode().level }; })()');
     check('P7 点恢复系统默认 → 移除 data-fx-force 并回到 reduced', cleared && cleared.attr === null && cleared.mode === 'reduced', cleared);
