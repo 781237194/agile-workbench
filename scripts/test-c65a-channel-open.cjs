@@ -57,7 +57,7 @@ function seed() {
   try { const j = JSON.parse(req.out); reqId = String((j.requirement && j.requirement.id) || j.id || ''); } catch { reqId = ''; }
   let taskId = '';
   if (reqId) {
-    const task = run(['task', 'create', '--boot', pmToken, '--project', PNAME, '--requirement', reqId, '--title', '夹具派单任务', '--priority', 'P2', '--json'], env);
+    const task = run(['task', 'create', '--boot', pmToken, '--project', PNAME, '--requirement', reqId, '--title', '写需求正文', '--priority', 'P2', '--json'], env);
     try { const j = JSON.parse(task.out); taskId = String((j.task && j.task.id) || ''); } catch { taskId = ''; }
   }
   check('C3 建立夹具需求+任务', Boolean(reqId && taskId), { reqId, taskId, reqErr: String(req.out || '').slice(0, 200) });
@@ -89,6 +89,15 @@ function seed() {
   // 子代理审计=0
   let subagentRows = 0;
   try { subagentRows = fs.readFileSync(path.join(seedInfo.teamRoot, '状态', '项目', PNAME, '子代理', '记录.jsonl'), 'utf8').split('\n').filter(Boolean).length; } catch { subagentRows = 0; }
+  // C8（AC3）：doc 阶段豁免审计可回查——团队/状态/事件.jsonl 里有 reason=doc_stage 的 dispatch_gate_skipped
+  let docSkipRows = 0;
+  try {
+    const evFile = path.join(seedInfo.teamRoot, '状态', '事件.jsonl');
+    docSkipRows = fs.readFileSync(evFile, 'utf8').split('\n').filter(Boolean)
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .filter((row) => row && row.action === 'dispatch_gate_skipped' && row.data && row.data.reason === 'doc_stage').length;
+  } catch { docSkipRows = 0; }
+  check('C8 doc 阶段豁免审计（事件.jsonl reason=doc_stage）', docSkipRows >= 1, { docSkipRows });
   check('C7 全程 subagent 审计记录=0（子代理树为空）', subagentRows === 0, { subagentRows });
   try { fs.writeFileSync(path.join(OUT, 'channel-open-run.json'), JSON.stringify({ at: new Date().toISOString(), checks: rows }, null, 2) + '\n', 'utf8'); } catch { /* ignore */ }
   try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }

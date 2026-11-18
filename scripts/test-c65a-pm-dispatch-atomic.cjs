@@ -23,6 +23,8 @@ const OUT = (() => { const i = process.argv.indexOf('--out'); return i > 0 && pr
 const rows = [];
 const P_FULL = '原子项目-full';
 const P_FAST = '原子项目-fast';
+const P_CLI = '原子项目-cli';
+const P_LOCK = '原子项目-lock';
 function check(name, ok, detail) { rows.push({ name, ok: Boolean(ok), detail: ok ? null : detail }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : ' :: ' + JSON.stringify(detail).slice(0, 400)}`); }
 function cli(args, env) {
   try {
@@ -47,7 +49,9 @@ function seed() {
   const env = { ...process.env, TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: PROJ, TEAM_WORKBENCH_JSON: WB, TEAM_SELFTEST: '1' };
   const full = cli(['project', 'add', '--name', P_FULL, '--path', path.join(PROJ, P_FULL), '--team-mode', 'full', '--json'], env);
   const fast = cli(['project', 'add', '--name', P_FAST, '--path', path.join(PROJ, P_FAST), '--team-mode', 'fast', '--json'], env);
-  return { env, full, fast };
+  const cliProject = cli(['project', 'add', '--name', P_CLI, '--path', path.join(PROJ, P_CLI), '--team-mode', 'full', '--json'], env);
+  const lockProject = cli(['project', 'add', '--name', P_LOCK, '--path', path.join(PROJ, P_LOCK), '--team-mode', 'full', '--json'], env);
+  return { env, full, fast, cliProject, lockProject };
 }
 (async () => {
   fs.mkdirSync(OUT, { recursive: true });
@@ -79,6 +83,22 @@ function seed() {
   check('C3 五步均有结果（bootSelf/lessons/bootTarget/dispatchCheck/send）', Boolean(checks.bootSelf && checks.lessons && checks.bootTarget && checks.dispatchCheck && checks.send), Object.keys(checks));
   const verdict = checks.dispatchCheck && checks.dispatchCheck.json && checks.dispatchCheck.json.verdict;
   check('C4 dispatch-check 放行为 go/go_degraded', ['go', 'go_degraded'].includes(String(verdict)), { verdict });
+  // D) AC2 真实 CLI：pm dispatch 子命令（不是直接调模块）
+  const cliOk = cli(['pm', 'dispatch', '--project', P_CLI, '--to', 'product', '--subject', 'CLI原子派单', '--body', '夹具：CLI 正常路径', '--json'], env);
+  const cliJson = (() => { try { return JSON.parse(cliOk.out); } catch { return null; } })();
+  check('D1 pm dispatch CLI 成功且返回一条 M-*', Boolean(cliJson) && cliJson.ok === true && /^M-/.test(String(cliJson.messageId || '')), { cliJson, err: cliOk.err });
+  const cliFail = cli(['pm', 'dispatch', '--project', P_FAST, '--to', 'programmer2', '--subject', 'CLI失败', '--body', '夹具：CLI 失败路径', '--json'], env);
+  let cliFailJson = null;
+  try { cliFailJson = JSON.parse(cliFail.out); } catch { cliFailJson = null; }
+  check('D2 pm dispatch CLI 失败一次列全 missing≥2 且 wrote=false', Boolean(cliFailJson) && cliFailJson.ok === false && Array.isArray(cliFailJson.missing) && cliFailJson.missing.length >= 2 && cliFailJson.wrote === false, { cliFailJson, err: cliFail.err });
+  // E) AC4：三缺项一次列全且零写盘（目标未 boot + 派单锁 + dispatch-check 未放行）
+  const m1 = cli(['pm', 'dispatch', '--project', P_FAST, '--to', 'analyst', '--subject', '占锁派单', '--body', '夹具：先占住 PM 派单锁', '--json'], env);
+  let m1j = null; try { m1j = JSON.parse(m1.out); } catch { m1j = null; }
+  const mailBefore = mailCount(env, 'programmer2');
+  const lockRes = cli(['pm', 'dispatch', '--project', P_FAST, '--to', 'programmer2', '--subject', '三缺项派单', '--body', '夹具：应列全三缺项', '--json'], env);
+  let lockJson = null; try { lockJson = JSON.parse(lockRes.out); } catch { lockJson = null; }
+  check('E1 AC4 三缺项 missing≥3（一次列全）', Boolean(lockJson) && lockJson.ok === false && Array.isArray(lockJson.missing) && lockJson.missing.length >= 3, lockJson && lockJson.missing);
+  check('E2 AC4 失败零派单写入（programmer2 邮箱未变）', Boolean(lockJson) && lockJson.wrote === false && mailCount(env, 'programmer2') === mailBefore, { wrote: lockJson && lockJson.wrote, before: mailBefore, after: mailCount(env, 'programmer2'), m1wrote: m1j && m1j.wrote });
   try { fs.writeFileSync(path.join(OUT, 'pm-dispatch-atomic-run.json'), JSON.stringify({ at: new Date().toISOString(), checks: rows }, null, 2) + '\n', 'utf8'); } catch { /* ignore */ }
   try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
   const failed = rows.filter((r) => !r.ok);

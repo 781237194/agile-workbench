@@ -1,5 +1,6 @@
 // 团队工作台 v2 · 业务命令（boot / 消息 / 任务 / 提案 / 评审 / 签字 / 应用 / 索引 / 对账）
 import fs from 'node:fs';
+import { runPmDispatchAtomic } from './pm-dispatch-atomic.mjs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -875,6 +876,17 @@ function inElectronSelftestSandbox() {
  * 派单前的闸门串联：G8 跳步 → G1 定稿 → G2 评审 → G3 Owner 落账 → G5 角色忙 → G0 阶段角色 → G4 设计。
  * 拒绝写审计并带「缺项+下一步」；G4 默认硬门（AC14.4），fast 走 G4f 的 TECH_REVIEW_REQUIRED。
  */
+// c65a AC3（R-20261119-011310）：doc 阶段派单豁免——需求行在选择中/迭代/驳回 且任务类型为「需求正文/需求分析」，
+// 跳过 G2 的 REQ_REVIEW_REQUIRED（改由 dispatch_gate_skipped 审计留痕）；其余派单不豁免。
+function isDocStageDispatch({ task, row } = {}) {
+  const status = String((row && row.status) || '');
+  const type = String((task && task.type) || '').toLowerCase();
+  const title = String((task && task.title) || '');
+  const docType = ['analysis', 'doc', 'req-doc', 'requirement-doc', 'requirement-body'].includes(type)
+    || /需求正文|需求分析/.test(title);
+  return docType && ['review', 'iteration', 'rejected'].includes(status);
+}
+
 function runDispatchGates({ projectName, requirementId, role, targetRole = '', attempted = 'send --ack', taskId = '', skipRoleBusy = false }) {
   let project = null;
   try { project = loadProject(projectName); } catch { return; }
@@ -917,7 +929,20 @@ function runDispatchGates({ projectName, requirementId, role, targetRole = '', a
         });
       } catch { /* 审计失败不改变门禁结论 */ }
     }
-    gateFail(projectName, record, g2);
+    // c65a AC3：doc 阶段（需求正文/需求分析）派单豁免 G2，但必须留可回查审计。
+    let docStageTask = null;
+    try { docStageTask = taskId ? loadTask(projectName, taskId) : null; } catch { docStageTask = null; }
+    if (isDocStageDispatch({ task: docStageTask || reqTask, row })) {
+      try {
+        appendEvent({
+          role: record.role || 'pm', sessionId: '', action: 'dispatch_gate_skipped', project: projectName, target: requirementId,
+          note: 'doc 阶段派单豁免 G2（R-20261119-011310 AC3）',
+          data: { requirementId, taskId: String(taskId || ''), rule: 'G2', reason: 'doc_stage', status: String(row && row.status || '') },
+        });
+      } catch { /* 审计失败不阻断豁免 */ }
+    } else {
+      gateFail(projectName, record, g2);
+    }
   }
   // B-29b2 门禁互锁修复：可测性评审（TR-Q）属**需求阶段**，必须在 Owner 决定之前能跑；
   // 派 TR-Q 任务时 G3（Owner 落账）豁免，否则「TR-Q 不可测 → 落不了 Owner 决定」与「无 Owner 决定 → 派不了 TR-Q」互锁。
@@ -934,7 +959,19 @@ function runDispatchGates({ projectName, requirementId, role, targetRole = '', a
   }
   // R-75ec：派单与 claim/finish **同源**——都走 taskGateOf；对外 code 保留旧 OWNER_REVIEW_REQUIRED（兼容），
   // 同时带 gateCode/cause，测试按「同 cause + 同 gateCode」断言。
-  const g3 = isTrqTask ? null : (() => {
+  // c65a AC3（R-20261119-011310）：doc 阶段派单（需求正文/需求分析 + 需求 review/iteration/rejected）同时豁免 G3，
+  // 否则「派分析师写正文」在正文尚未产出、Owner 未落账时永远被 OWNER_REVIEW_REQUIRED 自锁。
+  const docStageDispatch = isDocStageDispatch({ task: targetTask || reqTask, row });
+  if (docStageDispatch && !isTrqTask) {
+    try {
+      appendEvent({
+        role: record.role || 'pm', sessionId: '', action: 'dispatch_gate_skipped', project: projectName, target: requirementId,
+        note: 'doc 阶段派单豁免 G3（R-20261119-011310 AC3）',
+        data: { requirementId, taskId: String(taskId || ''), rule: 'G3', reason: 'doc_stage', status: String(row && row.status || '') },
+      });
+    } catch { /* 审计失败不阻断豁免 */ }
+  }
+  const g3 = (isTrqTask || docStageDispatch) ? null : (() => {
     const gate = taskGateOf({
       task: { id: String(taskId || (reqTask && reqTask.id) || ''), requirementId },
       row: row || null,
@@ -965,7 +1002,8 @@ function runDispatchGates({ projectName, requirementId, role, targetRole = '', a
     commits: (() => { try { return listCommits(projectName); } catch { return []; } })(),
   });
   if (g4) {
-    if (cfg.productDesign === 'hard') gateFail(projectName, record, g4);
+    // c65a AC3：doc 阶段派单（尚未产出正文）不应被设计/技术评审硬门自锁；仍写软审计。
+    if (!docStageDispatch && cfg.productDesign === 'hard') gateFail(projectName, record, g4);
     gateWarn(projectName, record, g4);
   }
   return row;
@@ -5542,6 +5580,44 @@ export async function cmdSend(args) {
     });
 }
 
+/** c65a AC2（R-20261119-011310）：pm dispatch 原子命令——五步一次跑完，失败一次列全 missing[]、零派单写入。 */
+export async function cmdPmDispatch(args) {
+  const project = String(args.project || '').trim();
+  const to = String(args.to || '').trim();
+  const taskId = String(args.task || '').trim();
+  if (!project) fail('BAD_ARGS', 'pm dispatch 需要 --project <项目名>');
+  if (!to) fail('BAD_ARGS', 'pm dispatch 需要 --to <角色>');
+  let body = String(args.body || '');
+  if (body && body.length < 260 && exists(body)) {
+    try { body = readText(body); } catch { /* 当摘要处理 */ }
+  }
+  const env = { ...process.env };
+  const deps = {};
+  if (args['no-auto-boot-target']) {
+    deps.autoBootTarget = false;
+  }
+  const result = await runPmDispatchAtomic({
+    project, to, taskId,
+    subject: String(args.subject || ''),
+    body: String(body || ''),
+    type: String(args.type || 'dispatch'),
+    autoBootTarget: deps.autoBootTarget !== false,
+    targetSession: String(args['target-session'] || ''),
+    env,
+  });
+  const json = {
+    ok: result.ok, missing: result.missing, locks: result.locks,
+    checks: Object.keys(result.checks || {}), messageId: result.messageId, wrote: result.wrote,
+  };
+  if (result.ok) {
+    out(args, `已原子派单 ${result.messageId} → ${to}（missing=0，零多余写盘）`, json);
+  } else {
+    const lines = [`原子派单未发出（零派单写入）：缺 ${result.missing.length} 项`];
+    for (const item of result.missing) lines.push(`- ${item}`);
+    out(args, lines.join('\n'), { ok: false, ...json });
+  }
+  return result.ok;
+}
 export function cmdInbox(args) {
   const b = bootFor(args, 'inbox');
   // Owner 2026-11-14 08:44：清历史积压——只读盘点后批量标已读，写一条审计。

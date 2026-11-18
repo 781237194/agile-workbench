@@ -153,7 +153,7 @@ export function runPmDispatchAtomic({
   const missing = aggregateMissing(checks);
   const locks = [];
   const numbers = (checks.dispatchCheck && checks.dispatchCheck.json && checks.dispatchCheck.json.numbers) || {};
-  if (numbers.lockBy) locks.push({ messageId: String(numbers.lockBy), source: 'dispatch-check' });
+  if (numbers.lockBy) locks.push({ by: String(numbers.lockBy), source: 'dispatch-check' });
 
   if (missing.length) {
     return { ok: false, missing, locks, checks, wrote: false, token: '' };

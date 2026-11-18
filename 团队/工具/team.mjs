@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { parseArgs, TeamError, jsonOut, textOut } from './lib/core.mjs';
 import {
-  cmdInit, cmdProject, cmdBoot, cmdSend, cmdInbox, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
+  cmdInit, cmdProject, cmdBoot, cmdSend, cmdPmDispatch, cmdInbox, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
   cmdShow, cmdReview, cmdSign, cmdApply, cmdGrant, cmdIndex, cmdStatus, cmdClaim, cmdReconcile,
   cmdVerify, cmdLog, cmdLock, cmdOwnerApprove, cmdOwner, cmdRoster, cmdPilot, cmdDoctor,
   cmdReq, cmdFind, cmdBoard, cmdVote, cmdWorkflow, cmdOwnerProxyDecide, cmdQueue, cmdSkill, cmdSched,
@@ -319,6 +319,7 @@ async function main() {
     case 'boot': await cmdBoot(args); break;
     case 'auto-boot': cmdAutoBoot(args); break;
     case 'send': await cmdSend(args); break;
+    case 'pm': await cmdPmDispatch(args); break; // c65a AC2：pm dispatch 原子派单
     case 'inbox': cmdInbox(args); break;
     case 'read': cmdRead(args); break;
     case 'ack': await cmdAck(args); break;
