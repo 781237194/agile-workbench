@@ -735,6 +735,7 @@ function archiveGate(projectName, role, oldId) {
 export async function rotateSession({
   projectName, role, sessionId = '', force = false, offline = false, reason = '', by = 'owner',
   failAt = '', sessionTitle = '', windowMinutes = 30, dryRun = false, createSession = null, engineUrl = '',
+  audit = null,
 }) {
   const name = String(projectName || '');
   if (!name) fail('NO_PROJECT', '需要 --project');
@@ -843,6 +844,8 @@ export async function rotateSession({
         force: Boolean(force),
         archiveGate: { archived: gate.archived, archiveId: gate.archive ? gate.archive.id : null },
         archiveDeferred,
+        // R-20261118-143558-eba2：审计——谁换的（令牌角色）、交接回执与交接文件 sha。
+        ...(audit && typeof audit === 'object' ? audit : {}),
       },
       // 其余事务步骤（邮件归档 / 任务会话指向 / 派单锁 / 旧会话归档 / 一致性闸门）在映射写完之后、
       // 记账之前执行；抛错即由 roster-writer 回滚映射，本文件的 catch 再恢复邮件/任务/锁。
@@ -1128,6 +1131,104 @@ export function validateHandover(text) {
   return { ok: missingRequired.length === 0 && emptyRequired.length === 0, missingRequired, emptyRequired, redFlags };
 }
 
+// R-20261118-143558-eba2：交接回执（append-only）——换人前必须证明「回执针对的就是当前这份交接文件」。
+// 设计：本人写 交接-最新.md → session handover receipt --role <自己> 落回执（bytes+sha256）→ rotate 前校验 sha==磁盘。
+const HANDOVER_RECEIPT_FILE = '交接回执.jsonl';
+
+/** 角色交接文件路径：<项目>/<角色目录>/产出/交接-最新.md（与 PM 交接模板同路径）。 */
+export function handoverDocPath(projectName, role) {
+  const project = loadProject(String(projectName || ''));
+  const dir = ROLE_DIRS[String(role || '')] || String(role || '');
+  return path.join(project.path, dir, '产出', '交接-最新.md');
+}
+
+/** 交接回执账本：团队/状态/项目/<项目>/交接回执.jsonl（append-only）。 */
+export function handoverReceiptFile(projectName) {
+  return path.join(projectStatePaths(String(projectName || '')).dir, HANDOVER_RECEIPT_FILE);
+}
+
+/** 读交接文件信息（不存在/空 → ok:false，供回执与 rotate 共用）。 */
+export function readHandoverDoc(projectName, role) {
+  const project = loadProject(String(projectName || ''));
+  const file = handoverDocPath(projectName, role);
+  if (!exists(file)) return { ok: false, code: 'HANDOVER_FILE_MISSING', file };
+  const bytes = fs.statSync(file).size;
+  if (!bytes) return { ok: false, code: 'HANDOVER_FILE_EMPTY', file };
+  return {
+    ok: true, file, bytes,
+    rel: path.relative(project.path, file).replace(/\\/g, '/'),
+    sha256: hashFile(file),
+    mtime: fs.statSync(file).mtime.toISOString(),
+  };
+}
+
+/** 读全部回执行（坏行跳过，不中断）。 */
+export function listHandoverReceipts(projectName) {
+  const file = handoverReceiptFile(projectName);
+  if (!exists(file)) return [];
+  const rows = [];
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const row = JSON.parse(t);
+      if (row && row.role && row.sha256) rows.push(row);
+    } catch { /* 坏行跳过 */ }
+  }
+  return rows;
+}
+
+/** 某角色最新一条回执（append-only 的最后一行）。 */
+export function latestHandoverReceipt(projectName, role) {
+  const rows = listHandoverReceipts(projectName).filter((r) => String(r.role) === String(role));
+  return rows.length ? rows[rows.length - 1] : null;
+}
+
+/** 落一条交接回执：计算磁盘 bytes+sha256 并 append（by 取令牌角色，不取调用方自报）。 */
+export function recordHandoverReceipt(projectName, role, { by = '', messageId = '' } = {}) {
+  const doc = readHandoverDoc(projectName, role);
+  if (!doc.ok) {
+    fail(doc.code, doc.code === 'HANDOVER_FILE_MISSING' ? `交接文件不存在：${doc.file}` : `交接文件为空：${doc.file}`, { role, file: doc.file });
+  }
+  const at = nowIso();
+  const row = {
+    id: `H-${stamp()}-${role}`, at, role,
+    path: doc.rel, bytes: doc.bytes, sha256: doc.sha256,
+    by: String(by || ''), messageId: String(messageId || ''),
+  };
+  ensureDir(path.dirname(handoverReceiptFile(projectName)));
+  fs.appendFileSync(handoverReceiptFile(projectName), JSON.stringify(row) + '\n', 'utf8');
+  return { ok: true, receipt: row, file: handoverReceiptFile(projectName) };
+}
+
+/** rotate 前置校验：最新回执存在且 sha/bytes 与磁盘一致（只读，失败零副作用）。 */
+export function checkHandoverReceipt(projectName, role) {
+  const latest = latestHandoverReceipt(projectName, role);
+  if (!latest) return { ok: false, code: 'HANDOVER_RECEIPT_REQUIRED', reason: 'no_receipt' };
+  const doc = readHandoverDoc(projectName, role);
+  if (!doc.ok) return { ok: false, code: 'HANDOVER_RECEIPT_REQUIRED', reason: 'file_missing', receipt: latest, file: doc.file };
+  if (String(latest.sha256) !== String(doc.sha256) || Number(latest.bytes) !== Number(doc.bytes)) {
+    return {
+      ok: false, code: 'HANDOVER_RECEIPT_REQUIRED', reason: 'sha_mismatch',
+      receipt: latest, file: doc.rel, expected: doc.sha256, got: latest.sha256, expectedBytes: doc.bytes, gotBytes: latest.bytes,
+    };
+  }
+  return { ok: true, receipt: latest, file: doc.rel, sha256: doc.sha256, bytes: doc.bytes };
+}
+
+/**
+ * R-20261118-143558-eba2：rotate 权限（A 案）。
+ * owner：任意角色；pm：除 pm 自己（PM 自换由产品执行）；product：仅 pm；其余拒绝。
+ */
+export function rotateAllowed(tokenRole, targetRole) {
+  const t = String(tokenRole || '');
+  const target = String(targetRole || '');
+  if (t === 'owner') return true;
+  if (t === 'pm') return target !== 'pm';
+  if (t === 'product') return target === 'pm';
+  return false;
+}
+
 /** B-3f02：换人优先级（档位 产品/需求0、测试1、开发2、PM3）× 接手状态 → 建议列表，只给建议。 */
 export function rotationPriority(projectName) {
   const project = loadProject(projectName);
@@ -1261,6 +1362,28 @@ export async function cmdSession(args) {
   if (action === 'handover') {
     const role = String(args.role || '');
     if (!role) fail('BAD_ROLE', '需要 --role');
+    // R-20261118-143558-eba2：session handover receipt --role <角色> 落交接回执（换人前置）。
+    if (String(args._[2] || '').toLowerCase() === 'receipt') {
+      const sandbox = String(process.env.TEAM_SELFTEST || '') === '1';
+      const enforce = String(process.env.TEAM_BOOT_ENFORCE || '') === '1';
+      let tokenRole = 'selftest';
+      if (!sandbox || enforce) {
+        const token = String(args.boot || '').trim();
+        if (!token) fail('BOOT_REQUIRED', '落交接回执必须带 --boot 启动令牌', { role, project: projectName });
+        tokenRole = String(requireBoot(token).role || '');
+      }
+      const allowed = tokenRole === role
+        || ['pm', 'owner'].includes(tokenRole)
+        || (tokenRole === 'product' && role === 'pm');
+      if (!allowed) {
+        fail('PERMISSION_DENIED', `只有本人/PM/Owner（产品仅可为 PM）能落交接回执（当前令牌角色 ${tokenRole}）`, { role, project: projectName, tokenRole });
+      }
+      const rec = recordHandoverReceipt(projectName, role, { by: tokenRole, messageId: String(args['message-id'] || '') });
+      out(args,
+        `交接回执已记录：${rec.receipt.id} ｜ ${role} ｜ ${rec.receipt.path} ｜ ${rec.receipt.bytes}B ｜ sha256 ${rec.receipt.sha256.slice(0, 12)}…\n记录：${rec.file}\n下一步：PM 核对后 session rotate --role ${role}（rotate 会自动校验该回执 sha）`,
+        { ok: true, ...rec });
+      return;
+    }
     const r = buildHandover({ projectName, role, sessionId: String(args.session || '') });
     out(args, r.text, { ok: true, ...r });
     return;
@@ -1274,13 +1397,34 @@ export async function cmdSession(args) {
     // 校验放在接任包检查之前（起手第一件事）：失败零副作用，不写任何映射/记录/归档。
     const bootSandbox = String(process.env.TEAM_SELFTEST || '') === '1';
     const bootEnforce = String(process.env.TEAM_BOOT_ENFORCE || '') === '1';
+    let actorRole = 'selftest';
     if (!bootSandbox || bootEnforce) {
       const bootToken = String(args.boot || '').trim();
-      if (!bootToken) fail('BOOT_REQUIRED', '会话轮换必须带 --boot 启动令牌（只有 PM/Owner 能换人）', { role, project: projectName });
+      if (!bootToken) fail('BOOT_REQUIRED', '会话轮换必须带 --boot 启动令牌（PM/Owner，或产品换 PM）', { role, project: projectName });
       const bootInfo = requireBoot(bootToken);
-      if (!['pm', 'owner'].includes(String(bootInfo.role || ''))) {
-        fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话（当前令牌角色 ${bootInfo.role || '-'}）`, { role, project: projectName, tokenRole: bootInfo.role || '' });
+      actorRole = String(bootInfo.role || '');
+      if (!rotateAllowed(actorRole, role)) {
+        fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话；产品只能给 PM 换人、PM 不能给自己换人（当前令牌角色 ${actorRole || '-'} → 目标 ${role}）`, { role, project: projectName, tokenRole: actorRole });
       }
+    }
+    // R-20261118-143558-eba2：换人前必须有人落交接回执，且回执 sha 与磁盘一致。
+    // 沙盘默认豁免（既有 selftest 的 4 处 rotate 无回执），门禁本体用 TEAM_HANDOVER_ENFORCE=1 强制。
+    const handoverEnforce = String(process.env.TEAM_HANDOVER_ENFORCE || '') === '1';
+    let handoverAudit = { actorRole };
+    if (!bootSandbox || handoverEnforce) {
+      const rc = checkHandoverReceipt(projectName, role);
+      if (!rc.ok) {
+        fail('HANDOVER_RECEIPT_REQUIRED', `换人前必须落交接回执且 sha 与磁盘一致（${rc.reason}）；先 session handover receipt --role ${role}`, {
+          role, project: projectName, reason: rc.reason,
+          receiptId: rc.receipt ? rc.receipt.id : null,
+          expected: rc.expected || null, got: rc.got || null,
+        });
+      }
+      handoverAudit = {
+        actorRole,
+        handoverSha256: rc.sha256, handoverBytes: rc.bytes, handoverPath: rc.file,
+        receiptId: rc.receipt.id, receiptAt: rc.receipt.at,
+      };
     }
     // B-3f02 / B-20261118-083150-4b2f：rotate 前机械检查接任包小节；4 个必填【】小节缺失 → 拒 rotate（零副作用）。
     // 交接判据统一走 roster-writer.checkRotateHandover（内部固定 validateHandover），auto-rotate 用同一函数 → 两路径同判。
@@ -1299,7 +1443,8 @@ export async function cmdSession(args) {
       force: Boolean(args.force),
       offline: Boolean(args.offline),
       reason: String(args.reason || ''),
-      by: String(args.by || 'owner'),
+      by: actorRole,
+      audit: handoverAudit,
       failAt: String(args['fail-at'] || ''),
       sessionTitle: String(args.title || ''),
       windowMinutes: Number(args.window || 30),

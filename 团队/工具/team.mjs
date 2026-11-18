@@ -207,6 +207,8 @@ Owner 决策箱（R-9db6 · 工具侧）
        邮件归档只动本项目消息（按 project 限定，跨项目不归档）；失败回滚覆盖映射/邮件/任务/派单锁；
        --dry-run 只读预演（打印将写四处、将归档邮件、将改任务/锁，零写入）；
        同角色已有活跃会话时拒绝（SESSION_ALREADY_ACTIVE），--force 留痕
+       R-20261118-143558-eba2：必须带 --boot；PM 换普通角色、产品只能换 PM（PM 不能自换）；
+       换人前校验「交接回执 sha == 磁盘交接文件」，缺失/不符 → HANDOVER_RECEIPT_REQUIRED（零副作用）
   session check [--project P] [--json]
        四处映射一致性：逐角色 PASS/FAIL，全一致才算 6/6；不一致时派单/唤醒被拒 SESSION_MAP_INCONSISTENT
   session rounds --role R [--json]
@@ -222,6 +224,9 @@ Owner 决策箱（R-9db6 · 工具侧）
        Owner 确认 PM 自归档：写 confirmedAt=确认时间
   session handover --role <角色> [--json]
        输出接任包（项目/未完成任务/锁/最近决定/必读文件，≤2KB）；新会话 boot 自动带上
+  session handover receipt --boot T --role <角色> [--message-id M] [--json]
+       落交接回执（R-20261118-143558-eba2）：算 <角色>/产出/交接-最新.md 的 bytes+sha256，
+       append 团队/状态/项目/<项目>/交接回执.jsonl；rotate 前会校验最新回执 sha == 磁盘。
 
 工作流（工作台旧协议入口 · 与 状态/项目/<项目>/工作流.json 共用）
   workflow iterate --boot T --project P [--opinion "..."] [--requirement R-...] [--force]
