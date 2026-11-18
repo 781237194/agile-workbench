@@ -38,12 +38,29 @@
 
 > 套装包名 `dsh-agile-workbench`（npm 上架版本 2.0.0）；旧名 `dsh-agile-workbench` 已标记 deprecated，仍可安装但不推荐。
 > 不想装插件也可以直接用桌面版：见下面「新用户最短说明」的 PowerShell 一行命令。
+> **版本：vX.Y.Z**（发版时由 PM 填写；实际安装版本以工作台「更多 → 检查更新」显示为准）。
 
 ### 一句话之后会发生什么
 
 1. AI 安装 `dsh-agile-workbench` 套装 → 6 行插件全部上树（启动器 / 记忆 / 浏览器 / 搜索 / 视觉 / 安全搜索 MCP）；
 2. 第一次打开工作台 → 启动器发现本机没有本体，**自动后台运行官方安装器**（便携 Node + Electron + 应用 + 桌面快捷方式），返回「正在安装，约 2–5 分钟」；装完再次打开即可；
-3. 安全搜索 MCP 用 DSH 自带运行时启动，**PATH 没有 node 也能用**。
+3. 安全搜索 MCP 用 DSH 自带运行时启动，**PATH 没有 node 也能用**；
+4. **DSH 互通探针（运行期只读）**：工作台启动/首启后由主进程执行一次，检查 DSH 侧会话互通能力（不写 DSH、不改 asar），结果进 `data/install-result.json` 与「关于」页；探针失败不阻断启动；
+5. **可读日志（不再静默）**：安装器把每阶段结果写 `data/install-result.json`（`ok/stage/next/warnings[]`）；MCP 启动失败写 `~/.dsh/logs/mcp-<时间>.log`（command/args/errno/stderr 前 500 字），安装结果里给一条人话 warning，不再是空白 "server is disconnected"；
+6. **版本与升级**：版本号见「更多 → 检查更新」，升级行为见下节。
+
+### 在线升级（工作台内）
+
+- 入口：**更多菜单 →「检查更新」**（不往标题栏加图标）；显示当前版本与新版本，有新版时按钮为「立即升级」。
+- **版本源必须带 `sha256`**：源里缺校验值时界面显示「源缺少校验值，暂不可升级」，且**不会发起下载**。
+- **强制升级**（有角色在跑任务时）：必须填写原因才允许；审计写 `data/升级记录.jsonl` 的 `upgrade_forced{reason,runningRoles[],at}` 与 `force:true`；无原因直接拒绝。
+- 结果：失败给**顶部人话横幅**（含错误代码/原因，可回滚）；成功提示必须明确写 **「请重启后生效」或「无需重启」**（二选一，不省略），并写 `升级记录.jsonl`（`{ts,from,to,sha256,steps,ok}`）。
+- 边界：升级只换程序与套装，**不动** `团队/`、`data/`、需求/任务账本；不改 DSH 本体；不做静默自动升级。
+
+### 开局引导（新项目首启）
+
+- 第一次 `boot` 的启动简报会带 **「可直接复制的下一步命令」**（按角色给 boot/派单/回执模板）和红线 **「禁止用 DSH 子代理代跑团队角色任务」**；
+- PM 首条动作应直接粘贴命令发出 `M-*` 团队消息（走团队会话通道），而不是开子代理派角色。
 
 ## 需求流程与缺陷流程
 
@@ -110,6 +127,16 @@ dsh plugin --profile desktop add dsh-agile-workbench
 3. 下载/复用仓库，执行 `npm install`。
 4. 创建桌面 `PM工作台` 快捷方式，可选立即启动。
 5. 重复执行只补依赖，**不覆盖** `data/`、`项目/`、`团队/状态/`。
+
+### 安装 FAQ（干净 Windows / 无 Node）
+
+- **PATH 里没有 node / npm / git / dsh**：无需安装；安装器会下载便携 Node，MCP 用 DSH 自带运行时（`ELECTRON_RUN_AS_NODE`）。
+- **DSH 桌面版没有 `dsh` 命令**：优先用「方式 A：让 AI 装插件」；命令行方式只适合已装 DSH CLI 的环境。
+- **Electron 下载慢/无进度**：安装器默认走 npmmirror 镜像并每 5s 打印进度；`AWB_NO_MIRROR=1` 可关闭默认镜像改走官方源；失败会**保留缓存 zip**（不删，可重跑）。
+- **缓存兜底**：若 `node_modules/electron/dist` 缺失，安装器自动从 `%LOCALAPPDATA%\electron\Cache\*.zip` 解压补齐（日志写明「从缓存解压兜底」）。
+- **MCP 起不来 / 搜索不可用**：看 `data/install-result.json` 的 `warnings[]` 与 `~/.dsh/logs/mcp-*.log`（command/args/errno/stderr），不静默失败。
+- **审批弹窗太多**：一句话安装建议在「完全访问」权限下进行；普通权限会逐次弹审批。
+- **脚本被拦（执行策略）**：用 `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`。
 
 ---
 

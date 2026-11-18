@@ -36,6 +36,16 @@
 
 AI 会走 `plugin_manager` 的 `install_bundle`：装包 + 把包名注册进 profile 的 `dsh.profile.bundles`。
 
+**一句话之后会自动发生（版本 vX.Y.Z，发版时由 PM 填写）**：
+
+1. 首次打开工作台时，启动器发现本机没有本体 → 自动后台运行官方安装器（便携 Node + Electron + 应用 + 桌面快捷方式），**无需 Node、无需管理员权限**；
+2. 工作台启动/首启后执行一次 **DSH 互通探针**（只读，不写 DSH、不改 asar），结果进 `data/install-result.json` 与「关于」页，失败不阻断；
+3. **可读日志**：每阶段结果写 `data/install-result.json`（`ok/stage/next/warnings[]`），MCP 失败写 `~/.dsh/logs/mcp-*.log`（command/args/errno/stderr），不再只有 "server is disconnected"；
+4. **在线升级**：工作台「更多 → 检查更新」；源缺 `sha256` 时显示「暂不可升级」且不下载；强制升级需填原因并写审计；成功提示明确「请重启后生效 / 无需重启」；
+5. **开局引导**：新项目第一次 `boot` 的简报带「可直接复制的下一步命令」+ 红线「禁止用 DSH 子代理代跑团队角色任务」。
+
+> 详细 FAQ（`AWB_NO_MIRROR=1`、Electron 缓存兜底、`~/.dsh/logs`、执行策略）见仓库根 `README.md` 的「安装 FAQ（干净 Windows / 无 Node）」。
+
 ### 方式 B：命令行
 
 ```powershell
