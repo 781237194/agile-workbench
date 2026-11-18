@@ -1,6 +1,6 @@
 {
   "name": "pm-workbench-dsh",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "DSH launcher plugin for PM Workbench: opens the local Electron workbench from a tool call.",
   "type": "module",
   "main": "index.js",

@@ -45,6 +45,10 @@
         # 可配置，不写死本机路径：
         #   DSH_WEB_SEARCH_SAFE_NODE   node 可执行文件（默认 PATH 里的 node）
         #   DSH_WEB_SEARCH_SAFE_SCRIPT 安全搜索脚本（默认本包 mcp/web-search-safe.js）
-        command: !!js process.env.DSH_WEB_SEARCH_SAFE_NODE || 'node'
+        # 不依赖 PATH 里的 node：用运行 DSH 的同一运行时（Electron 下配 ELECTRON_RUN_AS_NODE 当 node 用），
+        # 这样新机器没装 Node.js 也能立刻连通；仍可用 DSH_WEB_SEARCH_SAFE_NODE 覆盖。
+        command: !!js process.env.DSH_WEB_SEARCH_SAFE_NODE || process.execPath
+        env:
+          ELECTRON_RUN_AS_NODE: '1'
         args:
           - !!js process.env.DSH_WEB_SEARCH_SAFE_SCRIPT || (process.env.DSH_PROFILE_DIR + '/node_modules/dsh-agile-workbench/mcp/web-search-safe.js')

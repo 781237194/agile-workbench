@@ -3,6 +3,7 @@
 > **一句话安装**：在 DSH 里对 AI 说 **「帮我装一下 dsh-agile-workbench」**。
 >
 > 装完即得到：工作台启动器（`pm_workbench_open`）+ 记忆插件 + 浏览器插件 + 搜索插件 + 视觉插件 + 安全搜索 MCP。
+> **不需要预装 Node.js**（MCP 用运行 DSH 的同一运行时）；**第一次打开工作台会自动安装本体**（便携 Node / Electron / 应用，约 2–5 分钟），不会再让你粘命令。
 > node 运行时不用单装，`@deepseek-ai/dsh-base` 已内置 `ptc-runtime-node`。
 
 - 包名：`dsh-agile-workbench`
@@ -120,3 +121,13 @@ dsh-plugin/
 4. P0 缺陷当天修；P1 三天内；P2 一周内；P3 两周内。
 
 > 完整口径见仓库内《团队宪法》与 `团队/流程.md` 第二部分「现行工作流」。
+
+
+## 七、零额外步骤（一句话之后会自动做什么）
+
+1. AI 调用 `plugin_manager install_bundle` 安装 `dsh-agile-workbench`，6 行插件全部上树；
+2. 第一次对 AI 说「打开工作台」（或 AI 自动调用 `pm_workbench_open`）时：
+   - 插件找不到工作台本体 → **自动在后台启动官方安装器**（`install.ps1`：便携 Node、Electron、应用本体、桌面快捷方式）；
+   - 工具立即返回「正在安装，约 2–5 分钟」；安装完成后再次调用即可打开；
+   - 安装日志：`%TEMP%\pm-workbench-install.log`。
+3. 安全搜索 MCP 默认用运行 DSH 的运行时（Electron 下 `ELECTRON_RUN_AS_NODE=1`），**PATH 里没有 node 也能连通**；仍可用环境变量 `DSH_WEB_SEARCH_SAFE_NODE` / `DSH_WEB_SEARCH_SAFE_SCRIPT` 覆盖。

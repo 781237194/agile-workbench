@@ -16,7 +16,9 @@
  *   7. 安装器默认：D:\PM工作台\start.cmd
  *   8. 安装器回退：%USERPROFILE%\PM工作台\start.cmd
  *
- * 找不到时返回可读错误、已查找路径和安装命令；不抛异常、不阻塞会话。
+ * 找不到时**自动在后台启动官方安装器**（install.ps1，装好 Node/Electron/应用本体），
+ * 并返回「正在安装，约 2–5 分钟后重试」；也可传 skipInstall=true 只看安装命令。
+ * 不抛异常、不阻塞会话。
  * ============================================================================
  */
 import { spawn } from 'node:child_process'
@@ -42,8 +44,10 @@ const DEFAULT_DIRS = [
   'D:\\PM工作台',
   join(homedir(), 'PM工作台'),
 ]
+const INSTALLER_SCRIPT_URL =
+  'https://cdn.jsdelivr.net/gh/781237194/agile-workbench@96395f1/install.ps1'
 const INSTALL_COMMAND =
-  '$f="$env:TEMP\\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@6031ac5/install.ps1" -OutFile $f; & $f'
+  '$f="$env:TEMP\\pm-workbench-install.ps1"; iwr "' + INSTALLER_SCRIPT_URL + '" -OutFile $f; & $f'
 const MANUAL_INSTALL_COMMAND =
   'git clone https://github.com/781237194/agile-workbench.git; cd agile-workbench; npm install'
 
@@ -155,6 +159,44 @@ function preflight(target) {
     installCommand: `cd /d "${workbenchDir}" && npm install`,
     hint: '先在 PM工作台目录执行 npm install，完成后再调用本工具。',
   }
+}
+
+const INSTALL_INFLIGHT = { startedAt: 0, logFile: '' }
+
+/**
+ * 找不到工作台本体时自动引导安装：后台启动官方 install.ps1，
+ * 立即返回。安装器自己负责便携 Node / Electron / 应用与桌面入口。
+ * 5 分钟内重复调用不重复起安装进程。
+ */
+function autoBootstrapInstall() {
+  if (INSTALL_INFLIGHT.startedAt && Date.now() - INSTALL_INFLIGHT.startedAt < 5 * 60 * 1000) {
+    return { started: false, reused: true, logFile: INSTALL_INFLIGHT.logFile }
+  }
+  const logDir = process.env.TEMP || process.env.TMP || homedir()
+  const logFile = join(logDir, 'pm-workbench-install.log')
+  const safeLog = logFile.replace(/'/g, "''")
+  const script =
+    "$ProgressPreference='SilentlyContinue'; " +
+    "$f=Join-Path $env:TEMP 'pm-workbench-install.ps1'; " +
+    "try { iwr '" + INSTALLER_SCRIPT_URL + "' -OutFile $f -UseBasicParsing } " +
+    "catch { iwr '" + INSTALLER_SCRIPT_URL + "' -OutFile $f }; " +
+    "& $f *> '" + safeLog + "'"
+  const env = { ...process.env }
+  delete env.ELECTRON_RUN_AS_NODE
+  let child
+  try {
+    child = spawn(
+      process.env.ComSpec || 'powershell.exe',
+      ['/d', '/s', '/c', 'powershell -NoProfile -ExecutionPolicy Bypass -Command "' + script + '"'],
+      { detached: true, stdio: 'ignore', windowsHide: true, env },
+    )
+  } catch (error) {
+    return { started: false, error: error?.message ?? String(error), logFile }
+  }
+  child.unref()
+  INSTALL_INFLIGHT.startedAt = Date.now()
+  INSTALL_INFLIGHT.logFile = logFile
+  return { started: true, pid: child.pid ?? null, logFile }
 }
 
 async function launch(target) {
@@ -659,6 +701,10 @@ export function apply(ctx, config) {
             type: 'string',
             description:
               '可选：PM工作台安装目录或 start.cmd 的绝对路径。省略时依次尝试插件配置、环境变量和默认路径。',
+          },          skipInstall: {
+            type: 'boolean',
+            description:
+              '可选：找不到 PM工作台本体时不自动启动安装器，只返回安装命令。默认 false（自动安装）。',
           },
         },
         additionalProperties: false,
@@ -674,7 +720,29 @@ export function apply(ctx, config) {
       async execute(args) {
         const input = args && typeof args === 'object' ? args : {}
         const resolved = resolveLaunchTarget(input, pluginConfig)
-        if (!resolved.ok) return resolved
+        if (!resolved.ok) {
+          // 找不到本体：自动引导官方安装器（一句话安装的第 2 步）
+          if (resolved.code === 'PM_WORKBENCH_NOT_FOUND' && input.skipInstall !== true) {
+            const boot = autoBootstrapInstall()
+            return {
+              ok: false,
+              code: 'PM_WORKBENCH_INSTALLING',
+              installing: boot.started || boot.reused === true,
+              autoInstallStarted: boot.started,
+              pid: boot.pid ?? null,
+              logFile: boot.logFile || '',
+              retryAfterSeconds: 180,
+              installCommand: INSTALL_COMMAND,
+              manualInstallCommand: MANUAL_INSTALL_COMMAND,
+              message:
+                '没有找到 PM工作台本体，已自动开始安装（含便携 Node / Electron / 应用本体）。约 2–5 分钟；完成后再次调用本工具即可打开。',
+              hint: '安装日志见 logFile；若 5 分钟后仍失败，把日志末尾贴给 PM 排查。',
+              searched: resolved.searched,
+              error: resolved.error,
+            }
+          }
+          return resolved
+        }
 
         const blocked = preflight(resolved.target)
         if (blocked) return blocked
