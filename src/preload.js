@@ -25,6 +25,10 @@ if (IS_BOARD_WINDOW) {
     perfRecent: (payload) => ipcRenderer.invoke('perf:recent', payload),
   // 7a3b：fx 诊断日志（渲染层 sync 结果 → data/fx.jsonl；失败静默）。
   fxLog: (row) => ipcRenderer.invoke('fx:diag-log', row),
+  // e610：在线升级（版本 / 检查 / 一步升级）
+  appVersion: () => ipcRenderer.invoke('app:version'),
+  upgradeCheck: (payload) => ipcRenderer.invoke('app:upgrade-check', payload),
+  upgradeStart: (payload) => ipcRenderer.invoke('app:upgrade-start', payload),
     filesList: (projectId) => ipcRenderer.invoke('files:list', projectId),
     // 只读文件预览：文本/Markdown/图片，主进程做路径越界与大小上限校验。
     filesRead: (payload) => ipcRenderer.invoke('files:read', payload),

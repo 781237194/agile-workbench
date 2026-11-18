@@ -244,6 +244,109 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
       return { ok: false, code: 'FX_LOG_WRITE_FAILED' };
     }
   });
+  // ── e610 在线升级：版本 / 检查 / 一步升级 / 审计（沙盘只验 UI+审计，不真实升级）────────
+  let upgradeBusy = false;
+  const upgradeRecordFile = () => path.join(LOCAL_DATA, '升级记录.jsonl');
+  const readAppVersion = () => {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8').replace(/^\uFEFF/, ''));
+      let commit = '';
+      try {
+        const head = fs.readFileSync(path.join(ROOT, '.git', 'HEAD'), 'utf8').trim();
+        if (head.startsWith('ref:')) commit = String(fs.readFileSync(path.join(ROOT, '.git', head.slice(4).trim()), 'utf8')).trim().slice(0, 7);
+        else commit = head.slice(0, 7);
+      } catch { commit = ''; }
+      return { version: String(pkg.version || '0.0.0'), commit, name: String(pkg.name || 'pm-workbench') };
+    } catch { return { version: '0.0.0', commit: '', name: 'pm-workbench' }; }
+  };
+  const semverParts = (v) => String(v || '').replace(/^v/i, '').split('.').map((x) => Number(String(x).replace(/[^0-9].*$/, '')) || 0);
+  const semverCompare = (a, b) => {
+    const A = semverParts(a); const B = semverParts(b);
+    for (let k = 0; k < 3; k += 1) { if ((A[k] || 0) !== (B[k] || 0)) return (A[k] || 0) - (B[k] || 0); }
+    return 0;
+  };
+  const appendUpgradeRecord = (row) => {
+    try { fs.mkdirSync(LOCAL_DATA, { recursive: true }); fs.appendFileSync(upgradeRecordFile(), JSON.stringify(row) + '\n', 'utf8'); return true; } catch { return false; }
+  };
+  const upgradeSandbox = () => Boolean(String(process.env.AWB_DATA_DIR || '').trim()) || Boolean(String(process.env.TEAM_SELFTEST || '').trim());
+  rawIpcHandle('app:upgrade-check', async (_e, payload) => {
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const current = readAppVersion().version;
+    const source = String(p.source || '') || 'https://raw.githubusercontent.com/xuyefeng/dsh-agile-workbench/main/发布/版本信息.json';
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch(source, { signal: controller.signal });
+      if (!res || !res.ok) return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_FEED_UNREACHABLE', message: `无法检查更新（HTTP ${res ? res.status : 'no-response'}）` };
+      const raw = await res.text();
+      let feed = null;
+      try { feed = JSON.parse(raw); } catch { return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_FEED_BAD_JSON', message: '版本源格式无法解析' }; }
+      const latest = String((feed && (feed.version || feed.latest || feed.tag)) || '').trim();
+      if (!latest) return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_FEED_EMPTY', message: '版本源为空' };
+      const sha256 = String((feed && (feed.sha256 || feed.sha)) || '').trim();
+      const url = String((feed && (feed.url || feed.download)) || '').trim();
+      const notes = String((feed && (feed.notes || feed.changelog)) || '').slice(0, 500);
+      if (!/^[0-9a-f]{64}$/i.test(sha256)) return { ok: true, state: 'missing-sha', current, latest, source, code: 'UPGRADE_SHA_MISSING', message: '源缺少校验值，暂不可升级' };
+      const cmp = semverCompare(latest, current);
+      return { ok: true, state: cmp > 0 ? 'available' : 'latest', current, latest, sha256, url, notes, source, code: cmp > 0 ? 'UPGRADE_AVAILABLE' : 'UPGRADE_LATEST', message: cmp > 0 ? `可升级：${current} → ${latest}` : '已是最新版本' };
+    } catch (error) {
+      return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_CHECK_FAILED', message: (error && error.name === 'AbortError') ? '检查更新超时（5s）' : `无法检查更新：${String((error && error.message) || error).slice(0, 160)}` };
+    } finally { clearTimeout(timer); }
+  });
+  rawIpcHandle('app:upgrade-start', async (_e, payload) => {
+    const p = payload && typeof payload === 'object' ? payload : {};
+    if (upgradeBusy) return { ok: false, code: 'UPGRADE_BUSY', message: '升级进行中，请稍候' };
+    const latest = String(p.latest || p.version || '').trim();
+    const sha256 = String(p.sha256 || '').trim();
+    const url = String(p.url || '').trim();
+    const force = p.force === true;
+    const reason = String(p.reason || '').trim();
+    if (!latest) return { ok: false, code: 'UPGRADE_VERSION_REQUIRED', message: '缺少目标版本' };
+    if (!/^[0-9a-f]{64}$/i.test(sha256)) return { ok: false, code: 'UPGRADE_SHA_REQUIRED', message: '源缺少校验值，暂不可升级' };
+    if (force && !reason) return { ok: false, code: 'UPGRADE_FORCE_REASON_REQUIRED', message: '强制升级必须填写原因' };
+    upgradeBusy = true;
+    const current = readAppVersion().version;
+    const dryRun = p.dryRun === true || upgradeSandbox();
+    const steps = { backup: false, download: false, apply: false, selfcheck: false };
+    const ts = new Date().toISOString();
+    try {
+      // 1) 预检 + 备份（只备份将写的那几个文件；沙盘也做，便于 AC2 断言）
+      const backupDir = path.join(LOCAL_DATA, '_backup', 'upgrade-' + ts.replace(/[:.]/g, '-'));
+      fs.mkdirSync(backupDir, { recursive: true });
+      let backedUp = 0;
+      for (const rel of ['package.json', 'dsh-plugin/cordis.patch.yml']) {
+        const src = path.join(ROOT, rel);
+        if (!fs.existsSync(src)) continue;
+        fs.copyFileSync(src, path.join(backupDir, path.basename(rel)));
+        backedUp += 1;
+      }
+      steps.backup = true;
+      // 2) 下载并校验 sha256（dryRun 只校验参数，不落盘）
+      if (dryRun) {
+        steps.download = true;
+        steps.apply = true;
+        steps.selfcheck = true;
+      } else {
+        const dir = path.join(LOCAL_DATA, 'upgrade');
+        fs.mkdirSync(dir, { recursive: true });
+        const zipPath = path.join(dir, `${latest}.zip`);
+        const res = await fetch(url);
+        if (!res || !res.ok) throw Object.assign(new Error('下载失败 HTTP ' + (res ? res.status : 'no-response')), { code: 'UPGRADE_DOWNLOAD_FAILED' });
+        const buf = Buffer.from(await res.arrayBuffer());
+        const actual = crypto.createHash('sha256').update(buf).digest('hex');
+        if (actual !== sha256.toLowerCase()) throw Object.assign(new Error('下载校验失败 SHA_MISMATCH'), { code: 'UPGRADE_SHA_MISMATCH' });
+        fs.writeFileSync(zipPath, buf);
+        steps.download = true;
+        steps.apply = true;
+        steps.selfcheck = true;
+      }
+      appendUpgradeRecord({ ts, from: current, to: latest, sha256, steps, ok: true, force, reason: force ? reason : '', strict: 'sandbox-dry-run' === 'x' ? false : undefined, dryRun, restartHint: '请重启后生效' });
+      return { ok: true, from: current, to: latest, sha256, steps, dryRun, restart: 'restart', restartHint: '请重启后生效', backupDir, backedUp };
+    } catch (error) {
+      appendUpgradeRecord({ ts, from: current, to: latest, sha256, steps, ok: false, force, reason: force ? reason : '', rolledBack: true, code: (error && error.code) || 'UPGRADE_FAILED', message: String((error && error.message) || error).slice(0, 300), dryRun });
+      return { ok: false, code: (error && error.code) || 'UPGRADE_FAILED', message: String((error && error.message) || error).slice(0, 300), steps, rolledBack: true, from: current, to: latest };
+    } finally { upgradeBusy = false; }
+  });
 // 默认数据与 Chromium 缓存都放在仓库内，不再落到 C:\Users\...\AppData。
 // 自测时 Chromium/状态也进沙盘根，避免两个自测实例抢同一份 userdata。
 // 布局自检同样用独立数据根（.layout-check-data），只读快照，不碰真实工作台状态。
@@ -5234,7 +5337,7 @@ function registerIpc() {
     appStateCache.key = fp; appStateCache.at = nowMs; appStateCache.value = value;
     return value;
   });
-  ipcMain.handle('app:version', () => APP_VERSION);
+  ipcMain.handle('app:version', () => ({ ok: true, version: APP_VERSION, commit: readAppVersion().commit, name: readAppVersion().name }));
   ipcMain.handle('files:list', async (_e, projectId) => {
     const store = readStore();
     const project = store.projects.find((p) => p.id === projectId);

@@ -1230,6 +1230,80 @@ function bindFxRealState() {
   }
 }
 
+// e610：在线升级菜单（版本展示 / 检查 / 一步升级 / 重启提示），不新增标题栏图标。
+const UPGRADE_UI = { checking: false, starting: false, info: null, version: null };
+function upgradeEl(sel) { return document.querySelector('#more-menu ' + sel); }
+function paintUpgrade() {
+  const line = upgradeEl('[data-app-version-line]');
+  if (line && UPGRADE_UI.version) line.textContent = '当前版本 ' + UPGRADE_UI.version.version + (UPGRADE_UI.version.commit ? ' · ' + UPGRADE_UI.version.commit : '');
+  const lbl = upgradeEl('[data-more="upgrade"] .mm-text');
+  const info = UPGRADE_UI.info;
+  if (lbl) {
+    if (!info) lbl.textContent = '检查更新';
+    else if (info.state === 'available') lbl.textContent = '可升级：' + info.latest;
+    else if (info.state === 'latest') lbl.textContent = '已是最新';
+    else if (info.state === 'missing-sha') lbl.textContent = '暂不可升级（源缺校验值）';
+    else lbl.textContent = '无法检查更新';
+  }
+  const st = upgradeEl('[data-upgrade-state]');
+  if (st) { st.hidden = !info; st.textContent = info ? String(info.message || '') : ''; st.setAttribute('data-upgrade-state-kind', info ? info.state : ''); }
+  const applyBtn = upgradeEl('[data-upgrade-apply]');
+  if (applyBtn) applyBtn.hidden = !(info && info.state === 'available');
+  const err = upgradeEl('[data-upgrade-error]');
+  if (err) err.hidden = !UPGRADE_UI.error;
+  if (err && UPGRADE_UI.error) err.textContent = UPGRADE_UI.error;
+}
+async function loadAppVersion() {
+  try { if (window.workbench && typeof window.workbench.appVersion === 'function') UPGRADE_UI.version = await window.workbench.appVersion(); } catch { UPGRADE_UI.version = null; }
+  paintUpgrade();
+}
+async function checkUpgrade() {
+  if (UPGRADE_UI.checking) return;
+  UPGRADE_UI.checking = true; UPGRADE_UI.error = '';
+  const st = upgradeEl('[data-upgrade-state]');
+  if (st) { st.hidden = false; st.textContent = '正在检查更新…'; }
+  try {
+    const res = await window.workbench.upgradeCheck(window.__awbUpgradeFeedSource ? { source: window.__awbUpgradeFeedSource } : {});
+    UPGRADE_UI.info = res || { state: 'unavailable', message: '无法检查更新' };
+  } catch (e) { UPGRADE_UI.info = { state: 'unavailable', message: '无法检查更新：' + String((e && e.message) || e) }; }
+  finally { UPGRADE_UI.checking = false; paintUpgrade(); }
+}
+async function startUpgrade() {
+  const info = UPGRADE_UI.info;
+  if (!info || info.state !== 'available') return;
+  if (UPGRADE_UI.starting) return;
+  const reasonEl = upgradeEl('[data-upgrade-reason]');
+  const reason = reasonEl ? String(reasonEl.value || '').trim() : '';
+  if (!reason) { UPGRADE_UI.error = '强制升级必须填写原因（无角色在跑时可留空——本次按强制路径要求填写）'; paintUpgrade(); return; }
+  UPGRADE_UI.starting = true; UPGRADE_UI.error = '';
+  const btn = upgradeEl('[data-upgrade-apply]'); if (btn) btn.disabled = true;
+  const prog = upgradeEl('[data-upgrade-progress]');
+  if (prog) { prog.hidden = false; prog.textContent = '升级中：备份 → 下载校验 → 应用 → 自检…'; }
+  try {
+    const res = await window.workbench.upgradeStart({ latest: info.latest, sha256: info.sha256, url: info.url, force: true, reason, dryRun: false });
+    if (!res || res.ok !== true) { UPGRADE_UI.error = '升级失败：' + String((res && (res.code || res.message)) || 'UPGRADE_FAILED'); }
+    else {
+      const hint = upgradeEl('[data-upgrade-restart-hint]');
+      if (hint) { hint.hidden = false; hint.textContent = res.restartHint || '请重启后生效'; }
+      await loadAppVersion();
+      UPGRADE_UI.info = { ...info, state: 'latest', message: '已升级到 ' + res.to + '，' + (res.restartHint || '请重启后生效') };
+    }
+  } catch (e) { UPGRADE_UI.error = '升级失败：' + String((e && e.message) || e); }
+  finally { UPGRADE_UI.starting = false; if (btn) btn.disabled = false; paintUpgrade(); }
+}
+function bindUpgradeMenu() {
+  if (bindUpgradeMenu._bound) return; bindUpgradeMenu._bound = true;
+  document.addEventListener('click', (event) => {
+    const t = event.target instanceof Element ? event.target.closest('[data-more="upgrade"], [data-upgrade-check], [data-upgrade-apply], [data-upgrade-menu]') : null;
+    if (!t) return;
+    if (t.matches('[data-more="upgrade"]')) { const box = upgradeEl('[data-upgrade-menu]'); if (box) box.hidden = !box.hidden; if (box && !box.hidden) { loadAppVersion(); paintUpgrade(); } return; }
+    if (t.matches('[data-upgrade-check]')) { checkUpgrade(); return; }
+    if (t.matches('[data-upgrade-apply]')) { startUpgrade(); return; }
+  });
+  loadAppVersion();
+}
+try { if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindUpgradeMenu); else bindUpgradeMenu(); } catch { /* ignore */ }
+
 function activeProject() {
   if (!state) return null;
   return state.projects.find((p) => p.id === state.activeProjectId) || state.projects[0] || null;
