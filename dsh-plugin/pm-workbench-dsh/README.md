@@ -70,9 +70,9 @@ pm_workbench_open
 3. 插件配置 `workbenchDir`
 4. 环境变量 `PM_WORKBENCH_START`
 5. 环境变量 `PM_WORKBENCH_DIR`
-6. 默认 `D:\deepseek\agile-workbench\start.cmd`
-7. 安装器默认 `D:\PM工作台\start.cmd`
-8. 安装器回退 `%USERPROFILE%\PM工作台\start.cmd`
+6. 默认：按运行环境推算的候选目录（`%USERPROFILE%\PM工作台`、`%LOCALAPPDATA%\PM工作台`、`PM_WORKBENCH_HOME`/`DSH_PROFILE_DIR` 推算位置），不再写死任何作者机器路径
+7. 插件装在工作台自身依赖里时，自动向上找 `start.cmd` 所在安装目录
+8. 兜底 `%USERPROFILE%\PM工作台\start.cmd`
 
 显式路径（参数/配置/环境变量）不存在时直接报错并列出该路径，**不会**偷偷换成别的目录。
 全部默认路径都找不到时，返回已查找路径、安装命令和手动安装命令。
@@ -84,13 +84,13 @@ pm_workbench_open
 ```yaml
 - id: pm-workbench-dsh
   config:
-    workbenchDir: 'D:\PM工作台'
+    workbenchDir: '<你的安装目录>\PM工作台'
 ```
 
 也可以不写配置，直接用环境变量：
 
 ```powershell
-$env:PM_WORKBENCH_DIR = 'D:\PM工作台'
+$env:PM_WORKBENCH_DIR = '<你的安装目录>\PM工作台'
 ```
 
 改了配置后需要让插件重新加载（DSH 重启或重新挂载该行）。

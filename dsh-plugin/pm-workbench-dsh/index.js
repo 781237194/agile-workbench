@@ -12,9 +12,9 @@
  *   3. 插件配置 workbenchDir
  *   4. 环境变量 PM_WORKBENCH_START
  *   5. 环境变量 PM_WORKBENCH_DIR
- *   6. 默认：D:\deepseek\agile-workbench\start.cmd
- *   7. 安装器默认：D:\PM工作台\start.cmd
- *   8. 安装器回退：%USERPROFILE%\PM工作台\start.cmd
+ *   6. 默认：按「运行环境 + 安装位置」推算的候选目录（见 DEFAULT_DIRS，不含任何作者机器绝对路径）
+ *   7. 插件装在工作台自身依赖里（<安装目录>\node_modules\...）时，自动向上找 start.cmd 的安装目录
+ *   8. 兜底：%USERPROFILE%\PM工作台、%LOCALAPPDATA%\PM工作台
  *
  * 找不到时**自动在后台启动官方安装器**（install.ps1，装好 Node/Electron/应用本体），
  * 并返回「正在安装，约 2–5 分钟后重试」；也可传 skipInstall=true 只看安装命令。
@@ -25,6 +25,7 @@ import { spawn } from 'node:child_process'
 import fs, { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, normalize, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 // c9ac 快照 v2：复用 session-queue.js 的唯一组装实现（三条通道共用一套 schema，不另立第二套）。
 import {
   SNAPSHOT_SCHEMA,
@@ -39,11 +40,27 @@ export const inject = ['tools', 'sessionController']
 
 const TOOL_NAME = 'pm_workbench_open'
 const START_FILE = 'start.cmd'
-const DEFAULT_DIRS = [
-  'D:\\deepseek\\agile-workbench',
-  'D:\\PM工作台',
-  join(homedir(), 'PM工作台'),
-]
+const DEFAULT_DIRS = (() => {
+  // 发版清理（2026-11-19）：候选目录全部按运行环境/安装位置推算，不写死任何作者机器路径。
+  const dirs = [
+    process.env.PM_WORKBENCH_HOME,
+    join(homedir(), 'PM工作台'),
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'PM工作台') : '',
+    process.env.DSH_PROFILE_DIR ? join(dirname(process.env.DSH_PROFILE_DIR), 'PM工作台') : '',
+    process.env.DSH_PROFILE_DIR ? join(process.env.DSH_PROFILE_DIR, 'PM工作台') : '',
+  ]
+  // 插件被装进工作台自身的依赖（<安装目录>\node_modules\...）时，从插件位置向上找 start.cmd。
+  try {
+    let cur = dirname(fileURLToPath(import.meta.url))
+    for (let i = 0; i < 5; i += 1) {
+      if (existsSync(join(cur, START_FILE))) { dirs.unshift(cur); break }
+      const parent = dirname(cur)
+      if (!parent || parent === cur) break
+      cur = parent
+    }
+  } catch { /* 定位失败不影响其它候选 */ }
+  return [...new Set(dirs.filter((dir) => typeof dir === 'string' && dir.trim()))]
+})()
 const INSTALLER_SCRIPT_URL =
   'https://cdn.jsdelivr.net/gh/781237194/agile-workbench@96395f1/install.ps1'
 const INSTALL_COMMAND =
@@ -121,7 +138,7 @@ function resolveLaunchTarget(args, config) {
       code: 'PM_WORKBENCH_PATH_INVALID',
       error: `${request.source} 指向的路径不存在，或目录里没有 ${START_FILE}：${toAbsolute(request.value)}`,
       searched: [toAbsolute(request.value)],
-      hint: `请把 path / workbenchDir / startScript 指向 PM工作台安装目录（例如 D:\\deepseek\\agile-workbench）或 ${START_FILE} 文件。`,
+      hint: `请把 path / workbenchDir / startScript 指向 PM工作台安装目录（例如用户目录下的 PM工作台，或你选择安装的位置）或 ${START_FILE} 文件。`,
     }
   }
 
@@ -692,7 +709,7 @@ export function apply(ctx, config) {
       name: TOOL_NAME,
       description:
         '启动本机的 PM工作台（PM Workbench，Electron 桌面应用）。这是 DSH 启动器插件，不把 Electron UI 嵌入 DSH；' +
-        '调用后只负责拉起 start.cmd 并立即返回，不等待工作台退出。默认查找 D:\\deepseek\\agile-workbench\\start.cmd，' +
+        '调用后只负责拉起 start.cmd 并立即返回，不等待工作台退出。默认按安装位置/用户目录自动查找 start.cmd，' +
         '也可用 path 参数或 workbenchDir 配置指定安装目录；找不到时会返回安装命令。',
       parameters: {
         type: 'object',
