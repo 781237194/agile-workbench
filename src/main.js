@@ -4202,6 +4202,10 @@ let teamBoardFilePath = '';
 let teamBoardLastBuild = null;
 // 看板窗当前实际渲染的文件（热开且同一项目时不重载，直接 show/focus，content 近似 0ms）。
 let teamBoardShownFile = '';
+// R-b34a R6补（PM 2026-11-18 19:57 热开门禁升级）：看板 HTML **内存缓存**——窗口销毁后重建时
+// 直接 loadURL(data:text/html) 走内存，不再每次重新解析 9.45MB 磁盘文件（重建路径 content 目标 ≤800ms）。
+// 只缓存 ≤12MB 的页面；项目切换/重新生成时覆盖；不做持久化，进程退出即释放。
+let teamBoardHtmlCache = null;
 
 function boardSkeletonDataUrl(title) {
   const t = String(title || '团队看板').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
@@ -8323,13 +8327,30 @@ ipcMain.handle('theme:metrics', async () => {
       result = await boardPromise;
       if (!result.ok) throw new Error(result.message || result.why || '看板生成失败');
       teamBoardLastBuild = { projectId: project.id, at: Date.now(), path: result.boardPath };
+      // 生成后立刻把 HTML 读进内存缓存（≤12MB），供「窗口销毁后重建」路径用 dataURL 加载。
+      try {
+        const size = fs.statSync(result.boardPath).size;
+        teamBoardHtmlCache = size > 0 && size <= 12 * 1024 * 1024
+          ? { projectId: project.id, at: Date.now(), bytes: size, html: fs.readFileSync(result.boardPath, 'utf8') }
+          : null;
+      } catch { teamBoardHtmlCache = null; }
     }
     teamBoardProjectId = project.id;
     teamBoardProjectPath = path.resolve(String(project.path));
     teamBoardFilePath = result.boardPath;
     teamBoardTheme = theme;
     // 复用窗也必须重新加载：generateBoard 每次都会重写 看板.html。
-    await teamBoardWindow.loadFile(result.boardPath, { query: { theme, style: boardStyle } });
+    // PM 2026-11-18 19:57：热开门禁=窗口销毁后重建，content≤800。重建时优先走**内存缓存 HTML + dataURL**
+    // （避免每次重新解析 9.45MB 磁盘文件）；缓存缺失/项目不符/超大文件才回落 loadFile。
+    const useMemoryHtml = Boolean(teamBoardHtmlCache && teamBoardHtmlCache.projectId === project.id
+      && teamBoardHtmlCache.html && teamBoardHtmlCache.bytes > 0);
+    if (useMemoryHtml) {
+      const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(teamBoardHtmlCache.html);
+      await teamBoardWindow.loadURL(dataUrl);
+      teamBoardHtmlCache.at = Date.now();
+    } else {
+      await teamBoardWindow.loadFile(result.boardPath, { query: { theme, style: boardStyle } });
+    }
     teamBoardShownFile = result.boardPath;
     const contentMs = Date.now() - startedAt;
     applyZoomToAllWindows(readZoomPref());

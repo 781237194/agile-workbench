@@ -199,6 +199,8 @@ async function main() {
         const listNow = await getJson(PORT, '/json/list');
         return (listNow || []).find((t) => t.type === 'page' && /看板\.html/i.test(decodeURIComponent(String(t.url || '')))) || null;
       };
+      // 严格热开路径（产品口径）：窗口**销毁后重建**（不隐藏）——用 CDP Page.close 直接销毁 target。
+      const DESTROY_MODE = ARGS.includes('--destroy-reopen');
       const closeBoardWindow = async () => {
         const t = await findBoardTarget();
         if (!t) return { closed: false, via: 'none' };
@@ -210,6 +212,14 @@ async function main() {
             // 产品口径「关窗」：走看板页自身 IPC（window.boardWin.control('close')）→ 主进程收到真实 close 事件
             // → hide-on-close 隐藏窗口保留已渲染内容（重开 content≈0）。CDP Page.close 会直接销毁 target，
             // 绕过 close 事件，只能当兜底。
+            if (DESTROY_MODE) {
+              // 严格热开：直接销毁 target（模拟用户关窗且窗口被销毁），随后重建测量。
+              try { await c.send('Page.close', {}, 8000); } catch { /* ignore */ }
+              via = 'page-close-destroy';
+              await sleep(500);
+              c.close();
+              return { closed: true, via };
+            }
             const r = await c.send('Runtime.evaluate', {
               expression: "(async () => { try { await window.boardWin.control('close'); return 'ipc-close'; } catch (e) { return 'err:' + String(e && e.message || e).slice(0, 80); } })()",
               returnByValue: true, awaitPromise: true,
