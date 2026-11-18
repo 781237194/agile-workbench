@@ -61,6 +61,9 @@ try {
     copyIf(path.join(realProjState, '任务', n), path.join(TEAM, '状态', '项目', PROJECT, '任务', n));
   }
 } catch { /* ignore */ }
+// PM 2026-11-18 20:26 优化验证：把已有的 看板.html 也复制进沙盘（最后复制 → mtime 最新），
+// 这样冷开时「看板.html 比依赖新」成立，可测「跳过 generateBoard 直接 loadFile」路径。
+copyIf(path.join(ROOT, '团队', '看板.html'), path.join(TEAM, '看板.html'));
 
 const env = {
   ...process.env,

@@ -4294,6 +4294,25 @@ async function ensureBoardWindowWithSkeleton({ theme = 'dark', style = 'native',
   return { created, windowReadyAt, skeletonAt: shownAt, windowMs: created ? windowReadyAt - startedWindowAt : 0, segments };
 }
 
+/** PM 2026-11-18 20:26 限时优化：冷开时若磁盘 看板.html 已比其数据依赖（工作流.json / 任务目录）新，
+ *  说明内容仍是最新 → 直接 loadFile，跳过 generateBoard（省 ~1s）；任何一项更新则照旧生成。
+ *  只读检查、不改看板内容语义；返回 null 表示不存在/不可用。 */
+function boardHtmlFreshInfo(project) {
+  try {
+    const teamRoot = resolveTeamRoot();
+    const htmlPath = path.join(teamRoot, '看板.html');
+    const hs = fs.statSync(htmlPath);
+    if (!hs.size) return null;
+    const projectDir = path.join(teamRoot, '状态', '项目', String(project.teamName || project.name || ''));
+    const deps = [hs.mtimeMs];
+    const depFiles = [path.join(projectDir, '工作流.json'), path.join(projectDir, '任务')];
+    for (const dep of depFiles) {
+      try { deps.push(fs.statSync(dep).mtimeMs); } catch { /* 缺依赖就当不新 */ }
+    }
+    return { path: htmlPath, bytes: hs.size, mtimeMs: hs.mtimeMs, depsMaxMtime: Math.max(...deps), fresh: hs.mtimeMs >= Math.max(...deps) };
+  } catch { return null; }
+}
+
 async function boardControl(action) {
   if (!boardWindowAlive()) {
     return { ok: false, code: 'BOARD_WINDOW_MISSING', message: '看板窗口不存在' };
@@ -8321,14 +8340,24 @@ ipcMain.handle('theme:metrics', async () => {
       && (Date.now() - teamBoardLastBuild.at) < 8000
       && teamBoardLastBuild.path && fs.existsSync(teamBoardLastBuild.path));
     let result;
+    let skippedGenerate = false;
     if (warm) {
       result = { ok: true, boardPath: teamBoardLastBuild.path };
     } else {
-      result = await teamTools.generateBoard(project);
-      if (!result.ok) throw new Error(result.message || result.why || '看板生成失败');
-      teamBoardLastBuild = { projectId: project.id, at: Date.now(), path: result.boardPath };
-      // 只记元信息（不读文件）；html/bytes/dataUrl 在重建路径首次使用时懒加载。
-      teamBoardHtmlCache = { projectId: project.id, at: Date.now(), path: result.boardPath, html: null, bytes: null, dataUrl: null };
+      // PM 2026-11-18 20:26 限时优化：看板.html 存在且比依赖新 → 跳过 generateBoard 直接 loadFile。
+      const freshInfo = boardHtmlFreshInfo(project);
+      if (freshInfo && freshInfo.fresh) {
+        result = { ok: true, boardPath: freshInfo.path };
+        skippedGenerate = true;
+        teamBoardLastBuild = { projectId: project.id, at: Date.now(), path: freshInfo.path };
+        teamBoardHtmlCache = { projectId: project.id, at: Date.now(), path: freshInfo.path, html: null, bytes: null, dataUrl: null };
+      } else {
+        result = await teamTools.generateBoard(project);
+        if (!result.ok) throw new Error(result.message || result.why || '看板生成失败');
+        teamBoardLastBuild = { projectId: project.id, at: Date.now(), path: result.boardPath };
+        // 只记元信息（不读文件）；html/bytes/dataUrl 在重建路径首次使用时懒加载。
+        teamBoardHtmlCache = { projectId: project.id, at: Date.now(), path: result.boardPath, html: null, bytes: null, dataUrl: null };
+      }
     }
     teamBoardProjectId = project.id;
     teamBoardProjectPath = path.resolve(String(project.path));
@@ -8363,7 +8392,7 @@ ipcMain.handle('theme:metrics', async () => {
     teamBoardWindow.show();
     teamBoardWindow.focus();
     const timings = {
-      windowMs, skeletonVisibleMs, contentMs, warm, reused: !ensured.created,
+      windowMs, skeletonVisibleMs, contentMs, warm, reused: !ensured.created, skippedGenerate,
       budget: { skeletonVisibleMs: 200, contentMs: 800 },
     };
     try {
