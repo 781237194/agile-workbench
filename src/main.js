@@ -4197,6 +4197,8 @@ const BOARD_SKELETON_MARK = 'board:skeleton';
 let boardHideDestroyTimer = null;
 let boardDestroying = false;
 let boardQuitting = false;
+// 隐藏后多久由应用自身销毁窗口（默认 60s；自检可用 AWB_BOARD_HIDE_DESTROY_MS 调小，走「应用自身销毁后重建」路径）。
+const BOARD_HIDE_DESTROY_MS = (() => { const n = Number(process.env.AWB_BOARD_HIDE_DESTROY_MS); return Number.isFinite(n) && n >= 0 ? n : 60000; })();
 let teamBoardFilePath = '';
 // R-b34a R6补：真实看板 8 秒内重复打开复用（只省重建，不省 loadFile；文件缺失/项目变必重建）。
 let teamBoardLastBuild = null;
@@ -4261,7 +4263,7 @@ async function ensureBoardWindowWithSkeleton({ theme = 'dark', style = 'native',
         boardDestroying = true;
         try { teamBoardWindow.destroy(); } catch { /* ignore */ }
         boardDestroying = false;
-      }, 60000);
+      }, BOARD_HIDE_DESTROY_MS);
     });
     teamBoardWindow.on('closed', () => {
       teamBoardWindow = null;
@@ -8345,7 +8347,8 @@ ipcMain.handle('theme:metrics', async () => {
     const useMemoryHtml = Boolean(teamBoardHtmlCache && teamBoardHtmlCache.projectId === project.id
       && teamBoardHtmlCache.html && teamBoardHtmlCache.bytes > 0);
     if (useMemoryHtml) {
-      const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(teamBoardHtmlCache.html);
+      // 编码只做一次（9.45MB 页面每次 encodeURIComponent 约数百 ms）——重建路径复用同一 dataURL 字符串。
+      const dataUrl = teamBoardHtmlCache.dataUrl || (teamBoardHtmlCache.dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(teamBoardHtmlCache.html));
       await teamBoardWindow.loadURL(dataUrl);
       teamBoardHtmlCache.at = Date.now();
     } else {

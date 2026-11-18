@@ -70,6 +70,9 @@ const env = {
   TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'),
   TEAM_SELFTEST: '1',
   AWB_TEAM_ROOT: TEAM,
+  // 严格热开（产品口径）= 关窗 → 应用自身按 TTL 销毁窗口 → 重开。自检把 TTL 调到 800ms，
+  // 让「应用自身销毁后重建」这条真实路径在几秒内可复现（生产默认 60000ms 不变）。
+  AWB_BOARD_HIDE_DESTROY_MS: ARGS.includes('--ttl-reopen') ? '800' : '',
 };
 // 关键：父进程若继承 ELECTRON_RUN_AS_NODE=1（DSH/团队工具环境常见），Electron 会以纯 Node 模式跑主进程
 // → require('electron') 里没有 ipcMain → main.js:48 崩（`Cannot read properties of undefined (reading 'handle')`）。
@@ -201,6 +204,8 @@ async function main() {
       };
       // 严格热开路径（产品口径）：窗口**销毁后重建**（不隐藏）——用 CDP Page.close 直接销毁 target。
       const DESTROY_MODE = ARGS.includes('--destroy-reopen');
+      // 严格热开（产品口径细化）：关窗→hide→等应用自身按 TTL 销毁窗口→重开。TTL 由 env 调到 800ms。
+      const TTL_MODE = ARGS.includes('--ttl-reopen');
       const closeBoardWindow = async () => {
         const t = await findBoardTarget();
         if (!t) return { closed: false, via: 'none' };
@@ -225,6 +230,17 @@ async function main() {
               returnByValue: true, awaitPromise: true,
             }, 12000);
             via = String((r && r.result && r.result.value) || 'unknown');
+            // 严格热开（产品口径细化 2026-11-18 20:04）：关窗（close→hide）后**等应用自身按 TTL 销毁窗口**，
+            // 再重开测量重建路径。TTL 由 spawn env AWB_BOARD_HIDE_DESTROY_MS 调到 800ms。
+            if (TTL_MODE && /^ipc-close/.test(via)) {
+              for (let i = 0; i < 30; i += 1) {
+                await sleep(200);
+                if (!(await findBoardTarget())) { via = 'ttl-self-destroy'; break; }
+              }
+              if (via === 'ipc-close') via = 'ttl-destroy-timeout';
+              c.close();
+              return { closed: true, via };
+            }
             await sleep(350);
           } catch { /* ignore */ }
           // 只有 ipc 关闭没生效时才用 CDP Page.close 兜底；否则会把「已隐藏保留内容」的 target 直接销毁，
