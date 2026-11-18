@@ -4,12 +4,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { PATHS, appendEvent, jsonOut, textOut, nowIso, fail } from './lib/core.mjs';
-import { ROLE_NAMES, ROLES, loadTeam, mutateTeam, getMember, projectStatePaths, setActiveProject, loadProject, projectTeamMode } from './lib/store.mjs';
+import { PATHS, appendEvent, appendLine, jsonOut, textOut, nowIso, fail } from './lib/core.mjs';
+import { ROLE_NAMES, ROLES, loadTeam, mutateTeam, getMember, projectStatePaths, setActiveProject, loadProject, projectTeamMode, sendMessage } from './lib/store.mjs';
 import {
   TEAM_MODES, TEAM_MODE_LABELS, isTeamMode, normalizeTeamMode, rolesForMode, teamModeDescription, MODEL_BY_ROLE,
 } from './lib/roles.mjs';
 import { DshClient } from './lib/dsh-session.mjs';
+// B-20261118-080052-207b：三源复用判定 + 轮换记账（纯逻辑单元，Node 可测）。
+import launchReuse from './lib/launch-reuse.mjs';
+const { pickReuse, buildRotation } = launchReuse;
 // B-20261117-113925-b64d：团队工具的状态文件写入也走 ad44 的原子写（tmp→fsync→bak→rename + 锁），
 // 不再裸 fs.writeFileSync（崩溃时会留半截 JSON）。
 import { writeJsonAtomic } from './lib/json-atomic.mjs';
@@ -124,7 +127,7 @@ if (!fs.existsSync(projectStatePaths(project).config)) fail('NO_PROJECT', `项�
 const client = new DshClient(engineUrl || undefined);
 const workspaceResult = await client.workspaceCreate({ path: workspace });
 const dshWorkspace = workspaceResult.workspace;
-const activeSessionIds = new Set(dshWorkspace.sessionIds || []);
+// B-20261118-080052-207b：不再用 workspace.sessionIds 当复用前提（三源判定见 lib/launch-reuse.mjs）。
 // 程序把真实 workspaceId 写回项目元数据，后续恢复不再依赖猜测。
 try {
   const metaFile = path.join(workspace, 'workspace.json');
@@ -134,28 +137,47 @@ try {
   fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2) + '\n', 'utf8');
 } catch { /* 旧目录没有 workspace.json 也继续 */ }
 const existingList = await client.list();
-// 只复用“已经被这个工作区正式记账”的会话；archived 的历史会话不当作成员。
-const existingByTitle = new Map(
-  existingList.items
-    .filter((s) => activeSessionIds.has(s.sessionId))
-    .filter((s) => String(s.cwd || '').toLowerCase() === workspace.toLowerCase() && s.projections?.values?.title)
-    .map((s) => [s.projections.values.title, s.sessionId]),
-);
+// B-20261118-080052-207b：三源复用（title + 团队.json 名册 + 项目映射 团队会话.json）。
+// 旧实现只认 workspace.sessionIds → 工作区重建/归档/标题轻微不一致时静默新建并覆盖名册（07:39 PM 被换）。
+const rosterSessions = new Map(roles.map((r) => {
+  const m = getMember(team, r);
+  return [r, String((m && m.sessionId) || '')];
+}));
+const manifestSessions = (() => {
+  const map = new Map();
+  try {
+    const mf = JSON.parse(fs.readFileSync(path.join(workspace, '团队会话.json'), 'utf8').replace(/^\uFEFF/, ''));
+    for (const row of (mf.roles || [])) if (row && row.role) map.set(String(row.role), String(row.sessionId || ''));
+  } catch { /* 旧工作区没有 团队会话.json：只靠名册/标题 */ }
+  return map;
+})();
 const sessions = [];
 const errors = [];
+const rotations = [];
 for (const p of plan) {
   try {
-    const reusedId = existingByTitle.get(p.title);
+    const pick = pickReuse({
+      role: p.role, title: p.title,
+      rosterSessionId: rosterSessions.get(p.role), manifestSessionId: manifestSessions.get(p.role),
+      sessions: existingList.items, workspace, workspaceSessionIds: dshWorkspace.sessionIds || [],
+    });
     let sessionId;
     let reused = false;
-    if (reusedId) {
-      sessionId = reusedId;
+    let reuseSource = pick.source;
+    if (pick.sessionId) {
+      sessionId = pick.sessionId;
       reused = true;
       // 工作区被归档时，成员可能仍在 sessionIds 里但处于 archived 集合；先恢复再复用。
+      // 名册指向的会话不在 workspace.sessionIds 时同样走这一步（把它重新加回工作区）。
       try { await client.workspaceUnarchiveSession({ sessionId }); } catch { /* 未归档时可能报错，忽略 */ }
     } else {
       const created = await client.create({ workspaceId: dshWorkspace.workspaceId });
       sessionId = created.sessionId;
+      // 名册原本绑过别的会话 → 这是「换了这个人」，必须留轮换记录，不能静默覆盖。
+      const priorRoster = String(rosterSessions.get(p.role) || '').trim();
+      const priorManifest = String(manifestSessions.get(p.role) || '').trim();
+      const prior = priorRoster || priorManifest;
+      if (prior && prior !== sessionId) rotations.push({ role: p.role, from: prior, to: sessionId });
     }
     try { await client.rename({ sessionId, title: p.title }); } catch { /* 标题失败不影响 */ }
     let modelSelected = null;
@@ -175,9 +197,64 @@ for (const p of plan) {
         errors.push({ role: p.role, stage: 'prompt', message: e.message, code: e.code || '' });
       }
     }
-    sessions.push({ role: p.role, name: ROLE_NAMES[p.role], title: p.title, sessionId, reused, prompted, model: p.model, modelSelected: Boolean(modelSelected) });
+    sessions.push({ role: p.role, name: ROLE_NAMES[p.role], title: p.title, sessionId, reused, reuseSource, prompted, model: p.model, modelSelected: Boolean(modelSelected) });
   } catch (e) {
     errors.push({ role: p.role, stage: 'create', message: e.message, code: e.code || '' });
+  }
+}
+
+// B-20261118-080052-207b：新建替换必须留痕——会话轮换/<role>.json + 项目 会话轮换.jsonl +
+// 事件 session_rotate(by=launch) + 旧会话标 retired/归档 + 广播重 boot。
+// 放在写名册之前：任何「名册指向新会话但没有轮换记录」的状态都不允许出现。
+const rotationResults = [];
+for (const rot of rotations) {
+  try {
+    const built = buildRotation({
+      role: rot.role, from: rot.from, to: rot.to, project,
+      at: nowIso(), members: (loadTeam().members || []),
+    });
+    if (!built) continue;
+    const rotateDir = path.join(projectStatePaths(project).dir, '会话轮换');
+    fs.mkdirSync(rotateDir, { recursive: true });
+    let oldArchived = false;
+    try {
+      await client.workspaceArchiveSession({ sessionId: rot.from, stopActivity: false });
+      oldArchived = true;
+    } catch (e) {
+      errors.push({ role: rot.role, stage: 'archive-old', message: String((e && e.message) || e), code: e.code || '' });
+    }
+    const record = { ...built.record, archivedOld: oldArchived };
+    writeJsonAtomic(path.join(rotateDir, `${rot.role}.json`), record);
+    writeJsonAtomic(path.join(rotateDir, `${record.id}.json`), record);
+    appendLine(path.join(projectStatePaths(project).dir, '会话轮换.jsonl'), JSON.stringify({ ...built.jsonl, archivedOld: oldArchived }));
+    appendEvent({
+      role: 'launch', sessionId: '', action: 'session_rotate', project, target: rot.role,
+      note: `${rot.from} → ${rot.to}（launch 未找到可复用会话，新建后替换名册）`,
+      data: { from: rot.from, to: rot.to, by: 'launch', mode: 'auto', created: true, archivedOld: oldArchived },
+    });
+    // 广播：本人去新会话 boot + 其余 active 成员重 boot（名册变更=全员旧令牌失效）
+    const bcast = [];
+    try {
+      sendMessage({
+        from: 'system', to: rot.role, project, type: 'notice',
+        subject: `会话已更换：请在新会话 boot（${rot.role}）`,
+        body: `${rot.role} 的会话已由「启动团队」新建替换：${rot.from} → ${rot.to}。\n请在新会话执行：node 团队\\工具\\team.mjs boot --role ${rot.role} --project ${project} --session ${rot.to}\n旧会话已标 retired${oldArchived ? '（已归档）' : '（归档失败，见 errors）'}。`,
+      });
+      bcast.push(rot.role);
+    } catch (e) { errors.push({ role: rot.role, stage: 'broadcast-self', message: String((e && e.message) || e) }); }
+    for (const other of built.broadcasts.others) {
+      try {
+        sendMessage({
+          from: 'system', to: other, project, type: 'notice',
+          subject: '名册已变更：请重新 boot（旧令牌已失效）',
+          body: `${rot.role} 的会话已由 launch 替换（${rot.from} → ${rot.to}），团队名册随之变更，全员旧令牌失效。\n请重新执行：node 团队\\工具\\team.mjs boot --role ${other} --project ${project}`,
+        });
+        bcast.push(other);
+      } catch (e) { errors.push({ role: other, stage: 'broadcast-other', message: String((e && e.message) || e) }); }
+    }
+    rotationResults.push({ role: rot.role, from: rot.from, to: rot.to, recordId: record.id, archivedOld: oldArchived, broadcasts: bcast });
+  } catch (e) {
+    errors.push({ role: rot.role, stage: 'rotation', message: String((e && e.message) || e) });
   }
 }
 
@@ -264,9 +341,19 @@ try {
   errors.push({ role: 'system', stage: 'index', message: String(e.message || e).slice(-400) });
 }
 
+// 轮换记账失败的 role 一律**不写名册**：宁可不换人，也不允许「名册指向新会话但没有轮换记录」。
+const rotationFailedRoles = new Set(rotations.map((r) => r.role).filter((role) => !rotationResults.some((x) => x.role === role)));
+if (rotationFailedRoles.size) {
+  for (const role of rotationFailedRoles) {
+    const s = sessions.find((x) => x.role === role);
+    if (s) s.rosterSkipped = 'ROTATION_RECORD_FAILED';
+  }
+}
+
 // 回填已有成员的 sessionId；可选把新角色加进 roster
 mutateTeam((t) => {
   for (const s of sessions) {
+    if (rotationFailedRoles.has(s.role)) continue;
     const m = t.members.find((x) => x.role === s.role);
     if (m) m.sessionId = s.sessionId;
     else if (addMembers) t.members.push({ role: s.role, name: ROLE_NAMES[s.role] || s.role, status: 'active', joinedAt: nowIso(), sessionId: s.sessionId });
@@ -291,7 +378,7 @@ const currentWorkspace = {
 };
 writeJsonAtomic(path.join(PATHS.state, '当前工作区.json'), currentWorkspace);
 
-const record = { generatedAt: nowIso(), workspace, workspaceId: dshWorkspace.workspaceId, dshWorkspaceCreated: workspaceResult.created, project, teamMode, restoreMode, seedVisible, seedResults, noPrompt, promptRoles, addMembers, sessions, errors, cleanup, indexRefreshed, sessionManifest, currentWorkspace };
+const record = { generatedAt: nowIso(), workspace, workspaceId: dshWorkspace.workspaceId, dshWorkspaceCreated: workspaceResult.created, project, teamMode, restoreMode, seedVisible, seedResults, noPrompt, promptRoles, addMembers, sessions, errors, cleanup, indexRefreshed, sessionManifest, currentWorkspace, rotations: rotationResults };
 const file = path.join(PATHS.state, '会话.json');
 writeJsonAtomic(file, record);
 appendEvent({
