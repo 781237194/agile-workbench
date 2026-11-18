@@ -59,6 +59,7 @@ function copyDir(src, dst, skip) {
     TEAM_ROOT: TEAM,
     TEAM_PROJECTS_ROOT: PROJ,
     AWB_DATA_DIR: DATA,
+    TEAM_WORKBENCH_JSON: path.join(DATA, 'workbench.json'),
     TEAM_SELFTEST: '1'
   };
   delete env.ELECTRON_RUN_AS_NODE;

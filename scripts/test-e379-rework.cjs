@@ -13,7 +13,7 @@
  *   R6 界面锚点与 IPC 接线（AC6③）：[data-install-warning]/[data-mcp-warning]、preload diagnostics、main app:diagnostics
  *
  * 跑法：node scripts/test-e379-rework.cjs
- * 隔离：PowerShell 夹具只写 %TEMP%；MCP 夹具 DSH_HOME 与 data 都指沙盘；真实 data/install-result.json 前后 sha 不变。
+ * 隔离：PowerShell 夹具只写 %TEMP%（RepoRoot 指沙盘）；MCP 夹具 DSH_HOME 与 data 都指沙盘；不读取真实 团队/ 与 data/。
  * 安全：只杀自己 spawn 的进程（本脚本不 spawn 常驻进程，全部 spawnSync 同步等待结束）。
  */
 const fs = require('node:fs');
@@ -32,8 +32,6 @@ function ok(cond, name, detail) {
 }
 const read = (rel) => { try { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); } catch { return ''; } };
 const sha = (file) => { try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); } catch { return ''; } };
-const realInstallResult = path.join(ROOT, 'data', 'install-result.json');
-const beforeReal = sha(realInstallResult);
 
 function runPwsh(scriptFile, env) {
   const res = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile], {
@@ -229,7 +227,9 @@ function runPwsh(scriptFile, env) {
   ok(main.includes("require('./mcp-selfcheck')"), 'R6e main.js 引入 mcp-selfcheck 模块', {});
 
   /* ── 隔离断言 ─────────────────────────────────────────────────── */
-  ok(sha(realInstallResult) === beforeReal, 'I1 真实 data/install-result.json 零写入（前后 sha 相同）', { before: beforeReal, after: sha(realInstallResult) });
+  // I1：不读真实 data/团队（PM 2026-11-19 发布前口径）——改为断言安装器只写沙盘目录。
+  const resultPath = ((/RESULT_FILE=([^\r\n]*)/.exec(ps.stdout.replace(/\r/g, '')) || [])[1] || '').trim();
+  ok(Boolean(resultPath) && resultPath.startsWith(sandbox), 'I1 安装结果只写沙盘目录（不碰真实 data/）', { resultPath, sandbox });
 
   fs.rmSync(sandbox, { recursive: true, force: true, maxRetries: 2, retryDelay: 200 });
   const pass = results.filter((r) => r.ok).length;

@@ -19,13 +19,13 @@ const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.e
 const PORT = 9986;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sha = (f) => { try { return crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex'); } catch { return ''; } };
-const realTeam = path.join(ROOT, '团队', '状态', '团队.json');
-const realWb = path.join(ROOT, 'data', 'userdata', 'workbench.json');
-const before = { team: sha(realTeam), wb: sha(realWb) };
 
 const SB = path.join(ROOT, '_tmp', `e379-runtime-${process.pid}-${Date.now().toString(36)}`);
 const DATA = path.join(SB, 'data');
 const TEAM = path.join(SB, '团队');
+// PM 2026-11-19 发布前口径：脚本不读取真实 团队/ 与 data/；隔离证明只看沙盘自身（前后 sha 不变）。
+const sandboxTeamFile = path.join(TEAM, '状态', '团队.json');
+let sandboxTeamBefore = '';
 const results = [];
 const ok = (c, name, d) => { results.push({ name, ok: !!c, detail: c ? undefined : d }); console.log(`${c ? 'PASS' : 'FAIL'}  ${name}${c ? '' : ' :: ' + JSON.stringify(d)}`); if (!c) process.exitCode = 1; };
 
@@ -57,9 +57,12 @@ async function main() {
       log: seededLog
     }]
   }, null, 2) + '\n', 'utf8');
-  copyDir(path.join(ROOT, '团队'), TEAM, (p) => /[\\/]邮箱([\\/]|$)/.test(p) || /[\\/]锁([\\/]|$)/.test(p));
-  fs.copyFileSync(realWb, path.join(DATA, 'userdata', 'workbench.json'));
-  const env = { ...process.env, AWB_DATA_DIR: DATA, AWB_STORE: path.join(DATA, 'userdata', 'workbench.json'), TEAM_ROOT: TEAM, AWB_TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'), TEAM_SELFTEST: '1', AWB_BOARD_PREGEN_MS: '0' };
+  // 不复制真实 团队/（PM 2026-11-19 发布前口径）：沙盘团队目录留空，壳按降级路径处理。
+  fs.mkdirSync(TEAM, { recursive: true });
+  sandboxTeamBefore = sha(sandboxTeamFile);
+  // 沙盘不复制真实 workbench：写最小 store，壳会在此基础上补齐（隔离口径）。
+  fs.writeFileSync(path.join(DATA, 'userdata', 'workbench.json'), JSON.stringify({ version: 1, activeProjectId: '', projects: [], ui: {} }, null, 2) + '\n', 'utf8');
+  const env = { ...process.env, AWB_DATA_DIR: DATA, AWB_STORE: path.join(DATA, 'userdata', 'workbench.json'), TEAM_ROOT: TEAM, AWB_TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'), TEAM_WORKBENCH_JSON: path.join(DATA, 'userdata', 'workbench.json'), TEAM_SELFTEST: '1', AWB_BOARD_PREGEN_MS: '0' };
   delete env.ELECTRON_RUN_AS_NODE;
   const child = spawn(ELECTRON, ['.', `--remote-debugging-port=${PORT}`], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
   const pid = child.pid;
@@ -127,7 +130,7 @@ async function main() {
     ok(clicked === 'clicked' && ui && ui.hasRow && ui.visible, '⑮ 设置页（更多 → 关于 PM工作台）可见 [data-mcp-warning] 且 rect>0（AC6③）', { clicked, ui });
     ok(ui && /正常|失败/.test(String(ui.mcpStatus || '')), '⑯ 关于面板显示 MCP 自检状态行（data-mcp-status）', { mcpStatus: ui && ui.mcpStatus });
   } finally {
-    fs.writeFileSync(path.join(EV, 'run-runtime.json'), JSON.stringify({ at: new Date().toISOString(), sandbox: path.relative(ROOT, SB), results, pass: results.every((r) => r.ok), isolation: { realTeamSame: sha(realTeam) === before.team, realWbSame: sha(realWb) === before.wb }, logTail: log.slice(-1200) }, null, 2) + '\n', 'utf8');
+    fs.writeFileSync(path.join(EV, 'run-runtime.json'), JSON.stringify({ at: new Date().toISOString(), sandbox: path.relative(ROOT, SB), results, pass: results.every((r) => r.ok), isolation: { sandboxTeamSame: Boolean(sandboxTeamBefore) && sha(sandboxTeamFile) === sandboxTeamBefore }, logTail: log.slice(-1200) }, null, 2) + '\n', 'utf8');
     console.log(`\nE379_RUNTIME ${results.filter((r) => r.ok).length}/${results.length} PASS`);
     try { if (cdp) cdp.close(); } catch { /* ignore */ }
     try { if (pid) spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* ignore */ }
