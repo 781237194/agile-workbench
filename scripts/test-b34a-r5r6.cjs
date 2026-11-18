@@ -156,6 +156,17 @@ function fakeDoc() {
   check('R5-⑪ 批2：流程列表沿用既有渲染签名短路（不整块重建）+ 骨架', /flowRenderUi\.sig/.test(app2) && /skeleton\(board/.test(app2), {});
   check('R5-⑫ 骨架样式已入 style.css（.awb-skeleton 且 reduced-motion 关动画）',
     /\.awb-skeleton-row/.test(read(path.join('src', 'renderer', 'style.css'))) && /prefers-reduced-motion/.test(read(path.join('src', 'renderer', 'style.css'))), {});
+  // R6 二轮（T-20261118-195240-d7a5）：连续点击减负 + 长任务可观测 + 分片工具
+  check('R6-⑤ gate.js 二轮 API 就绪（clickGate/chunked/observeLongTasks）',
+    ['clickGate', 'chunked', 'observeLongTasks'].every((k) => typeof gate[k] === 'function'), {});
+  check('R6-⑥ 点击抖动门语义：同 key 窗口内第二次返回 false、窗口外恢复 true',
+    (() => { const a = gate.clickGate('k-test', 150); const b = gate.clickGate('k-test', 150); const c = gate.clickGate('k-test', 0); return a === true && b === false && c === true; })(), {});
+  check('R6-⑦ app.js 已装长任务观测与连续点击减负（capture 阶段 clickGate，不拦抽屉开合）',
+    /__b34aLongTasks = R4GateApi\.observeLongTasks\(\)/.test(app2) && /R2_CLICK_LAUNCHERS/.test(app2) && /clickGate\(key, 150\)/.test(app2) && /addEventListener\('click', \(ev\) => \{/.test(app2), {});
+  check('R6-⑧ 抖动门不拦抽屉开合按钮（team-pill/session-pill/btn-pool/btn-session-queue 不在减负清单）',
+    !/#team-pill/.test((app2.match(/const R2_CLICK_LAUNCHERS = '([^']*)'/) || [])[1] || '') && !/#btn-pool/.test((app2.match(/const R2_CLICK_LAUNCHERS = '([^']*)'/) || [])[1] || ''), {});
+  check('R6-⑨ chunked 分片让出主线程（budget 内同步、超出后 await 让出）',
+    (() => { const order = []; return gate.chunked([() => order.push(1), () => order.push(2), () => order.push(3)], { budgetMs: 0 }).then((r) => r.ran === 3 && order.join(',') === '1,2,3'); })(), {});
   const sqIntervals = (panel.match(/setInterval\(/g) || []).length;
   check('R5-⑦ c9ac 契约保持：session-queue-panel setInterval 恒 = 2', sqIntervals === 2, { sqIntervals });
 
