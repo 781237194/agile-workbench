@@ -17,6 +17,8 @@ const RenderMemDir = require('./render-mem-dir.js');
 const StoreAudit = require('./store-audit.js');
 // B-20261117-074103-75e9：「文件夹」重复点击去重/节流（纯逻辑，Node 可测；壳层只注入 shell.openPath）
 const FolderOpen = require('./folder-open.js');
+// 97db 返工补口（T-20261119-025312-f3aaba）：AWB_DSH_BASE_URL / AWB_WORKSPACE_MOCK 测试钩子纯逻辑单源。
+const workspaceMock = require('./workspace-mock.js');
 // R-20261118-170937-b34a（T-e2d8 R2）：读盘缓存 + 慢操作日志（性能-YYYYMMDD.jsonl）+ IPC 计时包装的 CJS 单源。
 const perfCache = require('./perf-cache.js');
 // B-20261118-191527-c437（P1 稳定性）：崩溃后「复活主窗 / 恢复 webview / 不误退」的纯判定逻辑（Node 可测）。
@@ -469,7 +471,7 @@ const SAVED_DSH_URL = (() => {
  * 只有它能让「多候选」不报 ambiguous；自动发现写进 dsh.json 的地址（source=auto）只是提示，不算显式配置。
  */
 const DSH_EXPLICIT = (() => {
-  const envUrl = String(process.env.DSH_WEB_URL || '').trim();
+  const envUrl = String(process.env.AWB_DSH_BASE_URL || process.env.DSH_WEB_URL || '').trim();
   if (envUrl) return { baseUrl: envUrl, source: '环境变量 DSH_WEB_URL' };
   const envPort = String(process.env.DSH_WEB_PORT || process.env.DSH_PORT || '').trim();
   if (/^\d{2,5}$/.test(envPort)) return { baseUrl: 'http://127.0.0.1:' + envPort, source: '环境变量 DSH_WEB_PORT/DSH_PORT' };
@@ -1167,6 +1169,12 @@ function persistSessionMapping(projectId, sessions, extra = {}) {
  * 错误码原样保留（DSH_OFFLINE / DSH_TIMEOUT / DSH_NOT_CONFIGURED / DSH_AUTH_MISSING ...）。
  */
 async function bindProjectWorkspace(project, options = {}) {
+  // 97db 返工补口（T-20261119-025312-f3aaba）：tester 恢复/工作区钩子（仅显式设置 env 时生效；不设则行为不变）。
+  try {
+    const mockInfo = workspaceMock.workspaceMockOf(process.env);
+    const mocked = workspaceMock.mockWorkspaceResult({ mode: mockInfo.workspaceMock, project, current: workspaceOf(project) });
+    if (mocked) return mocked;
+  } catch { /* 钩子异常不影响真实路径 */ }
   const engineUrl = String(options.engineUrl || dsh.baseUrl || '').trim();
   const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 6000;
   const projectPath = path.resolve(String(project.path || ''));
@@ -2158,7 +2166,7 @@ let teamBoardProjectPath = null;
 let teamBoardTheme = 'dark';
 let teamBoardExpandedBounds = null;
 // 优先级：显式环境变量（测试/运维）→ 上次保存的地址 → 旧默认 52711。
-let dsh = new DshAdapter(process.env.DSH_WEB_URL || SAVED_DSH_URL || 'http://127.0.0.1:52711');
+let dsh = new DshAdapter(process.env.AWB_DSH_BASE_URL || process.env.DSH_WEB_URL || SAVED_DSH_URL || 'http://127.0.0.1:52711');
 // DSH 端口自动发现：只在检测到离线且当前地址是本机时触发；15 秒冷却避免轮询时反复探测。
 const DSH_DISCOVERY_COOLDOWN_MS = 15000;
 const DSH_DISCOVERY_CHECK_TIMEOUT_MS = 4000;
@@ -7538,6 +7546,24 @@ ipcMain.handle('theme:metrics', async () => {
       if (!options.dryRun && picked.persisted) {
         const binding = await bindProjectWorkspace(project, { engineUrl: options.engineUrl });
         if (!binding.ok) warnings.push({ code: binding.code, message: binding.message });
+        // 97db 返工补口（T-20261119-025312-f3aaba）：AWB_WORKSPACE_MOCK=fail 时按 AC5 返回 missing=['workspace']，
+        // 不进入会话段（半恢复零写入），并写恢复审计行供 tester 复验。
+        if (binding && binding.ok === false && binding.mock === true) {
+          const failAudit = projectRosterCleanup.buildRestoreAudit({ record: true, workspace: false, sessions: false, ui: true });
+          try {
+            fs.appendFileSync(path.join(projectDir, '恢复审计.jsonl'), JSON.stringify({
+              at: new Date().toISOString(), action: 'project_restore', project: hit.name,
+              stages: failAudit.stages, ok: failAudit.ok, missing: failAudit.missing, mock: true
+            }) + '\n', 'utf8');
+          } catch { /* 审计失败不阻断返回 */ }
+          return {
+            ok: false, code: binding.code || 'WORKSPACE_CREATE_FAILED',
+            why: binding.message || '工作区创建失败（AWB_WORKSPACE_MOCK=fail）',
+            projectDir, project: hit.name, name: hit.name,
+            restore: true, restoreAudit: failAudit, warnings, mock: true,
+            state: statePayload()
+          };
+        }
         if (binding.ok) {
           try {
             const inspected = await inspectProjectSessions(requireProject(readStore(), project.id), binding);
@@ -7581,6 +7607,32 @@ ipcMain.handle('theme:metrics', async () => {
     if (/[\\/]/.test(input) || input === '.' || input === '..') {
       return { ok: false, code: 'BAD_NAME', why: '只输项目名，不要带路径', state: statePayload() };
     }
+    // 97db 返工补口（T-20261119-025312-f3aaba）：AWB_WORKSPACE_MOCK=fail 快速注入——不碰旧团队工具/DSH，
+    // 直接按 AC5 返回 missing=['workspace'] 并写恢复审计（供 tester 验顶部横幅与半恢复零写入）。
+    try {
+      const restoreMockMode = workspaceMock.workspaceMockOf(process.env).workspaceMock;
+      if (restoreMockMode === 'fail') {
+        const failAudit = projectRosterCleanup.buildRestoreAudit({ record: true, workspace: false, sessions: false, ui: true });
+        let mockProjectDir = '';
+        try { const hit = findProjectByName(input); mockProjectDir = hit && hit.path ? path.resolve(String(hit.path)) : ''; } catch { mockProjectDir = ''; }
+        if (mockProjectDir) {
+          try {
+            fs.appendFileSync(path.join(mockProjectDir, '恢复审计.jsonl'), JSON.stringify({
+              at: new Date().toISOString(), action: 'project_restore', project: input,
+              stages: failAudit.stages, ok: failAudit.ok, missing: failAudit.missing, mock: true
+            }) + '\n', 'utf8');
+          } catch { /* 审计失败不阻断返回 */ }
+        }
+        return {
+          ok: false, code: 'WORKSPACE_CREATE_FAILED',
+          why: '工作区创建失败（AWB_WORKSPACE_MOCK=fail 注入）',
+          projectDir: mockProjectDir, project: input, name: input, restore: true,
+          restoreAudit: failAudit, mock: true,
+          warnings: [{ code: 'WORKSPACE_CREATE_FAILED', message: 'AWB_WORKSPACE_MOCK=fail' }],
+          state: statePayload()
+        };
+      }
+    } catch { /* 钩子异常继续走真实路径 */ }
     try {
       const hit = findProjectByName(input);
       if (!hit || !hit.path || !fs.existsSync(hit.path)) {
