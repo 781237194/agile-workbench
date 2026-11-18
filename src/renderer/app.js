@@ -1260,7 +1260,7 @@ function bindFxRealState() {
 }
 
 // e610：在线升级菜单（版本展示 / 检查 / 一步升级 / 重启提示），不新增标题栏图标。
-const UPGRADE_UI = { checking: false, starting: false, info: null, version: null };
+const UPGRADE_UI = { checking: false, starting: false, info: null, version: null, auto: { enabled: false, intervalMs: 0, timer: 0 } };
 function upgradeEl(sel) { return document.querySelector('#more-menu ' + sel); }
 function paintUpgrade() {
   const line = upgradeEl('[data-app-version-line]');
@@ -1281,6 +1281,13 @@ function paintUpgrade() {
   const err = upgradeEl('[data-upgrade-error]');
   if (err) err.hidden = !UPGRADE_UI.error;
   if (err && UPGRADE_UI.error) err.textContent = UPGRADE_UI.error;
+  // e610 AC6：有新版只亮小圆点（非侵入提示），不下载、不安装
+  const dot = upgradeEl('[data-upgrade-dot]');
+  if (dot) dot.hidden = !(info && info.state === 'available');
+  const autoBox = upgradeEl('[data-upgrade-auto]');
+  if (autoBox) autoBox.checked = UPGRADE_UI.auto.enabled === true;
+  const autoLine = upgradeEl('[data-upgrade-auto-line]');
+  if (autoLine) autoLine.hidden = false;
 }
 async function loadAppVersion() {
   try { if (window.workbench && typeof window.workbench.appVersion === 'function') UPGRADE_UI.version = await window.workbench.appVersion(); } catch { UPGRADE_UI.version = null; }
@@ -1296,6 +1303,44 @@ async function checkUpgrade() {
     UPGRADE_UI.info = res || { state: 'unavailable', message: '无法检查更新' };
   } catch (e) { UPGRADE_UI.info = { state: 'unavailable', message: '无法检查更新：' + String((e && e.message) || e) }; }
   finally { UPGRADE_UI.checking = false; paintUpgrade(); }
+}
+// ── e610 AC6：自动检查（只检查/只提示；绝不自动下载或安装）──────────────────────
+async function loadUpgradeAutoPref() {
+  try {
+    if (window.workbench && typeof window.workbench.upgradeAutoGet === 'function') {
+      const res = await window.workbench.upgradeAutoGet();
+      UPGRADE_UI.auto.enabled = Boolean(res && res.enabled === true);
+      const interval = Number(res && res.intervalMs);
+      UPGRADE_UI.auto.intervalMs = Number.isFinite(interval) && interval > 0 ? interval : 30 * 60 * 1000;
+    }
+  } catch { /* 读取失败按关闭处理 */ }
+  scheduleUpgradeAuto();
+  paintUpgrade();
+}
+function scheduleUpgradeAuto() {
+  if (UPGRADE_UI.auto.timer) { try { clearInterval(UPGRADE_UI.auto.timer); } catch { /* ignore */ } UPGRADE_UI.auto.timer = 0; }
+  if (!UPGRADE_UI.auto.enabled) return;
+  const ms = Math.max(1000, Number(UPGRADE_UI.auto.intervalMs) || 30 * 60 * 1000);
+  UPGRADE_UI.auto.timer = setInterval(() => { void autoCheckUpgrade(); }, ms);
+}
+async function autoCheckUpgrade() {
+  // 只做「检查」，发现新版只亮小圆点；这里永远不调用 startUpgrade（AC6）。
+  if (UPGRADE_UI.checking || UPGRADE_UI.starting) return;
+  await checkUpgrade();
+}
+async function setUpgradeAuto(enabled) {
+  const want = enabled === true;
+  UPGRADE_UI.auto.enabled = want;
+  try {
+    if (window.workbench && typeof window.workbench.upgradeAutoSet === 'function') {
+      const res = await window.workbench.upgradeAutoSet(want);
+      UPGRADE_UI.auto.enabled = Boolean(res && res.enabled === true);
+      const interval = Number(res && res.intervalMs);
+      if (Number.isFinite(interval) && interval > 0) UPGRADE_UI.auto.intervalMs = interval;
+    }
+  } catch { UPGRADE_UI.auto.enabled = want; }
+  scheduleUpgradeAuto();
+  paintUpgrade();
 }
 async function startUpgrade() {
   const info = UPGRADE_UI.info;
@@ -1329,7 +1374,14 @@ function bindUpgradeMenu() {
     if (t.matches('[data-upgrade-check]')) { checkUpgrade(); return; }
     if (t.matches('[data-upgrade-apply]')) { startUpgrade(); return; }
   });
+  // e610 AC6：自动检查开关（写 ui.autoUpgradeCheck；只影响检查频率，不触发安装）
+  document.addEventListener('change', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element) || !target.matches('[data-upgrade-auto]')) return;
+    void setUpgradeAuto(Boolean(target.checked));
+  });
   loadAppVersion();
+  void loadUpgradeAutoPref();
 }
 try { if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindUpgradeMenu); else bindUpgradeMenu(); } catch { /* ignore */ }
 

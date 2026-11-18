@@ -32,6 +32,9 @@ if (IS_BOARD_WINDOW) {
   appVersion: () => ipcRenderer.invoke('app:version'),
   upgradeCheck: (payload) => ipcRenderer.invoke('app:upgrade-check', payload),
   upgradeStart: (payload) => ipcRenderer.invoke('app:upgrade-start', payload),
+  // e610 AC6：自动检查开关（只检查/只提示，不自动安装）
+  upgradeAutoGet: () => ipcRenderer.invoke('app:upgrade-auto-get'),
+  upgradeAutoSet: (enabled) => ipcRenderer.invoke('app:upgrade-auto-set', enabled),
     filesList: (projectId) => ipcRenderer.invoke('files:list', projectId),
     // 只读文件预览：文本/Markdown/图片，主进程做路径越界与大小上限校验。
     filesRead: (payload) => ipcRenderer.invoke('files:read', payload),

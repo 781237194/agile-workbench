@@ -169,7 +169,7 @@
     <button type="button" role="menuitem" data-more="open-project"><span class="mm-ico" aria-hidden="true">▱</span><span class="mm-text">打开已有项目文件夹（登记）</span></button>
     <button type="button" role="menuitem" data-more="team-board"><span class="mm-ico" aria-hidden="true">▦</span><span class="mm-text">团队看板（内嵌浮窗 / 切项目）</span></button>
     <!-- e610：在线升级（更多菜单内，不新增标题栏图标） -->
-    <button type="button" role="menuitem" data-more="upgrade"><span class="mm-ico" aria-hidden="true">⇪</span><span class="mm-text" data-app-version>检查更新</span></button>
+    <button type="button" role="menuitem" data-more="upgrade"><span class="mm-ico" aria-hidden="true">⇪</span><span class="mm-text" data-app-version>检查更新</span><span class="mm-dot" data-upgrade-dot hidden aria-label="有新版本" title="有新版本"></span></button>
     <div class="mm-sub" data-upgrade-menu role="menu" aria-label="在线升级" hidden>
       <div class="mm-hint"><span data-app-version-line>版本 —</span></div>
       <div class="mm-hint" data-upgrade-state hidden></div>
@@ -179,6 +179,8 @@
       <label class="mm-hint" data-upgrade-force hidden>强制原因 <input type="text" data-upgrade-reason maxlength="120" placeholder="有角色在跑任务时必须填写原因"></label>
       <button type="button" role="menuitem" data-upgrade-check>检查更新</button>
       <button type="button" role="menuitem" data-upgrade-apply hidden>立即升级</button>
+      <!-- e610 AC6：自动检查只更新提示（小圆点/文案），绝不自动下载或安装 -->
+      <label class="mm-hint" data-upgrade-auto-line><input type="checkbox" data-upgrade-auto> 自动检查更新（只提示，不自动安装）</label>
     </div>
     <button type="button" role="menuitem" data-more="team-board-window"><span class="mm-ico" aria-hidden="true">▱</span><span class="mm-text">独立看板窗口（旧版 BrowserWindow）</span></button>
     <button type="button" role="menuitem" data-more="sync"><span class="mm-ico" aria-hidden="true">⇄</span><span class="mm-text">同步团队登记 / 绑定工作区</span></button>

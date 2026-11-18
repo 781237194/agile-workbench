@@ -123,7 +123,8 @@ class WS {
     AWB_BOARD_PREGEN_MS: '0',
     AWB_INSTALLER_PS1: path.join(INSTALL, 'install.ps1'),
     AWB_UPGRADE_INSTALL_DIR: INSTALL,
-    AWB_UPGRADE_FORCE_REAL: '1'
+    AWB_UPGRADE_FORCE_REAL: '1',
+    AWB_UPGRADE_AUTO_INTERVAL_MS: '1500'
   };
   delete env.ELECTRON_RUN_AS_NODE;
   const child = spawn(ELECTRON, ['.', `--remote-debugging-port=${PORT}`], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -195,6 +196,23 @@ class WS {
       return { b, a: ra };
     })()`);
     ok(Boolean(busy) && busy.b && busy.b.code === 'UPGRADE_BUSY', 'E7 升级中第二次调用 → UPGRADE_BUSY', { busy });
+    // E8 AC6：自动检查开关持久化 + 只提示（小圆点）、绝不自动安装
+    const auto0 = await evalJs('window.workbench.upgradeAutoGet()');
+    ok(auto0 && auto0.ok === true && auto0.enabled === false, 'E8a 默认关闭自动检查', { auto0 });
+    // 必须走界面勾选（渲染层 setUpgradeAuto 才会排定时器）；直接调 IPC 只写配置不排定时器。
+    const autoOn = await evalJs('(async () => { const box = document.querySelector("#more-menu [data-upgrade-auto]"); if (!box) return { noBox: true }; box.checked = true; box.dispatchEvent(new Event("change", { bubbles: true })); await new Promise((r) => setTimeout(r, 700)); const saved = await window.workbench.upgradeAutoGet(); return { saved }; })()');
+    ok(autoOn && autoOn.saved && autoOn.saved.enabled === true && Number(autoOn.saved.intervalMs) > 0, 'E8b 界面勾选自动检查 → 写 ui.autoUpgradeCheck 并返回间隔', { autoOn });
+    ok(readJson(path.join(DATA, 'userdata', 'workbench.json'), {}).ui && readJson(path.join(DATA, 'userdata', 'workbench.json'), {}).ui.autoUpgradeCheck === true, 'E8b2 开关已持久化到 workbench.json 的 ui.autoUpgradeCheck（重启可恢复）', { ui: readJson(path.join(DATA, 'userdata', 'workbench.json'), {}).ui });
+    const rowsBeforeAuto = readUpgradeRows(DATA).length;
+    const verBeforeAuto = readJson(path.join(INSTALL, 'package.json'), {}).version;
+    const feedUrl = base.url + '/feed-ok';
+    const autoState = await evalJs('(async () => {' + 'window.__awbUpgradeFeedSource = ' + JSON.stringify(feedUrl) + ';' + 'await new Promise((r) => setTimeout(r, 4200));' + 'const line = document.querySelector("#more-menu [data-more=\\"upgrade\\"] .mm-text");' + 'const dot = document.querySelector("#more-menu [data-upgrade-dot]");' + 'return { label: line ? String(line.textContent || "") : "", dotHidden: dot ? dot.hidden : null };' + '})()');
+    ok(/可升级/.test(String((autoState && autoState.label) || '')) && autoState && autoState.dotHidden === false, 'E8c 自动检查发现新版 → 只亮小圆点/文案（不下载）', { autoState });
+    ok(readUpgradeRows(DATA).length === rowsBeforeAuto && readJson(path.join(INSTALL, 'package.json'), {}).version === verBeforeAuto, 'E8d AC6：静置期无新升级记录、版本不变（未自动安装）', { added: readUpgradeRows(DATA).length - rowsBeforeAuto, version: readJson(path.join(INSTALL, 'package.json'), {}).version });
+
+    // E9 AC5②：MCP 可用（等价 list_mcp_resources 通）
+    const diag = await evalJs('window.workbench.diagnostics()');
+    ok(Boolean(diag && diag.mcp && diag.mcp.record && diag.mcp.record.ok === true), 'E9 AC5② 升级后 MCP 自检通过（list_mcp_resources 等价可用）', { mcp: diag && diag.mcp && diag.mcp.record });
   } finally {
     try { fs.writeFileSync(path.join(process.env.AWB_E610_INT_OUT || path.join(os.tmpdir(), 'e610-int.json')), JSON.stringify({ at: new Date().toISOString(), sandbox: SB, results: RESULTS, logTail: log.slice(-1500) }, null, 2) + '\n', 'utf8'); } catch { /* ignore */ }
     console.log('\nE610_INTEGRATION ' + RESULTS.filter((r) => r.ok).length + '/' + RESULTS.length + (RESULTS.every((r) => r.ok) ? ' PASS' : ' FAIL'));

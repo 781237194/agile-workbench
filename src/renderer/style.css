@@ -451,6 +451,9 @@ button:focus-visible, [tabindex]:focus-visible {
 .mm-ico { width: 14px; flex: 0 0 14px; color: var(--gold); font-size: 10px; text-align: center; opacity: .9; }
 .mm-ico-pm { font-size: 8px; font-weight: 800; letter-spacing: -.03em; }
 .mm-text { flex: 1; min-width: 0; }
+/* e610 AC6：自动检查发现新版本时的非侵入小圆点（只提示，不下载） */
+.mm-dot { flex: 0 0 auto; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--gold-2, #ffcc66); box-shadow: 0 0 0 2px rgba(255, 204, 102, 0.18); }
+.mm-dot[hidden] { display: none; }
 .more-label { padding: 5px 9px 3px; color: var(--dim); font-size: 8px; font-weight: 700; letter-spacing: 1.4px; }
 .more-sep { height: 1px; margin: 4px 6px; background: var(--line); }
 /* 2a69 发版：菜单里的版本行（只读，不抢菜单项焦点） */
