@@ -227,14 +227,18 @@ function nextMorning(hour, minute) { const d = new Date(); d.setDate(d.getDate()
       autoRotateRows: [
         { at: new Date(now - 3 * HOUR).toISOString(), stage: 'enqueue', code: 'NIGHT_QUEUED', role: 'analyst', evidence: { level: 'force' } },
         { at: new Date(now - 2 * HOUR).toISOString(), stage: 'trigger', code: 'HANDOVER_REQUESTED', role: 'product' },
-        { at: new Date(now - 90 * 60 * 1000).toISOString(), stage: 'skipped', code: 'HANDOVER_TIMEOUT', role: 'product', note: '超时' },
-        { at: new Date(now - 60 * 60 * 1000).toISOString(), stage: 'rotate', result: 'ok', role: 'analyst', note: '已换人：a → b' },
+        { at: new Date(now - 60 * 1000).toISOString(), stage: 'skipped', code: 'HANDOVER_TIMEOUT', role: 'product', note: '超时' },
+        // B-3594/B-318 后口径：面板「时效」阈值可配（AR_STALE_MS 现行 15 分钟、历史 90 分钟），
+        // 夹具不能再把 rotate 行放在 60 分钟前（否则阈值一变就从 rotating 变 idle）——固定放「1 分钟前」。
+        { at: new Date(now - 60 * 1000).toISOString(), stage: 'rotate', result: 'ok', role: 'analyst', note: '已换人：a → b' },
+        // ⑥b 需要「今日失败 1 次」可复算：显式放一条真失败行（不与设计内 HANDOVER_TIMEOUT 混）
+        { at: new Date(now - 30 * 1000).toISOString(), stage: 'failed', result: 'fail', role: 'tester', code: 'ROTATE_FAILED', note: '夹具失败行' },
       ],
     });
     const arOf = (role) => (model.rows.find((r) => r.role === role) || {}).autoRotate || {};
-    check('⑥ 面板字段：analyst=rotating + 审计尾、product=failed/HANDOVER_TIMEOUT、pm=idle 不伪造',
+    check('⑥ 面板字段：analyst=rotating + 审计尾、product=warn（设计内超时不判红）、pm=idle 不伪造',
       arOf('analyst').state === 'rotating' && /已换人/.test(arOf('analyst').reason) && /rotate/.test(arOf('analyst').auditTail)
-      && arOf('product').state === 'failed' && arOf('product').error === 'HANDOVER_TIMEOUT'
+      && arOf('product').state === 'warn' && /超时/.test(arOf('product').reason) && String(arOf('product').error || '') === ''
       && arOf('pm').state === 'idle' && arOf('pm').auditTail === '', { analyst: arOf('analyst'), product: arOf('product'), pm: arOf('pm') });
     check('⑥b [data-ar-summary] 文案：今日自动换人 N 次 / 失败 M 次', /今日自动换人\s*1\s*次\s*\/\s*失败\s*1\s*次/.test(String(model.autoRotate.summary)), model.autoRotate);
   }
