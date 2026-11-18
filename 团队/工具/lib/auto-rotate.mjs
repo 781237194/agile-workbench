@@ -4,14 +4,17 @@
  * 需求：R-20261117-180740-fa0e-角色上下文到顶自动换人.md（v3 / RR-34ba）
  * 契约：项目/工作台改造修复/项目经理/产出/fa0e-接线契约-20261117.md（A 案，本文件即入口）
  *
- * 五步流水线：触发（阈值）→ 只发 1 条交接请求 → 等回执 → rotate + 新会话 boot + 广播其余角色重 boot → 审计。
- * 硬规则（Owner 2026-11-17 定）：
- *   · 夜间 22:00–08:00 **一律不换人（含 force）**，只入队记账：stage=skipped / code=NIGHT_SILENT / deferredUntil=次日 08:00；
- *     同一夜同一角色只 1 行（幂等，按「夜键」= 以 08:00 为界的前一日）；
- *   · 次日 08:00–08:30 执行窗口：**force 档优先**，其余按轮次降序 → 触发时间早者，直接 rotate（夜间已入队，不再等回执）；
- *   · 阈值命中只发 1 条交接请求（同角色 60 秒内不重复发）；
- *   · 交接回执 15 分钟未到 → **不换人，只升级 PM**（skipped/HANDOVER_TIMEOUT）；
- *   · 全程 append-only 审计写 `团队/状态/项目/<项目>/自动换人.jsonl`。
+ * B-20261118-143542-3594（Owner 2026-11-18 14:35 指令）：**只提醒、不换人**。
+ * 到阈值后只发提醒（该角色 1 条 + PM 1 条），**绝不自己调 rotateSession**；
+ * 交接文件更新 / 回执检测 / 夜间入队都只产生「请 PM 手动换人」的提醒，不触发换人。
+ * 换人唯一执行入口 = PM 手动 `team.mjs session rotate --role … --project …`（PM 确认收到交接回执 + 八节齐才执行）。
+ * 配置 autoRotate.enabled 语义 = **是否发提醒**（false 时连提醒都不发，零动作零审计）。
+ *
+ * 历史（已废止，仅存档）：原五步流水线「触发 → 交接请求 → 等回执 → rotate + 广播重 boot」——2026-11-18 14:10 因在无回执时
+ * 自动换掉 PM 被 Owner 叫停。rotateSession() 保留在文件内（R-28b8 归档逻辑在那里，不改），但**调度层不再调用**。
+ * 硬规则（保留）：夜间 22:00–08:00 不换人也只提醒（入队记账 NIGHT_SILENT 语义保留）；交接 15 分钟未回执 → 只升级 PM。
+ * 全程 append-only 审计写 `团队/状态/项目/<项目>/自动换人.jsonl`（CYCLE / WARN_ONLY / REMIND 行保留，
+ * rotate / broadcast_reboot 自动行不再产生）。
  *
  * 时间可注入：`AWB_NOW`（带时区偏移，如 `2026-11-17T08:05:00+08:00`；非法值回落系统时间）——
  * 与 团队/工具/lib/lessons.mjs 的 AWB_NOW 先例同口径，自检/复验不需要改系统时钟。
@@ -472,7 +475,7 @@ export function handoverRequestBody({ role, level, kind, tokens, rounds, deadlin
     `二、目标文件：${ROLE_DIRS[role] || role}/产出/交接-最新.md（整份覆盖写，写最新的在办状态）`,
     '三、需写内容：在办任务 id 与当前进度、下一步动作、未决问题与卡点、关键文件路径、本会话约定与临时口径',
     `四、死线：${deadlineIso} 前完成（逾期不换人，只升级 PM 催办）`,
-    '五、回执要求：交接文件写完后回执 PM 一条，主题含「交接完成」，正文写「交接已完成 + 文件路径」（系统据此校验并执行换人）',
+    '五、回执要求：交接文件写完后回执 PM 一条，主题含「交接完成」，正文写「交接已完成 + 文件路径」（PM 确认收到后**手动**执行换人；系统只做提醒，不会自动换人）',
     '六、模板：\n# 交接-最新（<角色> · <时间>）\n## 在办\n## 下一步\n## 卡点\n## 关键文件\n## 口径与约定',
   ].join('\n');
 }
@@ -482,7 +485,8 @@ export const DEFAULT_INTERVAL_MS = 300000;   // 5 分钟
 
 /**
  * 团队配置 autoRotate={enabled,intervalMs,rotateRounds}；缺省 enabled=true / 300000 / 8。
- * 0 或 false = 关。PM 2026-11-17 21:36 最终口径：rotateRounds 默认 8、**上限 10**；
+ * **B-20261118-143542-3594：enabled 语义 = 是否发「换人提醒」**（不再代表「是否自动换人」；本模块已不换人）。
+ * enabled=false/0 时连提醒都不发（零动作、零审计）。PM 2026-11-17 21:36 最终口径：rotateRounds 默认 8、**上限 10**；
  * 配置 >10 必须 fail fast（AUTO_ROTATE_CONFIG_INVALID）——静默回落会让「永不触发」被当成正常。
  */
 export const ROUNDS_CONFIG_MAX = 10;
@@ -575,9 +579,40 @@ function latestRotationByRole({ projectName, rows }) {
   return out;
 }
 
+/* ── B-3594：只提醒不换人 —— 提醒文案与「手动换人命令」单一来源 ───────────────── */
+
+/** 手动换人命令（唯一执行入口＝PM；回执/提醒里直接给出可复制命令）。 */
+export function manualRotateCommand(projectName, role) {
+  return `node 团队/工具/team.mjs session rotate --role ${role} --project "${projectName}"`;
+}
+
+/** 提醒该角色（1 条，类型 session_rotate_warn；失败不影响审计）。 */
+function remindRoleManual(projectName, role, note) {
+  try {
+    sendMessage({
+      from: 'system', to: role, project: projectName, type: 'session_rotate_warn',
+      subject: `换人提醒（只提醒，不自动换人）：${role}`,
+      body: `${note}\n口径（Owner 2026-11-18 14:35）：到阈值 → 提醒 → 你写交接并回执 PM → **PM 手动执行换人**；系统不会自动换人。\n手动命令（PM 执行）：${manualRotateCommand(projectName, role)}`,
+    });
+  } catch { /* 审计已留痕 */ }
+}
+
+/** 提醒 PM（1 条，类型 session_rotate_warn）：给角色清单 + 可复制的手动换人命令。 */
+function remindPmManual(projectName, roles, reason, command) {
+  const list = (Array.isArray(roles) ? roles : [roles]).filter(Boolean);
+  if (!list.length) return;
+  try {
+    sendMessage({
+      from: 'system', to: 'pm', project: projectName, type: 'session_rotate_warn',
+      subject: `换人提醒（只提醒，不自动换人）：${list.join('/')}`,
+      body: `${reason}。\n按 Owner 2026-11-18 14:35 口径：系统只提醒，**换人只能由 PM 手动执行**（先确认该角色交接回执已到、交接八节齐）。\n手动命令：${command}\n换人后按流程广播其余角色重 boot。`,
+    });
+  } catch { /* 审计已留痕 */ }
+}
+
 /**
  * 跑一拍（带配置门禁）——route-daemon 循环里直接调它：
- *   · enabled=false / 0 → 跳过；距上次不足 intervalMs → 跳过（不重入）；
+ *   · enabled=false / 0 → 跳过（**语义＝是否发提醒**，B-3594）；距上次不足 intervalMs → 跳过（不重入）；
  *   · 同一进程内用传入的 state 记上次执行时间（不落盘，重启后重算）。
  * 返回 { ok, skipped?: 'disabled'|'interval', result? }。
  */
@@ -846,14 +881,18 @@ export async function runAutoRotateCycle(projectName, options = {}) {
       return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), actions, dryRun, source, note: '昨夜入队的角色都有在办任务：本轮不换（AC3 红线）' };
     }
     const head = eligible[0];
-    const rotated = await rotateSession({ projectName: name, role: head.role, now, reason: `next-day-queue-${head.level}`, auditFile, dryRun, engineUrl });
-    if (rotated.failed) {
-      actions.push({ stage: 'rotate', role: head.role, code: rotated.code, result: 'fail' });
-      return { ok: false, code: rotated.code, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), rotated: [], actions, dryRun, source, manualCommand: rotated.manualCommand, note: rotated.manualCommand ? `自动建会话失败（${rotated.code}）：本轮不换人，已留手建降级命令` : `自动建会话失败（${rotated.code}）：本轮不换人（未新建会话或已回滚，无需手建）` };
+    // B-3594：**只提醒不换人**——昨夜入队的角色由 PM 手动换；这里只发「角色 + PM」提醒并留痕
+    if (!dryRun) {
+      appendAudit(auditFile, {
+        at: nowIso, stage: 'remind', code: 'REMIND_ONLY_MANUAL_ROTATE', result: 'ok', role: head.role, project: name,
+        note: `昨夜入队角色 ${head.role}（${head.level}）：按 Owner 14:35 口径只提醒、不换人；换人由 PM 手动执行`,
+        evidence: { level: head.level, rounds: head.rounds || null, tokens: head.tokens === undefined ? null : head.tokens, mode: 'next-day', manualCommand: manualRotateCommand(name, head.role) },
+      });
+      remindRoleManual(name, head.role, `昨夜入队（${head.level}）待换人：请按流程更新 <角色目录>/产出/交接-最新.md 后回执 PM；系统不会自动换人。`);
+      remindPmManual(name, [head.role], `昨夜入队（${head.level}）待手动换人`, manualRotateCommand(name, head.role));
     }
-    actions.push({ stage: 'rotate', role: head.role, oldSessionId: rotated.oldId, newSessionId: rotated.newId, mode: 'next-day', createMode: rotated.mode, created: rotated.created });
-    actions.push({ stage: 'broadcast_reboot', role: head.role, roles: rotated.others });
-    return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), rotated: [head.role], invalidated: invalidated.map((x) => x.role), actions, dryRun, source, note: '每拍只换一个：本拍换 ' + head.role };
+    actions.push({ stage: 'remind', code: 'REMIND_ONLY_MANUAL_ROTATE', role: head.role, mode: 'next-day' });
+    return { ok: true, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), rotated: [], invalidated: invalidated.map((x) => x.role), actions, dryRun, source, manualCommand: manualRotateCommand(name, head.role), note: `只提醒不换人：本拍提醒 ${head.role} 与 PM（换人由 PM 手动执行）` };
   }
 
   /* ③ 白天常规流水线 */
@@ -914,15 +953,18 @@ export async function runAutoRotateCycle(projectName, options = {}) {
           actions.push({ stage: 'skipped', code: 'HANDOVER_INCOMPLETE', role: item.role, source: 'file' });
           continue;
         }
-        const rotated = await rotateSession({ projectName: name, role: item.role, now, reason: `handover:${done.source}`, auditFile, dryRun, engineUrl });
-        if (rotated.failed) {
-          actions.push({ stage: 'rotate', role: item.role, code: rotated.code, result: 'fail' });
-          return { ok: false, code: rotated.code, project: name, at: nowIso, mode: 'day', actions, dryRun, source, manualCommand: rotated.manualCommand, note: rotated.manualCommand ? `自动建会话失败（${rotated.code}）：本轮不换人，已留手建降级命令` : `自动建会话失败（${rotated.code}）：本轮不换人（未新建会话或已回滚，无需手建）` };
+        // B-3594：交接回执到了也只提醒 PM 手动换人，**不再自动 rotate**（Owner 14:35 口径）
+        if (!dryRun) {
+          appendAudit(auditFile, {
+            at: nowIso, stage: 'remind', code: 'HANDOVER_READY_REMIND_PM', result: 'ok', role: item.role, project: name,
+            note: `${item.role} 交接回执已到（${done.source}）：按 Owner 14:35 口径只提醒，换人由 PM 手动执行`,
+            evidence: { source: done.source, level: item.level, manualCommand: manualRotateCommand(name, item.role) },
+          });
+          remindRoleManual(name, item.role, `交接回执已到（${done.source}）：请等 PM 手动执行换人；系统不会自动换人。`);
+          remindPmManual(name, [item.role], `交接回执已到（${done.source}）——请手动换人`, manualRotateCommand(name, item.role));
         }
-        actions.push({ stage: 'rotate', role: item.role, oldSessionId: rotated.oldId, newSessionId: rotated.newId, mode: 'handover', createMode: rotated.mode, created: rotated.created });
-        actions.push({ stage: 'broadcast_reboot', role: item.role, roles: rotated.others });
-        continue;
-      }
+        actions.push({ stage: 'remind', code: 'HANDOVER_READY_REMIND_PM', role: item.role, source: done.source });
+        continue;      }
       const waited = now - pending.at;
       if (waited > HANDOVER_TIMEOUT_MS) {
         const row = {
@@ -982,8 +1024,11 @@ export async function runAutoRotateCycle(projectName, options = {}) {
           body: handoverRequestBody({ role: item.role, level: item.level, kind: item.kind, tokens: item.tokens, rounds: item.rounds, deadlineIso: iso(now + HANDOVER_TIMEOUT_MS), projectName: name }),
         });
       } catch { /* 审计已留痕 */ }
+      // B-3594：阈值命中 → 角色 + PM **各一条**提醒（PM 那条给可复制的手动换人命令）
+      remindPmManual(name, [item.role], `阈值命中（${item.kind === 'rounds' ? `轮数 ${item.rounds}/${ROUNDS_MAX}` : `${item.level} ${item.tokens}`}）待交接`, manualRotateCommand(name, item.role));
     }
     actions.push({ stage: 'trigger', role: item.role, level: item.level });
+    actions.push({ stage: 'remind', role: 'pm', code: 'REMIND_PM_MANUAL_ROTATE', forRole: item.role });
   }
 
   return { ok: true, project: name, at: nowIso, mode: 'day', candidates: candidates.map((c) => `${c.role}:${c.level}`), actions, dryRun, source, auditFile };

@@ -179,23 +179,30 @@ function nextMorning(hour, minute) { const d = new Date(); d.setDate(d.getDate()
       { ok: [r1.ok, r2.ok], hasCycle, enqueue: enqueueRows.length, nightRows: nightRows.length, perRole, rotateRows: rotateRows.length, deferred });
   }
 
-  /* ④ 次日严格队列：只换昨夜入队角色，force 优先，每拍只换 1 个 */
+  /* ④ 次日严格队列：B-3594 起**只提醒不换人**——force 角色先被提醒、PM 收到手动换人提醒、0 rotate */
   {
     const night = atNight(23, 55);
     const sb = makeSandbox('c4-nextday-queue', { usage: usage(night), rounds });
     cycle(sb, night);                                   // 夜间入队：analyst(force) + product(rounds)
     const morning = nextMorning(8, 5);
     const r1 = cycle(sb, morning);
-    const afterFirst = sb.rows().filter((x) => x.stage === 'rotate');
+    const rem1 = sb.rows().filter((x) => x.stage === 'remind' && /REMIND_ONLY_MANUAL_ROTATE/.test(String(x.code || '')));
     const r2 = cycle(sb, morning + 5 * 60 * 1000);
-    const afterSecond = sb.rows().filter((x) => x.stage === 'rotate');
+    const rem2 = sb.rows().filter((x) => x.stage === 'remind' && /REMIND_ONLY_MANUAL_ROTATE/.test(String(x.code || '')));
     const r3 = cycle(sb, morning + 10 * 60 * 1000);
-    const afterThird = sb.rows().filter((x) => x.stage === 'rotate');
-    check('④ 次日严格队列：第 1 拍只换 force（analyst）1 个、第 2 拍换 product、第 3 拍不再换',
-      r1.ok === true && afterFirst.length === 1 && afterFirst[0].role === 'analyst'
-      && r2.ok === true && afterSecond.length === 2 && afterSecond[1].role === 'product'
-      && r3.ok === true && afterThird.length === 2,
-      { r1: r1.rotated, first: afterFirst.map((x) => x.role), r2: r2.rotated, second: afterSecond.map((x) => x.role), third: afterThird.map((x) => x.role) });
+    const rotateRows = sb.rows().filter((x) => x.stage === 'rotate');
+    const pmMails = (() => {
+      try {
+        const dir = path.join(sb.team, '状态', '邮箱', 'pm', 'new');
+        return fs.readdirSync(dir).filter((n) => n.endsWith('.json')).map((n) => fs.readFileSync(path.join(dir, n), 'utf8')).join('\n');
+      } catch { return ''; }
+    })();
+    check('④ 次日严格队列（新语义）：第 1 拍提醒 force（analyst）、后续拍继续提醒、PM 有人工换人提醒、全程 0 rotate',
+      r1.ok === true && rem1.length === 1 && rem1[0].role === 'analyst'
+      && r2.ok === true && rem2.length >= 1
+      && r3.ok === true && rotateRows.length === 0
+      && /session rotate|手动换人|换人提醒/.test(pmMails),
+      { r1: r1.rotated, rem1: rem1.map((x) => x.role), r2: r2.rotated, rem2: rem2.map((x) => x.role), r3: r3.rotated, rotateRows: rotateRows.length, pmReminded: /session rotate|手动换人|换人提醒/.test(pmMails) });
   }
 
   /* ⑤ 昨夜无入队 → 次日窗口一个都不换（严格口径） */

@@ -238,14 +238,17 @@ async function case2() {
     sb.handover('analyst', now + 5000);
     const r2 = sb.runCycle(now + 60 * 1000);
     const rows = sb.auditRows();
-    const rotateRows = rows.filter((r) => r.role === 'analyst' && r.stage === 'rotate');
+    // B-3594：交接回执到了也**只提醒不换人**（Owner 14:35）——不得出现 rotate/broadcast_reboot，名册不变
+    const rotateRows = rows.filter((r) => r.stage === 'rotate');
+    const remind = rows.some((r) => String(r.stage) === 'remind' && /HANDOVER_READY_REMIND_PM/.test(String(r.code || '')));
+    const pmRemind = sb.mails('pm').some((m) => /换人提醒|手动换人|session rotate/i.test(`${m.subject || ''} ${m.body || ''}`));
     const newId = sb.sessionOf('analyst');
-    const wb = sb.wbSessions();
-    const broadcast = ROLES.filter((r) => r !== 'analyst').some((r) => sb.mails(r).some((m) => /boot|重 boot|重boot|名册变更/i.test(`${m.subject || ''} ${m.body || ''}`)));
-    const bootDirective = rows.some((r) => /broadcast_reboot|request_handover|handover_received/.test(String(r.stage))) || sb.mails('analyst').some((m) => /boot|启动/i.test(`${m.subject || ''} ${m.body || ''}`));
-    const ok = r1.entryOk && r2.entryOk && rotateRows.length >= 1 && rotateRows.every((r) => String(r.result) !== 'fail') && newId && newId !== oldId && String(wb.analyst || '') === newId && broadcast && bootDirective;
-    return check('② 合式交接回执 → rotate + 新会话 boot 指令 + 其他角色重 boot 广播',
-      ok, { entryOk: [r1.entryOk, r2.entryOk], errors: [r1.error, r2.error].filter(Boolean), oldId, newId, wbAnalyst: wb.analyst, rotateRows: rotateRows.map((r) => `${r.stage}/${r.result}/${r.code || ''}`), broadcast, bootDirective });
+    // 其他角色（不含 analyst 与 pm）不得收到重 boot 广播；pm 只应收到「提醒」——提醒正文本身会提到
+    // 「换人后广播重 boot」，所以 pm 不参与这条「广播」判定（B-3594）。
+    const broadcast = ROLES.filter((r) => r !== 'analyst' && r !== 'pm').some((r) => sb.mails(r).some((m) => /重 boot|重boot|名册变更/i.test(`${m.subject || ''} ${m.body || ''}`)));
+    const ok = r1.entryOk && r2.entryOk && rotateRows.length === 0 && newId === oldId && !broadcast && remind && pmRemind;
+    return check('② 合式交接回执 → 只提醒（remind/HANDOVER_READY_REMIND_PM）+ PM 收到手动换人提醒，不 rotate、名册不变',
+      ok, { entryOk: [r1.entryOk, r2.entryOk], errors: [r1.error, r2.error].filter(Boolean), oldId, newId, rotateRows: rotateRows.length, remind, pmRemind, broadcast });
   } finally { sb.cleanup(); }
 }
 
@@ -320,7 +323,7 @@ async function case6() {
     const queuedRoles = [...new Set(queued.map((r) => String(r.role)))].sort();
     const nightRotates = nightRows.filter((r) => String(r.stage) === 'rotate').length;
 
-    // ② 次日 08:05 连跑 3 拍，逐拍统计 rotate 数（每拍 1 个）
+    // ② 次日 08:05 连跑 3 拍：B-3594 新语义＝只提醒不换人（每拍 remind，0 rotate）
     const sliceFrom = (n) => sb.auditRows().slice(n);
     let mark = sb.auditRows().length;
     const run1 = sb.runCycle(dayMs);
@@ -329,15 +332,19 @@ async function case6() {
     const a2 = sliceFrom(mark); mark = sb.auditRows().length;
     const run3 = sb.runCycle(dayMs + 120 * 1000);
     const a3 = sliceFrom(mark);
-    const rots = (rows) => rows.filter((r) => String(r.stage) === 'rotate' && String(r.result) !== 'fail').map((r) => String(r.role));
+    const rots = (rows) => rows.filter((r) => String(r.stage) === 'rotate').map((r) => String(r.role));
+    const reminds = (rows) => rows.filter((r) => String(r.stage) === 'remind' && /REMIND_ONLY_MANUAL_ROTATE/.test(String(r.code || ''))).map((r) => String(r.role));
     const rot1 = rots(a1); const rot2 = rots(a2); const rot3 = rots(a3);
+    const rem1 = reminds(a1); const rem2 = reminds(a2); const rem3 = reminds(a3);
     const order = [...rot1, ...rot2, ...rot3];
-    const perCycle = rot1.length === 1 && rot2.length === 1 && rot3.length === 0;
-    const orderOk = order.length >= 2 && order[0] === 'analyst' && order[1] === 'product';
+    const noRotate = order.length === 0;
+    const remOk = rem1.length >= 1 && rem1[0] === 'analyst';
+    const pmReminded = sb.mails('pm').some((m) => /换人提醒|手动换人|session rotate/i.test(`${m.subject || ''} ${m.body || ''}`));
+    const rosterSame = ROLES.every((r) => sb.sessionOf(r) === (r === 'analyst' ? 'sess-old-analyst' : sb.sessionOf(r)));
     const runs = [nightRun, run1, run2, run3];
-    return check('⑥ 夜间 23:30 打 1 拍真实入队 → 次日 08:05 连打 3 拍：analyst(force) 先换、product(rounds) 次之、每拍只换 1 个',
-      runs.every((r) => r.entryOk) && nightRotates === 0 && queuedRoles.join(',') === 'analyst,product' && perCycle && orderOk,
-      { entryOk: runs.map((r) => r.entryOk), errors: runs.map((r) => r.error).filter(Boolean), queuedRoles, nightRotates, perCycle, rot1, rot2, rot3, order });
+    return check('⑥ 夜间 23:30 入队 → 次日 08:05 连打 3 拍：只提醒不换人（analyst 先提醒、PM 收到手动换人提醒、0 rotate、名册不变）',
+      runs.every((r) => r.entryOk) && nightRotates === 0 && queuedRoles.join(',') === 'analyst,product' && noRotate && remOk && pmReminded && rosterSame,
+      { entryOk: runs.map((r) => r.entryOk), errors: runs.map((r) => r.error).filter(Boolean), queuedRoles, nightRotates, rem1, rem2, rem3, order, pmReminded, rosterSame });
   } finally { sb.cleanup(); }
 }
 
@@ -389,11 +396,12 @@ async function case9() {
     const oldId = sb.sessionOf('analyst');
     sb.runCycle(now);                       // ① 触发交接请求
     sb.handover('analyst', now);            // ② 交接 + 回执
-    const r2 = sb.runCycle(now + 2 * 60 * 1000);  // ③ rotate
+    const r2 = sb.runCycle(now + 2 * 60 * 1000);  // ③ B-3594：只提醒，不再 rotate
     const newId = sb.sessionOf('analyst');
     const wbSessions = (() => { const wb = readJson(sb.workbenchFile, {}); const p = ((wb.projects || [])[0] || {}); return (p.sessions || {}); })();
-    // ③ 会话轮换记录：需求 AC5③ 写「会话轮换/<角色>.json」；f35b 实现在 会话轮换.jsonl（append-only）。
-    //    两处都认（记录必须含 from/to/at/reason），但把实际落点写进 detail 以便口径核对。
+    // B-3594 新口径：交接回执到后**四落地全部不动**（名册 / workbench.sessions / 会话轮换记录 / 归档），
+    // 换人只由 PM 手动 `session rotate` 执行（手动路径 6/6 在 test-3594-remind-only.cjs 覆盖）。
+    const wbSame = String(wbSessions.analyst || '') === oldId;
     const rotFile = path.join(sb.state, '会话轮换', 'analyst.json');
     const rotJsonl = path.join(sb.state, '会话轮换.jsonl');
     const rot = readJson(rotFile, null);
@@ -404,17 +412,15 @@ async function case9() {
           .filter((r) => String(r.role) === 'analyst').pop() || null;
       } catch { return null; }
     })();
-    const rec = rot || jsonlRow;
-    const recText = JSON.stringify(rec || {});
-    const hasRotRecord = Boolean(rec) && recText.includes(newId) && /from|oldSessionId/i.test(recText) && /at/i.test(recText) && /reason/i.test(recText);
-    const landing = rot ? '会话轮换/analyst.json' : (jsonlRow ? '会话轮换.jsonl' : 'none');
-    // ④ 归档目录存在 或 记录含 archiveDeferred
+    const noRotRecord = !rot && !jsonlRow;
     const archiveDir = path.join(sb.state, '归档');
-    const archiveOk = fs.existsSync(archiveDir) || /archiveDeferred/i.test(recText + JSON.stringify(sb.auditRows()));
-    const pass = r2.entryOk && newId !== oldId && String(wbSessions.analyst || '') === newId && hasRotRecord && archiveOk;
-    return check('⑩ AC5 轮换四测：名册 / workbench.sessions / 会话轮换记录(from,to,at,reason) / 归档或 archiveDeferred',
+    const noArchive = !fs.existsSync(archiveDir);
+    const remind = sb.auditRows().some((r) => String(r.stage) === 'remind' && /HANDOVER_READY_REMIND_PM/.test(String(r.code || '')));
+    const noRotate = !sb.auditRows().some((r) => String(r.stage) === 'rotate');
+    const pass = r2.entryOk && newId === oldId && wbSame && noRotRecord && noArchive && remind && noRotate;
+    return check('⑩ AC5 四落地在「只提醒」下全部不动：名册 / workbench.sessions / 会话轮换记录 / 归档（换人改由 PM 手动）',
       pass,
-      { entryOk: r2.entryOk, oldId, newId, wbAnalyst: String(wbSessions.analyst || ''), landing, hasRotRecord, archiveOk, expectedByReq: '会话轮换/analyst.json', rotSample: rec ? Object.keys(rec).slice(0, 8) : null });
+      { entryOk: r2.entryOk, oldId, newId, wbAnalyst: String(wbSessions.analyst || ''), wbSame, noRotRecord, noArchive, remind, noRotate });
   } finally { sb.cleanup(); }
 }
 
