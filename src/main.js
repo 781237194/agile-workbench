@@ -17,6 +17,8 @@ const RenderMemDir = require('./render-mem-dir.js');
 const StoreAudit = require('./store-audit.js');
 // B-20261117-074103-75e9：「文件夹」重复点击去重/节流（纯逻辑，Node 可测；壳层只注入 shell.openPath）
 const FolderOpen = require('./folder-open.js');
+// R-20261118-170937-b34a（T-e2d8 R2）：读盘缓存 + 慢操作日志（性能-YYYYMMDD.jsonl）+ IPC 计时包装的 CJS 单源。
+const perfCache = require('./perf-cache.js');
 
 const ROOT = path.join(__dirname, '..');
 // B-20261116-071224-9300：团队根唯一解析器——隔离优先（AWB_TEAM_ROOT > TEAM_ROOT > layout > 仓库团队），
@@ -26,6 +28,22 @@ function resolveTeamRoot() {
   if (envRoot) return envRoot;
   return (teamTools && teamTools.layout && (teamTools.layout.teamRoot || teamTools.layout.root)) || path.join(ROOT, '团队');
 }
+// R-20261118-170937-b34a（T-e2d8 R2）：所有 ipcMain.handle 统一计时——慢调用（≥100ms，含同步重活 ≥50ms）
+// 写 `团队/状态/项目/<项目>/性能-YYYYMMDD.jsonl`，handler 语义/返回值/异常行为一字不改。
+// 项目名在慢路径上惰性解析（不在每次 IPC 都读 store），解析失败就跳过日志、不影响业务。
+const activeTeamProjectNameForPerf = () => {
+  try {
+    const st = typeof readStore === 'function' ? readStore() : null;
+    if (!st) return '';
+    const list = Array.isArray(st.projects) ? st.projects : [];
+    const hit = list.find((p) => p && p.id === st.activeProjectId) || list[0];
+    return hit ? String(hit.teamName || hit.name || '') : '';
+  } catch { return ''; }
+};
+const rawIpcHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, handler) => rawIpcHandle(channel, (typeof handler === 'function'
+  ? perfCache.withIpcTiming(channel, handler, { projectNameOf: activeTeamProjectNameForPerf, teamRootOf: resolveTeamRoot })
+  : handler));
 // T-20261118-090620-6e39：团队工具子进程的环境。
 // 生产实例（非 TEAM_SELFTEST）不把 TEAM_ROOT / TEAM_PROJECTS_ROOT 继承给子进程——旧行为下子进程里的
 // isSandboxTeamRoot() 会因这两个 env 存在而判真，把真实唤醒当沙盘静默跳过（2026-11-18 09:04 事故：PM 摘要/升级/评审唤醒 103 条全被跳过）。
@@ -2519,6 +2537,8 @@ try { ipcMain.handle('pm-identity:get', () => pmIdentityLast); } catch { /* 重�
 function writeStore(store) {
   // 写前先失效缓存：调用方可能已原地修改了缓存对象；即使本次写盘失败，也不能让下次读到脏缓存。
   storeCache = { file: '', key: '', value: null };
+  // R-b34a：通用读盘缓存同样在写前失效（mtime/size 是第二道防线，这里保证「写后立刻可见」）。
+  try { perfCache.invalidate(storeFile()); } catch { /* 缓存失效失败不阻断写盘 */ }
   if (storeFatal) throw new Error('状态文件损坏且没有可用备份，已阻止写入；请先处理 workbench.json.corrupt-*');
   const file = storeFile();
   // B-20261117-113926-8be3：workbench.json 的写入原来没有任何审计行（json-atomic 的 appendAudit 只认
