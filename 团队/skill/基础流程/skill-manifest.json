@@ -8,7 +8,7 @@
     "version": "1.2.0",
     "archive": "团队/skill/归档/基础流程-1.2.0/"
   },
-  "change": "新增「现行工作流对齐」（programmer1.md）：验收边界（开发不验收、需求只能 Owner）、代管边界（只代记评审决定）、工装安全 P0（PID-only，禁批量杀）、测量窗口（报备+隔离+负载口径）、模板维护（roleCard/DEFAULT_IRON/DEFAULT_CONSTITUTION 由 A 维护，夹具覆盖）。依据 Owner 2026-11-18 22:01 指令、流程.md 第二部分与任务 T-20261118-220400-4981。",
+  "change": "新增「现行工作流对齐」（programmer1.md）：验收边界（开发不验收、需求只能 Owner）、代管边界（只代记评审决定）、工装安全 P0（PID-only，禁批量杀）、测量窗口（报备+隔离+负载口径）、模板维护（roleCard/DEFAULT_IRON/DEFAULT_CONSTITUTION 由 A 维护，夹具覆盖）。依据 Owner 2026-11-18 22:01 指令、流程.md 第二部分与任务 T-20261118-220400-4981。 ｜ 2026-11-18 22:46 PM 统一重算各角色最终 skill sha（B/product/tester 等编辑后对齐）。",
   "files": {
     "00-索引.md": "5430648a918e0854d534aff0d513419186e335fa11bf2f30fc267b36bcb3945a",
     "analyst.md": "bbe29e19f5730244141c7e0c9b62ecfb16fd997eaec2ae5be06c6c520137c9b4",
