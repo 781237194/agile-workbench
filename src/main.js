@@ -19,6 +19,8 @@ const StoreAudit = require('./store-audit.js');
 const FolderOpen = require('./folder-open.js');
 // R-20261118-170937-b34a（T-e2d8 R2）：读盘缓存 + 慢操作日志（性能-YYYYMMDD.jsonl）+ IPC 计时包装的 CJS 单源。
 const perfCache = require('./perf-cache.js');
+// B-20261118-191527-c437（P1 稳定性）：崩溃后「复活主窗 / 恢复 webview / 不误退」的纯判定逻辑（Node 可测）。
+const CrashGuard = require('./crash-guard.js');
 // R-b34a 批5：目录扫描结果缓存（files:list 等递归扫描用；键=目录 mtime+size，3s TTL 兜底）
 const dirScanCache = require('./dir-scan-cache.js');
 const FILES_LIST_MAX_DEPTH = 4;
@@ -11138,7 +11140,7 @@ installShellAuditSensors();
     }
     if (action === 'min') target.minimize();
     else if (action === 'max') target.isMaximized() ? target.unmaximize() : target.maximize();
-    else if (action === 'close') target.close();
+    else if (action === 'close') { lastUserCloseAt = Date.now(); target.close(); }
   });
 }
 
@@ -19941,6 +19943,11 @@ function currentRendererMemoryMB() {
 }
 
 const CRASH_CLOSE_GUARD_MS = 10 * 1000;
+// B-c437：窗口生命周期判定状态（用户主动关窗时刻 / 崩溃后复活与恢复的限次窗口）。
+let lastUserCloseAt = 0;
+let explicitQuit = false;
+const shellReviveTimes = [];
+const crashRecoverTimes = [];
 let lastRenderCrashAt = 0;
 
 /**
@@ -19996,7 +20003,8 @@ function recordRenderCrash(kind, details) {
   const row = {
     at: now(),
     kind: String(kind || 'unknown'),
-    processType: String(info.type || info.processType || 'renderer'),
+        processType: CrashGuard.normalizeCrashFields(info).processType,
+        serviceName: CrashGuard.normalizeCrashFields(info).serviceName,
     reason: String(info.reason || ''),
     exitCode: info.exitCode === undefined || info.exitCode === null ? null : Number(info.exitCode),
     memoryMB: currentRendererMemoryMB(),
@@ -20018,6 +20026,8 @@ function recordRenderCrash(kind, details) {
   console.log('[crash]', JSON.stringify(row));
   // R-c1ed §2.4：崩溃归档三件套（渲染崩溃/<ts>/），失败只报不影响感知与审计。
   try { archiveRenderCrash(row); } catch (error) { console.error('[crash] 归档失败：', String((error && error.message) || error).slice(0, 160)); }
+  // B-c437：崩溃后按类型调度恢复（主窗渲染崩溃→reload 主窗；webview guest 崩溃→通知渲染层重载 dsh-view）。
+  try { scheduleCrashRecovery(row, info); } catch (error) { console.error('[crash] 恢复调度失败：', String((error && error.message) || error).slice(0, 160)); }
   return row;
 }
 
@@ -20080,6 +20090,54 @@ function installShellAuditSensors() {
   });
 }
 
+/** B-c437：恢复/复活限次窗口（10 分钟 3 次；复活 1 小时 3 次）。 */
+function pruneTimes(list, windowMs, nowMs) {
+  while (list.length && nowMs - list[0] > windowMs) list.shift();
+  return list;
+}
+/** 主窗渲染崩溃：限次 reload 主窗（不关窗、不退出）。 */
+function scheduleCrashRecovery(row, info) {
+  const nowMs = Date.now();
+  const kind = String(row && row.kind || '');
+  const isWebviewCrash = kind === 'web-contents-render-gone' && String(info && (info.type || '') ) === 'webview';
+  const decision = CrashGuard.decideCrashRecovery({
+    crashKind: kind,
+    isWebview: isWebviewCrash,
+    isMainWindow: kind === 'render-process-gone' && (!info || info.type === 'renderer' || !info.type),
+    recoversInWindow: pruneTimes(crashRecoverTimes, CrashGuard.RECOVER_WINDOW_MS, nowMs).length,
+    lastRecoverAgoMs: crashRecoverTimes.length ? nowMs - crashRecoverTimes[crashRecoverTimes.length - 1] : null,
+  });
+  try { recordShellAudit('shell-recovery-decision', { kind, action: decision.action, reason: decision.reason }); } catch { /* ignore */ }
+  if (decision.action === 'reload-main') {
+    crashRecoverTimes.push(nowMs);
+    setTimeout(() => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+          mainWindow.webContents.reload();
+        }
+      } catch { /* reload 失败只留审计 */ }
+    }, 800);
+    return;
+  }
+  if (decision.action === 'reload-webview') {
+    crashRecoverTimes.push(nowMs);
+    try {
+      const wc = (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) ? mainWindow.webContents : null;
+      if (wc) {
+        // 优先 DOM 层 reload；guest 已被销毁时把 src 重新指回同一地址，让 Chromium 重建 webview。
+        wc.executeJavaScript(`(() => { const v = document.querySelector('#dsh-view'); if (!v) return false; try { v.reload(); return true; } catch { try { const s = v.getAttribute('src') || ''; if (!s) return false; v.setAttribute('src', s); return true; } catch { return false; } } })()`, true).catch(() => {});
+        recordShellAudit('shell-webview-recovered', { at: new Date().toISOString() });
+      }
+    } catch { /* 渲染层不可达时由下一次页面加载自愈 */ }
+  }
+}
+/** webview guest 崩溃：审计 + 走恢复调度（不关闭主窗）。 */
+function handleWebviewCrash(contents, details) {
+  let url = '';
+  try { url = String(contents.getURL ? contents.getURL() : '').slice(0, 200); } catch { /* ignore */ }
+  try { recordShellAudit('shell-webview-crash', { url, reason: String((details && details.reason) || '') }); } catch { /* ignore */ }
+  scheduleCrashRecovery({ kind: 'web-contents-render-gone' }, { type: 'webview' });
+}
 function installCrashSensors() {
   if (installCrashSensors.done) return;
   installCrashSensors.done = true;
@@ -20087,7 +20145,12 @@ function installCrashSensors() {
   app.on('child-process-gone', (_event, details) => { recordRenderCrash('child-process-gone', details); });
   app.on('web-contents-created', (_event, contents) => {
     try {
-      contents.on('render-process-gone', (_e, details) => { recordRenderCrash('web-contents-render-gone', details); });
+      contents.on('render-process-gone', (_e, details) => {
+        recordRenderCrash('web-contents-render-gone', details);
+        try {
+          if (contents.getType && contents.getType() === 'webview') handleWebviewCrash(contents, details);
+        } catch { /* 单个 webview 处理失败不影响其它 */ }
+      });
       contents.on('unresponsive', () => { recordRenderCrash('unresponsive', { type: contents.getType ? contents.getType() : 'unknown' }); });
     } catch { /* 单个 contents 挂不上不影响其它 */ }
   });
@@ -22337,8 +22400,35 @@ app.on('window-all-closed', () => {
     console.log('[keep-alive] window-all-closed 但 AWB_KEEP_ALIVE=1，不退出');
     return;
   }
+  // B-c437：崩溃后 2 分钟内的「窗口全关」不再直接退出——复活主窗一次（1 小时最多 3 次），
+  // 只有「用户主动关窗 / 显式 quit / 无崩溃关联」才正常退出（审计写清决策与依据）。
+  const nowMs = Date.now();
+  pruneTimes(shellReviveTimes, 60 * 60 * 1000, nowMs);
+  const decision = CrashGuard.decideWindowAllClosed({
+    explicitQuit,
+    lastUserCloseAgoMs: lastUserCloseAt ? nowMs - lastUserCloseAt : null,
+    lastCrashAgoMs: lastRenderCrashAt ? nowMs - lastRenderCrashAt : null,
+    revivesInLastHour: shellReviveTimes.length,
+    keepAlive: process.env.AWB_KEEP_ALIVE === '1',
+  });
+  try { recordShellAudit('shell-window-all-closed-decision', { action: decision.action, reason: decision.reason, revives: shellReviveTimes.length }); } catch { /* ignore */ }
+  if (decision.action === 'revive') {
+    shellReviveTimes.push(nowMs);
+    try {
+      createWindow();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (AWB_START_HIDDEN && !mainWindow.isVisible()) mainWindow.show();
+        else mainWindow.show();
+      }
+      recordShellAudit('shell-revive', { reason: decision.reason, revives: shellReviveTimes.length });
+      console.log('[revive] window-all-closed 后复活主窗 ' + JSON.stringify({ reason: decision.reason, revives: shellReviveTimes.length }));
+      return;
+    } catch (error) {
+      console.error('[revive] 复活失败，按正常退出处理：' + String((error && error.message) || error));
+    }
+  }
   if (process.platform !== 'darwin') app.quit();
 });
 
 // T-b417：退出时先请守护子进程停，不让它变成孤儿进程继续抢锁。
-app.on('before-quit', () => { boardQuitting = true; stopRouteSupervisor(); });
+app.on('before-quit', () => { explicitQuit = true; boardQuitting = true; stopRouteSupervisor(); });
