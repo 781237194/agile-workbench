@@ -36,5 +36,22 @@
 - **失败回滚**：交接文件没写完不 rotate；rotate 失败保留旧绑定并报 PM（不手工改 JSON）；有在途任务时归档是**建议不阻断**（ARCHIVE_DEFERRED），不得为归档丢活；回滚以「旧会话继续干」为默认，不重 claim、不重写报告。
 - 角色专属提示（pm）：交接时把「当前在办任务 id + 卡点 + 下一步命令」写进「在途」，让接手人不用翻聊天记录即可继续。
 
+## 派单前置检查（程序门）
+
+- **先检查再派**：任何 `send --ack ...`（派单）之前，先跑
+  `node 团队\工具\team.mjs dispatch-check --boot <PM令牌> --project <项目> --to <角色> [--json]`；
+  判定 `go` / `go_degraded` 才发，`queue` / `wait` / `wake_first` / `blocked` 一律先处置再派。
+- **程序门（不靠自觉）**：`send --ack` 写盘前会读「最近 10 分钟内 to=该角色 的检查记录」——
+  没有记录 → `DISPATCH_PRECHECK_REQUIRED`（零写入）；最新判定不是 go → `DISPATCH_BLOCKED_BY_STATE`（带 reasons 与数字）；
+  只有 `--force --reason "为什么在 X 状态仍要派"` 能放行，并在 `派单前置检查.jsonl` 记 `forced:true`（无 reason → `DISPATCH_FORCE_REASON_REQUIRED`）。
+- **五种判定怎么处置**：`queue`=排队/等审批 → 等消化或用 ask 问清；`wait`=正在思考（<600s）→ 等这一轮结束；
+  `wake_first`=running 太久 / 15 分钟无活动 / 唤醒失败 → 先 `wake` 或 `auto-boot` 确认它还活着；
+  `blocked`=派单锁在该角色 或 目标未 boot → 先等回执/清锁或先 boot。
+- **降级口径**：会话排队快照过期（≥120s）或缺 c9ac v2 字段（running/pendingInput/runningSince）时判 `go_degraded` 或 `wake_first`，
+  **绝不给 go**；这时先看 presence（未读/未回执/停滞/唤醒失败）再决定。
+- **通知不受限**：非派单的 notice / receipt / 请求不受此门限制，照旧发。
+
 ## 版本
-- version：1.1.0（2026-11-17 新增「换人/交接」小节；Owner 批准版本，改版须走 Owner 批准 + manifest 归档）。
+- version：1.2.0（2026-11-18 新增「派单前置检查（程序门）」小节；依据 Owner 2026-11-18 09:15 明确「可以更新 skill」+「派单不能靠 PM 自觉」）。
+- 历史：1.1.0（2026-11-17 新增「换人/交接」小节）；1.0.0（初版）。
+

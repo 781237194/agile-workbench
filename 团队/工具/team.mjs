@@ -12,6 +12,8 @@ import {
   cmdProjectConfig, sendLessonsProgramNotice, flushLessonsProgramWakes,
 } from './lib/ops.mjs';
 import { noteActionAfterWrite } from './lib/store.mjs';
+// T-20261118-091644-6e53：派单前置检查（程序门）CLI
+import { cmdDispatchCheck } from './lib/dispatch-check.mjs';
 
 /**
  * a28a：命令成功返回后按白名单自增轮次。
@@ -316,6 +318,8 @@ async function main() {
     case 'read': cmdRead(args); break;
     case 'ack': await cmdAck(args); break;
     case 'presence': cmdPresence(args); break;
+    // T-20261118-091644-6e53：派单前置检查（PM 派单前必跑；send --ack 的程序门读它的最近一次结果）
+    case 'dispatch-check': await cmdDispatchCheck(args); break;
     case 'mark-read': cmdMarkRead(args); break;
     case 'wake': await cmdWake(args); break;
     case 'ask': await cmdAsk(args); break;

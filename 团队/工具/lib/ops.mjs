@@ -66,6 +66,8 @@ import { memoryCheck } from './memory-check.mjs';
 import { handoverBriefLine } from './handover.mjs';
 // B-20261118-083150-4b2f（AC-W1）：名册成员入册只允许走 roster-writer 的唯一入口。
 import { pushRosterMember } from './roster-writer.mjs';
+// T-20261118-091644-6e53：派单前置检查程序门（Owner 2026-11-18 09:15「不能靠 PM 自觉」）
+import { assertDispatchPrecheck } from './dispatch-check.mjs';
 import { checkEvidenceGate } from './evidence.mjs';
 import { bumpRound, archiveSession, confirmArchive, ROUNDS_MAX } from './session-archive.mjs';
 import {
@@ -5125,8 +5127,8 @@ export async function cmdSend(args) {
   if (args.ack && args.task) failLessonGate(lessonGateFor(b, args));
   // R-c651 F-c651-2：send 的唤醒路径也是重试执行者——先消化上一批到期重试，再把本次消息发出去，
   // 避免刚排队的重试被本命令立刻再跑一次（同一条消息出现两条 attempt=1）。
+  // T-6e53：这一步挪到「派单前置检查」之后（见下面），保证程序门拒绝时**零写入**。
   let sendWakeRetry = null;
-  try { sendWakeRetry = await processWakeRetries(b.project, { source: 'send' }); } catch { sendWakeRetry = null; }
   const to = String(args.to || '');
   if (!to) fail('BAD_RECIPIENT', '需要 --to');
   if (to === b.role) fail('SELF_SEND', `不能把消息发给自己（${to}）；回执/通知请发给对方角色，派单由 PM 发。`);
@@ -5240,6 +5242,18 @@ export async function cmdSend(args) {
   // --queue：不硬拒，把本单排进 派单队列.json，等角色 task done 后自动续跑（R-31b3）。
   let releasedLock = null;
   const pmDispatch = isDispatch && b.role === 'pm';
+  // ── T-20261118-091644-6e53：派单前置检查程序门（Owner 2026-11-18 09:15） ──
+  // 只有 PM 的派单（--ack 且目标未收口，含 --queue 排队派单）受此门限制；通知/回执/请求不受限。
+  // 位置：所有写盘动作（派单锁释放、入队、任务 owner、消息落盘）**之前** → 拒绝时零写入。
+  // 沙盘豁免（TEAM_SELFTEST=1）保持既有 176 项 selftest 不回归；门禁本体用 TEAM_DISPATCH_PRECHECK_ENFORCE=1 强制。
+  let dispatchPrecheck = null;
+  if (pmDispatch) {
+    dispatchPrecheck = assertDispatchPrecheck({
+      projectName: b.project, to, force: Boolean(args.force), reason: String(args.reason || ''), by: b.role,
+    });
+  }
+  // 唤醒重试：放在程序门之后（门拒绝时零写入）；语义不变——仍在本条消息落盘前消化旧重试。
+  try { sendWakeRetry = await processWakeRetries(b.project, { source: 'send' }); } catch { sendWakeRetry = null; }
   // R-bad3 F-bad3-2：派单（含排队派单）前先确保目标角色有有效 boot 令牌；失败不阻塞但返回 pendingBoot。
   // B-5989：trigger 不再写死 stale——按上下文推断 rotate / create / rules_changed / stale 四类。
   const ensureBootForDispatch = async () => {
@@ -5370,6 +5384,7 @@ export async function cmdSend(args) {
         ? { role: to, state: targetAlive.probe.state, sessionId: targetAlive.probe.sessionId, warmup: targetAlive.warmup }
         : null,
       wakeFailed, releasedLock, wakeHeader, wakeRetry: sendWakeRetry, autoRead,
+      ...(dispatchPrecheck ? { dispatchPrecheck } : {}),
       ...(pendingBoot ? { pendingBoot: true, autoBoot } : {}),
     });
 }
