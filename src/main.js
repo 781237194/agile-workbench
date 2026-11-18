@@ -6070,6 +6070,10 @@ ipcMain.handle('theme:metrics', async () => {
     const baseRoles = manifestRoles.length
       ? manifestRoles.filter((row) => row && memberRoleSet.has(String(row.role)) && ROLE_BY_ID.has(String(row.role)))
       : memberRoleIds.filter((roleId) => mapped[roleId]).map((roleId) => ({ role: roleId }));
+    // B-20261119-015113-2443：名册四态由后端单源判定（AC3：渲染层不自算 ok/stale）。
+    const rosterMemberMap = new Map((teamTools.teamMembers() || []).map((m) => [String((m && m.role) || ''), String((m && m.sessionId) || '')]));
+    const workspaceSessionSet = new Set((project && project.workspace && Array.isArray(project.workspace.sessionIds) ? project.workspace.sessionIds : []).map(String));
+    const membersEmpty = rosterMemberMap.size === 0;
     const roles = baseRoles.map((row) => {
       const roleId = String(row.role);
       const role = ROLE_BY_ID.get(roleId);
@@ -6081,7 +6085,13 @@ ipcMain.handle('theme:metrics', async () => {
         sessionId: sessionId ? String(sessionId) : '',
         reused: row ? Boolean(row.reused) : null,
         model: row ? row.model || '' : '',
-        source: mapped[roleId] ? 'store' : (row ? 'manifest' : '')
+        source: mapped[roleId] ? 'store' : (row ? 'manifest' : ''),
+        state: projectRosterCleanup.memberStateOf({
+          rosterSession: rosterMemberMap.get(roleId) || '',
+          projectSession: mapped[roleId] || '',
+          workspaceSession: workspaceSessionSet.size && mapped[roleId] ? workspaceSessionSet.has(String(mapped[roleId])) : undefined
+        }),
+        memberArchived: Boolean((teamTools.teamMembers() || []).find((m) => m && m.role === roleId) || {}).archived
       };
     });
     if (!roles.length) {
@@ -6096,6 +6106,7 @@ ipcMain.handle('theme:metrics', async () => {
       workspace: (manifestTrusted && manifest && manifest.workspace) || workspacePath,
       teamMode: normalizeTeamMode(project && project.teamMode),
       roleIds: memberRoleIds,
+      membersEmpty,
       roles,
       count: roles.length,
       // workspaceId 只在“清单记录了 workspace 且与项目目录一致”时采信；否则以状态库绑定为准。
@@ -7501,6 +7512,19 @@ ipcMain.handle('theme:metrics', async () => {
       });
       if (p.dryRun !== true) persistTeamLaunch(stored ? stored.id : null, result);
       const persisted = stored && p.dryRun !== true ? requireProject(readStore(), stored.id) : null;
+      // B-20261119-015113-2443（AC4/AC5/6.4）：恢复四段审计 + missing 可回查；UI 段由渲染层收到返回后确认。
+      const restoreAudit = projectRosterCleanup.buildRestoreAudit({
+        record: true,
+        workspace: Boolean(binding && binding.ok),
+        sessions: Boolean(persisted && persisted.sessions && Object.values(persisted.sessions).filter(Boolean).length >= 1),
+        ui: true
+      });
+      try {
+        fs.appendFileSync(path.join(projectDir, '恢复审计.jsonl'), JSON.stringify({
+          at: new Date().toISOString(), action: 'project_restore', project: result.name || hit.name,
+          stages: restoreAudit.stages, ok: restoreAudit.ok, missing: restoreAudit.missing
+        }) + '\n', 'utf8');
+      } catch { /* 审计写失败不阻断恢复 */ }
       return {
         ...result,
         restore: true,
@@ -7512,6 +7536,7 @@ ipcMain.handle('theme:metrics', async () => {
         warnings,
         mapping: persisted ? publicMapping(persisted) : null,
         reload: true,
+        restoreAudit,
         state: statePayload()
       };
     } catch (e) {
@@ -8623,7 +8648,15 @@ ipcMain.handle('theme:metrics', async () => {
           teamChanged = true;
         }
         // 名册是全局单例：只清掉“被删项目”的会话，不能把其它项目的当前名册一并清空。
-        const doomedSessions = new Set(Object.values(project.sessions || {}).filter(Boolean).map(String));
+        // B-20261119-015113-2443（AC7）：四处映射同事务清理——名册会话集合必须含
+        // ②项目会话清单(团队会话.json) 与 ④workspace.sessionIds，否则「只建角色未建会话」的项目删完仍有幽灵。
+        let manifestRolesForCleanup = [];
+        try {
+          const mf = teamTools.readSessionManifest(path.resolve(String(project.path || '')));
+          manifestRolesForCleanup = mf && Array.isArray(mf.roles) ? mf.roles : [];
+        } catch { /* 清单坏了不阻断删除 */ }
+        const cleanupPlan = projectRosterCleanup.planProjectCleanup({ team, project, manifestRoles: manifestRolesForCleanup });
+        const doomedSessions = new Set(cleanupPlan.doomsSessions);
         // B-20261118-164055-2a44：清名册同样走单源（team-tools → roster-apply.cjs），不再直接 `member.sessionId = ''`。
         const cleared = (teamTools && typeof teamTools.clearRosterSessionsOf === 'function')
           ? teamTools.clearRosterSessionsOf(team, doomedSessions, { activeProject: (project.teamName || project.name) })
@@ -10772,6 +10805,7 @@ installShellAuditSensors();
         };
       }
     }
+    void runDshCapabilityProbe('status');
     return { ok: true, status: finalStatus, discovery: discovery ? dshDiscoverySummary(discovery) : null };
   });
   // 手动“重新发现”：供设置页/诊断按钮调用；不新增假 UI，返回结构化结果。

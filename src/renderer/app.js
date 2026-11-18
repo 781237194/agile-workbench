@@ -2078,6 +2078,32 @@ function renderBridgeAlert() {
   if (view && view.getAttribute('src') !== 'about:blank') view.setAttribute('src', 'about:blank');
 }
 
+// B-20261119-015113-2443（97db）：团队台/侧栏四态唯一来源＝后端 team:members 的 state 字段；
+// 渲染层只做 state→文案映射（AC3：不在渲染层自算 ok/stale）。
+let memberStatesCache = null;
+async function loadMemberStates(project) {
+  if (!project || !window.workbench || typeof window.workbench.teamMembers !== 'function') return null;
+  try {
+    const res = await window.workbench.teamMembers({ projectId: project.id });
+    if (!res || res.ok === false) return { projectId: project.id, at: Date.now(), rows: [], empty: true };
+    const rows = Array.isArray(res.roles) ? res.roles : [];
+    return { projectId: project.id, at: Date.now(), rows, empty: Boolean(res.membersEmpty) || rows.length === 0 };
+  } catch { return null; }
+}
+function memberStateOfCache(project, roleId) {
+  if (!memberStatesCache || !project || memberStatesCache.projectId !== project.id) return null;
+  const row = memberStatesCache.rows.find((item) => String(item.role || '') === String(roleId));
+  return row ? String(row.state || '') : null;
+}
+function memberStateView(stateStr, fallback) {
+  const st = String(stateStr || '');
+  if (st === 'stale') return { cls: 'stale', text: '已失效（成员已归档）', title: '该角色已归档/成员表已清空，不再显示为就绪', boot: false };
+  if (st === 'pending') return { cls: 'pending', text: '待激活', title: '名册有会话，项目映射未对齐（待激活/重新绑定）', boot: true };
+  if (st === 'missing') return { cls: 'missing', text: '未就绪（缺会话）', title: '项目映射里有会话，但名册无该成员会话', boot: true };
+  if (st === 'ok') return { ...fallback, boot: true };
+  return { ...fallback, boot: true };
+}
+
 async function refresh() {
   if (!window.workbench) {
     renderBridgeAlert();
@@ -2087,6 +2113,7 @@ async function refresh() {
   renderBridgeAlert();
   try {
     state = await window.workbench.state();
+    try { memberStatesCache = await loadMemberStates(activeProject()); } catch { memberStatesCache = null; }
     hydrateTeamModes();
     render();
     const current = activeProject();
@@ -2555,14 +2582,17 @@ function renderSessions() {
   const count = $('#session-count');
   const p = activeProject();
   if (!box) return;
-  const entries = sessionEntries(p);
+  const rosterRows = memberStatesCache && p && memberStatesCache.projectId === p.id ? memberStatesCache.rows : null;
+  const rosterEmpty = Boolean(rosterRows && rosterRows.length === 0);
+  const allEntries = sessionEntries(p);
+  const entries = rosterRows ? allEntries.filter((item) => rosterRows.some((row) => String(row.role || '') === String(item.role.id))) : allEntries;
   const ready = entries.filter((item) => item.sessionId).length;
   const verified = p ? verifiedCount(p) : null;
   const total = p ? teamRoleCount(p) : entries.length || 6;
   if (count) {
     // e29f F-3：展示数字只认 DSH 核验（sessionId 全等 + 属于本工作区）；未核验/过期显示「待核验」。
     // 本地映射不再冒充展示数字，但保留在 data-local 上（5 秒跟随外部轮换的用例靠它核对）。
-    count.textContent = verified === null ? '待核验' : `${verified}/${total}`;
+    count.textContent = rosterEmpty ? '0' : (verified === null ? '待核验' : `${verified}/${total}`);
     count.title = verified === null
       ? `DSH 未核验：本地映射 ${ready}/${total} 只作参考`
       : `DSH 核验 ${verified}/${total}（本地映射 ${ready}/${total}）`;
@@ -2575,8 +2605,13 @@ function renderSessions() {
     box.innerHTML = '<div class="empty-row">先选择工作区；当前团队模式的角色会话会显示在这里。</div>';
     return;
   }
+  if (rosterEmpty) {
+    box.innerHTML = '<div class="empty-row" data-roster-empty="1">本工作区无在册成员（团队已归档/成员表已清空）' + '<button class="link-btn" type="button" data-open-new-project>＋ 建团队</button></div>';
+    if (count) { count.textContent = '0'; count.setAttribute('data-verified', '0'); }
+    return;
+  }
   box.innerHTML = entries.map(({ role, sessionId }) => {
-    const st = p ? sessionState(p, role) : { cls: 'missing', text: '未启动', title: '' };
+    const st = p ? memberStateView(memberStateOfCache(p, role.id), sessionState(p, role)) : { cls: 'missing', text: '未启动', title: '', boot: true };
     const live = p ? liveItemFor(p, role.id) : null;
     const titleMismatch = Boolean(live && live.currentTitle && live.currentTitle !== roleSessionTitle(p, role.id));
     const sub = sessionId
@@ -2672,7 +2707,10 @@ function renderTeamSessions() {  const box = $('#team-session-list');
     box.innerHTML = '<div class="empty-row">先新建或选择一个工作区，当前团队模式的角色会话会显示在这里。</div>';
     return;
   }
-  const entries = sessionEntries(p);
+  const rosterRows = memberStatesCache && memberStatesCache.projectId === p.id ? memberStatesCache.rows : null;
+  const rosterEmpty = Boolean(rosterRows && rosterRows.length === 0);
+  const allEntries = sessionEntries(p);
+  const entries = rosterRows ? allEntries.filter((item) => rosterRows.some((row) => String(row.role || '') === String(item.role.id))) : allEntries;
   const ready = entries.filter((item) => item.sessionId).length;
   const verified = verifiedCount(p);
   const total = teamRoleCount(p);
@@ -2682,7 +2720,7 @@ function renderTeamSessions() {  const box = $('#team-session-list');
   if (count) {
     // e29f F-3：6/6 (X/N) 只认 DSH 核验（sessionId 全等 + 属于本工作区）的条数；
     // 未核验/核验过期就显示「待核验」，不能拿本地映射冒充满员。
-    count.textContent = verified === null ? '待核验' : `${verified}/${total}`;
+    count.textContent = rosterEmpty ? '0' : (verified === null ? '待核验' : `${verified}/${total}`);
     count.title = verified === null
       ? `DSH 未核验：本地映射 ${ready}/${total} 只作参考，不计入 ${total} 分母之外的满员判定`
       : `DSH 核验 ${verified}/${total}（本地映射 ${ready}/${total}）`;
@@ -14588,6 +14626,7 @@ async function openRestoreModal(options = {}) {
       <button class="link-btn" id="restore-rescan" type="button">重新扫描</button>
     </div>
     <p class="hint">只登记目录，不复制、不覆盖；普通目录请先新建项目。</p>
+    <div data-restore-error hidden></div>
     <div class="modal-error"></div>`;
   const dlg = openModal({
     title: '恢复项目', subtitle: '按名字复用团队会话，或从已有目录登记', icon: '♻', body: wrap, width: 640,
@@ -14621,6 +14660,10 @@ async function openRestoreModal(options = {}) {
       const restored = activeProject();
       if (registered && restored) await focusDshWorkspace(restored, { notify: true });
     } catch (e) {
+      try {
+        const bar = wrap.querySelector('[data-restore-error]');
+        if (bar) { bar.hidden = false; bar.textContent = '恢复失败：' + String(e && e.message || e); bar.setAttribute('data-code', String((e && e.code) || 'RESTORE_FAILED')); }
+      } catch { /* 横幅失败不影响错误提示 */ }
       dlg.error('恢复失败：' + e.message);
     } finally {
       goBtn.disabled = false;
