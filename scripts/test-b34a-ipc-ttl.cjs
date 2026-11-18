@@ -43,8 +43,9 @@ const realTeamFile = path.join(ROOT, '团队', '状态', '团队.json');
 const realStoreFile = path.join(ROOT, 'data', 'userdata', 'workbench.json');
 const beforeReal = { team: sha(realTeamFile), store: sha(realStoreFile) };
 
-check('T1 热点 TTL 表：workflow:state 5000 / team:board 8000 / system:metrics 5000',
-  /const HOT_IPC_TTL_MS = \{ 'workflow:state': 5000, 'team:board': 8000, 'system:metrics': 5000 \};/.test(src), {});
+check('T1 热点 TTL 表：workflow:state 5000 / team:board 8000 / system:metrics 5000（批5 追加扫描类通道）',
+  /const HOT_IPC_TTL_MS = \{[\s\S]{0,600}'workflow:state': 5000[\s\S]{0,200}'team:board': 8000[\s\S]{0,200}'system:metrics': 5000/.test(src)
+  && /'team:presence': 4000[\s\S]{0,200}'dsh:team-status': 6000[\s\S]{0,200}'workspace:plan': 8000/.test(src), {});
 
 check('T2 TTL 包装接到全局 ipcMain.handle 注册处（未改 handler 本体）',
   /perfCache\.withIpcTiming\(channel, hotIpcTtlWrap\(channel, handler\)/.test(src), {});

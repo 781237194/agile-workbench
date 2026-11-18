@@ -49,7 +49,13 @@ const rawIpcHandle = ipcMain.handle.bind(ipcMain);
 // R-b34a 批4（测量单：workflow:state p95 1.74s、team:board p95 8.48s、metrics 均 359ms）：
 // 热点只读 IPC 加 5–10s 短 TTL 缓存（PM 2026-11-18 17:57 优先序 b/c）。写路径 writeStore 会清空该缓存，
 // 保证「写完立刻可见」；TTL 只是重复刷新时的降本，不改变 handler 返回值。
-const HOT_IPC_TTL_MS = { 'workflow:state': 5000, 'team:board': 8000, 'system:metrics': 5000 };
+const HOT_IPC_TTL_MS = {
+  'workflow:state': 5000, 'team:board': 8000, 'system:metrics': 5000,
+  // 批5：目录扫描类只读 IPC（presence/team-status/status/workspaces）——结果短 TTL 复用，写后 hotIpcCacheClear 立即失效；
+  // files:list 已走「目录 mtime+size」指纹（dir-scan-cache），其余 handler 的 mtime 指纹接线随后续提交。
+  'team:presence': 4000, 'dsh:team-status': 6000, 'team:status': 6000,
+  'workspace:plan': 8000, 'workspace:list': 8000,
+};
 const hotIpcCache = new Map();
 const hotIpcStats = { hits: 0, misses: 0 };
 function hotIpcCacheClear() { hotIpcCache.clear(); }
