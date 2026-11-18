@@ -23,8 +23,10 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { PATHS, WORKSPACE, appendLine } from './core.mjs';
-import { loadTeam, saveTeam, projectStatePaths, sendMessage } from './store.mjs';
+import { PATHS } from './core.mjs';
+import { loadTeam, projectStatePaths, sendMessage } from './store.mjs';
+// B-20261118-083150-4b2f（fa0e 补丁 A）：名册写入收归唯一入口；本文件不再自己写四处映射/裸写 workbench。
+import { rotateRoster, checkRotateHandover, sweepRosterPostChecks } from './roster-writer.mjs';
 import { ROUNDS_MAX } from './session-archive.mjs';
 // B-20261117-212500-a837：换人必须真建会话（复用 session.mjs 的唯一出口），禁止在调度层自造 session id。
 import { createTeamSession, sessionUsage, usageLevelOf, sessionLimitsOf, DEFAULT_TOKEN_WARN as SESSION_TOKEN_WARN, DEFAULT_TOKEN_FORCE as SESSION_TOKEN_FORCE } from './session.mjs';
@@ -116,11 +118,7 @@ function readAudit(file) {
 function usageFileOf(projectName) { return path.join(projectStatePaths(projectName).dir, '会话用量.json'); }
 function roundsFileOf(projectName) { return path.join(projectStatePaths(projectName).dir, '会话轮次.json'); }
 function auditFileOf(projectName) { return path.join(projectStatePaths(projectName).dir, AUDIT_NAME); }
-function workbenchFileOf() {
-  const env = String(process.env.TEAM_WORKBENCH_JSON || '').trim();
-  if (env) return path.resolve(env);
-  return path.join(WORKSPACE, 'data', 'userdata', 'workbench.json');
-}
+// B-4b2f：workbench 的读改写已收归 roster-writer（json-atomic），本文件不再持有裸写路径函数。
 function projectDirOf(projectName) {
   const cfg = readJsonSafe(projectStatePaths(projectName).config, null);
   if (cfg && cfg.path) return path.resolve(cfg.path);
@@ -192,26 +190,51 @@ function handoverDone({ projectDir, role, mailDir, sinceMs }) {
   return { done: false, source: '' };
 }
 
-/* ── rotate：建会话（唯一出口 createTeamSession，禁自造 id）+ 写名册 + 写壳 store + 审计 + 广播 ── */
+/* ── rotate：建会话（唯一出口 createTeamSession）+ 名册唯一写入口 rotateRoster + 审计 + 广播 ── */
 async function rotateSession({ projectName, role, now, reason, auditFile, dryRun, engineUrl = '' }) {
   const team = loadTeam();
   const member = (team.members || []).find((m) => m && m.role === role);
   const oldId = String((member && member.sessionId) || '');
-  // 沙盘/自检可用 __AR_NEW_SESSION 指定新会话 id（= 手建登记：mode=manual / created=false）；
-  // 未指定时一律走 createTeamSession：生产 DshClient.create，沙盘（TEAM_SELFTEST=1）用注入 factory 模拟。
-  const injectedNewSessionId = String(process.env.__AR_NEW_SESSION || '').trim();
+  // 沙盘自检可用 __AR_CREATE_FAIL 注入「自动建会话失败」；未指定时一律走 createTeamSession 真建（禁自造 id）。
   const selftest = process.env.TEAM_SELFTEST === '1';
   const failInjected = selftest && String(process.env.__AR_CREATE_FAIL || '') === '1';
+  // B-20261118-083150-4b2f（AC-W7）：__AR_NEW_SESSION 注入入口已废——出现即拒写（08:02 旧副本形态），零写入。
+  const injectedLegacy = String(process.env.__AR_NEW_SESSION || '').trim();
+  if (injectedLegacy && !dryRun) {
+    appendAudit(auditFile, {
+      at: iso(now), stage: 'rotate_failed', code: 'LEGACY_SESSION_ID_REFUSED', result: 'fail', role, project: projectName,
+      note: `检测到 __AR_NEW_SESSION 注入（旧副本入口，已废）：${injectedLegacy}；本轮不换人（名册未改动）`,
+      reason: String(reason || 'context-full'),
+      evidence: { code: 'LEGACY_SESSION_ID_REFUSED', injected: injectedLegacy, oldSessionId: oldId, rosterUntouched: true },
+    });
+    try {
+      sendMessage({
+        from: 'system', to: 'pm', project: projectName, type: 'escalation',
+        subject: '名册写入被拒：LEGACY_SESSION_ID_REFUSED',
+        body: `自动换人检测到 __AR_NEW_SESSION 注入（旧副本入口）：${injectedLegacy}。\n已拒写、名册未改动（零写入）。请确认是否旧代码副本仍在运行（08:02 事故形态）。`,
+      });
+    } catch { /* 告警失败不影响拒绝 */ }
+    return { oldId, newId: '', others: [], failed: true, code: 'LEGACY_SESSION_ID_REFUSED', manualCommand: '' };
+  }
+  // AC-W5：交接判据与 session rotate 同一个函数（内部固定 validateHandover，4 个必填【】小节 + 遗留坑红标）。
+  const handoverCheck = await checkRotateHandover({ projectName, role });
+  if (handoverCheck.code === 'HANDOVER_INCOMPLETE') {
+    if (!dryRun) {
+      appendAudit(auditFile, {
+        at: iso(now), stage: 'skipped', code: 'HANDOVER_INCOMPLETE', result: 'ok', role, project: projectName,
+        note: `接任包缺必填小节（${(handoverCheck.missingRequired || []).concat(handoverCheck.emptyRequired || []).join('、')}）：本轮不换人`,
+        evidence: { missing: handoverCheck.missingRequired, empty: handoverCheck.emptyRequired, redFlags: handoverCheck.redFlags, judge: 'validateHandover', source: handoverCheck.source },
+      });
+    }
+    return { oldId, newId: '', others: [], failed: true, code: 'HANDOVER_INCOMPLETE', manualCommand: '' };
+  }
   let newId = '';
   let created = false;
   let mode = 'auto';
   let engine = '';
   if (dryRun) {
-    newId = injectedNewSessionId || '(dry-run)';
+    newId = '(dry-run)';
     mode = 'dry-run';
-  } else if (injectedNewSessionId) {
-    newId = injectedNewSessionId;
-    mode = 'manual';
   } else {
     try {
       const info = await createTeamSession({
@@ -245,85 +268,48 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
       return { oldId, newId: '', others: [], failed: true, code, manualCommand: command };
     }
   }
-  const wbFile = workbenchFileOf();
-  const store = readJsonSafe(wbFile, null);
-  if (!dryRun) {
-    if (member) {
-      member.sessionId = newId;
-      member.rotatedAt = iso(now);
-      member.rotateReason = String(reason || 'context-full');
-      saveTeam(team);
-    }
-    if (store && Array.isArray(store.projects)) {
-      const project = store.projects.find((p) => p && String(p.teamName || p.name || '') === projectName) || store.projects[0];
-      if (project) {
-        project.sessions = { ...(project.sessions || {}), [role]: newId };
-        if (project.workspace && Array.isArray(project.workspace.sessionIds)) {
-          project.workspace.sessionIds = project.workspace.sessionIds.map((id) => (id === oldId ? newId : id));
-        }
-        fs.writeFileSync(wbFile, JSON.stringify(store, null, 2) + '\n', 'utf8');
-      }
-    }
-    // B-2d6d / a837 复核：四处映射之四——<项目>/团队会话.json 的 roles[].sessionId 也要同步，
-    // 否则 checkSessionMap 判 6/6 不一致（团队.json / 团队会话.json / workbench.sessions / workspace.sessionIds）。
-    try {
-      const manifestFile = path.join(projectDirOf(projectName), '团队会话.json');
-      const manifest = readJsonSafe(manifestFile, null);
-      if (manifest && Array.isArray(manifest.roles)) {
-        let changed = false;
-        for (const row of manifest.roles) {
-          if (row && String(row.role) === role && String(row.sessionId || '') !== newId) { row.sessionId = newId; changed = true; }
-        }
-        if (changed) {
-          const tmp = `${manifestFile}.tmp-${process.pid}`;
-          fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-          fs.renameSync(tmp, manifestFile);
-        }
-      }
-    } catch { /* manifest 缺失/损坏不阻断换人（团队.json 与 workbench 已写） */ }
-  }
-  // T-f35b（AC5 四测）：换人必须留「会话轮换记录 from/to/at/reason」+「归档或 archiveDeferred」。
-  // 记录 append-only 落 团队/状态/项目/<项目>/会话轮换.jsonl；有未闭环任务时不强行归档，写 archiveDeferred。
+  // 有未闭环任务时不强行归档，写 archiveDeferred（归档是建议不是硬门）。
   const openTasks = (() => {
     try { return workingTasksOf(projectName, role).slice(0, 20); } catch { return []; }
   })();
   const archiveDeferred = openTasks.length
     ? { code: 'ARCHIVE_DEFERRED', tasks: openTasks, note: '有未闭环任务：先闭环再归档（归档是建议不是硬门）' }
     : null;
+  // B-20261118-083150-4b2f：名册写入（四处映射 / 轮换记录 / BQ / 广播 / 事件）只走唯一入口 rotateRoster。
+  let rotateResult = null;
   if (!dryRun) {
     try {
-      appendLine(path.join(projectStatePaths(projectName).dir, '会话轮换.jsonl'), JSON.stringify({
-        at: iso(now), project: projectName, role, from: oldId, to: newId,
-        reason: String(reason || 'context-full'), by: 'auto-rotate', mode, created, archiveDeferred,
-      }));
-    } catch { /* 记录失败不影响换人；审计行仍带 from/to */ }
-  }
-  // 行级 mode/created 同时放在**顶层**（审查/验收脚本按 rot.mode / rot.created 读）与 evidence 内（明细），两处同值。
-  const rotateRow = { at: iso(now), stage: 'rotate', code: 'ROTATED', result: 'ok', role, project: projectName, mode, created, note: `已换人：${oldId || '未记录'} → ${newId}（${reason || 'context-full'}｜${mode}${created ? '/created' : ''}）`, evidence: { mode, created, ...(engine ? { engine } : {}), oldSessionId: oldId, newSessionId: newId, reason: String(reason || 'context-full'), from: oldId, to: newId, rotatedAt: iso(now), ...(archiveDeferred ? { archiveDeferred } : { archive: 'pending-daily' }) } };
-  if (!dryRun) appendAudit(auditFile, rotateRow);
-
-  // 新会话 boot 指令（给本人）+ 其余角色重 boot 广播（名册变更=全员旧令牌失效）
-  const others = (team.members || []).filter((m) => m && m.role !== role && (!m.status || m.status === 'active'));
-  if (!dryRun) {
-    try {
-      sendMessage({
-        from: 'system', to: role, project: projectName, type: 'notice',
-        subject: `已换人：请在新会话 boot（${role}）`,
-        body: `本角色会话已轮换：${oldId || '未记录'} → ${newId}。\n请在新会话执行：node 团队\\工具\\team.mjs boot --role ${role} --project ${projectName} --session ${newId}\n原因：${reason || 'context-full'}。`,
+      rotateResult = await rotateRoster({
+        projectName, role, newSessionId: newId, mode, created,
+        reason: String(reason || 'context-full'), by: 'auto-rotate', source: 'auto-rotate',
+        offline: false, now,
+        recordExtra: { archiveDeferred },
+        jsonlExtra: { archiveDeferred },
+        eventExtra: { archiveDeferred: Boolean(archiveDeferred) },
       });
-    } catch { /* 消息失败不影响换人本身，下面审计带出 */ }
-    for (const m of others) {
-      try {
-        sendMessage({
-          from: 'system', to: m.role, project: projectName, type: 'notice',
-          subject: '名册变更：请重 boot（换人后旧令牌已失效）',
-          body: `${role} 已换人（${oldId || '未记录'} → ${newId}），团队名册变更使全员旧令牌失效。\n请执行：node 团队\\工具\\team.mjs boot --role ${m.role} --project ${projectName}`,
-        });
-      } catch { /* 单个失败不阻断其他广播 */ }
+    } catch (e) {
+      const code = String((e && e.code) || 'ROTATE_ROSTER_FAILED');
+      appendAudit(auditFile, {
+        at: iso(now), stage: 'rotate_failed', code, result: 'fail', role, project: projectName,
+        note: `名册写入失败（${code}）：本轮不换人（已回滚）`, reason: String(reason || 'context-full'),
+        evidence: { code, oldSessionId: oldId, newSessionId: newId, why: String((e && e.message) || e) },
+      });
+      return { oldId, newId: '', others: [], failed: true, code, manualCommand: '' };
     }
-    appendAudit(auditFile, { at: iso(now), stage: 'broadcast_reboot', code: 'REBOOT_BROADCAST', result: 'ok', role, project: projectName, note: `已广播 ${others.length} 个角色重 boot`, evidence: { newSessionId: newId, roles: others.map((m) => m.role) } });
   }
-  return { oldId, newId, others: others.map((m) => m.role), mode, created };
+  const others = (rotateResult && rotateResult.broadcast && Array.isArray(rotateResult.broadcast.others))
+    ? rotateResult.broadcast.others : [];
+  // 行级 mode/created 同时放在**顶层**（审查/验收脚本按 rot.mode / rot.created 读）与 evidence 内（明细），两处同值。
+  const rotateRow = { at: iso(now), stage: 'rotate', code: 'ROTATED', result: 'ok', role, project: projectName, mode, created, note: `已换人：${oldId || '未记录'} → ${newId}（${reason || 'context-full'}｜${mode}${created ? '/created' : ''}）`, evidence: { mode, created, ...(engine ? { engine } : {}), oldSessionId: oldId, newSessionId: newId, reason: String(reason || 'context-full'), from: oldId, to: newId, rotatedAt: iso(now), source: 'auto-rotate', ...(rotateResult && rotateResult.dshCheck ? { dshCheck: rotateResult.dshCheck } : {}), ...(rotateResult && rotateResult.bootPending ? { bootQueued: Boolean(rotateResult.bootPending.queued) } : {}), ...(archiveDeferred ? { archiveDeferred } : { archive: 'pending-daily' }) } };
+  if (!dryRun) appendAudit(auditFile, rotateRow);
+  if (!dryRun) {
+    appendAudit(auditFile, { at: iso(now), stage: 'broadcast_reboot', code: 'REBOOT_BROADCAST', result: 'ok', role, project: projectName, note: `已广播 ${others.length} 个角色重 boot`, evidence: { newSessionId: newId, roles: others } });
+  }
+  return {
+    oldId, newId, others, mode, created,
+    bootPending: rotateResult ? rotateResult.bootPending : null,
+    recordId: rotateResult ? rotateResult.recordId : '',
+  };
 }
 
 /* ── AC3（红线）：在办任务不换人 ─────────────────────────────────────── */
@@ -701,6 +687,16 @@ export async function runAutoRotateCycle(projectName, options = {}) {
       }
       actions.push({ stage: 'boot_check', code: 'boot_timeout', role: row.role });
     }
+  }
+
+  // B-4b2f（AC-W7）：写后 60 秒存在性兜底——名册指向的会话在 DSH 仍不存在 → 审计 1 行 + 告警 PM。
+  if (!dryRun) {
+    try {
+      const sweep = await sweepRosterPostChecks({ projectName: name, now, engineUrl });
+      if (sweep && sweep.missing && sweep.missing.length) {
+        actions.push({ stage: 'post_check', code: 'ROSTER_SESSION_MISSING', role: sweep.missing.map((x) => x.role).join(',') });
+      }
+    } catch { /* 兜底校验失败不阻断换人流水线 */ }
   }
 
   /* ① 夜间：只记账不换人（含 force），同夜同角色只 1 行 */

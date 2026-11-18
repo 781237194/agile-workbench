@@ -29,6 +29,9 @@ import { DshClient } from './dsh-session.mjs';
 import { roundsQuery, exportTranscriptToProject, auditOutput, archiveSession, firstTurnUsage, writeBackRotated, listArchives } from './session-archive.mjs';
 import { requireBoot } from './store.mjs';
 import { resolveDshBaseUrl, dshUrlMissingHint } from './dsh-url.mjs';
+// B-20261118-083150-4b2f（fa0e 补丁 A）：名册写入（四处映射 / 轮换记录 / BQ / 广播 / 事件）收归唯一入口，
+// session rotate 与 auto-rotate 都只调它；本文件不再直接写 members[].sessionId。
+import { rotateRoster, checkRotateHandover } from './roster-writer.mjs';
 
 // R-2e6b AC18.4：双档水位——30 万预警（提示准备归档/换人）、50 万强制归档/换人（与 c0a6 口径一致）。
 export const DEFAULT_TOKEN_WARN = 300000;
@@ -79,13 +82,8 @@ function readWorkbench() {
   try { return readJson(workbenchPath()); } catch { return null; }
 }
 
-function writeWorkbench(data) {
-  const file = workbenchPath();
-  ensureDir(path.dirname(file));
-  const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
-  fs.renameSync(tmp, file);
-}
+// B-20261118-083150-4b2f：workbench 的写入口已收归 roster-writer（json-atomic 锁内读改写），
+// 这里不再保留 `writeWorkbench`（裸 tmp+rename）——避免有人再拿它写 workbench。
 
 function atomicWriteJson(file, data) {
   ensureDir(path.dirname(file));
@@ -274,7 +272,7 @@ function usageOfSession(info) {
   return { uncachedInputTokens: uncached, cacheReadTokens: cacheRead, outputTokens: output, inputTokens: input, totalTokens: input + cacheRead + output };
 }
 
-function listDshSessions(engineOverride = '') {
+export function listDshSessions(engineOverride = '') {
   // B-405f 用例注入：沙盘里没有真 DSH，用 TEAM_DSH_FAKE 提供会话列表（只允许 TEAM_SELFTEST=1 时生效）。
   const fake = process.env.TEAM_SELFTEST === '1' ? String(process.env.TEAM_DSH_FAKE || '') : '';
   if (fake) {
@@ -618,74 +616,6 @@ export function consumeBootQueue(projectName, role, sessionId = '') {
 
 // ---------- 轮换 ----------
 
-function sortedSnapshot(map) {
-  return {
-    team: JSON.stringify(map.team, null, 2) + '\n',
-    manifest: map.manifestRaw ? JSON.stringify(map.manifestRaw, null, 2) + '\n' : null,
-    workbench: map.wb ? JSON.stringify(map.wb, null, 2) + '\n' : null,
-  };
-}
-
-function atomicWriteRaw(file, raw) {
-  ensureDir(path.dirname(file));
-  const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, raw, 'utf8');
-  fs.renameSync(tmp, file);
-}
-
-function restoreSnapshot(projectName, snap) {
-  const project = loadProject(projectName);
-  // 原子写（tmp+rename）：回滚中途断电不会留下半截文件（复核 P2-6）。
-  if (snap.team) atomicWriteRaw(PATHS.team, snap.team);
-  if (snap.manifest) atomicWriteRaw(path.join(project.path, '团队会话.json'), snap.manifest);
-  if (snap.workbench) atomicWriteRaw(workbenchPath(), snap.workbench);
-}
-
-function applyMaps({ projectName, role, oldId, newId, map, failAt }) {
-  const project = loadProject(projectName);
-  const team = loadTeam();
-  // 团队.json 是全局名册（单一 activeProject 镜像）：非活跃项目轮换不写它，避免污染当前项目映射。
-  const activeProject = String(team.activeProject || '') === projectName;
-  let teamRoster = activeProject ? 'updated' : 'skipped（非活跃项目，团队.json 是当前项目镜像）';
-  if (activeProject) {
-    const member = getMember(team, role);
-    if (!member) fail('BAD_ROLE', `团队名册没有角色：${role}`);
-    member.sessionId = newId;
-    if (failAt === 'afterTeam') fail('ROTATE_INJECTED_FAIL', '注入失败：团队.json 写入前');
-    atomicWriteJson(PATHS.team, team);
-  }
-
-  const manifest = map.manifestRaw || { project: projectName, teamMode: projectTeamMode(project), workspace: project.path, roles: [] };
-  manifest.roles = Array.isArray(manifest.roles) ? manifest.roles : [];
-  let row = manifest.roles.find((r) => r && r.role === role);
-  if (!row) {
-    row = { role, name: ROLE_NAMES[role] || role, title: `团队·${ROLE_NAMES[role] || role}`, sessionId: newId, reused: false, model: '' };
-    manifest.roles.push(row);
-  } else row.sessionId = newId;
-  manifest.generatedAt = nowIso();
-  if (failAt === 'afterManifest') fail('ROTATE_INJECTED_FAIL', '注入失败：团队会话.json 写入前');
-  atomicWriteJson(path.join(project.path, '团队会话.json'), manifest);
-
-  const wb = map.wb || { version: 1, activeProjectId: null, projects: [] };
-  wb.projects = Array.isArray(wb.projects) ? wb.projects : [];
-  let wp = wb.projects.find((p) => p && (p.name === projectName || p.path === project.path));
-  if (!wp) {
-    wp = { name: projectName, path: project.path, sessions: {}, workspace: { sessionIds: [] } };
-    wb.projects.push(wp);
-  }
-  wp.sessions = (wp.sessions && typeof wp.sessions === 'object') ? wp.sessions : {};
-  wp.sessions[role] = newId;
-  wp.workspace = (wp.workspace && typeof wp.workspace === 'object') ? wp.workspace : {};
-  wp.workspace.sessionIds = Array.isArray(wp.workspace.sessionIds) ? wp.workspace.sessionIds.map(String) : [];
-  if (oldId) wp.workspace.sessionIds = wp.workspace.sessionIds.filter((sid) => sid !== oldId);
-  if (!wp.workspace.sessionIds.includes(newId)) wp.workspace.sessionIds.push(newId);
-  wp.sessionMeta = (wp.sessionMeta && typeof wp.sessionMeta === 'object') ? wp.sessionMeta : {};
-  wp.sessionMeta[role] = { ...(wp.sessionMeta[role] || {}), updatedAt: nowIso() };
-  if (failAt === 'afterWorkbench') fail('ROTATE_INJECTED_FAIL', '注入失败：workbench.json 写入前');
-  writeWorkbench(wb);
-  return { teamRoster };
-}
-
 /**
  * 邮件归档的“计划”阶段（只读）：按项目 + 旧会话圈定要归档的消息。
  * 作用域规则（复核 P0-2）：
@@ -886,116 +816,94 @@ export async function rotateSession({
     newId = info.sessionId;
     created = true;
   } else {
-    if (!/^session-[A-Za-z0-9-]+$/.test(newId)) fail('BAD_SESSION', `会话 id 格式不对：${newId}`);
-    if (!offlineMode) {
-      if (list.ok) {
-        const info = (list.items || []).find((s) => s.sessionId === newId);
-        if (!info) fail('SESSION_NOT_FOUND', `指定会话不存在：${newId}；可先 session usage 或 DSH 会话列表确认`, { sessionId: newId });
-      } else {
-        fail('DSH_UNAVAILABLE', `无法校验指定会话：DSH 不可达（${list.why}）`);
-      }
-    }
+    // B-20261118-083150-4b2f：格式 / 旧副本形态 / DSH 存在性统一由 roster-writer 的写前校验判定
+    //（旧实现在这里自造 SESSION_NOT_FOUND，形成与单写入口两套判据；AC-W2 统一成 SESSION_NOT_IN_DSH，且零写入）。
   }
   if (newId === oldId) fail('SESSION_SAME', `新旧会话相同：${newId}`);
 
-  const snap = sortedSnapshot(map);
   const at = nowIso();
-  const recordId = `S-${stamp()}`;
   let archived = null;
-  // 事务外先声明：catch 里要按“写入前原文”恢复邮件/任务/锁，不能只恢复四处映射（复核 P0-2）。
+  // 事务外先声明：catch 里要按“写入前原文”恢复邮件/任务/锁；四处映射由 roster-writer 自己回滚（复核 P0-2）。
   let mailOriginals = [];
   let taskResult = { changed: [], originals: [] };
   let dispatchLock = { cleared: false, messageId: '' };
   try {
-    const mapResult = applyMaps({ projectName: name, role, oldId, newId, map, failAt });
-    const mailPlan = collectMailChanges({ role, oldId, newId, projectName: name });
-    mailOriginals = applyMailArchive(mailPlan, oldId, newId);
-    if (failAt === 'afterMail') fail('ROTATE_INJECTED_FAIL', '注入失败：邮件归档之后');
-    taskResult = stampTasks(name, role, oldId, newId);
-    dispatchLock = clearDispatchLockForRole(name, role);
-    const maps = { teamRoster: mapResult.teamRoster };
-    // 归档旧会话（只读保留）；失败只记，不回滚映射
-    if (oldId && !offlineMode && list.ok) {
-      try {
-        const client = new DshClient(engine);
-        await client.workspaceArchiveSession({ sessionId: oldId, stopActivity: true });
-        archived = { ok: true, sessionId: oldId };
-      } catch (e) {
-        archived = { ok: false, sessionId: oldId, why: e.message };
-      }
-    }
-    // R-703f F-5 / AC4：一真相三派生——写记录前先算一致性；不满足就按 F-6 回滚并判 ROTATE_MAPPING_MISMATCH，
-    // 错误里写明哪一角色/哪一字段不一致（catch 里 restoreSnapshot 会把映射/邮件/任务/锁全部恢复）。
-    const consistencyNow = checkSessionMap(name);
-    const fullRatio = `${roleIds.length}/${roleIds.length}`;
-    // 判「不一致」而不是「没绑全」：沙盘/新项目其它角色可能本来就没绑定（四路皆空）；
-    // 目标角色行必须一致；任何角色只要出现过 id 但相互不同（fields 含「会话 id 不一致」）就算冲突。
-    const targetRow = (consistencyNow.rows || []).find((row) => row && row.role === role) || null;
-    const badRows = (consistencyNow.rows || []).filter((row) => {
-      if (!row || row.consistent !== false) return false;
-      const fields = Array.isArray(row.fields) ? row.fields : [];
-      if (fields.some((text) => String(text).includes('不一致'))) return true;
-      const anyBound = Boolean(row.teamId || row.manifestId || row.wbId);
-      return row.role === role && anyBound;
+    const result = await rotateRoster({
+      projectName: name, role, newSessionId: newId,
+      mode: created ? 'auto' : 'manual', created, reason, by,
+      source: 'session-rotate', expectedOldId: oldId,
+      offline: offlineMode, dshList: list, engineUrl: engine, failAt, now: at,
+      recordExtra: {
+        force: Boolean(force),
+        archiveGate: { archived: gate.archived, archiveId: gate.archive ? gate.archive.id : null },
+        archiveDeferred,
+      },
+      // 其余事务步骤（邮件归档 / 任务会话指向 / 派单锁 / 旧会话归档 / 一致性闸门）在映射写完之后、
+      // 记账之前执行；抛错即由 roster-writer 回滚映射，本文件的 catch 再恢复邮件/任务/锁。
+      beforeFinalize: async ({ oldId: actualOld, newId: nextId, mapResult }) => {
+        const mailPlan = collectMailChanges({ role, oldId: actualOld, newId: nextId, projectName: name });
+        mailOriginals = applyMailArchive(mailPlan, actualOld, nextId);
+        if (failAt === 'afterMail') fail('ROTATE_INJECTED_FAIL', '注入失败：邮件归档之后');
+        taskResult = stampTasks(name, role, actualOld, nextId);
+        dispatchLock = clearDispatchLockForRole(name, role);
+        // 归档旧会话（只读保留）；失败只记，不回滚映射
+        if (actualOld && !offlineMode && list.ok) {
+          try {
+            const client = new DshClient(engine);
+            await client.workspaceArchiveSession({ sessionId: actualOld, stopActivity: true });
+            archived = { ok: true, sessionId: actualOld };
+          } catch (e) {
+            archived = { ok: false, sessionId: actualOld, why: e.message };
+          }
+        }
+        // R-703f F-5 / AC4：一真相三派生——写记录前先算一致性；不满足就按 F-6 回滚并判 ROTATE_MAPPING_MISMATCH，
+        // 错误里写明哪一角色/哪一字段不一致（roster-writer 回滚映射、catch 再恢复邮件/任务/锁）。
+        const consistencyNow = checkSessionMap(name);
+        const fullRatio = `${roleIds.length}/${roleIds.length}`;
+        // 判「不一致」而不是「没绑全」：沙盘/新项目其它角色可能本来就没绑定（四路皆空）；
+        // 目标角色行必须一致；任何角色只要出现过 id 但相互不同（fields 含「会话 id 不一致」）就算冲突。
+        const badRows = (consistencyNow.rows || []).filter((row) => {
+          if (!row || row.consistent !== false) return false;
+          const fields = Array.isArray(row.fields) ? row.fields : [];
+          if (fields.some((text) => String(text).includes('不一致'))) return true;
+          const anyBound = Boolean(row.teamId || row.manifestId || row.wbId);
+          return row.role === role && anyBound;
+        });
+        const consistencyEnforceable = consistencyNow.workbenchAvailable === true;
+        if (consistencyEnforceable && badRows.length) {
+          const detail = badRows.length
+            ? badRows.map((row) => `${row.role}:${(row.fields || row.mismatched || []).join('/') || '不一致'}`).join('，')
+            : `ratio=${consistencyNow.ratio}（应为 ${fullRatio}），ok=${consistencyNow.ok}`;
+          fail('ROTATE_MAPPING_MISMATCH', `轮换后四处映射不一致（${detail}）；已按 F-6 回滚到旧会话 ${actualOld || '(无)'}，本轮不换人`, {
+            role, project: name, from: actualOld, to: nextId, consistency: consistencyNow, expectedRatio: fullRatio,
+          });
+        }
+        return {
+          recordExtra: {
+            archived,
+            mailArchived: mailPlan.changes.length,
+            mailArchivedIds: mailPlan.changes.map((c) => c.id),
+            mailSkipped: mailPlan.skipped.length,
+            mailSkippedReasons: mailPlan.skipped.slice(0, 20),
+            tasks: taskResult.changed,
+            dispatchLock,
+            teamRoster: mapResult ? mapResult.teamRoster : 'updated',
+            consistency: consistencyNow,
+            // 沙盘/未绑定 workbench 项目时不判硬门（可一致性前提不存在），但如实标注。
+            consistencyEnforced: consistencyNow.workbenchAvailable === true,
+          },
+          eventExtra: {
+            force: Boolean(force), mailArchived: mailPlan.changes.length, mailSkipped: mailPlan.skipped.length,
+            tasks: taskResult.changed, archived, archiveDeferred: Boolean(archiveDeferred),
+          },
+        };
+      },
     });
-    const consistencyEnforceable = consistencyNow.workbenchAvailable === true;
-    if (consistencyEnforceable && badRows.length) {
-      const detail = badRows.length
-        ? badRows.map((row) => `${row.role}:${(row.fields || row.mismatched || []).join('/') || '不一致'}`).join('，')
-        : `ratio=${consistencyNow.ratio}（应为 ${fullRatio}），ok=${consistencyNow.ok}`;
-      fail('ROTATE_MAPPING_MISMATCH', `轮换后四处映射不一致（${detail}）；已按 F-6 回滚到旧会话 ${oldId || '(无)'}，本轮不换人`, {
-        role, project: name, from: oldId, to: newId, consistency: consistencyNow, expectedRatio: fullRatio,
-      });
-    }
-    const record = {
-      id: recordId, project: name, role, from: oldId, to: newId, at, by, reason,
-      // R-703f F-2/F-4：status=这条记录是不是当前绑定；mode=自动建会话还是 Owner 手建后登记（沿用 from/to）。
-      status: 'active', mode: created ? 'auto' : 'manual', retiredAt: null,
-      force: Boolean(force), created, archived,
-      archiveGate: { archived: gate.archived, archiveId: gate.archive ? gate.archive.id : null },
-      archiveDeferred,
-      mailArchived: mailPlan.changes.length,
-      mailArchivedIds: mailPlan.changes.map((c) => c.id),
-      mailSkipped: mailPlan.skipped.length,
-      mailSkippedReasons: mailPlan.skipped.slice(0, 20),
-      tasks: taskResult.changed,
-      dispatchLock, teamRoster: maps.teamRoster,
-      consistency: consistencyNow,
-      // 沙盘/未绑定 workbench 项目时不判硬门（可一致性前提不存在），但如实标注。
-      consistencyEnforced: consistencyNow.workbenchAvailable === true,
-    };
-    // B-405f ③：rotate 后自动拉起一次（写待启动队列 + 尝试推送启动提示），失败只记、不阻断轮换。
-    try {
-      record.bootPending = await queueBootForRole({
-        projectName: name, role, sessionId: newId,
-        reason: `session_rotate:${reason || '未写原因'}`, offline: offlineMode,
-      });
-    } catch (e) {
-      record.bootPending = { queued: false, why: String((e && e.message) || e) };
-    }
-    // R-703f F-7：上一份同角色记录标 retired（历史记录文件保留可查），当前角色文件=active 新记录。
-    const roleFile = path.join(rotateDir(name), `${role}.json`);
-    const previous = (() => { try { return readJson(roleFile); } catch { return null; } })();
-    if (previous && previous.id && previous.id !== recordId) {
-      record.previous = { id: previous.id, from: previous.from || '', to: previous.to || '', status: 'retired', retiredAt: at };
-      try {
-        const prevHistory = path.join(rotateDir(name), `${previous.id}.json`);
-        const prevRow = readJson(prevHistory);
-        if (prevRow) atomicWriteJson(prevHistory, { ...prevRow, status: 'retired', retiredAt: at });
-      } catch { /* 历史文件缺失不阻断轮换 */ }
-    }
-    atomicWriteJson(roleFile, record);
-    atomicWriteJson(path.join(rotateDir(name), `${recordId}.json`), record);
-    appendEvent({
-      role: by, sessionId: newId, action: 'session_rotate', project: name, target: role,
-      note: `${oldId || '(无)'} → ${newId}（${reason || '未写原因'}）`,
-      data: { from: oldId, to: newId, force: Boolean(force), mailArchived: mailPlan.changes.length, mailSkipped: mailPlan.skipped.length, tasks: taskResult.changed, archived, archiveDeferred: Boolean(archiveDeferred) },
-    });
-    return record;
+    // 记录（含 bootPending / broadcastTo / 会话轮换两份文件）由 roster-writer 落盘；对外返回结构保持不变。
+    return result.record;
   } catch (e) {
-    // 回滚：四处映射 + 邮件 + 任务 + 派单锁全部恢复到轮换前，再归档本次创建的新会话。
-    const rollback = { maps: false, mail: 0, tasks: 0, dispatchLock: false, newSessionArchived: false, errors: [] };
-    try { restoreSnapshot(name, snap); rollback.maps = true; } catch (err) { rollback.errors.push(`映射恢复失败：${err.message}`); }
+    // 回滚：邮件 + 任务 + 派单锁恢复到轮换前（映射已由 roster-writer 回滚），再归档本次创建的新会话。
+    const rollback = { maps: Boolean(e && e.details && e.details.rollback), mail: 0, tasks: 0, dispatchLock: false, newSessionArchived: false, errors: [] };
     for (const o of mailOriginals) {
       try { fs.writeFileSync(o.file, o.raw, 'utf8'); rollback.mail++; } catch (err) { rollback.errors.push(`邮件恢复失败：${path.basename(o.file)}`); }
     }
@@ -1312,14 +1220,15 @@ export async function cmdSession(args) {
         fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话（当前令牌角色 ${bootInfo.role || '-'}）`, { role, project: projectName, tokenRole: bootInfo.role || '' });
       }
     }
-    // B-3f02：rotate 前机械检查接任包 6 小节；4 个必填小节缺失 → 拒 rotate（零副作用）。
+    // B-3f02 / B-20261118-083150-4b2f：rotate 前机械检查接任包小节；4 个必填【】小节缺失 → 拒 rotate（零副作用）。
+    // 交接判据统一走 roster-writer.checkRotateHandover（内部固定 validateHandover），auto-rotate 用同一函数 → 两路径同判。
     try {
-      const pre = buildHandover({ projectName, role, sessionId: String(args.session || '') });
-      const v = validateHandover(pre.text);
-      if (!v.ok) {
-        fail('HANDOVER_INCOMPLETE', `接任包缺必填小节：${v.missingRequired.concat(v.emptyRequired).join('、')}；补齐后再 rotate`, { role, missing: v.missingRequired.concat(v.emptyRequired), redFlags: v.redFlags });
+      const v = await checkRotateHandover({ projectName, role, sessionId: String(args.session || '') });
+      if (v.code === 'HANDOVER_INCOMPLETE' || (v.code === '' && !v.ok)) {
+        const missing = (v.missingRequired || []).concat(v.emptyRequired || []);
+        fail('HANDOVER_INCOMPLETE', `接任包缺必填小节：${missing.join('、')}；补齐后再 rotate`, { role, missing, redFlags: v.redFlags, source: v.source });
       }
-    } catch (e) { if (e && e.code === 'HANDOVER_INCOMPLETE') throw e; /* 其它失败不阻 rotate */ }
+    } catch (e) { if (e && e.code === 'HANDOVER_INCOMPLETE') throw e; /* 其它失败不阻 rotate（与原实现同口径） */ }
     const dryRun = Boolean(args['dry-run']);
     const record = await rotateSession({
       projectName,

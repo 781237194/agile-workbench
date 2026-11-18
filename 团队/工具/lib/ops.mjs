@@ -64,6 +64,8 @@ import { auditHardcodedPaths, pathAuditLines } from './path-audit.mjs';
 import { memoryCheck } from './memory-check.mjs';
 // R-5b14：每角色默认交接文档（<角色>/产出/交接-最新.md）的只读发现 + 「最新」判定（固定名优先）。
 import { handoverBriefLine } from './handover.mjs';
+// B-20261118-083150-4b2f（AC-W1）：名册成员入册只允许走 roster-writer 的唯一入口。
+import { pushRosterMember } from './roster-writer.mjs';
 import { checkEvidenceGate } from './evidence.mjs';
 import { bumpRound, archiveSession, confirmArchive, ROUNDS_MAX } from './session-archive.mjs';
 import {
@@ -11744,7 +11746,8 @@ export function cmdRoster(args) {
     }
     if (getMember(team, role)) fail('ROLE_EXISTS', `角色已存在：${role}`);
     const m = { role, name: args.name || ROLE_NAMES[role] || role, status: 'active', joinedAt: nowIso(), sessionId: args.session || '' };
-    mutateTeam((t) => { t.members.push(m); return t; });
+    // B-20261118-083150-4b2f（AC-W1）：入册只走 roster-writer 的唯一入口（同理 sessionId 赋值）
+    mutateTeam((t) => { pushRosterMember(t, m); return t; });
     const card = path.join(PATHS.roles, `${role}.md`);
     if (!exists(card)) writeText(card, `# ${m.name}\n\n- 职责：${args.duty || '（待补）'}\n- 每次先 boot。\n`);
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'roster_add', project: b.project, target: role, note: `${m.name} ${args.reason || ''}`, data: { member: m, teamMode: addMode } });

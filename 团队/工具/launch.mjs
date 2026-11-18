@@ -16,6 +16,8 @@ const { pickReuse, buildRotation } = launchReuse;
 // B-20261117-113925-b64d：团队工具的状态文件写入也走 ad44 的原子写（tmp→fsync→bak→rename + 锁），
 // 不再裸 fs.writeFileSync（崩溃时会留半截 JSON）。
 import { writeJsonAtomic } from './lib/json-atomic.mjs';
+// B-20261118-083150-4b2f（AC-W1）：名册 sessionId 的赋值/入册只允许在 lib/roster-writer.mjs 里。
+import { setMemberSession, pushRosterMember } from './lib/roster-writer.mjs';
 
 function parse(argv) {
   const out = { _: [] };
@@ -350,13 +352,14 @@ if (rotationFailedRoles.size) {
   }
 }
 
-// 回填已有成员的 sessionId；可选把新角色加进 roster
+// 回填已有成员的 sessionId；可选把新角色加进 roster（唯一赋值/入册入口在 lib/roster-writer.mjs，AC-W1）
 mutateTeam((t) => {
   for (const s of sessions) {
     if (rotationFailedRoles.has(s.role)) continue;
-    const m = t.members.find((x) => x.role === s.role);
-    if (m) m.sessionId = s.sessionId;
-    else if (addMembers) t.members.push({ role: s.role, name: ROLE_NAMES[s.role] || s.role, status: 'active', joinedAt: nowIso(), sessionId: s.sessionId });
+    const member = setMemberSession(t, s.role, s.sessionId);
+    if (!member && addMembers) {
+      pushRosterMember(t, { role: s.role, name: ROLE_NAMES[s.role] || s.role, status: 'active', joinedAt: nowIso(), sessionId: s.sessionId });
+    }
   }
   return t;
 });
