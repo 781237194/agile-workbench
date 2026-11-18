@@ -168,6 +168,40 @@ const PROJECT = '沙盘项目';
     { before: beforeReal, after: { team: sha(realTeamFile), store: sha(realStoreFile) } });
 
 
+  /* ===== B-R3 补：perf-log.js（PM 2026-11-18 17:34 裁定 A 案 = 唯一实现） ===== */
+  {
+    const perfLog = require(path.join(ROOT, 'src', 'perf-log.js'));
+    const savedRoot = process.env.TEAM_ROOT;
+    process.env.TEAM_ROOT = path.join(SB, 'pl-team');
+    try {
+      const proj2 = 'perf-log-夹具';
+      perfLog.record(proj2, { kind: 'ipc', name: 'slow-x', ms: 120 });
+      perfLog.record(proj2, { kind: 'ipc', name: 'fast-x', ms: 5 });
+      const rows2 = perfLog.recent(proj2, 10);
+      check('B-R3⑦ perf-log.record：≥100ms 落盘、<100ms 丢弃；recent 新的在前',
+        rows2.length === 1 && rows2[0].name === 'slow-x' && rows2[0].slow === true && rows2[0].kind === 'ipc', { rows: rows2 });
+      const proj3 = 'perf-log-prune';
+      const dir3 = perfLog.shardDir(proj3);
+      fs.mkdirSync(dir3, { recursive: true });
+      const oldDay = new Date(Date.now() - 8 * 24 * 3600 * 1000 + 8 * 3600 * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+      const stale = path.join(dir3, '性能-' + oldDay + '.jsonl');
+      fs.writeFileSync(stale, '{}\n');
+      const removed = perfLog.pruneShards(proj3, Date.now());
+      check('B-R3⑧ perf-log.pruneShards：超过 7 天的分片被清理', removed >= 1 && !fs.existsSync(stale), { removed });
+      check('B-R3⑨ API 别名与文件头契约一致（logSlow/readPerfRecent/prunePerfShards）',
+        typeof perfLog.logSlow === 'function' && typeof perfLog.readPerfRecent === 'function' && typeof perfLog.prunePerfShards === 'function', {});
+      const fake = new Map();
+      const fakeIpc = { handle: (c, f) => fake.set(c, f) };
+      const wrappedOne = perfLog.wrapIpcHandle(fakeIpc, () => proj2);
+      fakeIpc.handle('team:fixture-slow', async () => 'ok');
+      check('B-R3⑩ perf-log.wrapIpcHandle 替换 handle：后续注册的通道被计时包装（注册即生效）',
+        wrappedOne === true && fake.has('team:fixture-slow') && typeof fake.get('team:fixture-slow') === 'function',
+        { wrappedOne, registered: [...fake.keys()] });
+    } finally {
+      if (savedRoot === undefined) delete process.env.TEAM_ROOT; else process.env.TEAM_ROOT = savedRoot;
+    }
+  }
+
   /* ===== R3+R4（B，T-20261118-172619-c495）：IPC 合并 / 慢调用可观测 / 渲染层定时器可见性 ===== */
   {
     const coalesce = require(path.join(ROOT, 'src', 'ipc-coalesce.js'));
