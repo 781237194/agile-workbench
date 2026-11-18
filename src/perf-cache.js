@@ -286,6 +286,7 @@ module.exports = {
   recordPerf,
   readPerfRecent,
   perfShardPath,
+  prunePerfShards,
   perfStats,
   withIpcTiming,
   timeSync,

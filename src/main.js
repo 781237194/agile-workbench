@@ -44,6 +44,15 @@ const rawIpcHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => rawIpcHandle(channel, (typeof handler === 'function'
   ? perfCache.withIpcTiming(channel, handler, { projectNameOf: activeTeamProjectNameForPerf, teamRootOf: resolveTeamRoot })
   : handler));
+// R-b34a R3（T-20261118-172619-c495，B 负责）：同通道 + 同参数合并（只读 allowlist，写操作绝不合并）。
+// 只合并在途重复请求（后到者复用同一 Promise）；完成后不复用结果（显式刷新必须拿新值）。AWB_IPC_COALESCE_MS=0 关闭。
+// 见 src/ipc-coalesce.js（cacheResultMs>0 才启用「完成后窗口内复用」，默认关闭）。
+const ipcCoalesce = require('./ipc-coalesce.js');
+const ipcCoalesceMs = (() => {
+  const raw = Number(process.env.AWB_IPC_COALESCE_MS);
+  return process.env.AWB_IPC_COALESCE_MS === undefined || !Number.isFinite(raw) || raw < 0 ? 300 : raw;
+})();
+ipcMain.handle = ipcCoalesce.wrapHandle(ipcMain.handle, { windowMs: ipcCoalesceMs });
 // T-20261118-090620-6e39：团队工具子进程的环境。
 // 生产实例（非 TEAM_SELFTEST）不把 TEAM_ROOT / TEAM_PROJECTS_ROOT 继承给子进程——旧行为下子进程里的
 // isSandboxTeamRoot() 会因这两个 env 存在而判真，把真实唤醒当沙盘静默跳过（2026-11-18 09:04 事故：PM 摘要/升级/评审唤醒 103 条全被跳过）。
