@@ -393,9 +393,14 @@ async function main() {
     process.exitCode = 0;
   } finally {
     try { if (cdp) cdp.close(); } catch { /* ignore */ }
-    try { child.kill(); } catch { /* ignore */ }
+    // P0 B-20261118-200539-e923：**绝对禁止按进程名/路径批量杀 electron**——Owner 的生产工作台
+    // 就是 D:\deepseek\agile-workbench\node_modules\electron\dist\electron.exe，曾被这里误杀两次。
+    // 只允许回收本脚本自己 spawn 的那棵进程树（child.pid → taskkill /PID /T /F）。
+    try { if (child && child.pid) child.kill(); } catch { /* ignore */ }
     await sleep(1200);
-    try { execFileSync('powershell', ['-NoProfile', '-Command', 'Get-Process electron -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*deepseek*" } | Stop-Process -Force -ErrorAction SilentlyContinue'], { timeout: 20000 }); } catch { /* ignore */ }
+    try {
+      if (child && child.pid) execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { timeout: 20000, stdio: 'ignore' });
+    } catch { /* 已退出则忽略 */ }
     try { fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* ignore */ }
   }
 }
