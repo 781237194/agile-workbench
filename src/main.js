@@ -390,6 +390,30 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
       return { ok: false, code: (error && error.code) || 'UPGRADE_FAILED', message: String((error && error.message) || error).slice(0, 300), from: current, to: latest, sha256, steps: emptySteps, dryRun, restartHint: '请重启后生效' };
     } finally { upgradeBusy = false; }
   });
+  // ── e610 AC6：自动检查（只检查/只提示小圆点，绝不自动下载或安装）────────────────
+  // 开关存 workbench.json 的 ui.autoUpgradeCheck（与 ui.zoom 同一写入口）；渲染层按 intervalMs 定时只调 upgrade-check。
+  const UPGRADE_AUTO_INTERVAL_MS = (() => {
+    const n = Number(process.env.AWB_UPGRADE_AUTO_INTERVAL_MS || 0);
+    return Number.isFinite(n) && n >= 1000 ? Math.floor(n) : 30 * 60 * 1000;
+  })();
+  const readUpgradeAutoPref = () => {
+    try {
+      const store = readStore();
+      return Boolean(store && store.ui && store.ui.autoUpgradeCheck === true);
+    } catch { return false; }
+  };
+  rawIpcHandle('app:upgrade-auto-get', () => ({ ok: true, enabled: readUpgradeAutoPref(), intervalMs: UPGRADE_AUTO_INTERVAL_MS }));
+  rawIpcHandle('app:upgrade-auto-set', (_e, enabled) => {
+    const want = enabled === true;
+    try {
+      const store = readStore();
+      store.ui = { ...(store.ui || {}), autoUpgradeCheck: want };
+      writeStore(store);
+    } catch (error) {
+      return { ok: false, code: 'UPGRADE_AUTO_WRITE_FAILED', message: String((error && error.message) || error).slice(0, 200), enabled: readUpgradeAutoPref(), intervalMs: UPGRADE_AUTO_INTERVAL_MS };
+    }
+    return { ok: true, enabled: readUpgradeAutoPref(), intervalMs: UPGRADE_AUTO_INTERVAL_MS };
+  });
 // 默认数据与 Chromium 缓存都放在仓库内，不再落到 C:\Users\...\AppData。
 // 自测时 Chromium/状态也进沙盘根，避免两个自测实例抢同一份 userdata。
 // 布局自检同样用独立数据根（.layout-check-data），只读快照，不碰真实工作台状态。
@@ -7758,6 +7782,24 @@ ipcMain.handle('theme:metrics', async () => {
       const registeredMode = readTeamModeValue(registration && registration.teamMode);
       const storedMode = readTeamModeValue(stored && stored.teamMode);
       const restoreMode = requestedMode || registeredMode || storedMode || DEFAULT_TEAM_MODE;
+      // 97db AC4 口径（tester M-20261119-035018-ec6bda）：对「workbench 记录已删、目录仍在」的项目点恢复时，
+      // 必须先把项目记录重建回 store，否则下面的 sessions 段判据恒 false（persisted 需要 stored.id）。
+      if (!stored) {
+        try {
+          const fresh = readStore();
+          const at = now();
+          const recreated = {
+            id: id('P'), name: hit.name, path: projectDir, teamName: hit.name, teamMode: restoreMode,
+            createdAt: at, updatedAt: at, ownerReview: null,
+            tasks: [], messages: [], proposals: [], commits: [], votes: [],
+            pendingAck: [], pendingAckAt: null, events: [], workspace: null, sessionMeta: {},
+            dshWorkspaceId: null, workspacePath: null, requirements: [], workflowMirror: null, sessions: {}
+          };
+          fresh.projects.push(recreated);
+          writeStore(fresh);
+          stored = recreated;
+        } catch { /* 记录重建失败不阻断恢复；sessions 段会如实 missing */ }
+      }
       // dry-run 预览必须在任何写盘之前返回：下面的 setProjectTeamMode 会写 workbench.json、
       // 同步 团队.json 名册，并通过 ensureProjectReady 改 项目.json/workspace.json。
       // dry-run 只跑旧 launch.mjs --dry-run 拿角色计划，一个字节都不落盘。

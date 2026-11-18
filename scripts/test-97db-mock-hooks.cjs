@@ -102,6 +102,31 @@ function seed() {
     try { cdp2.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ }
     await sleep(700); try { ws2.close(); } catch { /* ignore */ } try { child2.kill(); } catch { /* ignore */ } await sleep(300); try { if (child2.pid && child2.exitCode === null) spawnSync('taskkill', ['/PID', String(child2.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ }
   }
+  // ③ AC4 实景口径（tester M-20261119-035018-ec6bda）：workbench 项目记录已删、目录仍在 → 恢复应重建记录并让 sessions 段转绿
+  try {
+    const wb = JSON.parse(fs.readFileSync(path.join(DATA, 'userdata', 'workbench.json'), 'utf8'));
+    wb.projects = (wb.projects || []).filter((x) => !(x && String(x.path || '').toLowerCase() === PROJ.toLowerCase()));
+    fs.writeFileSync(path.join(DATA, 'userdata', 'workbench.json'), JSON.stringify(wb, null, 2) + '\n', 'utf8');
+  } catch { /* ignore */ }
+  const child3 = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + (PORT + 2)], { cwd: ROOT, env: env2, stdio: 'ignore', windowsHide: false });
+  const target3 = await waitTarget(PORT + 2, 90000, (item) => item && item.type === 'page' && String(item.url || '').includes('renderer/index.html'));
+  check('U15 记录已删场景实例启动', Boolean(target3));
+  if (target3) {
+    const ws3 = new WebSocket(target3.webSocketDebuggerUrl);
+    await new Promise((resolve) => ws3.addEventListener('open', resolve, { once: true }));
+    const cdp3 = new Cdp(ws3); await cdp3.send('Runtime.enable');
+    for (let i = 0; i < 200; i += 1) { const ok = await cdp3.evaluate('document.readyState === "complete" && Boolean(window.workbench && window.workbench.teamRestore)'); if (ok === true) break; await sleep(400); }
+    const res3 = await cdp3.evaluate('(async () => { try { return await window.workbench.teamRestore({ name: "沙盘项目" }); } catch (e) { return { threw: String((e && e.message) || e) }; } })()');
+    const auditOk3 = Boolean(res3 && res3.restoreAudit) && res3.restoreAudit.ok === true && res3.restoreAudit.stages.sessions === true;
+    check('U16 记录已删后恢复：ok:true 且四段全 true（含 sessions）', Boolean(res3) && res3.ok === true && auditOk3, res3 && { ok: res3.ok, audit: res3.restoreAudit, code: res3.code, why: res3.why });
+    let store3 = null;
+    try { store3 = JSON.parse(fs.readFileSync(path.join(DATA, 'userdata', 'workbench.json'), 'utf8')); } catch { store3 = null; }
+    const project3 = store3 && (store3.projects || []).find((x) => x && String(x.path || '').toLowerCase() === PROJ.toLowerCase());
+    const mapped3 = project3 && project3.sessions ? Object.values(project3.sessions).filter(Boolean) : [];
+    check('U17 记录重建 + 会话映射 6/6', Boolean(project3) && mapped3.length === 6, { mapped: mapped3.length, exists: Boolean(project3) });
+    try { cdp3.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ }
+    await sleep(700); try { ws3.close(); } catch { /* ignore */ } try { child3.kill(); } catch { /* ignore */ } await sleep(300); try { if (child3.pid && child3.exitCode === null) spawnSync('taskkill', ['/PID', String(child3.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ }
+  }
   try { fs.writeFileSync(path.join(OUT, 'mock-hooks-run.json'), JSON.stringify({ at: new Date().toISOString(), checks: rows }, null, 2) + '\n', 'utf8'); } catch { /* ignore */ }
   try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
   const failed = rows.filter((r) => !r.ok);
