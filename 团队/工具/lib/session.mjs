@@ -1366,21 +1366,26 @@ export async function cmdSession(args) {
     if (String(args._[2] || '').toLowerCase() === 'receipt') {
       const sandbox = String(process.env.TEAM_SELFTEST || '') === '1';
       const enforce = String(process.env.TEAM_BOOT_ENFORCE || '') === '1';
+      // B-20261118-163400-3ad1（B 交叉审计 P1-1）：本分支与 rotate（下方 :1397 起同一套路）口径必须一致——
+      // 沙盘且未 enforce → 与 rotate 一样**显式豁免**（by 记 sandbox，审计可查），不再因为
+      // tokenRole 被写成 selftest 而恒 PERMISSION_DENIED（旧实现：receipt 沙盘必拒 / rotate 沙盘全放）。
+      const sandboxExempt = sandbox && !enforce;
       let tokenRole = 'selftest';
-      if (!sandbox || enforce) {
+      if (!sandboxExempt) {
         const token = String(args.boot || '').trim();
         if (!token) fail('BOOT_REQUIRED', '落交接回执必须带 --boot 启动令牌', { role, project: projectName });
         tokenRole = String(requireBoot(token).role || '');
+        const allowed = tokenRole === role
+          || ['pm', 'owner'].includes(tokenRole)
+          || (tokenRole === 'product' && role === 'pm');
+        if (!allowed) {
+          fail('PERMISSION_DENIED', `只有本人/PM/Owner（产品仅可为 PM）能落交接回执（当前令牌角色 ${tokenRole}）`, { role, project: projectName, tokenRole });
+        }
       }
-      const allowed = tokenRole === role
-        || ['pm', 'owner'].includes(tokenRole)
-        || (tokenRole === 'product' && role === 'pm');
-      if (!allowed) {
-        fail('PERMISSION_DENIED', `只有本人/PM/Owner（产品仅可为 PM）能落交接回执（当前令牌角色 ${tokenRole}）`, { role, project: projectName, tokenRole });
-      }
-      const rec = recordHandoverReceipt(projectName, role, { by: tokenRole, messageId: String(args['message-id'] || '') });
+      const byRole = sandboxExempt ? 'sandbox' : tokenRole;
+      const rec = recordHandoverReceipt(projectName, role, { by: byRole, messageId: String(args['message-id'] || '') });
       out(args,
-        `交接回执已记录：${rec.receipt.id} ｜ ${role} ｜ ${rec.receipt.path} ｜ ${rec.receipt.bytes}B ｜ sha256 ${rec.receipt.sha256.slice(0, 12)}…\n记录：${rec.file}\n下一步：PM 核对后 session rotate --role ${role}（rotate 会自动校验该回执 sha）`,
+        `交接回执已记录：${rec.receipt.id} ｜ ${role} ｜ ${rec.receipt.path} ｜ ${rec.receipt.bytes}B ｜ sha256 ${rec.receipt.sha256.slice(0, 12)}…${sandboxExempt ? `（沙盘豁免：by=sandbox，未校验令牌；设 TEAM_BOOT_ENFORCE=1 可验门禁本体）` : ''}\n记录：${rec.file}\n下一步：PM 核对后 session rotate --role ${role}（rotate 会自动校验该回执 sha）`,
         { ok: true, ...rec });
       return;
     }

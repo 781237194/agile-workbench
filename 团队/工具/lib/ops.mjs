@@ -26,6 +26,8 @@ import {
   onPmCriticalMessage,
   // B-20261117-224405-d376：任务 id 归一（布尔占位不再进正文/邮箱）
   normalizeTaskId,
+  // B-20261118-163238-1ca5：消息正文上限归一（与 store.sendMessage 单源，防两处口径漂移）
+  normalizeMessageMaxChars,
 } from './store.mjs';
 import { dispatchGateFor, scanClaims, claimSummary, clearClaimFlags, CLAIM_OVERDUE_MIN, CLAIM_STALLED_MIN } from './claim-watch.mjs';
 import { DshClient } from './dsh-session.mjs';
@@ -1242,7 +1244,8 @@ const DISPATCH_FILE_HINT = {
 };
 
 function messageMaxChars() {
-  try { return Number(loadTeam().config.messageMaxChars || 600); } catch { return 600; }
+  // B-1ca5：非法值（NaN/负数/0/缺失）统一回落 600，与 store.sendMessage 共用同一归一函数（单源）。
+  try { return normalizeMessageMaxChars(loadTeam().config.messageMaxChars); } catch { return 600; }
 }
 
 /** 程序生成的通知正文超限时只截正文，不截状态；截断必须留痕，不静默。 */
@@ -4798,7 +4801,7 @@ export async function cmdBoot(args) {
     ? '快速模式: 需求评审=需求分析师 ｜ 技术评审记录=程序员A ｜ 投票=vote start/cast/status'
     : '完整模式: 需求评审=产品设计师 ｜ 技术评审记录=产品/程序员A ｜ 投票=vote start/cast/status');
   lines.push(`阶段: ${team.phase} ｜ 活跃成员: ${activeRoles(team).filter((r) => rolesForMode(teamMode).includes(r)).join(', ')} ｜ 当前锁: ${locks.length ? locks.map((l) => l.key + '@' + l.role).slice(0, 6).join(', ') : '无'}`);
-  lines.push(`纪律: 中文思考、中文回复、中文写文档 ｜ 每轮先读《团队宪法》（唯一最高优先级）；项目铁律按需（开工/接手读一次即可） ｜ 消息≤${team.config.messageMaxChars}字 ｜ 回执≤${team.config.ackNoteMaxChars}字 ｜ 先读索引再找文件`);
+  lines.push(`纪律: 中文思考、中文回复、中文写文档 ｜ 每轮先读《团队宪法》（唯一最高优先级）；项目铁律按需（开工/接手读一次即可） ｜ 消息≤${messageMaxChars()}字 ｜ 回执≤${team.config.ackNoteMaxChars}字 ｜ 先读索引再找文件`);
   lines.push('派单闭环: ack=已回执（收到/认领）≠ 已完成；执行正文任务 → 产出写本角色目录（开发代码写 site/**）→ 完成回执 + task done --evidence');
   lines.push(`结构化输出: ${OUTPUT_DISCIPLINE}`);
   const outSpec = OUTPUT_DOCS[role];

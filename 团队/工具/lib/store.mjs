@@ -961,6 +961,16 @@ export function normalizeTaskId(raw) {
   return text;
 }
 
+/**
+ * B-20261118-163238-1ca5：消息正文上限的唯一归一函数（store.sendMessage 与 ops 预检/截断共用，避免两处口径漂移）。
+ * 非法值两个方向都要回落默认：'abc' → NaN（`len > NaN` 恒 false → 上限失效）；负数（任何正文都超上限 → 全量误拒）；
+ * 0 / 缺失 / Infinity / 负零 一并回落 fallback。
+ */
+export function normalizeMessageMaxChars(raw, fallback = 600) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
 export function sendMessage(msg) {
   // R-9db6 F-9db6-10②：断消息通道注入（只在测试里设），用于造 RECEIPT_FAILED；生产默认不设。
   if (process.env.TEAM_MESSAGE_SEND_FAIL === '1') {
@@ -970,7 +980,12 @@ export function sendMessage(msg) {
   if (msg.from !== 'system' && !getMember(team, msg.from)) fail('NO_SENDER', `发件人不在团队：${msg.from}`);
   const to = getMember(team, msg.to);
   if (!to || to.status !== 'active') fail('NO_RECIPIENT', `收件人不在团队或未激活：${msg.to}`);
-  const max = Number(team.config.messageMaxChars || 600);
+  // B-20261118-163238-1ca5：非法配置值必须回落默认（两个方向都要堵）——
+  //  · 'abc' → Number('abc')=NaN → body.length > NaN 恒 false → **上限失效**（700 字照发）；
+  //  · 负数（如 -5）→ 任何非空正文都 > -5 → **所有消息被拒**；
+  //  · 0 / 缺失 → 回落 600（保持旧行为）。
+  // 归一函数与 ops 预检共用 normalizeMessageMaxChars（单源）。
+  const max = normalizeMessageMaxChars(team.config && team.config.messageMaxChars);
   const body = String(msg.body || '').trim();
   if (!body) fail('EMPTY_MESSAGE', '消息正文不能为空');
   if (body.length > max) fail('MESSAGE_TOO_LONG', `消息超过 ${max} 字，请拆成多条`, { length: body.length, max });
@@ -1022,6 +1037,32 @@ export function onPmCriticalMessage(fn) {
   return pmCriticalHooks.length;
 }
 
+/**
+ * B-20261118-163239-64bc：单个坏 JSON 不得阻断整个邮箱扫描（ack 曾因同目录一个 `{ bad` 直接 BAD_JSON 退出）。
+ * 口径：读成功 → 消息；SyntaxError/BAD_JSON → 跳过该文件、累计计数、stderr 留痕（可观测），不影响正常消息。
+ * 其它 IO 错误（EACCES 等）仍抛出——那是真故障，不能被吞。
+ */
+const mailboxBadJson = { count: 0, files: [] };
+export function readMailboxBadJsonStats() {
+  return { count: mailboxBadJson.count, files: mailboxBadJson.files.slice(-20) };
+}
+function readMailboxJson(file) {
+  try {
+    return readJson(file, null);
+  } catch (e) {
+    if (e && (e.code === 'BAD_JSON' || e instanceof SyntaxError)) {
+      mailboxBadJson.count += 1;
+      mailboxBadJson.files.push(String(file));
+      if (mailboxBadJson.files.length > 200) mailboxBadJson.files.splice(0, mailboxBadJson.files.length - 200);
+      try {
+        console.warn('MAILBOX_BAD_JSON_SKIPPED ' + JSON.stringify({ file: String(file), total: mailboxBadJson.count, cause: String((e && e.message) || e).slice(0, 120) }));
+      } catch { /* 告警失败不影响扫描 */ }
+      return null;
+    }
+    throw e;
+  }
+}
+
 export function listInbox(role, { includeCur = false, project = '' } = {}) {
   const out = [];
   for (const box of includeCur ? ['new', 'cur'] : ['new']) {
@@ -1029,11 +1070,10 @@ export function listInbox(role, { includeCur = false, project = '' } = {}) {
     if (!exists(dir)) continue;
     for (const name of fs.readdirSync(dir)) {
       if (!name.endsWith('.json')) continue;
-      try {
-        const msg = readJson(path.join(dir, name));
-        if (project && msg.project && msg.project !== project) continue;
-        out.push({ ...msg, box });
-      } catch { /* skip broken */ }
+      const msg = readMailboxJson(path.join(dir, name));
+      if (!msg) continue;
+      if (project && msg.project && msg.project !== project) continue;
+      out.push({ ...msg, box });
     }
   }
   return out.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
@@ -1053,7 +1093,7 @@ export function findMessage(role, id) {
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
       const file = path.join(dir, name);
-      const msg = readJson(file, null);
+      const msg = readMailboxJson(file);
       if (msg && msg.id === id) return { msg, file, box };
     }
   }
