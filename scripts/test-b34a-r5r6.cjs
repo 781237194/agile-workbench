@@ -145,6 +145,17 @@ function fakeDoc() {
     /installInteraction\(window\)/.test(app) && /skeleton\(board/.test(app) && /skeleton\(host/.test(panel), {});
   check('R5-⑥ gate.js 导出 R5/R6 API（skeleton/clearSkeleton/reconcileReplace/schedule/installInteraction）',
     ['skeleton', 'clearSkeleton', 'reconcileReplace', 'schedule', 'installInteraction'].every((k) => typeof gate[k] === 'function'), {});
+  const app2 = app;
+  const orSrc = read(path.join('src', 'renderer', 'owner-review.js'));
+  check('R5-⑧ 批2：团队台/需求池开启时骨架已接（r5Skeleton 注入点存在）',
+    /r5Skeleton\('#team-drawer'/.test(app2) && /r5Skeleton\('#pool-req-list'/.test(app2) && /r5Skeleton\('#pool-def-list'/.test(app2), {});
+  check('R5-⑨ 批2：评审弹窗打开先骨架 + 5s 刷新按签名跳过重建（差量）',
+    /AWBGate\.skeleton\(list/.test(orSrc) && /reviewRenderSig\(allRows\)/.test(orSrc) && /state\._renderSig === renderSig/.test(orSrc), {});
+  check('R5-⑩ 批2：需求池缺陷列表改行级差量（reconcileReplaceMarkup，不再整块 innerHTML）',
+    /reconcileReplaceMarkup\(defList/.test(app2) && typeof gate.reconcileReplaceMarkup === 'function', {});
+  check('R5-⑪ 批2：流程列表沿用既有渲染签名短路（不整块重建）+ 骨架', /flowRenderUi\.sig/.test(app2) && /skeleton\(board/.test(app2), {});
+  check('R5-⑫ 骨架样式已入 style.css（.awb-skeleton 且 reduced-motion 关动画）',
+    /\.awb-skeleton-row/.test(read(path.join('src', 'renderer', 'style.css'))) && /prefers-reduced-motion/.test(read(path.join('src', 'renderer', 'style.css'))), {});
   const sqIntervals = (panel.match(/setInterval\(/g) || []).length;
   check('R5-⑦ c9ac 契约保持：session-queue-panel setInterval 恒 = 2', sqIntervals === 2, { sqIntervals });
 
