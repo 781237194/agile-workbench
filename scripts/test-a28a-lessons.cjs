@@ -91,8 +91,8 @@ function check(name, cond, detail) {
 }
 
 // 阈值 3（项目配置）
-sh(['project', 'config', '--lessons-turns', '3', '--project', PROJ, '--boot', TOKEN], envBase);
-const envDay = { ...envBase, AWB_LESSONS_TURNS: '3', AWB_LESSONS_TURNS_FORCE: '1', AWB_NOW: '2026-11-17T10:00:00+08:00' };
+sh(['project', 'config', '--lessons-turns', '2', '--project', PROJ, '--boot', TOKEN], envBase);
+const envDay = { ...envBase, AWB_LESSONS_TURNS: '2', AWB_LESSONS_TURNS_FORCE: '1', AWB_NOW: '2026-11-17T10:00:00+08:00' };
 delete envDay.TEAM_SELFTEST;
 
 /* ---------- AC1：3 次 send → turns=3 + 提示 1 条 ---------- */
@@ -100,8 +100,8 @@ const inboxBefore = mailCount('product');
 for (let i = 1; i <= 3; i += 1) sh(['send', '--project', PROJ, '--boot', TOKEN, '--to', 'product', '--subject', 's' + i, '--body', 'b' + i], envDay);
 let tf = readJsonOr(TURNS);
 const bc1 = bcRows();
-check('AC1 3 次 send 后 turns 归零（达阈值触发后清零）', tf && tf.roles.pm && tf.roles.pm.turns === 0, tf && tf.roles.pm);
-check('AC1 键集恰好 5+2', tf && tf.roles.pm && Object.keys(tf.roles.pm).length === 7, tf && Object.keys(tf.roles.pm || {}));
+check('AC1 3 次 send 后 turns 累计为 3（不归零）+ lastMaintenanceRounds=3', tf && tf.roles.pm && tf.roles.pm.turns === 3 && tf.roles.pm.lastMaintenanceRounds === 3, tf && tf.roles.pm);
+check('AC1 键集恰好 6+3（新增 lastMaintenanceRounds/lastMaintenanceAt）', tf && tf.roles.pm && Object.keys(tf.roles.pm).length === 9, tf && Object.keys(tf.roles.pm || {}));
 check('AC2 三次 send 落箱 3 条、pm 不自收（0 新增）', mailCount('product') - inboxBefore === 3 && mailCount('pm') === 0, { product: mailCount('product') - inboxBefore, pm: mailCount('pm') });
 check('AC2 广播 1 行 action=prompt', bc1.filter((r) => r.action === 'prompt').length === 1, bc1);
 check('AC2 lastNotifiedAt 前进', tf && tf.roles.pm && !!tf.roles.pm.lastNotifiedAt, tf && tf.roles.pm && tf.roles.pm.lastNotifiedAt);
@@ -134,7 +134,7 @@ for (let i = 1; i <= 3; i += 1) sh(['send', '--project', PROJ, '--boot', TOKEN, 
 const bc2 = bcRows();
 check('AC3 记过之后 → skip already_recorded', bc2.slice(-1)[0] && bc2.slice(-1)[0].action === 'skip' && bc2.slice(-1)[0].reason === 'already_recorded', bc2.slice(-1)[0]);
 const tf2 = readJsonOr(TURNS);
-check('AC3 达阈值并 skip 后 turns 被清零（低于阈值）', tf2 && tf2.roles.pm.turns < 3, tf2 && tf2.roles.pm.turns);
+check('AC3 达阈值并 skip 后 turns 不归零（累计语义）', tf2 && tf2.roles.pm.turns >= 2, tf2 && tf2.roles.pm.turns);
 
 /* ---------- AC4：夜间静默 + 08:05 合并（先由 tester 写一条造成内容变更） ---------- */
 const testerT = boot('tester', 'sb-tester');
@@ -143,20 +143,20 @@ const envNight = { ...envDay, AWB_NOW: '2026-11-17T23:30:00+08:00' };
 const beforeNight = bcRows().length;
 for (let i = 1; i <= 3; i += 1) sh(['send', '--project', PROJ, '--boot', TOKEN, '--to', 'product', '--subject', 'n' + i, '--body', 'n' + i], envNight);
 const nightRows = bcRows().slice(beforeNight);
-check('AC4 夜间 → action=quiet、不发消息', nightRows.length === 1 && nightRows[0].action === 'quiet', nightRows);
+check('AC4 夜间（23:30）照发 action=prompt、不再 quiet', nightRows.length >= 1 && nightRows.every((r) => r.action !== 'quiet') && nightRows.some((r) => r.action === 'prompt'), nightRows);
 const envMorning = { ...envDay, AWB_NOW: '2026-11-17T08:05:00+08:00' };
 const inboxBeforeMorning = mailCount('product');
 for (let i = 1; i <= 3; i += 1) sh(['send', '--project', PROJ, '--boot', TOKEN, '--to', 'product', '--subject', 'm' + i, '--body', 'm' + i], envMorning);
 const morningNew = bcRows().slice(-1)[0];
-check('AC4 08:05 后合并成 1 条 prompt', morningNew && morningNew.action === 'prompt', morningNew);
-check('AC4 夜间累计写进广播行', morningNew && Number(morningNew.turns) > 0, morningNew);
+check('AC4 08:05 无夜间累计合并（不再有 quiet；内容未变时可为 skip）', morningNew && morningNew.action !== 'quiet' && !bcRows().slice(-6).some((r) => r.action === 'quiet'), morningNew);
+check('AC4 广播行 turns 记录当前累计轮次', morningNew && Number(morningNew.turns) > 0, morningNew);
 
 /* ---------- 阈值来源（放在改名册之前，避免 RULES_CHANGED 干扰） ---------- */
 const envNoForce = { ...envBase, AWB_LESSONS_TURNS: '9' };
 delete envNoForce.AWB_LESSONS_TURNS_FORCE;
 delete envNoForce.TEAM_SELFTEST;   // SELFTEST 本身也放行 env，这里要验「都不设时以项目配置为准」
 const tNoForce = sh(['lessons', 'turns', '--project', PROJ, '--boot', TOKEN], envNoForce);
-check('阈值：无 FORCE 时 env 不生效（读项目配置 3）', /阈值：3（来源 project）/.test(tNoForce.out), tNoForce.out.match(/阈值：[^\n]*/));
+check('阈值：无 FORCE 时 env 不生效（读项目配置 2）', /阈值：2（来源 project）/.test(tNoForce.out), tNoForce.out.match(/阈值：[^\n]*/));
 const envForce = { ...envNoForce, AWB_LESSONS_TURNS_FORCE: '1' };
 const tForce = sh(['lessons', 'turns', '--project', PROJ, '--boot', TOKEN], envForce);
 check('阈值：FORCE 时 env 生效（9）', /阈值：9（来源 env）/.test(tForce.out), tForce.out.match(/阈值：[^\n]*/));

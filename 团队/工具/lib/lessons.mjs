@@ -251,8 +251,8 @@ const LOCK_STALE_MS = 30000;
 const DEFAULT_TURNS = 20;
 const NIGHT_START_HOUR = 22;
 const NIGHT_END_HOUR = 8;
-const BASE_KEYS = ['turns', 'lastAt', 'sessionId', 'lastNotifiedAt', 'lastNoticeSha'];
-const EXT_KEYS = ['lastSeenAuditSeq', 'lastSelfWriteAt'];
+const BASE_KEYS = ['turns', 'lastAt', 'sessionId', 'lastNotifiedAt', 'lastNoticeSha', 'lastMaintenanceRounds'];
+const EXT_KEYS = ['lastSeenAuditSeq', 'lastSelfWriteAt', 'lastMaintenanceAt'];
 const TURN_KEYS = BASE_KEYS.concat(EXT_KEYS);
 
 /** CLI 白名单（7 个 actionType） */
@@ -383,6 +383,9 @@ function normalizeRoleEntry(prev, sessionId, atIso, opts) {
     lastNoticeSha: reset || src.lastNoticeSha == null ? null : String(src.lastNoticeSha),
     lastSeenAuditSeq: (!reset && Number.isFinite(Number(src.lastSeenAuditSeq))) ? Math.floor(Number(src.lastSeenAuditSeq)) : null,
     lastSelfWriteAt: (!reset && src.lastSelfWriteAt != null) ? String(src.lastSelfWriteAt) : null,
+    // R-cfca：维护提醒幂等键（同一 turns 只发一次）与最近一次发送时间；换人 reset 时清空。
+    lastMaintenanceRounds: (!reset && Number.isFinite(Number(src.lastMaintenanceRounds))) ? Math.floor(Number(src.lastMaintenanceRounds)) : null,
+    lastMaintenanceAt: (!reset && src.lastMaintenanceAt != null) ? String(src.lastMaintenanceAt) : null,
   };
   return entry;
 }
@@ -614,7 +617,10 @@ function promptIfDue(opts) {
   const o = opts && typeof opts === 'object' ? opts : {};
   const { stateDir, teamRoot, role, entry, threshold, now, atIso } = o;
   if (!entry || !threshold) return { action: 'none' };
-  if (entry.turns < threshold.value) return { action: 'none', turns: entry.turns, threshold: threshold.value };
+  // R-cfca 契约 6.2：严格大于阈值才触发（turns=20 不发、21 才发）。
+  if (!(entry.turns > threshold.value)) return { action: 'none', turns: entry.turns, threshold: threshold.value };
+  // 幂等键 role + turns：同一 turns 只发一次（不改用「人工注回」验）。
+  if (Number(entry.lastMaintenanceRounds) === Number(entry.turns)) return { action: 'none', reason: 'same_round', turns: entry.turns, threshold: threshold.value };
 
   const parsed = o.parsed || null;
   const auditRows = readAudit(teamRoot);
@@ -631,10 +637,12 @@ function promptIfDue(opts) {
   }
 
   const finished = (action, reason, extra) => {
-    entry.turns = 0;
+    // R-cfca：轮次语义改**累计**（发后不归零）；prompt 时写幂等键 lastMaintenanceRounds。
     entry.lastAt = atIso;
     if (action === 'prompt') {
       entry.lastNotifiedAt = atIso;
+      entry.lastMaintenanceRounds = Number(entry.turns) || 0;
+      entry.lastMaintenanceAt = atIso;
       if (currentSha) entry.lastNoticeSha = currentSha;
       entry.lastSeenAuditSeq = auditCount;
     }
@@ -649,18 +657,6 @@ function promptIfDue(opts) {
   };
 
   const beforeTurns = entry.turns;
-
-  // 夜间静默优先：达阈值只记账（action='quiet'）、不发消息、不清零（晚上不打扰）
-  // 同一次跨越只记一行（turns 恰等于阈值时），之后继续累加不再重复记账。
-  if (isNightHour(now.localHour)) {
-    entry.lastAt = atIso;
-    const dataN = readTurnsRaw(stateDir);
-    if (dataN.ok) { dataN.data.roles = dataN.data.roles || {}; dataN.data.roles[role] = entry; writeTurnsRaw(stateDir, dataN.data); }
-    if (beforeTurns === threshold.value) {
-      writeBroadcast(teamRoot, { at: atIso, role, turns: beforeTurns, action: 'quiet', reason: 'night' });
-    }
-    return { action: 'quiet', reason: 'night', turns: beforeTurns, recorded: beforeTurns === threshold.value };
-  }
 
   if (!changed) {
     // 唯一优先级：① 本角色自上次提醒后写过（含同一时刻，注入时钟下会相等）→ already_recorded；② 否则 no_content
@@ -678,22 +674,13 @@ function promptIfDue(opts) {
     return r;
   }
 
-  // 08:00 后首轮合并夜间累计：若上次记账里有 quiet 行且之后没发过 prompt
-  const rows = readBroadcast(teamRoot).filter((x) => x && x.role === role);
-  let nightTurns = 0;
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    const row = rows[i];
-    if (row.action === 'prompt') break;
-    if (row.action === 'quiet') nightTurns += Number(row.turns) || 0;
-  }
-  const merged = nightTurns > 0;
-
   const sha12 = currentSha ? String(currentSha).slice(0, 12) : '—';
+  // R-cfca 6.1：一条消息两问两命令，按 600 字预算写（超长会被 MESSAGE_TOO_LONG 拦）。
   const bodyLines = [
-    `【经验教训提醒】${role} 已完成 ${beforeTurns} 轮动作（阈值 ${threshold.value}），经验教训登记册（${sha12}）自上次提醒后有更新。`,
-    merged ? `夜间累计 ${nightTurns} 轮（已合并成这一条，夜间不打扰）。` : '',
-    '请跑 `team.mjs lessons read` 读一遍，并用 `team.mjs lessons append --scene … --lesson … --next …` 记一条（记了就跳过，下次达阈值再提醒）。',
-    `阈值来源：${(o.threshold && o.threshold.source) || 'project'}；夜间静默 22:00–08:00 只记账。`,
+    `【维护提醒】${role} 已完成 ${beforeTurns} 轮动作（阈值 ${threshold.value}），登记册（${sha12}）有更新。这一次一起处理两件事：`,
+    '1) skill：要不要把本轮做法建/更新成 skill？要就说明场景与步骤；不要就跑：team.mjs skill skip --reason "已评估"',
+    '2) 经验教训：跑 `team.mjs lessons read` 读一遍，再用 `team.mjs lessons append --scene … --lesson … --next …` 记一条。',
+    '两个都处理完，提醒才会停；只做一件时，另一件下轮继续提醒（同一轮只发这一条）。',
   ].filter(Boolean);
 
   let delivered = false;
@@ -705,11 +692,11 @@ function promptIfDue(opts) {
     try {
       const sent = sendNotice({
         to: role,
-        subject: '经验教训提醒（程序自动）',
+        subject: `维护提醒：skill 与经验教训（第 ${beforeTurns} 轮）`,
         body: bodyLines.join('\n'),
         wake: true,
         senderKind: 'program',
-        type: 'notice',
+        type: 'maintenance_prompt',
         ackRequired: false,
       });
       if (sent && sent.ok) { delivered = true; messageId = sent.messageId || ''; if (sent.wakeError) wakeError = String(sent.wakeError); }
@@ -956,7 +943,10 @@ function readAllTurns(opts) {
       lastSeenAuditSeq: entry.lastSeenAuditSeq == null ? null : entry.lastSeenAuditSeq,
       lastSelfWriteAt: entry.lastSelfWriteAt || null,
       sessionId: entry.sessionId || '',
-      nextInTurns: entry && Number.isFinite(Number(entry.turns)) ? Math.max(0, threshold.value - Math.floor(Number(entry.turns))) : null,
+      // R-cfca 6.7：轮次改累计后，距下次 = 阈值 −（turns − 上次维护轮次）。
+      nextInTurns: entry && Number.isFinite(Number(entry.turns))
+        ? Math.max(0, threshold.value - (Math.floor(Number(entry.turns)) - (Number.isFinite(Number(entry.lastMaintenanceRounds)) ? Math.floor(Number(entry.lastMaintenanceRounds)) : 0)))
+        : null,
     } : null;
   }
   return { ok: true, threshold: threshold.value, source: threshold.source, missing, roles, tickMs: lessonsTickMs() };

@@ -42,6 +42,8 @@ export const WAKE_KIND_LABEL = {
   boot_failed: '自动boot失败',
   // R-9db6：Owner 决策箱回执（默认必须唤醒；无静默开关；只在防长期静默兜底时才额外唤醒 PM）。
   owner_decision_receipt: 'Owner决策回执',
+  // R-cfca（T-ef3c）：合并维护提醒（skill 与经验教训两问合一，唯一提示来源）。
+  maintenance_prompt: '维护提醒',
   // R-703f F-1：会话用量到提醒阈值（默认 30 万）时的提醒消息；只提醒，不自动换人。
   session_rotate_warn: '会话轮换提醒',
   // R-5016 F-7（PM 2026-11-15 有条件确认①）：PM 正式「问 Owner 要不要拍板」的消息类型。
