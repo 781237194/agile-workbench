@@ -714,22 +714,6 @@ export function sweepDeferredArchives({ projectName, now = Date.now(), limit = A
   return { ok: true, project: name, at, scanned: latestDeferred.size, due: matched.length, picked: due.length, processed: results.length, results };
 }
 
-/** 面板用：每个角色最近一次 failed（count=该角色历史 failed 行数）；纯读，不写。 */
-export function summarizeArchiveFailures(rows) {
-  const list = Array.isArray(rows) ? rows.filter(Boolean) : [];
-  const byRole = {};
-  let total = 0;
-  for (const row of list) {
-    if (String(row.result || '') !== 'failed') continue;
-    const role = String(row.role || '');
-    if (!role) continue;
-    total += 1;
-    const item = byRole[role] || { count: 0, lastAt: '', reason: '', oldSessionId: '' };
-    item.count += 1;
-    item.lastAt = String(row.at || '');
-    item.reason = String(row.reason || row.error || '');
-    item.oldSessionId = String(row.oldSessionId || '');
-    byRole[role] = item;
-  }
-  return { total, byRole };
-}
+/** 面板用：每个角色最近一次 failed（count=该角色历史 failed 行数）；纯读，不写。
+ *  注意：唯一实现在 src/session-queue.js → summarizeArchiveFailures（渲染层只读 model）；本文件不再重复实现，
+ *  以免两处口径漂移。 */

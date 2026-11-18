@@ -82,6 +82,12 @@ function check(name, ok, detail) {
   return Boolean(ok);
 }
 const sha = (f) => { try { return crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex'); } catch { return '(missing)'; } };
+const statOf = (f) => {
+  try { const st = fs.statSync(f); return { exists: true, size: st.size, sha256: sha(f) }; } catch { return { exists: false, size: 0, sha256: '' }; }
+};
+const shaPrefix = (file, bytes) => {
+  try { return crypto.createHash('sha256').update(fs.readFileSync(file).subarray(0, bytes)).digest('hex'); } catch { return ''; }
+};
 const readJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8').replace(/^\uFEFF/, '')); } catch { return d; } };
 const writeJson = (f, v) => { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(v, null, 2) + '\n', 'utf8'); };
 const jsonlRows = (f) => {
@@ -159,7 +165,17 @@ async function main() {
   }
   if (fs.existsSync(path.join(ROOT, '团队', '协议'))) fs.cpSync(path.join(ROOT, '团队', '协议'), path.join(TEAM, '协议'), { recursive: true });
 
-  const realBefore = { team: sha(REAL_TEAM), store: sha(REAL_STORE), ledgerExists: fs.existsSync(REAL_LEDGER) };
+  const realBefore = {
+    team: sha(REAL_TEAM),
+    store: sha(REAL_STORE),
+    // 真实账本可能被**生产**换人实时追加（本单上线后就会发生）：只断言「运行前的前缀没被改写 + 没有沙盘记录」，
+    // 不能断言「文件不存在」（那是旧基线，现在会误红）。
+    ledger: (() => {
+      const s = statOf(REAL_LEDGER);
+      if (s.exists) s.prefixHash = shaPrefix(REAL_LEDGER, s.size);
+      return s;
+    })(),
+  };
 
   const setup = runJson(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--json']);
   check('S0 沙盘项目登记（full 六角色）', setup.code === 0, { code: setup.code, out: textOf(setup).slice(0, 300) });
@@ -418,9 +434,21 @@ async function main() {
     { cache: /readArchiveLogCached/.test(mainSrc), rows: /archiveRows/.test(mainSrc) });
 
   /* ── 真实树零写入 ──────────────────────────────────────────────────── */
-  check('隔离：真实 团队/状态/项目/工作台改造修复/会话归档.jsonl 不存在（沙盘不写真实树）',
-    !fs.existsSync(REAL_LEDGER) && realBefore.ledgerExists === false,
-    { exists: fs.existsSync(REAL_LEDGER), existedBefore: realBefore.ledgerExists });
+  const realAfter = statOf(REAL_LEDGER);
+  const realPrefixSame = !realBefore.ledger.exists
+    ? true                                    // 运行前没有 → 前面那条「无沙盘记录」负责兜住
+    : (realAfter.exists && realAfter.size >= realBefore.ledger.size
+      && shaPrefix(REAL_LEDGER, realBefore.ledger.size) === realBefore.ledger.prefixHash);
+  const realRowsHaveSandbox = (() => {
+    try {
+      return fs.readFileSync(REAL_LEDGER, 'utf8').split(/\r?\n/).filter(Boolean)
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean)
+        .some((r) => String(r.project || '') === PROJECT || String(r.oldSessionId || '').startsWith('session-28b8-'));
+    } catch { return false; }
+  })();
+  check('隔离：真实 团队/状态/项目/工作台改造修复/会话归档.jsonl 未被沙盘写入（运行前前缀不被改写 + 无沙盘记录）',
+    realPrefixSame && !realRowsHaveSandbox,
+    { before: realBefore.ledger, after: realAfter, prefixSame: realPrefixSame, hasSandboxRows: realRowsHaveSandbox });
   check('隔离：真实 团队.json / workbench.json 前后 sha256 不变',
     sha(REAL_TEAM) === realBefore.team && sha(REAL_STORE) === realBefore.store,
     { teamSame: sha(REAL_TEAM) === realBefore.team, storeSame: sha(REAL_STORE) === realBefore.store });
