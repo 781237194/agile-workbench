@@ -4811,6 +4811,12 @@ export async function cmdBoot(args) {
   lines.push(`网关提取: team.mjs brief --role ${role} --project "${projectName}" --section <区块> ｜ 他人读你产出只提取区块，不读全文`);
   // 必读分层：核心 4 份 → 按需文档 → 任务相关；已读/未读都列，核心 4 份永远排在最前、不被截断。
   lines.push(`必读-核心已读 ${coreRead.length}/${coreDocs.length}: ${coreRead.map((d) => d.rel || d.path).join(' ')}`);
+  // 013a §6.1：命令模板（必留区）+ 当前状态（可丢区）+ 红线（必留区），统一由 buildBootGuidanceLines 生成，
+  // 位置放在「必读-核心已读」之后——超限尾部硬截断时不会被切掉（tester v263 AC1/AC3）。
+  const bootGuidance = buildBootGuidanceLines(projectName, role);
+  const bootGuidanceStart = lines.length;
+  for (const line of bootGuidance.lines) lines.push(line);
+  const statusBlockIdx = bootGuidance.statusIdxRel.map((i) => bootGuidanceStart + i);
   if (coreMissing.length) lines.push(`必读-核心未读（缺文件，先 project ensure）: ${coreMissing.map((d) => d.rel || d.label).join(' ')}`);
   // R-5b14 F-2/F-3：交接文档发现行，位置固定在「必读-按需已读」之前。
   // 有 交接-最新.md → 提示先读；只有历史命名（交接-/接任-/开工交接-/换人交接-）→ 中性提示并给最新一份；
@@ -4858,16 +4864,7 @@ export async function cmdBoot(args) {
   }
   // R-f9b1 F-7⑧：本角色当前任务所涉需求的增补卷（缺失也写一行；不进必读计数、不阻塞 boot）。
   for (const line of supplementBriefLines(project, tasks)) lines.push(line);
-  // 013a：boot 简报「可复制的下一条命令」模板（按角色；<T> 为 boot 令牌）。
-  const BOOT_NEXT_COMMAND = {
-    pm: 'send --boot <T> --to <角色> --task <T-id> --ack --subject "…" --body "…"；收尾 task done --id <T-id> --evidence <纯路径>',
-    analyst: 'req write --requirement <R-id> --file <路径> --expected-sha <sha>；req review --requirement <R-id> --verdict approve|reject --comments "…"',
-    product: 'req review --requirement <R-id> --verdict approve|reject --comments "…"',
-    programmer1: 'task claim --id <T-id>；收尾 task done --id <T-id> --evidence <纯路径>',
-    programmer2: 'task claim --id <T-id>；收尾 task done --id <T-id> --evidence <纯路径>',
-    tester: 'req trq --requirement <R-id> --verdict testable|not_testable；收尾 task done --id <T-id> --evidence <测试报告路径>',
-    default: '<子命令> --help（先确认角色职责再动手）',
-  };
+
   // B-20261118-004424-6c6b：关键行上移到核心区——「可选插件 / 记忆降级 / 队列续跑」以前放在末尾，
   // 超 2000 字按尾部截断时会被切掉（selftest「记忆插件 off → boot 降级」用例因此红）。现固定放在核心区，必留。
   try {
@@ -4905,12 +4902,27 @@ export async function cmdBoot(args) {
   for (const t of tasks.slice(0, 3)) pushDrop(`  [${t.id}] ${t.priority} ${t.status} ${t.owner || '-'} ${t.title}`);
   for (const p of proposals.slice(0, 3)) pushDrop(`  [${p.id}] ${p.risk} ${p.status} by ${p.author}: ${p.title}`);
   pushDrop(`授权: ${grants.length ? grants.map((g) => `${g.actions.join('/')}@${g.project}:${g.scope.join(',')}`).join(' ｜ ') : '（无，需 PM grant）'}`);
-  // 013a：简报四要素——可复制的下一条命令 + 红线（Owner 2026-11-19 需求：新项目首启即可直接发第一条 M-*）。
-  const copyCmd = BOOT_NEXT_COMMAND[String(role)] || BOOT_NEXT_COMMAND.default;
-  lines.push(`下一步命令（可直接复制；<T>=boot 令牌）: ${copyCmd}`);
-  lines.push('红线: 禁止用 DSH 子代理代跑角色任务（子代理只做只读检索/摘录）；一次只处理一个任务；失败先原样贴错误码。');
   const maxBrief = Number(team.config.bootBriefMaxChars || 2000);
-  const briefingComposed = composeBriefing(lines, droppableIdx, maxBrief);
+  // 013a §6.2 丢弃顺序：先丢既有可丢明细；**仍要硬截断时再先丢动态块（派单锁/未回执）并重算**，
+  // 这样正常项目里状态块可见（AC2），超限项目里优先牺牲动态块（AC4）。
+  let statusDropped = 0;
+  let briefingComposed = composeBriefing(lines, droppableIdx, maxBrief);
+  if (briefingComposed.truncated && statusBlockIdx.length) {
+    const statusSet = new Set(statusBlockIdx);
+    for (let i = statusBlockIdx.length - 1; i >= 0; i -= 1) lines.splice(statusBlockIdx[i], 1);
+    const remapped = new Set();
+    for (const idx of droppableIdx) {
+      if (statusSet.has(idx)) continue;
+      let shift = 0;
+      for (const s of statusBlockIdx) if (s < idx) shift += 1;
+      remapped.add(idx - shift);
+    }
+    droppableIdx.clear();
+    for (const idx of remapped) droppableIdx.add(idx);
+    statusDropped = statusBlockIdx.length;
+    statusBlockIdx.length = 0;
+    briefingComposed = composeBriefing(lines, droppableIdx, maxBrief);
+  }
   let briefing = briefingComposed.text;
   // 接任包：只有“当前会话正是最近一次轮换进来的新会话”才附加，避免每轮都贴。
   let handover = null;
@@ -4944,12 +4956,106 @@ export async function cmdBoot(args) {
     bootTtlMinutes,
     docHashes: docs.hashes, read: bootRead, briefing, unread, tasks, proposals, grants,
     // B-20261118-004424-6c6b：简报超限处理的可观测字段（dropped=被丢的可丢行数，truncated=是否尾部硬截断）
-    briefingMeta: { dropped: briefingComposed.dropped, truncated: briefingComposed.truncated, maxBrief },
+    // 013a：dropped 含「先丢的动态块」行数（dynamicDropped 单列，便于夹具断言丢的是哪一类）
+    briefingMeta: { dropped: briefingComposed.dropped + statusDropped, dynamicDropped: statusDropped, truncated: briefingComposed.truncated, maxBrief },
     dispatchQueue: bootPump,
     bootQueue,
     handover: handover ? handover.text : null, handoverMeta: handover, startupPackage,
   });
   else textOut(startupPackage ? `${startupPackage}\n\n${briefing}` : (handover ? `${briefing}\n\n${handover.text}` : briefing));
+}
+
+function buildBootGuidanceLines(projectName, role) {
+  const prefix = 'node 团队\\工具\\team.mjs';
+  const common = [
+    `${prefix} read --id <M-id> --boot <T>`,
+    `${prefix} ack --id <M-id> --boot <T>`,
+  ];
+  const roleCommands = {
+    pm: [
+      `${prefix} dispatch-check --to <角色> --boot <T>`,
+      `${prefix} send --boot <T> --to <角色> --ack --task <T-id>`,
+      `${prefix} task done --id <T-id> --boot <T> --evidence <路径>`,
+    ],
+    analyst: [
+      `${prefix} task claim --id <T-id> --boot <T>`,
+      `${prefix} req write --requirement <R-id> --boot <T>`,
+      `${prefix} task done --id <T-id> --boot <T> --evidence <路径>`,
+    ],
+    product: [
+      `${prefix} req review --requirement <R-id> --verdict approve|reject --comments "…" --boot <T>`,
+      `${prefix} task claim --id <T-id> --boot <T>`,
+      `${prefix} task done --id <T-id> --boot <T> --evidence <路径>`,
+    ],
+    programmer1: [
+      `${prefix} task claim --id <T-id> --boot <T>`,
+      `${prefix} task done --id <T-id> --boot <T> --evidence <路径>`,
+      `${prefix} send --boot <T> --to pm --subject "…" --body "…"`,
+    ],
+    programmer2: [
+      `${prefix} task claim --id <T-id> --boot <T>`,
+      `${prefix} task done --id <T-id> --boot <T> --evidence <路径>`,
+      `${prefix} send --boot <T> --to pm --subject "…" --body "…"`,
+    ],
+    tester: [
+      `${prefix} req trq --requirement <R-id> --verdict testable|not_testable --boot <T>`,
+      `${prefix} task claim --id <T-id> --boot <T>`,
+      `${prefix} task done --id <T-id> --boot <T> --evidence <测试报告路径>`,
+    ],
+  };
+  const lines = ['命令模板（可直接复制；<T>=boot 令牌，id 换成实际值）:'];
+  for (const cmd of [...common, ...(roleCommands[String(role)] || [`${prefix} task list --boot <T>`])]) {
+    lines.push(`  ${cmd}`);
+  }
+  const statusIdxRel = [];
+  for (const line of bootStatusBlockLines(projectName, role)) {
+    statusIdxRel.push(lines.length);
+    lines.push(line);
+  }
+  lines.push('红线: 禁止用 DSH 子代理代跑角色任务（子代理只做只读检索）；一次只处理一个任务；失败先贴错误码。');
+  return { lines, statusIdxRel };
+}
+
+/**
+ * 013a §6.1.2：boot 简报的动态状态块（派单锁 + 未回执）。
+ * 只读、不写任何文件；读失败不阻断 boot（打印可读原因）。
+ *   派单锁: 无 / 派单锁: <角色> ← <M-id>（剩余 N 分钟）/ 派单锁: 读取失败（<code>）
+ *   未回执: 无 / 未回执: <M-id1>, <M-id2>（最多 3 条，其余「等 N 条」）
+ */
+function bootStatusBlockLines(projectName, role) {
+  const out = [];
+  try {
+    const file = dispatchLockPath(projectName);
+    if (!fs.existsSync(file)) {
+      out.push('派单锁: 无');
+    } else {
+      let lock = null;
+      try { lock = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { lock = null; }
+      if (!lock || !lock.messageId) {
+        out.push('派单锁: 读取失败（DISPATCH_LOCK_CORRUPT）');
+      } else {
+        const expiresAtMs = Date.parse(String(lock.expiresAt || '')) || 0;
+        const remainMin = expiresAtMs ? Math.max(0, Math.round((expiresAtMs - Date.now()) / 60000)) : null;
+        out.push(`派单锁: ${String(lock.to || '?')} ← ${String(lock.messageId)}${remainMin === null ? '' : `（剩余 ${remainMin} 分钟）`}`);
+      }
+    }
+  } catch (error) {
+    out.push(`派单锁: 读取失败（${String((error && error.code) || 'DISPATCH_LOCK_UNREADABLE').slice(0, 40)}）`);
+  }
+  try {
+    const rows = presenceFor(projectName, { roles: [String(role)] }) || [];
+    const ids = (rows[0] && Array.isArray(rows[0].ackPendingIds) ? rows[0].ackPendingIds : []).filter(Boolean);
+    if (!ids.length) {
+      out.push('未回执: 无');
+    } else {
+      const shown = ids.slice(0, 3).map(String);
+      const rest = ids.length - shown.length;
+      out.push(`未回执: ${shown.join(', ')}${rest > 0 ? ` 等 ${rest} 条` : ''}`);
+    }
+  } catch {
+    out.push('状态: 暂不可用（未回执统计读取失败）');
+  }
+  return out;
 }
 
 /**
