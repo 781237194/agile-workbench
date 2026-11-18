@@ -85,6 +85,18 @@ async function runScenario(name, sessionMode, port) {
   try { team = JSON.parse(fs.readFileSync(path.join(envs.TEAM, '状态', '团队.json'), 'utf8')); } catch { team = null; }
   const leftover = (team && Array.isArray(team.members) ? team.members : []).filter((m) => m && m.sessionId).map((m) => m.role);
   check(`D1 [${name}] 删除后团队.json members[].sessionId 全清（确定性）`, leftover.length === 0, { leftover, del });
+  // D1b 延迟复读（T-20261119-041748-0001）：删后 2s/5s 再读名册仍全空（防异步 saveTeam 旧副本回写）
+  const readLeftover = () => {
+    try {
+      const t = JSON.parse(fs.readFileSync(path.join(envs.TEAM, '状态', '团队.json'), 'utf8'));
+      return (Array.isArray(t.members) ? t.members : []).filter((m) => m && m.sessionId).map((m) => m.role);
+    } catch { return ['__read_failed__']; }
+  };
+  await sleep(2000);
+  const late2 = readLeftover();
+  await sleep(3000);
+  const late5 = readLeftover();
+  check(`D1b [${name}] 删后 2s/5s 名册仍全空（防并发回写）`, Array.isArray(late2) && late2.length === 0 && Array.isArray(late5) && late5.length === 0, { late2, late5 });
   let manifestExists = false;
   try { manifestExists = fs.existsSync(path.join(envs.projDir, '团队会话.json')); } catch { manifestExists = true; }
   check(`D2 [${name}] 项目 团队会话.json 不再存在（第二处映射）`, manifestExists === false, { manifestExists });

@@ -9049,6 +9049,12 @@ ipcMain.handle('theme:metrics', async () => {
         }
         // R-ad44 AC1①（批4b）：团队状态文件统一走 json-atomic.cjs（行为不变：仅 teamChanged 时写整份 team）。
         if (teamChanged) jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'panelTeamSync' });
+        // P0 97db 持久性（T-20261119-041748-0001）：删除墓碑 + 延迟/启动清扫（防止旧副本 saveTeam 回写名册）。
+        try {
+          const names = [project.teamName, project.name].filter(Boolean).map(String);
+          for (const nm of names) writeDeletionTombstone(nm, project.name);
+          scheduleRosterSettle(names);
+        } catch { /* 墓碑失败不阻断删除 */ }
       }
       const currentFile = path.join(teamRoot, '状态', '当前工作区.json');
       if (fs.existsSync(currentFile)) {
@@ -22876,7 +22882,72 @@ async function runB2dd3Check() {
   finish();
 }
 
+// P0 97db 持久性（T-20261119-041748-0001）：删除墓碑 + 延迟清扫，防止旧 saveTeam 副本/异步写者把名册 sessionId 回写。
+function deletionTombstoneFile(teamName) {
+  return path.join(resolveTeamRoot(), '状态', '项目', teamTools.teamSlug(String(teamName)), '删除墓碑.json');
+}
+function writeDeletionTombstone(teamName, projectName) {
+  try {
+    const file = deletionTombstoneFile(teamName);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const body = { teamName: String(teamName), projectName: String(projectName || ""), deletedAt: new Date().toISOString(), generation: Date.now() };
+    const tmp = file + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(body, null, 2) + "\n", "utf8");
+    fs.renameSync(tmp, file);
+    return body;
+  } catch { return null; }
+}
+// 墓碑清扫：若有删除记录且工作区里没有同名活跃项目，则再次清空名册 sessionId + activeProject，并审计。
+function sweepRosterFromTombstone(teamName) {
+  try {
+    const file = deletionTombstoneFile(teamName);
+    if (!fs.existsSync(file)) return { cleared: false, reason: "no-tombstone" };
+    const tomb = JSON.parse(fs.readFileSync(file, "utf8"));
+    try {
+      const store = readStore();
+      const stillActive = (store.projects || []).some((proj) => proj && (String(proj.teamName || proj.name) === String(teamName)) && proj.path && fs.existsSync(String(proj.path)));
+      if (stillActive) return { cleared: false, reason: "project-exists" };
+    } catch { /* 读库失败时按墓碑继续清扫 */ }
+    const teamFile = path.join(resolveTeamRoot(), "状态", "团队.json");
+    if (!fs.existsSync(teamFile)) return { cleared: false, reason: "no-team" };
+    const team = JSON.parse(fs.readFileSync(teamFile, "utf8"));
+    const roles = [];
+    let teamChanged = false;
+    if (team && Array.isArray(team.members)) {
+      for (const member of team.members) {
+        if (member && member.sessionId) { roles.push(String(member.role || "")); member.sessionId = ""; teamChanged = true; }
+      }
+    }
+    if (team && team.activeProject && String(team.activeProject) === String(teamName)) { team.activeProject = null; teamChanged = true; }
+    if (!teamChanged) return { cleared: false, reason: "already-empty" };
+    jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: "panelTeamSync" });
+    try { teamTools.appendRosterAudit(String(teamName), { source: "shell/deletion-tombstone", cleared: roles, gen: tomb.generation || 0 }); } catch { /* 审计失败不阻断 */ }
+    return { cleared: true, roles, gen: tomb.generation || 0 };
+  } catch (error) { return { cleared: false, reason: String((error && error.message) || error).slice(0, 120) }; }
+}
+function scheduleRosterSettle(teamNames) {
+  for (const delay of [500, 2000, 5000]) {
+    try {
+      const timer = setTimeout(() => { for (const nm of teamNames) { try { sweepRosterFromTombstone(nm); } catch { /* ignore */ } } }, delay);
+      if (timer && typeof timer.unref === "function") timer.unref();
+    } catch { /* ignore */ }
+  }
+}
+// 启动补扫：上次删除后若有墓碑且名册又被回写，启动即清（重启 3/3 的兜底）。
+function applyDeletionTombstonesOnStartup() {
+  try {
+    const dir = path.join(resolveTeamRoot(), "状态", "项目");
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const file = path.join(dir, entry.name, "删除墓碑.json");
+      if (!fs.existsSync(file)) continue;
+      try { const tomb = JSON.parse(fs.readFileSync(file, "utf8")); if (tomb && tomb.teamName) sweepRosterFromTombstone(String(tomb.teamName)); } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
+
 app.whenReady().then(async () => {
+  try { applyDeletionTombstonesOnStartup(); } catch { /* 墓碑补扫失败不阻断启动 */ }
   if (!singleInstanceLock) return;
   app.setName(APP_NAME);
   registerIpc();
