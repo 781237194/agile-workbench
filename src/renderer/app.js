@@ -16219,6 +16219,19 @@ function bind() {
   $('#dsh-retry')?.addEventListener('click', retryDsh);
   $('#dsh-config-2')?.addEventListener('click', openDshConfig);
   $('#btn-dsh-config')?.addEventListener('click', openDshConfig);
+$('#btn-dsh-pin')?.addEventListener('click', async () => {
+  try {
+    const r = await window.workbench.dshPin();
+    if (r && r.ok) {
+      toast('已记住 DSH 地址：' + String(r.baseUrl || ''), 'ok');
+      const s = await window.workbench.dshStatus();
+      state.dsh = s.status;
+      renderDsh(s.status);
+    } else {
+      toast((r && (r.message || r.code)) || '记住地址失败', 'bad');
+    }
+  } catch (e) { toast('记住地址失败：' + (e.message || e), 'bad'); }
+});
   $('#store-flag')?.addEventListener('click', () => {
     const err = state?.storeError;
     toast(err ? (err.message || '状态库异常') : '状态库正常', err ? 'bad' : 'ok');

@@ -257,6 +257,9 @@ if (IS_BOARD_WINDOW) {
     taskAccept: (payload) => ipcRenderer.invoke('task:accept', payload),
     // 手动重新发现本机 DSH Web 端口；返回结构化结果，界面不新增假按钮。
     dshRediscover: () => ipcRenderer.invoke('dsh:rediscover'),
+    // e379：DSH 互通能力（只读 session/list）与「一键记住当前地址」（自动发现不算 pin）。
+    dshCapability: () => ipcRenderer.invoke('dsh:capability'),
+    dshPin: () => ipcRenderer.invoke('dsh:pin-endpoint'),
     dshConfigure: (baseUrl) => ipcRenderer.invoke('dsh:configure', baseUrl),
     dshProvision: (payload) => ipcRenderer.invoke('dsh:provision', payload),
     dshTeamStatus: (projectId) => ipcRenderer.invoke('dsh:team-status', projectId),

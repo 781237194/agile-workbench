@@ -557,8 +557,12 @@ if (IS_OWNER_CHECK) {
 }
 
 const { DshAdapter, discoverDshWeb } = require('./dsh-adapter');
+// e379：DSH 互通能力探针（只读 session/list → data/dsh-capability.json + 日志摘要）
+const { probeDshCapability, readCapability, capabilityLine } = require('./dsh-capability');
 // 自测会把 teamTools 换成一个带 mock 旧协议命令的实例；生产始终保持默认工具。
 let teamTools = require('./team-tools');
+// B-20261119-015113-2443（97db）：名册四态/删除清四处映射/恢复四段审计的纯逻辑单源（壳层与夹具共用）。
+const projectRosterCleanup = require('./project-roster-cleanup.js');
 // R-4657：缺陷验收自动化单源（CLI 与主进程 watch/tick/IPC 共用；不写第二套判据）。
 const autoAccept = require(path.join(ROOT, 'scripts', 'auto-accept.cjs'));
 // B-9b05（AC1/AC2/AC5）：验收前置两档判定与渲染层共用同一份实现——
@@ -11263,6 +11267,41 @@ installShellAuditSensors();
       cookieOk,
       warnings
     };
+  });
+  // e379：首启/安装后探测 DSH 互通能力（只读 session/list），落 data/dsh-capability.json + 日志摘要。
+  // 同进程 5 分钟内复用结果，避免 dsh:status 轮询把探针打成热点。
+  let dshCapabilityState = { at: 0, record: null, running: null };
+  async function runDshCapabilityProbe(reason) {
+    const now = Date.now();
+    if (dshCapabilityState.running) return dshCapabilityState.running;
+    if (dshCapabilityState.record && now - dshCapabilityState.at < 5 * 60 * 1000) return dshCapabilityState.record;
+    dshCapabilityState.running = (async () => {
+      const record = await probeDshCapability({ adapter: dsh, dataDir: DATA_ROOT, timeoutMs: 8000 });
+      dshCapabilityState = { at: Date.now(), record, running: null };
+      try { console.log('[dsh-capability] ' + capabilityLine(record) + '（reason=' + String(reason || '') + '）'); } catch { /* ignore */ }
+      return record;
+    })();
+    return dshCapabilityState.running;
+  }
+  ipcMain.handle('dsh:capability', async () => {
+    const record = await runDshCapabilityProbe('ipc');
+    return { ok: true, record, line: capabilityLine(record), file: path.join(DATA_ROOT, 'dsh-capability.json') };
+  });
+  // e379：一键 pin 当前已发现地址（自动发现写入的是 source:auto，不算显式配置；这里让用户一键记住）。
+  ipcMain.handle('dsh:pin-endpoint', async () => {
+    const baseUrl = String((dsh && dsh.baseUrl) || '').trim();
+    if (!baseUrl) {
+      return { ok: false, code: 'DSH_NOT_CONFIGURED', message: '还没有可记住的 DSH 地址：先点「重新发现」或手动填地址' };
+    }
+    try {
+      persistDshConfig(baseUrl, { source: 'user', pinned: true });
+    } catch (error) {
+      return { ok: false, code: 'DSH_CONFIG_WRITE_FAILED', message: String((error && error.message) || error).slice(0, 200) };
+    }
+    dshDiscovery.at = 0;
+    dshDiscovery.last = null;
+    console.log('[dsh] pinned endpoint ' + baseUrl);
+    return { ok: true, code: 'OK', baseUrl, configFile: DSH_CONFIG_FILE, status: dsh.statusSync() };
   });
   // B-2d19：把 IPC sender 反查成「它自己所属的 BrowserWindow」；查不到就返回 null（=拒绝）。
   // 只认真实存在的窗口对象，不按 URL/标题猜，也不允许跨窗控制。

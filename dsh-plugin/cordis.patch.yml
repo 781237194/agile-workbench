@@ -24,7 +24,10 @@
       # mkdir 抛错、又被静默吞掉，导致 Owner 重启 DSH 后面板永远「未接入」。
       # 现在给默认值；插件侧另有 cfg > env > workbench.json 上溯 > 默认目录 的多级兜底。
       config:
-        teamRoot: !!js process.env.AWB_TEAM_ROOT || 'D:/deepseek/agile-workbench/团队'
+        # e379：默认值不再写死作者机器路径（旧值 'D:/deepseek/agile-workbench/团队' 在新机器上必然不存在，
+        # 插件采集会静默失败 → 面板「未接入」）。现在要求由安装器写 AWB_TEAM_ROOT 用户环境变量，
+        # 插件侧还有 cfg → env → workbench.json 上溯多级兜底；解析不到时给出可读 warn（SQ_TEAMROOT_UNRESOLVED）。
+        teamRoot: !!js process.env.AWB_TEAM_ROOT || ''
     - id: dsh-memory-evolve
       name: dsh-memory-evolve
       config: {}

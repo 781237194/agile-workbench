@@ -53,7 +53,7 @@ if "%RC%"=="1" (
   echo [失败] PM工作台启动失败，退出码 %RC%
 )
 echo 排查建议：
-echo   1. 确认依赖已安装：npm install
+echo   1. 重跑 安装PM工作台.cmd（会用便携运行时重新安装依赖；无 npm 也可用）
 echo   2. 确认没有另一个实例占用同一数据目录
 echo   3. 改用 npm start 启动（会显示完整报错）
 echo   4. 只做启动前检查：start.cmd --check

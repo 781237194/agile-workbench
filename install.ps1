@@ -89,7 +89,20 @@ $script:InstallMode = ''
 $script:TotalSteps = 7
 $script:NodeRuntime = $null
 $script:IsFileInvocation = -not [string]::IsNullOrEmpty($PSCommandPath)
+$script:KeepNodeZip = $false
 $script:DefaultRepoZipUrl = 'https://github.com/781237194/agile-workbench/archive/refs/heads/main.zip'
+
+# e379：从「右键运行/双击」进来时执行策略可能是 Restricted —— 先给出可直接复制的命令，
+# 避免用户只看到红字不知道怎么办。
+try {
+    $policy = (Get-ExecutionPolicy -Scope Process) -as [string]
+    if ($policy -eq 'Restricted' -or $policy -eq 'AllSigned') {
+        Write-Host ''
+        Write-Host '当前 PowerShell 执行策略不允许直接运行脚本，请改用这一行命令：' -ForegroundColor Yellow
+        Write-Host '  powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1' -ForegroundColor Yellow
+        Write-Host ''
+    }
+} catch { /* 执行策略读不到不影响安装主流程 */ }
 
 $script:HelpText = @'
 PM工作台 Windows 一键安装器
@@ -665,9 +678,31 @@ function Install-PortableNode {
         if (Test-Path -LiteralPath $Destination) {
             throw "便携 Node 目录在安装过程中被创建，停止覆盖：$Destination"
         }
-        # Directory.Move 在目标已存在时会直接失败，不会把 staging 塞进已有目录。
-        [System.IO.Directory]::Move($source, $Destination)
-        $moved = $true
+        # e379：杀毒/索引器偶发锁住 staging 目录时 Directory.Move 会 EPERM；先退避重试 3 次，
+        # 仍失败则改用「复制到最终目录」，并把下载包留给用户重试（旧实现失败即删 zip，重试要重新下载 39MB）。
+        $moveError = $null
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                [System.IO.Directory]::Move($source, $Destination)
+                $moveError = $null
+                $moved = $true
+                break
+            } catch {
+                $moveError = $_
+                Write-InstallerLog 'WARN' "便携 Node 落盘失败（第 $attempt 次）：$($_.Exception.Message)"
+                Start-Sleep -Milliseconds (200 * $attempt)
+            }
+        }
+        if (-not $moved) {
+            try {
+                Copy-Item -LiteralPath (Join-Path $source '*') -Destination $Destination -Recurse -Force -ErrorAction Stop
+                $moved = $true
+                Write-InstallerLog 'WARN' 'Directory.Move 不可用，已改用复制方式落到最终目录'
+            } catch {
+                $script:KeepNodeZip = $true
+                throw "便携 Node.js 落盘失败：$($moveError.Exception.Message)；下载包已保留，可重跑安装器：$zipPath"
+            }
+        }
 
         $final = Test-NodeRuntime -NodeExe (Join-Path $Destination 'node.exe')
         if (-not $final.Ok) {
@@ -689,7 +724,8 @@ function Install-PortableNode {
         if (Test-Path -LiteralPath $staging) {
             Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
         }
-        if (Test-Path -LiteralPath $zipPath) {
+        # e379：失败时保留下载包（供重试），成功才清理。
+        if ((Test-Path -LiteralPath $zipPath) -and -not $script:KeepNodeZip) {
             Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
         }
         if (Test-Path -LiteralPath $downloadDir) {
@@ -1179,7 +1215,67 @@ try {
         Write-Host '  只在本次安装进程内临时加入 PATH，不写系统 PATH、不改系统环境。'
     }
 
+    # e379：把团队目录写进用户环境变量，供 DSH 套装插件解析 teamRoot（bundle 里不再写死作者机器路径）。
+    try {
+        $teamRootForDsh = Join-Path $repoRoot '团队'
+        if (Test-Path -LiteralPath $teamRootForDsh) {
+            [Environment]::SetEnvironmentVariable('AWB_TEAM_ROOT', $teamRootForDsh, 'User')
+            Write-InstallerLog 'OK' "已写用户环境变量 AWB_TEAM_ROOT=$teamRootForDsh（供 DSH 套装解析团队目录）"
+        } else {
+            Write-InstallerLog 'WARN' "团队目录不存在，未写 AWB_TEAM_ROOT：$teamRootForDsh"
+        }
+    } catch {
+        Write-InstallerLog 'WARN' "写 AWB_TEAM_ROOT 失败（不影响工作台本体）：$($_.Exception.Message)"
+    }
+
     Write-Step 5 '安装依赖（npm install）'
+    $repoRoot = $script:RepoRoot
+    # e379：Electron 二进制默认从 GitHub 下载，国内网络常 10 分钟以上无任何输出。
+    # 默认走 npmmirror 镜像（可用 ELECTRON_MIRROR 覆盖）；失败再用 GitHub 重试一次。
+    if (-not $env:ELECTRON_MIRROR) {
+        $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
+        Write-Host '  Electron 下载镜像：npmmirror（设置 ELECTRON_MIRROR 可覆盖）'
+    } else {
+        Write-Host "  Electron 下载镜像：$env:ELECTRON_MIRROR"
+    }
+    # e379：快捷方式与安装预检提前到依赖安装之前——Electron 下载失败时用户也能看到入口并重跑安装器。
+    if (-not $NoShortcut) {
+        try {
+            $earlyDesktop = $ShortcutDir
+            if (-not $earlyDesktop) { $earlyDesktop = [Environment]::GetFolderPath('Desktop') }
+            if ($earlyDesktop) {
+                $earlyLaunch = Join-Path $repoRoot 'launch.vbs'
+                $earlyWscript = Join-Path $env:WINDIR 'System32\wscript.exe'
+                if ((Test-Path -LiteralPath $earlyLaunch) -and (Test-Path -LiteralPath $earlyWscript)) {
+                    $earlyFile = Join-Path $earlyDesktop 'PM工作台.lnk'
+                    $earlyShell = New-Object -ComObject WScript.Shell
+                    try {
+                        $earlySc = $earlyShell.CreateShortcut($earlyFile)
+                        $earlySc.TargetPath = $earlyWscript
+                        $earlySc.Arguments = '"' + $earlyLaunch + '"'
+                        $earlySc.WorkingDirectory = $repoRoot
+                        $earlySc.Description = 'PM工作台（PM Workbench）'
+                        $earlyIcon = Join-Path $repoRoot 'assets\pm-workbench.ico'
+                        if (Test-Path -LiteralPath $earlyIcon) { $earlySc.IconLocation = "$earlyIcon,0" }
+                        $earlySc.Save()
+                        $script:ShortcutPath = $earlyFile
+                        Write-InstallerLog 'OK' '已在安装依赖前提前创建桌面快捷方式（失败也可用 start.cmd 启动）'
+                    } finally {
+                        if ($earlySc) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($earlySc) }
+                        if ($earlyShell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($earlyShell) }
+                    }
+                }
+            }
+        } catch { Write-InstallerLog 'WARN' "提前创建快捷方式失败（不阻断安装）：$($_.Exception.Message)" }
+    }
+    try {
+        $checkCmd = Join-Path $repoRoot 'start.cmd'
+        if (Test-Path -LiteralPath $checkCmd) {
+            Write-Host '  预检：start.cmd --check（依赖未装完时提示缺失属正常，装完会再验证一次）'
+            $checkText = (& cmd.exe /c ('"' + $checkCmd + '" --check')) 2>&1
+            ($checkText | Select-Object -Last 6) | ForEach-Object { Write-Host "    $_" }
+        }
+    } catch { Write-InstallerLog 'WARN' "安装预检失败（不阻断安装）：$($_.Exception.Message)" }
     $repoRoot = $script:RepoRoot
     Write-Host "  目录：$repoRoot"
     Write-Host '  首次安装会下载 Electron，可能需要几分钟，请保持网络畅通。'
@@ -1197,6 +1293,12 @@ try {
             $env:PATH = $nodeRuntimeDir
         }
         $npmExit = Invoke-LoggedCommand -Exe $tools.NpmExe -Arguments @('install', '--no-audit', '--no-fund', '--no-color') -WorkingDirectory $repoRoot
+        if ($npmExit -ne 0 -and $env:ELECTRON_MIRROR -like '*npmmirror*') {
+            # e379：镜像不可用时回退官方源再试一次，避免一次网络抖动就整机装败。
+            Write-InstallerLog 'WARN' "镜像源安装失败（退出码 $npmExit），改用官方源重试一次"
+            $env:ELECTRON_MIRROR = ''
+            $npmExit = Invoke-LoggedCommand -Exe $tools.NpmExe -Arguments @('install', '--no-audit', '--no-fund', '--no-color') -WorkingDirectory $repoRoot
+        }
     } finally {
         if ($null -ne $previousRunAsNode) {
             $env:ELECTRON_RUN_AS_NODE = $previousRunAsNode
@@ -1226,11 +1328,45 @@ try {
     Write-InstallerLog 'OK' 'npm install 完成'
 
     $electronExe = Join-Path $repoRoot 'node_modules\electron\dist\electron.exe'
-    if (Test-Path -LiteralPath $electronExe) {
-        Write-InstallerLog 'OK' 'Electron 已就位'
+    $electronPathTxt = Join-Path $repoRoot 'node_modules\electron\path.txt'
+    if ((Test-Path -LiteralPath $electronExe) -and (Test-Path -LiteralPath $electronPathTxt)) {
+        Write-InstallerLog 'OK' 'Electron 已就位（electron.exe + path.txt 都在）'
     } else {
-        Write-InstallerLog 'WARN' "没有找到 Electron：$electronExe"
-        Write-Host '  启动可能失败。可以先手动运行 npm install，或检查网络后重跑安装器。'
+        # e379：收尾校验 + 缓存兜底——npm 失败或下载被中断时，从 Electron 本地缓存 zip 解压恢复，
+        # 避免「装完了但一启动就报缺少 electron」的静默半成品。
+        Write-InstallerLog 'WARN' "Electron 不完整：exe=$electronExe pathTxt=$electronPathTxt"
+        $electronDist = Join-Path $repoRoot 'node_modules\electron\dist'
+        $cacheDir = Join-Path $env:LOCALAPPDATA 'electron\Cache'
+        $recovered = $false
+        if (Test-Path -LiteralPath $cacheDir) {
+            $cacheZip = Get-ChildItem -LiteralPath $cacheDir -Filter 'electron-v33*.zip' -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($cacheZip) {
+                try {
+                    New-Item -ItemType Directory -Force -Path $electronDist -ErrorAction Stop | Out-Null
+                    Expand-Archive -LiteralPath $cacheZip.FullName -DestinationPath $electronDist -Force -ErrorAction Stop
+                    if (Test-Path -LiteralPath (Join-Path $electronDist 'electron.exe')) {
+                        $recovered = $true
+                        Write-InstallerLog 'OK' "已从 Electron 缓存恢复：$($cacheZip.FullName)"
+                    }
+                } catch {
+                    Write-InstallerLog 'WARN' "从缓存解压 Electron 失败：$($_.Exception.Message)"
+                }
+            }
+        }
+        if (-not $recovered) {
+            $script:ExitCode = 1
+            $electronHint = @(
+                'Electron 二进制没有就位，安装未完成（但其余步骤已装好）。'
+                "  期望文件：$electronExe",
+                '  可手动重试（在安装目录执行）：',
+                '    npm install --no-audit --no-fund',
+                '  国内网络建议先设镜像再重试：',
+                '    $env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"',
+                '  或重跑 安装PM工作台.cmd（会复用本地缓存）。'
+            ) -join [Environment]::NewLine
+            throw $electronHint
+        }
     }
 
     Write-Step 6 '创建桌面快捷方式'
