@@ -63,7 +63,7 @@ try {
 } catch { /* ignore */ }
 // PM 2026-11-18 20:26 优化验证：把已有的 看板.html 也复制进沙盘（最后复制 → mtime 最新），
 // 这样冷开时「看板.html 比依赖新」成立，可测「跳过 generateBoard 直接 loadFile」路径。
-copyIf(path.join(ROOT, '团队', '看板.html'), path.join(TEAM, '看板.html'));
+if (!ARGS.includes('--pregen-test')) copyIf(path.join(ROOT, '团队', '看板.html'), path.join(TEAM, '看板.html'));
 
 const env = {
   ...process.env,
@@ -73,6 +73,8 @@ const env = {
   TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'),
   TEAM_SELFTEST: '1',
   AWB_TEAM_ROOT: TEAM,
+  // 启动后台预生成（PM 2026-11-18 20:42）：自检用 2000ms 延迟；生产默认 8000ms。
+  AWB_BOARD_PREGEN_MS: ARGS.includes('--pregen-test') ? '2000' : '',
   // 严格热开（产品口径）= 关窗 → 应用自身按 TTL 销毁窗口 → 重开。自检把 TTL 调到 800ms，
   // 让「应用自身销毁后重建」这条真实路径在几秒内可复现（生产默认 60000ms 不变）。
   AWB_BOARD_HIDE_DESTROY_MS: ARGS.includes('--ttl-reopen') ? '800' : '',
@@ -190,6 +192,7 @@ async function main() {
       const projectId = String(wb.activeProjectId || ((wb.projects || [])[0] || {}).id || '');
       if (!projectId) throw new Error('沙盘 workbench 里没有可用项目 id');
       put({ kind: 'board-mode', projectId });
+      if (ARGS.includes('--pregen-test')) { put({ kind: 'pregen-wait' }); await sleep(5000); }
       const svgStart = Date.now();
       const result = await evalJs(`window.workbench.teamBoardOld(${JSON.stringify(projectId)})`, 90000, true);
       const wallMs = Date.now() - svgStart;

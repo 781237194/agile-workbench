@@ -8330,7 +8330,16 @@ ipcMain.handle('theme:metrics', async () => {
     } else {
       // PM 2026-11-18 20:26 限时优化：看板.html 存在且比依赖新 → 跳过 generateBoard 直接 loadFile。
       const freshInfo = boardHtmlFreshInfo({ teamRoot: resolveTeamRoot(), project });
-      if (freshInfo && freshInfo.fresh) {
+      // 同一进程内刚做过启动预生成、且此后依赖未变 → 直接复用预生成结果（首次打开也命中）。
+      const pregenReuse = Boolean(boardPregenerationMark && boardPregenerationMark.projectId === project.id
+        && boardPregenerationMark.path && fs.existsSync(boardPregenerationMark.path)
+        && freshInfo && freshInfo.depsMaxMtime === boardPregenerationMark.depsMaxMtime);
+      if (pregenReuse) {
+        result = { ok: true, boardPath: boardPregenerationMark.path };
+        skippedGenerate = true;
+        teamBoardLastBuild = { projectId: project.id, at: Date.now(), path: boardPregenerationMark.path };
+        teamBoardHtmlCache = { projectId: project.id, at: Date.now(), path: boardPregenerationMark.path, html: null, bytes: null, dataUrl: null };
+      } else if (freshInfo && freshInfo.fresh) {
         result = { ok: true, boardPath: freshInfo.path };
         skippedGenerate = true;
         teamBoardLastBuild = { projectId: project.id, at: Date.now(), path: freshInfo.path };
@@ -11686,6 +11695,41 @@ function saveWindowPref(win) {
   } catch { /* 记不住尺寸不阻断使用 */ }
 }
 
+let boardPregenerationTimer = null;
+// 预生成标记（仅本进程有效）：{projectId, path, at, depsMaxMtime}。
+let boardPregenerationMark = null;
+/** PM 2026-11-18 20:42：启动后后台低优先级预生成看板 HTML（让首次打开也命中磁盘缓存）。
+ *  AWB_BOARD_PREGEN_MS：延迟毫秒（默认 8000；0=关闭；自检用 2000）。失败静默、不阻塞启动。 */
+function scheduleBoardPregeneration() {
+  try {
+    if (boardPregenerationTimer) { clearTimeout(boardPregenerationTimer); boardPregenerationTimer = null; }
+    const raw = process.env.AWB_BOARD_PREGEN_MS;
+    const delayMs = raw === undefined || raw === '' ? 8000 : Number(raw);
+    if (!Number.isFinite(delayMs) || delayMs <= 0) return;
+    boardPregenerationTimer = setTimeout(async () => {
+      boardPregenerationTimer = null;
+      try {
+        const st = readStore();
+        const list = Array.isArray(st.projects) ? st.projects : [];
+        const project = list.find((x) => x && x.id === st.activeProjectId) || list[0];
+        if (!project) return;
+        const info = boardHtmlFreshInfo({ teamRoot: resolveTeamRoot(), project });
+        if (info && info.fresh) { console.log('[board-pregen] 磁盘看板已新鲜，跳过预生成'); return; }
+        const r = await teamTools.generateBoard(project);
+        console.log('[board-pregen] ' + JSON.stringify({ ok: Boolean(r && r.ok), at: new Date().toISOString() }));
+        // 记下预生成标记：同一进程内首次打开看板若期间数据未变 → 直接复用（省 generateBoard）。
+        if (r && r.ok) {
+          try {
+            const after = boardHtmlFreshInfo({ teamRoot: resolveTeamRoot(), project });
+            boardPregenerationMark = { projectId: project.id, path: r.boardPath, at: Date.now(), depsMaxMtime: after ? after.depsMaxMtime : 0 };
+          } catch { boardPregenerationMark = null; }
+        }
+      } catch (e) { try { console.log('[board-pregen] failed ' + String((e && e.message) || e).slice(0, 120)); } catch { /* ignore */ } }
+    }, delayMs);
+    if (boardPregenerationTimer.unref) boardPregenerationTimer.unref();
+  } catch { /* 预生成失败不影响启动 */ }
+}
+
 function createWindow() {
   const bounds = initialWindowBounds();
   mainWindow = new BrowserWindow({
@@ -11701,6 +11745,10 @@ function createWindow() {
     }
   });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // PM 2026-11-18 20:42：app ready 后**后台低优先级预生成** 看板.html，让用户首次打开看板也命中磁盘缓存
+  // （tester 净机：命中时冷开 T3 1370ms；首开无缓存 5735-7441ms）。延迟执行、失败静默，不影响启动。
+  // AWB_BOARD_PREGEN_MS 可注入延迟（自检用 2000，默认 8000；=0 关闭）。
+  scheduleBoardPregeneration();
   // 重启恢复上次字号：等页面加载完再设置，避免 zoom 被导航重置。
   mainWindow.webContents.on('did-finish-load', () => applyZoomToWindow(mainWindow, readZoomPref()));
   startMemSampler();
