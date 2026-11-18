@@ -26,6 +26,24 @@ function resolveTeamRoot() {
   if (envRoot) return envRoot;
   return (teamTools && teamTools.layout && (teamTools.layout.teamRoot || teamTools.layout.root)) || path.join(ROOT, '团队');
 }
+// T-20261118-090620-6e39：团队工具子进程的环境。
+// 生产实例（非 TEAM_SELFTEST）不把 TEAM_ROOT / TEAM_PROJECTS_ROOT 继承给子进程——旧行为下子进程里的
+// isSandboxTeamRoot() 会因这两个 env 存在而判真，把真实唤醒当沙盘静默跳过（2026-11-18 09:04 事故：PM 摘要/升级/评审唤醒 103 条全被跳过）。
+function teamChildEnv(extra = {}, opts = {}) {
+  const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...(extra || {}) };
+  try {
+    const targetRoot = String((opts && opts.teamRoot) || resolveTeamRoot());
+    const installRoot = path.join(ROOT, '团队');
+    const isRealTarget = path.resolve(targetRoot) === path.resolve(installRoot);
+    const isolated = Boolean(String(process.env.AWB_TEAM_ROOT || '').trim());
+    if (!IS_SANDBOX && isRealTarget && !isolated) {
+      delete env.TEAM_ROOT;
+      delete env.TEAM_PROJECTS_ROOT;
+      delete env.TEAM_SELFTEST;
+    }
+  } catch { /* 路径解析失败时保守继承原 env */ }
+  return env;
+}
 const APP_ICON = path.join(ROOT, 'assets', 'pm-workbench.ico');
 const APP_NAME = 'PM工作台';
 // R-b5fc F-4b：角色队列派生文件（由 团队/工具/lib/route-queues.mjs 生成，工作台只读）。
@@ -2353,7 +2371,7 @@ function pmIdentitySessionMapCheck(projectName) {
   try {
     const teamTool = path.join(resolveTeamRoot(), '工具', 'team.mjs');
     stdout = String(execFileSync(process.execPath, [teamTool, 'session', 'check', '--project', String(projectName), '--json'], {
-      encoding: 'utf8', timeout: 30000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      encoding: 'utf8', timeout: 30000, env: teamChildEnv(),
     }) || '');
   } catch (e) {
     return { ok: false, code: 'SESSION_CHECK_FAILED', error: String((e && e.message) || e), stdoutTail: String(stdout).slice(-400) };
@@ -5208,7 +5226,7 @@ ipcMain.handle('theme:metrics', async () => {
     const args = [ledgerTeamMjsPath(), 'task', 'accept', '--project', name, '--task', taskId, '--as', as,
       '--decision', decision, '--opinion', String(p.opinion === undefined ? '' : p.opinion), '--boot', token, '--json'];
     for (const item of evidence) args.push('--evidence', item);
-    const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 120000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
+    const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 120000, env: teamChildEnv() });
     const text = String((r.stdout || '') + (r.stderr || ''));
     if (r.status !== 0) {
       const code = (text.match(/\[([A-Z_]+)\]/) || [])[1] || 'TASK_ACCEPT_FAILED';
@@ -5221,7 +5239,7 @@ ipcMain.handle('theme:metrics', async () => {
     const project = requireProject(readStore(), p.projectId);
     const name = project.teamName || project.name;
     try {
-      const out = execFileSync(process.execPath, [TEAM_MJS_PATH, 'finalize', 'status', '--project', name, '--json'], { encoding: 'utf8', stdio: 'pipe', timeout: 30000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
+      const out = execFileSync(process.execPath, [TEAM_MJS_PATH, 'finalize', 'status', '--project', name, '--json'], { encoding: 'utf8', stdio: 'pipe', timeout: 30000, env: teamChildEnv() });
       return JSON.parse(String(out || '{}').trim());
     } catch (error) {
       throw codedError('FINALIZE_STATUS_FAILED', String((error && (error.stderr || error.message)) || error).slice(0, 400));
@@ -5236,7 +5254,7 @@ ipcMain.handle('theme:metrics', async () => {
     const args = [TEAM_MJS_PATH, 'finalize', 'run', '--project', name, '--boot', token, '--json'];
     if (p.force) args.push('--force');
     // 同 ledger 处置：主进程 process.execPath 是 electron.exe，子进程必须按 Node 跑，否则命令跑完不退出。
-    const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 120000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
+    const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 120000, env: teamChildEnv() });
     if (r.status !== 0) {
       const text = String((r.stdout || '') + (r.stderr || ''));
       const code = (text.match(/\[([A-Z_]+)\]/) || [])[1] || 'FINALIZE_FAILED';
@@ -5438,7 +5456,7 @@ ipcMain.handle('theme:metrics', async () => {
     const run = spawnSync(process.execPath, [ledgerTeamMjsPath(), ...commandArgs], {
       encoding: 'utf8',
       timeout: 120000,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+      env: teamChildEnv()
     });
     const rawText = String((run.stdout || '') + (run.stderr || ''));
     const timedOut = Boolean(run.error && run.error.code === 'ETIMEDOUT');
@@ -6146,7 +6164,7 @@ ipcMain.handle('theme:metrics', async () => {
       if (projectName) {
         try {
           const schedOut = execFileSync(process.execPath, [path.join(teamRoot, '工具', 'team.mjs'), 'sched', 'advice', '--project', projectName, '--json'], {
-            encoding: 'utf8', timeout: 20000, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+            encoding: 'utf8', timeout: 20000, env: teamChildEnv(),
           });
           const schedLine = String(schedOut || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
           const parsed = JSON.parse(schedLine);
@@ -20291,7 +20309,7 @@ function runClaimScanTick(projectName) {
     const args = [ledgerTeamMjsPath(), 'claim', 'scan', '--project', String(projectName || ''), '--json'];
     const run = spawnSync(process.execPath, args, {
       cwd: path.join(__dirname, '..'),
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      env: teamChildEnv(),
       encoding: 'utf8', timeout: 20000, windowsHide: true,
     });
     claimScanLastAt = Date.now();
@@ -20504,8 +20522,22 @@ function ensureRouteSupervisor(project) {
   }
   try {
     const { spawn } = require('node:child_process');
+    // T-20261118-090620-6e39：守护进程不许继承「沙盘开关」——曾经有实例把 TEAM_ROOT（即使指向真实根）
+    // 继承给守护，守护侧 isSandboxTeamRoot() 判真 → 它发出的 PM 摘要/升级/评审唤醒全部被静默跳过
+    // （2026-11-18 09:04 事故：103 条 sandbox_wake_skipped 全是 to=pm）。
+    // 口径：teamRoot 就是仓库安装根时，剥掉 TEAM_ROOT / TEAM_PROJECTS_ROOT / TEAM_SELFTEST 再传；
+    // 根是沙盘时原样继承（沙盘要的就是沙盘语义），并用 AWB_ROUTE_HOST_TEAM_ROOT 显式告知守护该用哪个根。
+    const daemonEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1', AWB_ROUTE_HOST_TEAM_ROOT: teamRoot };
+    try {
+      const installRoot = path.join(ROOT, '团队');
+      if (path.resolve(teamRoot) === path.resolve(installRoot)) {
+        delete daemonEnv.TEAM_ROOT;
+        delete daemonEnv.TEAM_PROJECTS_ROOT;
+        delete daemonEnv.TEAM_SELFTEST;
+      }
+    } catch { /* 路径解析失败时保守保留原 env */ }
     const child = spawn(process.execPath, [ROUTE_DAEMON_HOST, name], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', AWB_ROUTE_HOST_TEAM_ROOT: teamRoot },
+      env: daemonEnv,
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       windowsHide: true,
     });

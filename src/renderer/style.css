@@ -5114,6 +5114,8 @@ html[data-effect-level="reduced"] #awb-theme-particles { display: none; }
 /* B-20261118-085825-0950：一次失败 + 已排重试 = 重试中（黄），不再闪红（用固定琥珀色，避免被主题 --gold 覆盖成青色） */
 .sq-row .sq-state-retry { color: #e3b341; }
 .sq-row .sq-state-skip { color: var(--gold); }
+/* B-20261118-090620-6e39：skip 细分原因 chip（黄点，不红）——已合并 / 已去重 / 去抖 / 沙盘跳过 */
+.sq-row .sq-skip-reason { color: var(--gold-2); background: var(--gold-soft); border: 1px solid var(--gold-line); border-radius: 5px; padding: 1px 5px; font-size: 11px; white-space: nowrap; }
 .sq-row .sq-state-ok { color: var(--green); }
 .sq-row .sq-fail, .sq-row .sq-skip { font-family: var(--mono); text-align: right; color: var(--muted); }
 .sq-row .sq-last-ok { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

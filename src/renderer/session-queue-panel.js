@@ -48,7 +48,16 @@
     pushApiBound: false,
   };
 
-  const STATE_LABEL = { fail: '失败（真的没送出去）', retry: '重试中（一次失败已排重试，先别看红）', skip: '跳过（设计内不唤醒）', ok: '成功', none: '无记录' };
+  const STATE_LABEL = { fail: '失败（真的没送出去）', retry: '重试中（一次失败已排重试，先别看红）', skip: '跳过（设计内不唤醒，细分见 hover）', ok: '成功', none: '无记录' };
+  // B-20261118-090620-6e39：skip 细分（团队侧 session-queue.js 归一成 merged/dedupe/debounced/sandbox 四类）
+  const SKIP_SHORT = { merged: '已合并', dedupe: '已去重', debounced: '去抖', sandbox: '沙盘跳过', other: '跳过' };
+  const SKIP_LABEL = {
+    merged: '已合并（合并窗口内，不重复唤醒）',
+    dedupe: '已送达（去重，同一条已投过）',
+    debounced: '去抖（窗口内合并，未单独唤醒）',
+    sandbox: '沙盘跳过（沙盘根不驱动真实会话）',
+    other: '跳过（其它设计内原因）',
+  };
   // R-fa0e（3a12）§六：自动换人六态（[data-ar-state]）
   const AR_STATE_LABEL = { idle: '空闲', warn: '预警/已入队', pending_handover: '等交接回执', rotating: '正在换人', rebooting: '已广播重 boot', failed: '失败' };
   // R-c9ac：五态中文文案（写死；unknown=未接入）
@@ -196,11 +205,25 @@
       line.appendChild(queued);
 
       // B-20261118-085825-0950：retry（重试中）显示中文，其余状态保持原英文值（旧断言依赖）
-      const stateText = String(row.state || 'none') === 'retry' ? '重试中' : String(row.state || 'none');
-      const stateChip = node('span', 'sq-state sq-state-' + String(row.state || 'none'), stateText);
+      // B-6e39：skip 的细分不塞进 [data-sq-state] 文本（旧断言按 'skip' 文本断言），另加一个原因 chip。
+      const rowState = String(row.state || 'none');
+      const skipReason = String(row.skipReason || '');
+      const stateText = rowState === 'retry' ? '重试中' : rowState;
+      const stateChip = node('span', 'sq-state sq-state-' + rowState, stateText);
       stateChip.setAttribute('data-sq-state', '1');
-      stateChip.title = STATE_LABEL[String(row.state || 'none')] || '';
+      stateChip.title = rowState === 'skip'
+        ? `${SKIP_LABEL[skipReason] || STATE_LABEL.skip}${row.skipDetail ? '（' + row.skipDetail + '）' : ''}`
+        : (STATE_LABEL[rowState] || '');
       line.appendChild(stateChip);
+      if (rowState === 'skip') {
+        // 面板据此断言「黄点不红」与细分原因（四类之一，未知落 other）
+        const reasonChip = node('span', 'sq-skip-reason', SKIP_SHORT[skipReason] || '跳过');
+        reasonChip.setAttribute('data-sq-skip-reason', skipReason || 'other');
+        reasonChip.setAttribute('data-sq-skip-tone', 'warn');
+        reasonChip.title = `${SKIP_LABEL[skipReason] || STATE_LABEL.skip}${row.skipDetail ? '（' + row.skipDetail + '）' : ''}`;
+        line.setAttribute('data-sq-skip-reason', skipReason || 'other');
+        line.appendChild(reasonChip);
+      }
 
       const fail = node('span', 'sq-fail', String(Number(row.failCount) || 0));
       fail.setAttribute('data-sq-fail-count', '1');

@@ -35,6 +35,50 @@ const BACKPRESSURE_THRESHOLD = 3; // 排队 ≥3 才提示
 /** skipped 的三种真实取值（正文 §5.3 实测：MERGED_PENDING / ALREADY_DELIVERED / DEBOUNCED）。 */
 const SKIP_VALUES = new Set(['MERGED_PENDING', 'ALREADY_DELIVERED', 'DEBOUNCED']);
 
+/**
+ * B-20261118-090620-6e39：skip 细分。旧面板只显示一个笼统的 skip，看不出「设计内合并/去重」与
+ * 「被误判沙盘」的区别；这里把唤醒日志里的 skipped 归一成四类，面板据此显示文案与黄点。
+ *   merged    已合并（合并窗口）  ← skipped=MERGED_PENDING
+ *   dedupe    已送达（去重）      ← skipped=ALREADY_DELIVERED
+ *   debounced 去抖                ← skipped=DEBOUNCED
+ *   sandbox   沙盘跳过            ← skipped=SANDBOX_WAKE_SKIPPED 或 sandboxReason 非空
+ */
+const SKIP_REASON_LABELS = Object.freeze({
+  merged: '已合并（合并窗口）',
+  dedupe: '已送达（去重）',
+  debounced: '去抖',
+  sandbox: '沙盘跳过',
+  other: '跳过（其它原因）',
+});
+/** 面板短标签（行内 chip 用，四字以内）。 */
+const SKIP_REASON_SHORT = Object.freeze({ merged: '已合并', dedupe: '已去重', debounced: '去抖', sandbox: '沙盘跳过', other: '跳过' });
+
+function skipReasonOf(row) {
+  if (!row || typeof row !== 'object') return '';
+  const skipped = String(row.skipped == null ? '' : row.skipped).trim().toUpperCase();
+  const sandboxReason = String(row.sandboxReason || row.sandboxWhy || '').trim();
+  const reason = String(row.reason || row.why || '');
+  if (skipped === 'MERGED_PENDING') return 'merged';
+  if (skipped === 'ALREADY_DELIVERED') return 'dedupe';
+  if (skipped === 'DEBOUNCED') return 'debounced';
+  if (skipped === 'SANDBOX_WAKE_SKIPPED' || sandboxReason || /sandbox/i.test(reason)) return 'sandbox';
+  if (String(row.state || '') === 'skipped') return 'other';
+  return '';
+}
+
+/** skip 明细串（面板 hover 用）：原始 skipped + reason + 沙盘细分原因。 */
+function skipDetailOf(row) {
+  if (!row || typeof row !== 'object') return '';
+  const parts = [];
+  const skipped = String(row.skipped == null ? '' : row.skipped).trim();
+  const reason = String(row.reason || row.why || '').trim();
+  const sandboxWhy = String(row.sandboxWhy || row.sandboxReason || '').trim();
+  if (skipped) parts.push(`skipped=${skipped}`);
+  if (reason) parts.push(`reason=${reason}`);
+  if (sandboxWhy) parts.push(`sandbox=${sandboxWhy}`);
+  return parts.join(' · ');
+}
+
 function toMs(value) {
   const ms = Date.parse(String(value == null ? '' : value));
   return Number.isFinite(ms) ? ms : 0;
@@ -175,6 +219,9 @@ function summarizeRows(rows, options = {}) {
     consecutiveFails,
     retryWindowMs,
     retryUntilAt,
+    // B-6e39：skip 细分（只在最新一条确实是 skip 时给，其它情况留空——不伪造）
+    skipReason: latest && latest.kind === 'skip' ? skipReasonOf(latest.row) : '',
+    skipDetail: latest && latest.kind === 'skip' ? skipDetailOf(latest.row) : '',
     lastOkAt: lastOkMs ? new Date(lastOkMs).toISOString() : '',
     lastAt: lastMs ? new Date(lastMs).toISOString() : '',
     lastFailAt: lastFailMs ? new Date(lastFailMs).toISOString() : '',
@@ -397,6 +444,9 @@ function buildPanelModel(options = {}) {
       // R-c9ac：快照 v2 实时状态（五态 / 秒表 / 最近事件 / 停滞）——渲染层与团队台行同口径
       live: liveRowOf(entry, { now, stallMs: stallCfg.stallMs }),
       state: summary.state,
+      // B-6e39：skip 细分（reason 四类 + 原始明细），面板据此显示「跳过·沙盘／已合并／去重／去抖」
+      skipReason: summary.skipReason || '',
+      skipDetail: summary.skipDetail || '',
       failCount: summary.failCount,
       skipCount: summary.skipCount,
       okCount: summary.okCount,
@@ -584,6 +634,10 @@ module.exports = {
   SNAPSHOT_MAX_BYTES,
   BACKPRESSURE_THRESHOLD,
   SKIP_VALUES,
+  SKIP_REASON_LABELS,
+  SKIP_REASON_SHORT,
+  skipReasonOf,
+  skipDetailOf,
   // R-c9ac：快照 v2（五态 / 停滞 / 秒表 / 相对时间 / byPlacement 文案）
   LIVE_STATE_LABEL,
   DEFAULT_STALL_MS,

@@ -293,6 +293,69 @@ async function runSqCheck(options = {}) {
   check('AC1 同角色混合（fail+skip+ok）→ 最近一条是 fail ⇒ fail，失败数 1 / 跳过数 1 各自独立', rowOf(panel, 'analyst').state === 'fail' && rowOf(panel, 'analyst').fail === '1' && rowOf(panel, 'analyst').skip === '1', rowOf(panel, 'analyst'));
   const ac1Shot = (await shotOf('sq-ac1-four-states.png', '#session-queue-panel')).file;
 
+  // ── B-20261118-090620-6e39：skip 细分（四类文案 + data-sq-skip-reason + 黄点不红）─────────
+  writeWake(wakeFile, [
+    { to: 'pm', at: ago(20 * 1000), ok: true, skipped: 'SANDBOX_WAKE_SKIPPED', reason: 'mailbox_digest', sandboxReason: 'sandbox_root', sandboxWhy: 'env_root' },
+    { to: 'product', at: ago(30 * 1000), ok: true, skipped: 'DEBOUNCED', reason: 'debounce' },
+    { to: 'tester', at: ago(30 * 1000), ok: true, skipped: 'MERGED_PENDING', reason: 'merge' },
+    { to: 'programmer2', at: ago(30 * 1000), ok: true, skipped: 'ALREADY_DELIVERED', reason: 'dedupe' },
+  ]);
+  panel = await refresh();
+  const SKIP_DOM = `(() => {
+    const out = { rows: {} };
+    const rootStyle = getComputedStyle(document.documentElement);
+    out.varGold = rootStyle.getPropertyValue('--gold').trim();
+    out.varRed = rootStyle.getPropertyValue('--red').trim();
+    for (const row of Array.from(document.querySelectorAll('[data-sq-row]'))) {
+      const role = row.getAttribute('data-role');
+      const chip = row.querySelector('[data-sq-state]');
+      const reason = row.querySelector('[data-sq-skip-reason]');
+      out.rows[role] = {
+        state: chip ? chip.textContent.trim() : '',
+        reason: reason ? reason.textContent.trim() : '',
+        why: reason ? reason.getAttribute('data-sq-skip-reason') : '',
+        reasonColor: reason ? getComputedStyle(reason).color : '',
+        stateColor: chip ? getComputedStyle(chip).color : '',
+        rowWhy: row.getAttribute('data-sq-skip-reason') || '',
+      };
+    }
+    return out;
+  })()`;
+  const skipDom = await evalJs(SKIP_DOM);
+  const goldRgb = (() => {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(skipDom.varGold || '').trim());
+    if (!m) return '';
+    const n = parseInt(m[1], 16);
+    return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+  })();
+  const redRgb = (() => {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(skipDom.varRed || '').trim());
+    if (!m) return '';
+    const n = parseInt(m[1], 16);
+    return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+  })();
+  const sr = (role) => (skipDom.rows || {})[role] || {};
+  check('B-6e39 面板 skip 四类文案（沙盘跳过/去抖/已合并/已去重）+ data-sq-skip-reason',
+    sr('pm').reason === '沙盘跳过' && sr('pm').why === 'sandbox' && sr('pm').rowWhy === 'sandbox'
+    && sr('product').reason === '去抖' && sr('product').why === 'debounced'
+    && sr('tester').reason === '已合并' && sr('tester').why === 'merged'
+    && sr('programmer2').reason === '已去重' && sr('programmer2').why === 'dedupe',
+    { dom: skipDom.rows, goldRgb });
+  check('B-6e39 黄点不红：skip 状态 chip 取主题 --gold、原因 chip 不是 --red，state 文本仍是 skip',
+    ['pm', 'product', 'tester', 'programmer2'].every((role) => sr(role).state === 'skip')
+    && ['pm', 'product', 'tester', 'programmer2'].every((role) => Boolean(goldRgb) && sr(role).stateColor === goldRgb)
+    && ['pm', 'product', 'tester', 'programmer2'].every((role) => Boolean(sr(role).reasonColor) && sr(role).reasonColor !== redRgb),
+    { dom: skipDom.rows, goldRgb, redRgb });
+  check('B-6e39 沙盘跳过 hover 带原因（title 含 sandbox=env_root）',
+    await evalJs(`(() => {
+      const row = Array.from(document.querySelectorAll('[data-sq-row]')).find((el) => el.getAttribute('data-role') === 'pm');
+      const reason = row ? row.querySelector('[data-sq-skip-reason]') : null;
+      return Boolean(reason) && /sandbox=env_root/.test(String(reason.title || ''));
+    })()`) === true,
+    {});
+  const skipShot = (await shotOf('sq-b6e39-skip-reasons.png', '#session-queue-panel')).file;
+  void skipShot;
+
   // ── B-20261118-085825-0950：单次失败 + 已排重试 → retry（重试中，黄），不再闪红 ─────────
   writeWake(wakeFile, [
     { to: 'programmer2', at: ago(20 * 1000), ok: false, retried: true, reason: 'fetch failed', messageIds: ['M-retry'] },

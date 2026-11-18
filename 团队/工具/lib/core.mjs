@@ -12,14 +12,47 @@ export const TEAM_ROOT = process.env.TEAM_ROOT
   ? path.resolve(process.env.TEAM_ROOT)
   : path.join(WORKSPACE, '团队');
 export const INSTALL_TEAM_ROOT = path.join(WORKSPACE, '团队');
-/** B-3c03 / B-47c0：沙盘根判定——TEAM_ROOT 或 TEAM_PROJECTS_ROOT 任一被环境变量指走，
- *  或 TEAM_SELFTEST=1，都视为沙盘；沙盘默认不唤醒真实会话（防串台）。 */
+/** B-3c03 / B-47c0 / B-20261118-090620-6e39：沙盘根判定。
+ *
+ *  旧判据「只要环境里存在 TEAM_ROOT/TEAM_PROJECTS_ROOT 就判沙盘」会把**生产环境里显式指定真实根**也当成沙盘，
+ *  于是该进程发出的唤醒全被静默跳过（2026-11-18 09:04 事故：PM 的摘要/升级/评审唤醒 103 条全部 sandbox_wake_skipped）。
+ *  新判据（PM 2026-11-18 12:19 定的口径）：
+ *    ① `TEAM_SELFTEST=1` → 沙盘（自检/演示显式声明）；
+ *    ② env 把根指到**安装默认根以外** → 沙盘；
+ *    ③ env 指到的就是本模块的安装根 → 生产，不算沙盘；
+ *    ④ **整目录拷贝双保险（B-3c03 不破）**：拷贝树里 WORKSPACE 不是安装目录（缺 src/main.js 等标记），
+ *       此时 `INSTALL_TEAM_ROOT` 只是拷贝自己，env 指到它依然算沙盘。
+ */
+export function installWorkspaceMarkers() {
+  return ['src/main.js', 'package.json', 'scripts/run-electron.cjs', '团队/工具/team.mjs']
+    .every((rel) => { try { return fs.existsSync(path.join(WORKSPACE, rel)); } catch { return false; } });
+}
+
+/** 沙盘判定的可解释结果：{ sandbox, why }，why ∈ selftest | env_root | env_projects | copied_tree | ''。 */
+export function sandboxRootInfo() {
+  if (String(process.env.TEAM_SELFTEST || '') === '1') return { sandbox: true, why: 'selftest' };
+  const envRoot = String(process.env.TEAM_ROOT || '').trim();
+  const envProjects = String(process.env.TEAM_PROJECTS_ROOT || '').trim();
+  if (!envRoot && !envProjects) return { sandbox: false, why: '' };
+  const installWorkspace = installWorkspaceMarkers();
+  if (envRoot) {
+    const resolved = path.resolve(envRoot);
+    if (resolved !== path.resolve(INSTALL_TEAM_ROOT)) return { sandbox: true, why: 'env_root' };
+    // env 指向本模块的安装根：只有「确实在安装目录里」才算生产（拷贝树里这仍是沙盘）
+    if (!installWorkspace) return { sandbox: true, why: 'copied_tree' };
+  }
+  if (envProjects) {
+    const resolved = path.resolve(envProjects);
+    if (resolved !== path.resolve(path.join(WORKSPACE, '项目'))) return { sandbox: true, why: 'env_projects' };
+    if (!installWorkspace) return { sandbox: true, why: 'copied_tree' };
+  }
+  return { sandbox: false, why: '' };
+}
+
 export function isSandboxTeamRoot() {
-  // 判据：调用方是否用 TEAM_ROOT/TEAM_PROJECTS_ROOT 把根指走（安装默认运行不设这两个变量）。
-  // 不能用“模块所在位置推导”，因为沙盘是整目录复制，推导出来还是沙盘自己。
-  return Boolean(String(process.env.TEAM_ROOT || '').trim())
-    || Boolean(String(process.env.TEAM_PROJECTS_ROOT || '').trim())
-    || String(process.env.TEAM_SELFTEST || '') === '1';
+  // 判据集中在 sandboxRootInfo：env 指到安装默认根 = 生产；指到别处 / 自检开关 / 拷贝树 = 沙盘。
+  // 不能用“模块所在位置推导沙盘”，因为沙盘常是整目录拷贝，推导出来还是沙盘自己——所以额外用 installWorkspaceMarkers 区分。
+  return sandboxRootInfo().sandbox;
 }
 export const PROJECTS_ROOT = process.env.TEAM_PROJECTS_ROOT
   ? path.resolve(process.env.TEAM_PROJECTS_ROOT)
