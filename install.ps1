@@ -71,11 +71,27 @@ param(
     [switch]$Launch,
     [switch]$NoShortcut,
     [switch]$NonInteractive,
-    [switch]$Help
+    [switch]$Help,
+    # ── e610 在线升级（安装器侧，T-20261119-021320-2b3a）──────────────────────────
+    [switch]$Upgrade,
+    [string]$UpgradeFeed,
+    [string]$UpgradeVersion,
+    [string]$UpgradeSha256,
+    [string]$UpgradeUrl,
+    [string]$UpgradeDataDir,
+    [switch]$UpgradeDryRun,
+    [switch]$UpgradeForce,
+    [string]$UpgradeReason,
+    [string]$UpgradeRollback
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# e610：被壳层/夹具以子进程方式调用时，中文输出按 UTF-8 走管道（否则父进程按默认代码页解码会乱码）。
+try {
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+} catch { /* 控制台不支持时保持默认，不影响安装 */ }
 
 $script:ExitCode = 0
 $script:LogFile = $null
@@ -1279,6 +1295,458 @@ function Show-Summary {
     Write-InstallerLog 'OK' "安装完成：$RepoRoot"
 }
 
+# ── e610 在线升级（安装器侧）：真实下载 + sha256 校验 + 备份 + 失败回滚 + 重启提示 ──
+# 字段与壳层 IPC（src/main.js app:upgrade-start）对齐：
+#   入参：version/latest、sha256、url、force、reason、dryRun、source
+#   落账：<data>/升级记录.jsonl 一行 {ts,from,to,sha256,steps{backup,download,apply,selfcheck},ok,
+#         force,reason,dryRun,restartHint,source:'installer',...}
+#   退出码：0 成功；1 升级失败（已回滚或已停在可回滚态）；2 参数/校验错误（零副作用）
+function Get-RepoPackageInfo {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+    $pkg = Join-Path $RepoRoot 'package.json'
+    $info = [pscustomobject]@{ version = '0.0.0'; name = 'pm-workbench' }
+    if (-not (Test-Path -LiteralPath $pkg)) { return $info }
+    try {
+        $text = [System.IO.File]::ReadAllText($pkg, [System.Text.Encoding]::UTF8)
+        $json = $text | ConvertFrom-Json
+        if ($json) {
+            $info.version = [string]($json.version)
+            $info.name = [string]($json.name)
+        }
+    } catch { }
+    if (-not $info.version) { $info.version = '0.0.0' }
+    return $info
+}
+
+function Compare-UpgradeVersion {
+    param([string]$Left, [string]$Right)
+    $split = {
+        param($v)
+        $clean = ([string]$v).Trim().TrimStart('v', 'V')
+        $parts = $clean.Split('.')
+        $out = @()
+        foreach ($p in $parts) {
+            $num = [regex]::Match($p, '^\d+')
+            if ($num.Success) { $out += [int]$num.Value } else { $out += 0 }
+        }
+        while ($out.Count -lt 3) { $out += 0 }
+        return $out
+    }
+    $a = & $split $Left
+    $b = & $split $Right
+    for ($i = 0; $i -lt 3; $i++) {
+        $x = if ($i -lt $a.Count) { $a[$i] } else { 0 }
+        $y = if ($i -lt $b.Count) { $b[$i] } else { 0 }
+        if ($x -ne $y) { return ($x - $y) }
+    }
+    return 0
+}
+
+function Test-Sha256Hex {
+    param([string]$Value)
+    return [bool]($Value -and ($Value -match '^[0-9a-fA-F]{64}$'))
+}
+
+function Read-UpgradeFeed {
+    param([Parameter(Mandatory = $true)][string]$Feed)
+    if ($Feed -match '^https?://') {
+        Write-Host "  读取版本源：$Feed"
+        $resp = Invoke-WebRequest -Uri $Feed -UseBasicParsing -TimeoutSec 10
+        $text = [string]$resp.Content
+    } else {
+        if (-not (Test-Path -LiteralPath $Feed)) { throw "版本源文件不存在：$Feed" }
+        $resolved = (Resolve-Path -LiteralPath $Feed).Path
+        Write-Host "  读取版本源：$resolved"
+        $text = [System.IO.File]::ReadAllText($resolved, [System.Text.Encoding]::UTF8)
+    }
+    return ($text | ConvertFrom-Json)
+}
+
+function Get-UpgradeStamp {
+    $now = Get-Date
+    return $now.ToString('yyyyMMdd-HHmmss') + '-' + ([guid]::NewGuid().ToString('n').Substring(0, 6))
+}
+
+function Write-UpgradeRecord {
+    param([string]$DataDir, $Row)
+    if (-not $DataDir) { return $false }
+    try {
+        New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+        $file = Join-Path $DataDir '升级记录.jsonl'
+        $json = ($Row | ConvertTo-Json -Depth 8 -Compress)
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::AppendAllText($file, $json + [Environment]::NewLine, $enc)
+        return $true
+    } catch {
+        Write-Host ("  [警告] 写升级记录失败：" + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Invoke-UpgradeSelfCheck {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+    $startCmd = Join-Path $RepoRoot 'start.cmd'
+    if (-not (Test-Path -LiteralPath $startCmd)) { return $false }
+    try {
+        Write-Host '  自检：start.cmd --check'
+        $output = & cmd.exe /c ('"' + $startCmd + '" --check') 2>&1
+        $exitCode = [int]$LASTEXITCODE
+        $text = ($output | Out-String)
+        foreach ($line in @($output)) {
+            if ([string]$line -and ([string]$line).Trim().Length -gt 0) { Write-Host ('    ' + [string]$line) }
+        }
+        # 只看 ASCII 锚点：`start.cmd --check` 会打印 [检查] APP_DIR=… / electron …；
+        # 中文在 cmd → PowerShell 之间可能按控制台代码页解码成乱码，不能拿中文当判据。
+        $hasAppDir = [bool]($text -match 'APP_DIR=')
+        $hasElectron = [bool]($text -match '(?i)electron')
+        $electronExe = Join-Path $RepoRoot 'node_modules\electron\dist\electron.exe'
+        $electronOk = $hasElectron -or (Test-Path -LiteralPath $electronExe)
+        return [bool]($exitCode -eq 0 -and $hasAppDir -and $electronOk)
+    } catch {
+        Write-Host ("  自检执行失败：" + $_.Exception.Message)
+        return $false
+    }
+}
+
+# 用「先移动到备份、再复制新内容」的方式替换程序文件：备份 = 可回滚实体，且不复制整棵树。
+function Invoke-UpgradeApplyTree {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$StagingRoot,
+        [Parameter(Mandatory = $true)][string]$BackupDir
+    )
+    $relatives = @(
+        'src', 'scripts', 'dsh-plugin', 'assets', 'docs',
+        'package.json', 'package-lock.json', 'install.ps1', 'start.cmd', 'launch.vbs',
+        'README.md', 'CHANGELOG.md', 'NOTICE.md', 'LICENSE', '发版记录.md', '安装PM工作台.cmd'
+    )
+    $plan = @()
+    foreach ($rel in $relatives) {
+        $src = Join-Path $StagingRoot $rel
+        if (-not (Test-Path -LiteralPath $src)) { continue }
+        $dst = Join-Path $RepoRoot $rel
+        $plan += [pscustomobject]@{ rel = $rel; existed = (Test-Path -LiteralPath $dst) }
+    }
+    if ($plan.Count -eq 0) { throw '升级包里没有可应用的程序文件（src/package.json 等缺失）' }
+    # 1) 备份：把将被替换的条目移动到 _backup/upgrade-<ts>/
+    foreach ($entry in $plan) {
+        $dst = Join-Path $RepoRoot $entry.rel
+        if (-not $entry.existed) { continue }
+        $backupPath = Join-Path $BackupDir $entry.rel
+        $parent = Split-Path -Parent $backupPath
+        if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+        Move-Item -LiteralPath $dst -Destination $backupPath -Force
+    }
+    $manifestFile = Join-Path $BackupDir 'manifest.json'
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($manifestFile, (($plan | ConvertTo-Json -Depth 4) + [Environment]::NewLine), $enc)
+    # 夹具注入口：模拟「应用阶段失败」（备份与 manifest 已就绪，尚未复制新文件）。
+    if ($env:AWB_UPGRADE_FAIL_APPLY -eq '1') {
+        throw 'injected apply failure (AWB_UPGRADE_FAIL_APPLY=1)'
+    }
+    # 2) 应用：复制新内容
+    foreach ($entry in $plan) {
+        $src = Join-Path $StagingRoot $entry.rel
+        $dst = Join-Path $RepoRoot $entry.rel
+        if ((Get-Item -LiteralPath $src).PSIsContainer) {
+            Copy-Item -LiteralPath $src -Destination $dst -Recurse -Force
+        } else {
+            Copy-Item -LiteralPath $src -Destination $dst -Force
+        }
+    }
+    return [pscustomobject]@{ manifest = $plan; manifestFile = $manifestFile }
+}
+
+function Restore-UpgradeBackup {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot, [Parameter(Mandatory = $true)][string]$BackupDir)
+    $manifestFile = Join-Path $BackupDir 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestFile)) { throw "备份清单不存在：$manifestFile" }
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    $text = [System.IO.File]::ReadAllText($manifestFile, [System.Text.Encoding]::UTF8)
+    $parsed = $text | ConvertFrom-Json
+    # PS 5.1 的 ConvertFrom-Json 对 JSON 数组会返回 Object[]：不能再套 @()，否则只会迭代到「一个数组元素」。
+    $entries = @()
+    if ($parsed -is [System.Array]) { $entries = $parsed } elseif ($null -ne $parsed) { $entries = @($parsed) }
+    $restored = 0
+    foreach ($entry in $entries) {
+        $rel = [string]$entry.rel
+        if (-not $rel) { continue }
+        $dst = Join-Path $RepoRoot $rel
+        if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force -ErrorAction SilentlyContinue }
+        $src = Join-Path $BackupDir $rel
+        if ($entry.existed -and (Test-Path -LiteralPath $src)) {
+            $parent = Split-Path -Parent $dst
+            if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+            Move-Item -LiteralPath $src -Destination $dst -Force
+            $restored += 1
+        }
+    }
+    return $restored
+}
+
+function Invoke-UpgradeMode {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [string]$DataDir,
+        [string]$Feed,
+        [string]$Version,
+        [string]$Sha256,
+        [string]$Url,
+        [bool]$DryRun,
+        [bool]$Force,
+        [string]$Reason
+    )
+    $stamp = Get-UpgradeStamp
+    $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    $targetVersion = [string]$Version
+    $targetSha = [string]$Sha256
+    $targetUrl = [string]$Url
+    $restartHint = '请重启后生效'
+    $fromVersion = (Get-RepoPackageInfo -RepoRoot $RepoRoot).version
+    $steps = @{ backup = $false; download = $false; apply = $false; selfcheck = $false }
+    $baseRow = [ordered]@{
+        ts          = $ts
+        from        = $fromVersion
+        to          = $targetVersion
+        sha256      = $targetSha
+        steps       = $steps
+        ok          = $false
+        force       = [bool]$Force
+        reason      = [string]$Reason
+        dryRun      = [bool]$DryRun
+        source      = 'installer'
+        restartHint = $restartHint
+    }
+
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor DarkCyan
+    Write-Host '  PM工作台 · 在线升级（安装器侧）' -ForegroundColor Cyan
+    Write-Host '============================================================' -ForegroundColor DarkCyan
+    Write-Host "  安装目录：$RepoRoot"
+    Write-Host "  当前版本：$fromVersion"
+    if ($DataDir) { Write-Host "  数据目录：$DataDir" }
+
+    # 1) 强制升级必须给原因（零副作用）
+    if ($Force -and -not $Reason) {
+        Write-Host ''
+        Write-Host '  [升级被拒] UPGRADE_FORCE_REASON_REQUIRED：强制升级必须填写原因（-UpgradeReason）' -ForegroundColor Red
+        return 2
+    }
+
+    # 2) 版本源：缺字段就从 feed 补
+    if (-not $targetVersion -or -not $targetSha -or -not $targetUrl) {
+        if ($Feed) {
+            try {
+                $feedJson = Read-UpgradeFeed -Feed $Feed
+            } catch {
+                Write-Host ('  [升级失败] UPGRADE_FEED_UNREACHABLE：' + $_.Exception.Message) -ForegroundColor Red
+                return 2
+            }
+            if ($feedJson) {
+                if (-not $targetVersion) { $targetVersion = [string]($feedJson.version); if (-not $targetVersion) { $targetVersion = [string]($feedJson.latest) }; if (-not $targetVersion) { $targetVersion = [string]($feedJson.tag) } }
+                if (-not $targetSha) { $targetSha = [string]($feedJson.sha256); if (-not $targetSha) { $targetSha = [string]($feedJson.sha) } }
+                if (-not $targetUrl) { $targetUrl = [string]($feedJson.url); if (-not $targetUrl) { $targetUrl = [string]($feedJson.download) } }
+            }
+        }
+    }
+    $baseRow.to = $targetVersion
+    $baseRow.sha256 = $targetSha
+
+    if (-not $targetVersion) {
+        Write-Host '  [升级被拒] UPGRADE_VERSION_REQUIRED：缺少目标版本（-UpgradeVersion 或版本源里没有 version）' -ForegroundColor Red
+        return 2
+    }
+    # 3) 缺 sha256 → 不下载、零副作用（需求 §6.1 / AC3①）
+    if (-not (Test-Sha256Hex -Value $targetSha)) {
+        Write-Host '  [升级被拒] UPGRADE_SHA_MISSING：源缺少校验值，暂不可升级' -ForegroundColor Red
+        return 2
+    }
+    if (-not $targetUrl) {
+        Write-Host '  [升级被拒] UPGRADE_URL_REQUIRED：缺少下载地址（-UpgradeUrl 或版本源里没有 url）' -ForegroundColor Red
+        return 2
+    }
+    $targetSha = $targetSha.ToLower()
+    $baseRow.sha256 = $targetSha
+
+    $cmp = Compare-UpgradeVersion -Left $targetVersion -Right $fromVersion
+    if ($cmp -le 0) {
+        Write-Host ("  提示：目标版本 $targetVersion 不高于当前 $fromVersion（按强制升级流程继续）") -ForegroundColor Yellow
+    }
+
+    # 4) dry-run：只校验参数并落一条 dryRun 记录（供 tester mock，不下载/不改文件）
+    if ($DryRun) {
+        $steps.backup = $true
+        $steps.download = $true
+        $steps.apply = $true
+        $steps.selfcheck = $true
+        $baseRow.steps = $steps
+        $baseRow.ok = $true
+        $baseRow.dryRun = $true
+        $baseRow.message = 'dry-run：只校验版本源与参数，不下载、不修改文件'
+        [void](Write-UpgradeRecord -DataDir $DataDir -Row $baseRow)
+        Write-Host ''
+        Write-Host ("  [dry-run 通过] $fromVersion → $targetVersion；sha256=$targetSha") -ForegroundColor Green
+        Write-Host "  未下载、未修改任何文件；已写升级记录（dryRun=true）"
+        Write-Host "  重启提示：$restartHint"
+        return 0
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'package.json'))) {
+        Write-Host '  [升级失败] UPGRADE_NOT_INSTALLED：没有找到 package.json，请在安装目录运行' -ForegroundColor Red
+        return 2
+    }
+
+    # 5) 备份目录（只备份将被替换的条目）
+    $backupDir = Join-Path $RepoRoot (Join-Path '_backup' ("upgrade-$stamp"))
+    try {
+        New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+    } catch {
+        Write-Host ('  [升级失败] UPGRADE_BACKUP_FAILED：' + $_.Exception.Message) -ForegroundColor Red
+        return 1
+    }
+    $baseRow.backupDir = $backupDir
+    $steps.backup = $true
+    $baseRow.steps = $steps
+    Write-Host "  备份目录：$backupDir"
+
+    # 6) 下载 + sha256 校验
+    $zipDir = Join-Path $RepoRoot (Join-Path '_tmp' 'upgrade')
+    $zipPath = Join-Path $zipDir ("upgrade-$targetVersion-$stamp.zip")
+    try {
+        New-Item -ItemType Directory -Force -Path $zipDir | Out-Null
+        Write-Host "  下载：$targetUrl"
+        $downloadStarted = Get-Date
+        Invoke-WebRequest -Uri $targetUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
+        $sizeMb = [Math]::Round(((Get-Item -LiteralPath $zipPath).Length / 1MB), 2)
+        $secs = [int]((Get-Date) - $downloadStarted).TotalSeconds
+        Write-Host ("  下载完成：{0} MB，{1}s → {2}" -f $sizeMb, $secs, $zipPath)
+    } catch {
+        $steps.download = $false
+        $baseRow.steps = $steps
+        $baseRow.code = 'UPGRADE_DOWNLOAD_FAILED'
+        $baseRow.message = [string]$_.Exception.Message
+        [void](Write-UpgradeRecord -DataDir $DataDir -Row $baseRow)
+        Write-Host ('  [升级失败] UPGRADE_DOWNLOAD_FAILED：' + $_.Exception.Message) -ForegroundColor Red
+        return 1
+    }
+    $actualSha = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLower()
+    if ($actualSha -ne $targetSha) {
+        $steps.download = $false
+        $baseRow.steps = $steps
+        $baseRow.code = 'UPGRADE_SHA_MISMATCH'
+        $baseRow.message = "SHA_MISMATCH：期望 $targetSha，实际 $actualSha"
+        $baseRow.rolledBack = $false
+        [void](Write-UpgradeRecord -DataDir $DataDir -Row $baseRow)
+        Write-Host ("  [升级中止] UPGRADE_SHA_MISMATCH：下载文件校验失败（版本不变，已保留 zip 供排查：$zipPath）") -ForegroundColor Red
+        return 1
+    }
+    $steps.download = $true
+    $baseRow.steps = $steps
+
+    # 7) 应用（失败即回滚）
+    $staging = Join-Path $zipDir ("staging-$stamp")
+    $applied = $null
+    try {
+        Write-Host '  解压升级包…'
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $staging -Force
+        $stagingRoot = $staging
+        $children = @(Get-ChildItem -LiteralPath $staging)
+        $dirs = @($children | Where-Object { $_.PSIsContainer })
+        if ($dirs.Count -eq 1 -and (Test-Path -LiteralPath (Join-Path $dirs[0].FullName 'package.json'))) {
+            $stagingRoot = $dirs[0].FullName
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $stagingRoot 'package.json'))) {
+            throw '升级包里没有 package.json（不是 PM工作台 发布包）'
+        }
+        if (-not ((Test-Path -LiteralPath (Join-Path $stagingRoot 'src\main.js')) -or (Test-Path -LiteralPath (Join-Path $stagingRoot 'install.ps1')))) {
+            throw '升级包里没有 src\main.js / install.ps1（不是完整的 PM工作台 发布包）'
+        }
+        $applied = Invoke-UpgradeApplyTree -RepoRoot $RepoRoot -StagingRoot $stagingRoot -BackupDir $backupDir
+        $steps.apply = $true
+        $baseRow.steps = $steps
+        Write-Host ("  已应用：{0} 个条目（备份清单 {1}）" -f $applied.manifest.Count, $applied.manifestFile)
+    } catch {
+        $steps.apply = $false
+        $baseRow.steps = $steps
+        $rolledBack = $false
+        try {
+            if (Test-Path -LiteralPath (Join-Path $backupDir 'manifest.json')) {
+                [void](Restore-UpgradeBackup -RepoRoot $RepoRoot -BackupDir $backupDir)
+                $rolledBack = $true
+            }
+        } catch {
+            Write-Host ('  [严重] 回滚失败：' + $_.Exception.Message) -ForegroundColor Red
+        }
+        $baseRow.code = 'UPGRADE_APPLY_FAILED'
+        $baseRow.message = [string]$_.Exception.Message
+        $baseRow.rolledBack = $rolledBack
+        [void](Write-UpgradeRecord -DataDir $DataDir -Row $baseRow)
+        if ($rolledBack) {
+            Write-Host ('  [升级失败已回滚] UPGRADE_APPLY_FAILED：' + $_.Exception.Message) -ForegroundColor Red
+        } else {
+            Write-Host ('  [升级失败] UPGRADE_APPLY_FAILED（回滚未执行）：' + $_.Exception.Message) -ForegroundColor Red
+        }
+        return 1
+    }
+
+    # 8) 自检（start.cmd --check；失败不自动回滚，给一键回滚命令）
+    $steps.selfcheck = Invoke-UpgradeSelfCheck -RepoRoot $RepoRoot
+    $baseRow.steps = $steps
+    if (-not $steps.selfcheck) {
+        $baseRow.ok = $false
+        $baseRow.code = 'UPGRADE_SELFCHECK_FAILED'
+        $baseRow.rolledBack = $false
+        $baseRow.message = '已升级但自检未通过（start.cmd --check）'
+        [void](Write-UpgradeRecord -DataDir $DataDir -Row $baseRow)
+        Write-Host '  [升级未完成] 已升级但自检未通过；可回滚：' -ForegroundColor Red
+        Write-Host ("    powershell -NoProfile -ExecutionPolicy Bypass -File `"$RepoRoot\install.ps1`" -UpgradeRollback `"$backupDir`"") -ForegroundColor Yellow
+        return 1
+    }
+
+    # 9) 落账
+    $baseRow.ok = $true
+    $baseRow.restartHint = $restartHint
+    [void](Write-UpgradeRecord -DataDir $DataDir -Row $baseRow)
+    $afterVersion = (Get-RepoPackageInfo -RepoRoot $RepoRoot).version
+    Write-Host ''
+    Write-Host ("  [升级成功] {0} → {1}（sha256 {2}）" -f $fromVersion, $afterVersion, $targetSha.Substring(0, 12)) -ForegroundColor Green
+    Write-Host ("  备份：{0}" -f $backupDir)
+    Write-Host ("  重启提示：{0}（先退出工作台再运行 start.cmd）" -f $restartHint)
+    return 0
+}
+
+function Invoke-UpgradeRollbackMode {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot, [Parameter(Mandatory = $true)][string]$BackupDir, [string]$DataDir)
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor DarkCyan
+    Write-Host '  PM工作台 · 升级回滚' -ForegroundColor Cyan
+    Write-Host '============================================================' -ForegroundColor DarkCyan
+    Write-Host "  安装目录：$RepoRoot"
+    Write-Host "  备份目录：$BackupDir"
+    try {
+        $restored = Restore-UpgradeBackup -RepoRoot $RepoRoot -BackupDir $BackupDir
+    } catch {
+        Write-Host ('  [回滚失败] ' + $_.Exception.Message) -ForegroundColor Red
+        return 1
+    }
+    $row = [ordered]@{
+        ts          = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+        from        = ''
+        to          = ''
+        sha256      = ''
+        steps       = @{ backup = $true; download = $true; apply = $true; selfcheck = $true }
+        ok          = $true
+        rolledBack  = $true
+        source      = 'installer'
+        backupDir   = $BackupDir
+        restartHint = '请重启后生效'
+        message     = "手动回滚完成：恢复 $restored 个条目"
+    }
+    [void](Write-UpgradeRecord -DataDir $DataDir -Row $row)
+    Write-Host ("  [回滚完成] 已恢复 $restored 个条目；请重启后生效（先退出工作台再运行 start.cmd）") -ForegroundColor Green
+    return 0
+}
+
 function Show-Help {
     Write-Host $script:HelpText
 }
@@ -1311,6 +1779,41 @@ if ($LogDir) {
 }
 if (-not $script:LogFile) {
     Start-InstallerLog -Directory (Join-Path ([System.IO.Path]::GetTempPath()) 'PMWorkbench-install-logs')
+}
+
+# ── e610：-Upgrade / -UpgradeRollback 走独立分支（不进安装主流程）─────────────
+if ($Upgrade -or $UpgradeRollback) {
+    # 目标目录优先级：-InstallDir > 本脚本所在目录 > 当前目录。
+    # （只信 cwd 会误伤：从别的目录调用沙盘里的 install.ps1 时会把「当前仓库」当成升级目标。）
+    $upgradeRepo = $null
+    $scriptRoot = $null
+    if ($PSCommandPath) { $scriptRoot = Split-Path -Parent $PSCommandPath }
+    if ($InstallDir -and (Test-Path -LiteralPath $InstallDir) -and (Test-RepoRoot $InstallDir)) {
+        $upgradeRepo = (Resolve-Path -LiteralPath $InstallDir).Path
+    } elseif ($scriptRoot -and (Test-RepoRoot $scriptRoot)) {
+        $upgradeRepo = $scriptRoot
+    } elseif ($cwdIsRepo) {
+        $upgradeRepo = $cwd
+    }
+    if (-not $upgradeRepo) {
+        Write-Host ''
+        Write-Host '  [升级失败] UPGRADE_NOT_INSTALLED：当前目录不是 PM工作台（缺 package.json/start.cmd/src\main.js）' -ForegroundColor Red
+        Write-Host '  请在安装目录运行，或加 -InstallDir "E:\PM工作台"' -ForegroundColor Yellow
+        if ($script:LogFile) { Write-Host "日志：$($script:LogFile)" -ForegroundColor DarkGray }
+        exit 2
+    }
+    $upgradeData = $UpgradeDataDir
+    if (-not $upgradeData) {
+        if ($env:AWB_DATA_DIR) { $upgradeData = $env:AWB_DATA_DIR } else { $upgradeData = Join-Path $upgradeRepo 'data' }
+    }
+    $upgradeExit = 0
+    if ($UpgradeRollback) {
+        $upgradeExit = Invoke-UpgradeRollbackMode -RepoRoot $upgradeRepo -BackupDir $UpgradeRollback -DataDir $upgradeData
+    } else {
+        $upgradeExit = Invoke-UpgradeMode -RepoRoot $upgradeRepo -DataDir $upgradeData -Feed $UpgradeFeed -Version $UpgradeVersion -Sha256 $UpgradeSha256 -Url $UpgradeUrl -DryRun ([bool]$UpgradeDryRun) -Force ([bool]$UpgradeForce) -Reason $UpgradeReason
+    }
+    if ($script:LogFile) { Write-Host "日志：$($script:LogFile)" -ForegroundColor DarkGray }
+    exit $upgradeExit
 }
 
 Write-Host ''
