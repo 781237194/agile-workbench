@@ -72,8 +72,23 @@
 - 测量前协调干净窗口（目标角色/他人停止 Electron 起停），测量报告记录被测 HEAD、隔离方式、启动 PID、同时段 electron 进程数与 CPU；负载异常结果只作观测。
 - 界面/性能测量必须隔离实例（`AWB_DATA_DIR` + 沙盘团队 + `TEAM_SELFTEST=1`），并核对真实 `团队.json` 与 `workbench.json` sha 前后不变。
 
+
+## 换人流程（回执驱动 · 2026-11-18 Owner 14:35 定稿）
+
+完整流程以 `团队/协议/07-换人流程-回执驱动.md` 为准；PM 必须按四步执行，**不得强换、不得自换**：
+
+1. **到阈值只提醒**：`session usage` 判档后只发 `session_rotate_warn`，任何程序不得自动 rotate（auto-rotate 已改 remind-only）。
+2. **本人写交接 + 落回执**：本人写 `<角色目录>/产出/交接-最新.md`（八节）→ `session handover receipt --boot <本人令牌> --role <自己> --project <项目>` → 回执 `bytes+sha256` 写 `交接回执.jsonl` → 发 PM「交接就绪：<角色> <sha8>」。
+3. **PM 核对后手动换人**：`session rotate --boot <PM令牌> --role <角色> --project <项目> --reason "…"`；rotate 起手校验「最新回执 sha/bytes 与磁盘一致」（不符 `HANDOVER_RECEIPT_REQUIRED`，零副作用）+ 接任包必填小节；成功写轮换记录（审计含 `by=pm/receiptId/handoverSha256`）。
+4. **PM 自己的换人由产品执行**：PM 写交接 + 落回执 → 把 sha8 发 Owner/产品 → 产品 `session rotate --role pm`；**PM 不能给自己换人**（`PERMISSION_DENIED`）。
+
+权限矩阵：owner 任意角色 / pm 换除 pm 外全部 / product 仅可换 pm / 其他无权限（校验在写盘之前）。
+审计字段写死：`actorRole/by/handoverSha256/handoverBytes/handoverPath/receiptId/receiptAt`（+ `名册变更.jsonl`）。
+换人收尾：写「待启动队列」BQ 拉起新会话 + 广播其余角色重 boot；新会话 boot 后读交接包。
+失败一律**零副作用**（不改名册/不建会话/不写轮换记录）：`HANDOVER_RECEIPT_REQUIRED`（无回执/sha 不符）、`HANDOVER_FILE_MISSING/EMPTY`、`HANDOVER_INCOMPLETE`、`PERMISSION_DENIED`。
 ## 版本
-- version：1.3.0（2026-11-18 新增「验收权限边界」「文档维护与角色卡/skill 对齐」「工装安全与测量窗口」三节；依据 Owner 2026-11-18 22:01 指令：以现行工作流为准，全员修正角色卡与 skill、对齐模板）。
+- version：1.3.1（2026-11-18 新增「换人流程（回执驱动）」一节点，与 协议/07 同源）。
+- 1.3.0（2026-11-18 新增「验收权限边界」「文档维护与角色卡/skill 对齐」「工装安全与测量窗口」三节；依据 Owner 2026-11-18 22:01 指令：以现行工作流为准，全员修正角色卡与 skill、对齐模板）。
 - 1.2.0（2026-11-18 新增「派单前置检查（程序门）」小节；依据 Owner 2026-11-18 09:15）。
 - 历史：1.1.0（2026-11-17 新增「换人/交接」小节）；1.0.0（初版）。
 
