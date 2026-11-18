@@ -1462,6 +1462,8 @@ async function tryWake({ project, target, batch, isDispatch = false, engineUrl =
           text = buildNoticePrompt({
             to: target, project, messageId: last.messageId || '', subject: last.subject || '',
             from: last.from || '', teamTool: path.join(PATHS.teamRoot, '工具', 'team.mjs'), body: String(last.body || ''),
+            // T-d4e9：正文上限读 团队.json → config.messageMaxChars（非法值由 wake-text 回落 600）
+            messageMaxChars: messageMaxChars(),
           });
         } catch { text = ''; }
         // B-47c0：沙盘留痕统一由 wakeWithGuard 在成功分支写一行（skipped=sandbox_wake_skipped），
@@ -1549,6 +1551,7 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
       selftestWakeText = buildNoticePrompt({
         to: target, project, messageId: last.messageId || '', subject: last.subject || '',
         from: last.from || '', teamTool: path.join(PATHS.teamRoot, '工具', 'team.mjs'), body: String(last.body || ''),
+        messageMaxChars: messageMaxChars(),
       });
     } catch { selftestWakeText = ''; }
     return { ok: true, skipped: 'SELFTEST', to: target, merged: batch.length, reason, text: selftestWakeText };
@@ -2032,6 +2035,7 @@ async function wakeSessionForMessage({ project, to, msg, isDispatch = true, engi
     })
     : buildNoticePrompt({
       to, project, messageId: msg.id, subject: msg.subject, from: msg.from || '', teamTool, body: String((msg && msg.body) || ''),
+      messageMaxChars: messageMaxChars(),
     });
   // B-743e：首行统一归属（系统消息·非Owner·来自谁·什么类型·发给谁），正文前保留原消息 id。
   const header = wakeHeaderFor(msg, to, { merged: Number(msg.merged) || 0 });
@@ -2200,6 +2204,10 @@ export async function sendToPmWithWake(project, { subject = '', body = '', type 
  * 目标角色仍忙（G5）则保留队列并返回 blocked；working 幽灵满 30 分钟不占名额。
  */
 export async function pumpDispatchQueue(project, { role = '', source = 'tick' } = {}) {
+  // T-d5a6（2026-11-18）：时间源可注入——入口只取一次 now，函数体内不再出现裸 Date.now()；
+  // 沙盘注入 AWB_NOW_MS 即可把队列项 age 拨到 5 分钟以上验证补投/重试判定（同 ops.mjs 既有 AWB_NOW_MS 先例）。
+  const envNow = Number(process.env.AWB_NOW_MS || 0);
+  const now = Number.isFinite(envNow) && envNow > 0 ? envNow : Date.now();
   // B-20261117-201316-1441：每拍先兜底补唤醒 PM 邮箱（系统/升级/评审消息只写邮箱不唤醒 → 504 条漏讯）。
   // 失败只记 warning，绝不阻断派单泵。
   let mailboxDigest = null;
@@ -2246,7 +2254,7 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
   let firstBlocked = null;
   let item = null;
   let idleBackfill = null;
-  const pumpNow = Date.now();
+  const pumpNow = now;
   for (const candidate of candidates) {
     const busy = gateRoleBusy({
       role: String(candidate.to || ''),
@@ -2305,7 +2313,7 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
       appendDeliveryAudit(project, {
         itemId: item.id, to: String(item.to || ''), taskId: String(item.task || ''), attempt: prevAttempt,
         result: 'blocked', code: blockedCode,
-        stallMs: Number.isFinite(atMs) ? Math.max(0, Date.now() - atMs) : 0,
+        stallMs: Number.isFinite(atMs) ? Math.max(0, now - atMs) : 0,
         messageId: '', wakeOk: false, source: pumpSource,
       });
     } catch { /* 状态/审计写失败不阻断重泵 */ }
@@ -2318,7 +2326,7 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
   // B-80bc（2026-11-17）：唤醒失败保留队列项后，到期重投必须复用原消息快照——不再调 notify，
   // 否则每重投一次就往邮箱多塞一条重复消息。未到期则本拍不动它（等下一拍）。
   const wakeRetryDueMs = Date.parse(String(item.wakeRetryAt || ''));
-  if (item.wakeMsg && item.wakeMsg.id && Number.isFinite(wakeRetryDueMs) && wakeRetryDueMs > Date.now()) {
+  if (item.wakeMsg && item.wakeMsg.id && Number.isFinite(wakeRetryDueMs) && wakeRetryDueMs > now) {
     return { ok: true, pumped: false, reason: 'WAKE_RETRY_WAIT', item, remaining: readDispatchQueue(project).items.length };
   }
   const msg = (item.wakeMsg && item.wakeMsg.id) ? item.wakeMsg : notify({
@@ -2342,7 +2350,7 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
     appendDeliveryAudit(project, {
       itemId: item.id, to: String(item.to || ''), taskId: String(item.task || ''),
       attempt: Number(item.attempt) || 1, result: 'delivered', code: 'SOURCE_AUTO', // 不扩枚举：用 code/source 区分自动重派
-      stallMs: Number.isFinite(Date.parse(String(item.at || ''))) ? Math.max(0, Date.now() - Date.parse(String(item.at || ''))) : 0,
+      stallMs: Number.isFinite(Date.parse(String(item.at || ''))) ? Math.max(0, now - Date.parse(String(item.at || ''))) : 0,
       messageId: String(msg.id || ''), wakeOk: false, source: 'auto',
     });
   } catch (e) {
@@ -2356,7 +2364,7 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
   // 达到 WAKE_RETRY_MAX_ATTEMPT 次仍失败 → 出队转 blocked + 结构化错误码 WAKE_FAILED_MAX_ATTEMPTS + 给 PM 发 wake_failed（不静默）。
   // 沙盘（wakeSessionForMessage 返回 null）按「已跳过、不算失败」记，与既有 wakeFailed 判据同口径。
   const atMs = Date.parse(String(item.at || ''));
-  const stallMs = Number.isFinite(atMs) ? Math.max(0, Date.now() - atMs) : 0;
+  const stallMs = Number.isFinite(atMs) ? Math.max(0, now - atMs) : 0;
   const prevRow = readDeliveryState(project).items[item.id] || null;
   const prevAttempt = Number((prevRow && prevRow.attempt) || item.attempt) || 1;
   const prevState = String((prevRow && prevRow.state) || '');
@@ -2389,7 +2397,7 @@ export async function pumpDispatchQueue(project, { role = '', source = 'tick' } 
       const row = queue.items.find((it) => String(it.id) === String(item.id));
       if (row) {
         row.attempt = nextAttempt;
-        row.wakeRetryAt = new Date(Date.now() + delayMs).toISOString();
+        row.wakeRetryAt = new Date(now + delayMs).toISOString();
         row.wakeMsg = { id: msg.id, from: msg.from, to: msg.to, subject: msg.subject, body: msg.body, task: msg.task, sessionId: msg.sessionId };
         writeDispatchQueue(project, queue);
       }
@@ -5829,6 +5837,82 @@ export async function cmdTask(args) {
       notify({ from: b.role, to: task.owner, subject: `新任务 ${task.id}`, body: clipMessage(`${task.priority} ${task.title}\n${task.detail}`), project: b.project, task: task.id, ackRequired: true, sessionId: b.sessionId });
     }
     out(args, `已建任务 ${task.id} [${task.priority}] ${task.title}${task.owner ? ' → ' + task.owner : ''}`, { ok: true, task });
+    return;
+  }
+  // T-e05b（2026-11-18）：任务元数据修订入口（title/priority/owner）——以前没有，标题与字段漂移只能新开单。
+  // 权限：仅 PM/Owner；`--reason` 必填；append-only 审计 `任务修改.jsonl`（{at,by,id,field,before,after,reason}）。
+  // 非法字段/非法值/同值都在写盘前判定：报错或 NOOP 时**零副作用**（不写任务、不写审计）。
+  if (sub === 'update') {
+    if (!['pm', 'owner'].includes(String(b.role || ''))) {
+      fail('PERMISSION_DENIED', `只有 PM/Owner 能修任务元数据（当前 ${b.role || '-'}）；开发/测试请找 PM 改`, { role: b.role || '', allowed: ['pm', 'owner'] });
+    }
+    const taskId = String(args.id || args._[2] || '').trim();
+    if (!taskId) fail('BAD_ID', 'task update 需要 --id <任务id>');
+    const reason = String(args.reason || '').trim();
+    if (!reason) fail('REASON_REQUIRED', 'task update 必须带 --reason（为什么改；会写进审计）');
+    if (reason.length > 200) fail('REASON_TOO_LONG', `--reason 最多 200 字（收到 ${reason.length} 字）`, { length: reason.length, max: 200 });
+    const wanted = ['title', 'priority', 'owner'].filter((key) => args[key] !== undefined);
+    if (!wanted.length) fail('BAD_ARGS', '至少指定一项：--title / --priority / --owner', { allowed: ['title', 'priority', 'owner'] });
+    const task = loadTask(b.project, taskId);
+    // 先全部校验、再落盘：任何一项非法都零副作用。
+    const changes = [];
+    if (args.title !== undefined) {
+      const next = String(args.title).trim();
+      if (!next) fail('EMPTY_TITLE', '--title 不能为空');
+      if (next.length > 120) fail('TITLE_TOO_LONG', `标题最多 120 字（收到 ${next.length} 字）`, { length: next.length, max: 120 });
+      changes.push({ field: 'title', before: String(task.title || ''), after: next });
+    }
+    if (args.priority !== undefined) {
+      const next = String(args.priority).trim().toUpperCase();
+      if (!['P0', 'P1', 'P2', 'P3'].includes(next)) fail('BAD_PRIORITY', `--priority 只能是 P0/P1/P2/P3（收到 ${args.priority}）`, { priority: String(args.priority) });
+      changes.push({ field: 'priority', before: String(task.priority || ''), after: next });
+    }
+    if (args.owner !== undefined) {
+      const next = String(args.owner).trim();
+      if (next) {
+        const allowedRoles = (() => {
+          const set = new Set();
+          try { for (const r of projectRoleIds(loadProject(b.project)) || []) set.add(String(r)); } catch { /* 项目不可读时只认名册 */ }
+          try { for (const m of (loadTeam().members || [])) if (m && m.role) set.add(String(m.role)); } catch { /* 名册不可读时只认项目 */ }
+          return [...set];
+        })();
+        if (!allowedRoles.includes(next)) {
+          fail('BAD_OWNER', `--owner 必须是团队/项目角色（可选：${allowedRoles.join('/') || '无'}）；清空 owner 用 --owner ""`, { owner: next, allowed: allowedRoles });
+        }
+      }
+      changes.push({ field: 'owner', before: String(task.owner || ''), after: next ? next : null });
+    }
+    const real = changes.filter((c) => String(c.before == null ? '' : c.before) !== String(c.after == null ? '' : c.after));
+    if (!real.length) {
+      out(args, `任务 ${taskId} 无需修改：字段已是目标值（NOOP；未写审计）`, { ok: true, noop: true, taskId, changes: [] });
+      return;
+    }
+    // 审计先落（意图行），写失败即中止且零改动——与 b51b 的「删前先审计」同口径。
+    const at = nowIso();
+    const auditPath = path.join(projectStatePaths(b.project).dir, '任务修改.jsonl');
+    for (const c of real) {
+      try {
+        appendLine(auditPath, JSON.stringify({ at, by: b.role, id: taskId, field: c.field, before: c.before, after: c.after, reason: truncate(reason, 200) }));
+      } catch (e) {
+        fail('AUDIT_WRITE_FAILED', `审计写入失败，任务未修改：${String((e && e.message) || e)}`, { taskId, auditPath });
+      }
+    }
+    for (const c of real) {
+      if (c.field === 'owner') task.owner = c.after;      // null=清空
+      else task[c.field] = c.after;
+    }
+    // saveTask 自己会 rev+1 并追加一条 history；用 _by/_action/_note 把「谁改的、改了哪几项」写进那条记录（不要再手动 rev/history，会重复计数）。
+    task._by = b.role;
+    task._action = 'update';
+    task._note = real.map((c) => `${c.field}: ${c.before == null ? '(空)' : c.before} → ${c.after == null ? '(空)' : c.after}`).join('；');
+    saveTask(b.project, task);
+    appendEvent({
+      role: b.role, sessionId: b.sessionId, action: 'task_update', project: b.project, target: taskId,
+      note: real.map((c) => `${c.field}=${c.after == null ? '(空)' : c.after}`).join('；'), data: { changes: real, reason: truncate(reason, 200) },
+    });
+    const human = `已更新 ${taskId}（rev ${task.rev}）：\n` + real.map((c) => `- ${c.field}：${c.before == null || c.before === '' ? '(空)' : c.before} → ${c.after == null ? '(空)' : c.after}`).join('\n')
+      + `\n审计：${auditPath}`;
+    out(args, human, { ok: true, taskId, rev: task.rev, changes: real, task, auditFile: auditPath });
     return;
   }
   if (sub === 'list') {

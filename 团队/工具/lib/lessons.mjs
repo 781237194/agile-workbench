@@ -622,6 +622,8 @@ function bumpTurns(opts) {
 function promptIfDue(opts) {
   const o = opts && typeof opts === 'object' ? opts : {};
   const { stateDir, teamRoot, role, entry, threshold, now, atIso } = o;
+  // T-d4e9 ②：维护提醒也是程序通知，必须带 project（旧实现漏了 → 消息 project 为空、唤醒头显示 undefined）。
+  const projectName = String(o.projectName || '');
   if (!entry || !threshold) return { action: 'none' };
   const turnsNow = Number.isFinite(Number(entry.turns)) ? Math.floor(Number(entry.turns)) : 0;
   // R-cfca 契约 6.2：严格大于阈值才触发（turns=20 不发、21 才发）。
@@ -714,6 +716,7 @@ function promptIfDue(opts) {
   if (sendNotice && !isPm) {
     try {
       const sent = sendNotice({
+        project: projectName,
         to: role,
         subject: `维护提醒：skill 与经验教训（第 ${beforeTurns} 轮）`,
         body: bodyLines.join('\n'),

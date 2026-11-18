@@ -10,23 +10,43 @@
  *
  * 口径（任一改动都同时影响两端，不再各写一套）：
  *   · 头部：`【团队消息 <id>】<subject>` + `<from> → <to> · 项目：<project>` + AC 引用行；
- *   · 正文：有 body 时截断 600 字并标「全文用 read --id」；
+ *   · 正文：按有效上限截断；**只有真超长才标「已截断 N 字」**，短消息不误标（T-d4e9）；
  *   · PM → 角色：按「需要判断/执行」呈现（先执行、纯知悉才回已读、判断不了回需要明确）；
  *   · 其它：回复/通知，不必新建任务。
+ *
+ * T-d4e9 ①（2026-11-18）：正文上限不再写死 600，改由调用方传 `messageMaxChars`（`团队.json → config.messageMaxChars`）。
+ * 有效上限 = min(600, 配置值)：600 是唤醒正文的硬上限（与旧口径一致），配置只能调小；非法值（非数字/0/负数）回落 600。
+ * 纯函数、不读盘——壳层与团队工具各自把配置值传进来（ops.mjs 用 messageMaxChars()，壳层用 teamConfig()）。
  */
 
 const AC_LINE = 'AC 引用：见需求正文 §验收标准（写清路径 + sha256）；version/change 指回需求正文当前版本。';
+/** 唤醒正文硬上限（配置只能在此之下调小；改动会同时影响团队工具与壳层）。 */
 const BODY_LIMIT = 600;
 
-function buildNoticePrompt({ to, project, messageId, subject, from = '', teamTool = '', body = '' }) {
+/** 归一正文上限：非法（非数字/NaN/≤0）回落 600；配置大于 600 时仍取 600（硬上限）。 */
+function normalizeBodyLimit(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return BODY_LIMIT;
+  return Math.min(BODY_LIMIT, Math.floor(n));
+}
+
+function buildNoticePrompt({ to, project, messageId, subject, from = '', teamTool = '', body = '', messageMaxChars }) {
   const id = String(messageId || '(缺 id)');
   const tool = teamTool ? `node "${teamTool}" ` : '';
-  const excerpt = String(body || '').trim().slice(0, BODY_LIMIT);
+  const limit = normalizeBodyLimit(messageMaxChars);
+  const full = String(body || '').trim();
+  const truncated = full.length > limit;
+  const excerpt = truncated ? full.slice(0, limit) : full;
   const fromText = from ? `${from} → ` : '';
+  const bodyLine = !excerpt ? ''
+    : (truncated
+      ? `正文（已截断 ${limit} 字，全文用 read --id ${id}）：\n${excerpt}\n`
+      // 未截断也要给「全文用 read --id」入口（selftest 的既有契约），只是不谎称被截断（T-d4e9）。
+      : `正文（全文用 read --id ${id}；未截断）：\n${excerpt}\n`);
   const head = `【团队消息 ${id}】${subject || ''}\n`
     + `${fromText}${to} · 项目：${project}\n`
     + `${AC_LINE}\n`
-    + (excerpt ? `正文（已截断 ${BODY_LIMIT} 字，全文用 read --id ${id}）：\n${excerpt}\n` : '');
+    + bodyLine;
   if (from === 'pm' && to !== 'pm') {
     return head
       + '这是 PM 下发给你的消息：先判断——**需要你执行**就立即按正文做、做完发完成回执（不要只回“收到”）；\n'
@@ -40,4 +60,4 @@ function buildNoticePrompt({ to, project, messageId, subject, from = '', teamToo
     + `只回一行：已读/已回执 + ${id}。`;
 }
 
-module.exports = { buildNoticePrompt, AC_LINE, BODY_LIMIT };
+module.exports = { buildNoticePrompt, AC_LINE, BODY_LIMIT, normalizeBodyLimit };

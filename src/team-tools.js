@@ -10405,6 +10405,8 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
         from,
         teamTool: tool,
         body: input.body,
+        // T-d4e9：正文上限与团队工具同源（团队.json → config.messageMaxChars；非法值由 wake-text 归一回落 600）
+        messageMaxChars: (() => { try { return teamConfig().messageMaxChars; } catch { return 600; } })(),
       });
       return {
         ok: Boolean(projectName && ROLE_IDS.includes(role) && messageId),
