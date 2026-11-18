@@ -23,6 +23,7 @@ const decisionVersionCore = require(path.join(__dirname, '..', '团队', '工具
 // B-20261118-164055-2a44：名册 sessionId 赋值/写前校验的 CJS 单源（rosster-writer.mjs 也 re-export 同一实现）。
 // 壳层（本文件 + src/main.js）一律走这里，不再自己 `member.sessionId =`（违反 roster-writer 单写不变量）。
 const rosterApplyCore = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'roster-apply.cjs'));
+const rosterDeletionGuard = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'roster-deletion-guard.cjs'));
 const { execFile } = require('node:child_process');
 // R-1dfb：把 团队/工具/lib/ops.mjs（ESM）桥接进 CJS 壳层，动态 import 需要 file:// URL。
 const { pathToFileURL } = require('node:url');
@@ -1012,6 +1013,9 @@ function createTeamTools(options = {}) {
     if (!name || !sessions || typeof sessions !== 'object') return { ok: false, code: 'BAD_ROSTER' };
     const team = readJsonSafe(layout.teamFile);
     if (!team || !Array.isArray(team.members)) return { ok: false, code: 'NO_TEAM' };
+    // P0 97db 持久性（T-20261119-044009-7ded）：删除墓碑命中时拒写名册（防 6s 延迟回写），并写名册守卫审计。
+    const tombGuardSync = rosterDeletionGuard.deletionTombstoneBlocksRoster({ projectName: name, stateDir: projectStatePaths(name).dir, workbenchFile: process.env.TEAM_WORKBENCH_JSON || '' });
+    if (tombGuardSync.blocked) return { ok: true, code: 'ROSTER_SYNC_BLOCKED_TOMBSTONE', blocked: true, reason: tombGuardSync.reason };
     // B-2a44：赋值/校验全部走 roster-apply.cjs 单源（与 roster-writer.mjs 同一实现），
     // 不再自己 `member.sessionId =`；非法/旧副本 id 保持名册原值并审计，不静默写坏名册。
     const result = rosterApplyCore.syncRosterSessions(team, sessions, {
@@ -4290,6 +4294,9 @@ function createTeamTools(options = {}) {
     const backfillSkipped = Boolean(explicit.length) && explicit.length !== roleIdsForTeamMode(mode).length;
     const team = readJsonSafe(layout.teamFile);
     if (!team || !Array.isArray(team.members)) return { ok: false, code: 'NO_TEAM' };
+    // P0 97db 持久性（T-20261119-044009-7ded）：删除墓碑命中时拒绝补册/回写名册。
+    const tombGuardEnsure = rosterDeletionGuard.deletionTombstoneBlocksRoster({ projectName: name, stateDir: projectStateDir(name), workbenchFile: process.env.TEAM_WORKBENCH_JSON || '' });
+    if (tombGuardEnsure.blocked) return { ok: true, code: 'ROSTER_SYNC_BLOCKED_TOMBSTONE', blocked: true, reason: tombGuardEnsure.reason };
     let added = 0;
     for (const role of roleIds) {
       if (team.members.some((member) => member && member.role === role && member.status !== 'removed')) continue;

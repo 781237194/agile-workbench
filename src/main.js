@@ -1960,7 +1960,7 @@ async function resolveProjectTeamRole(payload, role) {
   const verified = await verifyProjectRoleSession(project, roleId, sessionId, { timeoutMs: 6000 });
   if (!verified.ok) throw codedError(verified.code, verified.message);
   // 名册同步成当前项目快照，旧工具 boot 读到的才是本项目会话。
-  teamTools.syncRoster(teamName, project.sessions || {});
+  syncRosterGuarded(teamName, project);
   return { project, role: roleId, teamName, sessionId: verified.sessionId, verified };
 }
 
@@ -9995,7 +9995,7 @@ ipcMain.handle('theme:metrics', async () => {
     const sessionId = String(p.sessionId || (project.sessions && project.sessions[role]) || '');
     const verified = await verifyProjectRoleSession(project, role, sessionId, { timeoutMs: 6000 });
     if (!verified.ok) throw codedError(verified.code, verified.message);
-    teamTools.syncRoster(teamName, project.sessions || {});
+    syncRosterGuarded(teamName, project);
     const result = await teamTools.legacyProposalAction({
       ...p,
       action,
@@ -10296,7 +10296,7 @@ ipcMain.handle('theme:metrics', async () => {
       if (!sessionIdentity.ok) throw codedError(sessionIdentity.code, sessionIdentity.message);
       recipientIdentity = await verifyProjectRoleSession(project, role, sessionId, { timeoutMs: 6000 });
       if (!recipientIdentity.ok) throw codedError(recipientIdentity.code, recipientIdentity.message);
-      teamTools.syncRoster(teamName, project.sessions || {});
+      syncRosterGuarded(teamName, project);
       // 派单/回执走旧团队工具：team.mjs send（PM 一次只能派一个，由旧协议自己兜）。
       const buildDispatch = () => teamTools.sendDispatch({
         projectName: teamName,
@@ -10761,7 +10761,7 @@ ipcMain.handle('theme:metrics', async () => {
         verifiedIdentity = await verifyProjectRoleSession(project, message.to, claimedSession, { timeoutMs: 6000 });
         if (!verifiedIdentity.ok) throw codedError(verifiedIdentity.code, verifiedIdentity.message);
         // 名册同步成当前项目快照，避免旧协议 boot 读到另一个项目的 sessionId。
-        teamTools.syncRoster(teamName, project.sessions || {});
+        syncRosterGuarded(teamName, project);
         const ackSession = project.sessions && project.sessions[message.to] ? String(project.sessions[message.to]) : mappedSession;
         mappedSession = ackSession;
         const result = await teamTools.ackDispatch({
@@ -22886,6 +22886,33 @@ async function runB2dd3Check() {
 function deletionTombstoneFile(teamName) {
   return path.join(resolveTeamRoot(), '状态', '项目', teamTools.teamSlug(String(teamName)), '删除墓碑.json');
 }
+// P0 97db 持久性（T-20261119-044009-7ded）：syncRoster 写前墓碑守卫——删除态项目禁止把名册 sessionId 写回。
+function syncRosterGuarded(teamName, project) {
+  try {
+    const tombFile = deletionTombstoneFile(teamName);
+    if (fs.existsSync(tombFile)) {
+      const tomb = JSON.parse(fs.readFileSync(tombFile, "utf8"));
+      let stillActive = false;
+      try {
+        const store = readStore();
+        stillActive = (store.projects || []).some((proj) => proj && String(proj.teamName || proj.name) === String(teamName) && proj.path && fs.existsSync(String(proj.path)));
+      } catch { stillActive = false; }
+      if (!stillActive) {
+        try {
+          const dir = path.join(resolveTeamRoot(), "状态", "项目", teamTools.teamSlug(String(teamName)));
+          fs.mkdirSync(dir, { recursive: true });
+          fs.appendFileSync(path.join(dir, "名册守卫.jsonl"), JSON.stringify({
+            at: new Date().toISOString(), project: String(teamName), action: "roster_sync_blocked",
+            reason: "deletion-tombstone", generation: Number(tomb && tomb.generation) || 0, source: "main/syncRosterGuarded"
+          }) + "\n", "utf8");
+        } catch { /* 审计失败仍拦截 */ }
+        return { ok: true, code: "ROSTER_SYNC_BLOCKED_TOMBSTONE", blocked: true };
+      }
+    }
+  } catch { /* 守卫异常时按原逻辑写，不阻断主流程 */ }
+  return teamTools.syncRoster(teamName, project && project.sessions || {});
+}
+
 function writeDeletionTombstone(teamName, projectName) {
   try {
     const file = deletionTombstoneFile(teamName);
