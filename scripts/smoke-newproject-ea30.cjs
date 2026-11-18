@@ -38,8 +38,10 @@ function copyDir(src, dst) { fs.mkdirSync(dst, { recursive: true }); for (const 
 function main() {
   fs.mkdirSync(EV, { recursive: true });
   const TEAM = path.join(SB, '团队');
-  const PROJROOT = path.join(SB, '项目');
-  fs.mkdirSync(PROJROOT, { recursive: true });
+  // 新项目必须落在「团队区」内（ops.mjs PROJECT_OUTSIDE 校验），所以放到沙盘 团队/项目区/。
+  const PROJROOT = path.join(TEAM, '项目区');
+  const PROJDIR = path.join(PROJROOT, PROJ);
+  fs.mkdirSync(PROJDIR, { recursive: true });
   // ① 沙盘团队：状态 + 宪法 + 项目铁律（不复制邮箱/锁，避免污染）
   copyDir(path.join(ROOT, '团队', '状态'), path.join(TEAM, '状态'));
   fs.rmSync(path.join(TEAM, '状态', '邮箱'), { recursive: true, force: true });
@@ -51,7 +53,7 @@ function main() {
   const env = { ...process.env, TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'), TEAM_SELFTEST: '1', ELECTRON_RUN_AS_NODE: '1' };
 
   // ② project add（真实生成）
-  const add = run(['project', 'add', '--name', PROJ, '--dir', PROJROOT], env);
+  const add = run(['project', 'add', '--name', PROJ, '--dir', PROJDIR], env);
   ok(add.status === 0, '① project add 成功（新项目真实生成）', { status: add.status, stderr: add.stderr.slice(-400) });
   const projDir = path.join(PROJROOT, PROJ);
   ok(fs.existsSync(projDir), '② 项目目录存在', { projDir });
