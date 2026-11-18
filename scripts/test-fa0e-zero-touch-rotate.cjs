@@ -20,6 +20,12 @@
  *
  * 隔离：AWB_DATA_DIR + TEAM_ROOT + TEAM_PROJECTS_ROOT + TEAM_WORKBENCH_JSON + 假 DSH_URL/HOME。
  * 用法：node scripts/test-fa0e-zero-touch-rotate.cjs [--json]
+ *
+ * 2026-11-18（T-20261118-091134-ace9）：B-20261118-080102-2c05 把会话阈值改成按角色单源
+ * （pm warn 60 万 / force 100 万，其余角色仍 30 万 / 50 万）后，本夹具写死的 52 万落进 ok 档 → 8 红。
+ * 现改为**动态取 sessionLimitsOf(project).of('pm')**（与 auto-rotate 候选判定同一函数），
+ * 用量取 force 边界值；并把注入时钟改成**与时区无关的上海 15:00**（格式化走 Intl，不再假设宿主是 +08:00），
+ * 避免夜间跑落 NIGHT_SILENT、也避免换机后 AWB_NOW 偏移。
  */
 'use strict';
 const fs = require('node:fs');
@@ -41,6 +47,24 @@ const OLD_PM = 'sess-oldpm-2d6d';
 const oldId = (role) => (role === 'pm' ? OLD_PM : `sess-old-${role}`);
 const ts = new Date().toISOString().replace(/[:.]/g, '-');
 const SANDBOX = path.join(ROOT, '_tmp', `fa0e-zerotouch-${process.pid}-${Date.now().toString(36)}`);
+
+/* ── 注入时钟（不依赖宿主时区）：一律按 Asia/Shanghai 解释，固定白天 15:00 ── */
+const SH_TZ = 'Asia/Shanghai';
+/** 上海本地墙钟 → 形如 2026-11-18T15:00:00+08:00（auto-rotate 的 AWB_NOW 口径）。 */
+function awbNow(ms) {
+  const s = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: SH_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).format(new Date(Number(ms)));
+  return String(s).replace(' ', 'T') + '+08:00';
+}
+/** 今天的上海本地 hour:00 的绝对时刻（白天基准，避免夜间 22–08 的 NIGHT_SILENT 分支）。 */
+function dayTimeMs(hour = 15) {
+  const day = new Intl.DateTimeFormat('en-CA', { timeZone: SH_TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(new Date());
+  return Date.parse(`${day}T${String(hour).padStart(2, '0')}:00:00+08:00`);
+}
+const shHour = (ms) => Number(new Intl.DateTimeFormat('en-GB', { timeZone: SH_TZ, hour: '2-digit', hour12: false }).format(new Date(Number(ms))));
 
 const results = [];
 function check(name, ok, detail) {
@@ -128,7 +152,7 @@ function env(nowMs) {
     TEAM_SELFTEST: '',
     DSH_WEB_URL: FAKE.base,
     DSH_HOME: SB.dshHome,
-    AWB_NOW: new Date(Number(nowMs) + 8 * 3600000).toISOString().slice(0, 19) + '+08:00',
+    AWB_NOW: awbNow(nowMs),
   };
   delete e.TEAM_DSH_FAKE;
   delete e.__AR_NEW_SESSION;
@@ -166,6 +190,25 @@ async function runCycle(nowMs) {
 async function runCli(args, nowMs) {
   const r = await runProc([path.join(ROOT, '团队', '工具', 'team.mjs'), ...args], nowMs);
   return { code: r.code, out: String(r.stdout || ''), err: String(r.stderr || '') };
+}
+/**
+ * 阈值单源：在**沙盘环境**子进程里调 sessionLimitsOf(项目).of('pm')（auto-rotate 候选判定用的同一函数），
+ * 顺带把 usageLevelOf 的三个边界语义一起带回来，供 ⓪ 断言（防止夹具与实现再次各自写数）。
+ */
+async function resolveLimits(nowMs) {
+  const sessionMod = path.join(ROOT, '团队', '工具', 'lib', 'session.mjs');
+  const code = [
+    'const { pathToFileURL } = require("node:url");',
+    '(async () => {',
+    `  const m = await import(pathToFileURL(${JSON.stringify(sessionMod)}).href);`,
+    `  const lim = m.sessionLimitsOf(${JSON.stringify(PROJECT)}).of('pm');`,
+    '  const lv = (n) => m.usageLevelOf(n, lim.warn, lim.force);',
+    '  console.log("@@LIM@@" + JSON.stringify({ warn: lim.warn, force: lim.force, atWarn: lv(lim.warn), atForce: lv(lim.force), justBelowWarn: lv(lim.warn - 1), justBelowForce: lv(lim.force - 1) }));',
+    '})().catch((e) => { console.log("@@LIM@@" + JSON.stringify({ error: String((e && e.message) || e) })); });',
+  ].join('\n');
+  const r = await runProc(['-e', code], nowMs);
+  const m = /@@LIM@@(.*)/.exec(String(r.stdout || ''));
+  try { return m ? JSON.parse(m[1]) : { error: `no payload (code=${r.code}) ${String(r.stderr || '').slice(0, 200)}` }; } catch { return { error: 'bad json' }; }
 }
 const auditRows = () => {
   if (!fs.existsSync(SB.auditFile)) return [];
@@ -213,7 +256,9 @@ async function main() {
   await startFakeDsh();
 
   // 沙盘登记项目（正常环境：DSH 指向假服务）
-  const base0 = Date.now();
+  // 注入时钟：固定白天 15:00（上海），任何时刻跑都走白天分支，不落夜间 NIGHT_SILENT
+  const base = dayTimeMs(15);
+  const base0 = base;
   const addR = await runCli(['project', 'add', '--name', PROJECT, '--team-mode', 'full', '--by', 'owner'], base0);
   if (addR.code !== 0) throw new Error('沙盘 project add 失败：' + addR.out + addR.err);
   for (const r of ROLES) fs.mkdirSync(path.join(SB.projectDir, ROLE_DIRS[r], '产出'), { recursive: true });
@@ -244,12 +289,21 @@ async function main() {
   entry.workspace = { ...(entry.workspace || {}), path: SB.projectDir, sessionIds: ROLES.map(oldId) };
   writeJson(SB.workbenchFile, { ...realStore, projects: [entry], activeProjectId: entry.id });
 
-  // 夹具：工作流 + 会话轮次 + 用量（pm force 520000）
+  // 夹具：工作流 + 会话轮次 + 用量（阈值动态取 sessionLimitsOf：用量＝pm 的 force 边界值）
   writeJson(path.join(SB.state, '工作流.json'), { schema: 2, project: PROJECT, round: 1, requirements: {}, boots: {} });
   writeJson(path.join(SB.state, '会话轮次.json'), {});
-  // 时间：固定白天 15:00（脚本要在任何时刻可跑；夜间 22–08 分支只记账不换人，会天然红）
-  const base = (() => { const d = new Date(); d.setHours(15, 0, 0, 0); return d.getTime(); })();
-  writeJson(path.join(SB.state, '会话用量.json'), { pm: { sessionId: OLD_PM, tokens: 520000, at: new Date(base).toISOString(), source: 'fixture' } });
+  const limits = await resolveLimits(base);
+  const PM_TOKENS = Number(limits && Number.isFinite(Number(limits.force)) ? Number(limits.force) : 1000000);
+  check('⓪ 夹具阈值取自 sessionLimitsOf(project).of(pm) 单源，且用量恰在 force 边界（usageLevelOf 语义一致）',
+    Boolean(limits) && !limits.error && Number(limits.force) > Number(limits.warn)
+      && limits.atWarn === 'warn' && limits.atForce === 'force'
+      && limits.justBelowWarn === 'ok' && limits.justBelowForce === 'warn'
+      && PM_TOKENS === Number(limits.force),
+    { limits, PM_TOKENS });
+  check('⓪b 注入时钟固定为白天 15:00（Asia/Shanghai），与宿主时区无关，不会落夜间分支',
+    shHour(base) === 15 && /^\d{4}-\d{2}-\d{2}T15:00:00\+08:00$/.test(awbNow(base)),
+    { base, baseIso: new Date(base).toISOString(), shHour: shHour(base), awbNow: awbNow(base) });
+  writeJson(path.join(SB.state, '会话用量.json'), { pm: { sessionId: OLD_PM, tokens: PM_TOKENS, at: new Date(base).toISOString(), source: 'fixture' } });
 
   // ── ① 一拍：阈值命中 → 交接请求（只 1 条） ────────────────────────────────
   const c1 = await runCycle(base);
@@ -334,7 +388,7 @@ async function main() {
     realBefore.team.sha256 === realAfter.team.sha256 && realBefore.workbench.sha256 === realAfter.workbench.sha256 && Boolean(realBefore.team.sha256),
     { before: realBefore, after: realAfter });
 
-  return finish({ realBefore, realAfter, fakeDsh: { base: FAKE.base, calls: FAKE.calls, created: FAKE.created } });
+  return finish({ realBefore, realAfter, fakeDsh: { base: FAKE.base, calls: FAKE.calls, created: FAKE.created }, thresholds: { ...limits, PM_TOKENS }, injectedNow: awbNow(base) });
 }
 
 function finish(extra) {
@@ -345,7 +399,7 @@ function finish(extra) {
   fs.mkdirSync(evDir, { recursive: true });
   const payload = {
     at: new Date().toISOString(), script: 'scripts/test-fa0e-zero-touch-rotate.cjs',
-    task: 'T-20261117-205947-2d6d', requirement: 'R-20261117-180740-fa0e',
+    task: 'T-20261118-091134-ace9', relatedTask: 'T-20261117-205947-2d6d', requirement: 'R-20261117-180740-fa0e',
     mode: 'fake-dsh', total, pass, red, results, realFiles: extra,
   };
   const evFile = path.join(evDir, `run-${ts}-${red === 0 ? 'green' : 'red'}.json`);
