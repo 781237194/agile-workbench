@@ -11511,7 +11511,9 @@ function renderLegacyTeamGate() {
   }
   const ready = legacyDocumentsReady();
   const sessions = p.sessions || {};
-  const rows = teamRoles(p).map((role) => {
+  // 97db AC1（PM M-20261119-040303-c14d7f）：名册全空时团队台「六角色旧行」必须 0 行（团队台 0 行口径）。
+  const rosterAllEmptyView = !Array.isArray(memberStatesCache) || memberStatesCache.length === 0;
+  const rows = (rosterAllEmptyView ? [] : teamRoles(p)).map((role) => {
     const card = legacyHas(legacyRoleCardRel(role));
     const index = legacyHas(legacyRoleIndexRel(role));
     // B-4baa 顺手修复：v42 三态改造在这里漏了 cardState，团队台整块渲染会报 “cardState is not defined”。
@@ -11552,7 +11554,7 @@ function renderLegacyTeamGate() {
   const activityHead = `<div class="legacy-team-activity-head" style="display:flex;gap:5px;justify-content:flex-end;padding:0 4px;color:var(--muted);font-size:8px" title="团队提交记录（提交/*.json），非 git 代码提交">${LEGACY_ACTIVITY_COLUMNS.map((col) => `<span data-activity-head="${esc(col.key)}" style="flex:0 0 auto;min-width:56px;text-align:right;white-space:nowrap">${esc(col.label)}</span>`).join('')}</div>`;
   box.innerHTML = `<div class="legacy-read-order">必读分层：<b>团队宪法（唯一最高，每轮） → 项目信息 → 角色卡 → 其他人文档（铁律按需避坑）</b>（角色目录 ${ready.dirs}/${ready.total} · 角色卡 ${ready.cards}/${ready.total} · 文件索引 ${ready.indexes}/${ready.total} · 其他文档 ${ready.others} 份 · 项目索引 ${ready.index ? '有' : '缺'}）</div>
     <div class="legacy-team-docs">${LEGACY_PROJECT_DOCS.map((doc) => `<button type="button" class="${legacyHas(doc.rel) ? 'ok' : 'bad'}" data-legacy-doc="${esc(doc.key)}" title="${esc(doc.rel)} · ${legacyHas(doc.rel) ? '存在' : '缺失'}">${esc(doc.label)} ${legacyHas(doc.rel) ? '有' : '缺'}</button>`).join('')}</div>
-    <div class="legacy-team-list">${activityHead}${rows}</div>
+    <div class="legacy-team-list">${activityHead}${rows || '<div class="empty-row" data-roster-empty>本工作区无在册成员</div>'}</div>
     <div class="legacy-team-result">${(() => {
       // F-9fbe-1/F-2：团队台红橙与项目面板同一判定（只有 block 才红、才写拦截词）。
       const gate = legacyGateState();

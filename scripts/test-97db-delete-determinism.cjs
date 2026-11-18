@@ -142,12 +142,21 @@ async function runScenario(name, sessionMode, port) {
       const opened = await cdp3.evaluate('(async () => { let d = document.querySelector("#team-drawer"); if (d && d.hidden) { const pill = document.querySelector("#team-pill"); if (pill) pill.click(); await new Promise((r) => setTimeout(r, 500)); } d = document.querySelector("#team-drawer"); return Boolean(d && !d.hidden); })()');
       if (!opened) { await cdp3.evaluate('setDrawer("team"); true'); }
       await sleep(1800);
-      teamRows = await cdp3.evaluate('(() => { const rows = document.querySelectorAll("#team-drawer .session-row"); return { count: rows.length, drawerHidden: (() => { const d = document.querySelector("#team-drawer"); return d ? d.hidden : null; })() }; })()');
+      teamRows = await cdp3.evaluate('(() => { const d = document.querySelector("#team-drawer"); const rows = document.querySelectorAll("#team-drawer .session-row"); const legacy = document.querySelectorAll("#team-drawer .legacy-team-row"); return { count: rows.length, legacyCount: legacy.length, drawerHidden: d ? d.hidden : null }; })()');
       try { cdp3.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ }
       await sleep(600); try { ws3.close(); } catch { /* ignore */ } try { child3.kill(); } catch { /* ignore */ }
     } else { try { child3.kill(); } catch { /* ignore */ } }
   } catch { teamRows = null; }
-  check(`D6 [${name}] 团队台已打开且成员行=0（DOM 真实渲染）`, Boolean(teamRows) && teamRows.count === 0 && teamRows.drawerHidden === false, teamRows);
+  // PM 补线索（M-20261119-040303-c14d7f）：D6 自证——抽屉必须已打开、成员行=0、六角色旧行=0，且 activeProject 已置 null
+  let activeProjectAfter = null;
+  try { activeProjectAfter = JSON.parse(fs.readFileSync(path.join(envs.TEAM, '状态', '团队.json'), 'utf8')).activeProject; } catch { activeProjectAfter = '__read_failed__'; }
+  check(`D6 [${name}] 团队台已打开且成员行=0、六角色旧行=0、activeProject=null（DOM 自证）`,
+    Boolean(teamRows) && teamRows.count === 0 && teamRows.legacyCount === 0 && teamRows.drawerHidden === false && (activeProjectAfter === null || activeProjectAfter === undefined),
+    { teamRows, activeProjectAfter });
+  check(`D7 [${name}] 删除墓碑存在（并发写者代际防护落盘）`,
+    (() => { try { const dir = path.join(envs.TEAM, '状态', '项目'); for (const e of fs.readdirSync(dir, { withFileTypes: true })) { if (e.isDirectory() && fs.existsSync(path.join(dir, e.name, '删除墓碑.json'))) return true; } return false; } catch { return false; } })(), {});
+  check(`D8 [${name}] 静态：delete 事务顺序 activeProject=null → 清名册 → 落盘`,
+    (() => { try { const src = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8'); const a = src.indexOf('team.activeProject = null'); const b = src.indexOf('clearRosterSessionsOf('); const c = src.indexOf("case: 'panelTeamSync'"); return a >= 0 && b > a && c > b; } catch { return false; } })(), {});
   try { fs.rmSync(sb, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 (async () => {
