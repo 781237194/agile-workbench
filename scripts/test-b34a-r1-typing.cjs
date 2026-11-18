@@ -397,7 +397,7 @@ async function main() {
   } finally {
     try { if (cdp) cdp.close(); } catch { /* ignore */ }
     // P0 B-20261118-200539-e923：**绝对禁止按进程名/路径批量杀 electron**——Owner 的生产工作台
-    // 就是 D:\deepseek\agile-workbench\node_modules\electron\dist\electron.exe，曾被这里误杀两次。
+    // 就是同一个 electron.exe（仓库根下的 node_modules/electron/dist/electron.exe），曾被这里误杀两次。
     // 只允许回收本脚本自己 spawn 的那棵进程树（child.pid → taskkill /PID /T /F）。
     try { if (child && child.pid) child.kill(); } catch { /* ignore */ }
     await sleep(1200);

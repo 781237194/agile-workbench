@@ -5,7 +5,7 @@
  *
  * 背景：A 的 scripts/test-b34a-r1-typing.cjs 曾用
  *   Get-Process electron | Where-Object { $_.Path -like "*deepseek*" } | Stop-Process -Force
- * 清理现场，而 Owner 的生产工作台就是 D:\deepseek\agile-workbench\node_modules\electron\dist\electron.exe
+ * 清理现场，而 Owner 的生产工作台就是同一个 electron.exe（仓库根下的 node_modules/electron/dist/electron.exe）
  * → 把 Owner 的工作台一并杀掉（2026-11-18 19:05 / 20:00 两次）。此后所有采集/夹具只允许：
  *   ①记录自己 spawn 的 child.pid → taskkill /PID <pid> /T /F（或 child.kill()）；
  *   ②只按 PID 精确杀，绝不 taskkill /IM electron.exe、绝不 Stop-Process -Name electron。
