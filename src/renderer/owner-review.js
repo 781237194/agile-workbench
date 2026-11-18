@@ -2185,6 +2185,8 @@
     ok.setAttribute('data-action', rejecting ? 'owner-reject-confirm' : 'owner-accept-confirm');
     // B-53ff：以前点「确认验收」到 IPC 返回之间界面完全没变化（一次 1.5–3 秒），Owner 体感是"点了没反应"。
     // 现在：立刻进入忙碌态（按钮文案 + 进度行 + 计时）、成功后立刻把该行从列表移除，失败才恢复。
+    // B-20261118-211237-9ded：一次验收只允许一个在途请求（成功后重置，失败也重置）。
+    let submitting = false;
     const busy = el('p', 'accept-busy');
     busy.setAttribute('data-accept-busy', '1');
     busy.hidden = true;
@@ -2196,7 +2198,11 @@
       busy.textContent = (rejecting ? '正在提交打回…' : '正在验收…') + ' 0 秒';
       if (busyTimer) clearInterval(busyTimer);
       busyTimer = setInterval(() => {
-        busy.textContent = (rejecting ? '正在提交打回…' : '正在验收…') + ' ' + Math.round((Date.now() - startedAt) / 1000) + ' 秒';
+      // B-20261118-211237-9ded：超过 1.2s / 3s 追加阶段提示，不让 Owner 只看到干等秒数。
+      const elapsedMs = Date.now() - startedAt;
+      const sec = Math.round(elapsedMs / 1000);
+      const hint = elapsedMs >= 3000 ? '（写入工作流与镜像刷新中，请稍候…）' : (elapsedMs >= 1200 ? '（正在校验并写入…）' : '');
+      busy.textContent = (rejecting ? '正在提交打回…' : '正在验收…') + ' ' + sec + ' 秒' + hint;
       }, 400);
     };
     const stopBusy = () => {
@@ -2204,6 +2210,9 @@
       busy.hidden = true;
     };
     ok.addEventListener('click', async () => {
+      // B-20261118-211237-9ded：防重复提交（按钮 disabled 之外再加一道闸，键盘/连点都拦）。
+      if (submitting) return;
+      submitting = true;
       ok.disabled = true;
       ok.textContent = rejecting ? '正在打回…' : '正在验收…';
       err.hidden = true;
@@ -2218,6 +2227,7 @@
         ok.disabled = false;
         ok.textContent = '确认打回';
         stopBusy();
+        submitting = false;
         return;
       }
       try {
@@ -2239,18 +2249,21 @@
           throw error;
         }
         form.hidden = true;
+        submitting = false;
         stopBusy();
         // B-53ff：成功后立刻把该行从列表移除（不等下一次 5 秒轮询），
         // 否则 Owner 看到"行还在"，会以为没生效并反复点。
         const goneRow = document.querySelector(`#accept-list .accept-row[data-req-id="${String(row.id).replace(/["\\]/g, '\\$&')}"]`);
         if (goneRow) goneRow.remove();
         renderMissing([]);
-        await loadData();
-        renderAcceptList();
+        // B-20261118-211237-9ded：先给成功提示（响应即完成），列表刷新改成后台——
+        // 之前 await loadData() 排在提示之前，主进程若正被看板重建占用，Owner 要再等数秒才看到结果。
         showNotice(rejecting
           ? `已打回：${row.id}；需求回到可整改，PM 会收到打回原因`
           : `已验收：${row.id}；流程图 ≤6 秒内更新`);
+        void Promise.resolve().then(() => loadData()).then(() => renderAcceptList()).catch(() => { /* 刷新失败不掩盖成功 */ });
       } catch (e) {
+        submitting = false;
         stopBusy();
         ok.disabled = false;
         ok.textContent = rejecting ? '确认打回' : '确认验收';
