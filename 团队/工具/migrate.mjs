@@ -22,6 +22,8 @@ import { fileURLToPath } from 'node:url';
 // ESM 下没有 __dirname：默认根目录（未传 --root 时）依赖它，必须显式构造
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { bsdtarZip, bsdtarUnzip, writeTarList } from './lib/evidence-pack.mjs';
+// B-20261118-083158-990c：rebind-sessions 写前校验目标会话是否存在于 DSH
+import { DshClient } from './lib/dsh-session.mjs';
 
 const MANIFEST_NAME = '迁移清单.json';
 const NOISE_RE = /(^|\/)(_backup|_tmp[^\/]*|\.selftest-[^\/]*|_archive|node_modules)(\/|$)|\.bak-\d+$|\.tmp$/;
@@ -395,7 +397,7 @@ function cmdRebind(argv) {
 }
 
 /* ───────── rebind-sessions ───────── */
-function cmdRebindSessions(argv) {
+async function cmdRebindSessions(argv) {
   const repoRoot = argv.root ? path.resolve(argv.root) : path.resolve(__dirname, '..', '..');
   { const project = String(argv.project || '').trim(); guardLiveRoot(argv, repoRoot, project); }
   const teamFile = path.join(repoRoot, '团队', '状态', '团队.json');
@@ -415,6 +417,7 @@ function cmdRebindSessions(argv) {
     mapping[r] = String(argv.session || '');
   }
   const clearAll = argv.clear === true; // AC5②：--clear 六条空且 pending
+  // ① 先算变更（不写盘）——写前校验必须在任何写之前
   const changes = [];
   for (const m of roles) {
     const role = String(m.role || '');
@@ -423,26 +426,64 @@ function cmdRebindSessions(argv) {
     else if (mapping[role] !== undefined) next = mapping[role];
     if (next === String(m.sessionId || '')) continue;
     changes.push({ role, from: String(m.sessionId || ''), to: next });
-    if (!dryRun) {
+  }
+  // ② B-20261118-083158-990c：写前校验目标 sessionId 在 DSH 存在；不存在默认拒绝（零写入）。
+  //    --allow-missing 放行旧行为并写 allowMissing:true 审计。
+  //    沙盘/自检豁免（TEAM_SELFTEST=1 或传了 --root），要验门禁本体用 TEAM_MIGRATE_ENFORCE=1。
+  const allowMissing = argv['allow-missing'] === true;
+  const gateExempt = process.env.TEAM_MIGRATE_ENFORCE === '1'
+    ? false
+    : (process.env.TEAM_SELFTEST === '1' || Boolean(argv.root));
+  let missingSessions = [];
+  let dshChecked = false;
+  if (!dryRun && !gateExempt) {
+    const targets = Array.from(new Set(changes.filter((c) => c.to).map((c) => String(c.to))));
+    if (targets.length) {
+      let present = null;
+      try {
+        const client = new DshClient();
+        const list = await client.list();
+        present = new Set(((list && list.items) || []).map((x) => String(x.sessionId)));
+      } catch { present = null; }
+      dshChecked = Boolean(present);
+      missingSessions = targets.filter((id) => !present || !present.has(id));
+      if (missingSessions.length && !allowMissing) {
+        fail('STALE_SESSION_REFUSED',
+          `目标会话在 DSH 不存在：${missingSessions.join(',')}；名册未改动（零写入）。确认要写入请加 --allow-missing（审计会记 allowMissing:true）`,
+          { missing: missingSessions, dshChecked, hint: 'rebind-sessions --allow-missing --yes' });
+      }
+    }
+  }
+  // ③ 落盘（校验通过后）
+  if (!dryRun) {
+    for (const c of changes) {
+      const m = roles.find((x) => String(x.role || '') === c.role);
+      if (!m) continue;
       const prev = String(m.sessionId || '');
       // F5②：旧会话归档字段（正文要求的 archivedSession / replacedBySessionId）
-      if (prev) { m.archivedSession = prev; m.replacedBySessionId = next; }
+      if (prev) { m.archivedSession = prev; m.replacedBySessionId = c.to; }
       m.sessionPrevSessionId = prev;
       m.sessionRebindAt = new Date().toISOString();
-      m.sessionId = next;
-      m.sessionPending = next === '';
+      m.sessionId = c.to;
+      m.sessionPending = c.to === '';
     }
   }
   if (!dryRun && changes.length) {
     writeJsonFile(teamFile, team);
-    // F5③：迁移审计.jsonl（项目级，append-only，含每角色 from→to 与旧会话归档字段）
+    const at = new Date().toISOString();
+    const by = String(argv.by || 'migrate');
+    // F5③：迁移审计.jsonl（项目级，append-only）——字段对齐 207b：{at, by, role, from, to, reason, allowMissing}
     const auditProject = String(argv.project || '').trim();
     if (auditProject) {
       const auditFile = path.join(repoRoot, '团队', '状态', '项目', auditProject, '迁移审计.jsonl');
       fs.mkdirSync(path.dirname(auditFile), { recursive: true });
-      const at = new Date().toISOString();
       for (const c of changes) {
-        fs.appendFileSync(auditFile, JSON.stringify({ at, project: auditProject, role: c.role, from: c.from, to: c.to, archivedSession: c.from || '', replacedBySessionId: c.to, reason: 'rebind_sessions' }) + '\n', 'utf8');
+        fs.appendFileSync(auditFile, JSON.stringify({
+          at, project: auditProject, by, role: c.role, from: c.from, to: c.to,
+          archivedSession: c.from || '', replacedBySessionId: c.to,
+          reason: 'rebind_sessions', allowMissing: Boolean(allowMissing),
+          ...(allowMissing && missingSessions.includes(String(c.to)) ? { missingSession: true } : {}),
+        }) + '\n', 'utf8');
       }
     }
     // AC5③：旧会话隔离审计——重绑后在项目 唤醒.jsonl 写 reason='stale_session'（旧会话不再被发往）
@@ -450,13 +491,12 @@ function cmdRebindSessions(argv) {
     if (project) {
       const wake = path.join(repoRoot, '团队', '状态', '项目', project, '唤醒.jsonl');
       fs.mkdirSync(path.dirname(wake), { recursive: true });
-      const at = new Date().toISOString();
       for (const c of changes) {
         fs.appendFileSync(wake, JSON.stringify({ at, project, to: c.role, reason: 'stale_session', oldSessionId: c.from, newSessionId: c.to, ok: false }) + '\n', 'utf8');
       }
     }
   }
-  return out({ ok: true, dryRun, changes }, argv.json);
+  return out({ ok: true, dryRun, changes, gateExempt, allowMissing, missingSessions, dshChecked }, argv.json);
 }
 
 /* ───────── migrate-check（AC6① 固定五步）───────── */
@@ -528,7 +568,7 @@ function cmdCheck(argv) {
 }
 
 /* ───────── CLI ───────── */
-const BOOL_FLAGS = ['yes', 'dry-run', 'force', 'with-noise', 'no-evidence', 'clear', 'json', 'all', 'allow-live-root'];
+const BOOL_FLAGS = ['yes', 'dry-run', 'force', 'with-noise', 'no-evidence', 'clear', 'json', 'all', 'allow-live-root', 'allow-missing'];
 function parseArgs(argv) {
   const args = {};
   const rest = [];
@@ -541,7 +581,7 @@ function parseArgs(argv) {
   }
   return { cmd: rest[0] || '', args };
 }
-function main() {
+async function main() {
   const { cmd, args } = parseArgs(process.argv.slice(2));
   const HELP = [
     '项目迁移包（R-20261116-193349-4761）',
@@ -567,7 +607,7 @@ function main() {
     const table = { export: cmdExport, import: cmdImport, rebind: cmdRebind, 'rebind-sessions': cmdRebindSessions, 'migrate-check': cmdCheck };
     const fn = table[cmd];
     if (!fn) fail('UNKNOWN_COMMAND', `未知命令：${cmd}\n${HELP}`);
-    fn(args);
+    await fn(args);
     return 0;
   } catch (e) {
     const payload = { ok: false, code: e.code || 'MIGRATE_FAILED', message: String(e.message || e) };
@@ -580,4 +620,4 @@ function main() {
 }
 function cleanupZipTemp(dir) { if (!dir) return; try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* 忽略 */ } }
 process.on('exit', () => { try { const g = globalThis.__MIGRATE_ZIP_TEMP; if (g) cleanupZipTemp(g); } catch { /* 忽略 */ } });
-process.exit(main());
+process.exit(await main());
