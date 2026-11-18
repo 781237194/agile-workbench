@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "version": "1.2.0",
+  "approvedBy": "Owner（2026-11-18 09:15 明确「可以更新 skill」）",
+  "approvedAt": "2026-11-18",
+  "dir": "团队/skill/基础流程",
+  "previousVersion": {
+    "version": "1.1.0",
+    "archive": "团队/skill/归档/基础流程-1.1.0/"
+  },
+  "change": "新增「派单前置检查（程序门）」小节（pm.md）：派单前先跑 dispatch-check，verdict=go/go_degraded 才发；queue/wait/wake_first/blocked 的处置；--force --reason 强制并审计；降级口径（快照过期/缺 c9ac v2 字段时绝不给 go）。配套程序：lib/dispatch-check.mjs + CLI team.mjs dispatch-check + send --ack 硬门 DISPATCH_PRECHECK_REQUIRED / DISPATCH_BLOCKED_BY_STATE。依据 Owner 2026-11-18 09:15 指令与任务 T-20261118-091644-6e53（PM 派单 M-20261118-091702-3829b3）。",
+  "files": {
+    "00-索引.md": "410a5dbc33abd16b2e50c05042e5e752a083205f41d4b45ab116a957df5a5a9b",
+    "analyst.md": "68bffb8deba4fa2d864728e49abd7963bc1d3a405c36e08e5322b40cbf0d9a8f",
+    "index.md": "d50a9e7a5b7ce131e154e32ebbaaf152be87e38487725bfbe3f8cc2c06c90fbc",
+    "pm.md": "5b286f28dde484097615d9cf533ffd23412fff7ea50a20b14a23702850fdcee5",
+    "product.md": "d775af95c970236aa97b24a4fada1afb997130f5111c91f2f7d1f62f01393f47",
+    "programmer1.md": "25fe3b8b6b1c7587485e270b20f6f013d1c928159168aeaf997c705435cd4899",
+    "programmer2.md": "93b2504ddd724d27a1c88f306f06281b984fc8429349d4b0d80bb94d92d578de",
+    "tester.md": "42e847fd93b145bf542d8463959df84a8200ec6111280489d7cdadcefd1742c7"
+  },
+  "note": "基础流程 skill 随仓库分发；任何文件 sha 与清单不一致即视为篡改（SKILL_TEMPLATE_TAMPERED）。改版须 Owner 批准新版本并归档旧版。"
+}

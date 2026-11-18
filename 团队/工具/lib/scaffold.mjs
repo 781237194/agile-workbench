@@ -28,7 +28,36 @@ export const DEFAULT_IRON = `# 项目铁律（默认版）
 8. 派单必须带任务正文、产出目录、完成标准；ack=已回执（收到/认领），完成回执 + task done 证据=已完成。
 9. **面向 Owner/PM 汇报用「人话 + 需求名」**：先说这是什么（需求名/功能名），再说现在到哪了，最后说要不要对方拍板；F-2、B-149a、G2.5 这类内部代号只能放括号里，不许单独出现。Owner 需要回头问“这是什么意思”即视为汇报不合格。
 10. **不打断正在跑的任务**：角色会话 running 时不插新单、不改优先级；要插的单先记下，等这次收工再发。只有线上故障/数据损坏、或 Owner 明确说「立刻停」才打断；打断后必须由 PM 主动补发「继续原任务」，不靠对方记得。
+11. **工装安全（P0，进程与临时命令）**：禁止按进程名/路径/时间窗批量杀 electron（\`Get-Process … | Stop-Process\`、\`taskkill /IM electron.exe\`、\`pkill\`/\`killall\`）；只允许 \`taskkill /PID <自己 spawn 的 child.pid> /T /F\` 或 \`child.kill()\`，无 PID 不杀；提交工装前跑 \`node scripts/check-no-batch-electron-kill.cjs\`。
+12. **测量窗口**：任何真窗口/Electron 测量前先向 PM 报「需要干净窗口」，测完立即停手；测量必须 \`AWB_DATA_DIR\` 独立实例 + 沙盘团队，并记被测 HEAD、启动 PID、同时段 electron 进程数与负载；负载异常的数字只作观测、不作门禁判据。
+13. **验收与代管边界**：需求级验收只能 Owner 本人；PM/测试只验收缺陷单；代管只可代记评审决定（approved/rejected/skipped），不得代需求验收（\`PROXY_ACCEPT_FORBIDDEN\`）。现行工作流唯一执行口径＝\`团队/流程.md\` 第二部分；角色卡、skill、模板与其对齐。
 `;
+
+// ---------- 现行工作流对齐附录（2026-11-18 校准，Owner 22:01 指令） ----------
+// 所有角色卡模板统一追加本节，保证新项目生成物与 `团队/流程.md` 第二部分（现行工作流）一致。
+// 维护人：程序员 A（内容由产品评审，见 流程.md §F 文档维护职责）。
+export const WORKFLOW_ALIGN_SECTION = `
+## 现行工作流对齐（2026-11-18 校准 · 流程.md 第二部分）
+
+- **验收权限**：需求级验收只能 Owner 本人（界面「我的验收」或 Owner 终端）；PM 与测试只可验收缺陷单（\`task accept --as pm|tester\`）；任何角色不得代需求验收。
+- **代管边界**：有效代管只可代记**评审决定**（approved / rejected / skipped）；需求验收、迭代、终止一律 Owner 本人，代管通道硬拦（\`PROXY_ACCEPT_FORBIDDEN\`）。
+- **工装安全（P0）**：禁止按进程名/路径/时间窗批量杀 electron（\`Get-Process … | Stop-Process\`、\`taskkill /IM electron.exe\`、\`pkill\`/\`killall\`）；只允许 \`taskkill /PID <自己 spawn 的 child.pid> /T /F\` 或 \`child.kill()\`，无 PID 不杀；提交工装前跑 \`node scripts/check-no-batch-electron-kill.cjs\`。
+- **测量窗口**：任何真窗口/Electron 测量前先向 PM 报「需要干净窗口」；测量用 \`AWB_DATA_DIR\` 独立实例 + 沙盘团队（\`TEAM_ROOT\`+\`TEAM_SELFTEST=1\`），断言真实状态 sha256 前后不变；测完立即停手并把机器让出。
+- **文档维护**：宪法由 PM 主笔 + Owner 一句话同意；流程.md 由 PM 维护；角色卡与 skill 各角色本人维护（改角色卡只失效本人令牌，需自行重 boot）；角色卡模板 \`roleCard()\`、\`DEFAULT_IRON\`、\`DEFAULT_CONSTITUTION\` 由程序员 A 维护，改动须有夹具覆盖新项目生成。
+`;
+
+
+// 项目铁律「现行工作流对齐」固定块：无论项目铁律来自团队模板还是 DEFAULT_IRON，新项目都必须带上。
+// 维护人：程序员 A（与 WORKFLOW_ALIGN_SECTION 同源口径，见 流程.md §F）。
+export const IRON_ALIGN_BLOCK = `
+
+## 现行工作流对齐（2026-11-18 校准）
+
+11. **工装与进程安全（P0）**：禁止按进程名/路径/时间窗批量杀 electron（Get-Process…|Stop-Process、taskkill /IM、pkill/killall）；只允许 taskkill /PID <自己 spawn 的 child.pid> /T /F 或 child.kill()，无 PID 不杀；提交工装前跑 node scripts/check-no-batch-electron-kill.cjs。
+12. **测量窗口**：真窗口/Electron 测量前先向 PM 报「需要干净窗口」，测完立即停手让出机器；必须 AWB_DATA_DIR 独立实例 + 沙盘团队，并记录被测 HEAD、启动 PID、同时段进程数与负载；负载异常的数字只作观测、不作门禁判据。
+13. **验收与代管边界**：需求级验收只能 Owner 本人；PM/测试只验收缺陷单（task accept --as pm|tester）；代管只可代记评审决定（approved/rejected/skipped），不得代需求验收（PROXY_ACCEPT_FORBIDDEN）。
+`;
+
 
 // ---------- 角色职责（按团队模式区分） ----------
 
@@ -221,6 +250,15 @@ const ROLE_CARD_BODIES = {
 9b. **要 Owner 拍板 → 先 \`decision add\` 拿 \`D-xxx\` 再引用**；⛔ **禁裸问「A 还是 B / 要不要 / 确认一下」**（实证：假僵尸跳 40 分钟、G3 门也跳）。**选项不自造**：给 2-3 个方案 + 各自代价。
 10. **交接**：换人前写 \`产出/交接-最新.md\`（六小节），新 PM 先读它再读卡。
 11. **判断「有没有在做」不能只看任务状态**：\`open\` ≠ 没在做（B 的 \`B-9300\` 实际在改、系统显示 \`open\`，我曾误催三次）。要同时看**产出文件 mtime**。
+
+## 换人流程（回执驱动 · 必读）
+
+- 口径：**不搞强制换人**；到阈值只提醒，本人写交接并落回执，PM 核对后手动 rotate；**PM 自己的换人由产品执行**。
+- 完整流程与权限矩阵：\`团队/协议/07-换人流程-回执驱动.md\`（每项目沿用同一团队协议目录，boot 后先读本节与该文件）。
+- 四步：①\`session usage\` 判档 → 只发 \`session_rotate_warn\`（任何程序不得自动 rotate）；②本人写 \`产出/交接-最新.md\`（八节）→ \`session handover receipt --role <自己> --project <项目>\` 落回执（bytes+sha256）→ 通知 PM；③PM 核对「最新回执 sha == 磁盘交接文件」后 \`session rotate --role <角色> --project <项目>\`（不符报 \`HANDOVER_RECEIPT_REQUIRED\`，零副作用：不改名册、不建会话、不写记录）；④**PM 换人**：PM 写交接+落回执 → 把 sha8/字节交 Owner/产品 → **由产品**执行 \`session rotate --role pm\`；PM 不能自换（\`PERMISSION_DENIED\`）。
+- 换人后：rotate 写「待启动队列」BQ 拉起新会话 + 广播其余角色重 boot；新 PM 先 boot、读 \`项目经理/产出/交接-最新.md\` 再接任。
+- 审计：\`by/actorRole\`、\`receiptId\`、\`handoverSha256/Bytes/Path\`；产品换 PM 时 \`by=product\`、\`actorRole=product\`。
+- 阈值：\`session usage\` 默认 warn 30 万 / force 50 万（PM 2 倍）；达到只提醒，不自动换。
 
 ## 验收权限（Owner 2026-11-16 10:56 裁定）
 
@@ -475,6 +513,8 @@ export function roleCard(projectName, role, mode = 'full') {
   const roleName = ROLE_NAMES[role] || role;
   let text = body(project, roleName, cardModeDetail(role, m), m === 'fast');
   if (m === 'fast') text += fastCardExtras(role);
+  // 2026-11-18 校准：所有角色卡模板统一追加「现行工作流对齐」附录（验收权限/代管边界/工装安全/测量窗口/文档维护）。
+  text += WORKFLOW_ALIGN_SECTION;
   return text;
 }
 
@@ -882,7 +922,9 @@ export function ensureProjectStructure({ name, root, desc = '', overwrite = fals
   // 直接复制会让新项目拿到一张白纸，与本项目实际使用的「按需清单」形态不一致。
   // 判定为空白模板时回落到 DEFAULT_IRON（本项目在用的按需清单：宪法最高 + 10 条避坑）。
   const teamIronIsBlank = /这不是规则全文|空白起点|空白模板/.test(teamIronText);
-  put(path.join(base, '项目铁律.md'), (teamIronText && !teamIronIsBlank) ? teamIronText : DEFAULT_IRON);
+  const chosenIron = (teamIronText && !teamIronIsBlank) ? teamIronText : DEFAULT_IRON;
+  // 新项目铁律必须带现行工作流条款（工装安全/测量窗口/验收边界）；缺则追加固定块，已有则不重复（避免重复编号）。
+  put(path.join(base, '项目铁律.md'), chosenIron.includes('工装与进程安全') ? chosenIron : (chosenIron.trimEnd() + IRON_ALIGN_BLOCK));
   // a28a：新建项目默认带经验教训登记册（默认继承；已有文件不覆盖）
   put(path.join(base, '经验教训登记册.md'), lessonsRegister(projectName, m));
 

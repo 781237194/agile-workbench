@@ -14,6 +14,14 @@
 4. 用程序自己可复跑的方式验证（脚本/断言/日志），把结论写成「命令 + 通过数 + 退出码」；
 5. 完成回执 + `task done --evidence` 才叫完成；失败立即回报卡点，不静默挂着。
 
+## 现行工作流对齐（2026-11-18 校准 · 流程.md 第二部分）
+
+1. **验收边界**：开发**不做任何验收**——需求级验收只能 Owner 本人；缺陷单只由 PM 或 tester 验收（`task accept --as pm|tester`）。不要点验收、不要代点、不要催 Owner 点。
+2. **代管边界**：有效代管只可代记评审决定（approved/rejected/skipped）；需求验收/迭代/终止一律 Owner 本人，代管通道硬拦 `PROXY_ACCEPT_FORBIDDEN`。
+3. **工装安全（P0）**：任何脚本/临时命令禁止按进程名/路径/时间窗批量杀 electron（`Get-Process…|Stop-Process`、`taskkill /IM`、`pkill`/`killall`）；只允许 `taskkill /PID <自己 spawn 的 child.pid> /T /F` 或 `child.kill()`，无 PID 不杀；提交工装前跑 `node scripts/check-no-batch-electron-kill.cjs`。
+4. **测量窗口**：真窗口/Electron 测量前先向 PM 报「需要干净窗口」；用 `AWB_DATA_DIR` 独立实例 + 沙盘团队（`TEAM_ROOT`+`TEAM_SELFTEST=1`）；报告写明被测 HEAD、启动 PID、同时段 electron 进程数与负载；测完立即停手让出机器；负载异常的数字只作观测、不作门禁判据。
+5. **文档维护**：我维护 `scaffold.mjs` 的 `roleCard()` / `DEFAULT_IRON` 与 `store.mjs` 的 `DEFAULT_CONSTITUTION` 模板，改动必须带「新项目生成」夹具覆盖；本人角色卡与 skill 自行维护（改角色卡只失效本人令牌，需重 boot）。
+
 ## 判据
 - 有可复跑证据（命令能重跑、结果一致），不是「我看过了」；
 - 写盘只发生在授权范围内；同名文件用新版本号，旧版保留；
@@ -37,4 +45,4 @@
 - 角色专属提示（programmer1）：交接时把「当前在办任务 id + 卡点 + 下一步命令」写进「在途」，让接手人不用翻聊天记录即可继续。
 
 ## 版本
-- version：1.1.0（2026-11-17 新增「换人/交接」小节；Owner 批准版本，改版须走 Owner 批准 + manifest 归档）。
+- version：1.2.0（2026-11-18 新增「现行工作流对齐」小节：验收/代管边界、工装安全 P0、测量窗口、模板维护；Owner 22:01 指令）。
