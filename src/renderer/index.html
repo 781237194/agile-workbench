@@ -926,6 +926,8 @@
        必须在 app.js 之前加载：app.js 的 themeEffects()/themeState() 按 window.AWB_FX 取实时档位。
        顶层零声明（整份 IIFE），不参与 index.html 多脚本的全局词法作用域（B-20261116-101950-212b）。 -->
   <script src="fx-layer.js"></script>
+  <!-- R-b34a R4（T-c495）：可见性门（后台/隐藏时暂停轮询）。必须在 app.js 之前加载。 -->
+  <script src="gate.js"></script>
   <script src="app.js"></script>
   <!-- B-d100：打回后复审判定（owner-review.js 之前引入，Node 也可 require 做断言） -->
   <script src="ui-perf-core.js"></script>

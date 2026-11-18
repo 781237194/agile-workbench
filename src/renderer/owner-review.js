@@ -1,5 +1,7 @@
 (function () {
   'use strict';
+  // R-b34a R4（T-c495）：评审列表 5s 轮询在隐藏/后台时暂停（gate.js 缺失时直通）。
+  const r4Gate = (fn) => (typeof AWBGate !== 'undefined' && AWBGate && typeof AWBGate.gate === 'function' ? AWBGate.gate(fn) : fn);
   const STATUS_TEXT = { approved: '已通过', rejected: '已打回', skipped: '已先跳过', pending: '等你决定', optional: '等你决定' };
   // B-4baa（R-1cee）：看板与待评估清单默认各展示前 5 条，其余折叠在 DOM 里（不删、不裁切），可展开全部。
   const PREVIEW_ROWS = 5;
@@ -3336,7 +3338,8 @@
   function start() {
     buildShell();
     loadData();
-    state.timer = setInterval(loadData, 5000);
+    // R4 结论：保留 + 降级门——评审列表 5s 只读刷新；隐藏/后台时暂停（gate.js）。
+    state.timer = setInterval(r4Gate(loadData), 5000);
     window.addEventListener('focus', loadData);
     // B-a1cf：评审代管.json 一变主进程就推事件 → 立刻重算徽标（不再只靠 5 秒轮询；
     // 窗口隐藏时浏览器会把定时器降到 1 分钟，看起来就像“代管数不更新”）。

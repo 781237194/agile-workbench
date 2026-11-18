@@ -17,6 +17,10 @@ let lastWorkspaceProjectId = null;
 let openDrawerName = null;
 // boot 过期后要自动重绘，把“已读全/可推进”降级；只用一个定时器，换项目/重新 boot 时重置。
 let bootExpiryTimer = null;
+// R-b34a R4（T-20261118-172619-c495）：可见性门——隐藏面板/后台窗口不轮询（gate.js 缺失时降级直通，行为不变）。
+const R4GateApi = (typeof AWBGate !== 'undefined' && AWBGate) ? AWBGate : null;
+const r4Gate = (fn) => (R4GateApi && typeof R4GateApi.gate === 'function' ? R4GateApi.gate(fn) : fn);
+const r4Coalesce = (fn, ms, key) => (R4GateApi && typeof R4GateApi.coalesce === 'function' ? R4GateApi.coalesce(fn, ms, key) : fn);
 
 const fileUi = { projectId: null, expanded: new Set(), data: null };
 // DSH 侧核验结果只对“当前项目”有效；换项目立即作废，避免把上一个项目的 6/6 贴到新项目上。
@@ -4877,6 +4881,7 @@ function startAckTicker(project) {
     });
   };
   tick();
+  // R4 结论：保留（纯本地倒计时文本刷新，无 IPC/无读盘，不占主进程）；不纳入可见性门以免暂停后回到旧文本。
   dispatchTicker = setInterval(tick, 1000);
 }
 
@@ -15018,7 +15023,7 @@ function startRosterWatch() {
   if (rosterUi.timer) return;
   rosterUi.lastSig = rosterSignature(state);
   rosterUi.lastAt = Date.now();
-  rosterUi.timer = setInterval(rosterWatchTick, ROSTER_WATCH_MS);
+  rosterUi.timer = setInterval(r4Gate(rosterWatchTick), ROSTER_WATCH_MS);
   // 自测/排查用只读钩子：当前映射签名与侧栏计数。
   window.__teamRoster = {
     sync: (opts) => syncRosterFromDisk(opts || {}),
@@ -15839,7 +15844,8 @@ function bind() {
   // T-b417：守护状态点击立即刷新（平时 10 秒刷新）；启动先读一次。
   $('#daemon-pill')?.addEventListener('click', () => { tickDaemonStatus(); });
   tickDaemonStatus();
-  setInterval(() => { tickDaemonStatus(); }, 10000);
+  // R4 结论：保留 + 降级门——守护状态 10s IPC 只读；后台/隐藏时暂停（gate.js）。
+  setInterval(r4Gate(() => { tickDaemonStatus(); }), 10000);
   // R-2a69：F1 由主进程统一接管（焦点在 DSH webview 里也能开引导）。
   if (window.workbench && typeof window.workbench.onGuideOpen === 'function') {
     window.workbench.onGuideOpen(() => { showGuide(true); });
@@ -16973,17 +16979,20 @@ window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /*
   }
   await initDsh();
   await tickMetrics();
-  setInterval(tickMetrics, 2000);
+  // R4 结论：保留 + 降级门 + 重合入下一帧——指标 2s 只读 IPC；隐藏/后台暂停（gate.js），同 key 300ms 合并。
+  setInterval(r4Coalesce(r4Gate(tickMetrics), 300, 'metrics'), 2000);
   // 流程图/项目面板打开时轮询工作流真相（只读，5 秒节流）；隐藏暂停，失败按 2s/5s/10s 退避。
-  setInterval(flowRefreshTick, 1000);
+  // R4 结论：保留 + 降级门 + 300ms 合并（flowRefreshTick 内部已有 5s 节流与隐藏暂停，这里再兜一层）。
+  setInterval(r4Coalesce(flowRefreshTick, 300, 'flow'), 1000);
   // B-405f：会话映射自动跟随（rotate/换人后 5 秒内刷新成员列表与计数，不用重启）。
   startRosterWatch();
   // 团队台打开时定期复核会话（只读）；平时不轮询，避免打扰 DSH。
-  setInterval(() => {
+  // R4 结论：保留 + 降级门——45s 只在团队台打开且在线时拉；隐藏/后台暂停。
+  setInterval(r4Gate(() => {
     if (!state || !state.dsh || !state.dsh.online) return;
     if (openDrawerName !== 'team') return;
     loadDshTeamStatus({ force: true });
-  }, 45000);
+  }), 45000);
 
   // DSH 就是主画面：不再按旧 awb.mode 在“团队工作台 / DSH”之间交换场景。
   showDshView(true);

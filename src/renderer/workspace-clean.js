@@ -243,7 +243,9 @@
     refresh().catch(() => { /* 首次失败不阻塞界面 */ });
     if (state.timer) clearInterval(state.timer);
     // 5 秒跟其它面板同频：绑定被清理/换项目后数字要跟着变，不能停在旧值。
-    state.timer = setInterval(() => { refresh().catch(() => { /* ignore */ }); }, 5000);
+    // R4 结论：保留 + 降级门——隐藏/后台时暂停（gate.js；缺失时直通，行为不变）。
+    const r4Gate0 = (fn) => (typeof AWBGate !== 'undefined' && AWBGate && typeof AWBGate.gate === 'function' ? AWBGate.gate(fn) : fn);
+    state.timer = setInterval(r4Gate0(() => { refresh().catch(() => { /* ignore */ }); }), 5000);
     window.addEventListener('focus', () => { refresh().catch(() => { /* ignore */ }); });
   }
 
