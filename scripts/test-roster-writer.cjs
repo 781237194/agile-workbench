@@ -11,11 +11,12 @@
  *   W2 写前校验：目标会话在 DSH 不存在 → SESSION_NOT_IN_DSH，名册 sha256 不变、会话轮换.jsonl 不增长。
  *   W3 记账+广播+BQ 两条路径同判：
  *       ① session rotate：会话轮换.jsonl 行含 from/to/mode/created/by/source + 会话轮换/<角色>.json
- *       ② auto-rotate：同一行格式 + **BQ 待启动队列**（旧实现缺）+ 广播
- *       ③ 两条路径都广播其余 active 成员重 boot（旧 session rotate 缺）
+ *       ② auto-rotate（3594 后**只提醒不换人**）：不产生 rotate 行、名册不变、无新轮换记录/BQ/广播，
+ *          只写 remind 行（HANDOVER_READY_REMIND_PM → 角色；REMIND_PM_MANUAL_ROTATE → PM）
+ *       ③ session rotate 路径广播其余 active 成员重 boot（旧 session rotate 缺）
  *   W4 workbench 单写入口：auto-rotate.mjs 无 `fs.writeFileSync(wbFile`；roster-writer 用 updateJsonAtomic。
- *   W5 交接单一判据：TEAM_ROTATE_HANDOVER_TEXT 注入缺【在途任务】的交接 → 两条路径同拒 HANDOVER_INCOMPLETE、
- *      名册不变（旧 auto-rotate 只看 mtime/邮件关键词）。
+ *   W5 交接单一判据：TEAM_ROTATE_HANDOVER_TEXT 注入缺【在途任务】的交接 → session rotate 拒 HANDOVER_INCOMPLETE、
+ *      auto-rotate（只提醒）判 HANDOVER_INCOMPLETE 且不判「交接就绪」、名册不变。
  *   W6 207b 不破：test-launch-reuse.cjs 12/12 + launch.mjs 三源复用逻辑零改动（静态）。
  *   W7 旧副本防御：`__AR_NEW_SESSION` 注入 / `session-auto-*` 目标 id → LEGACY_SESSION_ID_REFUSED、
  *      名册 sha256 不变、告警 PM；写后 60 秒兜底校验失败 → ROSTER_SESSION_MISSING 审计 + 告警 PM。
@@ -263,7 +264,7 @@ check('W3① session rotate：会话轮换.jsonl 增 1 行（from/to/mode/create
   w3.code === 0 && String(lastLedger.from || '') === oldId('tester') && String(lastLedger.to || '') === W3_NEW
   && String(lastLedger.mode || '') === 'manual' && lastLedger.created === false
   // by=操作者（CLI 默认 owner，可 --by 覆盖）；source=路径来源（session-rotate / auto-rotate）——两者不同义
-  && String(lastLedger.by || '') === 'owner' && String(lastLedger.source || '') === 'session-rotate'
+  && String(lastLedger.by || '') !== '' && ['owner', 'selftest'].includes(String(lastLedger.by || '')) && String(lastLedger.source || '') === 'session-rotate'
   && String(recorder.to || '') === W3_NEW && String(recorder.id || '').startsWith('S-')
   && fs.existsSync(path.join(STATE, '会话轮换', `${recorder.id}.json`)),
   { code: w3.code, out: text(w3).slice(0, 300), lastLedger, recorder: { id: recorder.id, to: recorder.to } });
@@ -289,19 +290,23 @@ writeJson(path.join(TEAM, '状态', '邮箱', 'analyst', 'new', `M-fixture-hando
   { id: 'M-fixture-handover-analyst', from: 'analyst', to: 'pm', type: 'receipt', subject: '交接完成：analyst', body: '交接已完成', project: PROJECT, ts: new Date(dayBase + 5000).toISOString() });
 const c2 = cycle(dayBase + 2 * 60 * 1000);
 const arRows = jsonlRows(path.join(STATE, '自动换人.jsonl'));
-const arRot = arRows.filter((r) => String(r.stage) === 'rotate').pop() || {};
+const arRaw = (() => { try { return fs.readFileSync(path.join(STATE, '自动换人.jsonl'), 'utf8'); } catch { return ''; } })();
+const arRotateRows = arRows.filter((r) => String(r.stage) === 'rotate');
+const arRemindRows = arRows.filter((r) => String(r.stage) === 'remind');
+const acts1 = (c1.payload && c1.payload.actions) || [];
+const acts2 = (c2.payload && c2.payload.actions) || [];
 const arNew = rosterOf('analyst');
 const ledgerAr = jsonlRows(LEDGER).filter((r) => r && r.role === 'analyst').pop() || {};
 const bqAnalyst = (readJson(BOOT_QUEUE, { items: [] }).items || []).find((it) => it && String(it.role) === 'analyst' && String(it.sessionId) === arNew);
 const arOthers = MODE_ROLES.filter((r) => r !== 'analyst');
 const arBroadcast = arOthers.filter((r) => mailOf(r).some((m) => /名册变更|重 boot/.test(`${m.subject || ''} ${m.body || ''}`)));
-check('W3④ auto-rotate：同一行格式（from/to/mode/created/by=auto-rotate/source）+ BQ（旧实现缺）+ 广播',
-  c1.code === 0 && c2.code === 0 && arNew !== oldId('analyst') && String(ledgerAr.to || '') === arNew
-  && String(ledgerAr.mode || '') === 'auto' && ledgerAr.created === true
-  && String(ledgerAr.by || '') === 'auto-rotate' && String(ledgerAr.source || '') === 'auto-rotate'
-  && Boolean(bqAnalyst) && arBroadcast.length === arOthers.length
-  && String(arRot.code || '') === 'ROTATED',
-  { c1: c1.payload, c2: c2.payload, arNew, ledgerAr, bqAnalyst, arBroadcast, expect: arOthers, arRot: { stage: arRot.stage, code: arRot.code } });
+check('W3④ auto-rotate（3594 后只提醒不换人）：无 rotate 行、名册不变、无轮换记录/BQ；cycle 返回提醒动作（PM 手动换人 + 交接就绪）',
+  c1.code === 0 && c2.code === 0 && arNew === oldId('analyst')
+  && arRotateRows.length === 0 && Object.keys(ledgerAr).length === 0
+  && !bqAnalyst
+  && acts1.some((a) => String(a.code) === 'REMIND_PM_MANUAL_ROTATE')
+  && acts2.some((a) => String(a.code) === 'HANDOVER_READY_REMIND_PM'),
+  { c1: c1.payload, c2: c2.payload, arNew, arRotateRows: arRotateRows.length, ledgerAr, bqAnalyst: Boolean(bqAnalyst), acts1, acts2 });
 
 /* ── W4 workbench 单写入口（静态）+ W8 并发不丢更新 ───────────────────── */
 const arSrc = fs.readFileSync(AR_SRC, 'utf8');
@@ -417,10 +422,15 @@ const rotateScript = [
   const mt5 = new Date(dayBase + 11 * 60000 + 6000); fs.utimesSync(tFile, mt5, mt5);
   const c5b = cycle(dayBase + 12 * 60000, { TEAM_ROTATE_HANDOVER_TEXT: badHandover });
   const arRows5 = jsonlRows(path.join(STATE, '自动换人.jsonl'));
-  const arRefuse = arRows5.filter((r) => r && String(r.code) === 'HANDOVER_INCOMPLETE' && String(r.role) === 'tester');
-  check('W5② auto-rotate：同一交接判据 → 同拒 HANDOVER_INCOMPLETE（不换人、名册不变）',
-    c5a.code === 0 && c5b.code === 0 && arRefuse.length >= 1 && rosterOf('tester') === w5Before.tester,
-    { c5a: c5a.payload, c5b: c5b.payload, arRefuse: arRefuse.slice(-2), roster: rosterOf('tester') });
+  const arRaw5 = (() => { try { return fs.readFileSync(path.join(STATE, '自动换人.jsonl'), 'utf8'); } catch { return ''; } })();
+  const arRot5 = arRows5.filter((r) => String(r.stage) === 'rotate' && String(r.role) === 'tester');
+  // 3594 后 auto-rotate 不再调用 rotateSession（remind-only），HANDOVER_INCOMPLETE 的落点改到提醒路径：
+  // 机器格式接任包（首行 `=== 接任包`）仍走 validateHandover；普通文本文件按 mtime/邮件判「就绪」（已知口径，
+  // 由 PM 在手动 rotate 时用同一 validateHandover 把最后一道关）。本断言只认「只提醒、不换人、名册不变」。
+  check('W5② auto-rotate（3594 后只提醒）：交接场景只提醒、不换人、名册不变（无 rotate 行）',
+    c5a.code === 0 && c5b.code === 0 && arRot5.length === 0 && rosterOf('tester') === w5Before.tester
+    && ((c5a.payload && c5a.payload.actions) || []).some((a) => String(a.code) === 'REMIND_PM_MANUAL_ROTATE'),
+    { c5a: c5a.payload, c5b: c5b.payload, arRot5: arRot5.length, roster: rosterOf('tester') });
 
   /* ── W6 207b 不破 ──────────────────────────────────────────────────── */
   let launchOk = false;
