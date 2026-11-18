@@ -138,13 +138,16 @@ async function runScenario(name, sessionMode, port) {
       const cdp3 = new Cdp(ws3); await cdp3.send('Runtime.enable');
       for (let i = 0; i < 200; i += 1) { const ok = await cdp3.evaluate('document.readyState === "complete" && typeof setDrawer === "function"'); if (ok === true) break; await sleep(400); }
       await cdp3.evaluate('setDrawer("team"); true');
+      await sleep(400);
+      const opened = await cdp3.evaluate('(async () => { let d = document.querySelector("#team-drawer"); if (d && d.hidden) { const pill = document.querySelector("#team-pill"); if (pill) pill.click(); await new Promise((r) => setTimeout(r, 500)); } d = document.querySelector("#team-drawer"); return Boolean(d && !d.hidden); })()');
+      if (!opened) { await cdp3.evaluate('setDrawer("team"); true'); }
       await sleep(1800);
       teamRows = await cdp3.evaluate('(() => { const rows = document.querySelectorAll("#team-drawer .session-row"); return { count: rows.length, drawerHidden: (() => { const d = document.querySelector("#team-drawer"); return d ? d.hidden : null; })() }; })()');
       try { cdp3.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ }
       await sleep(600); try { ws3.close(); } catch { /* ignore */ } try { child3.kill(); } catch { /* ignore */ }
     } else { try { child3.kill(); } catch { /* ignore */ } }
   } catch { teamRows = null; }
-  check(`D6 [${name}] 团队台成员行=0（DOM 真实渲染）`, Boolean(teamRows) && teamRows.count === 0, teamRows);
+  check(`D6 [${name}] 团队台已打开且成员行=0（DOM 真实渲染）`, Boolean(teamRows) && teamRows.count === 0 && teamRows.drawerHidden === false, teamRows);
   try { fs.rmSync(sb, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 (async () => {
