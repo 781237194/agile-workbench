@@ -18,8 +18,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
-// B-f62d 修 import：原实现 `const ROOT = process.cwd()` + `import('file:///' + win路径)`——
-// 在 Windows 上 cwd 不是仓库根或盘符路径拼成 `file:///D:\...` 都会在 import 阶段直接失败（脚本跑不起来）。
+// B-f62d 修 import：原实现 `const ROOT = process.cwd()` + `import('file:///' + 拼上盘符反斜杠路径)`——
+// 在 Windows 上 cwd 不是仓库根、或把盘符反斜杠路径直接拼进 file:// 前缀，都会在 import 阶段失败（脚本跑不起来）。
 // 改为「__dirname 上溯 + pathToFileURL」，从任意目录调用都能跑。
 const ROOT = path.resolve(__dirname, '..');
 const LIB = path.join(ROOT, '团队', '工具', 'lib');
