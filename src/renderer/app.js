@@ -923,17 +923,10 @@ function themeLowFx() {
 function themeEffects(themeId) {
   const id = themeId || currentThemeId();
   if (window.AWB_FX && typeof window.AWB_FX.effects === 'function') return window.AWB_FX.effects(id);
-  const on = !themeLowFx() && !themeReducedMotion();
-  return {
-    mode: on ? 'full' : 'reduced',
-    particles: Boolean(on),
-    grid: Boolean(on && id === 'tech-dark'),
-    blur: Boolean(on && id === 'glass-dark'),
-    bounce: Boolean(on && id === 'anime-dark'),
-    idle: false,
-    particleCount: 0,
-  };
+  // 7a3b §6.3 / AC6：fx 层不可用时不得对外谎报「开着」。
+  return { mode: 'off', particles: false, grid: false, blur: false, bounce: false, idle: false, particleCount: 0, fxUnavailable: true };
 }
+try { window.__awbThemeEffects = themeEffects; } catch { /* ignore */ }
 
 /** 主题状态（F-6 的一部分 + 增补卷-fe90-1 §一.5：source 区分「URL 真生效」与「碰巧等于默认」） */
 function themeState() {
@@ -1112,7 +1105,7 @@ function themeMenuFocus(step) {
  * 落盘值（workbench.json ui.effectLevel）：'off' | 'reduced' | 'full'
  * DOM 属性（documentElement data-effect-level）：'off' | 'reduced' | 移除
  * —— 选项值（off/low/full）与属性值不同名，AC1 禁止两者混用。 */
-const EFFECT_LEVEL_LABEL = { off: '关闭', low: '低特效', full: '完整' };
+const EFFECT_LEVEL_LABEL = { off: '关闭', low: '低特效（关闭粒子与光晕，保留点击涟漪）', full: '完整' };
 const EFFECT_ATTR_OF = { off: 'off', low: 'reduced', full: '' };
 function effectLevelOfAttr(raw) {
   const v = String(raw || '');
@@ -1149,8 +1142,27 @@ function paintEffectMenu() {
     item.setAttribute('aria-checked', String(item.dataset.effectOption === cur));
   }
   const label = $('#more-menu [data-more="effect"] [data-effect-current]');
-  if (label) label.textContent = EFFECT_LEVEL_LABEL[cur] || '完整';
+  // 7a3b §6.1：真实态来自 fx 层（不再只读手动档）；系统减少动画降级时给提示行 + 仍然开启。
+  let real = null;
+  try { if (window.AWB_FX && typeof window.AWB_FX.mode === 'function') real = window.AWB_FX.mode(); } catch { real = null; }
+  const realMode = real && real.level ? String(real.level) : (window.AWB_FX ? 'unknown' : 'unavailable');
+  const realBox = $('#more-menu [data-fx-real-mode]');
+  if (realBox) {
+    realBox.setAttribute('data-fx-real-mode', realMode);
+    const text = $('#more-menu [data-fx-real-mode-text]');
+    const textOf = realMode === 'unavailable' ? '特效层未加载' : ('真实特效：' + realMode + (real && real.reasons && real.reasons.length ? '（' + real.reasons.join('、') + '）' : ''));
+    if (text) text.textContent = textOf; else realBox.textContent = textOf;
+  }
+  const reducedHint = $('#more-menu [data-fx-reduced-hint]');
+  const forceBtn = $('#more-menu [data-fx-force-btn]');
+  const forced = Boolean(real && real.forced);
+  const showHint = realMode === 'reduced' && cur === 'full' && !forced;
+  if (reducedHint) reducedHint.hidden = !showHint;
+  if (forceBtn) forceBtn.hidden = !showHint;
+  if (label) label.textContent = realMode === 'unavailable' ? '特效层未加载' : ((EFFECT_LEVEL_LABEL[cur] || '完整') + (showHint ? '（系统减少动画已降级）' : ''));
+  try { bindFxRealState(); } catch { /* ignore */ }
 }
+try { window.__awbPaintEffectMenu = paintEffectMenu; } catch { /* ignore */ }
 function applyEffectOption(opt) {
   const attr = EFFECT_ATTR_OF[opt];
   if (attr === undefined) return false;
@@ -1185,6 +1197,38 @@ function setEffectMenu(open) {
   if (btn) btn.setAttribute('aria-expanded', String(Boolean(open)));
 }
 
+
+// 7a3b：真实态一键强制 + 特效诊断（菜单内控件，不新增标题栏按钮）。
+function bindFxRealState() {
+  const forceBtn = $('#more-menu [data-fx-force-btn]');
+  if (forceBtn && !forceBtn.getAttribute('data-bound')) {
+    forceBtn.setAttribute('data-bound', '1');
+    forceBtn.addEventListener('click', () => {
+      document.documentElement.setAttribute('data-fx-force', '1');
+      try { if (window.AWB_FX && typeof window.AWB_FX.sync === 'function') window.AWB_FX.sync(); } catch { /* ignore */ }
+      paintEffectMenu();
+    });
+  }
+  const diag = $('#more-menu [data-fx-diag]');
+  if (diag && !diag.getAttribute('data-bound')) {
+    diag.setAttribute('data-bound', '1');
+    diag.addEventListener('toggle', () => {
+      if (!diag.open) return;
+      let s = null;
+      try { if (window.AWB_FX && typeof window.AWB_FX.sample === 'function') s = window.AWB_FX.sample(); } catch { s = null; }
+      const body = diag.querySelector('[data-fx-diag-body]');
+      if (!body) return;
+      if (!s) { body.textContent = '特效层未加载'; return; }
+      const perf = (s.perf && typeof s.perf === 'object') ? s.perf : {};
+      let dg = null;
+      try { if (window.AWB_FX && typeof window.AWB_FX.degraded === 'function') dg = window.AWB_FX.degraded(); } catch { dg = null; }
+      body.textContent = 'mode=' + s.mode + ' ｜ reasons=' + ((s.reasons || []).join('、') || '无')
+        + ' ｜ 粒子=' + (s.particles || s.particleCount || 0)
+        + ' ｜ fps=' + (perf.fps != null ? perf.fps : '—')
+        + (dg && dg.steps && dg.steps.length ? ' ｜ 已降级=' + dg.steps.join(',') : '');
+    });
+  }
+}
 
 function activeProject() {
   if (!state) return null;

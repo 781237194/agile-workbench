@@ -233,6 +233,17 @@ const IS_SUPPLEMENT_CHECK = process.argv.includes('--supplement-check');
 // B-20261115-134716-2dd3（P0）：内存阈值告警 + 崩溃归因自检（隔离数据根 + 真实采样；不碰真实工作台/团队状态）。
 const IS_B2DD3_CHECK = process.argv.includes('--b2dd3-check');
 const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_DIR) : path.join(ROOT, 'data');
+  // 7a3b §6.3：fx 诊断日志落 <数据目录>/fx.jsonl（append-only；失败静默返回 ok:false，不影响渲染）。
+  rawIpcHandle('fx:diag-log', (_e, row) => {
+    try {
+      fs.mkdirSync(LOCAL_DATA, { recursive: true });
+      fs.appendFileSync(path.join(LOCAL_DATA, 'fx.jsonl'), JSON.stringify({ ...(row && typeof row === 'object' ? row : {}), loggedAt: new Date().toISOString() }) + '\n', 'utf8');
+      return { ok: true };
+    } catch (error) {
+      try { console.warn('[fx] diag-log failed ' + String((error && error.message) || error)); } catch { /* ignore */ }
+      return { ok: false, code: 'FX_LOG_WRITE_FAILED' };
+    }
+  });
 // 默认数据与 Chromium 缓存都放在仓库内，不再落到 C:\Users\...\AppData。
 // 自测时 Chromium/状态也进沙盘根，避免两个自测实例抢同一份 userdata。
 // 布局自检同样用独立数据根（.layout-check-data），只读快照，不碰真实工作台状态。

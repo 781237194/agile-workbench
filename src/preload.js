@@ -23,6 +23,8 @@ if (IS_BOARD_WINDOW) {
     metrics: () => ipcRenderer.invoke('system:metrics'),
     // R-b34a AC8③：最近慢 IPC（只读，供 [data-perf-log] 展示）
     perfRecent: (payload) => ipcRenderer.invoke('perf:recent', payload),
+  // 7a3b：fx 诊断日志（渲染层 sync 结果 → data/fx.jsonl；失败静默）。
+  fxLog: (row) => ipcRenderer.invoke('fx:diag-log', row),
     filesList: (projectId) => ipcRenderer.invoke('files:list', projectId),
     // 只读文件预览：文本/Markdown/图片，主进程做路径越界与大小上限校验。
     filesRead: (payload) => ipcRenderer.invoke('files:read', payload),

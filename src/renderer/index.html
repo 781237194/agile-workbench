@@ -154,6 +154,11 @@
       <button type="button" role="menuitemradio" data-effect-option="off" aria-checked="false"><span class="mm-ico" aria-hidden="true">◌</span><span class="mm-text">关闭（关闭后更流畅、更省电）</span></button>
       <button type="button" role="menuitemradio" data-effect-option="low" aria-checked="false"><span class="mm-ico" aria-hidden="true">◍</span><span class="mm-text">低特效（减少粒子与动效）</span></button>
       <button type="button" role="menuitemradio" data-effect-option="full" aria-checked="true"><span class="mm-ico" aria-hidden="true">✦</span><span class="mm-text">完整特效（默认，最丝滑）</span></button>
+      <!-- 7a3b：真实态 + 系统降级提示 + 一键强制 + 特效诊断（仍在更多菜单内） -->
+      <div class="mm-sub-sep" data-fx-real-sep></div>
+      <div class="mm-hint" data-fx-real-mode="unknown"><span data-fx-real-mode-text>真实特效：—</span></div>
+      <div class="mm-hint" data-fx-reduced-hint hidden>系统已开启减少动画，粒子与光晕已暂停 <button type="button" class="link-btn" data-fx-force-btn>仍然开启</button></div>
+      <details class="mm-diag" data-fx-diag><summary>特效诊断</summary><div class="mm-hint" data-fx-diag-body>展开后读取真实 mode / reasons / 粒子数 / fps</div></details>
     </div>
     <div class="mm-error" data-effect-error role="alert" hidden></div>
     <button type="button" role="menuitem" data-more="refresh"><span class="mm-ico" aria-hidden="true">⟳</span><span class="mm-text">刷新工作区 / DSH 状态</span></button>
