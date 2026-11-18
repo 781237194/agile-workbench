@@ -227,6 +227,29 @@ check('W2 写前校验：目标会话在 DSH 不存在 → SESSION_NOT_IN_DSH，
   && rosterOf('tester') === oldId('tester') && jsonlRows(ROSTER_AUDIT).some((r) => r && r.code === 'SESSION_NOT_IN_DSH' && r.result === 'refused'),
   { code: w2.code, out: text(w2).slice(0, 400), teamShaSame: sha(TEAM_FILE) === w2Before.teamSha, roster: rosterOf('tester'), audit: jsonlRows(ROSTER_AUDIT).slice(-2) });
 
+/* ── W2b 自动建会话（created=true）不被「建会话前的旧列表」误杀（P1-1 复核回归） ───── */
+const autoCreateScript = [
+  'const { pathToFileURL } = require("node:url");',
+  '(async () => {',
+  `  const rw = await import(pathToFileURL(${JSON.stringify(RW_SRC)}).href);`,
+  `  const r = await rw.rotateRoster({ projectName: ${JSON.stringify(PROJECT)}, role: "programmer1", newSessionId: "session-st-autocreate-1", mode: "auto", created: true, reason: "W2b 自动建会话", by: "auto-rotate", source: "auto-rotate", offline: false, bootQueue: false, broadcast: false, dshList: [] });`,
+  '  console.log("AUTOCREATE " + JSON.stringify({ ok: r.ok, to: r.newId, dshCheck: r.dshCheck }));',
+  '})().catch((e) => { console.log("ERR " + JSON.stringify({ code: (e && e.code) || "", message: String((e && e.message) || e) })); });',
+].join('\n');
+{
+  let autoRes = { code: 1, out: '', err: '' };
+  try {
+    const out = execFileSync(process.execPath, ['-e', autoCreateScript], { encoding: 'utf8', env: env({ TEAM_ROSTER_DSH_ENFORCE: '1', TEAM_DSH_FAKE: '[]' }), timeout: 120000, cwd: ROOT });
+    autoRes = { code: 0, out: String(out), err: '' };
+  } catch (e) {
+    autoRes = { code: e.status == null ? 1 : e.status, out: String(e.stdout || ''), err: String(e.stderr || '') };
+  }
+  const hasSkip = /"exempt":"created"/.test(autoRes.out);
+  check('W2b 自动建会话（created=true）不被建会话前的旧 DSH 列表误杀（P1-1 复核回归）',
+    /AUTOCREATE/.test(autoRes.out) && hasSkip && rosterOf('programmer1') === 'session-st-autocreate-1',
+    { out: autoRes.out.slice(0, 600), err: autoRes.err.slice(0, 300), roster: rosterOf('programmer1') });
+}
+
 /* ── W3① session rotate 路径：记账 + 广播 + BQ ─────────────────────────── */
 const W3_NEW = 'session-st-new-tester';
 const w3 = runJson(['session', 'rotate', '--project', PROJECT, '--role', 'tester', '--session', W3_NEW, '--offline', '--reason', 'W3 沙盘轮换', '--json']);
@@ -334,7 +357,7 @@ const rotateScript = [
   const mt5 = new Date(dayBase + 11 * 60000 + 6000); fs.utimesSync(tFile, mt5, mt5);
   const c5b = cycle(dayBase + 12 * 60000, { TEAM_ROTATE_HANDOVER_TEXT: badHandover });
   const arRows5 = jsonlRows(path.join(STATE, '自动换人.jsonl'));
-  const arRefuse = arRows5.filter((r) => r && String(r.code) === 'HANDOVER_INCOMPLETE');
+  const arRefuse = arRows5.filter((r) => r && String(r.code) === 'HANDOVER_INCOMPLETE' && String(r.role) === 'tester');
   check('W5② auto-rotate：同一交接判据 → 同拒 HANDOVER_INCOMPLETE（不换人、名册不变）',
     c5a.code === 0 && c5b.code === 0 && arRefuse.length >= 1 && rosterOf('tester') === w5Before.tester,
     { c5a: c5a.payload, c5b: c5b.payload, arRefuse: arRefuse.slice(-2), roster: rosterOf('tester') });
@@ -384,7 +407,7 @@ const rotateScript = [
   const sweepPmMail = mailOf('pm').filter((m) => /ROSTER_SESSION_MISSING/.test(`${m.subject || ''} ${m.body || ''}`));
   check('W7④ 写后 60 秒兜底：DSH 仍查不到 → ROSTER_SESSION_MISSING 审计 + 告警 PM',
     /SWEEP/.test(sweepRes.out) && sweepAudit.length >= 1 && sweepPmMail.length >= 1
-    && !fs.existsSync(POST_CHECK) || (readJson(POST_CHECK, { items: [] }).items || []).length === 0,
+    && (!fs.existsSync(POST_CHECK) || (readJson(POST_CHECK, { items: [] }).items || []).length === 0),
     { sweep: sweepRes.out.slice(0, 400), err: sweepRes.err.slice(0, 200), sweepAudit: sweepAudit.slice(-1), sweepPmMail: sweepPmMail.length });
 
   /* ── 收口：真实状态零写入 ──────────────────────────────────────────── */

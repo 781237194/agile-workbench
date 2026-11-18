@@ -31,6 +31,7 @@ import {
   PATHS, fail, nowIso, ensureDir, appendLine, appendEvent, withLock, stamp, readJson, exists, sha256,
 } from './core.mjs';
 import { loadTeam, saveTeam, projectStatePaths, loadProject, projectTeamMode, getMember, sendMessage } from './store.mjs';
+import { ROLE_NAMES } from './roles.mjs';
 import { writeJsonAtomic, updateJsonAtomic } from './json-atomic.mjs';
 
 /* ── 常量 ────────────────────────────────────────────────────────────── */
@@ -133,14 +134,32 @@ function alertPm({ projectName, role, reason, code, sessionId, source, by }) {
 }
 
 /**
+ * 统一拒绝路径（P2-4 复核）：所有「写前不过」都走这里——写 1 行审计 + 告警 PM，再抛错。
+ * 零写入由调用点保证（本函数只记账/告警，不碰名册）。
+ */
+function refuse({ projectName, role, sessionId = '', source = 'system', by = 'system', code, why, details = {} }) {
+  try {
+    appendJsonl(rosterAuditPath(projectName), {
+      at: nowIso(), event: 'roster_write_refused', result: 'refused', code,
+      project: projectName, role, from: '', to: String(sessionId || ''), by, source,
+      reason: String(why || '').slice(0, 200), rosterSha256: shaOfFile(PATHS.team),
+    });
+  } catch { /* 记账失败不掩盖拒绝 */ }
+  alertPm({ projectName, role, reason: why, code, sessionId, source, by });
+  fail(code, `名册写入被拒（${code}）：${why}；名册未改动（零写入）`, { role, project: projectName, source, sessionId, ...details });
+}
+
+/**
  * 写前形态自检（W7）：目标 id 形如 `session-auto-*`，或进程里仍注入着 `__AR_NEW_SESSION` → 拒写。
  * 零写入；写 1 行统一记账（result=refused）+ 告警 PM。
  */
 export function assertSessionWritable({ projectName, role, sessionId, source = 'system', by = 'system' }) {
   const id = String(sessionId || '').trim();
-  if (!id) fail('BAD_SESSION', '目标会话 id 为空：名册不写空会话（零写入）', { role, project: projectName, source });
+  if (!id) {
+    refuse({ projectName, role, sessionId: id, source, by, code: 'BAD_SESSION', why: '目标会话 id 为空：名册不写空会话' });
+  }
   if (!SESSION_ID_RE.test(id)) {
-    fail('BAD_SESSION', `会话 id 格式不对：${id}（要求 ${SESSION_ID_RE}）；名册未改动（零写入）`, { role, project: projectName, source, sessionId: id });
+    refuse({ projectName, role, sessionId: id, source, by, code: 'BAD_SESSION', why: `会话 id 格式不对：${id}（要求 ${SESSION_ID_RE}）` });
   }
   const injected = String(process.env.__AR_NEW_SESSION || '').trim();
   const refusals = [];
@@ -148,18 +167,12 @@ export function assertSessionWritable({ projectName, role, sessionId, source = '
   if (injected) refusals.push({ code: 'LEGACY_SESSION_ID_REFUSED', why: `检测到 __AR_NEW_SESSION 注入（旧副本入口，已废）：${injected}` });
   if (!refusals.length) return id;
   const hit = refusals[0];
-  try {
-    appendJsonl(rosterAuditPath(projectName), {
-      at: nowIso(), event: 'roster_write_refused', result: 'refused', code: hit.code,
-      project: projectName, role, from: '', to: id, by, source,
-      reason: hit.why, extra: refusals.map((r) => r.why), rosterSha256: shaOfFile(PATHS.team),
-    });
-  } catch { /* 记账失败不掩盖拒绝 */ }
-  alertPm({ projectName, role, reason: hit.why, code: hit.code, sessionId: id, source, by });
-  fail(hit.code, `名册写入被拒（${hit.code}）：${hit.why}；名册未改动（零写入）`, {
-    role, project: projectName, source, sessionId: id, reasons: refusals,
-    hint: '08:02 事故形态：旧代码副本仍在生成 session-auto-* 假会话 id。不要重新启用 __AR_NEW_SESSION。',
+  refuse({
+    projectName, role, sessionId: id, source, by, code: hit.code,
+    why: refusals.map((r) => r.why).join('；'),
+    details: { reasons: refusals, hint: '08:02 事故形态：旧代码副本仍在生成 session-auto-* 假会话 id。不要重新启用 __AR_NEW_SESSION。' },
   });
+  return id;
 }
 
 /**
@@ -220,6 +233,12 @@ export function captureRosterSnapshot({ projectName }) {
     manifestSkipped: manifestFile ? '' : `项目未登记（无 项目.json）：团队会话.json 未写（${info.why}）`,
     workbenchFile,
     before: { team: readRaw(PATHS.team), manifest: manifestFile ? readRaw(manifestFile) : null, workbench: readRaw(workbenchFile) },
+    // P1-3 复核：回滚必须知道「这些文件原来就不存在」——否则中途失败会留下只含 1 行的 团队会话.json（check 0/N）。
+    existed: {
+      team: exists(PATHS.team),
+      manifest: manifestFile ? exists(manifestFile) : false,
+      workbench: exists(workbenchFile),
+    },
     wrote: {},
     oldId: '',
     teamRoster: '',
@@ -251,7 +270,7 @@ export function applyRosterMaps({
   snap.workbenchFile = wbFile;
   if (!manifestFile) snap.manifestSkipped = `项目未登记（无 项目.json）：团队会话.json 未写（${project.why}）`;
   if (!snap.before) snap.before = { team: readRaw(PATHS.team), manifest: manifestFile ? readRaw(manifestFile) : null, workbench: readRaw(wbFile) };
-  const before = snap.before;
+  if (!snap.existed) snap.existed = { team: exists(PATHS.team), manifest: manifestFile ? exists(manifestFile) : false, workbench: exists(wbFile) };
   return withLock(ROSTER_LOCK_KEY, { ...ROSTER_LOCK_OPTS, reason: `roster write：${roleId}@${name}` }, () => {
     const team = loadTeam();
     // 团队.json 是全局名册（单一 activeProject 镜像）：非活跃项目不写它，避免污染当前项目映射。
@@ -276,7 +295,8 @@ export function applyRosterMaps({
       manifest.roles = Array.isArray(manifest.roles) ? manifest.roles : [];
       let row = manifest.roles.find((r) => r && String(r.role) === roleId);
       if (!row) {
-        row = { role: roleId, name: roleId, title: `团队·${roleId}`, sessionId: newSessionId, reused: false, model: '' };
+        // P3-3 复核：缺行时沿用旧实现的显示名（ROLE_NAMES），别把中文名写成 role id
+        row = { role: roleId, name: ROLE_NAMES[roleId] || roleId, title: `团队·${ROLE_NAMES[roleId] || roleId}`, sessionId: newSessionId, reused: false, model: '' };
         manifest.roles.push(row);
       } else {
         row.sessionId = newSessionId;
@@ -320,11 +340,13 @@ export function applyRosterMaps({
 
 /**
  * 失败回滚：只回滚「当前内容 == 我们写出去的那份」的文件（不覆盖并发写者的新改动）。
- * 在锁内执行，不影响别人的 RMW。
+ * - 原本不存在、被本次新建的文件（典型：项目还没有 团队会话.json）→ 删掉，不留「只有 1 行」的半成品（P1-3）；
+ * - 返回 {restored, removed, skipped, full}：`full=false` 表示**部分回滚**，调用方必须审计 + 告警 PM（P1-2）。
  */
 export function restoreRosterSnapshot({ projectName, snap }) {
-  if (!snap || !snap.wrote) return { restored: [], skipped: [] };
+  if (!snap || !snap.wrote) return { restored: [], removed: [], skipped: [], full: true };
   const restored = [];
+  const removed = [];
   const skipped = [];
   return withLock(ROSTER_LOCK_KEY, { ...ROSTER_LOCK_OPTS, reason: `roster rollback@${projectName}` }, () => {
     const targets = [
@@ -333,14 +355,21 @@ export function restoreRosterSnapshot({ projectName, snap }) {
       ['workbench', snap.workbenchFile],
     ];
     for (const [key, file] of targets) {
+      if (!file) continue;
       const raw = snap.before ? snap.before[key] : null;
       const wantSha = snap.wrote ? snap.wrote[key] : '';
-      if (!file) continue;
-      if (!raw) continue;
+      const existed = snap.existed ? snap.existed[key] !== false : true;
       const nowSha = shaOfFile(file);
       if (!wantSha) { skipped.push({ key, why: '本次未写出该文件，不回滚' }); continue; }
       if (nowSha && nowSha !== wantSha) { skipped.push({ key, why: '文件已被其它写者改动，不回滚', nowSha, wantSha }); continue; }
       try {
+        if (!existed) {
+          // 原本没有 → 删掉本次新建的那份
+          if (nowSha) fs.rmSync(file, { force: true });
+          removed.push(key);
+          continue;
+        }
+        if (!raw) { skipped.push({ key, why: '没有写入前快照，无法回滚' }); continue; }
         const tmp = `${file}.rollback-${process.pid}-${Date.now().toString(36)}`;
         ensureDir(path.dirname(file));
         fs.writeFileSync(tmp, raw);
@@ -350,7 +379,9 @@ export function restoreRosterSnapshot({ projectName, snap }) {
         skipped.push({ key, why: String((e && e.message) || e) });
       }
     }
-    return { restored, skipped };
+    // 「本次没写出该文件」不算部分回滚失败；只有真写出却回不去的才算
+    const realSkips = skipped.filter((s) => !/本次未写出/.test(String(s.why || '')));
+    return { restored, removed, skipped, full: realSkips.length === 0 };
   });
 }
 
@@ -410,6 +441,7 @@ export function broadcastReboot({ projectName, role, oldId, newSessionId, reason
 export async function finalizeRoster({
   projectName, role, from = '', to, mode = 'auto', created = false, reason = '', by = 'system', source = 'session-rotate',
   recordExtra = {}, jsonlExtra = {}, eventExtra = {}, bootQueue = true, offline = false, broadcast = true, now = null,
+  activeProject = true,
 }) {
   const name = String(projectName || '');
   const at = isoOf(now);
@@ -417,9 +449,27 @@ export async function finalizeRoster({
   const dir = rotateRecordDir(name);
   ensureDir(dir);
   const roleFile = path.join(dir, `${role}.json`);
+  const historyFile = path.join(dir, `${recordId}.json`);
   const previous = (() => { try { return readJson(roleFile, null); } catch { return null; } })();
 
-  // BQ：新会话登记待启动项并尝试拉起一次（旧 auto-rotate 缺这一段）
+  const record = {
+    id: recordId, project: name, role, from, to, at, by, reason,
+    status: 'active', mode, created, retiredAt: null, source,
+    ...(recordExtra || {}),
+  };
+  if (previous && previous.id && previous.id !== recordId) {
+    record.previous = { id: previous.id, from: previous.from || '', to: previous.to || '', status: 'retired', retiredAt: at };
+    try {
+      const prevHistory = path.join(dir, `${previous.id}.json`);
+      const prevRow = readJson(prevHistory, null);
+      if (prevRow) writeJsonAtomic(prevHistory, { ...prevRow, status: 'retired', retiredAt: at }, { case: 'roster-rotate', project: name });
+    } catch { /* 历史文件缺失不阻断轮换 */ }
+  }
+  // ① 先把轮换记录落盘：任何失败都在「已广播/BQ」之前暴露，避免「名册已回滚但已通知全员重 boot」这种假消息。
+  writeJsonAtomic(roleFile, record, { case: 'roster-rotate', project: name });
+  writeJsonAtomic(historyFile, record, { case: 'roster-rotate', project: name });
+
+  // ② BQ：新会话登记待启动项并尝试拉起一次（旧 auto-rotate 缺这一段）
   let bootPending = null;
   if (bootQueue) {
     try {
@@ -432,28 +482,20 @@ export async function finalizeRoster({
       bootPending = { queued: false, why: String((e && e.message) || e) };
     }
   }
-  // 广播：本人 + 其余 active 成员（旧 session rotate 缺这一段）
-  const bcast = broadcast
+  // ③ 广播：本人 + 其余 active 成员（旧 session rotate 缺这一段）。
+  // 非活跃项目（团队.json 未改）不广播——否则全队收到「名册变更请重 boot」，但 rulesHash 其实没变（P2-5 复核）。
+  const bcast = (broadcast && activeProject)
     ? broadcastReboot({ projectName: name, role, oldId: from, newSessionId: to, reason, source, now })
-    : { self: false, others: [], failed: [], skipped: 'asker-disabled' };
-
-  const record = {
-    id: recordId, project: name, role, from, to, at, by, reason,
-    status: 'active', mode, created, retiredAt: null, source,
-    ...(bootPending ? { bootPending } : {}),
-    ...(bcast && Array.isArray(bcast.others) ? { broadcastTo: bcast.others } : {}),
-    ...(recordExtra || {}),
-  };
-  if (previous && previous.id && previous.id !== recordId) {
-    record.previous = { id: previous.id, from: previous.from || '', to: previous.to || '', status: 'retired', retiredAt: at };
+    : { self: false, others: [], failed: [], skipped: broadcast ? 'inactive-project' : 'asker-disabled' };
+  // ④ 记录回填 BQ/广播结果（版本号不变；只在有内容时多写一次）
+  if (bootPending || (bcast && bcast.others && bcast.others.length)) {
+    if (bootPending) record.bootPending = bootPending;
+    if (bcast && Array.isArray(bcast.others)) record.broadcastTo = bcast.others;
     try {
-      const prevHistory = path.join(dir, `${previous.id}.json`);
-      const prevRow = readJson(prevHistory, null);
-      if (prevRow) writeJsonAtomic(prevHistory, { ...prevRow, status: 'retired', retiredAt: at }, { case: 'roster-rotate', project: name });
-    } catch { /* 历史文件缺失不阻断轮换 */ }
+      writeJsonAtomic(roleFile, record, { case: 'roster-rotate', project: name });
+      writeJsonAtomic(historyFile, record, { case: 'roster-rotate', project: name });
+    } catch { /* 回填失败不改变「换人已成事实」；审计行仍记 bootQueued/broadcastTo */ }
   }
-  writeJsonAtomic(roleFile, record, { case: 'roster-rotate', project: name });
-  writeJsonAtomic(path.join(dir, `${recordId}.json`), record, { case: 'roster-rotate', project: name });
 
   // 会话轮换.jsonl（两条路径同一行格式：from/to/mode/created/by/source）
   try {
@@ -466,9 +508,12 @@ export async function finalizeRoster({
   // 名册变更.jsonl（统一审计：一行回答「这行名册是谁、什么时候、为什么改的」）
   try {
     appendJsonl(rosterAuditPath(name), {
-      at, event: 'roster_rotate', result: 'ok', code: 'ROSTER_UPDATED',
+      at, event: 'roster_rotate', result: 'ok',
+      // 非活跃项目不写团队.json → 名册其实没变，不能记 ROSTER_UPDATED（P2-5 复核）
+      code: activeProject ? 'ROSTER_UPDATED' : 'ROSTER_SKIPPED_INACTIVE_PROJECT',
       project: name, role, from, to, by, source, mode, created, reason: String(reason || '').slice(0, 200),
       recordId, rosterSha256: shaOfFile(PATHS.team),
+      rosterWritten: Boolean(activeProject),
       bootQueued: Boolean(bootPending && bootPending.queued), broadcastTo: bcast && bcast.others,
     });
   } catch { /* 同上 */ }
@@ -493,15 +538,15 @@ export function queueRosterPostCheck({ projectName, role, sessionId, at = null }
       const data = readJson(file, null);
       return data && Array.isArray(data.items) ? data.items : [];
     } catch { return []; }
-  })().filter((it) => it && String(it.sessionId) !== String(sessionId));
+  })().filter((it) => it && !(String(it.sessionId) === String(sessionId) && String(it.role || '') === String(role || '')));
   items.push({ role: String(role || ''), sessionId: String(sessionId || ''), at: isoOf(at), checkedAt: null });
   ensureDir(path.dirname(file));
   writeJsonAtomic(file, { items: items.slice(-50), updatedAt: isoOf(at) }, { case: 'roster-post-check', project: projectName });
   return { file, items };
 }
 
-/** 扫待校验项：超过 60 秒仍查不到 → 审计 1 行 + 告警 PM；查到则移除。 */
-export async function sweepRosterPostChecks({ projectName, now = Date.now(), engineUrl = '', dshList = null }) {
+/** 扫待校验项：超过 60 秒仍查不到 → 审计 1 行 + 告警 PM；查到则移除。`skipDsh` 用于离线（--offline）场景。 */
+export async function sweepRosterPostChecks({ projectName, now = Date.now(), engineUrl = '', dshList = null, skipDsh = false }) {
   const file = postCheckPath(projectName);
   const data = (() => { try { return readJson(file, null); } catch { return null; } })();
   const items = data && Array.isArray(data.items) ? data.items : [];
@@ -513,6 +558,7 @@ export async function sweepRosterPostChecks({ projectName, now = Date.now(), eng
   for (const it of items) {
     const atMs = Date.parse(String(it.at || ''));
     if (!Number.isFinite(atMs) || (Number.isFinite(nowMs) ? nowMs : Date.now()) - atMs < POST_CHECK_TTL_MS) { keep.push(it); continue; }
+    if (skipDsh) { keep.push(it); continue; }                            // 离线（--offline）：不联网，保留待下次
     const chk = await checkSessionInDsh({ sessionId: it.sessionId, engineUrl, dshList });
     if (chk.checked === false) { keep.push(it); continue; }             // 沙盘/不可校验：保留待下次
     if (chk.exists === null) { keep.push(it); continue; }               // DSH 不可达：保留
@@ -597,12 +643,22 @@ export async function rotateRoster({
   const roleId = String(role || '');
   if (!name) fail('NO_PROJECT', '需要项目名');
   if (!roleId) fail('BAD_ROLE', '需要角色');
+  if (!ROSTER_SOURCES.includes(String(source))) {
+    fail('ROSTER_SOURCE_UNKNOWN', `未知的名册变更来源：${source}（允许 ${ROSTER_SOURCES.join('/')}）`, { source, allowed: ROSTER_SOURCES });
+  }
   const target = assertSessionWritable({ projectName: name, role: roleId, sessionId: newSessionId, source, by });
   // 写后 60 秒兜底校验的清扫点之一（另一个在 auto-rotate 每拍）：换人前后都把过期待校验项收掉，不积压。
-  try { await sweepRosterPostChecks({ projectName: name, engineUrl }); } catch { /* 兜底清扫失败不阻断本次换人 */ }
-  // 新旧相同：零写入先判（读名册现值 + 调用方给的期望旧 id）
+  // --offline 不联网（sweep 只保留待校验项，不尝试 DSH）。
+  try { await sweepRosterPostChecks({ projectName: name, engineUrl, skipDsh: offline }); } catch { /* 兜底清扫失败不阻断本次换人 */ }
+  // 新旧相同：零写入先判（读名册现值 + 调用方给的期望旧 id）。
+  // 注意：团队.json 是「当前项目」的镜像——只有本项目是 activeProject 时，名册值才是本角色的真相，
+  // 非活跃项目拿它比对会把别的项目的会话误当成本角色现值（假 SESSION_SAME）。
   const currentOld = (() => {
-    try { return String((getMember(loadTeam(), roleId) || {}).sessionId || ''); } catch { return ''; }
+    try {
+      const team = loadTeam();
+      if (String(team.activeProject || '') !== name) return '';
+      return String((getMember(team, roleId) || {}).sessionId || '');
+    } catch { return ''; }
   })();
   if (String(expectedOldId || '') && String(expectedOldId) === target) {
     fail('SESSION_SAME', `新旧会话相同：${target}；名册未改动（零写入）`, { role: roleId, project: name, sessionId: target, source });
@@ -615,22 +671,27 @@ export async function rotateRoster({
   }
   // 写前 DSH 存在性校验（W2）：不通过 → 零写入。
   // 沙盘/--offline 默认豁免，但 `TEAM_ROSTER_DSH_ENFORCE=1` 表示「门禁本体强制」——豁免让位于强制。
+  // `created=true`（刚由 createTeamSession 真建）不再查列表：调用方手里的 DSH 列表是**建会话之前**拍的快照
+  // （P1-1 复核：旧实现会把刚建好的新会话判成不存在 → 生产自动建会话换人 100% 失败）；存在性由写后 60 秒兜底负责。
   const dshEnforce = String(process.env.TEAM_ROSTER_DSH_ENFORCE || '') === '1';
   let dshCheck = { checked: false, exempt: offline ? 'offline' : 'skipped', exists: null, code: '' };
-  if (checkDsh && (!offline || dshEnforce)) {
+  if (created) {
+    dshCheck = { checked: false, exempt: 'created', exists: null, code: '', why: '刚由 DSH create 建出的会话：不做建会话前快照比对，存在性由写后 60 秒兜底' };
+  } else if (checkDsh && (!offline || dshEnforce)) {
     dshCheck = await checkSessionInDsh({ sessionId: target, engineUrl, dshList });
     if (dshCheck.checked === true && dshCheck.exists === false) {
-      try {
-        appendJsonl(rosterAuditPath(name), {
-          at: nowIso(), event: 'roster_write_refused', result: 'refused', code: 'SESSION_NOT_IN_DSH',
-          project: name, role: roleId, from: '', to: target, by, source,
-          reason: `目标会话在 DSH 不存在：${target}`, rosterSha256: shaOfFile(PATHS.team),
-        });
-      } catch { /* ignore */ }
-      fail('SESSION_NOT_IN_DSH', `目标会话在 DSH 不存在：${target}；名册未改动（零写入）`, { role: roleId, project: name, sessionId: target, source });
+      refuse({
+        projectName: name, role: roleId, sessionId: target, source, by, code: 'SESSION_NOT_IN_DSH',
+        why: `目标会话在 DSH 不存在：${target}`,
+        details: { dshCheck },
+      });
     }
     if (dshCheck.checked === true && dshCheck.exists === null && mode === 'manual') {
-      fail('DSH_UNAVAILABLE', `无法校验指定会话（DSH 不可达：${dshCheck.why}）；名册未改动（零写入）`, { role: roleId, project: name, sessionId: target, source });
+      refuse({
+        projectName: name, role: roleId, sessionId: target, source, by, code: 'DSH_UNAVAILABLE',
+        why: `无法校验指定会话（DSH 不可达：${dshCheck.why || '未知'}）`,
+        details: { dshCheck },
+      });
     }
   }
   let snap = null;
@@ -649,6 +710,7 @@ export async function rotateRoster({
       jsonlExtra: { ...(jsonlExtra || {}), ...(hookExtra.jsonlExtra || {}) },
       eventExtra: { ...(eventExtra || {}), ...(hookExtra.eventExtra || {}) },
       bootQueue, offline, broadcast, now,
+      activeProject: snap.activeProject !== false,
     });
     try { queueRosterPostCheck({ projectName: name, role: roleId, sessionId: target, at: now }); } catch { /* 兜底登记失败不阻断换人 */ }
     return {
@@ -657,12 +719,14 @@ export async function rotateRoster({
       teamRoster: snap.teamRoster, dshCheck,
     };
   } catch (e) {
+    let rollback = null;
     if (snap) {
       try {
-        const rb = restoreRosterSnapshot({ projectName: name, snap });
-        e.details = { ...(e.details || {}), rollback: rb };
+        rollback = restoreRosterSnapshot({ projectName: name, snap });
+        e.details = { ...(e.details || {}), rollback };
       } catch (err) {
-        e.details = { ...(e.details || {}), rollback: { error: String((err && err.message) || err) } };
+        rollback = { restored: [], removed: [], skipped: [], full: false, error: String((err && err.message) || err) };
+        e.details = { ...(e.details || {}), rollback };
       }
     }
     try {
@@ -670,8 +734,25 @@ export async function rotateRoster({
         at: nowIso(), event: 'roster_write_failed', result: 'fail', code: String((e && e.code) || 'ROSTER_WRITE_FAILED'),
         project: name, role: roleId, from: snap ? String(snap.oldId || '') : '', to: target, by, source,
         reason: String((e && e.message) || e).slice(0, 200),
+        rollback: rollback ? { full: rollback.full, restored: rollback.restored, removed: rollback.removed, skipped: rollback.skipped } : null,
       });
     } catch { /* 记账失败不掩盖原始错误 */ }
+    // P1-2 复核：部分回滚必须显式暴露（不许在错误里写「已回滚」了事）——单独审计一行 + 告警 PM。
+    if (rollback && rollback.full === false) {
+      try {
+        appendJsonl(rosterAuditPath(name), {
+          at: nowIso(), event: 'roster_rollback_partial', result: 'fail', code: 'ROSTER_ROLLBACK_PARTIAL',
+          project: name, role: roleId, from: snap ? String(snap.oldId || '') : '', to: target, by, source,
+          reason: `部分回滚：${(rollback.skipped || []).map((x) => `${x.key}(${x.why})`).join('；')}`.slice(0, 300),
+          rollback,
+        });
+      } catch { /* ignore */ }
+      alertPm({
+        projectName: name, role: roleId, sessionId: target, source, by,
+        code: 'ROSTER_ROLLBACK_PARTIAL',
+        reason: `换人失败且回滚不完整（${(rollback.skipped || []).map((x) => x.key).join('/')}）：四处映射可能不一致，请跑 session check 并人工确认`,
+      });
+    }
     throw e;
   }
 }

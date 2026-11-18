@@ -742,7 +742,11 @@ export async function rotateSession({
   const roleIds = projectRoleIds(project);
   if (!roleIds.includes(role)) fail('BAD_ROLE', `角色 ${role} 不在项目 ${name} 的模式内（${roleIds.join('/')}）`);
   const map = sessionOfRole(name);
-  const oldId = String(map.members[role] || map.manifest[role] || map.wbSessions[role] || '');
+  // P3-2 复核：团队.json 是「当前项目」的镜像——非活跃项目拿 map.members 当旧会话会写成别的项目的 id。
+  // 口径：活跃项目按「名册 → 清单 → workbench」，非活跃项目按「清单 → workbench → 名册兜底」。
+  const teamIsActive = String((map.team && map.team.activeProject) || '') === name;
+  const oldId = String((teamIsActive ? map.members[role] : '')
+    || map.manifest[role] || map.wbSessions[role] || map.members[role] || '');
   // R-2e6b：rotate 前置归档门（默认硬门；在途任务/锁走 ARCHIVE_DEFERRED 例外）。
   const gate = archiveGate(name, role, oldId);
   // 注入失败只用于沙盘自测，生产环境忽略，防止误用造半状态。
@@ -903,7 +907,14 @@ export async function rotateSession({
     return result.record;
   } catch (e) {
     // 回滚：邮件 + 任务 + 派单锁恢复到轮换前（映射已由 roster-writer 回滚），再归档本次创建的新会话。
-    const rollback = { maps: Boolean(e && e.details && e.details.rollback), mail: 0, tasks: 0, dispatchLock: false, newSessionArchived: false, errors: [] };
+    // P1-2 复核：rollback.maps 只能是布尔（旧写法 Boolean(details.rollback) 对对象恒真，会把「部分回滚」报成「已回滚」）。
+    const mapRollback = (e && e.details && e.details.rollback) || null;
+    const rollback = {
+      maps: Boolean(mapRollback && mapRollback.full === true),
+      mapsPartial: Boolean(mapRollback && mapRollback.full === false),
+      mapsDetail: mapRollback,
+      mail: 0, tasks: 0, dispatchLock: false, newSessionArchived: false, errors: [],
+    };
     for (const o of mailOriginals) {
       try { fs.writeFileSync(o.file, o.raw, 'utf8'); rollback.mail++; } catch (err) { rollback.errors.push(`邮件恢复失败：${path.basename(o.file)}`); }
     }
@@ -924,7 +935,11 @@ export async function rotateSession({
       note: `失败回滚：${e.message}`, data: { from: oldId, to: newId, code: e.code || '', failAt, rollback, legacyAction: 'session_rotate_failed' },
     });
     if (e instanceof TeamError) throw e;
-    fail('ROTATE_FAILED', `轮换失败已回滚到旧会话：${e.message}`, { from: oldId, to: newId, code: e.code || '', rollback });
+    // 部分回滚不许说「已回滚」：文案按实际结论给，并提示先跑 session check（P1-2/P3-4 复核）
+    const tailMsg = rollback.mapsPartial
+      ? `轮换失败：四处映射**仅部分回滚**（${(mapRollback.skipped || []).map((x) => x.key).join('/') || '未知'}），请先跑 session check 确认再操作：${e.message}`
+      : `轮换失败已回滚到旧会话：${e.message}`;
+    fail('ROTATE_FAILED', tailMsg, { from: oldId, to: newId, code: e.code || '', rollback, hint: rollback.mapsPartial ? 'node 团队\\工具\\team.mjs session check --project "<项目>"' : '' });
   }
 }
 

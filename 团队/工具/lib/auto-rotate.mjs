@@ -289,12 +289,24 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
       });
     } catch (e) {
       const code = String((e && e.code) || 'ROTATE_ROSTER_FAILED');
+      // P2-2 复核：会话已建但名册写入失败 → 必须把刚建的会话归档掉，否则每拍漏一个孤儿会话。
+      let compensation = null;
+      if (created && newId) {
+        try {
+          const { DshClient } = await import('./dsh-session.mjs');
+          await new DshClient(engine || undefined).workspaceArchiveSession({ sessionId: newId, stopActivity: true });
+          compensation = { archivedNewSession: true, sessionId: newId };
+        } catch (err) {
+          compensation = { archivedNewSession: false, sessionId: newId, why: String((err && err.message) || err) };
+        }
+      }
       appendAudit(auditFile, {
         at: iso(now), stage: 'rotate_failed', code, result: 'fail', role, project: projectName,
-        note: `名册写入失败（${code}）：本轮不换人（已回滚）`, reason: String(reason || 'context-full'),
-        evidence: { code, oldSessionId: oldId, newSessionId: newId, why: String((e && e.message) || e) },
+        note: `名册写入失败（${code}）：本轮不换人（${compensation && compensation.archivedNewSession ? '新会话已归档补偿' : compensation ? '新会话归档补偿失败，需人工清理' : '未新建会话，无需补偿'}）`,
+        reason: String(reason || 'context-full'),
+        evidence: { code, oldSessionId: oldId, newSessionId: newId, why: String((e && e.message) || e), compensation, rollback: (e && e.details && e.details.rollback) ? { full: e.details.rollback.full, skipped: e.details.rollback.skipped } : null },
       });
-      return { oldId, newId: '', others: [], failed: true, code, manualCommand: '' };
+      return { oldId, newId: '', others: [], failed: true, code, manualCommand: '', compensation };
     }
   }
   const others = (rotateResult && rotateResult.broadcast && Array.isArray(rotateResult.broadcast.others))
@@ -797,7 +809,7 @@ export async function runAutoRotateCycle(projectName, options = {}) {
     const rotated = await rotateSession({ projectName: name, role: head.role, now, reason: `next-day-queue-${head.level}`, auditFile, dryRun, engineUrl });
     if (rotated.failed) {
       actions.push({ stage: 'rotate', role: head.role, code: rotated.code, result: 'fail' });
-      return { ok: false, code: rotated.code, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), rotated: [], actions, dryRun, source, manualCommand: rotated.manualCommand, note: `自动建会话失败（${rotated.code}）：本轮不换人，已留手建降级命令` };
+      return { ok: false, code: rotated.code, project: name, at: nowIso, mode: 'next-day', queued: queued.map((q) => q.role), rotated: [], actions, dryRun, source, manualCommand: rotated.manualCommand, note: rotated.manualCommand ? `自动建会话失败（${rotated.code}）：本轮不换人，已留手建降级命令` : `自动建会话失败（${rotated.code}）：本轮不换人（未新建会话或已回滚，无需手建）` };
     }
     actions.push({ stage: 'rotate', role: head.role, oldSessionId: rotated.oldId, newSessionId: rotated.newId, mode: 'next-day', createMode: rotated.mode, created: rotated.created });
     actions.push({ stage: 'broadcast_reboot', role: head.role, roles: rotated.others });
@@ -841,10 +853,31 @@ export async function runAutoRotateCycle(projectName, options = {}) {
     if (pending) {
       const done = handoverDone({ projectDir, role: item.role, mailDir, sinceMs: pending.at });
       if (done.done) {
+        // P2-3 复核：交接**文件**若本身就是【】机器格式（含任一必填小节标记），必须过同一个 validateHandover；
+        // 人类八节模板（无【】标记）仍按 fa0e §5.3 的「文件更新/回执邮件」口径，不误判。
+        let fileGate = null;
+        try {
+          const hf = path.join(projectDir, ROLE_DIRS[item.role] || item.role, '产出', '交接-最新.md');
+          const txt = fs.readFileSync(hf, 'utf8');
+          if (/【(?:在途任务|未闭环事项|最近决策|建议下一步|遗留问题与坑)】/.test(txt)) {
+            fileGate = await checkRotateHandover({ projectName: name, role: item.role, text: txt });
+          }
+        } catch { /* 文件不存在/读不到：按回执邮件口径，不额外拦 */ }
+        if (fileGate && fileGate.code === 'HANDOVER_INCOMPLETE') {
+          if (!dryRun) {
+            appendAudit(auditFile, {
+              at: nowIso, stage: 'skipped', code: 'HANDOVER_INCOMPLETE', result: 'ok', role: item.role, project: name,
+              note: `交接文件是机器格式但缺必填【】小节（${(fileGate.missingRequired || []).concat(fileGate.emptyRequired || []).join('、')}）：本轮不换人`,
+              evidence: { missing: fileGate.missingRequired, empty: fileGate.emptyRequired, redFlags: fileGate.redFlags, judge: 'validateHandover', source: 'file' },
+            });
+          }
+          actions.push({ stage: 'skipped', code: 'HANDOVER_INCOMPLETE', role: item.role, source: 'file' });
+          continue;
+        }
         const rotated = await rotateSession({ projectName: name, role: item.role, now, reason: `handover:${done.source}`, auditFile, dryRun, engineUrl });
         if (rotated.failed) {
           actions.push({ stage: 'rotate', role: item.role, code: rotated.code, result: 'fail' });
-          return { ok: false, code: rotated.code, project: name, at: nowIso, mode: 'day', actions, dryRun, source, manualCommand: rotated.manualCommand, note: `自动建会话失败（${rotated.code}）：本轮不换人，已留手建降级命令` };
+          return { ok: false, code: rotated.code, project: name, at: nowIso, mode: 'day', actions, dryRun, source, manualCommand: rotated.manualCommand, note: rotated.manualCommand ? `自动建会话失败（${rotated.code}）：本轮不换人，已留手建降级命令` : `自动建会话失败（${rotated.code}）：本轮不换人（未新建会话或已回滚，无需手建）` };
         }
         actions.push({ stage: 'rotate', role: item.role, oldSessionId: rotated.oldId, newSessionId: rotated.newId, mode: 'handover', createMode: rotated.mode, created: rotated.created });
         actions.push({ stage: 'broadcast_reboot', role: item.role, roles: rotated.others });
