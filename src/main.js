@@ -1162,7 +1162,7 @@ function syncTeamRosterSessions(sessions, options = {}) {
       } catch { /* 审计失败不阻断同步 */ }
     }
     // R-ad44 AC1①（批4b）：团队状态文件统一走 json-atomic.cjs（行为不变：仅有变化时才写，仍写整份 team）。
-    if (changed) jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'syncTeamRosterSessions' });
+    if (changed && !teamWriteBlockedByDeletion(projectName)) jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'syncTeamRosterSessions' });
     return { ok: true, changed, activeProject: team.activeProject || null, rejected: (applied && applied.rejected) || [] };
   } catch { /* 名册同步失败不阻断会话映射 */ }
 }
@@ -3678,7 +3678,7 @@ function restoreTeamActiveProject(snapshot) {
     team.activeProject = snapshot.teamActiveProject;
     // R-ad44 AC1①：状态文件（团队/状态/团队.json）唯一写入口＝json-atomic.cjs，不再直接 fs.writeFileSync。
     // 行为不变：仍是「回滚时把 activeProject 写回快照值」，失败由外层 catch 吞掉不阻断原始错误。
-    jsonAtomicCore.writeJsonAtomic(teamTools.layout.teamFile, team, { case: 'restoreTeamActiveProject' });
+    if (!teamWriteBlockedByDeletion(snapshot.teamActiveProject)) jsonAtomicCore.writeJsonAtomic(teamTools.layout.teamFile, team, { case: "restoreTeamActiveProject" });
   } catch { /* 回滚不阻断原始错误 */ }
 }
 
@@ -15581,7 +15581,7 @@ function selftestTeamCleanup(testRoot, before) {
         const previous = before && before.team && before.team.activeProject;
         team.activeProject = previous && remaining.has(previous) ? previous : null;
         // R-ad44 AC1①：团队状态文件唯一写入口＝json-atomic.cjs（同 restoreTeamActiveProject 的收编）。
-        jsonAtomicCore.writeJsonAtomic(layout.teamFile, team, { case: 'cleanupRestoreTeamActiveProject' });
+        if (!teamWriteBlockedByDeletion(team.activeProject)) jsonAtomicCore.writeJsonAtomic(layout.teamFile, team, { case: "cleanupRestoreTeamActiveProject" });
       }
     }
   } catch { /* ignore */ }
@@ -22883,6 +22883,19 @@ async function runB2dd3Check() {
 }
 
 // P0 97db 持久性（T-20261119-041748-0001）：删除墓碑 + 延迟清扫，防止旧 saveTeam 副本/异步写者把名册 sessionId 回写。
+// P0 97db 根因（M-20261119-040141-001c7a）：团队.json 直接写者的删除态守卫——
+// 删除墓碑存在且工作区没有同名活跃项目时，拒绝把 activeProject/名册写回。
+function teamWriteBlockedByDeletion(teamName) {
+  try {
+    const name = String(teamName || "").trim();
+    if (!name) return false;
+    const tombFile = deletionTombstoneFile(name);
+    if (!fs.existsSync(tombFile)) return false;
+    const store = readStore();
+    const stillActive = (store.projects || []).some((proj) => proj && String(proj.teamName || proj.name) === name && proj.path && fs.existsSync(String(proj.path)));
+    return !stillActive;
+  } catch { return false; }
+}
 function deletionTombstoneFile(teamName) {
   return path.join(resolveTeamRoot(), '状态', '项目', teamTools.teamSlug(String(teamName)), '删除墓碑.json');
 }
