@@ -35,6 +35,34 @@ export const DEFAULT_TOKEN_WARN = 300000;
 export const DEFAULT_TOKEN_FORCE = 500000;
 // R-20261114-001011-703f F-1：30 万是“提醒”阈值（可配），只提醒不强制换人；硬上限由 Owner 另定。
 export const DEFAULT_SESSION_TOKEN_LIMIT = 300000;
+
+/**
+ * B-20261118-080102-2c05：**按角色覆盖**的会话阈值（单源）。
+ * Owner 2026-11-18 08:00 口径：PM 允许到 2 倍才换人 → 代码级默认 `pm: {warn:600000, force:1000000}`；
+ * 其余五个角色沿用全局默认（30 万 / 50 万）。
+ * 落点覆盖：项目状态 `项目.json` 的 `sessionLimits`（项目状态不进 rulesHash，改它不会让全员令牌失效）：
+ *   { "sessionLimits": { "pm": { "warn": 600000, "force": 1000000 } } }
+ * `session usage` / `session_rotate_warn` / auto-rotate 候选都必须用这里的结果，禁止第二套阈值。
+ */
+export const ROLE_SESSION_LIMIT_DEFAULTS = Object.freeze({ pm: { warn: 600000, force: 1000000 } });
+export function sessionLimitsOf(projectName) {
+  let cfg = null;
+  try { cfg = readJson(projectStatePaths(String(projectName || '')).config); } catch { cfg = null; }
+  const per = (cfg && cfg.sessionLimits && typeof cfg.sessionLimits === 'object' && !Array.isArray(cfg.sessionLimits))
+    ? cfg.sessionLimits : {};
+  const num = (v, dflt) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : dflt);
+  const builtinRoom = (role) => (ROLE_SESSION_LIMIT_DEFAULTS[String(role || '')] || null);
+  const of = (role) => {
+    const builtin = builtinRoom(role) || {};
+    const row = (per[String(role || '')] && typeof per[String(role || '')] === 'object') ? per[String(role || '')] : {};
+    return {
+      warn: num(row.warn, num(builtin.warn, DEFAULT_TOKEN_WARN)),
+      force: num(row.force, num(builtin.force, DEFAULT_TOKEN_FORCE)),
+    };
+  };
+  const overrides = { ...ROLE_SESSION_LIMIT_DEFAULTS, ...per };
+  return { defaults: { warn: DEFAULT_TOKEN_WARN, force: DEFAULT_TOKEN_FORCE }, overrides, configOverrides: per, of };
+}
 const USAGE_FILE_NAME = '会话用量.json';
 const USAGE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const HANDOVER_MAX = 2048;
@@ -323,6 +351,8 @@ export async function checkSessionRotateWarn({ projectName, limit = DEFAULT_SESS
   const name = String(projectName || '');
   if (!name) fail('NO_PROJECT', '需要 --project');
   const threshold = Number(limit) > 0 ? Number(limit) : DEFAULT_SESSION_TOKEN_LIMIT;
+  // B-20261118-080102-2c05：按角色覆盖优先（pm 2 倍），未覆盖的角色仍用传入 limit / 全局默认。
+  const limits = sessionLimitsOf(name);
   const track = readSessionUsageTrack(name);
   const team = loadTeam();
   const members = Array.isArray(team.members) ? team.members : [];
@@ -334,23 +364,29 @@ export async function checkSessionRotateWarn({ projectName, limit = DEFAULT_SESS
     const tokens = Number(row.tokens);
     const atMs = Date.parse(String(row.at || ''));
     const member = members.find((m) => m && m.role === role && m.status === 'active');
+    const lim = limits.of(role);
+    // 角色有显式覆盖 → 用覆盖值；否则沿用传入 limit（默认 30 万）/ 全局强制阈值。
+    const hasOverride = Boolean(limits.configOverrides[role] || ROLE_SESSION_LIMIT_DEFAULTS[role]);
+    const warnThreshold = hasOverride ? lim.warn : threshold;
+    const forceThreshold = hasOverride ? lim.force : DEFAULT_TOKEN_FORCE;
     const item = {
       role, name: ROLE_NAMES[role] || role,
       tokens: Number.isFinite(tokens) ? tokens : null,
       at: row.at || '', source: row.source || '', sessionId: row.sessionId || '',
-      level: usageLevelOf(tokens, threshold, DEFAULT_TOKEN_FORCE),
+      warnThreshold, forceThreshold,
+      level: usageLevelOf(tokens, warnThreshold, forceThreshold),
       warned: false, reason: ''
     };
     if (!Number.isFinite(tokens)) { item.reason = '用量未知'; rows.push(item); continue; }
     if (!Number.isFinite(atMs) || Date.now() - atMs > USAGE_MAX_AGE_MS) { item.reason = '用量过期（at 超 24h）'; rows.push(item); continue; }
-    if (tokens < threshold) { item.reason = '未到提醒阈值'; rows.push(item); continue; }
+    if (tokens < warnThreshold) { item.reason = '未到提醒阈值'; rows.push(item); continue; }
     if (!member) { item.reason = '角色不在队'; rows.push(item); continue; }
     const dedupe = `${role}:${tokens}:${row.sessionId || ''}`;
     if (String(row.warnedFor || '') === dedupe) { item.reason = '同一用量已提醒过'; rows.push(item); continue; }
     const sessionId = String(row.sessionId || member.sessionId || '');
-    const subject = `会话用量提醒：${ROLE_NAMES[role] || role} ${tokens} ≥ ${threshold}`;
+    const subject = `会话用量提醒：${ROLE_NAMES[role] || role} ${tokens} ≥ ${warnThreshold}`;
     const body = [
-      `${ROLE_NAMES[role] || role} 当前会话用量 ${tokens} / 提醒阈值 ${threshold}（只提醒，不自动换人）。`,
+      `${ROLE_NAMES[role] || role} 当前会话用量 ${tokens} / 预警阈值 ${warnThreshold}（强制阈值 ${forceThreshold}；只提醒，不自动换人）。`,
       `会话：${sessionId || '未记录'}`,
       `建议：先准备 archive，再 session rotate --role ${role} --reason "上下文到阈值"；硬上限由 Owner 定，未定前不强制。`,
       `数据来源：${USAGE_FILE_NAME}（${row.source || source}，${row.at || '未写时间'}）`,
@@ -383,6 +419,8 @@ export async function sessionUsage({
   if (!name) fail('NO_PROJECT', '需要 --project');
   const warn = Number(warnThreshold);
   const force = Number(forceThreshold);
+  // B-20261118-080102-2c05：每角色实际生效阈值（pm 有 2 倍覆盖时用它；其余角色沿用传入/全局默认）
+  const limits = sessionLimitsOf(name);
   const project = loadProject(name);
   const roleIds = projectRoleIds(project);
   const map = sessionOfRole(name);
@@ -401,7 +439,10 @@ export async function sessionUsage({
       usage = usageOfSession(info);
       if (!usage) source = 'DSH 无 tokenUsage 字段';
     }
-    const level = usageLevelOf(usage ? usage.inputTokens : null, warn, force);
+    const lim = limits.of(r);
+    const rowWarn = limits.overrides[r] ? lim.warn : warn;
+    const rowForce = limits.overrides[r] ? lim.force : force;
+    const level = usageLevelOf(usage ? usage.inputTokens : null, rowWarn, rowForce);
     rows.push({
       role: r, name: ROLE_NAMES[r] || r, sessionId,
       inputTokens: usage ? usage.inputTokens : null,
@@ -412,14 +453,22 @@ export async function sessionUsage({
       warn: level === 'warn' || level === 'force',
       force: level === 'force',
       level, source,
+      warnThreshold: rowWarn, forceThreshold: rowForce,
+      thresholdSource: limits.configOverrides[r] ? 'project.sessionLimits' : (ROLE_SESSION_LIMIT_DEFAULTS[r] ? 'builtin:pm-2x' : 'default'),
+      thresholds: { warn: rowWarn, force: rowForce },
       note: level === 'force'
-        ? `input ${usage.inputTokens} ≥ 强制阈值 ${force}：先 session archive 再 session rotate（未归档 rotate 会被 ARCHIVE_REQUIRED 拒）`
+        ? `input ${usage.inputTokens} ≥ 强制阈值 ${rowForce}：先 session archive 再 session rotate（未归档 rotate 会被 ARCHIVE_REQUIRED 拒）`
         : level === 'warn'
-          ? `input ${usage.inputTokens} ≥ 预警阈值 ${warn}：建议准备 archive/rotate，避免到 ${force} 被动换人`
+          ? `input ${usage.inputTokens} ≥ 预警阈值 ${rowWarn}：建议准备 archive/rotate，避免到 ${rowForce} 被动换人`
           : (usage ? '' : '未知（不按 0）'),
     });
   }
-  return { project: name, warnThreshold: warn, forceThreshold: force, threshold: force, dshOk: list.ok, dshWhy: list.ok ? '' : list.why, rows };
+  return {
+    project: name, warnThreshold: warn, forceThreshold: force, threshold: force,
+    // B-20261118-080102-2c05：每角色实际生效阈值（单源）——人类输出与 --json 都从这里取
+    thresholds: { defaults: { warn, force }, overrides: limits.overrides },
+    dshOk: list.ok, dshWhy: list.ok ? '' : list.why, rows,
+  };
 }
 
 // ---------- 会话活性与自动拉起（B-20261113-061008-405f） ----------
@@ -1209,13 +1258,15 @@ export async function cmdSession(args) {
     const warnThreshold = Number(args.warn || args.threshold || DEFAULT_TOKEN_WARN);
     const forceThreshold = Number(args.force || DEFAULT_TOKEN_FORCE);
     const r = await sessionUsage({ projectName, role: String(args.role || ''), warnThreshold, forceThreshold });
-    const lines = [`会话 token 用量 · ${projectName} ｜ DSH ${r.dshOk ? '可用' : '不可达（' + r.dshWhy + '）'} ｜ 预警 input ≥ ${r.warnThreshold} · 强制 input ≥ ${r.forceThreshold}`];
-    lines.push('角色         会话                          未缓存输入    缓存读       output      total      状态');
+    const lines = [`会话 token 用量 · ${projectName} ｜ DSH ${r.dshOk ? '可用' : '不可达（' + r.dshWhy + '）'} ｜ 默认：预警 input ≥ ${r.warnThreshold} · 强制 input ≥ ${r.forceThreshold}`];
+    lines.push('角色         会话                          未缓存输入    缓存读       output      total      状态   预警/强制');
     for (const row of r.rows) {
       const id = row.sessionId || '(无)';
       const fmt = (v) => (v === null ? '未知' : String(v));
       const state = row.force ? '⛔ 强制归档/换人' : (row.level === 'warn' ? '⚠ 预警' : (row.inputTokens === null ? '未知' : '正常'));
-      lines.push(`${row.name.padEnd(10)} ${id.padEnd(30)} ${fmt(row.uncachedInputTokens).padStart(10)} ${fmt(row.cacheReadTokens).padStart(11)} ${fmt(row.outputTokens).padStart(11)} ${fmt(row.totalTokens).padStart(11)} ${state}`);
+      // B-20261118-080102-2c05：人类输出也给出**该角色实际生效**的 warn/force（pm 2 倍时一眼可见）
+      const thr = `${row.warnThreshold == null ? r.warnThreshold : row.warnThreshold}/${row.forceThreshold == null ? r.forceThreshold : row.forceThreshold}${row.thresholdSource === 'project.sessionLimits' ? '（PM 2 倍）' : ''}`;
+      lines.push(`${row.name.padEnd(10)} ${id.padEnd(30)} ${fmt(row.uncachedInputTokens).padStart(10)} ${fmt(row.cacheReadTokens).padStart(11)} ${fmt(row.outputTokens).padStart(11)} ${fmt(row.totalTokens).padStart(11)} ${state} ${thr}`);
     }
     for (const row of r.rows.filter((x) => x.note && x.level !== 'unknown')) lines.push(`提示 · ${row.name}：${row.note}`);
     if (r.rows.some((x) => x.inputTokens === null)) lines.push('说明：无 DSH tokenUsage 时标“未知”，不按 0；input=uncachedInputTokens（未缓存输入），cacheRead 单列不计入预警。');

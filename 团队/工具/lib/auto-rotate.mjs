@@ -27,11 +27,12 @@ import { PATHS, WORKSPACE, appendLine } from './core.mjs';
 import { loadTeam, saveTeam, projectStatePaths, sendMessage } from './store.mjs';
 import { ROUNDS_MAX } from './session-archive.mjs';
 // B-20261117-212500-a837：换人必须真建会话（复用 session.mjs 的唯一出口），禁止在调度层自造 session id。
-import { createTeamSession, sessionUsage, usageLevelOf } from './session.mjs';
+import { createTeamSession, sessionUsage, usageLevelOf, sessionLimitsOf, DEFAULT_TOKEN_WARN as SESSION_TOKEN_WARN, DEFAULT_TOKEN_FORCE as SESSION_TOKEN_FORCE } from './session.mjs';
 
-/* ── 常量（阈值与 session.mjs 同源：warn 30 万 / force 50 万；轮次沿用归档建议 20 轮） ── */
-export const DEFAULT_TOKEN_WARN = 300000;
-export const DEFAULT_TOKEN_FORCE = 500000;
+/* ── 常量（阈值单一来源＝session.mjs：默认 warn 30 万 / force 50 万；按角色覆盖走项目 sessionLimits） ── */
+// B-20261118-080102-2c05：不再在本地写字面量，改从 session.mjs 取（避免第二套阈值）。
+export const DEFAULT_TOKEN_WARN = SESSION_TOKEN_WARN;
+export const DEFAULT_TOKEN_FORCE = SESSION_TOKEN_FORCE;
 // T-20261117-211833-7a30（R-a4c7 AC3①）：到线口径单源——默认 8，且必须 ≤ session-archive 的 ROUNDS_MAX(10)，
 // 避免「归档归零线 10 < 换人触发线 20」这种永不归零的矛盾。调度建议（sched-advice.mjs）用同一个默认值。
 export const DEFAULT_ROUNDS_LIMIT = 8;
@@ -127,7 +128,7 @@ function projectDirOf(projectName) {
 }
 
 /** 候选：token 水位（force / warn）+ 轮次。同角色取最高优先级，force 在前。 */
-export function collectCandidates({ now, usage, rounds, memberRoles, warnThreshold = DEFAULT_TOKEN_WARN, forceThreshold = DEFAULT_TOKEN_FORCE, roundsLimit = DEFAULT_ROUNDS_LIMIT }) {
+export function collectCandidates({ now, usage, rounds, memberRoles, warnThreshold = DEFAULT_TOKEN_WARN, forceThreshold = DEFAULT_TOKEN_FORCE, limitsOf = null, roundsLimit = DEFAULT_ROUNDS_LIMIT }) {
   const roles = new Set(memberRoles || []);
   const byRole = new Map();
   const put = (item) => {
@@ -143,7 +144,11 @@ export function collectCandidates({ now, usage, rounds, memberRoles, warnThresho
     if (!Number.isFinite(tokens) || tokens <= 0) continue;
     const atMs = Date.parse(String(row.at || ''));
     if (Number.isFinite(atMs) && now - atMs > 24 * 3600 * 1000) continue;   // 超 24h 视为用量过期
-    const level = usageLevelOf(tokens, warnThreshold, forceThreshold);   // 单源：与 session usage / 水位提醒同一函数
+    // B-20261118-080102-2c05：按角色覆盖优先（pm 2 倍）；没有覆盖就沿用传入/全局默认。
+    const lim = typeof limitsOf === 'function' ? limitsOf(role) : null;
+    const roleWarn = lim && Number(lim.warn) > 0 ? Number(lim.warn) : warnThreshold;
+    const roleForce = lim && Number(lim.force) > 0 ? Number(lim.force) : forceThreshold;
+    const level = usageLevelOf(tokens, roleWarn, roleForce);   // 单源：与 session usage / 水位提醒同一函数
     if (level !== 'force' && level !== 'warn') continue;
     put({ role, kind: 'usage', level, tokens, atMs: Number.isFinite(atMs) ? atMs : now, usageAt: String(row.at || ''), sessionId: String(row.sessionId || '') });
   }
@@ -626,7 +631,7 @@ export async function runAutoRotateCycle(projectName, options = {}) {
   const usageFileRoles = memberRoles.filter((role) => usageSourceByRole[role] === 'file');
   const workingByRole = {};
   for (const role of memberRoles) workingByRole[role] = workingTasksOf(name, role);
-  const candidates = collectCandidates({ now, usage: liveUsage, rounds, memberRoles, roundsLimit: cfg.rotateRounds });
+  const candidates = collectCandidates({ now, usage: liveUsage, rounds, memberRoles, roundsLimit: cfg.rotateRounds, limitsOf: sessionLimitsOf(name).of });
   const rows = readAudit(auditFile);
   const actions = [];
   const night = isNight(now);
