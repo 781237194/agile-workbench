@@ -141,6 +141,14 @@ const { pathToFileURL } = require('node:url');
 
 (async () => {
   fs.mkdirSync(BASE, { recursive: true });
+  // 隔离基线（PM 2026-11-18 证据标准 ②）
+  const REAL_FILES = [
+    path.join(ROOT, '团队', '状态', '团队.json'),
+    path.join(ROOT, '团队', '状态', '项目', PROJECT, '自动换人.jsonl'),
+    path.join(ROOT, 'data', 'userdata', 'workbench.json'),
+  ];
+  const realBeforeSha = REAL_FILES.map(sha256);
+  console.log('[isolation] before ' + JSON.stringify(REAL_FILES.map((f, i) => ({ file: path.relative(ROOT, f).replace(/\\/g, '/'), sha256: realBeforeSha[i] }))));
   const now = dayTimeMs(10);
   const iso = (ms) => new Date(ms).toISOString();
 
@@ -273,10 +281,29 @@ const { pathToFileURL } = require('node:url');
     } finally { sb.cleanup(); }
   }
 
+  // ⑤ 隔离断言（PM 2026-11-18 证据标准 ②）：全程只写 _tmp 沙盘，真实团队状态零写入。
+  const realFiles = [
+    path.join(ROOT, '团队', '状态', '团队.json'),
+    path.join(ROOT, '团队', '状态', '项目', PROJECT, '自动换人.jsonl'),
+    path.join(ROOT, 'data', 'userdata', 'workbench.json'),
+  ];
+  const realAfter = realFiles.map(sha256);
+  check('⑤ 隔离断言：真实 团队.json / 自动换人.jsonl / workbench.json 全程 sha256 不变（沙盘 TEAM_ROOT+TEAM_SELFTEST 隔离）',
+    JSON.stringify(realAfter) === JSON.stringify(realBeforeSha),
+    { before: realBeforeSha, after: realAfter });
+  check('⑤ 隔离断言：全部写入落在 _tmp 沙盘（沙盘路径前缀自证）', String(BASE).startsWith(path.join(ROOT, '_tmp')), { sandbox: BASE });
+
   fs.mkdirSync(EVID, { recursive: true });
   const report = {
     task: 'B-20261118-143542-3594', at: new Date().toISOString(),
-    total: results.length, pass: results.filter((x) => x.ok).length, red: results.filter((x) => !x.ok).length, results,
+    commit: String(process.env.AWB_HEAD_SHA || '').trim() || undefined,
+    total: results.length, pass: results.filter((x) => x.ok).length, red: results.filter((x) => !x.ok).length,
+    isolation: {
+      sandbox: BASE,
+      real: realFiles.map((f, i) => ({ file: path.relative(ROOT, f).replace(/\\/g, '/'), sha256Before: realBeforeSha[i], sha256After: realAfter[i] })),
+      unchanged: JSON.stringify(realAfter) === JSON.stringify(realBeforeSha),
+    },
+    results,
   };
   const out = path.join(EVID, 'run-3594.json');
   fs.writeFileSync(out, JSON.stringify(report, null, 2) + '\n', 'utf8');

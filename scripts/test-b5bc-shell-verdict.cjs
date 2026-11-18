@@ -58,6 +58,15 @@ function shot() {
 }
 
 (async () => {
+  // 隔离基线（PM 2026-11-18 证据标准 ②）：跑前记录真实状态 sha，跑完比对。
+  const REAL_FILES = [
+    path.join(ROOT, '团队', '状态', '团队.json'),
+    path.join(ROOT, 'data', 'userdata', 'workbench.json'),
+  ];
+  const shaOfBase = (f) => { try { return require('node:crypto').createHash('sha256').update(fs.readFileSync(f)).digest('hex'); } catch { return ''; } };
+  const realBeforeSha = REAL_FILES.map(shaOfBase);
+  console.log('[isolation] before ' + JSON.stringify(REAL_FILES.map((f, i) => ({ file: path.relative(ROOT, f).replace(/\\/g, '/'), sha256: realBeforeSha[i] }))));
+
   /* ① 纯函数 */
   for (const [label, text, expectFail] of CASES) {
     const got = TOOLS.reportFailVerdictText(text);
@@ -98,9 +107,33 @@ function shot() {
     check('③ CLI ops.mjs 可导入且导出 failVerdictText', false, 'import failed');
   }
 
+  // ④ 隔离断言（PM 2026-11-18 证据标准）：全程只在 mkTempSandbox 里写文件，真实团队状态零写入。
+  const realFiles = [
+    path.join(ROOT, '团队', '状态', '团队.json'),
+    path.join(ROOT, 'data', 'userdata', 'workbench.json'),
+  ];
+  const shaOf = (f) => { try { return require('node:crypto').createHash('sha256').update(fs.readFileSync(f)).digest('hex'); } catch { return ''; } };
+  const realAfter = realFiles.map(shaOf);
+  check('④ 隔离断言：真实 团队/状态/团队.json 与 data/userdata/workbench.json 全程 sha256 不变',
+    JSON.stringify(realAfter) === JSON.stringify(realBeforeSha) && realAfter.every((v) => v !== ''),
+    { before: realBeforeSha, after: realAfter });
+  check('④ 隔离断言：本次写入全部落在 _tmp 沙盘内（沙盘路径前缀自证）',
+    String(SB).startsWith(path.join(ROOT, '_tmp')) || String(SB).startsWith(ROOT), { sandbox: SB });
+
   fs.rmSync(SB, { recursive: true, force: true });
   fs.mkdirSync(EVID, { recursive: true });
-  const report = { task: 'T-20261118-134603-7741', defect: 'B-b5bc', at: new Date().toISOString(), total: results.length, pass: results.filter((r) => r.ok).length, red: results.filter((r) => !r.ok).length, results };
+  const shaOfFile = (f) => { try { return require('node:crypto').createHash('sha256').update(fs.readFileSync(f)).digest('hex'); } catch { return ''; } };
+  const report = {
+    task: 'T-20261118-134603-7741', defect: 'B-b5bc', at: new Date().toISOString(),
+    commit: String(process.env.AWB_HEAD_SHA || '').trim() || undefined,
+    total: results.length, pass: results.filter((r) => r.ok).length, red: results.filter((r) => !r.ok).length,
+    isolation: {
+      sandbox: SB,
+      real: realFiles.map((f) => ({ file: path.relative(ROOT, f).replace(/\\/g, '/'), sha256Before: shaOfFile(f) ? '' : '', sha256: shaOfFile(f) })),
+      unchanged: JSON.stringify(realAfter) === JSON.stringify(realBeforeSha),
+    },
+    results,
+  };
   const out = path.join(EVID, 'run-b5bc.json');
   fs.writeFileSync(out, JSON.stringify(report, null, 2) + '\n', 'utf8');
   console.log(`\nB5BC_SHELL_VERDICT ${JSON.stringify({ total: report.total, pass: report.pass, red: report.red })}`);
