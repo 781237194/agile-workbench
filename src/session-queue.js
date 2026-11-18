@@ -436,10 +436,10 @@ function buildPanelModel(options = {}) {
 //   approval（pendingInput 含 approval）> blocked（含 question/other）> thinking（running===true）
 //   > queued（非 running 且 queued>0）> idle；known:false 或快照缺失/过期 → unknown（未接入）。
 const LIVE_STATE_LABEL = {
-  approval: '待批准',
+  approval: '待审批',
   blocked: '阻塞',
   thinking: '思考中',
-  queued: '排队中',
+  queued: '排队',
   idle: '空闲',
   unknown: '未接入',
 };

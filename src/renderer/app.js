@@ -11103,7 +11103,7 @@ const LEGACY_SQ_LIVE_COLUMNS = [
   { key: 'lastEvent', attr: 'data-role-last-event', label: '最近事件' },
   { key: 'stall', attr: 'data-role-stall', label: '停滞' },
 ];
-const LEGACY_SQ_LIVE_LABEL = { approval: '待批准', blocked: '阻塞', thinking: '思考中', queued: '排队中', idle: '空闲', unknown: '未接入' };
+const LEGACY_SQ_LIVE_LABEL = { approval: '待审批', blocked: '阻塞', thinking: '思考中', queued: '排队', idle: '空闲', unknown: '未接入' };
 
 function legacySqLiveModel() {
   try {

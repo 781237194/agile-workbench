@@ -52,7 +52,7 @@
   // R-fa0e（3a12）§六：自动换人六态（[data-ar-state]）
   const AR_STATE_LABEL = { idle: '空闲', warn: '预警/已入队', pending_handover: '等交接回执', rotating: '正在换人', rebooting: '已广播重 boot', failed: '失败' };
   // R-c9ac：五态中文文案（写死；unknown=未接入）
-  const LIVE_LABEL = { approval: '待批准', blocked: '阻塞', thinking: '思考中', queued: '排队中', idle: '空闲', unknown: '未接入' };
+  const LIVE_LABEL = { approval: '待审批', blocked: '阻塞', thinking: '思考中', queued: '排队', idle: '空闲', unknown: '未接入' };
 
   const el = (id) => document.getElementById(id);
   const node = (tag, className, text) => {
