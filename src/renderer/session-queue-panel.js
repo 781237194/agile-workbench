@@ -222,6 +222,13 @@
   function renderRows() {
     const host = el(ROWS_ID);
     if (!host) return;
+    const gateApi = (typeof AWBGate !== 'undefined' && AWBGate) ? AWBGate : null;
+    // R5（T-20261118-175633-18e8）：无模型时先骨架（同步出现），模型到达后清骨架再填行。
+    if (!state.model && gateApi && typeof gateApi.skeleton === 'function') {
+      gateApi.skeleton(host, { rows: 6, label: '会话排队加载中…' });
+      return;
+    }
+    if (gateApi && typeof gateApi.clearSkeleton === 'function') gateApi.clearSkeleton(host);
     const model = state.model || { rows: [], degraded: true };
     host.textContent = '';
     const now = Date.now();

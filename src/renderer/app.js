@@ -19,6 +19,8 @@ let openDrawerName = null;
 let bootExpiryTimer = null;
 // R-b34a R4（T-20261118-172619-c495）：可见性门——隐藏面板/后台窗口不轮询（gate.js 缺失时降级直通，行为不变）。
 const R4GateApi = (typeof AWBGate !== 'undefined' && AWBGate) ? AWBGate : null;
+// R-b34a R6（T-20261118-175633-18e8）：交互态门——打字/滚动/拖拽期间 gate() 暂停非必要 tick（900ms 静默后恢复）。
+try { if (R4GateApi && typeof R4GateApi.installInteraction === 'function') R4GateApi.installInteraction(window); } catch { /* 老环境忽略 */ }
 const r4Gate = (fn) => (R4GateApi && typeof R4GateApi.gate === 'function' ? R4GateApi.gate(fn) : fn);
 const r4Coalesce = (fn, ms, key) => (R4GateApi && typeof R4GateApi.coalesce === 'function' ? R4GateApi.coalesce(fn, ms, key) : fn);
 
@@ -12995,6 +12997,13 @@ function flowRefreshTick() {
   const flowOpen = !$('#flow-panel')?.hidden;
   if (!p || (!flowOpen && openDrawerName !== 'project' && activeTab !== 'flow')) { flowLiveState.nextAt = 0; return; }
   if (Date.now() < flowLiveState.nextAt) return;
+  // R5（T-20261118-175633-18e8）：首屏先骨架（同步出现，≤200ms 感知），数据到达后由 flow 渲染替换。
+  try {
+    const board = $('#flow-board');
+    if (board && !board.children.length && R4GateApi && typeof R4GateApi.skeleton === 'function') {
+      R4GateApi.skeleton(board, { rows: 6, label: '流程图加载中…' });
+    }
+  } catch { /* 骨架失败不影响刷新 */ }
   refreshFlowLive();
 }
 
