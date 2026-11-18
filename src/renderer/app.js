@@ -149,7 +149,9 @@ const TEAM_MODES = {
     short: '快速',
     roleIds: ['pm', 'analyst', 'programmer1', 'tester'],
     hidden: ['product', 'programmer2'],
-    note: '只显示 PM / 需求分析师 / 程序员A / 测试人员；产品设计师与高级程序员B 隐藏。'
+    note: '只显示 PM / 需求分析师 / 程序员A / 测试人员；产品设计师与高级程序员B 隐藏。',
+    // Owner 2026-11-18 临时需求：4 人团队暂不可用（展示但不可点击），标识文字写死。
+    unavailable: '【暂不可用，工作台三期工程】'
   }
 };
 /* 团队模式下的界面用词：Fast 不再沿用“六角色 / 产品评审 / 开发互审”，
@@ -16685,16 +16687,22 @@ function openTeamBuildModal(project) {
   const p = project || activeProject();
   if (!p) { openNewProject(); return null; }
   let picked = projectTeamMode(p);
+  // Owner 2026-11-18：fast（4 人）暂不可用 → 已存 fast 的项目也先回落到 full，避免「不可点却仍是选中态」。
+  if (TEAM_MODES[picked] && TEAM_MODES[picked].unavailable) picked = 'full';
   const wrap = document.createElement('div');
   wrap.innerHTML = `
     <p class="team-mode-intro">选择团队模式。模式会保存到项目；以后可再次打开「建团队」切换。</p>
     <div class="team-mode-grid">
-      ${Object.values(TEAM_MODES).map((def) => `<button type="button" class="team-mode-card${picked === def.id ? ' active' : ''}" data-team-mode-pick="${def.id}" aria-pressed="${picked === def.id ? 'true' : 'false'}">
+      ${Object.values(TEAM_MODES).map((def) => {
+    const off = Boolean(def.unavailable);
+    return `<button type="button" class="team-mode-card${picked === def.id && !off ? ' active' : ''}${off ? ' is-unavailable' : ''}" data-team-mode-pick="${def.id}" aria-pressed="${picked === def.id && !off ? 'true' : 'false'}"${off ? ' disabled aria-disabled="true"' : ''}>
         <span class="team-mode-card-top"><b>${esc(def.label)}</b><span class="badge">${def.roleIds.length} 人</span></span>
+        ${off ? `<span class="team-mode-unavailable" data-team-mode-unavailable="${def.id}">${esc(def.unavailable)}</span>` : ''}
         <span class="team-mode-note">${esc(def.note)}</span>
         <span class="team-mode-roles">${teamModeRoleMarkup(def.id, p)}</span>
         ${def.hidden.length ? `<span class="team-mode-hidden">隐藏：${def.hidden.map((id) => esc(roleById(id).name)).join('、')}</span>` : '<span class="team-mode-hidden">六个角色都显示</span>'}
-      </button>`).join('')}
+      </button>`;
+  }).join('')}
     </div>
     <p class="team-mode-current">当前项目：<b>${esc(p.name)}</b> · 当前模式：<b id="team-mode-current-label">${esc(teamModeLabel(p))}</b><span id="team-mode-save-state" class="team-mode-save-state">（当前）</span></p>
     <p class="team-mode-tip">快速模式由后端按 project.teamMode=fast 执行：只建 PM / 需求分析师 / 程序员A / 测试人员 4 个会话，需求走分析师评审，Owner 之后增加技术评审。已有会话不会被删除；DSH 不可用时建团队会真实报错，界面不伪造会话。</p>
@@ -16718,6 +16726,8 @@ function openTeamBuildModal(project) {
   wrap.addEventListener('click', (e) => {
     const card = e.target instanceof Element ? e.target.closest('[data-team-mode-pick]') : null;
     if (!card) return;
+    // Owner 2026-11-18：不可用模式（disabled）展示但不可选——双击穿透/程序化点击也当无效。
+    if (card.disabled || card.getAttribute('aria-disabled') === 'true') return;
     picked = normalizeTeamMode(card.dataset.teamModePick);
     syncPick();
   });
