@@ -48,7 +48,7 @@
     pushApiBound: false,
   };
 
-  const STATE_LABEL = { fail: '失败（真的没送出去）', skip: '跳过（设计内不唤醒）', ok: '成功', none: '无记录' };
+  const STATE_LABEL = { fail: '失败（真的没送出去）', retry: '重试中（一次失败已排重试，先别看红）', skip: '跳过（设计内不唤醒）', ok: '成功', none: '无记录' };
   // R-fa0e（3a12）§六：自动换人六态（[data-ar-state]）
   const AR_STATE_LABEL = { idle: '空闲', warn: '预警/已入队', pending_handover: '等交接回执', rotating: '正在换人', rebooting: '已广播重 boot', failed: '失败' };
   // R-c9ac：五态中文文案（写死；unknown=未接入）
@@ -195,7 +195,9 @@
         : '未知：DSH 会话未取到或该角色还没有会话（未知不等于 0）';
       line.appendChild(queued);
 
-      const stateChip = node('span', 'sq-state sq-state-' + String(row.state || 'none'), String(row.state || 'none'));
+      // B-20261118-085825-0950：retry（重试中）显示中文，其余状态保持原英文值（旧断言依赖）
+      const stateText = String(row.state || 'none') === 'retry' ? '重试中' : String(row.state || 'none');
+      const stateChip = node('span', 'sq-state sq-state-' + String(row.state || 'none'), stateText);
       stateChip.setAttribute('data-sq-state', '1');
       stateChip.title = STATE_LABEL[String(row.state || 'none')] || '';
       line.appendChild(stateChip);

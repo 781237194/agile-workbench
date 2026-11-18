@@ -275,12 +275,13 @@ async function runSqCheck(options = {}) {
   // ── AC1 四态 ──────────────────────────────────────────────
   writeJson(snapshotFile, snapshotOf(baseRoles, now));
   writeWake(wakeFile, [
-    { to: 'programmer1', at: ago(20 * 1000), ok: false, reason: 'WAKE_FAILED', messageIds: ['M-a'] },
+    // B-20261118-085825-0950：单条窗口内失败判 retry，这里把 fail 放到重试窗口（90s）之外，保留 fail 判据。
+    { to: 'programmer1', at: ago(100 * 1000), ok: false, reason: 'WAKE_FAILED', messageIds: ['M-a'] },
     { to: 'tester', at: ago(30 * 1000), ok: true, skipped: 'ALREADY_DELIVERED', reason: 'dedupe' },
     { to: 'product', at: ago(40 * 1000), ok: true, deliveredAt: ago(40 * 1000), reason: 'default', messageIds: ['M-b'] },
-    { to: 'analyst', at: ago(50 * 1000), ok: false, reason: 'WAKE_FAILED' },
-    { to: 'analyst', at: ago(60 * 1000), ok: true, skipped: 'MERGED_PENDING' },
-    { to: 'analyst', at: ago(70 * 1000), ok: true, deliveredAt: ago(70 * 1000) },
+    { to: 'analyst', at: ago(95 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    { to: 'analyst', at: ago(120 * 1000), ok: true, skipped: 'MERGED_PENDING' },
+    { to: 'analyst', at: ago(130 * 1000), ok: true, deliveredAt: ago(130 * 1000) },
   ]);
   let panel = await refresh();
   const rowOf = (p, role) => (p.rows || []).find((row) => row.role === role) || {};
@@ -291,6 +292,25 @@ async function runSqCheck(options = {}) {
   check('AC1④ 0 行 → none 且 last-ok「无记录」', rowOf(panel, 'pm').state === 'none' && rowOf(panel, 'pm').lastOk === '无记录', rowOf(panel, 'pm'));
   check('AC1 同角色混合（fail+skip+ok）→ 最近一条是 fail ⇒ fail，失败数 1 / 跳过数 1 各自独立', rowOf(panel, 'analyst').state === 'fail' && rowOf(panel, 'analyst').fail === '1' && rowOf(panel, 'analyst').skip === '1', rowOf(panel, 'analyst'));
   const ac1Shot = (await shotOf('sq-ac1-four-states.png', '#session-queue-panel')).file;
+
+  // ── B-20261118-085825-0950：单次失败 + 已排重试 → retry（重试中，黄），不再闪红 ─────────
+  writeWake(wakeFile, [
+    { to: 'programmer2', at: ago(20 * 1000), ok: false, retried: true, reason: 'fetch failed', messageIds: ['M-retry'] },
+  ]);
+  panel = await refresh();
+  const retryRow = rowOf(panel, 'programmer2');
+  const retryDom = await evalJs(`(() => {
+    const row = Array.from(document.querySelectorAll('[data-sq-row]')).find((el) => el.getAttribute('data-role') === 'programmer2');
+    if (!row) return null;
+    const chip = row.querySelector('[data-sq-state]');
+    return chip ? { text: chip.textContent.trim(), cls: chip.className, color: getComputedStyle(chip).color } : null;
+  })()`);
+  check('B-950 单次失败（retried=true，20s 前）→ state=retry（不是 fail）、文案「重试中」、样式 sq-state-retry（黄）',
+    (retryRow.state === 'retry' || /重试中/.test(String(retryRow.state || '')))
+    && Boolean(retryDom) && /重试中/.test(retryDom.text) && /sq-state-retry/.test(retryDom.cls)
+    && /227,\s*179,\s*65/.test(String(retryDom.color)),
+    { state: retryRow.state, dom: retryDom });
+  const retryShot = (await shotOf('sq-b950-retry-state.png', '#session-queue-panel')).file;
 
   // ── B-20261117-192034-e9b5（Owner 19:20 截图）：可读性——字号 9px→≥13px、补列头、面板宽 ≥560 ──
   const READABLE = `(() => {
@@ -396,9 +416,9 @@ async function runSqCheck(options = {}) {
     // 9688① 先失败、最近一次成功 → 必须 ok（旧实现会永久 fail）
     { to: 'programmer1', at: ago(120 * 1000), ok: false, reason: 'WAKE_FAILED' },
     { to: 'programmer1', at: ago(10 * 1000), ok: true, deliveredAt: ago(10 * 1000) },
-    // 9688② 先成功、最近一次失败 → fail
-    { to: 'tester', at: ago(120 * 1000), ok: true, deliveredAt: ago(120 * 1000) },
-    { to: 'tester', at: ago(10 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    // 9688② 先成功、最近一次失败 → fail（B-950：fail 放到 retry 窗口外，保持 fail 判据）
+    { to: 'tester', at: ago(130 * 1000), ok: true, deliveredAt: ago(130 * 1000) },
+    { to: 'tester', at: ago(100 * 1000), ok: false, reason: 'WAKE_FAILED' },
     // 9688③ 同一条 ok=true + skipped → skip（单条判定，skip 优先）
     { to: 'product', at: ago(10 * 1000), ok: true, skipped: 'ALREADY_DELIVERED' },
     // 9688④ 24h 内有 2 次失败，但最近一次成功 → 状态 ok；失败数照旧计 2
@@ -424,9 +444,9 @@ async function runSqCheck(options = {}) {
   const productRow = rowOf(panel, 'product');
   check('AC2 排队=3 且无 fail 行 → state ∈ {ok,skip}（不得 fail）', productRow.queued === '3' && ['ok', 'skip'].includes(productRow.state), productRow);
   writeWake(wakeFile, [
-    { to: 'product', at: ago(30 * 1000), ok: true, deliveredAt: ago(30 * 1000) },
-    // 9688：最近一条必须是 fail，否则按新语义（取最近一次）会判 ok
-    { to: 'product', at: ago(20 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    { to: 'product', at: ago(130 * 1000), ok: true, deliveredAt: ago(130 * 1000) },
+    // 9688：最近一条必须是 fail，否则按新语义（取最近一次）会判 ok；B-950：放到 retry 窗口外保持 fail
+    { to: 'product', at: ago(100 * 1000), ok: false, reason: 'WAKE_FAILED' },
   ]);
   panel = await refresh();
   const productFail = rowOf(panel, 'product');
@@ -436,9 +456,10 @@ async function runSqCheck(options = {}) {
   // ── AC8 沙盘原句：3 条排队 + 1 条真失败 + 2 条跳过 → 显示 3 / fail1 / skip2 ──
   writeJson(snapshotFile, snapshotOf(baseRoles.map((row) => (row.role === 'product' ? { ...row, queued: 3 } : row)), now));
   writeWake(wakeFile, [
-    { to: 'product', at: ago(15 * 1000), ok: false, reason: 'WAKE_FAILED' },
-    { to: 'product', at: ago(25 * 1000), ok: true, skipped: 'ALREADY_DELIVERED' },
-    { to: 'product', at: ago(35 * 1000), ok: true, skipped: 'DEBOUNCED' },
+    // B-6118-085825-0950：fail 放到 retry 窗口（90s）外，状态仍是 fail，计数 1/2 不变。
+    { to: 'product', at: ago(100 * 1000), ok: false, reason: 'WAKE_FAILED' },
+    { to: 'product', at: ago(120 * 1000), ok: true, skipped: 'ALREADY_DELIVERED' },
+    { to: 'product', at: ago(130 * 1000), ok: true, skipped: 'DEBOUNCED' },
   ]);
   panel = await refresh();
   const ac8Row = rowOf(panel, 'product');

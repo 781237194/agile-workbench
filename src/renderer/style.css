@@ -5099,6 +5099,8 @@ html[data-effect-level="reduced"] #awb-theme-particles { display: none; }
 .sq-row[data-sq-known="false"] .sq-queued { color: var(--dim); }
 .sq-row .sq-state { font-family: var(--mono); text-align: center; border-radius: 5px; padding: 2px 6px; font-size: 12px; background: var(--panel-3); color: var(--dim); }
 .sq-row .sq-state-fail { color: var(--red); }
+/* B-20261118-085825-0950：一次失败 + 已排重试 = 重试中（黄），不再闪红（用固定琥珀色，避免被主题 --gold 覆盖成青色） */
+.sq-row .sq-state-retry { color: #e3b341; }
 .sq-row .sq-state-skip { color: var(--gold); }
 .sq-row .sq-state-ok { color: var(--green); }
 .sq-row .sq-fail, .sq-row .sq-skip { font-family: var(--mono); text-align: right; color: var(--muted); }

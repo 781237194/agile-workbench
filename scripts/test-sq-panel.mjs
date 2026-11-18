@@ -40,8 +40,9 @@ check('① AC7③ {ok:true, skipped:"DEBOUNCED"} → skip', SRC.classifyRow(row(
 // B-20261117-181420-9688（P1）：四态取「最近一次投递」，不再「窗口内曾失败就永久 fail」。
 check('① 9688① 先 fail 后 ok（最近一条 ok）→ state=ok（不再永久 fail）',
   SRC.summarizeRows([row({ at: iso(120 * 1000), ok: false }), row({ at: iso(10 * 1000), ok: true })], { now }).state === 'ok');
+// B-20261118-085825-0950：单次失败 + 已排重试 = retry（黄）；这里用「两条连续失败」验 fail 判据仍成立。
 check('① 9688② 最近一条 fail（之前 ok）→ state=fail',
-  SRC.summarizeRows([row({ at: iso(120 * 1000), ok: true }), row({ at: iso(10 * 1000), ok: false })], { now }).state === 'fail');
+  SRC.summarizeRows([row({ at: iso(120 * 1000), ok: true }), row({ at: iso(50 * 1000), ok: false }), row({ at: iso(10 * 1000), ok: false })], { now }).state === 'fail');
 check('① 9688③ 同一条 ok=true + skipped → skip（单条判定，skip 优先）',
   SRC.classifyRow({ ok: true, skipped: 'ALREADY_DELIVERED' }) === 'skip');
 check('① 9688④ 计数与状态分离：failCount=2 但最近一条 ok → state=ok，且 lastFailAt 有值',
@@ -53,10 +54,12 @@ const mixed = SRC.summarizeRows([
   row({ at: iso(40 * 1000), ok: false }),
   row({ at: iso(30 * 1000), ok: false }),
   row({ at: iso(20 * 1000), ok: true, skipped: 'ALREADY_DELIVERED' }),
+  // B-20261118-085825-0950：单条窗口内失败会判 retry，所以这里补成「最新两条连续失败」才验 fail。
+  row({ at: iso(12 * 1000), ok: false }),
   row({ at: iso(10 * 1000), ok: false }),
 ], { now });
-check('① AC1 混合（最近一条是 fail）：state=fail，failCount=3 / skipCount=1 各自独立',
-  mixed.failCount === 3 && mixed.skipCount === 1 && mixed.state === 'fail', mixed);
+check('① AC1 混合（最新两条连续 fail）：state=fail，failCount=4 / skipCount=1 各自独立',
+  mixed.failCount === 4 && mixed.skipCount === 1 && mixed.state === 'fail', mixed);
 
 // ② AC2 积压≠失败
 const backlog = SRC.buildPanelModel({
@@ -72,10 +75,11 @@ const backlogPlusFail = SRC.buildPanelModel({
   now,
   roles: ['pm'],
   snapshot: { at: iso(5 * 1000), roles: [{ role: 'pm', known: true, queued: 3 }] },
-  wakeRows: [row({ to: 'pm', ok: true }), row({ to: 'pm', ok: false })],
+  // B-20261118-085825-0950：单条 fail 在窗口内判 retry，所以要两条连续失败（时间不同）才验 fail。
+  wakeRows: [row({ to: 'pm', ok: true, at: iso(60 * 1000) }), row({ to: 'pm', ok: false, at: iso(20 * 1000) }), row({ to: 'pm', ok: false, at: iso(10 * 1000) })],
 });
 const pmFail = backlogPlusFail.rows[0];
-check('② AC2 追加 1 条 {ok:false} → state=fail 而 queued 仍为 3（数值不被失败态改写）', pmFail.state === 'fail' && pmFail.queued === 3, pmFail);
+check('② AC2 追加 2 条连续 {ok:false} → state=fail 而 queued 仍为 3（数值不被失败态改写）', pmFail.state === 'fail' && pmFail.queued === 3, pmFail);
 
 // ③ AC4 未知≠0
 const unknown = SRC.buildPanelModel({

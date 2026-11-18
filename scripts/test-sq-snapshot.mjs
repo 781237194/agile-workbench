@@ -42,7 +42,12 @@ const q = SQ.queuedCount(sample);
 check('① 排队数只算 placement=queued（3），byPlacement 明细 steer=1/context=1', q.known === true && q.count === 3 && q.byPlacement.steering === 1 && q.byPlacement.context === 1, q);
 
 // ② 四态
-const stFail = SQ.wakeStateOf([row({ ok: true }), row({ ok: false, reason: 'WAKE_FAILED' })], { now });
+// B-20261118-085825-0950：单条窗口内失败判 retry，所以 fail 用「两条连续失败（时间不同）」夹具验。
+const stFail = SQ.wakeStateOf([
+  row({ ok: true, at: new Date(now - 60 * 1000).toISOString() }),
+  row({ ok: false, at: new Date(now - 20 * 1000).toISOString(), reason: 'WAKE_FAILED' }),
+  row({ ok: false, at: new Date(now - 10 * 1000).toISOString(), reason: 'WAKE_FAILED' }),
+], { now });
 const stSkip = SQ.wakeStateOf([row({ ok: true }), row({ ok: false, skipped: true, reason: 'skipped' })], { now });
 const stOk = SQ.wakeStateOf([row({ ok: true }), row({ ok: true })], { now });
 const stNone = SQ.wakeStateOf([], { now });

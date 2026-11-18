@@ -77,7 +77,28 @@ function wakeStateOf(rows, { now = Date.now(), staleMs = 120000 } = {}) {
       latestAt = row.at;
     }
   }
-  return { state: latest, lastOkAt, lastAt: lastAtMs ? new Date(lastAtMs).toISOString() : '', lastFailAt, stale };
+  // B-20261118-085825-0950：单次失败且仍在重试窗口内 → retry（黄）；连续 ≥2 条失败或超窗口才 fail（红）。
+  // 与团队侧 src/session-queue.js → summarizeRows 同口径（快照 state 支持 'retry'，旧字段不变）。
+  let consecutiveFails = 0;
+  let retryWindowMs = 90000;
+  {
+    const env = Number(process.env.AWB_SQ_RETRY_WINDOW_MS);
+    if (Number.isFinite(env) && env > 0) retryWindowMs = env;
+    for (const row of parsed) { if (row.failed) consecutiveFails += 1; else break; }
+  }
+  let state = latest;
+  let retryUntilAt = '';
+  if (state === 'fail') {
+    const withinRetry = consecutiveFails < 2 && latestAt > 0 && (Number(now) - latestAt) < retryWindowMs;
+    if (withinRetry) {
+      state = 'retry';
+      retryUntilAt = new Date(latestAt + retryWindowMs).toISOString();
+    }
+  }
+  return {
+    state, lastOkAt, lastAt: lastAtMs ? new Date(lastAtMs).toISOString() : '', lastFailAt, stale,
+    consecutiveFails, retryWindowMs, ...(retryUntilAt ? { retryUntilAt } : {}),
+  };
 }
 
 /**

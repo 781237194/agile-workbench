@@ -25,6 +25,9 @@ const ROLE_LABELS = {
 
 const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000; // 统计窗口默认最近 24 小时
 const DEFAULT_STALE_MS = 120 * 1000; // 快照过期阈值 120 秒
+// B-20261118-085825-0950：一次唤醒失败后的重试窗口（默认 90s，可配 AWB_SQ_RETRY_WINDOW_MS）。
+// 窗口内最新一条 fail 判「重试中」（黄），窗口外或连续 ≥2 条失败才判 fail（红）。
+const DEFAULT_RETRY_WINDOW_MS = 90 * 1000;
 // R-6bc8 §5.2：快照硬上限 64KB（B-c971：壳层读过大的快照会整份读入内存，必须拒读/降级）。
 const SNAPSHOT_MAX_BYTES = 65536;
 const BACKPRESSURE_THRESHOLD = 3; // 排队 ≥3 才提示
@@ -105,6 +108,11 @@ function parseWakeLog(text) {
 function summarizeRows(rows, options = {}) {
   const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
   const windowMs = Number(options.windowMs) > 0 ? Number(options.windowMs) : DEFAULT_WINDOW_MS;
+  // B-20261118-085825-0950：重试窗口——一次唤醒失败后在窗口内算「重试中」（黄），不是 fail（红）。
+  const envRetry = Number(process.env.AWB_SQ_RETRY_WINDOW_MS);
+  const retryWindowMs = Number(options.retryWindowMs) > 0
+    ? Number(options.retryWindowMs)
+    : (Number.isFinite(envRetry) && envRetry > 0 ? envRetry : DEFAULT_RETRY_WINDOW_MS);
   const windowStart = now - windowMs;
   const TIE_RANK = { skip: 3, fail: 2, ok: 1, none: 0 };
   let failCount = 0;
@@ -114,7 +122,7 @@ function summarizeRows(rows, options = {}) {
   let lastOkMs = 0;
   let lastMs = 0;
   let lastFailMs = 0;
-  let latest = null; // { at, kind }
+  let latest = null; // { at, kind, row }
   for (const row of Array.isArray(rows) ? rows : []) {
     const at = rowAt(row);
     if (at && at < windowStart) continue; // 窗口外不计
@@ -132,17 +140,41 @@ function summarizeRows(rows, options = {}) {
     }
     // 「最近一次投递」：时间新的优先；同一时间戳按 skip > fail > ok 定序（skip 是设计内不唤醒，语义更强）。
     if (!latest || at > latest.at || (at === latest.at && TIE_RANK[kind] > TIE_RANK[latest.kind])) {
-      latest = { at, kind };
+      latest = { at, kind, row };
     }
   }
-  const state = latest ? latest.kind : 'none';
+  let state = latest ? latest.kind : 'none';
+  // B-20261118-085825-0950：fail 的「重试中」降级判据（只看状态，**不动计数**）：
+  //   · 最新一条 fail 且距 now < retryWindowMs → retry（一次尝试失败、后端已排 60s 重试，用户不该看到闪红）；
+  //   · 连续 ≥2 条 fail（按时间倒序的最近两条都是 fail）→ 立即 fail（重试也没救回来）；
+  //   · 窗口外 → fail。
+  // 旧日志没有 retried 字段时同样按窗口判（正文 §5(d)），有 retried===true 只是补充证据。
+  let consecutiveFails = 0;
+  let retryUntilAt = '';
+  if (latest && latest.kind === 'fail') {
+    const recent = (Array.isArray(rows) ? rows : [])
+      .filter((row) => { const at = rowAt(row); return at && at >= windowStart; })
+      .sort((a, b) => rowAt(b) - rowAt(a));
+    for (const row of recent) {
+      if (classifyRow(row) !== 'fail') break;
+      consecutiveFails += 1;
+    }
+    const withinRetry = consecutiveFails < 2 && Number.isFinite(latest.at) && latest.at > 0 && (now - latest.at) < retryWindowMs;
+    if (withinRetry) {
+      state = 'retry';
+      retryUntilAt = new Date(latest.at + retryWindowMs).toISOString();
+    }
+  }
   return {
     state,
     failCount,
     skipCount,
     okCount,
     inWindow,
-    latestKind: state,
+    latestKind: latest ? latest.kind : 'none',
+    consecutiveFails,
+    retryWindowMs,
+    retryUntilAt,
     lastOkAt: lastOkMs ? new Date(lastOkMs).toISOString() : '',
     lastAt: lastMs ? new Date(lastMs).toISOString() : '',
     lastFailAt: lastFailMs ? new Date(lastFailMs).toISOString() : '',
