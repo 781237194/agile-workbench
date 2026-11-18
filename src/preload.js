@@ -70,6 +70,8 @@ if (IS_BOARD_WINDOW) {
     // 团队：旧版 IPC 形状（status/members/workspaces/workspaceCreate/launch/restore/board）全部保留。
     teamStatus: () => ipcRenderer.invoke('team:status'),
     teamMembers: (payload) => ipcRenderer.invoke('team:members', payload),
+    // c65a AC5：未走团队通道告警（#team-drawer [data-channel-warn]）
+    channelWarn: (payload) => ipcRenderer.invoke('team:channel-warn', payload),
     // R-c651：团队在场三列（未读/未回执/停滞）+ wakeFailed 红点；全部已读；一键唤醒。
     teamPresence: (payload) => ipcRenderer.invoke('team:presence', payload),
     // R-b5fc F-4b：角色队列面板（只读 role_queues.json；PM 看全量、角色只看自己）。

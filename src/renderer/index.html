@@ -542,6 +542,11 @@
                 <button class="drawer-close" type="button" data-close-drawer="team" aria-label="关闭团队台">×</button>
               </div>
             </header>
+            <!-- c65a AC5（R-20261119-011310）：未走团队通道告警——固定挂 #team-drawer 内、锚点 [data-channel-warn]，无状态时仍存在但 hidden -->
+            <div id="channel-warn" data-channel-warn hidden role="alert">
+              ⚠ 未走团队通道（六问题之④）：近 10 分钟有子代理活动但没有团队消息。
+              <button class="link-btn" type="button" data-channel-help>如何用团队通道</button>
+            </div>
             <div class="drawer-scroll team-scroll">
               <section class="team-block">
                 <div class="team-block-head"><h3>当前工作区</h3><div class="team-head-tools"><span id="team-mode-badge" class="badge">完整 6 人</span><span id="team-ws-badge" class="badge">—</span></div></div>

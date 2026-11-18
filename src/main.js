@@ -6341,6 +6341,52 @@ ipcMain.handle('theme:metrics', async () => {
     mailboxWatcherKey = key;
     return mailboxWatcher;
   };
+  // c65a AC5（R-20261119-011310）：未走团队通道告警——近 10 分钟有子代理记录但没有任何团队消息时认 war狼。
+  // 数据源：项目状态/子代理/记录.jsonl + 团队/状态/邮箱/<角色>/{new,cur}（只统计窗口内），不新增账本。
+  ipcMain.handle('team:channel-warn', (_e, payload) => {
+    try {
+      const store = readStore();
+      const projectId = String((payload && payload.projectId) || store.activeProjectId || '');
+      const project = (store.projects || []).find((x) => x && x.id === projectId) || (store.projects || [])[0] || null;
+      const projectName = String((project && (project.teamName || project.name)) || '');
+      const windowMs = 10 * 60 * 1000;
+      const since = Date.now() - windowMs;
+      if (!projectName) return { ok: true, warn: false, subagentCount: 0, messageCount: 0, reason: 'no-project', project: '' };
+      let subagentCount = 0;
+      try {
+        const recFile = path.join(resolveTeamRoot(), '状态', '项目', teamTools.teamSlug(projectName), '子代理', '记录.jsonl');
+        const lines = fs.readFileSync(recFile, 'utf8').split(/\r?\n/).filter(Boolean);
+        const merged = new Map();
+        for (const line of lines) { try { const row = JSON.parse(line); if (!row || !row.id) continue; merged.set(row.id, { ...(merged.get(row.id) || {}), ...row }); } catch { /* 坏行忽略 */ } }
+        subagentCount = [...merged.values()].filter((row) => {
+          if (!row || row.status === 'cancelled') return false;
+          const at = Date.parse(String(row.startedAt || row.at || ''));
+          return row.status === 'running' || (Number.isFinite(at) && at >= since);
+        }).length;
+      } catch { subagentCount = 0; }
+      let messageCount = 0;
+      if (subagentCount > 0) {
+        const mailRoot = path.join(resolveTeamRoot(), '状态', '邮箱');
+        let roleDirs = [];
+        try { roleDirs = fs.readdirSync(mailRoot, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch { roleDirs = []; }
+        for (const roleDirName of roleDirs) {
+          for (const box of ['new', 'cur']) {
+            const boxDir = path.join(mailRoot, roleDirName, box);
+            let files = [];
+            try { files = fs.readdirSync(boxDir); } catch { continue; }
+            for (const f of files) {
+              const fp = path.join(boxDir, f);
+              try { if (fs.statSync(fp).mtimeMs < since) continue; } catch { continue; }
+              try { const msg = JSON.parse(fs.readFileSync(fp, 'utf8')); const ts = Date.parse(String(msg.ts || msg.at || '')); if (!Number.isFinite(ts) || ts >= since) messageCount += 1; } catch { /* 坏文件忽略 */ }
+            }
+          }
+        }
+      }
+      return { ok: true, warn: subagentCount > 0 && messageCount === 0, subagentCount, messageCount, windowMs, project: projectName, at: new Date().toISOString() };
+    } catch (error) {
+      return { ok: false, code: 'CHANNEL_WARN_FAILED', message: String((error && error.message) || error).slice(0, 200), warn: false };
+    }
+  });
   ipcMain.handle('mailbox:snapshot', async (_e, payload) => {
     try {
       const watcher = ensureMailboxWatcher(payload);

@@ -4002,6 +4002,30 @@ function bindAutoAcceptRefresh() {
   });
 }
 
+// c65a AC5：未走团队通道告警——元素常驻 DOM，仅按状态切 hidden（无该状态时 hidden=true，不删元素）。
+async function refreshChannelWarn() {
+  const box = document.querySelector('#team-drawer [data-channel-warn]');
+  if (!box) return;
+  try {
+    if (!window.workbench || typeof window.workbench.channelWarn !== 'function') { box.hidden = true; return; }
+    const p = activeProject();
+    const res = await window.workbench.channelWarn({ projectId: p ? p.id : '' });
+    const warn = Boolean(res && res.ok !== false && res.warn);
+    box.hidden = !warn;
+    box.setAttribute('data-channel-warn-state', warn ? 'warn' : 'idle');
+    if (warn) {
+      box.textContent = '⚠ 未走团队通道（六问题之④）：近 10 分钟有子代理活动（' + Number(res.subagentCount || 0) + '）但没有团队消息。开机先 team.mjs send，勿用子代理顶替团队会话。';
+      const link = document.createElement('button');
+      link.type = 'button';
+      link.className = 'link-btn';
+      link.setAttribute('data-channel-help', '1');
+      link.textContent = '如何用团队通道';
+      link.addEventListener('click', () => { try { toast('团队通道：team.mjs send/ack/task（PM 开局首条动作）；详见 README「开局引导」与团队宪法第 2 条', 'ok'); } catch { /* ignore */ } });
+      box.appendChild(link);
+    }
+  } catch { box.hidden = true; }
+}
+
 function renderTeam() {
   const summary = $('#team-summary');
   const log = $('#team-log');
@@ -4190,6 +4214,7 @@ function renderReceipts() {
   const list = $('#team-receipts-list');
   if (!list) return;
   const p = activeProject();
+  try { refreshChannelWarn().catch(() => {}); } catch { /* 告警不阻断渲染 */ }
   renderManualAcks(p);
   const source = $('#team-receipts-source');
   const summary = $('#team-receipts-summary');
