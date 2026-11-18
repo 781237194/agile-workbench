@@ -8302,6 +8302,11 @@ ipcMain.handle('theme:metrics', async () => {
       };
       return { ok: true, path: teamBoardLastBuild.path, projectId: project.id, reused: true, reloaded: false, theme, style: boardStyle, themeId: payloadThemeId, timings };
     }
+    // PM 2026-11-18 19:56：cold T3 门槛 ≤4938（基线 4489×1.10）。冷开临界路径 =
+    // 骨架导航(~200ms) + generateBoard(~1020ms) + loadFile(9.45MB ~3.4s) 串行；
+    // 把 **generateBoard 与骨架导航并行**（generation 基本是 IO/拼串，不阻塞渲染进程），
+    // 可省掉骨架那 ~200–400ms → 中位/max 都落回 4938/5000 内；内容与语义不变。
+    const boardPromise = teamTools.generateBoard(project);
     const ensured = await ensureBoardWindowWithSkeleton({ theme, style: boardStyle, title: project.name });
     // 口径拆分（A4）：windowMs=窗口创建（一次性）、skeletonVisibleMs=骨架可见（AC4 的 ≤200ms 指这个）。
     const windowMs = ensured.windowMs || 0;
@@ -8315,7 +8320,7 @@ ipcMain.handle('theme:metrics', async () => {
     if (warm) {
       result = { ok: true, boardPath: teamBoardLastBuild.path };
     } else {
-      result = await teamTools.generateBoard(project);
+      result = await boardPromise;
       if (!result.ok) throw new Error(result.message || result.why || '看板生成失败');
       teamBoardLastBuild = { projectId: project.id, at: Date.now(), path: result.boardPath };
     }
