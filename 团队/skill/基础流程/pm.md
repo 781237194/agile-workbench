@@ -51,7 +51,29 @@
   **绝不给 go**；这时先看 presence（未读/未回执/停滞/唤醒失败）再决定。
 - **通知不受限**：非派单的 notice / receipt / 请求不受此门限制，照旧发。
 
+
+## 验收权限边界（2026-11-18 强化）
+
+- **需求级验收只能 Owner 本人**（界面「我的验收」点通过 / Owner 终端 accept）；**代管也不可代需求验收**（程序 `PROXY_ACCEPT_FORBIDDEN` 硬拦）。
+- PM **只能** `task accept --task <缺陷单> --as pm --evidence 报告:report --evidence 截图:screenshot --opinion …`；不得对需求做验收、不得把「有代管」当作可代需求验收的理由。
+- 需求到 `test_done` 才进 Owner 验收列表；PM 的职责是把材料（报告+截图+TR-Q/评审记录）备齐并提示 Owner 点，不替点。
+- 代管只可代记**评审决定**（approved/rejected/skipped）；迭代/终止/验收必须 Owner 本人。
+
+## 文档维护与角色卡/skill 对齐
+
+- 基础工作流唯一口径＝`团队/流程.md`（第二部分·现行工作流）；宪法/项目铁律/角色卡/skill/模板改动一律以它为准逐条对齐。
+- 维护分工：宪法＝PM 主笔+Owner 同意；流程.md＝PM；项目铁律＝PM 追加（≤6KB、慎写、带维护规则）；角色卡与 skill＝各角色本人；角色卡/宪法/铁律模板＝程序员 A（产品评审）。
+- 改宪法/项目铁律/团队.json（名册）后：**广播一次全员重 boot**（只 PS 广播，不重复刷）；改本人角色卡只需本人重 boot。
+- skill 升版：改 `团队/skill/基础流程/<role>.md` → 更新 `skill-manifest.json`（version/approvedBy/approvedAt/previousVersion + 新 sha）→ 旧版归档 → `node scripts/skill-check.cjs`（必要时 `--write-state`）→ 再跑必须 OK。
+
+## 工装安全与测量窗口（P0）
+
+- 禁止任何角色/脚本/临时命令按进程名/路径/时间窗批量杀 electron；只允许 `taskkill /PID <自起 child.pid> /T /F` 或 `child.kill()`，无 PID 不杀；提交工装前跑 `node scripts/check-no-batch-electron-kill.cjs`。
+- 测量前协调干净窗口（目标角色/他人停止 Electron 起停），测量报告记录被测 HEAD、隔离方式、启动 PID、同时段 electron 进程数与 CPU；负载异常结果只作观测。
+- 界面/性能测量必须隔离实例（`AWB_DATA_DIR` + 沙盘团队 + `TEAM_SELFTEST=1`），并核对真实 `团队.json` 与 `workbench.json` sha 前后不变。
+
 ## 版本
-- version：1.2.0（2026-11-18 新增「派单前置检查（程序门）」小节；依据 Owner 2026-11-18 09:15 明确「可以更新 skill」+「派单不能靠 PM 自觉」）。
+- version：1.3.0（2026-11-18 新增「验收权限边界」「文档维护与角色卡/skill 对齐」「工装安全与测量窗口」三节；依据 Owner 2026-11-18 22:01 指令：以现行工作流为准，全员修正角色卡与 skill、对齐模板）。
+- 1.2.0（2026-11-18 新增「派单前置检查（程序门）」小节；依据 Owner 2026-11-18 09:15）。
 - 历史：1.1.0（2026-11-17 新增「换人/交接」小节）；1.0.0（初版）。
 

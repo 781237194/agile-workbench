@@ -1,11 +1,12 @@
 # 基础流程 skill · 产品设计师
 
 ## 适用场景
-需要把需求写清楚、或评审别人写的需求时。
+需要把需求写清楚、评审别人写的需求、或按现行工作流做产品评估/口径裁定时。
 
 ## 前置条件
 - 已 boot 并持有本项目令牌（`team.mjs boot --role product --project <项目>`）；
-- 已读项目铁律与本人角色卡；本次动作的边界写清楚（只改自己目录 / 只动授权文件）。
+- 已读项目铁律与本人角色卡；本次动作的边界写清楚（只改自己目录 / 只动授权文件）；
+- 现行基线 = 《团队宪法》+《团队/流程.md》第二部分（2026-11-18 校准）。
 
 ## 步骤
 1. 先确认「真相在哪」：需求正文/工作流/任务单/队列文件属于哪一层，不要凭记忆；
@@ -13,6 +14,43 @@
 3. 产出落到本角色目录（代码按项目信息的规定目录），同哈希交付、版本递增不覆盖；
 4. 用程序自己可复跑的方式验证（脚本/断言/日志），把结论写成「命令 + 通过数 + 退出码」；
 5. 完成回执 + `task done --evidence` 才叫完成；失败立即回报卡点，不静默挂着。
+
+## 现行工作流对齐（2026-11-18）
+
+### 验收权限（硬边界）
+- **需求级验收只能 Owner 本人**（界面点通过 / Owner 终端 `owner --requirement <id> --action accept`）；产品只评审、不验收需求。
+- **代管不改变验收权限**：代管只可代记评审决定（approved/rejected/skipped）；需求验收/迭代/终止一律 Owner 本人，代验收被 `PROXY_ACCEPT_FORBIDDEN` 硬拦。
+- **缺陷单验收**由 PM 或 tester 执行（`task accept --as pm|tester`）；产品不验收任何单，只出评审意见与材料。
+- 需求到 `test_done` 才进 Owner 验收列表；PM 备材料，产品不替 Owner 点。
+
+### 工装安全（P0，强制）
+- 禁止按进程名/路径/时间窗批量杀 electron（`Get-Process … | Stop-Process`、`taskkill /IM electron.exe`、`pkill`/`killall`）；
+- 只允许 `taskkill /PID <自己 spawn 的 child.pid> /T /F` 或 `child.kill()`；**无 PID 不杀**；
+- 提交采集/夹具/脚本前跑 `node scripts/check-no-batch-electron-kill.cjs`，须 `NO_BATCH_ELECTRON_KILL_OK`。
+
+### 测量纪律
+- 真窗口/Electron 测量前**先向 PM 报「需要干净窗口」**，由 PM 协调其他角色停止起停；测完立即停手；
+- 隔离：`AWB_DATA_DIR` 独立实例 + 沙盘团队（`TEAM_ROOT`+`TEAM_SELFTEST=1`）；断言真实 `团队/状态/团队.json` 与 `data/userdata/workbench.json` sha256 前后不变；
+- 报告记录被测 HEAD、启动 PID、同时段 electron 进程数与 CPU；负载异常只作观测、不作门禁判据。
+
+### 证据标准
+- 每条结论：可复跑命令 + 退出码 + 通过数/样本数；
+- 证据版本递增不覆盖；报告禁用 `FAIL`/`不通过`/`未通过` 三词（用「未达标项/豁免项/不合格项」）；
+- Owner 书面豁免单独落文件，报告引用路径与数值。
+
+### 文档维护分工
+- 本人角色卡（`产品/角色卡.md`）与本人 skill（`团队/skill/基础流程/product.md`）由产品本人维护；改角色卡只失效本人令牌，改后自行重 boot；
+- skill 改版：升版本号 + 旧版归档 `团队/skill/归档/` + 更新 `skill-manifest.json` + `scripts/skill-check.cjs` 通过（按 PM 本轮指令，manifest 由 PM/A 统一收口，本人不直接改）；
+- 宪法/流程由 PM 维护；角色卡/宪法/铁律模板由程序员A 维护（内容产品评审）；**不改别人文件**，发现不一致报 PM。
+
+### 派单与环境
+- 派单前置检查门（`dispatch-check`）由 PM 执行：`go`/`go_degraded` 才发，`queue`/`wait`/`wake_first`/`blocked` 先处置；强制须 `--force --reason` 留痕；
+- 目标 `running=true` 时不插单、不催；判「是否在跑」以【会话排队】为准（running + lastEventAt），不以任务状态为准。
+
+### 换人流程（回执驱动，产品职责）
+- 完整流程/权限矩阵见 `团队/协议/07-换人流程-回执驱动.md`；**不搞强制换人**：到阈值只提醒，本人写交接并落回执，PM 核对后手动 rotate；**PM 自己的换人由产品执行**。
+- 四步：①`session usage` 判档 → 只发 `session_rotate_warn`（程序不得自动 rotate）；②本人写 `产出/交接-最新.md`（八节）→ `session handover receipt --role <自己> --project <项目>` 落回执（bytes+sha256）→ 通知 PM；③PM 核对「最新回执 sha == 磁盘交接文件」→ `session rotate --role <角色>`（不符 `HANDOVER_RECEIPT_REQUIRED`，零副作用）；④PM 换人：PM 落回执后**由产品**执行 `session rotate --role pm`（产品只能换 PM；PM 自换 `PERMISSION_DENIED`）。
+- 执行后核对审计 `by=product`、`actorRole=product`、`receiptId`、`handoverSha256/Bytes/Path`；换人后 BQ 拉起新会话 + 广播重 boot。
 
 ## 判据
 - 有可复跑证据（命令能重跑、结果一致），不是「我看过了」；
@@ -24,7 +62,9 @@
 - 直接改状态 JSON / 派生文件「图快」，导致账本与真相分叉；
 - 只回「收到」不产出、或把回执当成完成；
 - 用旧报告/旧截图当本次证据；测例或脚本被改过却不核对 mtime；
-- 报「已通过」但给不出重跑命令与通过数。
+- 报「已通过」但给不出重跑命令与通过数；
+- 按进程名/路径批量杀 electron（P0 事故）；
+- 未报 PM 就独占测量窗口，或测量不隔离真实状态。
 
 ## 换人 / 交接（每角色必读）
 
@@ -37,4 +77,5 @@
 - 角色专属提示（product）：交接时把「当前在办任务 id + 卡点 + 下一步命令」写进「在途」，让接手人不用翻聊天记录即可继续。
 
 ## 版本
-- version：1.1.0（2026-11-17 新增「换人/交接」小节；Owner 批准版本，改版须走 Owner 批准 + manifest 归档）。
+- version：1.2.0（2026-11-18 新增「现行工作流对齐」小节：验收权限硬边界/工装安全 P0/测量纪律/证据标准/文档维护分工/派单门；依据 Owner 2026-11-18 22:01 指令、流程.md 第二部分、任务 T-20261118-220345-d3ff）。
+- 上一版 1.1.0（2026-11-17 新增「换人/交接」小节）。

@@ -14,6 +14,15 @@
 4. 用程序自己可复跑的方式验证（脚本/断言/日志），把结论写成「命令 + 通过数 + 退出码」；
 5. 完成回执 + `task done --evidence` 才叫完成；失败立即回报卡点，不静默挂着。
 
+## 权限与安全边界（2026-11-18 现行工作流，硬边界）
+
+- **需求级验收只能 Owner 本人**：我不得验收需求、不得代 Owner 点需求通过；代管只代记评审决定，不代需求验收/迭代/终止（程序 `PROXY_ACCEPT_FORBIDDEN`）。
+- **我只能验收缺陷单**：`task accept --task <B-…> --as tester --evidence 报告:report --evidence 截图:screenshot --opinion "…"`（仅 bug/scenario-bug）。
+- 需求到 `test_done` 才进 Owner 验收列表；我的交付是「报告 + 证据两件套」，不是替 Owner 点通过。
+- **工装安全 P0**：清理只回收自己 spawn 的子进程（`child.kill()` / `taskkill /PID <child.pid> /T /F`），禁止按名/路径/时间窗批量杀 electron（`Get-Process … | Stop-Process`、`taskkill /IM electron.exe`、`pkill`/`killall`）；新工装先跑 `node scripts/check-no-batch-electron-kill.cjs`，测量前后核对 Owner 实例 PID 未变。
+- **测量窗口先报 PM**：真窗口/Electron 测量前向 PM 报「需要干净窗口」，由 PM 协调他人停起停；用完立即停手。隔离用 `AWB_DATA_DIR` + `TEAM_ROOT` + `TEAM_SELFTEST=1`，报真实 `团队.json`/`workbench.json` sha256 前后不变、被测 HEAD、启动 PID；同时段 electron 进程数/CPU 要记录，负载异常只作观测不作门禁。
+- **文档维护分工**：我只改 `测试人员/角色卡.md`、`团队/skill/基础流程/tester.md`（升版本+归档，manifest 由 PM 更新）与 `测试人员/产出/**`；需求正文/流程.md/宪法/铁律/模板/他人卡与 skill/`skill-manifest.json` 一律不改。
+
 ## 判据
 - 有可复跑证据（命令能重跑、结果一致），不是「我看过了」；
 - 写盘只发生在授权范围内；同名文件用新版本号，旧版保留；
@@ -37,4 +46,4 @@
 - 角色专属提示（tester）：交接时把「当前在办任务 id + 卡点 + 下一步命令」写进「在途」，让接手人不用翻聊天记录即可继续。
 
 ## 版本
-- version：1.1.0（2026-11-17 新增「换人/交接」小节；Owner 批准版本，改版须走 Owner 批准 + manifest 归档）。
+- version：1.2.0（2026-11-18 Owner 22:01 现行工作流对齐：新增「权限与安全边界」小节——需求验收只能 Owner 本人/代管不代验收/仅可验缺陷单、工装安全 P0 只杀自起 PID、测量窗口先报 PM、文档维护分工；manifest 字段由 PM 统一更新，旧版 1.1.0 内容除新增小节外未改）。
