@@ -81,7 +81,8 @@ ok('D1 去抖常量 ≤300ms 且 input 事件走 setTimeout',
 ok('D2 搜索框/计数/空态锚点齐全（[data-or-search] / [data-or-count] / [data-or-empty]）',
   src.includes("setAttribute('data-or-search', '1')") && src.includes("setAttribute('data-or-count', '1')")
   && src.includes("setAttribute('data-or-empty', '1')"), {});
-ok('D3 计数文案「N 条」+ 空态可读文案', /`\$\{total\} 条`/.test(src) && /没有匹配的需求/.test(src), {});
+// B-20261118-103216-9330：空态文案与需求「无匹配」对齐 → 断言只用关键词「无匹配」，锁长句会随文案微调就红。
+ok('D3 计数文案「N 条」+ 空态含「无匹配」', /`\$\{total\} 条`/.test(src) && /无匹配/.test(src), {});
 ok('D4 组头计数随筛选变化、0 条组头隐藏（data-or-group-title/label + group.hidden）',
   src.includes("setAttribute('data-or-group-title', '1')") && src.includes("setAttribute('data-or-group-label', String(group.label))")
   && /group\.hidden = Boolean\(q\) && shown === 0;/.test(src), {});

@@ -1061,7 +1061,7 @@
     const empty = box.querySelector('[data-or-empty]');
     if (empty) {
       empty.hidden = total !== 0;
-      empty.textContent = '没有匹配的需求：换个关键词，或清空搜索恢复全部';
+      empty.textContent = '无匹配的需求：换个关键词，或清空搜索恢复全部';
     }
   }
 
@@ -1085,7 +1085,7 @@
     // R-a64f：搜索框 + 结果计数 + 空态（锚点 data-or-search / data-or-count / data-or-empty）。
     const search = orEnsureSearchBar();
     box.appendChild(search.bar);
-    const emptyHint = el('p', 'or-empty or-all-empty', '没有匹配的需求：换个关键词，或清空搜索恢复全部');
+    const emptyHint = el('p', 'or-empty or-all-empty', '无匹配的需求：换个关键词，或清空搜索恢复全部');
     emptyHint.setAttribute('data-or-empty', '1');
     emptyHint.hidden = true;
     box.appendChild(emptyHint);
