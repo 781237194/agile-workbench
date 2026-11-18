@@ -155,8 +155,11 @@ async function runScenario(name, sessionMode, port) {
     { teamRows, activeProjectAfter });
   check(`D7 [${name}] 删除墓碑存在（并发写者代际防护落盘）`,
     (() => { try { const dir = path.join(envs.TEAM, '状态', '项目'); for (const e of fs.readdirSync(dir, { withFileTypes: true })) { if (e.isDirectory() && fs.existsSync(path.join(dir, e.name, '删除墓碑.json'))) return true; } return false; } catch { return false; } })(), {});
-  check(`D8 [${name}] 静态：delete 事务顺序 activeProject=null → 清名册 → 落盘`,
-    (() => { try { const src = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8'); const a = src.indexOf('team.activeProject = null'); const b = src.indexOf('clearRosterSessionsOf('); const c = src.indexOf("case: 'panelTeamSync'"); return a >= 0 && b > a && c > b; } catch { return false; } })(), {});
+  // D8（v285/PM M-20261119-051148-bd5e7e）：从「静态源码顺序」改为**行为断言**——删除后真实落盘结果必须体现事务已执行：
+  // team.json activeProject=null + 删除墓碑存在（两者在旧顺序 bug 下都不会出现）。
+  check(`D8 [${name}] 行为：删后 team.json activeProject=null 且删除墓碑已落盘`,
+    (activeProjectAfter === null || activeProjectAfter === undefined) && (() => { try { const dir = path.join(envs.TEAM, '状态', '项目'); for (const e of fs.readdirSync(dir, { withFileTypes: true })) { if (e.isDirectory() && fs.existsSync(path.join(dir, e.name, '删除墓碑.json'))) return true; } return false; } catch { return false; } })(),
+    { activeProjectAfter });
   try { fs.rmSync(sb, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 (async () => {
