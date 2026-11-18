@@ -36,5 +36,11 @@
 - **失败回滚**：交接文件没写完不 rotate；rotate 失败保留旧绑定并报 PM（不手工改 JSON）；有在途任务时归档是**建议不阻断**（ARCHIVE_DEFERRED），不得为归档丢活；回滚以「旧会话继续干」为默认，不重 claim、不重写报告。
 - 角色专属提示（pm）：交接时把「当前在办任务 id + 卡点 + 下一步命令」写进「在途」，让接手人不用翻聊天记录即可继续。
 
+## 换人流程（回执驱动 · 必读）
+
+- 完整流程与权限矩阵：`团队/协议/07-换人流程-回执驱动.md`；**不搞强制换人**：到阈值只提醒，本人写交接并落回执，PM 核对后手动 rotate；**PM 自己的换人由产品执行**。
+- 四步：①`session usage` 判档 → 只发 `session_rotate_warn`（程序不得自动 rotate）；②本人写 `产出/交接-最新.md`（八节）→ `session handover receipt --role <自己> --project <项目>` 落回执（bytes+sha256）→ 通知 PM；③PM 核对「最新回执 sha == 磁盘交接文件」→ `session rotate --role <角色>`（不符 `HANDOVER_RECEIPT_REQUIRED`，零副作用）；④PM 换人：PM 落回执后把 sha8/字节交 Owner/产品，**由产品**执行 `session rotate --role pm`；PM 自换 `PERMISSION_DENIED`。
+- 换人后：BQ 拉起新会话 + 广播重 boot；新 PM 先 boot、读 `项目经理/产出/交接-最新.md`；审计核对 `by/actorRole`、`receiptId`、`handoverSha256/Bytes/Path`。
+
 ## 版本
 - version：1.1.0（2026-11-17 新增「换人/交接」小节；Owner 批准版本，改版须走 Owner 批准 + manifest 归档）。

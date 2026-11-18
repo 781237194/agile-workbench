@@ -924,7 +924,7 @@ export function ensureProjectStructure({ name, root, desc = '', overwrite = fals
   const teamIronIsBlank = /这不是规则全文|空白起点|空白模板/.test(teamIronText);
   const chosenIron = (teamIronText && !teamIronIsBlank) ? teamIronText : DEFAULT_IRON;
   // 新项目铁律必须带现行工作流条款（工装安全/测量窗口/验收边界）；缺则追加固定块，已有则不重复（避免重复编号）。
-  put(path.join(base, '项目铁律.md'), chosenIron.includes('工装与进程安全') ? chosenIron : (chosenIron.trimEnd() + IRON_ALIGN_BLOCK));
+  put(path.join(base, '项目铁律.md'), chosenIron.includes('工装安全') ? chosenIron : (chosenIron.trimEnd() + IRON_ALIGN_BLOCK));
   // a28a：新建项目默认带经验教训登记册（默认继承；已有文件不覆盖）
   put(path.join(base, '经验教训登记册.md'), lessonsRegister(projectName, m));
 
