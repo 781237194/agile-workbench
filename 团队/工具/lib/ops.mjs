@@ -4858,6 +4858,16 @@ export async function cmdBoot(args) {
   }
   // R-f9b1 F-7⑧：本角色当前任务所涉需求的增补卷（缺失也写一行；不进必读计数、不阻塞 boot）。
   for (const line of supplementBriefLines(project, tasks)) lines.push(line);
+  // 013a：boot 简报「可复制的下一条命令」模板（按角色；<T> 为 boot 令牌）。
+  const BOOT_NEXT_COMMAND = {
+    pm: 'send --boot <T> --to <角色> --task <T-id> --ack --subject "…" --body "…"；收尾 task done --id <T-id> --evidence <纯路径>',
+    analyst: 'req write --requirement <R-id> --file <路径> --expected-sha <sha>；req review --requirement <R-id> --verdict approve|reject --comments "…"',
+    product: 'req review --requirement <R-id> --verdict approve|reject --comments "…"',
+    programmer1: 'task claim --id <T-id>；收尾 task done --id <T-id> --evidence <纯路径>',
+    programmer2: 'task claim --id <T-id>；收尾 task done --id <T-id> --evidence <纯路径>',
+    tester: 'req trq --requirement <R-id> --verdict testable|not_testable；收尾 task done --id <T-id> --evidence <测试报告路径>',
+    default: '<子命令> --help（先确认角色职责再动手）',
+  };
   // B-20261118-004424-6c6b：关键行上移到核心区——「可选插件 / 记忆降级 / 队列续跑」以前放在末尾，
   // 超 2000 字按尾部截断时会被切掉（selftest「记忆插件 off → boot 降级」用例因此红）。现固定放在核心区，必留。
   try {
@@ -4895,7 +4905,10 @@ export async function cmdBoot(args) {
   for (const t of tasks.slice(0, 3)) pushDrop(`  [${t.id}] ${t.priority} ${t.status} ${t.owner || '-'} ${t.title}`);
   for (const p of proposals.slice(0, 3)) pushDrop(`  [${p.id}] ${p.risk} ${p.status} by ${p.author}: ${p.title}`);
   pushDrop(`授权: ${grants.length ? grants.map((g) => `${g.actions.join('/')}@${g.project}:${g.scope.join(',')}`).join(' ｜ ') : '（无，需 PM grant）'}`);
-  lines.push('下一步: 先读 inbox/待审提案；收到派单先 ack，再执行正文任务，产出落盘，完成后发完成回执并 task done；文件变更按现行流程直接提交（提案五步已随宪法修订废止，见宪法第 2 条）。');
+  // 013a：简报四要素——可复制的下一条命令 + 红线（Owner 2026-11-19 需求：新项目首启即可直接发第一条 M-*）。
+  const copyCmd = BOOT_NEXT_COMMAND[String(role)] || BOOT_NEXT_COMMAND.default;
+  lines.push(`下一步命令（可直接复制；<T>=boot 令牌）: ${copyCmd}`);
+  lines.push('红线: 禁止用 DSH 子代理代跑角色任务（子代理只做只读检索/摘录）；一次只处理一个任务；失败先原样贴错误码。');
   const maxBrief = Number(team.config.bootBriefMaxChars || 2000);
   const briefingComposed = composeBriefing(lines, droppableIdx, maxBrief);
   let briefing = briefingComposed.text;

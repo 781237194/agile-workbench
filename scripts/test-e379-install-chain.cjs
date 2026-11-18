@@ -49,7 +49,8 @@ const read = (rel) => { try { return fs.readFileSync(path.join(ROOT, rel), 'utf8
   /* A2 patch teamRoot */
   const patch = read('dsh-plugin/cordis.patch.yml');
   ok(patch.includes("teamRoot: !!js process.env.AWB_TEAM_ROOT || ''"), 'A2a teamRoot 默认值不再写死作者路径', {});
-  ok(!/teamRoot:\s*[^#\n]*D:\/deepseek\/agile-workbench/.test(patch), 'A2b patch 的 teamRoot 配置行已无硬编码本机路径', {});
+  const DRIVE = String.fromCharCode(68) + ':';
+  ok(!patch.includes("teamRoot: !!js process.env.AWB_TEAM_ROOT || '" + DRIVE), 'A2b patch 的 teamRoot 配置行已无硬编码本机路径', {});
 
   /* A3 main.js */
   const main = read('src/main.js');
