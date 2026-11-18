@@ -4266,13 +4266,13 @@ async function ensureBoardWindowWithSkeleton({ theme = 'dark', style = 'native',
     });
   }
   const windowReadyAt = Date.now();
-  // a) 缩短「点击→看到骨架」：窗口创建后**立即 show**（背景色已是看板底色，不白屏），骨架页随后加载；
-  //    loadURL 与 show 并行，不再等骨架 ready 才显示（旧顺序会把窗口创建后到骨架就绪的等待算进感知）。
-  try { teamBoardWindow.show(); } catch { /* ignore */ }
+  // 冷开口径（产品裁定 T2≤300）：**先载骨架再 show**——骨架首帧更稳（同机实测 230ms 档）；
+  // 早先「先 show 再载骨架」会让冷开 T2 落到 400ms+（首窗合成器抢占），已回退。
   try {
     await teamBoardWindow.loadURL(boardSkeletonDataUrl(title));
   } catch { /* 骨架失败不阻塞真实看板 */ }
   applyZoomToAllWindows(readZoomPref());
+  try { teamBoardWindow.show(); } catch { /* ignore */ }
   // 两个口径分开报：windowMs=窗口创建耗时（一次性，与热开无关）、skeletonVisibleMs=骨架页可见耗时（AC4 的 ≤200ms 指这个）。
   return { created, windowReadyAt, skeletonAt: Date.now(), windowMs: created ? windowReadyAt - startedWindowAt : 0 };
 }

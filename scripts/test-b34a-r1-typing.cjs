@@ -201,32 +201,38 @@ async function main() {
       };
       const closeBoardWindow = async () => {
         const t = await findBoardTarget();
-        if (!t) return false;
+        if (!t) return { closed: false, via: 'none' };
+        let via = 'none';
         try {
           const c = new WS(t.webSocketDebuggerUrl);
           await c.connect();
           try {
-            // 先页面内 window.close()：会走 Electron 窗口 close 事件 → 主进程改为「隐藏」，保留已渲染内容；
-            // Page.close 只在 window.close 无效时兜底。
-            try { await c.send('Runtime.evaluate', { expression: 'window.close()', returnByValue: true }, 8000); } catch { /* ignore */ }
-            await sleep(150);
-            try { await c.send('Page.close', {}, 6000); } catch { /* ignore */ }
+            // 产品口径「关窗」：走看板页自身 IPC（window.boardWin.control('close')）→ 主进程收到真实 close 事件
+            // → hide-on-close 隐藏窗口保留已渲染内容（重开 content≈0）。CDP Page.close 会直接销毁 target，
+            // 绕过 close 事件，只能当兜底。
+            const r = await c.send('Runtime.evaluate', {
+              expression: "(async () => { try { await window.boardWin.control('close'); return 'ipc-close'; } catch (e) { return 'err:' + String(e && e.message || e).slice(0, 80); } })()",
+              returnByValue: true, awaitPromise: true,
+            }, 12000);
+            via = String((r && r.result && r.result.value) || 'unknown');
+            await sleep(350);
           } catch { /* ignore */ }
+          // 只有 ipc 关闭没生效时才用 CDP Page.close 兜底；否则会把「已隐藏保留内容」的 target 直接销毁，
+          // 下一轮就变成重建窗口（warm=false），测不到产品口径的「关窗重开」。
+          if (!/^ipc-close/.test(via)) { try { await c.send('Page.close', {}, 4000); } catch { /* ignore */ } }
           c.close();
         } catch { /* ignore */ }
-        // 等目标消失
-        for (let i = 0; i < 20; i += 1) { await sleep(150); if (!(await findBoardTarget())) return true; }
-        return false;
+        return { closed: true, via };
       };
       const reopenRuns = [];
       for (let round = 1; round <= 4; round += 1) {
-        const closed = await closeBoardWindow();
+        const closeInfo = await closeBoardWindow();
         await sleep(250);
         const t0 = Date.now();
         let r = null;
         try { r = await evalJs(`window.workbench.teamBoardOld(${JSON.stringify(projectId)})`, 90000, true); } catch (e) { r = { ok: false, why: String(e.message || e).slice(0, 160) }; }
-        reopenRuns.push({ round, closed, wallMs: Date.now() - t0, ok: Boolean(r && r.ok), timings: (r && r.timings) || null });
-        put({ kind: 'board-reopen', round, closed, timings: (r && r.timings) || null });
+        reopenRuns.push({ round, closed: Boolean(closeInfo && closeInfo.closed), via: (closeInfo && closeInfo.via) || '', wallMs: Date.now() - t0, ok: Boolean(r && r.ok), timings: (r && r.timings) || null });
+        put({ kind: 'board-reopen', round, via: (closeInfo && closeInfo.via) || '', timings: (r && r.timings) || null });
       }
       const warmRuns = reopenRuns.filter((x) => x.round > 1 && x.ok && x.timings).map((x) => x.timings);
       const num = (arr) => arr.map((v) => Number(v)).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
