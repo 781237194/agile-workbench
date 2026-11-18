@@ -5162,3 +5162,10 @@ html[data-effect-level="reduced"] #awb-theme-particles { display: none; }
 }
 /* B-20261117-192034-e9b5：面板最小宽 ≥560px（列头 + 6 列数字不挤压）；窄窗口按可用宽度收，不横向溢出 */
 #session-queue-drawer { min-width: min(560px, calc(100% - 52px)); }
+
+/* R-b34a R5/R6（T-20261118-182736-ac7f）：面板骨架屏（同步出现、数据到达即移除；respect reduced-motion） */
+.awb-skeleton { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
+.awb-skeleton-label { font-size: 12px; color: var(--muted, #8a8a8a); }
+.awb-skeleton-row { height: 22px; border-radius: 6px; background: linear-gradient(90deg, rgba(127,127,127,.12), rgba(127,127,127,.24), rgba(127,127,127,.12)); background-size: 200% 100%; animation: awb-skeleton-shimmer 1.2s ease-in-out infinite; }
+@keyframes awb-skeleton-shimmer { 0% { background-position: 120% 0; } 100% { background-position: -20% 0; } }
+@media (prefers-reduced-motion: reduce) { .awb-skeleton-row { animation: none; } }

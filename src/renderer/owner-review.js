@@ -460,8 +460,26 @@
     });
   }
 
-  async function loadData() {
-    const api = window.workbench;
+  /** R5 差量签名：列表重建的唯一判据（数据行 + 筛选/搜索/选中/折叠/代管/批量选择）。 */
+  function reviewRenderSig(allRows) {
+    const rows = [];
+    for (const r of allRows || []) {
+      rows.push([String(r.id || ''), String(r.status || ''), String(r.updatedAt || ''),
+        String((r.ownerReview && r.ownerReview.status) || ''), String(Number(r.round) || 1)].join('~'));
+    }
+    return JSON.stringify({
+      rows,
+      sug: (state.suggestions || []).length,
+      filter: state.listFilter,
+      search: state.searchText,
+      closed: state.closedCollapsed !== false,
+      selected: state.selected,
+      proxyAll: Boolean(state.proxyAllActive),
+      batch: (state.batchSelected && state.batchSelected.size) || 0,
+    });
+  }
+
+  async function loadData() {    const api = window.workbench;
     if (!api || !api.state) return;
     let store = null;
     try { store = await api.state(); } catch { return; }
@@ -1801,6 +1819,15 @@
       state.selected = pending.length ? String(pending[0].id) : '';
     }
     renderDialog();
+    // R5（T-20261118-182736-ac7f）：首次打开、数据未到 → 列表区先骨架（同步出现，≤200ms 感知）。
+    if (!state.data) {
+      try {
+        const list = dialog.querySelector('[data-or-list]');
+        if (list && typeof AWBGate !== 'undefined' && AWBGate && typeof AWBGate.skeleton === 'function') {
+          AWBGate.skeleton(list, { rows: 8, label: '评审列表加载中…' });
+        }
+      } catch { /* 骨架失败不影响打开 */ }
+    }
   }
 
   function closeDialog() {
@@ -2458,6 +2485,13 @@
     const rows = allRows.filter((row) => (Number(row && row.round) || 1) === round);
     rows.sort((a, b) => (isPending(b) ? 1 : 0) - (isPending(a) ? 1 : 0));
     const list = dialog.querySelector('[data-or-list]');
+    // R5 差量（T-20261118-182736-ac7f）：渲染签名未变（数据/筛选/搜索/选中/折叠都没变）→ 不重建列表，
+    // 保留滚动位置、搜索框焦点与选中态（5 秒轮询不再整块 innerHTML 重建）。
+    const renderSig = reviewRenderSig(allRows);
+    if (state._renderSig === renderSig && dialog.getAttribute('data-review-ready') === '1') {
+      return;
+    }
+    state._renderSig = renderSig;
     list.innerHTML = '';
     // R-5550 F-5550-6：旧正文只提示一次（全列表一条汇总），绝不逐条报「未按结构写」。
     if (ACP && allRows.some((row) => !(row.__ac && row.__ac.structured))) {

@@ -198,9 +198,30 @@
       stats.reconciled += 1;
       return { kept, created, removed };
     }
+    /**
+     * R5：markup 版差量——markup(item) 返回单行 HTML 字符串，内部 createElement + innerHTML 解析后取首元素；
+     * 仍走 reconcileReplace（容器不清空、同 key 节点复用）。仅用于「行是字符串模板」的列表（池/流程）。
+     */
+    function reconcileReplaceMarkup(container, items, options5 = {}) {
+      const o = options5 && typeof options5 === 'object' ? options5 : {};
+      const keyOf = typeof o.keyOf === 'function' ? o.keyOf : (it) => String(it && (it.id || it.key) || '');
+      const markup = typeof o.markup === 'function' ? o.markup : null;
+      const tag = String(o.tag || 'div');
+      const doc = (container && container.ownerDocument) || (typeof document !== 'undefined' ? document : null);
+      if (!markup || !doc) return { kept: 0, created: 0, removed: 0 };
+      return reconcileReplace(container, items, {
+        keyOf,
+        build: (item) => {
+          const holder = doc.createElement(tag);
+          holder.innerHTML = String(markup(item) || '');
+          const first = holder.firstElementChild || holder.children[0];
+          return first || null;
+        },
+      });
+    }
     return {
       hidden: hiddenOf, interacting: interactingOf, bumpInteraction, installInteraction,
-      gate, interval, coalesce, schedule, skeleton, clearSkeleton, reconcileReplace, stats,
+      gate, interval, coalesce, schedule, skeleton, clearSkeleton, reconcileReplace, reconcileReplaceMarkup, stats,
       createGate,
     };
   }

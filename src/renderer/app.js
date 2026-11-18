@@ -21,6 +21,24 @@ let bootExpiryTimer = null;
 const R4GateApi = (typeof AWBGate !== 'undefined' && AWBGate) ? AWBGate : null;
 // R-b34a R6（T-20261118-175633-18e8）：交互态门——打字/滚动/拖拽期间 gate() 暂停非必要 tick（900ms 静默后恢复）。
 try { if (R4GateApi && typeof R4GateApi.installInteraction === 'function') R4GateApi.installInteraction(window); } catch { /* 老环境忽略 */ }
+// R-b34a R5（T-20261118-182736-ac7f）：面板骨架便捷入口（同步出现；数据渲染替换后自动消失，另带 1.5s 兜底清理）。
+const r5Skeleton = (target, label, rows) => {
+  try {
+    if (!R4GateApi || typeof R4GateApi.skeleton !== 'function') return null;
+    const el = typeof target === 'string' ? $(target) : target;
+    if (!el) return null;
+    const box = R4GateApi.skeleton(el, { rows: rows || 6, label: label || '加载中…' });
+    setTimeout(() => { try { R4GateApi.clearSkeleton(el); } catch { /* ignore */ } }, 4000);
+    return box;
+  } catch { return null; }
+};
+const r5ClearSkeleton = (target) => {
+  try {
+    if (!R4GateApi || typeof R4GateApi.clearSkeleton !== 'function') return 0;
+    const el = typeof target === 'string' ? $(target) : target;
+    return el ? R4GateApi.clearSkeleton(el) : 0;
+  } catch { return 0; }
+};
 const r4Gate = (fn) => (R4GateApi && typeof R4GateApi.gate === 'function' ? R4GateApi.gate(fn) : fn);
 const r4Coalesce = (fn, ms, key) => (R4GateApi && typeof R4GateApi.coalesce === 'function' ? R4GateApi.coalesce(fn, ms, key) : fn);
 
@@ -2106,6 +2124,7 @@ function setDrawer(name, opts = {}) {
     loadLegacyDocs();
   }
   if (next === 'team') {
+    if (changed) r5Skeleton('#team-drawer', '团队台加载中…', 8);
     renderTeam();
     loadDshTeamStatus();
     loadTeamStatus();
@@ -12543,7 +12562,14 @@ function renderPool() {
     const req = rows.filter((row) => row.kind === 'requirement');
     const def = rows.filter((row) => row.kind !== 'requirement');
     if (reqList) renderPoolReqList();
-    if (defList) defList.innerHTML = def.length ? def.map(poolRowMarkup).join('') : '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
+    if (defList) {
+      // R5（T-20261118-182736-ac7f）：缺陷列表改用行级差量（同 key 复用节点，不整块 innerHTML 重建）。
+      if (R4GateApi && typeof R4GateApi.reconcileReplaceMarkup === 'function') {
+        R4GateApi.reconcileReplaceMarkup(defList, def, { keyOf: (row) => String(row.id || ''), markup: poolRowMarkup });
+      } else {
+        defList.innerHTML = def.length ? def.map(poolRowMarkup).join('') : '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
+      }
+    }
     poolUi.signature = signature;
     // 详情打开时数据变了：按 data-id 重渲染，不继续显示旧数据（并发边界）。
     if (poolUi.detailId) {
@@ -12711,6 +12737,8 @@ async function togglePool(force) {
     if (poolUi.detailId) closePoolDetail(false);
     return;
   }
+  r5Skeleton('#pool-req-list', '需求池加载中…', 5);
+  r5Skeleton('#pool-def-list', '缺陷池加载中…', 5);
   await refreshPool();
   void prefetchPoolRows(); // R-c72a AC2：预取各项目需求行，切项目时先同步换列表
 }
@@ -13960,6 +13988,7 @@ async function loadDshTeamStatus(opts = {}) {
       renderTeamWorkspace();
     }
     renderLaunchers();
+    r5ClearSkeleton('#team-drawer');
   }
 }
 
