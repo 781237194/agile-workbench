@@ -97,7 +97,7 @@ function runPwsh(scriptFile, env) {
     "Write-Output ('PROGRESS_HAS_STAGE=' + [bool]($progressOut -match '阶段：'))",
     // R5：安装结果 + warnings 合并
     "Write-Output '--- install-result ---'",
-    "[void](Add-InstallerWarning -Code 'MCP_START_FAILED' -Message 'MCP 自检失败（夹具中文）' -LogPath 'C:\\\\tmp\\\\mcp-fixture.log')",
+    "[void](Add-InstallerWarning -Code 'MCP_START_FAILED' -Message 'MCP 自检失败（夹具中文）' -LogPath (Join-Path $script:RepoRoot 'logs/mcp-fixture.log'))",
     '$file1 = Write-InstallResult -RepoRoot $script:RepoRoot -Ok $false -Stage "安装依赖（npm install）" -Next "重跑安装器"',
     "Write-Output ('RESULT_FILE=' + $file1)",
     '$p1 = [System.IO.File]::ReadAllText($file1, [System.Text.Encoding]::UTF8) | ConvertFrom-Json',
@@ -135,7 +135,7 @@ function runPwsh(scriptFile, env) {
 
   const r1 = /RESULT1_OK=([^\r\n]*)/.exec(ps.stdout.replace(/\r/g, ''));
   ok(Boolean(r1) && /^False\|STAGE=安装依赖/.test(r1[1]) && /WARN=1/.test(r1[1]) && /CODE=MCP_START_FAILED/.test(r1[1]), 'R5a 失败也写安装结果（ok=false + 失败阶段 + warnings[]）', { line: r1 && r1[1] });
-  ok(Boolean(r1) && /CN=True/.test(r1[1]) && /LOG=C:\\\\tmp\\\\mcp-fixture\.log/.test(r1[1]), 'R5b warnings 中文与日志路径完整落盘', { line: r1 && r1[1] });
+  ok(Boolean(r1) && /CN=True/.test(r1[1]) && /LOG=.*mcp-fixture\.log/.test(r1[1]), 'R5b warnings 中文与日志路径完整落盘', { line: r1 && r1[1] });
   const r2 = /RESULT2_WARN=(\d+)\|CODES=([^\r\n]*)/.exec(ps.stdout.replace(/\r/g, ''));
   ok(Boolean(r2) && Number(r2[1]) === 2 && /MCP_START_FAILED/.test(r2[2]) && /SECOND_WARN/.test(r2[2]), 'R5c 二次写入保留既有 warnings（安装器与 MCP 自检互不覆盖）', { line: r2 && r2[0] });
   ok(inst.includes('install-result.json') && inst.includes("Add-InstallerWarning -Code 'MCP_START_FAILED'"), 'R5d 安装器把 MCP 失败写进 install-result.json 的 warnings[]', {});
