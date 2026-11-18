@@ -25,6 +25,9 @@ if (IS_BOARD_WINDOW) {
     perfRecent: (payload) => ipcRenderer.invoke('perf:recent', payload),
   // 7a3b：fx 诊断日志（渲染层 sync 结果 → data/fx.jsonl；失败静默）。
   fxLog: (row) => ipcRenderer.invoke('fx:diag-log', row),
+  // 7a3b 补口：强制开启落盘（重启保持）
+  fxForceGet: () => ipcRenderer.invoke('theme:fx-force-get'),
+  fxForceSet: (force) => ipcRenderer.invoke('theme:set-fx-force', force),
   // e610：在线升级（版本 / 检查 / 一步升级）
   appVersion: () => ipcRenderer.invoke('app:version'),
   upgradeCheck: (payload) => ipcRenderer.invoke('app:upgrade-check', payload),
@@ -246,6 +249,8 @@ if (IS_BOARD_WINDOW) {
     ownerChallenge: (payload) => ipcRenderer.invoke('owner:challenge', payload),
     ownerConfirm: (payload) => ipcRenderer.invoke('owner:confirm', payload),
     dshStatus: () => ipcRenderer.invoke('dsh:status'),
+    // e379 返工①（AC6）：只读诊断（安装结果 warnings + MCP 自检 + DSH 能力），供「关于 PM工作台」显示。
+    diagnostics: () => ipcRenderer.invoke('app:diagnostics'),
     // R-c1ed 第一刀：崩溃感知（顶部横幅 + 一键重载 + 只读审计）。
     onRenderCrash: (cb) => {
       const handler = (_e, payload) => { try { cb(payload); } catch { /* 渲染层回调异常不影响主进程 */ } };

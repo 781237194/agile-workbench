@@ -1156,6 +1156,8 @@ function paintEffectMenu() {
   const reducedHint = $('#more-menu [data-fx-reduced-hint]');
   const forceBtn = $('#more-menu [data-fx-force-btn]');
   const forced = Boolean(real && real.forced);
+  const forcedHint = $('#more-menu [data-fx-forced-hint]');
+  if (forcedHint) forcedHint.hidden = !forced;
   const showHint = realMode === 'reduced' && cur === 'full' && !forced;
   if (reducedHint) reducedHint.hidden = !showHint;
   if (forceBtn) forceBtn.hidden = !showHint;
@@ -1199,6 +1201,20 @@ function setEffectMenu(open) {
 
 
 // 7a3b：真实态一键强制 + 特效诊断（菜单内控件，不新增标题栏按钮）。
+// 7a3b 补口（AC1⑥）：启动时读取 workbench.json ui.fxForce → 恢复 data-fx-force（重启仍保持）。
+async function loadPersistedFxForce() {
+  try {
+    if (!window.workbench || typeof window.workbench.fxForceGet !== 'function') return;
+    const r = await window.workbench.fxForceGet();
+    if (!r || r.ok !== true) return;
+    if (r.force) {
+      document.documentElement.setAttribute('data-fx-force', '1');
+      try { if (window.AWB_FX && typeof window.AWB_FX.sync === 'function') window.AWB_FX.sync(); } catch { /* ignore */ }
+    } else document.documentElement.removeAttribute('data-fx-force');
+    try { if (typeof window.__awbPaintEffectMenu === 'function') window.__awbPaintEffectMenu(); } catch { /* ignore */ }
+  } catch { /* 读取失败不阻断界面 */ }
+}
+
 function bindFxRealState() {
   const forceBtn = $('#more-menu [data-fx-force-btn]');
   if (forceBtn && !forceBtn.getAttribute('data-bound')) {
@@ -1207,8 +1223,20 @@ function bindFxRealState() {
       document.documentElement.setAttribute('data-fx-force', '1');
       try { if (window.AWB_FX && typeof window.AWB_FX.sync === 'function') window.AWB_FX.sync(); } catch { /* ignore */ }
       paintEffectMenu();
+      try { if (window.workbench && typeof window.workbench.fxForceSet === 'function') window.workbench.fxForceSet(true); } catch { /* ignore */ }
     });
   }
+  const forceOff = $('#more-menu [data-fx-force-off]');
+  if (forceOff && !forceOff.getAttribute('data-bound')) {
+    forceOff.setAttribute('data-bound', '1');
+    forceOff.addEventListener('click', () => {
+      document.documentElement.removeAttribute('data-fx-force');
+      try { if (window.AWB_FX && typeof window.AWB_FX.sync === 'function') window.AWB_FX.sync(); } catch { /* ignore */ }
+      try { if (window.workbench && typeof window.workbench.fxForceSet === 'function') window.workbench.fxForceSet(false); } catch { /* ignore */ }
+      paintEffectMenu();
+    });
+  }
+
   const diag = $('#more-menu [data-fx-diag]');
   if (diag && !diag.getAttribute('data-bound')) {
     diag.setAttribute('data-bound', '1');
@@ -1228,6 +1256,7 @@ function bindFxRealState() {
         + (dg && dg.steps && dg.steps.length ? ' ｜ 已降级=' + dg.steps.join(',') : '');
     });
   }
+  try { loadPersistedFxForce(); } catch { /* ignore */ }
 }
 
 // e610：在线升级菜单（版本展示 / 检查 / 一步升级 / 重启提示），不新增标题栏图标。
@@ -15585,11 +15614,60 @@ function openVersionModal() {
       <div><span>DSH 地址</span><b class="mono">${esc(state.dsh?.baseUrl || '—')}</b></div>
       <div><span>DSH 状态</span><b>${esc(state.dsh?.online ? '已连接' : (state.dsh?.configured ? '离线' : '未配置'))}</b></div>
     </div>
+    <div class="kv-list" data-install-warnings>
+      <div data-install-warning-empty><span>安装 / MCP 警告</span><b>加载中…</b></div>
+    </div>
+    <p class="hint">安装结果：<span class="mono">data/install-result.json</span>（warnings[]）；MCP 日志：<span class="mono">~/.dsh/logs/mcp-*.log</span>（MCP 不可用只影响搜索，不影响启动）。</p>
     <p class="hint">DSH 是主画面；项目 = 工作区，会话 = 角色。项目与团队状态保存在本机，不复制 DSH 内部实现。</p>`;
   openModal({
     title: '关于 PM工作台', subtitle: 'PM Workbench · DSH 壳 · 工作区与六角色', icon: 'PM', body, width: 560,
     actions: [{ label: '关闭', kind: 'ghost', onClick: ({ close }) => close() }]
   });
+  void loadInstallWarningsIntoModal();
+}
+
+/**
+ * e379 返工①（AC6③）：把安装结果 warnings[]（含 MCP 自检失败）+ DSH 互通能力写进「关于」面板。
+ * 只读，IPC 失败给可读一行，不静默。
+ */
+async function loadInstallWarningsIntoModal() {
+  const box = document.querySelector('[data-install-warnings]');
+  if (!box) return;
+  let data = null;
+  try {
+    if (!window.workbench || typeof window.workbench.diagnostics !== 'function') throw new Error('diagnostics IPC 不可用');
+    data = await window.workbench.diagnostics();
+  } catch (e) {
+    if (box.isConnected) {
+      box.innerHTML = `<div data-install-warning-empty><span>安装 / MCP 警告</span><b>读取失败：${esc(String((e && e.message) || e))}</b></div>`;
+    }
+    return;
+  }
+  if (!box.isConnected) return;
+  const rows = Array.isArray(data && data.warnings) ? data.warnings : [];
+  const mcp = (data && data.mcp && data.mcp.record) || null;
+  const capability = (data && data.capability) || null;
+  const parts = [];
+  parts.push(`<div><span>DSH 互通能力</span><b>${esc((capability && capability.line) || '未知（尚未探测）')}</b></div>`);
+  if (mcp) {
+    const state = mcp.ok === true
+      ? '正常（initialize 成功）'
+      : `失败（${esc(String(mcp.reason || '未知原因'))}）`;
+    const log = mcp.logPath ? ` · <span class="mono">${esc(String(mcp.logPath))}</span>` : '';
+    parts.push(`<div><span>MCP 安全搜索</span><b data-mcp-status="${mcp.ok === true ? 'ok' : 'fail'}">${state}${log}</b></div>`);
+  }
+  if (rows.length === 0) {
+    parts.push('<div data-install-warning-empty><span>安装 / MCP 警告</span><b>无</b></div>');
+  } else {
+    parts.push(`<div><span>安装 / MCP 警告</span><b>${rows.length} 条</b></div>`);
+    for (const row of rows.slice(-10)) {
+      const code = String((row && row.code) || '');
+      const isMcp = code.indexOf('MCP_') === 0;
+      const log = row && row.log ? `<br><span class="mono">${esc(String(row.log))}</span>` : '';
+      parts.push(`<div data-install-warning${isMcp ? ' data-mcp-warning' : ''} data-code="${esc(code)}"><span>${esc(code)}</span><b>${esc(String((row && row.message) || ''))}${log}</b></div>`);
+    }
+  }
+  box.innerHTML = parts.join('');
 }
 
 async function openProjectFolder() {

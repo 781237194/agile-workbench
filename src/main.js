@@ -673,6 +673,15 @@ if (IS_OWNER_CHECK) {
 const { DshAdapter, discoverDshWeb } = require('./dsh-adapter');
 // e379：DSH 互通能力探针（只读 session/list → data/dsh-capability.json + 日志摘要）
 const { probeDshCapability, readCapability, capabilityLine } = require('./dsh-capability');
+// e379 返工①（AC6）：MCP 安全搜索自检 + 可读告警（安装期由 install.ps1 写，运行期这里补一次）。
+const {
+  runMcpSelfCheck,
+  readInstallResult,
+  readSelfCheck,
+  mergeInstallWarnings,
+  selfCheckPath: mcpSelfCheckPath,
+  mcpLogsDir
+} = require('./mcp-selfcheck');
 // 自测会把 teamTools 换成一个带 mock 旧协议命令的实例；生产始终保持默认工具。
 let teamTools = require('./team-tools');
 // B-20261119-015113-2443（97db）：名册四态/删除清四处映射/恢复四段审计的纯逻辑单源（壳层与夹具共用）。
@@ -5530,6 +5539,26 @@ ipcMain.handle('theme:metrics', async () => {
     } catch (error) {
       return { ok: false, code: 'EFFECT_LEVEL_WRITE_FAILED', message: String((error && error.message) || error).slice(0, 200) };
     }
+  });
+
+  // 7a3b 补口（AC1⑥）：强制开启必须重启保持——落盘 workbench.json ui.fxForce（唯一写入口走 writeStore）。
+  ipcMain.handle('theme:fx-force-get', () => {
+    try { const store = readStore(); return { ok: true, force: Boolean(store.ui && store.ui.fxForce) }; }
+    catch (error) { return { ok: false, code: 'FX_FORCE_READ_FAILED', message: String((error && error.message) || error).slice(0, 200), force: false }; }
+  });
+  ipcMain.handle('theme:set-fx-force', (_e, raw) => {
+    const payload = raw && typeof raw === 'object' ? raw : { force: raw };
+    const force = payload.force === true || payload.force === 'true' || payload.force === 1;
+    try {
+      const store = readStore();
+      const current = Boolean(store.ui && store.ui.fxForce);
+      if (current === force) return { ok: true, changed: false, force };
+      const next = { ...store, ui: { ...(store.ui || {}), fxForce: force } };
+      writeStore(next);
+      const js = `(function(){try{var d=document.documentElement;if(${force ? 'true' : 'false'}){d.setAttribute('data-fx-force','1');}else{d.removeAttribute('data-fx-force');}try{if(window.AWB_FX&&typeof window.AWB_FX.sync==='function')window.AWB_FX.sync();}catch(e){}if(typeof window.__awbPaintEffectMenu==='function')try{window.__awbPaintEffectMenu();}catch(e){}}catch(e){}})();`;
+      for (const wc of webContents.getAllWebContents()) { try { if (!wc.isDestroyed()) wc.executeJavaScript(js, true).catch(() => {}); } catch { /* 窗口销毁中 */ } }
+      return { ok: true, changed: true, force };
+    } catch (error) { return { ok: false, code: 'FX_FORCE_WRITE_FAILED', message: String((error && error.message) || error).slice(0, 200) }; }
   });
 
   ipcMain.handle('app:choose-dir', async () => {
@@ -10920,6 +10949,8 @@ installShellAuditSensors();
       }
     }
     void runDshCapabilityProbe('status');
+    // e379 AC6：首次状态检查顺带做一次 MCP 自检（每进程一次，失败只记 warning，不阻断）。
+    if (!mcpSelfCheckState.record && !mcpSelfCheckState.running) void runMcpSelfCheckRuntime('status');
     return { ok: true, status: finalStatus, discovery: discovery ? dshDiscoverySummary(discovery) : null };
   });
   // 手动“重新发现”：供设置页/诊断按钮调用；不新增假 UI，返回结构化结果。
@@ -11434,6 +11465,86 @@ installShellAuditSensors();
   ipcMain.handle('dsh:capability', async () => {
     const record = await runDshCapabilityProbe('ipc');
     return { ok: true, record, line: capabilityLine(record), file: path.join(DATA_ROOT, 'dsh-capability.json') };
+  });
+
+  // e379 返工①（AC6）：MCP 安全搜索自检——安装期由 install.ps1 跑过一次，运行期这里再补一次
+  // （安装后 DSH 升级/换机器仍要能发现「MCP 起不来」）。失败只写 warning + 可读日志，不阻断启动。
+  let mcpSelfCheckState = { at: 0, running: null, record: null };
+  async function runMcpSelfCheckRuntime(reason) {
+    const now = Date.now();
+    if (mcpSelfCheckState.running) return mcpSelfCheckState.running;
+    if (mcpSelfCheckState.record && now - mcpSelfCheckState.at < 5 * 60 * 1000) return mcpSelfCheckState.record;
+    mcpSelfCheckState.running = (async () => {
+      let record = null;
+      try {
+        record = await runMcpSelfCheck({ repoRoot: ROOT, dataDir: DATA_ROOT, timeoutMs: 5000 });
+      } catch (error) {
+        const at = new Date().toISOString();
+        record = {
+          ok: false,
+          at,
+          reason: 'SELFCHECK_THREW',
+          stderr: String((error && error.message) || error).slice(0, 300),
+          logPath: '',
+          warning: {
+            code: 'MCP_SELFCHECK_FAILED',
+            message: 'MCP 自检异常：' + String((error && error.message) || error).slice(0, 160),
+            at
+          }
+        };
+      }
+      if (record && record.warning) {
+        try {
+          mergeInstallWarnings(DATA_ROOT, [{ ...record.warning, detail: { ...(record.warning.detail || {}), source: 'runtime' } }]);
+        } catch { /* warning 写失败不阻断启动 */ }
+      }
+      mcpSelfCheckState = { at: Date.now(), record, running: null };
+      try {
+        console.log('[mcp-selfcheck] '
+          + (record.ok ? 'MCP 安全搜索：正常' : 'MCP 安全搜索：失败（' + String(record.reason) + '）' + (record.logPath ? '；日志 ' + record.logPath : ''))
+          + '（reason=' + String(reason || '') + '）');
+      } catch { /* ignore */ }
+      return record;
+    })();
+    return mcpSelfCheckState.running;
+  }
+
+  // 只读诊断：安装结果 warnings + MCP 自检 + DSH 能力（界面「关于 PM工作台」用它显示，不写状态）。
+  ipcMain.handle('app:diagnostics', async () => {
+    let mcp = null;
+    let mcpError = null;
+    try {
+      mcp = await runMcpSelfCheckRuntime('ipc');
+    } catch (error) {
+      mcpError = String((error && error.message) || error).slice(0, 200);
+    }
+    const install = readInstallResult(DATA_ROOT) || {};
+    const installWarnings = Array.isArray(install.warnings) ? install.warnings : [];
+    const warnings = installWarnings.slice();
+    if (mcp && mcp.warning && !warnings.some((row) => row && row.log && mcp.logPath && String(row.log) === String(mcp.logPath))) {
+      warnings.push({ ...mcp.warning, detail: { ...(mcp.warning.detail || {}), source: 'runtime' } });
+    }
+    const capability = readCapability(DATA_ROOT) || (dshCapabilityState.record || null);
+    return {
+      ok: true,
+      at: new Date().toISOString(),
+      install: {
+        file: path.join(DATA_ROOT, 'install-result.json'),
+        ok: install.ok === true,
+        stage: String(install.stage || ''),
+        next: String(install.next || ''),
+        at: String(install.at || ''),
+        warnings: installWarnings
+      },
+      mcp: {
+        record: mcp || readSelfCheck(DATA_ROOT),
+        file: mcpSelfCheckPath(DATA_ROOT),
+        error: mcpError,
+        logsDir: mcpLogsDir()
+      },
+      capability: { record: capability, line: capabilityLine(capability), file: path.join(DATA_ROOT, 'dsh-capability.json') },
+      warnings
+    };
   });
   // e379：一键 pin 当前已发现地址（自动发现写入的是 source:auto，不算显式配置；这里让用户一键记住）。
   ipcMain.handle('dsh:pin-endpoint', async () => {

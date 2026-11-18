@@ -533,7 +533,9 @@
       active: steps.length > 0,
       steps: steps,
       reason: S.degraded.reason || '',
-      at: S.degraded.at || null
+      at: S.degraded.at || null,
+      lastRecoverAt: S.degraded.lastRecoverAt || null,
+      lastRecoverReason: S.degraded.lastRecoverReason || ''
     };
   }
 
@@ -1132,6 +1134,8 @@
     else if (S.degraded.particles) { S.degraded.particles = false; restored = 'particles'; }
     S.degraded.reason = '已恢复（连续 ' + healthyWindows + ' 个健康窗口；恢复 ' + restored + '）';
     S.degraded.at = Date.now();
+    S.degraded.lastRecoverAt = Date.now();
+    S.degraded.lastRecoverReason = '已恢复';
     pushDiag({ at: Date.now(), action: 'recover', source: source || 'rolling', restored: restored, reason: '已恢复' });
     sync({ keepSeed: false });
   }
@@ -1338,7 +1342,7 @@
     hitTest: hitTest,
     config: FX_CONFIG,
     setConfig: setConfig,
-    mode: function () { return { level: S.mode, reasons: S.reasons.slice() }; },
+    mode: function () { return { level: S.mode, reasons: S.reasons.slice(), forced: S.reasons.indexOf('forced:true') >= 0 }; },
     degraded: degradedInfo
   };
 })();
