@@ -123,6 +123,38 @@ function cacheSizes() {
   for (const [file, row] of textCache) out.push({ file, kind: 'text', size: Buffer.byteLength(String(row.value || ''), 'utf8') });
   return out.sort((a, b) => b.size - a.size);
 }
+/** 当前缓存占用（字节，粗算：JSON.stringify 长度）。 */
+function cachedBytes() {
+  let total = 0;
+  for (const row of jsonCache.values()) { try { total += Buffer.byteLength(JSON.stringify(row.value || null), 'utf8'); } catch { /* ignore */ } }
+  for (const row of textCache.values()) { try { total += Buffer.byteLength(String(row.value || ''), 'utf8'); } catch { /* ignore */ } }
+  return total;
+}
+
+/**
+ * 两级内存清理（AC5⑤ / 产品 v2：内存门禁不放宽）：
+ *   1) 先清最旧 key，直到占用 ≤ budgetBytes 或缓存空；
+ *   2) 仍超 → 全部清空（功能不降级，只降速）。
+ * 返回 {beforeBytes, afterBytes, evicted:[], clearedAll}。
+ */
+function evictToBudget(budgetBytes) {
+  const budget = Number(budgetBytes) > 0 ? Number(budgetBytes) : 0;
+  const beforeBytes = cachedBytes();
+  const evicted = [];
+  if (!budget || beforeBytes <= budget) return { beforeBytes, afterBytes: beforeBytes, evicted, clearedAll: false };
+  const entries = [...jsonCache.entries()].map(([file, row]) => ({ file, kind: 'json', mtimeMs: row.mtimeMs }))
+    .concat([...textCache.entries()].map(([file, row]) => ({ file, kind: 'text', mtimeMs: row.mtimeMs })))
+    .sort((a, b) => a.mtimeMs - b.mtimeMs);
+  for (const e of entries) {
+    if (cachedBytes() <= budget) break;
+    if (e.kind === 'json') jsonCache.delete(e.file); else textCache.delete(e.file);
+    evicted.push(e.file);
+  }
+  let clearedAll = false;
+  if (cachedBytes() > budget) { jsonCache.clear(); textCache.clear(); clearedAll = true; }
+  return { beforeBytes, afterBytes: cachedBytes(), evicted, clearedAll };
+}
+
 /** 内存超预算时清最旧 key（§AC5⑤：清最旧 → 再全部，功能不降级）。 */
 function evictOldest(n = 1) {
   const entries = [...jsonCache.entries()].map(([file, row]) => ({ file, kind: 'json', mtimeMs: row.mtimeMs }))
@@ -314,6 +346,8 @@ module.exports = {
   cacheStats,
   cacheSizes,
   evictOldest,
+  cachedBytes,
+  evictToBudget,
   recordPerf,
   readPerfRecent,
   perfShardPath,

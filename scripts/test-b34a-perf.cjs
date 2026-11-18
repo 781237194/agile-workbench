@@ -167,6 +167,21 @@ const PROJECT = '沙盘项目';
     sha(realTeamFile) === beforeReal.team && sha(realStoreFile) === beforeReal.store && Boolean(beforeReal.team),
     { before: beforeReal, after: { team: sha(realTeamFile), store: sha(realStoreFile) } });
 
+  /* C12 两级内存清理（产品 v2：内存门禁不放宽 → 缓存必须能压住；AC5⑤） */
+  {
+    const big = path.join(dataDir, 'mem-big.json');
+    fs.writeFileSync(big, JSON.stringify({ blob: 'z'.repeat(20000) }), 'utf8');
+    pc.getJsonFile(big);
+    const beforeBytes = pc.cachedBytes();
+    const r = pc.evictToBudget(1000);
+    check('C12 两级内存清理：evictToBudget 清到 ≤ 预算并返回 before/after/evicted（先清最旧，仍超才全清）',
+      beforeBytes > 1000 && r.beforeBytes === beforeBytes && r.afterBytes <= 1000 && Array.isArray(r.evicted) && r.evicted.length >= 1,
+      { beforeBytes, r });
+    const restored = pc.getJsonFile(big);
+    check('C12b 清理后功能不降级：再取同一文件 → 重新读盘且值正确',
+      restored.source === 'read' && Boolean(restored.value) && restored.value.blob.length === 20000, { source: restored.source });
+  }
+
   try { fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* ignore */ }
   fs.mkdirSync(EVID, { recursive: true });
   const report = {
