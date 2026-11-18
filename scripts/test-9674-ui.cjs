@@ -266,6 +266,7 @@ const TEAM_COL = `(() => {
   const list = document.querySelector('.legacy-team-list');
   return {
     headKeys: heads,
+    headLastActivity: Boolean(document.querySelector('[data-activity-head="lastActivity"]')),
     cellCount: cells.length,
     sample: cells.slice(0, 3).map((c) => ({ text: txt(c), title: String(c.title || ''), w: Math.round(c.getBoundingClientRect().width) })),
     scrollWidth: list ? list.scrollWidth : null,
@@ -394,13 +395,26 @@ const TEAM_COL = `(() => {
     check('AC5④ 主进程自报耗时字段 activityMeta.ms 存在（<50ms）', metaMs.every((v) => Number.isFinite(Number(v)) && Number(v) < 50),
       { metaMs });
     check('AC5④ 未触发 cached 降级（正常通道）', Array.isArray(times) && times.every((t) => t.cached === false), { cached: Array.isArray(times) && times.map((t) => t.cached) });
+    // R-9674 TR-Q ②：可测性探针 activityPerf（tailOffset/bytesRead/rebuilt/p95）——断言只读探针，不碰主进程私有变量
+    const perf = await cdp.evaluate(`(async () => {
+      const api = window.workbench && window.workbench.teamSessionQueue;
+      if (typeof api !== 'function') return null;
+      const m = await api({});
+      return m && m.activityPerf ? m.activityPerf : null;
+    })()`);
+    check('AC5④ 探针 activityPerf 字段齐（tailOffset/bytesRead/rebuilt/p95）且 p95 ≤50ms',
+      Boolean(perf) && Number.isFinite(Number(perf.tailOffset)) && Number(perf.tailOffset) > 0
+      && Number.isFinite(Number(perf.bytesRead)) && Number(perf.p95) <= 50 && Number.isFinite(Number(perf.rebuilt)),
+      perf);
+    check('AC5④ 探针标明沙盘身份且任务索引就绪（TEAM_SELFTEST=1）',
+      Boolean(perf) && perf.sandbox === true && perf.taskIndexReady === true, perf && { sandbox: perf.sandbox, taskIndexReady: perf.taskIndexReady, taskCount: perf.taskCount });
 
     // ── AC5① / AC5② / AC5③ 团队台第 4 列（1280 宽无横向滚动）──
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
     await sleep(800);
     const col = await cdp.evaluate(TEAM_COL);
     check('AC5① 团队台活动列 4 列（含 lastActivity）且单元格锚点齐', Array.isArray(col.headKeys) && col.headKeys.length === 4
-      && col.headKeys[3] === 'lastActivity' && col.cellCount >= 1, col);
+      && col.headKeys[3] === 'lastActivity' && col.cellCount >= 1 && col.headLastActivity === true, col);
     check('AC5② 单元格文本 = `<HH:MM> <摘要>`（样例匹配 /\\d{2}:\\d{2} .+/）且 title 含 ISO',
       (col.sample || []).some((s) => /^\d{2}:\d{2} .+/.test(s.text) && /\d{4}-\d{2}-\d{2}T/.test(s.title)), col.sample);
     check('AC5③ 1280 宽团队台无横向滚动（scrollWidth ≤ clientWidth+1）',

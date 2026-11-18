@@ -100,28 +100,12 @@ check('AC4① 面板实现新增 data-sq-last-activity/-text/-source，且未新
   && (panelSrc.match(/setAttribute\('data-sq-last-event'/g) || []).length === 1
   && /data-sq-last-activity'/.test(panelSrc), { lastEventWrites: (panelSrc.match(/setAttribute\('data-sq-last-event'/g) || []).length });
 const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
-function extractArray(src, name) {
-  const start = src.indexOf(`const ${name} = [`);
-  if (start < 0) return null;
-  let i = src.indexOf('[', start);
-  let depth = 0;
-  for (let j = i; j < src.length; j += 1) {
-    const ch = src[j];
-    if (ch === '[') depth += 1;
-    else if (ch === ']') { depth -= 1; if (depth === 0) return vm.runInNewContext('(' + src.slice(i, j + 1) + ')'); }
-  }
-  return null;
-}
-const actCols = extractArray(appSrc, 'LEGACY_ACTIVITY_COLUMNS');
-const liveCols = extractArray(appSrc, 'LEGACY_SQ_LIVE_COLUMNS');
-check('AC5① LEGACY_ACTIVITY_COLUMNS = 4 列（commit/file/wake/lastActivity）',
-  Array.isArray(actCols) && actCols.length === 4 && actCols.map((c) => c.key).join(',') === 'commit,file,wake,lastActivity', actCols && actCols.map((c) => c.key));
-check('AC5① 第 4 列声明 field=lastActivityAt + textField=lastActivityText + sourceField',
-  Array.isArray(actCols) && actCols[3] && actCols[3].field === 'lastActivityAt' && actCols[3].textField === 'lastActivityText' && actCols[3].sourceField === 'lastActivitySource', actCols && actCols[3]);
-check('AC5① LEGACY_SQ_LIVE_COLUMNS 仍 4 列（未被并入）', Array.isArray(liveCols) && liveCols.length === 4, liveCols && liveCols.length);
-check('AC5② app.js 自定义渲染分支：textField → `HH:MM 摘要` + title 含 ISO/来源',
+// R-9674 TR-Q ④：团队台列**不断言私有常量**（LEGACY_ACTIVITY_COLUMNS 是模块内常量），
+// 改由 test-9674-ui.cjs 在真窗口做 DOM 断言（表头 4 列 + [data-activity-lastActivity] 文本）。
+// 这里只保留「实现里确实有 textField 自定义渲染分支」这一源码级契约（不依赖常量取值）。
+check('AC5② app.js 存在 textField 自定义渲染分支（单元格 = `<HH:MM> <摘要>` + title 含 ISO/来源）',
   /col\.textField/.test(appSrc) && /text: `\$\{text\} \$\{summary\}`/.test(appSrc) && /LEGACY_ACTIVITY_SOURCE_LABEL/.test(appSrc));
-check('AC5② 团队台单元格锚点由列声明生成（data-activity-<key> / data-activity-head=<key>）',
+check('AC5② 团队台单元格/表头锚点由列声明生成（data-activity-<key> / data-activity-head=<key>）',
   /data-activity-\$\{esc\(col\.key\)\}/.test(appSrc) && /data-activity-head="\$\{esc\(col\.key\)\}"/.test(appSrc));
 
 /* ───────── AC5④ 真实规模性能（真实 唤醒.jsonl + 1024 任务位） ───────── */

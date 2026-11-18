@@ -6086,8 +6086,8 @@ ipcMain.handle('theme:metrics', async () => {
   //   变了只从 tailOffset 读新增字节（只消费以 \n 结尾的完整行，残行留到下一轮）；
   //   文件被截断/回滚（size < tailOffset）→ 丢弃 offset 全量重建并计 rebuilt=1。
   //   byRole 在追加时同步维护（每个角色最后一条），请求路径不再 8293 行重扫。
-  let sqWakeIdx = { file: '', mtimeMs: 0, size: 0, tailOffset: 0, tailHash: '', lines: 0, rows: [], byRole: {}, badLines: 0, rebuilt: 0 };
-  const emptyWakeIdx = () => ({ file: '', mtimeMs: 0, size: 0, tailOffset: 0, tailHash: '', lines: 0, rows: [], byRole: {}, badLines: 0, rebuilt: 0 });
+  let sqWakeIdx = { file: '', mtimeMs: 0, size: 0, tailOffset: 0, tailHash: '', bytesRead: 0, lines: 0, rows: [], byRole: {}, badLines: 0, rebuilt: 0 };
+  const emptyWakeIdx = () => ({ file: '', mtimeMs: 0, size: 0, tailOffset: 0, tailHash: '', bytesRead: 0, lines: 0, rows: [], byRole: {}, badLines: 0, rebuilt: 0 });
   // 读文件的 [start, start+len) 字节（用于尾部指纹与增量读；不整份读入）
   const readFileSlice = (file, start, len) => {
     if (len <= 0) return Buffer.alloc(0);
@@ -6155,7 +6155,9 @@ ipcMain.handle('theme:metrics', async () => {
       if (lastNl >= 0) {
         const complete = chunk.slice(0, lastNl + 1);
         pushWakeRows(sqWakeIdx, complete);
-        sqWakeIdx.tailOffset = start + Buffer.byteLength(complete, 'utf8');
+        const consumed = Buffer.byteLength(complete, 'utf8');
+        sqWakeIdx.bytesRead = (Number(sqWakeIdx.bytesRead) || 0) + consumed;
+        sqWakeIdx.tailOffset = start + consumed;
       }
     }
     sqWakeIdx.mtimeMs = st.mtimeMs;
@@ -6451,6 +6453,8 @@ ipcMain.handle('theme:metrics', async () => {
       const modelMs = Date.now() - modelStart;
       sqActivityStats.lastMs = modelMs;
       sqActivityStats.samples = (sqActivityStats.samples || 0) + 1;
+      sqActivityStats.recent.push(modelMs);
+      if (sqActivityStats.recent.length > 20) sqActivityStats.recent.shift();
       if (modelMs > 50 && sqLastSummary && typeof sqLastSummary === 'object') {
         model.summary = sqLastSummary;
         model.activityMeta = Object.assign({}, model.activityMeta, { cached: true, cachedMs: modelMs });
@@ -6459,9 +6463,24 @@ ipcMain.handle('theme:metrics', async () => {
       }
       model.activityMeta = Object.assign({}, model.activityMeta, {
         ms: modelMs, cached: Boolean(model.activityMeta && model.activityMeta.cached),
-        wakeIndex: { lines: wake.lines, tailOffset: wake.tailOffset, bytes: wake.size, rebuilt: wake.rebuilt, byRole: Object.keys(wake.byRole || {}).length, badLines: wake.badLines },
+        wakeIndex: { lines: wake.lines, tailOffset: wake.tailOffset, bytes: wake.size, bytesRead: wake.bytesRead, rebuilt: wake.rebuilt, byRole: Object.keys(wake.byRole || {}).length, badLines: wake.badLines },
         taskIndex: taskIdx ? { ready: taskIdx.ready, count: taskIdx.count, builtAt: taskIdx.builtAt, byRole: Object.keys(taskIdx.byRole || {}).length, error: taskIdx.error, dir: taskIdx.dir } : null,
       });
+      // R-9674 TR-Q ②：可测性探针 activityPerf（只读；tailOffset/bytesRead/rebuilt/p95 + 任务索引就绪）。
+      // 沙盘自检（TEAM_SELFTEST=1）与生产都带，字段同口径——断言只读它，不去读主进程私有变量。
+      model.activityPerf = {
+        tailOffset: Number(wake.tailOffset) || 0,
+        bytesRead: Number(wake.bytesRead) || 0,
+        rebuilt: Number(wake.rebuilt) || 0,
+        wakeLines: Number(wake.lines) || 0,
+        p95: activityP95(),
+        samples: sqActivityStats.samples,
+        lastMs: sqActivityStats.lastMs,
+        cached: Boolean(model.activityMeta.cached),
+        taskIndexReady: Boolean(taskIdx && taskIdx.ready),
+        taskCount: taskIdx ? Number(taskIdx.count) || 0 : 0,
+        sandbox: String(process.env.TEAM_SELFTEST || '') === '1',
+      };
       model.snapshotFile = snapshotFile;
       model.wakeFile = wakeFile;
       model.archiveFile = projectName ? path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName), '会话归档.jsonl') : '';
@@ -6501,7 +6520,13 @@ ipcMain.handle('theme:metrics', async () => {
   let sqLastPushAt = new Date().toISOString();
   const sqStats = { getSnapshotCalls: 0, pushEvents: 0 };
   // R-9674 §6.5：最近活动计算耗时样本（超标降级判据）与上一份摘要（cached 兜底）
-  const sqActivityStats = { lastMs: 0, samples: 0 };
+  const sqActivityStats = { lastMs: 0, samples: 0, recent: [] };
+  // R-9674 TR-Q ②：p95 = 最近 20 次样本按升序取 nearest-rank（[ceil(0.95N)-1]），与正文口径一致
+  const activityP95 = () => {
+    const list = (sqActivityStats.recent || []).slice().sort((a, b) => a - b);
+    if (!list.length) return 0;
+    return list[Math.min(list.length - 1, Math.ceil(0.95 * list.length) - 1)];
+  };
   let sqLastSummary = null;
   // R-9674 AC5⑦：任务/ 目录 fs.watch（去抖 300ms，复用 team:session-queue-changed 同一广播）——
   // 任务 status→done 后 ≤2s 面板摘要自动更新；渲染层不加定时器。
