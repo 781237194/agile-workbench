@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>团队看板</title>
+<style>
+html,body{margin:0;height:100%;background:#0b0c10;color:#dfe3ea;font:14px/1.6 -apple-system,"Segoe UI",system-ui,sans-serif}
+.wrap{height:100%;display:flex;flex-direction:column;gap:18px;padding:28px 32px;box-sizing:border-box}
+.h{display:flex;align-items:center;gap:10px;font-weight:650}
+.dot{width:9px;height:9px;border-radius:50%;background:#e0b25a;animation:p 1s infinite ease-in-out}
+.bar{height:16px;border-radius:6px;background:linear-gradient(90deg,#1b1f27,#262c36,#1b1f27);animation:p 1.4s infinite ease-in-out}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:6px}
+.card{height:120px;border-radius:10px;background:linear-gradient(90deg,#151920,#1e232c,#151920);animation:p 1.6s infinite ease-in-out}
+.tip{margin-top:auto;color:#7f8794;font-size:12px}
+@keyframes p{0%{opacity:.55}50%{opacity:1}100%{opacity:.55}}
+</style>
+</head>
+<body>
+<div class="wrap" data-board-skeleton="1">
+  <div class="h"><span class="dot"></span><span>看板加载中…</span></div>
+  <div class="bar" style="width:38%"></div>
+  <div class="bar" style="width:62%"></div>
+  <div class="grid"><div class="card"></div><div class="card"></div><div class="card"></div></div>
+  <div class="bar" style="width:82%"></div>
+  <div class="tip data-board-skeleton-tip">正在生成看板数据（首次约 1 秒，之后走缓存）</div>
+</div>
+<script>try{performance.mark('board:skeleton')}catch(e){}</script>
+</body>
+</html>

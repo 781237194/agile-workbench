@@ -4269,9 +4269,13 @@ async function ensureBoardWindowWithSkeleton({ theme = 'dark', style = 'native',
   // 冷开口径（产品裁定 T2≤300）：**先载骨架再 show**——骨架首帧更稳（同机实测 230ms 档）；
   // 早先「先 show 再载骨架」会让冷开 T2 落到 400ms+（首窗合成器抢占），已回退。
   const navStartAt = Date.now();
+  // PM 2026-11-18 19:01 优先序①：骨架改**极小本地静态文件**（src/board-skeleton.html，约 1KB），
+  // 不走 data URL（避免大字符串编码/解析）；失败时回落内联 data URL，保证骨架一定出得来。
   try {
-    await teamBoardWindow.loadURL(boardSkeletonDataUrl(title));
-  } catch { /* 骨架失败不阻塞真实看板 */ }
+    await teamBoardWindow.loadFile(path.join(__dirname, 'board-skeleton.html'));
+  } catch {
+    try { await teamBoardWindow.loadURL(boardSkeletonDataUrl(title)); } catch { /* 骨架失败不阻塞真实看板 */ }
+  }
   const navDoneAt = Date.now();
   applyZoomToAllWindows(readZoomPref());
   try { teamBoardWindow.show(); } catch { /* ignore */ }
