@@ -754,6 +754,89 @@ async function runSqCheck(options = {}) {
     archiveCleared);
   try { fs.rmSync(ledgerFile, { force: true }); } catch { /* 清理失败不影响结论 */ }
 
+  // ── B-20261118-144907-b318：自动换人栏陈旧状态（时效/关闭态/历史码/设计内超时/真失败） ──
+  // 数据源＝团队/状态/项目/<项目slug>/自动换人.jsonl；enabled 取自 团队.json → config.autoRotate（与名册同一次读盘）。
+  const autoRotateFile = path.join(ledgerProjectDir, '自动换人.jsonl');
+  const writeAutoRotate = (rows) => {
+    fs.mkdirSync(path.dirname(autoRotateFile), { recursive: true });
+    fs.writeFileSync(autoRotateFile, rows.map((row) => JSON.stringify(row)).join('\n') + (rows.length ? '\n' : ''), 'utf8');
+    const nowDate = new Date();
+    try { fs.utimesSync(autoRotateFile, nowDate, nowDate); } catch { /* mtime 刷不动不影响内容变化 */ }
+  };
+  const writeRoster = (autoRotate) => writeJson(rosterFile, {
+    activeProject: teamName || '沙盘',
+    members: ROSTER.map((row) => ({ ...row })),
+    config: autoRotate ? { autoRotate } : {},
+  });
+  const readAr = async () => evalJs(`(() => {
+    const rows = Array.from(document.querySelectorAll('[data-sq-row]')).map((row) => ({
+      role: row.dataset.role || '',
+      state: String(row.getAttribute('data-ar-state') || ''),
+      chip: String((row.querySelector('.sq-ar-chip') || {}).textContent || '').trim(),
+      error: String((row.querySelector('[data-ar-error]') || {}).textContent || '').trim(),
+      history: String((row.querySelector('[data-ar-history]') || {}).textContent || '').trim(),
+      reason: String((row.querySelector('[data-ar-reason]') || {}).textContent || '').trim(),
+      tail: String((row.querySelector('[data-ar-audit-tail]') || {}).textContent || '').trim(),
+    }));
+    const byRole = {};
+    for (const row of rows) byRole[row.role] = row;
+    const summaryEl = document.querySelector('[data-ar-summary]');
+    return { byRole, summary: summaryEl ? String(summaryEl.textContent || '') : '' };
+  })()`);
+  writeJson(snapshotFile, snapshotOf(baseRoles, Date.now()));
+  // ③ 先验「设计内超时不计失败」：只有 HANDOVER_TIMEOUT 时失败数必须是 0（旧实现会算 1）。
+  writeAutoRotate([{ at: ago(2 * 60 * 1000), role: 'tester', stage: 'skipped', code: 'HANDOVER_TIMEOUT', result: 'ok' }]);
+  writeRoster({ enabled: true, mode: 'auto' });
+  panel = await refresh();
+  const arTimeoutOnly = await readAr();
+  check('B318-③ HANDOVER_TIMEOUT 不计入失败数（只有它时 [data-ar-summary] 失败 0 次）',
+    /失败 0 次/.test(String(arTimeoutOnly.summary || '')), { summary: arTimeoutOnly.summary });
+  writeAutoRotate([
+    // pm：50 分钟前的 rotate（陈旧，不得再显示「正在换人」）+ 60 分钟前的旧错误码（灰字历史，不红）
+    { at: ago(50 * 60 * 1000), role: 'pm', stage: 'rotate', code: 'ROTATED', result: 'ok', note: '已换人（夹具）' },
+    { at: ago(60 * 60 * 1000), role: 'pm', stage: 'boot_check', code: 'ROTATE_MANUAL_REQUIRED', result: 'fail' },
+    // tester：2 分钟前的 HANDOVER_TIMEOUT（设计内，黄色，不算失败）
+    { at: ago(2 * 60 * 1000), role: 'tester', stage: 'skipped', code: 'HANDOVER_TIMEOUT', result: 'ok' },
+    // analyst：1 分钟前的真失败（红）
+    { at: ago(60 * 1000), role: 'analyst', stage: 'failed', code: 'ROTATE_FAILED', result: 'fail' },
+    // product：5 分钟前的交接请求（等回执，黄）
+    { at: ago(5 * 60 * 1000), role: 'product', stage: 'trigger', code: '', result: 'ok' },
+  ]);
+  writeRoster({ enabled: false, mode: 'remind-only' });
+  panel = await refresh();
+  const arDisabled = await readAr();
+  const arRoles = Object.keys(arDisabled.byRole || {});
+  check('B318-① enabled=false → 所有角色 data-ar-state=disabled，chip 文案含「已关闭」',
+    arRoles.length === 6 && arRoles.every((role) => arDisabled.byRole[role].state === 'disabled' && /已关闭/.test(arDisabled.byRole[role].chip)),
+    { roles: arRoles, pm: arDisabled.byRole.pm && arDisabled.byRole.pm.chip });
+  check('B318-② 关闭态仍把旧错误码放灰字历史（[data-ar-history] 含 ROTATE_MANUAL_REQUIRED，红 error 为空）',
+    /ROTATE_MANUAL_REQUIRED/.test(String(arDisabled.byRole.pm.history || '')) && String(arDisabled.byRole.pm.error || '') === '',
+    arDisabled.byRole.pm);
+  check('B318-③b 失败数只算真失败：2 条真失败（pm 旧错误码 + analyst 新失败），HANDOVER_TIMEOUT 不计',
+    /失败 2 次/.test(String(arDisabled.summary || '')), { summary: arDisabled.summary });
+  const b318Shot = (await shotOf('sq-b318-ar.png', '#session-queue-panel')).file;
+  // 打开开关：陈旧 rotate 不得显示「正在换人」；旧错误码灰字；设计内超时黄；真失败红。
+  writeRoster({ enabled: true, mode: 'auto' });
+  panel = await refresh();
+  const arOn = await readAr();
+  check('B318-④ 50 分钟前的 rotate → 不再 rotating/rebooting（陈旧事件回落 history）',
+    arOn.byRole.pm.state === 'history',
+    arOn.byRole.pm);
+  check('B318-⑤ 旧错误码只作灰字历史（reason 写「历史：…已恢复」），红 error 为空',
+    /历史：ROTATE_MANUAL_REQUIRED/.test(String(arOn.byRole.pm.reason || arOn.byRole.pm.history || '')) && String(arOn.byRole.pm.error || '') === '',
+    arOn.byRole.pm);
+  check('B318-⑥ HANDOVER_TIMEOUT → 黄色设计内（state=warn、reason 含「设计内」）',
+    arOn.byRole.tester.state === 'warn' && /设计内/.test(String(arOn.byRole.tester.reason || '')),
+    arOn.byRole.tester);
+  check('B318-⑦ 最近 1 分钟真失败 → failed + [data-ar-error]=ROTATE_FAILED（红）',
+    arOn.byRole.analyst.state === 'failed' && String(arOn.byRole.analyst.error || '') === 'ROTATE_FAILED',
+    arOn.byRole.analyst);
+  check('B318-⑧ 5 分钟前 trigger → pending_handover（等交接回执）',
+    arOn.byRole.product.state === 'pending_handover',
+    arOn.byRole.product);
+  try { fs.rmSync(autoRotateFile, { force: true }); } catch { /* 清理失败不影响结论 */ }
+  writeRoster(null);
+
   const failed = checks.filter((row) => !row.ok);
   const report = {
     ok: failed.length === 0,
@@ -765,6 +848,7 @@ async function runSqCheck(options = {}) {
     screenshots: {
       ac1: ac1Shot, ac2: ac2Shot, ac8: ac8Shot, ac3: ac3Shot, ac6: ac6Shot,
       missing: missingShot, broken: brokenShot, final: finalShot,
+      b318: b318Shot,
     },
   };
   fs.writeFileSync(path.join(outDir, 'sq-check.json'), JSON.stringify(report, null, 2), 'utf8');

@@ -342,9 +342,22 @@ function degradationOf(options = {}) {
  * 只读 `团队/状态/项目/<项目>/自动换人.jsonl`，不写任何状态；任何解析失败都降级为「无记录」，不抛。
  * state 六值：idle / warn / pending_handover / rotating / rebooting / failed。
  */
-function readAutoRotateSummary({ auditRows, now } = {}) {
+/** B-20261118-144907-b318：自动换人栏时效窗口——状态只认最近 15 分钟内的事件，超过即回落 idle/history。 */
+const AR_STALE_MS = 15 * 60 * 1000;
+/** 设计内的「不换人」代码：不算失败（黄色），不计入 failedToday。 */
+const AR_DESIGN_IN_CODES = new Set(['HANDOVER_TIMEOUT', 'NIGHT_SILENT', 'ALREADY_ROTATED', 'SKIPPED_BY_WORKING_TASK', 'SAME_ROUND']);
+
+function hhmmOf(iso) {
+  const ms = Date.parse(String(iso || ''));
+  if (!Number.isFinite(ms)) return '';
+  return new Date(ms + 8 * 3600 * 1000).toISOString().slice(11, 16);   // 上海本地 HH:MM
+}
+function readAutoRotateSummary({ auditRows, now, config } = {}) {
   const rows = Array.isArray(auditRows) ? auditRows.filter(Boolean) : [];
   const at = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const cfg = config && typeof config === 'object' ? config : null;
+  const enabled = !(cfg && cfg.enabled === false);
+  const mode = String((cfg && cfg.mode) || (enabled ? 'auto' : 'remind-only'));
   const todayKey = new Date(at + 8 * 3600 * 1000).toISOString().slice(0, 10);   // 上海本地日期
   const dayLocal = (iso) => {
     const ms = Date.parse(String(iso || ''));
@@ -352,9 +365,8 @@ function readAutoRotateSummary({ auditRows, now } = {}) {
   };
   const today = rows.filter((row) => dayLocal(row.at) === todayKey);
   const rotatedToday = today.filter((row) => String(row.stage) === 'rotate' && String(row.result) !== 'fail');
-  const failedToday = today.filter((row) => String(row.result) === 'fail' || String(row.stage) === 'failed'
-    || (String(row.stage) === 'skipped' && String(row.code) === 'HANDOVER_TIMEOUT' && String(row.result) !== 'ok'));
-  const byRole = {};
+  // 失败只认真失败：HANDOVER_TIMEOUT / NIGHT_SILENT 等设计内跳过不算（B-318）。
+  const failedToday = today.filter((row) => String(row.result) === 'fail' || String(row.stage) === 'failed');
   // B-20261118-002151-61f5：用量来源（file=会话用量.json / live=实时回退 / none=都取不到）→ 面板 data-ar-usage。
   const usageByRole = {};
   for (const row of rows) {
@@ -366,41 +378,95 @@ function readAutoRotateSummary({ auditRows, now } = {}) {
     }
     if (row && row.role && ev.usageSource) usageByRole[String(row.role)] = String(ev.usageSource);
   }
-  for (const row of rows) {
+  // 按角色分组（今日事件；只用于「最近一条」判定，历史错误码也从这里取）。
+  // B-3594 之后的 `archive` 成功行是 rotate 的后续动作、不是状态事件：跳过它，否则刚换完会立刻显示「空闲」。
+  const eventsByRole = new Map();
+  for (const row of today) {
     const role = String(row.role || '');
     if (!role) continue;
-    const stage = String(row.stage || '');
-    const code = String(row.code || '');
-    const item = byRole[role] || { last: null, pending: false, rotating: false, rebooting: false, failed: '', reason: '', state: 'idle' };
-    item.last = row;
-    if (stage === 'trigger') { item.pending = true; item.state = 'pending_handover'; item.reason = `已发交接请求，等回执（${String(row.at || '').slice(11, 16)}）`; }
-    if (stage === 'rotate') { item.pending = false; item.state = 'rotating'; item.reason = String(row.note || '已换人'); }
-    if (stage === 'broadcast_reboot') { item.rebooting = true; item.reason = String(row.note || '已广播重 boot'); }
-    if (stage === 'skipped' && code === 'NIGHT_SILENT') { item.state = 'warn'; item.reason = '夜间静默（22–08）未换人'; }
-    if (stage === 'enqueue') { item.state = 'warn'; item.reason = `已入队次日 08:00 执行（${String(row.evidence && row.evidence.level || '')}）`; }
-    if (stage === 'skipped' && code === 'HANDOVER_TIMEOUT') { item.state = 'failed'; item.failed = 'HANDOVER_TIMEOUT'; item.reason = '交接超时：不换人，已升级 PM'; }
-    if (String(row.result) === 'fail') { item.state = 'failed'; item.failed = code || 'rotate_failed'; }
-    byRole[role] = item;
+    if (String(row.stage || '') === 'archive' && String(row.result) !== 'fail') continue;
+    if (!eventsByRole.has(role)) eventsByRole.set(role, []);
+    eventsByRole.get(role).push(row);
   }
+  const isFailRow = (row) => String(row.result) === 'fail' || String(row.stage) === 'failed';
+  const isDesignIn = (row) => AR_DESIGN_IN_CODES.has(String(row.code || ''));
+  const stateOfRow = (row) => {
+    const stage = String(row.stage || '');
+    if (stage === 'rotate') return 'rotating';
+    if (stage === 'broadcast_reboot') return 'rebooting';
+    if (stage === 'trigger') return 'pending_handover';
+    if (stage === 'remind') return 'warn';       // B-3594：只提醒不换人 → 黄色「已提醒」
+    if (stage === 'enqueue') return 'warn';
+    if (stage === 'skipped') return 'warn';
+    if (isFailRow(row)) return 'failed';
+    return 'idle';
+  };
   const out = {};
-  for (const [role, item] of Object.entries(byRole)) {
-    out[role] = {
-      state: item.state || 'idle',
-      reason: item.reason || '',
-      auditTail: item.last ? `${String(item.last.stage || '')} · ${String(item.last.at || '')}` : '',
-      error: item.failed || '',
+  for (const [role, list] of eventsByRole.entries()) {
+    const sorted = list.slice().sort((a, b) => (Date.parse(String(a.at || '')) || 0) - (Date.parse(String(b.at || '')) || 0));
+    const last = sorted[sorted.length - 1] || null;
+    const lastMs = last ? Date.parse(String(last.at || '')) : NaN;
+    const recent = Number.isFinite(lastMs) ? (at - lastMs) <= AR_STALE_MS : false;
+    // 最近一条「真失败」（不含设计内代码）——用于红错/灰字历史。
+    const lastFail = sorted.slice().reverse().find((row) => isFailRow(row) && !isDesignIn(row)) || null;
+    const failMs = lastFail ? Date.parse(String(lastFail.at || '')) : NaN;
+    const failRecent = Number.isFinite(failMs) ? (at - failMs) <= AR_STALE_MS : false;
+    const item = {
+      state: 'idle', reason: '', error: '', history: '', historyAt: '', lastAt: last ? String(last.at || '') : '',
+      auditTail: last ? `${String(last.stage || '')} · ${String(last.at || '')}` : '',
       usageSource: usageByRole[role] || '',
     };
+    // ① 关闭优先级最高：手动换人模式是终态，不看事件时效。
+    if (!enabled) {
+      item.state = 'disabled';
+      item.reason = '自动换人已关闭（手动换人模式）';
+      if (lastFail && !failRecent) {
+        item.history = `历史：${String(lastFail.code || 'FAILED')}（${hhmmOf(lastFail.at)}，已恢复）`;
+        item.historyAt = String(lastFail.at || '');
+      }
+    } else if (recent && last) {
+      // ② 15 分钟内有事件：按最近一条事件给状态。
+      item.state = stateOfRow(last);
+      const code = String(last.code || '');
+      if (item.state === 'failed') item.error = code || 'ROTATE_FAILED';
+      if (String(last.stage) === 'rotate') item.reason = String(last.note || '已换人');
+      else if (String(last.stage) === 'broadcast_reboot') item.reason = String(last.note || '已广播重 boot');
+      else if (String(last.stage) === 'trigger') item.reason = `已发交接请求，等回执（${hhmmOf(last.at)}）`;
+      else if (String(last.stage) === 'remind') item.reason = '已提醒换人（只提醒、不换人）：等交接回执后由 PM 手动执行';
+      else if (String(last.stage) === 'enqueue') item.reason = `已入队（${String((last.evidence && last.evidence.level) || '')}）`;
+      else if (code === 'NIGHT_SILENT') item.reason = '夜间静默（22–08）未换人';
+      else if (code === 'HANDOVER_TIMEOUT') item.reason = '设计内：等交接回执超时，不换人（已升级 PM）';
+      else if (code) item.reason = String(last.note || code);
+      // 最近有真失败但最近一条不是失败 → 已恢复：放灰字历史，不红（不论旧失败是否在 15 分钟内）。
+      if (lastFail && item.state !== 'failed') {
+        item.history = `历史：${String(lastFail.code || 'FAILED')}（${hhmmOf(lastFail.at)}，已恢复）`;
+        item.historyAt = String(lastFail.at || '');
+      }
+    } else {
+      // ③ 超过 15 分钟无事件：回落 idle；若那条是旧失败 → history（灰字，不红）。
+      item.state = lastFail ? 'history' : 'idle';
+      item.reason = lastFail
+        ? `历史：${String(lastFail.code || 'FAILED')}（${hhmmOf(lastFail.at)}，已恢复）`
+        : '最近一次自动换人事件已超过 15 分钟（无进行中）';
+      if (lastFail) {
+        item.history = item.reason;
+        item.historyAt = String(lastFail.at || '');
+      }
+    }
+    out[role] = item;
   }
   // 只有 cycle 行（role 为空）时也要把用量来源带出来，面板才不会对空角色丢字段。
   for (const [role, src] of Object.entries(usageByRole)) {
     if (out[role]) out[role].usageSource = src;
-    else out[role] = { state: 'idle', reason: '', auditTail: '', error: '', usageSource: src };
+    else out[role] = { state: enabled ? 'idle' : 'disabled', reason: enabled ? '' : '自动换人已关闭（手动换人模式）', auditTail: '', error: '', history: '', historyAt: '', lastAt: '', usageSource: src };
   }
   return {
     byRole: out,
     rotatedToday: rotatedToday.length,
     failedToday: failedToday.length,
+    enabled,
+    mode,
+    staleMs: AR_STALE_MS,
     summary: `今日自动换人 ${rotatedToday.length} 次 / 失败 ${failedToday.length} 次`,
   };
 }
@@ -474,7 +540,7 @@ function buildPanelModel(options = {}) {
   const taskByRole = options.taskByRole && typeof options.taskByRole === 'object' ? options.taskByRole : null;
 
   const snapRoles = readSnapshotRoles(snapshot);
-  const autoRotate = readAutoRotateSummary({ auditRows: options.autoRotateRows, now });
+  const autoRotate = readAutoRotateSummary({ auditRows: options.autoRotateRows, now, config: options.autoRotateConfig });
   // R-28b8：归档失败可见（失败不静默）；来源＝会话归档.jsonl 的 failed 行（主进程读盘后传 rows）。
   const archiveFailures = summarizeArchiveFailures(options.archiveRows);
   // R-c9ac：停滞阈值（options.stallMs 优先；否则从 options.ui.sessionQueue.stallMs 热读；非法回落默认并标记 invalid）。
@@ -505,7 +571,7 @@ function buildPanelModel(options = {}) {
       // B-20261117-181420-9688：最近失败时间（展示用；计数与四态分离，失败数不再决定状态）
       lastFailAt: summary.lastFailAt || '',
       // R-fa0e（3a12）§六：自动换人字段（无记录时 state=idle、审计尾为空，不伪造）
-      autoRotate: autoRotate.byRole[role] || { state: 'idle', reason: '', auditTail: '', error: '', usageSource: '' },
+      autoRotate: autoRotate.byRole[role] || { state: autoRotate.enabled === false ? 'disabled' : 'idle', reason: '', auditTail: '', error: '', history: '', usageSource: '' },
       // R-28b8：旧会话自动归档失败（黄点；值全部来自 model，渲染层不读盘）
       archiveFailed: Boolean((archiveFailures.byRole[role] || {}).count),
       archiveFailedReason: String((archiveFailures.byRole[role] || {}).reason || ''),
@@ -532,7 +598,7 @@ function buildPanelModel(options = {}) {
     live: { stallMs: stallCfg.stallMs, stallInvalid: Boolean(stallCfg.invalid), defaultStallMs: DEFAULT_STALL_MS, source: stallCfg.reason },
     backpressure: backpressureHint((rows.find((row) => row.role === 'pm') || {}).queued),
     // R-fa0e（3a12）§六：团队台只读汇总 [data-ar-summary]
-    autoRotate: { summary: autoRotate.summary, rotatedToday: autoRotate.rotatedToday, failedToday: autoRotate.failedToday },
+    autoRotate: { summary: autoRotate.summary, rotatedToday: autoRotate.rotatedToday, failedToday: autoRotate.failedToday, enabled: autoRotate.enabled, mode: autoRotate.mode, staleMs: autoRotate.staleMs },
     // R-28b8：归档失败聚合（摘要行「· 有 N 个归档失败」+ 行级黄点都取它）
     archiveFailures,
   };
@@ -861,6 +927,8 @@ module.exports = {
   readSnapshotRoles,
   degradationOf,
   summarizeArchiveFailures,
+  readAutoRotateSummary,
+  AR_STALE_MS,
   buildPanelModel,
   backpressureHint,
   pendingInputOf,

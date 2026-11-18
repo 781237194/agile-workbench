@@ -6339,6 +6339,9 @@ ipcMain.handle('theme:metrics', async () => {
       // 名册（团队.json members[].name）是角色显示名唯一来源；读不到就用六角色兜底。
       const roles = [];
       const roleNames = {};
+      // B-20261118-144907-b318：自动换人栏要认 config.autoRotate.enabled（false=已关闭/手动换人模式），
+      // 与名册同一次读盘带出来，不额外读文件。
+      let autoRotateConfig = null;
       try {
         const team = JSON.parse(fs.readFileSync(path.join(teamRoot, '状态', '团队.json'), 'utf8').replace(/^\uFEFF/, ''));
         for (const member of (Array.isArray(team.members) ? team.members : [])) {
@@ -6347,6 +6350,7 @@ ipcMain.handle('theme:metrics', async () => {
           if (!roles.includes(role)) roles.push(role);
           if (member.name) roleNames[role] = String(member.name);
         }
+        if (team.config && typeof team.config.autoRotate === 'object') autoRotateConfig = team.config.autoRotate;
       } catch { /* 名册不可读：用六角色默认顺序与默认名字 */ }
       const projectName0 = String(name || '');
       // 渲染层可以不传 projectId（面板是全局侧栏区块）：此时退回 store 的当前项目，
@@ -6436,6 +6440,7 @@ ipcMain.handle('theme:metrics', async () => {
       const model = SessionQueue.buildPanelModel({
         project: projectName,
         autoRotateRows,
+        autoRotateConfig,
         archiveRows,
         roles: roles.length ? roles : SessionQueue.SIX_ROLES,
         roleNames,

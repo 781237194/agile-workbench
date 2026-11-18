@@ -59,8 +59,8 @@
     sandbox: '沙盘跳过（沙盘根不驱动真实会话）',
     other: '跳过（其它设计内原因）',
   };
-  // R-fa0e（3a12）§六：自动换人六态（[data-ar-state]）
-  const AR_STATE_LABEL = { idle: '空闲', warn: '预警/已入队', pending_handover: '等交接回执', rotating: '正在换人', rebooting: '已广播重 boot', failed: '失败' };
+  // R-fa0e（3a12）§六：自动换人六态（[data-ar-state]）；B-318 增 disabled（已关闭/手动换人）与 history（历史已恢复）
+  const AR_STATE_LABEL = { idle: '空闲', warn: '预警/已入队', pending_handover: '等交接回执', rotating: '正在换人', rebooting: '已广播重 boot', failed: '失败', disabled: '已关闭（手动换人）', history: '历史（已恢复）' };
   // R-c9ac：五态中文文案（写死；unknown=未接入）
   const LIVE_LABEL = { approval: '待审批', blocked: '阻塞', thinking: '思考中', queued: '排队', idle: '空闲', unknown: '未接入' };
   // R-9674：最近活动来源标签（title 用；source=none 表示三源全空）
@@ -289,8 +289,12 @@
       const arChip = node('span', 'sq-ar-chip sq-ar-' + arState, `自动换人：${AR_STATE_LABEL[arState] || arState}`);
       arChip.setAttribute('data-ar-state', arState);
       if (ar.usageSource === 'live') arChip.title = '本轮 token 判档来自实时回退（会话用量.json 缺失或超 24h）';
+      // B-318：关闭态与历史态给一句可读解释（不靠颜色猜）。
+      if (arState === 'disabled') arChip.title = 'config.autoRotate.enabled=false：自动换人已关闭，换人由 PM 手动执行（提醒仍由阈值触发）';
+      if (arState === 'history') arChip.title = '最近一次自动换人事件已超过 15 分钟且已恢复：只作历史提示，不是当前进行中/失败';
       arBox.appendChild(arChip);
-      if (ar.reason) {
+      // 历史态时 reason 与 history 同文，只渲染一次（灰字）。
+      if (ar.reason && !(ar.history && String(ar.reason) === String(ar.history))) {
         const reasonEl = node('span', 'sq-ar-reason', String(ar.reason));
         reasonEl.setAttribute('data-ar-reason', '1');
         arBox.appendChild(reasonEl);
@@ -305,6 +309,12 @@
         const err = node('span', 'sq-ar-error', String(ar.error));
         err.setAttribute('data-ar-error', '1');
         arBox.appendChild(err);
+      } else if (ar.history) {
+        // B-318：历史错误码只作灰字备注（「历史：CODE（HH:MM，已恢复）」），不再标红。
+        const hist = node('span', 'sq-ar-history-text', String(ar.history));
+        hist.setAttribute('data-ar-history', '1');
+        hist.title = `历史自动换人事件（${String(ar.historyAt || '')}）：已恢复，不是当前失败`;
+        arBox.appendChild(hist);
       }
       line.appendChild(arBox);
 
