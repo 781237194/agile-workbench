@@ -167,6 +167,13 @@ function readSnapshotRoles(snapshot) {
       queued: known ? Number(entry.queued) : null,
       byPlacement: known && entry.byPlacement && typeof entry.byPlacement === 'object' ? entry.byPlacement : null,
       sessionId: String(entry.sessionId || ''),
+      // R-c9ac：快照 v2 每角色新增字段（**只增不改**；未知时保持 null/空，不写 false/0 冒充已知）。
+      active: known && entry.active === true,
+      running: known && entry.running === true,
+      pendingInput: known && Array.isArray(entry.pendingInput) ? entry.pendingInput.map((v) => String(v)) : [],
+      runningSince: known && entry.runningSince ? String(entry.runningSince) : '',
+      lastEventAt: known && entry.lastEventAt ? String(entry.lastEventAt) : '',
+      cursor: known && entry.cursor !== undefined && entry.cursor !== null && entry.cursor !== '' ? entry.cursor : null,
     });
   };
   if (Array.isArray(roles)) {
@@ -341,6 +348,10 @@ function buildPanelModel(options = {}) {
 
   const snapRoles = readSnapshotRoles(snapshot);
   const autoRotate = readAutoRotateSummary({ auditRows: options.autoRotateRows, now });
+  // R-c9ac：停滞阈值（options.stallMs 优先；否则从 options.ui.sessionQueue.stallMs 热读；非法回落默认并标记 invalid）。
+  const stallCfg = (Number.isFinite(Number(options.stallMs)) && Number(options.stallMs) > 0)
+    ? { stallMs: Number(options.stallMs), invalid: Boolean(options.stallInvalid), raw: options.stallMs, reason: 'options' }
+    : stallMsOf(options.ui);
   const rows = roles.map((role) => {
     const entry = snapRoles.get(role) || null;
     const summary = summarizeRows(wakeByRole.get(role) || [], { now, windowMs });
@@ -351,6 +362,8 @@ function buildPanelModel(options = {}) {
       queued: entry && entry.known ? entry.queued : null,
       byPlacement: entry ? entry.byPlacement : null,
       sessionId: entry ? entry.sessionId : '',
+      // R-c9ac：快照 v2 实时状态（五态 / 秒表 / 最近事件 / 停滞）——渲染层与团队台行同口径
+      live: liveRowOf(entry, { now, stallMs: stallCfg.stallMs }),
       state: summary.state,
       failCount: summary.failCount,
       skipCount: summary.skipCount,
@@ -377,10 +390,148 @@ function buildPanelModel(options = {}) {
     banner: health,
     badLines: wake.badLines,
     rows,
+    // R-c9ac：本次生效的停滞阈值（面板热读 ui.sessionQueue.stallMs；非法回落默认并给可见提示）
+    live: { stallMs: stallCfg.stallMs, stallInvalid: Boolean(stallCfg.invalid), defaultStallMs: DEFAULT_STALL_MS, source: stallCfg.reason },
     backpressure: backpressureHint((rows.find((row) => row.role === 'pm') || {}).queued),
     // R-fa0e（3a12）§六：团队台只读汇总 [data-ar-summary]
     autoRotate: { summary: autoRotate.summary, rotatedToday: autoRotate.rotatedToday, failedToday: autoRotate.failedToday },
   };
+}
+
+/* ───────── R-c9ac：快照 v2 —— 五态 / 秒表 / 最近事件 / 停滞（纯逻辑，渲染层与团队台行共用口径） ───────── */
+
+// 五态优先级（**写死，不许换序**）：
+//   approval（pendingInput 含 approval）> blocked（含 question/other）> thinking（running===true）
+//   > queued（非 running 且 queued>0）> idle；known:false 或快照缺失/过期 → unknown（未接入）。
+const LIVE_STATE_LABEL = {
+  approval: '待批准',
+  blocked: '阻塞',
+  thinking: '思考中',
+  queued: '排队中',
+  idle: '空闲',
+  unknown: '未接入',
+};
+const DEFAULT_STALL_MS = 600000; // 10 分钟：now - lastEventAt >= stallMs 判停滞
+// 快照 5 秒无更新 / watch 不可用 → 面板降级（R-c9ac 口径）。
+const PUSH_STALE_MS = 5000;
+
+/** pendingInput 归一：小写、去空、去重，最多 20 个（快照最多写 20）。 */
+function pendingInputOf(entry) {
+  const list = entry && Array.isArray(entry.pendingInput) ? entry.pendingInput : [];
+  const out = [];
+  for (const raw of list) {
+    const key = String(raw == null ? '' : raw).trim().toLowerCase();
+    if (!key || out.includes(key)) continue;
+    out.push(key);
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+/** 五态判定（未知不冒充：known!==true 一律 unknown）。 */
+function liveStateOf(entry) {
+  if (!entry || entry.known !== true) return 'unknown';
+  const pending = pendingInputOf(entry);
+  if (pending.includes('approval')) return 'approval';
+  if (pending.includes('question') || pending.includes('other')) return 'blocked';
+  if (entry.running === true) return 'thinking';
+  if (Number(entry.queued) > 0) return 'queued';
+  return 'idle';
+}
+
+/**
+ * 停滞阈值热读：`ui.sessionQueue.stallMs`（默认 600000；非法回落 600000 并给出 invalid 供面板提示）。
+ * @returns {{ stallMs:number, invalid:boolean, raw:*, reason:string }}
+ */
+function stallMsOf(ui) {
+  const box = ui && typeof ui === 'object' ? ui.sessionQueue : null;
+  const raw = box && typeof box === 'object' ? box.stallMs : (box === undefined ? undefined : box);
+  const n = Number(raw);
+  if (raw === undefined || raw === null || raw === '') return { stallMs: DEFAULT_STALL_MS, invalid: false, raw, reason: 'default' };
+  if (!Number.isFinite(n) || n <= 0) return { stallMs: DEFAULT_STALL_MS, invalid: true, raw, reason: 'invalid' };
+  return { stallMs: n, invalid: false, raw, reason: 'configured' };
+}
+
+/**
+ * 停滞判定：lastEventAt 缺失不判停滞；unknown 行不判停滞。
+ * @returns {{ stall:boolean, minutes:number|null, text:string, ageMs:number|null }}
+ */
+function stallOf({ now, lastEventAt, stallMs, state } = {}) {
+  const base = { stall: false, minutes: null, text: '', ageMs: null };
+  if (String(state || '') === 'unknown') return base;
+  const at = Date.parse(String(lastEventAt || ''));
+  if (!Number.isFinite(at)) return base;
+  const ts = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const threshold = Number(stallMs) > 0 ? Number(stallMs) : DEFAULT_STALL_MS;
+  const ageMs = Math.max(0, ts - at);
+  if (ageMs < threshold) return { ...base, ageMs };
+  const minutes = Math.floor(ageMs / 60000);
+  return { stall: true, minutes, text: `停滞 ${minutes} 分`, ageMs };
+}
+
+/** 秒表文本：thinking 行 mm:ss（按 runningSince 起算）；非 thinking 或缺 runningSince 一律「—」。 */
+function thinkTextOf(entry, now) {
+  const state = liveStateOf(entry);
+  if (state !== 'thinking') return '—';
+  const since = Date.parse(String((entry && entry.runningSince) || ''));
+  if (!Number.isFinite(since)) return '—';
+  const ts = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const elapsed = Math.max(0, ts - since);
+  const minutes = Math.floor(elapsed / 60000);
+  const seconds = Math.floor((elapsed % 60000) / 1000);
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+/** 相对时间文本（最近事件列）；不可解析 → 「—」。 */
+function relativeTimeText(iso, now) {
+  const ms = Date.parse(String(iso || ''));
+  if (!Number.isFinite(ms)) return '—';
+  const ts = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const diff = Math.max(0, ts - ms);
+  if (diff < 60 * 1000) return '刚刚';
+  if (diff < 60 * 60 * 1000) return `${Math.floor(diff / 60000)} 分钟前`;
+  if (diff < 24 * 60 * 60 * 1000) return `${Math.floor(diff / 3600000)} 小时前`;
+  return `${Math.floor(diff / 86400000)} 天前`;
+}
+
+/** byPlacement 的 title 文本：必须同时含 queued/steering/context 三个数（未知给「—」）。 */
+function byPlacementTitleOf(byPlacement) {
+  const box = byPlacement && typeof byPlacement === 'object' ? byPlacement : null;
+  const pick = (key) => {
+    if (!box) return '—';
+    const n = Number(box[key]);
+    return Number.isFinite(n) ? String(n) : '—';
+  };
+  const q = pick('queued');
+  const s = pick('steering');
+  const c = pick('context');
+  return `queued=${q} steering=${s} context=${c}`;
+}
+
+/**
+ * 单角色 live 视图（buildPanelModel 的 rows[].live）。
+ * 字段全部来自快照 v2；stall 用传入阈值计算（渲染层若要热读阈值，可自行用 stallOf 重算）。
+ */
+function liveRowOf(entry, { now, stallMs } = {}) {
+  const state = liveStateOf(entry);
+  const merged = {
+    state,
+    stateText: LIVE_STATE_LABEL[state] || LIVE_STATE_LABEL.unknown,
+    known: Boolean(entry && entry.known === true),
+    active: entry && entry.known === true ? entry.active === true : null,
+    running: entry && entry.known === true ? entry.running === true : null,
+    pendingInput: pendingInputOf(entry),
+    queued: entry && entry.known === true ? Number(entry.queued) : null,
+    byPlacement: entry && entry.byPlacement ? entry.byPlacement : null,
+    byPlacementTitle: byPlacementTitleOf(entry && entry.byPlacement),
+    runningSince: String((entry && entry.runningSince) || ''),
+    lastEventAt: String((entry && entry.lastEventAt) || ''),
+    cursor: entry && entry.cursor !== undefined ? entry.cursor : null,
+    thinkText: thinkTextOf(entry, now),
+    lastEventText: relativeTimeText(entry && entry.lastEventAt, now),
+  };
+  merged.stall = stallOf({ now, lastEventAt: merged.lastEventAt, stallMs, state });
+  return merged;
 }
 
 /** 背压提示：排队 ≥3 才有节点（<3 时节点不存在，不是隐藏）；只提示、不阻断派单。 */
@@ -401,6 +552,10 @@ module.exports = {
   SNAPSHOT_MAX_BYTES,
   BACKPRESSURE_THRESHOLD,
   SKIP_VALUES,
+  // R-c9ac：快照 v2（五态 / 停滞 / 秒表 / 相对时间 / byPlacement 文案）
+  LIVE_STATE_LABEL,
+  DEFAULT_STALL_MS,
+  PUSH_STALE_MS,
   rowAt,
   rowReason,
   rowSkipped,
@@ -411,4 +566,12 @@ module.exports = {
   degradationOf,
   buildPanelModel,
   backpressureHint,
+  pendingInputOf,
+  liveStateOf,
+  stallMsOf,
+  stallOf,
+  thinkTextOf,
+  relativeTimeText,
+  byPlacementTitleOf,
+  liveRowOf,
 };

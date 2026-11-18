@@ -65,6 +65,17 @@ if (IS_BOARD_WINDOW) {
     teamRoleQueues: (payload) => ipcRenderer.invoke('team:role-queues', payload),
     // R-6bc8（T-37f5）：会话排队面板（只读：会话排队.json 排队数 + 唤醒.jsonl 四态；不写任何会话）。
     teamSessionQueue: (payload) => ipcRenderer.invoke('team:session-queue', payload),
+    // c9ac 自检旋钮（主进程只在 --live-check 进程注册这两个 IPC；生产调用会被拒绝/未注册）。
+    sessionQueuePushMode: (payload) => ipcRenderer.invoke('team:session-queue-push-mode', payload),
+    liveCheckStats: () => ipcRenderer.invoke('team:live-check-stats'),
+    // c9ac（T-20261118-083424-8e33）：会话排队快照变化推送——主进程 fs.watch(团队/状态) 去抖 300ms 后 send，
+    // 渲染层只订阅（不新增轮询通道）；watch 不可用时主进程在 model.push 里如实标 degraded，黄条复用 #session-queue-banner。
+    onSessionQueueChanged: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      const handler = (_event, payload) => { try { cb(payload || {}); } catch { /* 回调自身异常忽略 */ } };
+      ipcRenderer.on('team:session-queue-changed', handler);
+      return () => { try { ipcRenderer.off('team:session-queue-changed', handler); } catch { /* ignore */ } };
+    },
     // R-1dfb（F7/AC5，卷 §六）：团队台活跃度三列只读通道——主进程统一算 + 5 分钟缓存，
     // 渲染层只显示不自算（最近提交 / 最近文件写入 / 最后成功唤醒）。
     teamRoleActivity: (payload) => ipcRenderer.invoke('team:role-activity', payload),

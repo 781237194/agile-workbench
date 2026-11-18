@@ -84,6 +84,8 @@ function printHelp() {
   console.log('');
   console.log('  .                    启动当前工作台（与 npm start 相同）');
   console.log('  . --selftest         运行自检（与 npm run selftest 相同）');
+  console.log('  . --sq-check         会话排队面板自检（沙盘 + AWB_SQ_OUT 指定产物目录）');
+  console.log('  . --live-check       会话实时状态面板自检（沙盘 + AWB_LIVE_OUT 指定产物目录）');
   console.log('  --version            只让 Electron 打印版本，不打开窗口');
   console.log('  --print-plan         只打印解析到的 Electron 路径/参数/环境清理结果，不启动');
   console.log('');
@@ -142,6 +144,21 @@ if (inheritedRunAsNode) {
 }
 
 const args = argv.length ? argv : ['.'];
+
+// R-c9ac：--live-check 自检的沙盘隔离在启动前兜底（主进程 src/main.js 里还会再兜一次，
+// 保证直接 `electron . --live-check` 与经本入口启动行为一致）：
+//   ① TEAM_SELFTEST=1 —— 沙盘不驱动 DSH、不弹通知；
+//   ② AWB_LIVE_DATA   —— 独立数据根（缺省 .live-check-data）；
+//   ③ AWB_LIVE_OUT    —— 自检产物目录（缺省 _tmp/live-check）。
+// 只给 flag 不给 app 路径时补 '.'，否则 Electron 会把 --live-check 当成应用目录。
+if (args.includes('--live-check')) {
+  if (!process.env.TEAM_SELFTEST) process.env.TEAM_SELFTEST = '1';
+  if (!process.env.AWB_LIVE_DATA) process.env.AWB_LIVE_DATA = path.join(ROOT, '.live-check-data');
+  if (!process.env.AWB_LIVE_OUT) process.env.AWB_LIVE_OUT = path.join(ROOT, '_tmp', 'live-check');
+  if (args[0] && String(args[0]).startsWith('--')) args.unshift('.');
+  // 写 stdout（不是 stderr）：自检按 ok=true 判成功，stderr 会被 CI 误当失败。
+  console.log(`[live-check] 沙盘隔离：TEAM_SELFTEST=${process.env.TEAM_SELFTEST} · AWB_LIVE_DATA=${process.env.AWB_LIVE_DATA} · AWB_LIVE_OUT=${process.env.AWB_LIVE_OUT}`);
+}
 
 // 30d8：沙盘测试集中隔离 DSH_HOME。
 // 背景：UI/沙盘测试拉起工作台（内嵌 DSH）时若未隔离 DSH_HOME，DSH 会把 _tmp 沙盘目录

@@ -23,6 +23,14 @@ import { spawn } from 'node:child_process'
 import fs, { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, normalize, resolve } from 'node:path'
+// c9ac 快照 v2：复用 session-queue.js 的唯一组装实现（三条通道共用一套 schema，不另立第二套）。
+import {
+  SNAPSHOT_SCHEMA,
+  SNAPSHOT_FILE,
+  buildLiveSnapshot,
+  applyStateFrame,
+  snapshotEqualsExceptAt,
+} from './session-queue.js'
 
 // R-6bc8（T-37f5）：host half 只读消费 sessionController.state（写侧一律不碰）。
 export const inject = ['tools', 'sessionController']
@@ -380,47 +388,6 @@ function atomicWriteJson(file, value, eol = "\n") {
   fs.renameSync(tmp, file)
 }
 
-function queuedOf(state) {
-  const queue = state && Array.isArray(state.queue) ? state.queue : null
-  if (queue === null) return { known: false, count: null, byPlacement: null }
-  const byPlacement = { queued: 0, steering: 0, context: 0 }
-  for (const row of queue) {
-    const placement = String((row && row.placement) || 'queued')
-    byPlacement[placement] = (byPlacement[placement] || 0) + 1
-  }
-  return { known: true, count: byPlacement.queued || 0, byPlacement }
-}
-
-function wakeStateOf(rows, now, staleMs) {
-  const list = Array.isArray(rows) ? rows.filter(Boolean) : []
-  if (!list.length) return { state: 'none', lastOkAt: '', lastAt: '', lastFailAt: '', stale: false }
-  const atOf = (row) => Date.parse(String((row && (row.at || row.deliveredAt || row.deliverAt)) || '')) || 0
-  const parsed = list.map((row) => {
-    const ok = row.ok === true
-    const skipped = row.skipped === true || row.state === 'skipped' || /^skipped$/i.test(String(row.reason || row.why || ''))
-    return { ok, skipped, failed: !ok && !skipped, at: atOf(row) }
-  }).sort((a, b) => b.at - a.at)
-  const lastAt = parsed[0] ? parsed[0].at : 0
-  const lastOk = parsed.find((row) => row.ok && row.at)
-  const lastOkAt = lastOk ? new Date(lastOk.at).toISOString() : ''
-  const lastFail = parsed.find((row) => row.failed && row.at)
-  const lastFailAt = lastFail ? new Date(lastFail.at).toISOString() : ''
-  const stale = lastAt ? (Number(now) - lastAt) > Number(staleMs) : false
-  // B-20261117-181420-9688（P1）：四态取最近一次投递的结果，不能「窗口内曾失败一次就永久 fail」。
-  // 同时间戳 tie-break：skip > fail > ok。
-  const TIE_RANK = { skip: 3, fail: 2, ok: 1, none: 0 }
-  let state = 'none'
-  let latestAt = -1
-  for (const row of parsed) {
-    const kind = row.skipped ? 'skip' : (row.failed ? 'fail' : (row.ok ? 'ok' : 'none'))
-    if (row.at > latestAt || (row.at === latestAt && TIE_RANK[kind] > TIE_RANK[state])) {
-      state = kind
-      latestAt = row.at
-    }
-  }
-  return { state, lastOkAt, lastAt: lastAt ? new Date(lastAt).toISOString() : '', lastFailAt, stale }
-}
-
 function readWakeRows(teamRoot, role, activeProject) {
   // 真实落点是「按项目分文件」：团队/状态/项目/<项目>/唤醒.jsonl（实测 1.6MB 级、6000+ 行）。
   // 顶层 团队/状态/唤醒.jsonl 只在旧沙盘/夹具里出现，作兼容回退（只读它会让人以为生产上「无记录」）。
@@ -437,7 +404,66 @@ function readWakeRows(teamRoot, role, activeProject) {
   return []
 }
 
-export async function collectSessionQueueSnapshot(ctx, pluginConfig, now = Date.now()) {
+function readTeamOf(teamRoot) {
+  return JSON.parse(fs.readFileSync(join(teamRoot, TEAM_STATE_SUBDIR, '团队.json'), 'utf8'))
+}
+
+function membersOf(team) {
+  return (Array.isArray(team && team.members) ? team.members : []).filter((m) => m && m.role)
+}
+
+/** 唤醒行按角色分组（schema 2 一次组装，避免每行重复读同一份 唤醒.jsonl）。 */
+function wakesOf(teamRoot, team) {
+  const wakes = {}
+  for (const member of membersOf(team)) {
+    const role = String(member.role || '')
+    wakes[role] = readWakeRows(teamRoot, role, team.activeProject)
+  }
+  return wakes
+}
+
+/** 兜底采样：每角色读一次 state()，把结果合进 live（保留 runningSince/lastEventAt 连续性）。 */
+async function sampleInto(ctx, team, live, now = Date.now()) {
+  for (const member of membersOf(team)) {
+    const role = String(member.role || '')
+    const sessionId = String(member.sessionId || '')
+    const entry = live.get(role) || { sessionId }
+    entry.sessionId = sessionId
+    let state = null
+    if (sessionId) {
+      try { state = await ctx.sessionController.state({ sessionId }, AbortSignal.timeout(3000)) } catch { state = null }
+    }
+    live.set(role, applyStateFrame(entry, state, now))
+  }
+  return live
+}
+
+/**
+ * 组装 + 落盘（订阅去抖与 60s 兜底共用这一条写路径）。
+ * skipIfUnchanged（兜底专用）：除 at 外与上一份全等 → 不写盘（3 分钟静置 ≤2 次写/读）。
+ */
+function publishSnapshot({ teamRoot, resolveSource, team, live, now = Date.now(), staleMs = 120000, degraded = null, skipIfUnchanged = false } = {}) {
+  const file = join(teamRoot, TEAM_STATE_SUBDIR, SNAPSHOT_FILE)
+  const previous = (() => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null } })()
+  const snapshot = buildLiveSnapshot({
+    project: team && team.activeProject, teamRoot, live, wakes: wakesOf(teamRoot, team), now, staleMs, degraded,
+  })
+  snapshot.resolveSource = resolveSource
+  if (skipIfUnchanged && previous && previous.schema === SNAPSHOT_SCHEMA && snapshotEqualsExceptAt(previous, snapshot)) {
+    return { ok: true, file, skipped: true, reason: 'UNCHANGED', roles: snapshot.roles.length, teamRoot, resolveSource, schema: SNAPSHOT_SCHEMA }
+  }
+  try {
+    atomicWriteJson(file, snapshot)
+  } catch (error) {
+    return {
+      ok: false, code: 'SQ_WRITE_FAILED', file, wroteDegraded: false,
+      message: `写快照失败：${String((error && error.message) || error).slice(0, 200)}`, teamRoot, resolveSource,
+    }
+  }
+  return { ok: true, file, roles: snapshot.roles.length, teamRoot, resolveSource, schema: SNAPSHOT_SCHEMA, skipped: false }
+}
+
+export async function collectSessionQueueSnapshot(ctx, pluginConfig, now = Date.now(), runtime = {}) {
   // B-20261117-180718-9229：先解析 teamRoot；解析不到就**明确失败**（绝不落相对路径）。
   const resolved = resolveTeamRoot(pluginConfig)
   const staleMs = Number((pluginConfig && pluginConfig.staleMs) || 120000)
@@ -448,7 +474,7 @@ export async function collectSessionQueueSnapshot(ctx, pluginConfig, now = Date.
     return { ok: false, code: resolved.error.code, message: resolved.error.message, tried: resolved.tried }
   }
   const teamRoot = resolved.teamRoot
-  const file = join(teamRoot, TEAM_STATE_SUBDIR, '会话排队.json')
+  const file = join(teamRoot, TEAM_STATE_SUBDIR, SNAPSHOT_FILE)
   // 上一份快照：失败时保留它的 roles（不清空面板），并沿用它的 at 作为「上次成功时间」。
   const previous = (() => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null } })()
 
@@ -456,7 +482,8 @@ export async function collectSessionQueueSnapshot(ctx, pluginConfig, now = Date.
     const lastAttemptAt = new Date(Number(now) || Date.now()).toISOString()
     const degraded = { code: String(code || 'SQ_COLLECT_FAILED'), message: String(message || '').slice(0, 300), lastAttemptAt }
     const snapshot = {
-      schema: 1,
+      // schema 2：旧字段（schema/at/project/staleMs/roles）一个不删，degraded 里如实写原因。
+      schema: SNAPSHOT_SCHEMA,
       at: (previous && previous.at) || lastAttemptAt,
       project: String((previous && previous.project) || ''),
       teamRoot,
@@ -481,73 +508,141 @@ export async function collectSessionQueueSnapshot(ctx, pluginConfig, now = Date.
 
   let team = null
   try {
-    team = JSON.parse(fs.readFileSync(join(teamRoot, TEAM_STATE_SUBDIR, '团队.json'), 'utf8'))
+    team = readTeamOf(teamRoot)
   } catch (error) {
     return writeDegraded('SQ_TEAM_JSON_MISSING', `读不到 ${join(teamRoot, TEAM_STATE_SUBDIR, '团队.json')}：${String((error && error.message) || error).slice(0, 160)}`)
   }
-  // AC4：没有 sessionId 的角色也要出行（known=false / queued=null），面板显示「—」而不是 0
-  const members = Array.isArray(team.members) ? team.members.filter((m) => m && m.role) : []
-  const roles = []
-  for (const member of members) {
-    const role = String(member.role || '')
-    const sessionId = String(member.sessionId || '')
-    let state = null
-    try {
-      state = await ctx.sessionController.state({ sessionId }, AbortSignal.timeout(3000))
-    } catch { state = null }
-    const queued = queuedOf(state)
-    const wake = wakeStateOf(readWakeRows(teamRoot, role, team.activeProject), now, staleMs)
-    roles.push({
-      role, sessionId,
-      known: queued.known && Boolean(sessionId),
-      queued: queued.known ? queued.count : null,
-      byPlacement: queued.byPlacement,
-      state: wake.state, lastOkAt: wake.lastOkAt, lastAt: wake.lastAt,
-      stale: wake.stale || !queued.known,
-    })
-  }
-  const snapshot = {
-    schema: 1,
-    at: new Date(Number(now) || Date.now()).toISOString(),
-    project: String(team.activeProject || ''),
-    teamRoot,
-    resolveSource: resolved.source,
-    staleMs,
-    degraded: null,
-    roles,
-  }
-  try {
-    atomicWriteJson(file, snapshot)
-  } catch (error) {
-    return writeDegraded('SQ_WRITE_FAILED', `写快照失败：${String((error && error.message) || error).slice(0, 200)}；path=${file}`)
-  }
-  return { ok: true, file, roles: roles.length, teamRoot, resolveSource: resolved.source }
+  // AC4：没有 sessionId 的角色也要出行（known=false / queued=null），面板显示「—」而不是 0。
+  // c9ac：live 可复用（订阅/兜底共用同一份，runningSince/lastEventAt 才有连续性）。
+  const live = runtime && runtime.live instanceof Map ? runtime.live : new Map()
+  await sampleInto(ctx, team, live, Number(now) || Date.now())
+  return publishSnapshot({ teamRoot, resolveSource: resolved.source, team, live, now: Number(now) || Date.now(), staleMs, skipIfUnchanged: true })
 }
 
 export function apply(ctx, config) {
   const pluginConfig = config && typeof config === 'object' ? config : {}
 
-  // R-6bc8：会话排队只读快照（周期采集；卸载自动清）
+  // R-6bc8 → R-c9ac：会话排队只读快照。采样通道升级为
+  //   ① 优先 observeState 订阅（每个有 sessionId 的角色一条流；变更去抖 ≤500ms 合并写一次）；
+  //   ② 每 60s 一次 state() 兜底采样（除 at 外与上一份全等 → 不写盘）；
+  //   ③ observeState 不可用/抛错 → 退回 60s 兜底，并在快照 degraded 里如实记原因（不静默）。
+  // 卸载时 abort 订阅 + 清定时器（ctx.effect 清理），绝不调用写侧方法。
   ctx.effect(() => {
-    const intervalMs = Math.max(2000, Number(pluginConfig.snapshotIntervalMs) || 5000)
+    const controller = new AbortController()
+    const signal = controller.signal
+    const fallbackMs = Math.max(1000, Number(pluginConfig.fallbackIntervalMs) || 60000)
+    const debounceMs = Math.min(500, Math.max(50, Number(pluginConfig.debounceMs) || 500))
+    const staleMs = Number(pluginConfig.staleMs || 120000)
+    const live = new Map()
     let stopped = false
-    const tick = () => {
-      if (stopped) return
-      Promise.resolve()
-        .then(() => collectSessionQueueSnapshot(ctx, pluginConfig))
-        // B-20261117-180718-9229：不许静默吞错——采集内部已写 degraded 快照，这里只兜「意外抛出」并留日志。
-        .catch((error) => {
-          try {
-            console.error('[sq] collect threw ' + JSON.stringify({
-              code: String((error && error.code) || ''),
-              message: String((error && error.message) || error).slice(0, 200),
-            }))
-          } catch { /* 控制台不可写时忽略 */ }
-        })
+    let degraded = null
+    let debounceTimer = null
+    const log = (code, extra) => {
+      try { console.error('[sq] ' + code + ' ' + JSON.stringify(extra || {})) } catch { /* 控制台不可写时忽略 */ }
     }
-    tick()
-    const timer = setInterval(tick, intervalMs)
-    return () => { stopped = true; clearInterval(timer) }
+    const flush = (source) => {
+      if (stopped) return
+      const resolved = resolveTeamRoot(pluginConfig)
+      if (!resolved.teamRoot) { log('SQ_TEAMROOT_UNRESOLVED', {}); return }
+      let team = null
+      try { team = readTeamOf(resolved.teamRoot) } catch (error) {
+        log('SQ_TEAM_JSON_MISSING', { message: String((error && error.message) || error).slice(0, 160) })
+        return
+      }
+      const result = publishSnapshot({
+        teamRoot: resolved.teamRoot, resolveSource: resolved.source, team, live,
+        now: Date.now(), staleMs, degraded, skipIfUnchanged: source === 'fallback',
+      })
+      if (!result.ok) log('SQ_WRITE_FAILED', { file: result.file, message: result.message })
+    }
+    // 变更去抖：窗口内的多帧合并成一次写（≤500ms），保证落盘 ≤1s。
+    const arm = () => {
+      if (stopped || debounceTimer) return
+      debounceTimer = setTimeout(() => { debounceTimer = null; flush('subscribe') }, debounceMs)
+    }
+
+    // ① 订阅（只读）：兼容 async iterable / 回调 / { dispose } 三种返回形态。
+    const disposers = []
+    const subscribeOne = async (role, sessionId) => {
+      const entry = live.get(role) || { sessionId }
+      entry.sessionId = sessionId
+      live.set(role, entry)
+      const sc = ctx.sessionController
+      if (!sc || typeof sc.observeState !== 'function') throw new Error('observeState unavailable')
+      const stream = await sc.observeState({ sessionId }, signal)
+      const onFrame = (frame) => { applyStateFrame(entry, frame, Date.now()); arm() }
+      if (stream && typeof stream[Symbol.asyncIterator] === 'function') {
+        (async () => {
+          try {
+            for await (const frame of stream) {
+              if (signal.aborted) break
+              onFrame(frame)
+            }
+          } catch (error) {
+            if (!signal.aborted) {
+              degraded = { code: 'SQ_OBSERVE_STREAM_FAILED', message: String((error && error.message) || error).slice(0, 200) }
+              log('SQ_OBSERVE_STREAM_FAILED', { role, message: degraded.message })
+            }
+          }
+        })()
+        return
+      }
+      if (typeof stream === 'function') {
+        const dispose = stream(onFrame)
+        if (typeof dispose === 'function') disposers.push(dispose)
+        return
+      }
+      if (stream && typeof stream.dispose === 'function') {
+        disposers.push(() => stream.dispose())
+        return
+      }
+      throw new Error('observeState returned unsupported shape')
+    }
+    ;(async () => {
+      const resolved = resolveTeamRoot(pluginConfig)
+      let team = null
+      try { if (resolved.teamRoot) team = readTeamOf(resolved.teamRoot) } catch { team = null }
+      if (!team) return
+      for (const member of membersOf(team)) {
+        const role = String(member.role || '')
+        const sessionId = String(member.sessionId || '')
+        if (!sessionId) continue
+        try {
+          await subscribeOne(role, sessionId)
+        } catch (error) {
+          degraded = { code: 'SQ_OBSERVE_UNAVAILABLE', message: String((error && error.message) || error).slice(0, 200) }
+          log('SQ_OBSERVE_UNAVAILABLE', { role, message: degraded.message })
+        }
+      }
+      // 首屏落一次（不依赖第一帧到达时机）：订阅可用时走一次数据通道写；订阅不可用时先 state() 采一次，
+      // 保证退回兜底后面板不是空白，且 degraded 里带着失败原因（不静默）。
+      if (degraded) {
+        try { await sampleInto(ctx, team, live, Date.now()) } catch (error) {
+          log('SQ_FALLBACK_FAILED', { message: String((error && error.message) || error).slice(0, 200) })
+        }
+      }
+      flush(degraded ? 'fallback' : 'subscribe')
+    })().catch((error) => log('SQ_SUBSCRIBE_INIT_FAILED', { message: String((error && error.message) || error).slice(0, 200) }))
+
+    // ② 兜底：每 60s 一次 state() 采样；除 at 外全等 → 不写盘（3 分钟静置 ≤2 次写/读）。
+    const timer = setInterval(() => {
+      if (stopped) return
+      const resolved = resolveTeamRoot(pluginConfig)
+      if (!resolved.teamRoot) return
+      let team = null
+      try { team = readTeamOf(resolved.teamRoot) } catch { return }
+      sampleInto(ctx, team, live, Date.now())
+        .then(() => flush('fallback'))
+        .catch((error) => log('SQ_FALLBACK_FAILED', { message: String((error && error.message) || error).slice(0, 200) }))
+    }, fallbackMs)
+
+    return () => {
+      stopped = true
+      controller.abort()
+      clearInterval(timer)
+      if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null }
+      for (const dispose of disposers) { try { dispose() } catch { /* 清理失败不影响卸载 */ } }
+    }
   })
 
   ctx.effect(() =>

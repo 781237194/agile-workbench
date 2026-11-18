@@ -11094,6 +11094,79 @@ function legacyActivityRefresh(force) {
   return pending;
 }
 
+// R-c9ac（快照 v2）：团队台行 live 四列——数据源＝会话排队面板模型（window.__sqModel；面板每次重绘广播
+// awb:session-queue-model 事件后这里跟着刷新），**不新增轮询通道、不另算口径**：五态/秒表/最近事件/停滞
+// 全部取同一份模型 rows[].live，与 #session-live-section 逐字段同口径。
+const LEGACY_SQ_LIVE_COLUMNS = [
+  { key: 'live', attr: 'data-role-live', label: '五态' },
+  { key: 'think', attr: 'data-role-think', label: '思考时长' },
+  { key: 'lastEvent', attr: 'data-role-last-event', label: '最近事件' },
+  { key: 'stall', attr: 'data-role-stall', label: '停滞' },
+];
+const LEGACY_SQ_LIVE_LABEL = { approval: '待批准', blocked: '阻塞', thinking: '思考中', queued: '排队中', idle: '空闲', unknown: '未接入' };
+
+function legacySqLiveModel() {
+  try {
+    return (typeof window !== 'undefined' && typeof window.__sqModel === 'function') ? window.__sqModel() : null;
+  } catch (e) { return null; }
+}
+
+function legacySqLiveViewOf(roleId) {
+  const model = legacySqLiveModel();
+  const row = (model && Array.isArray(model.rows))
+    ? model.rows.find((item) => String((item && item.role) || '') === String(roleId))
+    : null;
+  const live = (row && row.live && typeof row.live === 'object') ? row.live : null;
+  const stateKey = live ? String(live.state || 'unknown') : 'unknown';
+  const label = (live && live.stateText) || LEGACY_SQ_LIVE_LABEL[stateKey] || '未接入';
+  const stall = Boolean(live && live.stall && live.stall.stall);
+  const stallText = (live && live.stall && live.stall.text) ? String(live.stall.text) : '';
+  const redish = stateKey === 'approval' || stateKey === 'blocked';
+  return {
+    live: {
+      text: label,
+      title: `五态（与 #session-live-section 同口径）：${label}`,
+      cls: stateKey === 'unknown' ? 'muted' : (redish ? 'warn' : 'ok'),
+    },
+    think: {
+      text: (live && live.thinkText) || '—',
+      title: stateKey === 'thinking'
+        ? ((live && live.runningSince) ? `思考开始：${live.runningSince}` : '缺 runningSince：显示「—」，不用当前时间伪造开始时刻')
+        : '非 thinking 行显示「—」',
+      cls: 'muted',
+    },
+    lastEvent: {
+      text: (live && live.lastEventText) || '—',
+      title: (live && live.lastEventAt) ? `最近事件（绝对时间）：${live.lastEventAt}` : '未记录最近事件（显示「—」，不按 0 处理）',
+      cls: 'muted',
+    },
+    stall: {
+      text: stall ? 'true' : 'false',
+      title: stallText || '停滞判据：now - lastEventAt ≥ 阈值（ui.sessionQueue.stallMs，默认 600000ms）；lastEventAt 缺失或 unknown 不判停滞',
+      cls: stall ? 'warn' : 'muted',
+    },
+  };
+}
+
+function legacySqLivePaint() {
+  const rows = Array.from(document.querySelectorAll('.legacy-team-row[data-activity-role]'));
+  for (const rowEl of rows) {
+    const view = legacySqLiveViewOf(rowEl.getAttribute('data-activity-role') || '');
+    for (const col of LEGACY_SQ_LIVE_COLUMNS) {
+      const cell = rowEl.querySelector(`[${col.attr}]`);
+      if (!cell) continue;
+      const value = view[col.key];
+      cell.textContent = value.text;
+      cell.title = value.title;
+      cell.className = value.cls;
+    }
+  }
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('awb:session-queue-model', () => legacySqLivePaint());
+}
+
 function renderLegacyTeamGate() {
   const box = $('#team-legacy-gate');
   if (!box) return;
@@ -11123,6 +11196,13 @@ function renderLegacyTeamGate() {
       const cell = act.cells[col.key];
       return `<span class="${esc(cell.cls)}" data-activity-${esc(col.key)} style="flex:0 0 auto;min-width:56px;text-align:right;white-space:nowrap" title="${esc(cell.title)}">${esc(cell.text)}</span>`;
     }).join('');
+    // R-c9ac：会话实时四列（[data-role-live]/[data-role-think]/[data-role-last-event]/[data-role-stall]），
+    // 与 #session-live-section 同口径；不动既有 data-activity-* 字段。
+    const sqLive = legacySqLiveViewOf(role.id);
+    const sqLiveCells = LEGACY_SQ_LIVE_COLUMNS.map((col) => {
+      const cell = sqLive[col.key];
+      return `<span class="${esc(cell.cls)}" ${esc(col.attr)} style="flex:0 0 auto;min-width:52px;text-align:right;white-space:nowrap" title="${esc(cell.title)}">${esc(cell.text)}</span>`;
+    }).join('');
     return `<div class="legacy-team-row" data-activity-role="${esc(role.id)}" data-activity-state="${esc(act.state)}" data-activity-level="${esc(act.level)}">
       <span class="legacy-team-dot" style="--role-color:${esc(role.color)}"></span>
       <b>${esc(role.name)}</b>
@@ -11132,6 +11212,7 @@ function renderLegacyTeamGate() {
       <span class="${session ? 'ok' : 'warn'}">${session ? '会话已映射' : '无会话'}</span>
       <span class="${boot.ready ? 'ok' : (boot.roundMismatch ? 'warn' : 'muted')}" title="${esc(boot.missing.join('、') || boot.at || '')}">${esc(boot.label)}</span>
       ${actCells}
+      ${sqLiveCells}
       <button type="button" class="legacy-boot-mini" data-legacy-boot="${esc(role.id)}" ${bootCtl.disabled ? 'disabled' : ''} title="${esc(bootCtl.title)}">${esc(bootCtl.text)}</button>
     </div>`;
   }).join('');

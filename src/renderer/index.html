@@ -27,6 +27,25 @@
     })();
   </script>
   <link rel="stylesheet" href="style.css">
+  <!-- R-c9ac（壳读取 + 渲染层面板）：会话实时状态区的最小样式钩子。
+       只作用于 #session-live-section 内部（新锚点 [data-live-row]），不改既有 .sq-* 任何规则；
+       行级样式随行内 data-live-state 变化，不新增布局断言依赖。 -->
+  <style>
+    #session-live-section .sq-live-head { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 6px; font-size: 12px; opacity: .85; }
+    #session-live-section .sq-live-rows { display: flex; flex-direction: column; gap: 6px; }
+    #session-live-section .sq-live-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 5px 8px; border: 1px solid transparent; border-radius: 8px; font-size: 13px; line-height: 1.6; }
+    #session-live-section .sq-live-role { min-width: 92px; font-weight: 600; white-space: nowrap; }
+    #session-live-section .sq-live-state { padding: 0 8px; border: 1px solid #3a4250; border-radius: 999px; white-space: nowrap; }
+    #session-live-section .sq-live-row[data-live-state="thinking"] .sq-live-state { border-color: #4da3ff; color: #7dbdff; }
+    #session-live-section .sq-live-row[data-live-state="approval"] .sq-live-state { border-color: #b3261e; color: #ff8b84; }
+    #session-live-section .sq-live-row[data-live-state="blocked"] .sq-live-state { border-color: #a2790a; color: #ffc400; }
+    #session-live-section .sq-live-row[data-live-state="unknown"] { opacity: .7; }
+    #session-live-section .sq-live-row.stall { border-color: #a2790a; background: rgba(255, 196, 0, .08); }
+    #session-live-section .sq-live-meta { font-size: 12px; opacity: .85; white-space: nowrap; }
+    #session-live-section .sq-live-num { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    #session-live-section .sq-live-stall-text { color: #ffc400; white-space: nowrap; }
+    #session-live-section .sq-live-attr { display: none; }
+  </style>
 </head>
 <body>
   <!-- T-5d98（R-fd42）：PM 身份绑定失败横幅（WB_UNREADABLE / 待写入；默认隐藏，失败时可见，不静默）。 -->
@@ -713,6 +732,28 @@
                   <span class="sq-h sq-h-last" title="最近一次成功投递时间（只取 ok 行）；「无记录」表示窗口内没有成功投递">最近成功投递</span>
                 </div>
                 <div id="session-queue-rows" class="sq-rows" aria-label="六角色会话排队与唤醒状态"></div>
+              </section>
+
+              <!-- R-c9ac（快照 v2 壳读取 + 渲染层）：会话实时状态六行。
+                   行锚点固定 [data-live-row]（**绝不带 data-sq-row**：旧表六行仍是唯一 [data-sq-row]，--sq-check 断言恰 6）。
+                   每行锚点：data-sq-live（中文五态）/ data-sq-think（思考 mm:ss 或「—」）/ data-sq-last-event（相对时间，title 绝对时间）/
+                   data-live-queued（只数 placement=queued）/ data-live-known（true|false）/ data-sq-byplacement（title 含三档数）/ data-sq-stall（true|false）。
+                   区级：data-sq-push（push|degraded）、data-sq-source（runtime=dsh + delivery=wake.jsonl）、data-sq-stall-hint（阈值非法提示）。 -->
+              <section id="session-live-section" class="team-block session-live-block" data-live-section="1">
+                <div class="team-block-head">
+                  <h3>会话实时状态 <span class="muted">/ 快照 v2</span></h3>
+                  <div class="team-head-tools">
+                    <span id="session-live-push" class="badge muted-badge" data-sq-push="unknown" title="推送状态：push=事件推送；degraded=降级改用 5 秒自检">推送：未接入</span>
+                    <span id="session-live-stall-hint" class="badge badge-skipped" data-sq-stall-hint hidden></span>
+                  </div>
+                </div>
+                <p class="team-status-source" id="session-live-source" data-sq-source>数据口径：runtime=dsh（快照 v2 的 active / running / pendingInput / cursor）+ delivery=wake.jsonl（投递四态与最近成功投递）。未知一律显示「—」，不显示 0；快照 5 秒无更新或 watch 不可用 → 降级（黄条见上）。</p>
+                <div class="sq-live-head">
+                  <span>角色</span><span>五态</span><span>思考时长</span><span>最近事件</span>
+                  <span title="只数 placement=queued（steering/context 单列在 title 里）">排队(queued)</span>
+                  <span>known</span><span title="queued / steering / context 三档，同值写在 title">分档</span><span>停滞</span>
+                </div>
+                <div id="session-live-rows" class="sq-live-rows" aria-label="六角色会话实时状态（五态 / 秒表 / 最近事件 / 停滞）"></div>
               </section>
             </div>
           </section>

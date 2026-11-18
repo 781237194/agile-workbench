@@ -27,6 +27,9 @@ const SNAPSHOT_FILE = '会话排队.json';
 // R-6bc8 需求正文 §5.2：快照 ≤64KB 是硬契约（面板/排查工具会整份读入，超大快照有炸内存风险）。
 // B-c971：序列化后超限 → 拒写 + 告警（不覆盖上一份可用快照；面板 degraded 不计为解析失败）。
 const SNAPSHOT_MAX_BYTES = 65536;
+// R-c9ac「插件 host half 快照 v2」：schema 升到 2，**旧字段一个不删**（6bc8 壳层按 schema/at/project/
+// staleMs/roles 读取，全部保持原义）；每角色行只新增，不改既有字段语义。
+const SNAPSHOT_SCHEMA = 2;
 const WRITE_SIDE_METHODS = ['updateQueue', 'prompt', 'cancel', 'selectModel', 'rename', 'fork', 'create', 'openWorkspacePath', 'initializeDefaultModel'];
 
 /** 排队条数：只算 placement==='queued'。 */
@@ -78,36 +81,114 @@ function wakeStateOf(rows, { now = Date.now(), staleMs = 120000 } = {}) {
 }
 
 /**
- * 组装快照：roles[] 每项 { role, sessionId, known, queued, byPlacement, state, lastOkAt, lastAt, stale }。
- * samples: { [role]: { sessionId, state } }，state 即 sessionController.state 的返回（可 null/未知）。
- * wakes: { [role]: rows[] }，来自 唤醒.jsonl 投影（由壳层/插件采集）。
+ * 把一帧 `sessionController.state`（或 observeState 推送的替换帧）合进 live 条目。
+ * - runningSince：**只在 running false→true 边沿**写 ISO；true→false 清空（null）；重启后允许缺失
+ *   （不回填 at —— 回填等于伪造「何时开始跑」）。
+ * - lastEventAt：最近一次会话状态替换（首帧 / cursor 前进）。
+ * - 拿不到 state（null）→ 只标 state=null，**不写** running/lastEventAt（未知不冒充）。
  */
-function buildSnapshot({ project, samples = {}, wakes = {}, now = Date.now(), staleMs = 120000, running = null } = {}) {
-  const roles = Object.keys(samples);
-  const rows = roles.map((role) => {
-    const sample = samples[role] || {};
-    const q = queuedCount(sample.state);
-    const w = wakeStateOf(wakes[role], { now, staleMs });
-    return {
-      role: String(role),
-      sessionId: String(sample.sessionId || ''),
-      known: q.known === true && Boolean(sample.sessionId),
-      queued: q.known ? q.count : null,
-      byPlacement: q.byPlacement || null,
-      state: w.state,
-      lastOkAt: w.lastOkAt,
-      lastAt: w.lastAt,
-      stale: w.stale || q.known !== true,
-    };
+function applyStateFrame(entry, state, ts = Date.now()) {
+  const item = entry && typeof entry === 'object' ? entry : {};
+  const at = new Date(Number(ts) || Date.now()).toISOString();
+  if (!state || typeof state !== 'object') { item.state = null; return item; }
+  const wasRunning = item.running === true;
+  const running = state.running === true;
+  if (running && !wasRunning) item.runningSince = at;
+  else if (!running && wasRunning) item.runningSince = null;
+  item.running = running;
+  const cursor = state.cursor === undefined ? null : state.cursor;
+  if (cursor !== item.cursor || !item.lastEventAt) item.lastEventAt = at;
+  item.cursor = cursor;
+  item.state = state;
+  return item;
+}
+
+/**
+ * 单角色行（schema 2）。未知（无 sessionId / state 为 null / queue===null）时：
+ * 只给 role/sessionId/known/queued(null)/byPlacement(null)/state/lastOkAt/lastAt/stale，
+ * **不写** queued 数字、running、runningSince、lastEventAt（禁 0/false 冒充「已知」）。
+ */
+function roleRowOf({ role, sessionId, state, wake, runningSince, lastEventAt }) {
+  const q = queuedCount(state);
+  const known = q.known === true && Boolean(sessionId);
+  const row = {
+    role: String(role),
+    sessionId: String(sessionId || ''),
+    known,
+    queued: known ? q.count : null,
+    byPlacement: known ? (q.byPlacement || null) : null,
+    state: wake.state,
+    lastOkAt: wake.lastOkAt,
+    lastAt: wake.lastAt,
+    stale: Boolean(wake.stale) || !known,
+  };
+  if (!known) return row;
+  const st = state && typeof state === 'object' ? state : {};
+  row.active = st.active === true;
+  row.running = st.running === true;
+  row.pendingInput = Array.isArray(st.pendingInput) ? st.pendingInput.slice(0, 20).map(String) : [];
+  row.cursor = st.cursor === undefined ? null : st.cursor;
+  // runningSince：只在 running 为真时有意义；缺失就 null（重启后允许缺失，不用 at 回填）
+  row.runningSince = row.running ? (runningSince ? String(runningSince) : null) : null;
+  if (lastEventAt) row.lastEventAt = String(lastEventAt);
+  return row;
+}
+
+/**
+ * schema 2 快照组装（纯函数，供自检与夹具直接调用）。
+ * live: { [role]: { sessionId, state, cursor?, runningSince?, lastEventAt? } } —— 由订阅帧/兜底采样维护。
+ * wakes: { [role]: rows[] }；degraded: observeState 不可用/抛错时如实记录的原因（不静默）。
+ */
+function buildLiveSnapshot({ project, teamRoot, live = {}, wakes = {}, now = Date.now(), staleMs = 120000, degraded = null, running = null } = {}) {
+  const entries = live instanceof Map ? Array.from(live.entries()) : Object.entries(live || {});
+  const rows = entries.map(([role, raw]) => {
+    const item = raw && typeof raw === 'object' ? raw : {};
+    const wake = wakeStateOf(wakes[role], { now, staleMs });
+    return roleRowOf({
+      role, sessionId: item.sessionId, state: item.state, wake,
+      runningSince: item.runningSince, lastEventAt: item.lastEventAt,
+    });
   });
-  return {
-    schema: 1,
+  const snapshot = {
+    schema: SNAPSHOT_SCHEMA,
     at: new Date(Number(now) || Date.now()).toISOString(),
     project: String(project || ''),
     staleMs: Number(staleMs) || 120000,
-    running: running && typeof running === 'object' ? { active: Boolean(running.active), queue: running.queue === null ? null : Number(running.queue) || 0 } : null,
+    degraded: degraded && typeof degraded === 'object'
+      ? { ...degraded, lastAttemptAt: String(degraded.lastAttemptAt || new Date(Number(now) || Date.now()).toISOString()) }
+      : null,
     roles: rows,
   };
+  if (teamRoot) snapshot.teamRoot = String(teamRoot);
+  if (running && typeof running === 'object') {
+    snapshot.running = { active: Boolean(running.active), queue: running.queue === null ? null : Number(running.queue) || 0 };
+  }
+  return snapshot;
+}
+
+/** 兜底采样「除 at 外与上一份全等 → 不写盘」的比较键（c9ac 要求：3 分钟静置 ≤2 次写）。 */
+function snapshotContentKey(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return '';
+  const { at, ...rest } = snapshot;
+  try { return JSON.stringify(rest); } catch { return ''; }
+}
+function snapshotEqualsExceptAt(a, b) {
+  const ka = snapshotContentKey(a);
+  return Boolean(ka) && ka === snapshotContentKey(b);
+}
+
+/**
+ * 组装快照（R-6bc8 旧入口，保留导出）：samples 即一次性采样的结果，
+ * 内部转成 live 形态后走 schema 2 组装（字段只增不减）。
+ */
+function buildSnapshot({ project, samples = {}, wakes = {}, now = Date.now(), staleMs = 120000, running = null } = {}) {
+  const live = new Map();
+  for (const [role, raw] of Object.entries(samples || {})) {
+    const item = raw && typeof raw === 'object' ? raw : {};
+    const entry = { sessionId: item.sessionId, state: item.state };
+    live.set(role, applyStateFrame(entry, item.state, now));
+  }
+  return buildLiveSnapshot({ project, live: live.size ? Object.fromEntries(live) : {}, wakes, now, staleMs, running });
 }
 
 function snapshotPath(teamRoot) {
@@ -155,9 +236,15 @@ function writeSideHits(files) {
 export {
   SNAPSHOT_FILE,
   SNAPSHOT_MAX_BYTES,
+  SNAPSHOT_SCHEMA,
   WRITE_SIDE_METHODS,
   queuedCount,
   wakeStateOf,
+  applyStateFrame,
+  roleRowOf,
+  buildLiveSnapshot,
+  snapshotContentKey,
+  snapshotEqualsExceptAt,
   buildSnapshot,
   snapshotPath,
   writeSnapshot,

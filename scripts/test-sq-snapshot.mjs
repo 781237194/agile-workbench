@@ -93,7 +93,7 @@ const snap = SQ.buildSnapshot({
 const written = SQ.writeSnapshot(teamRoot, snap);
 const disk = JSON.parse(fs.readFileSync(written.file, 'utf8'));
 check('⑧ 快照原子写落盘（团队/状态/会话排队.json）且字段齐全（at/roles[]/queued/byPlacement/staleMs）',
-  written.file.endsWith(path.join('团队', '状态', SQ.SNAPSHOT_FILE)) && disk.schema === 1 && Array.isArray(disk.roles)
+  written.file.endsWith(path.join('团队', '状态', SQ.SNAPSHOT_FILE)) && disk.schema === 2 && Array.isArray(disk.roles)
   && typeof disk.staleMs === 'number' && disk.roles[0].queued === 3 && disk.roles[0].byPlacement.context === 1,
   { file: written.file, via: written.via, disk: disk.roles && disk.roles[0] });
 
