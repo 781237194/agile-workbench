@@ -219,9 +219,59 @@
         },
       });
     }
+    /** R5/R6 二轮：点击抖动门——同 key windowMs 内重复点击直接判 false（调用方 stopImmediatePropagation 即可减负）。 */
+    function clickGate(key, windowMs = 250) {
+      if (!clickGate.__boxes) clickGate.__boxes = new Map();
+      const now = Date.now();
+      const at = Number(clickGate.__boxes.get(key) || 0);
+      if (now - at < windowMs) { stats.clickDropped = (stats.clickDropped || 0) + 1; return false; }
+      clickGate.__boxes.set(key, now);
+      return true;
+    }
+    /** R5/R6 二轮：把同步重活拆成每片 ≤budgetMs 的批次，批间让出主线程（默认 setTimeout 0；可注入 rAF）。 */
+    function chunked(tasks, options2 = {}) {
+      const o = options2 && typeof options2 === "object" ? options2 : {};
+      const list = Array.isArray(tasks) ? tasks.slice() : [];
+      const budgetMs = Number.isFinite(Number(o.budgetMs)) && Number(o.budgetMs) > 0 ? Number(o.budgetMs) : 8;
+      const nowFn = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
+      const yieldFn = typeof o.yieldFn === "function" ? o.yieldFn : () => new Promise((resolve) => setTimeout(resolve, 0));
+      return (async () => {
+        let sliceStart = nowFn();
+        let ran = 0;
+        for (const task of list) {
+          try { task(); ran += 1; } catch { /* 单片失败不拖垮整批 */ }
+          if (nowFn() - sliceStart >= budgetMs) { await yieldFn(); sliceStart = nowFn(); }
+        }
+        stats.chunkedRuns = (stats.chunkedRuns || 0) + 1;
+        return { ran };
+      })();
+    }
+    /** R5/R6 二轮：长任务观测（PerformanceObserver longtask）。返回 {count,maxMs,recent,supported,stop}，只读不干预。 */
+    function observeLongTasks() {
+      const box = { count: 0, maxMs: 0, recent: [], supported: false, stop() {} };
+      try {
+        if (typeof PerformanceObserver === "undefined") return box;
+        const supported = Array.isArray(PerformanceObserver.supportedEntryTypes)
+          ? PerformanceObserver.supportedEntryTypes.includes("longtask") : true;
+        if (!supported) return box;
+        const ob = new PerformanceObserver((list) => {
+          for (const e of list.getEntries()) {
+            box.count += 1;
+            const ms = Math.round(Number(e.duration) || 0);
+            if (ms > box.maxMs) box.maxMs = ms;
+            box.recent.push(ms);
+            if (box.recent.length > 50) box.recent.shift();
+          }
+        });
+        ob.observe({ entryTypes: ["longtask"] });
+        box.supported = true;
+        box.stop = () => { try { ob.disconnect(); } catch { /* ignore */ } };
+        return box;
+      } catch { return box; }
+    }
     return {
       hidden: hiddenOf, interacting: interactingOf, bumpInteraction, installInteraction,
-      gate, interval, coalesce, schedule, skeleton, clearSkeleton, reconcileReplace, reconcileReplaceMarkup, stats,
+      gate, interval, coalesce, schedule, clickGate, chunked, observeLongTasks, skeleton, clearSkeleton, reconcileReplace, reconcileReplaceMarkup, stats,
       createGate,
     };
   }

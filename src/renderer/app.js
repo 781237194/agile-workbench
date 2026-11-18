@@ -39,6 +39,23 @@ const r5ClearSkeleton = (target) => {
     return el ? R4GateApi.clearSkeleton(el) : 0;
   } catch { return 0; }
 };
+
+// R-b34a R6 二轮（T-20261118-195240-d7a5）：长任务观测（CDP/夹具读 window.__b34aLongTasks，只读不干预）。
+try {
+  if (R4GateApi && typeof R4GateApi.observeLongTasks === 'function') window.__b34aLongTasks = R4GateApi.observeLongTasks();
+} catch { /* 观测失败不影响功能 */ }
+// R6 二轮：连续点击减负——只对「打开即重渲染」的入口做 150ms 抖动门（抽屉开合类按钮不拦，保持原交互语义）。
+const R2_CLICK_LAUNCHERS = '#owner-review-entry,#board-launcher,#flow-launcher,#proxy-all-launcher,#btn-team-board-2,#btn-team-board-refresh,#btn-team-board,#btn-team-flow,#btn-team-members,#btn-team-project,#btn-decision-refresh';
+document.addEventListener('click', (ev) => {
+  try {
+    if (!R4GateApi || typeof R4GateApi.clickGate !== 'function') return;
+    const raw = ev.target;
+    const target = raw && raw.closest ? raw.closest(R2_CLICK_LAUNCHERS) : null;
+    if (!target) return;
+    const key = 'launcher:' + String(target.id || target.getAttribute('data-win') || target.textContent || '').trim();
+    if (!R4GateApi.clickGate(key, 150)) { ev.preventDefault(); ev.stopImmediatePropagation(); }
+  } catch { /* 门失败不影响点击 */ }
+}, true);
 const r4Gate = (fn) => (R4GateApi && typeof R4GateApi.gate === 'function' ? R4GateApi.gate(fn) : fn);
 const r4Coalesce = (fn, ms, key) => (R4GateApi && typeof R4GateApi.coalesce === 'function' ? R4GateApi.coalesce(fn, ms, key) : fn);
 
