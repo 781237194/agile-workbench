@@ -79,6 +79,29 @@ function seed() {
     try { cdp.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ }
     await sleep(700); try { ws.close(); } catch { /* ignore */ } try { child.kill(); } catch { /* ignore */ } await sleep(300); try { if (child.pid && child.exitCode === null) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ }
   }
+  // ② AC4 成功路径 sessions mock（AWB_WORKSPACE_MOCK=ok + AWB_SESSIONS_MOCK=six）：restore 应四段全 true、映射 6/6
+  const env2 = { ...env, AWB_WORKSPACE_MOCK: 'ok', AWB_SESSIONS_MOCK: 'six' };
+  const child2 = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + (PORT + 1)], { cwd: ROOT, env: env2, stdio: 'ignore', windowsHide: false });
+  const target2 = await waitTarget(PORT + 1, 90000, (item) => item && item.type === 'page' && String(item.url || '').includes('renderer/index.html'));
+  check('U11 AC4 sessions-mock 实例启动', Boolean(target2));
+  if (target2) {
+    const ws2 = new WebSocket(target2.webSocketDebuggerUrl);
+    await new Promise((resolve) => ws2.addEventListener('open', resolve, { once: true }));
+    const cdp2 = new Cdp(ws2); await cdp2.send('Runtime.enable');
+    for (let i = 0; i < 200; i += 1) { const ok = await cdp2.evaluate('document.readyState === "complete" && Boolean(window.workbench && window.workbench.teamRestore)'); if (ok === true) break; await sleep(400); }
+    const res2 = await cdp2.evaluate('(async () => { try { return await window.workbench.teamRestore({ name: "沙盘项目" }); } catch (e) { return { threw: String((e && e.message) || e) }; } })()');
+    const auditOk = Boolean(res2 && res2.restoreAudit) && res2.restoreAudit.ok === true && (res2.restoreAudit.missing || []).length === 0;
+    check('U12 AC4 ok 路径：restore ok:true + restoreAudit 四段全 true', Boolean(res2) && res2.ok === true && auditOk, res2 && { ok: res2.ok, audit: res2.restoreAudit, code: res2.code, why: res2.why });
+    let store2 = null;
+    try { store2 = JSON.parse(fs.readFileSync(path.join(DATA, 'userdata', 'workbench.json'), 'utf8')); } catch { store2 = null; }
+    const proj2 = store2 && (store2.projects || []).find((p) => p && p.path === PROJ);
+    const mapped = proj2 && proj2.sessions ? Object.values(proj2.sessions).filter(Boolean) : [];
+    const wsIds = proj2 && proj2.workspace && Array.isArray(proj2.workspace.sessionIds) ? proj2.workspace.sessionIds.filter(Boolean) : [];
+    check('U13 AC4 会话映射 6/6（projects[].sessions）', mapped.length === 6, { mapped: mapped.length });
+    check('U14 workspace.sessionIds 含 6 个 mock 会话', wsIds.length >= 6, { wsIds: wsIds.length });
+    try { cdp2.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ }
+    await sleep(700); try { ws2.close(); } catch { /* ignore */ } try { child2.kill(); } catch { /* ignore */ } await sleep(300); try { if (child2.pid && child2.exitCode === null) spawnSync('taskkill', ['/PID', String(child2.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ }
+  }
   try { fs.writeFileSync(path.join(OUT, 'mock-hooks-run.json'), JSON.stringify({ at: new Date().toISOString(), checks: rows }, null, 2) + '\n', 'utf8'); } catch { /* ignore */ }
   try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
   const failed = rows.filter((r) => !r.ok);

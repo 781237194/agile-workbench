@@ -7760,16 +7760,37 @@ ipcMain.handle('theme:metrics', async () => {
         );
         if (!binding.ok) warnings.push({ code: binding.code, message: binding.message });
       }
-      const result = await teamTools.launchSessions({ name: hit.name, path: projectDir, teamMode: restoreMode }, {
-        dryRun: p.dryRun === true,
-        roles: p.roles || roleIdsForTeamMode(restoreMode),
-        teamMode: restoreMode,
-        prompt: p.prompt === true,
-        restore: true,
-        addMembers: p.addMembers !== false,
-        seedVisible: p.seedVisible === true,
-        engineUrl: String(p.engineUrl || dsh.baseUrl || '').trim()
-      });
+      // 97db 测试钩子（T-20261119-032132-50f8bd）：AWB_SESSIONS_MOCK=six 或逗号 sessionId 列表
+      // → 注入会话映射（无真实 DSH/凭据时也能验 AC4 恢复成功路径：6 会话/映射 6/6）。
+      const sessionsMock = String(process.env.AWB_SESSIONS_MOCK || '').trim();
+      let result;
+      if (sessionsMock) {
+        const mockRoleIds = Array.isArray(p.roles) && p.roles.length ? p.roles.map(String) : roleIdsForTeamMode(restoreMode);
+        const rawIds = sessionsMock === 'six' ? [] : sessionsMock.split(',').map((x) => String(x || '').trim()).filter(Boolean);
+        const sessions = mockRoleIds.map((role, idx) => ({
+          role: String(role),
+          sessionId: rawIds[idx] || ('sess-mock-' + String(idx + 1).padStart(2, '0')),
+          mocked: true
+        }));
+        result = {
+          ok: true, name: hit.name, project: hit.name, teamMode: restoreMode, restore: true, mocked: true,
+          sessions, roles: sessions,
+          workspaceId: (binding && binding.workspaceId) || 'ws-mock',
+          workspace: projectDir,
+          engineUrl: String(p.engineUrl || dsh.baseUrl || 'mock://dsh')
+        };
+      } else {
+        result = await teamTools.launchSessions({ name: hit.name, path: projectDir, teamMode: restoreMode }, {
+          dryRun: p.dryRun === true,
+          roles: p.roles || roleIdsForTeamMode(restoreMode),
+          teamMode: restoreMode,
+          prompt: p.prompt === true,
+          restore: true,
+          addMembers: p.addMembers !== false,
+          seedVisible: p.seedVisible === true,
+          engineUrl: String(p.engineUrl || dsh.baseUrl || '').trim()
+        });
+      }
       if (p.dryRun !== true) persistTeamLaunch(stored ? stored.id : null, result);
       const persisted = stored && p.dryRun !== true ? requireProject(readStore(), stored.id) : null;
       // B-20261119-015113-2443（AC4/AC5/6.4）：恢复四段审计 + missing 可回查；UI 段由渲染层收到返回后确认。
