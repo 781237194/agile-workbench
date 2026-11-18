@@ -6238,9 +6238,10 @@ ipcMain.handle('theme:metrics', async () => {
       };
     });
     if (!roles.length) {
+      // 97db 返工：名册/映射都为空时必须显式告诉渲染层「无在册成员」，不得只返回 ok:false 让界面猜。
       return {
-        ok: false, project: projectName, workspace: workspacePath, roles: [],
-        error: '还没有当前模式的角色会话，请先建团队'
+        ok: true, project: projectName, workspace: workspacePath, roles: [], roleIds: memberRoleIds,
+        count: 0, membersEmpty: true, teamMode: normalizeTeamMode(project && project.teamMode), error: ''
       };
     }
     return {
@@ -8799,7 +8800,17 @@ ipcMain.handle('theme:metrics', async () => {
           manifestRolesForCleanup = mf && Array.isArray(mf.roles) ? mf.roles : [];
         } catch { /* 清单坏了不阻断删除 */ }
         const cleanupPlan = projectRosterCleanup.planProjectCleanup({ team, project, manifestRoles: manifestRolesForCleanup });
-        const doomedSessions = new Set(cleanupPlan.doomsSessions);
+        // 97db 返工（T-20261119-025124-6af3）：删除后名册必须**确定性**清空——
+        // 若删除后不再有其它项目引用同一团队名，把名册全部 sessionId 并入清理集合（离线/无 workspace/无清单也成立），
+        // 消除「run1 清、run2 不清」的非确定结果；pendingCleanup 只用于 DSH 侧会话归档重试。
+        let doomedSessions = new Set(cleanupPlan.doomsSessions);
+        try {
+          const names = [project.teamName, project.name].filter(Boolean).map(String);
+          const peersSameTeam = readStore().projects.filter((x) => x && x.id !== targetId && names.includes(String(x.teamName || x.name || '')));
+          const expanded = projectRosterCleanup.expandDoomedForDeletedTeam({ team, doomedSessions, peersSameTeam });
+          doomedSessions = expanded.doomed;
+          if (expanded.expanded) removed.deterministicRosterClear = true;
+        } catch { /* 读库失败时退回按会话清理；名册清空由后续 pendingCleanup 不影响 */ }
         // B-20261118-164055-2a44：清名册同样走单源（team-tools → roster-apply.cjs），不再直接 `member.sessionId = ''`。
         const cleared = (teamTools && typeof teamTools.clearRosterSessionsOf === 'function')
           ? teamTools.clearRosterSessionsOf(team, doomedSessions, { activeProject: (project.teamName || project.name) })
