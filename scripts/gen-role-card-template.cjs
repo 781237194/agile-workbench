@@ -95,14 +95,24 @@ function buildBody(role) {
 function main() {
   const roles = process.argv.slice(2).filter(Boolean);
   if (!roles.length) { console.error('用法：node scripts/gen-role-card-template.cjs <role> [role...]'); process.exit(2); }
-  const outPath = path.join(ROOT, '团队', '工具', 'lib', 'role-card-bodies.generated.mjs');
-  let out = `// 自动生成，勿手改：node scripts/gen-role-card-template.cjs ${roles.join(' ')}\n`
+  // 上线前风险收敛（Owner 2026-11-18 22:51）：生成内容**内联进 scaffold.mjs** 的标记块，
+  // 不再产出独立 .mjs（避免发版漏文件导致 import 失败、整个团队工具起不来）。
+  const targetPath = path.join(ROOT, '团队', '工具', 'lib', 'scaffold.mjs');
+  const BEGIN = '// === GENERATED_ROLE_CARDS_BEGIN（由 scripts/gen-role-card-template.cjs 生成，勿手改）===';
+  const END = '// === GENERATED_ROLE_CARDS_END ===';
+  const src = fs.readFileSync(targetPath, 'utf8');
+  const i = src.indexOf(BEGIN);
+  const j = src.indexOf(END);
+  if (i < 0 || j < 0 || j < i) { console.error('SCAFFOLD_MARKERS_MISSING：scaffold.mjs 缺少生成标记块'); process.exit(3); }
+  let block = `${BEGIN}\n`
+    + `// 自动生成，勿手改：node scripts/gen-role-card-template.cjs ${roles.join(' ')}\n`
     + '// 来源＝项目最终角色卡（项目名/角色名/团队模式行已占位符化；「现行工作流对齐」附录由 WORKFLOW_ALIGN_SECTION 统一追加）。\n'
-    + 'export const GENERATED_ROLE_CARDS = {\n';
-  for (const role of roles) out += buildBody(role);
-  out += '};\n';
-  fs.writeFileSync(outPath, out, 'utf8');
-  console.log('GENERATED ' + roles.join(',') + ' → ' + path.relative(ROOT, outPath) + ' bytes=' + Buffer.byteLength(out));
+    + 'const GENERATED_ROLE_CARDS = {\n';
+  for (const role of roles) block += buildBody(role);
+  block += '};\n';
+  const out = src.slice(0, i) + block + src.slice(j);
+  fs.writeFileSync(targetPath, out, 'utf8');
+  console.log('GENERATED ' + roles.join(',') + ' → ' + path.relative(ROOT, targetPath) + ' blockBytes=' + Buffer.byteLength(block));
 }
 
 main();
