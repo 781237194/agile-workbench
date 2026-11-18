@@ -34,6 +34,7 @@ export const DEFAULT_IRON = `# 项目铁律（默认版）
 11. **工装安全（P0，进程与临时命令）**：禁止按进程名/路径/时间窗批量杀 electron（\`Get-Process … | Stop-Process\`、\`taskkill /IM electron.exe\`、\`pkill\`/\`killall\`）；只允许 \`taskkill /PID <自己 spawn 的 child.pid> /T /F\` 或 \`child.kill()\`，无 PID 不杀；提交工装前跑 \`node scripts/check-no-batch-electron-kill.cjs\`。
 12. **测量窗口**：任何真窗口/Electron 测量前先向 PM 报「需要干净窗口」，测完立即停手；测量必须 \`AWB_DATA_DIR\` 独立实例 + 沙盘团队，并记被测 HEAD、启动 PID、同时段 electron 进程数与负载；负载异常的数字只作观测、不作门禁判据。
 13. **验收与代管边界**：需求级验收只能 Owner 本人；PM/测试只验收缺陷单；代管只可代记评审决定（approved/rejected/skipped），不得代需求验收（\`PROXY_ACCEPT_FORBIDDEN\`）。现行工作流唯一执行口径＝\`团队/流程.md\` 第二部分；角色卡、skill、模板与其对齐。
+14. **skill 升版**：改 团队/skill/基础流程/<role>.md → 更新 skill-manifest.json（version / approvedBy / approvedAt / previousVersion + 各文件 sha）→ 旧版归档到 团队/skill/归档/基础流程-<旧版本>/ → 跑 ode scripts/skill-check.cjs（漂移时用 --write-state）；缺任一步视为模板篡改（SKILL_TEMPLATE_TAMPERED）。
 `;
 
 // ---------- 现行工作流对齐附录（2026-11-18 校准，Owner 22:01 指令） ----------
@@ -46,6 +47,7 @@ export const WORKFLOW_ALIGN_SECTION = `
 - **代管边界**：有效代管只可代记**评审决定**（approved / rejected / skipped）；需求验收、迭代、终止一律 Owner 本人，代管通道硬拦（\`PROXY_ACCEPT_FORBIDDEN\`）。
 - **工装安全（P0）**：禁止按进程名/路径/时间窗批量杀 electron（\`Get-Process … | Stop-Process\`、\`taskkill /IM electron.exe\`、\`pkill\`/\`killall\`）；只允许 \`taskkill /PID <自己 spawn 的 child.pid> /T /F\` 或 \`child.kill()\`，无 PID 不杀；提交工装前跑 \`node scripts/check-no-batch-electron-kill.cjs\`。
 - **测量窗口**：任何真窗口/Electron 测量前先向 PM 报「需要干净窗口」；测量用 \`AWB_DATA_DIR\` 独立实例 + 沙盘团队（\`TEAM_ROOT\`+\`TEAM_SELFTEST=1\`），断言真实状态 sha256 前后不变；测完立即停手并把机器让出。
+- **skill 升版**：改 \`团队/skill/基础流程/<role>.md\` → 更新 \`skill-manifest.json\`（version / approvedBy / approvedAt / previousVersion + 各文件 sha）→ 旧版归档到 \`团队/skill/归档/基础流程-<旧版本>/\` → 跑 \`node scripts/skill-check.cjs\`（漂移时用 \`--write-state\` 派生状态）；不归档、不更新 manifest 即视为模板篡改（\`SKILL_TEMPLATE_TAMPERED\`）。
 - **文档维护**：宪法由 PM 主笔 + Owner 一句话同意；流程.md 由 PM 维护；角色卡与 skill 各角色本人维护（改角色卡只失效本人令牌，需自行重 boot）；角色卡模板 \`roleCard()\`、\`DEFAULT_IRON\`、\`DEFAULT_CONSTITUTION\` 由程序员 A 维护，改动须有夹具覆盖新项目生成。
 `;
 
@@ -59,6 +61,7 @@ export const IRON_ALIGN_BLOCK = `
 11. **工装与进程安全（P0）**：禁止按进程名/路径/时间窗批量杀 electron（Get-Process…|Stop-Process、taskkill /IM、pkill/killall）；只允许 taskkill /PID <自己 spawn 的 child.pid> /T /F 或 child.kill()，无 PID 不杀；提交工装前跑 node scripts/check-no-batch-electron-kill.cjs。
 12. **测量窗口**：真窗口/Electron 测量前先向 PM 报「需要干净窗口」，测完立即停手让出机器；必须 AWB_DATA_DIR 独立实例 + 沙盘团队，并记录被测 HEAD、启动 PID、同时段进程数与负载；负载异常的数字只作观测、不作门禁判据。
 13. **验收与代管边界**：需求级验收只能 Owner 本人；PM/测试只验收缺陷单（task accept --as pm|tester）；代管只可代记评审决定（approved/rejected/skipped），不得代需求验收（PROXY_ACCEPT_FORBIDDEN）。
+14. **skill 升版**：改 团队/skill/基础流程/<role>.md → 更新 skill-manifest.json（version/approvedBy/approvedAt/previousVersion+sha）→ 旧版归档 团队/skill/归档/基础流程-<旧版本>/ → 跑 node scripts/skill-check.cjs；缺任一步视为模板篡改。
 `;
 
 

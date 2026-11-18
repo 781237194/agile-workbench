@@ -28,7 +28,7 @@ const ok = (cond, name, detail) => { if (cond) { pass += 1; console.log(`PASS ${
 const read = (rel) => { try { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); } catch { return ''; } };
 
 const ROLE_IDS = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
-const KEYWORDS = ['验收', '代管', '工装安全', '测量窗口', '文档维护'];
+const KEYWORDS = ['验收', '代管', '工装安全', '测量窗口', '文档维护', 'skill 升版'];
 
 // A1 六张角色卡模板
 const missing = [];
@@ -42,16 +42,17 @@ ok(typeof stack.WORKFLOW_ALIGN_SECTION === 'string' && stack.WORKFLOW_ALIGN_SECT
 
 // A3 铁律模板
 const iron = stack.DEFAULT_IRON || '';
-ok(/工装安全|PID/.test(iron) && /测量窗口/.test(iron) && /验收/.test(iron) && /代管/.test(iron),
-  'A3 DEFAULT_IRON 含工装安全/测量窗口/验收与代管边界', {});
+ok(/工装安全|PID/.test(iron) && /测量窗口/.test(iron) && /验收/.test(iron) && /代管/.test(iron) && /skill 升版/.test(iron),
+  'A3 DEFAULT_IRON 含工装安全/测量窗口/验收代管边界/skill 升版', {});
 
 // A4 宪法模板（store.mjs 内 DEFAULT_CONSTITUTION）
 const storeSrc = read('团队/工具/lib/store.mjs');
 const constStart = storeSrc.indexOf('const DEFAULT_CONSTITUTION');
 const constText = constStart >= 0 ? storeSrc.slice(constStart, storeSrc.indexOf('`;', constStart)) : '';
 ok(constText.indexOf('工装与进程安全') >= 0 && constText.indexOf('基础工作流唯一执行口径') >= 0
-  && constText.indexOf('验收权限硬边界') >= 0 && constText.indexOf('测量窗口协同') >= 0,
-  'A4 DEFAULT_CONSTITUTION 含工装安全/工作流唯一口径/验收边界/测量窗口', {});
+  && constText.indexOf('验收权限硬边界') >= 0 && constText.indexOf('测量窗口协同') >= 0
+  && constText.indexOf('skill 升版') >= 0,
+  'A4 DEFAULT_CONSTITUTION 含工装安全/工作流唯一口径/验收边界/测量窗口/skill 升版', {});
 
 // A5 我的角色卡
 const myCard = read('项目/工作台改造修复/程序员A/角色卡.md');

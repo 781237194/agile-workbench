@@ -272,6 +272,8 @@ const DEFAULT_CONSTITUTION = `# 团队宪法（每轮必读 · v2）
 28. **验收权限硬边界**：需求级验收只能 Owner 本人（界面「我的验收」或 Owner 终端）；PM 与测试只可验收缺陷单（task accept --as pm|tester）；代管只可代记评审决定（approved / rejected / skipped），需求验收、迭代、终止一律 Owner 本人，代管通道硬拦（PROXY_ACCEPT_FORBIDDEN）。
 
 29. **测量窗口协同**：任何真窗口/Electron 测量前先向 PM 报「需要干净窗口」，测完立即停手让出机器；测量报告必须记录被测 HEAD、启动 PID、同时段 electron 进程数与负载；负载异常的数字只作观测、不作门禁判据。
+
+30. **skill 升版**：改 团队/skill/基础流程/<role>.md → 更新 skill-manifest.json（version / approvedBy / approvedAt / previousVersion + 各文件 sha）→ 旧版归档到 团队/skill/归档/基础流程-<旧版本>/ → 跑 node scripts/skill-check.cjs（漂移时用 --write-state 派生状态）；缺任一步即视为模板篡改（SKILL_TEMPLATE_TAMPERED）。
 `;
 
 // 团队级默认角色卡（新用户 init 生成 团队/角色/<role>.md；口径与项目内六卡一致，内容为通用精简版）。
