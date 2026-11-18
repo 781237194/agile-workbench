@@ -340,6 +340,66 @@ const rotateScript = [
     jsonlRows(LEDGER).some((r) => r && r.role === 'pm' && r.to === 'session-st-conc-pm' && r.source === 'session-rotate'),
     { tail: jsonlRows(LEDGER).slice(-3) });
 
+  /* ── W9 事务中途并发写（N6/N2/N1 回归） ──────────────────────────────
+     W9a：并发写者只改 team.json 的**别的字段** → 字段级 CAS 回滚把该角色 sessionId 复原，
+          full=true、别人改动保留（整文件回滚会丢他的改动）。
+     W9b：并发写者整份覆盖 workbench.json（模拟外部写者）→ 回滚必须**响亮地部分回滚**（full=false + 审计 + 告警 PM）。 */
+  function runTxCase(script) {
+    try {
+      return { out: String(execFileSync(process.execPath, ['-e', script], { encoding: 'utf8', env: env(), timeout: 120000, cwd: ROOT })), err: '' };
+    } catch (e) { return { out: String(e.stdout || ''), err: String(e.stderr || '') }; }
+  }
+  const makeTxScript = (name, marker, hijackWorkbench) => [
+    'const { pathToFileURL } = require("node:url");',
+    'const fs = require("node:fs");',
+    '(async () => {',
+    `  const s = await import(pathToFileURL(${JSON.stringify(path.join(ROOT, '团队', '工具', 'lib', 'store.mjs'))}).href);`,
+    `  const rw = await import(pathToFileURL(${JSON.stringify(RW_SRC)}).href);`,
+    '  const out = { code: "", rollback: null, markerKept: false, roster: "", workbenchHijacked: false };',
+    '  try {',
+    `    await rw.rotateRoster({ projectName: ${JSON.stringify(PROJECT)}, role: "programmer2", newSessionId: "session-st-${name}-programmer2", mode: "manual", created: false, reason: "${name} 事务中途并发写", by: "system", source: "session-rotate", offline: true, bootQueue: false, broadcast: false,`,
+    '      beforeFinalize: async () => {',
+    `        s.mutateTeam((t) => { t.config = { ...(t.config || {}), ${marker}: "concurrent-writer" }; return t; });`,
+    ...(hijackWorkbench ? [
+      '        const wbFile = String(process.env.TEAM_WORKBENCH_JSON || "");',
+      '        if (wbFile) {',
+      '          const wb = JSON.parse(fs.readFileSync(wbFile, "utf8"));',
+      '          wb.externalWriterMarker = "hijacked";',
+      '          fs.writeFileSync(wbFile, JSON.stringify(wb, null, 2) + "\\n", "utf8");',
+      '          out.workbenchHijacked = true;',
+      '        }',
+    ] : []),
+    `        throw new Error("${name} 注入失败：映射已写，事务中途有别的写者");`,
+    '      },',
+    '    });',
+    '  } catch (e) {',
+    '    out.code = String((e && e.code) || "THROWN");',
+    '    out.rollback = (e && e.details && e.details.rollback) || null;',
+    '    out.message = String((e && e.message) || e);',
+    '  }',
+    `  const team = JSON.parse(fs.readFileSync(${JSON.stringify(TEAM_FILE)}, "utf8"));`,
+    `  out.markerKept = String((team.config || {}).${marker} || "") === "concurrent-writer";`,
+    '  out.roster = String(((team.members || []).find((m) => m && m.role === "programmer2") || {}).sessionId || "");',
+    '  console.log("TX " + JSON.stringify(out));',
+    '})().catch((e) => { console.log("ERR " + String((e && e.message) || e)); });',
+  ].join('\n');
+  const w9aRes = runTxCase(makeTxScript('w9a', 'w9aMarker', false));
+  const w9a = (() => { try { return JSON.parse((/TX (\{.*\})/.exec(w9aRes.out) || [])[1] || 'null'); } catch { return null; } })();
+  check('W9a 并发改名册别的字段 → 字段级 CAS 回滚（该角色 sessionId 复原、别人改动保留、full=true）',
+    Boolean(w9a) && w9a.rollback && w9a.rollback.full === true
+    && (w9a.rollback.fieldRepaired || []).includes('team')
+    && w9a.markerKept === true && w9a.roster === oldId('programmer2'),
+    { w9a, out: w9aRes.out.slice(0, 500) });
+  const w9bRes = runTxCase(makeTxScript('w9b', 'w9bMarker', true));
+  const w9b = (() => { try { return JSON.parse((/TX (\{.*\})/.exec(w9bRes.out) || [])[1] || 'null'); } catch { return null; } })();
+  const w9Audit = jsonlRows(ROSTER_AUDIT).filter((r) => r && String(r.code) === 'ROSTER_ROLLBACK_PARTIAL');
+  const w9PmMail = mailOf('pm').filter((m) => /ROSTER_ROLLBACK_PARTIAL/.test(`${m.subject || ''} ${m.body || ''}`));
+  check('W9b 外部写者整份覆盖 workbench → 回滚响亮地报「部分回滚」（full=false）+ 审计 + 告警 PM',
+    Boolean(w9b) && w9b.workbenchHijacked === true && w9b.rollback && w9b.rollback.full === false
+    && (w9b.rollback.skipped || []).some((x) => x.key === 'workbench')
+    && w9Audit.length >= 1 && w9PmMail.length >= 1,
+    { w9b, out: w9bRes.out.slice(0, 500), w9Audit: w9Audit.slice(-1), pmMail: w9PmMail.length });
+
   /* ── W5 交接单一判据（两路径同拒） ─────────────────────────────────── */
   const badHandover = '# 坏交接\n\n没有必填小节，也没有遗留坑。\n';
   const w5Before = { teamSha: sha(TEAM_FILE), tester: rosterOf('tester'), ledger: jsonlRows(LEDGER).length };

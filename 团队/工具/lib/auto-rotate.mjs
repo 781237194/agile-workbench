@@ -281,6 +281,8 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
     try {
       rotateResult = await rotateRoster({
         projectName, role, newSessionId: newId, mode, created,
+        // P3-N9：created 通道对账——createTeamSession 真正返回的 id
+        createdSessionId: created ? newId : '',
         reason: String(reason || 'context-full'), by: 'auto-rotate', source: 'auto-rotate',
         offline: false, now,
         recordExtra: { archiveDeferred },
@@ -289,24 +291,35 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
       });
     } catch (e) {
       const code = String((e && e.code) || 'ROTATE_ROSTER_FAILED');
-      // P2-2 复核：会话已建但名册写入失败 → 必须把刚建的会话归档掉，否则每拍漏一个孤儿会话。
+      const rollbackInfo = (e && e.details && e.details.rollback) || null;
+      // P2-2 复核：会话已建但名册写入失败 → 把刚建的会话归档掉，否则每拍漏一个孤儿会话。
+      // N3 复核：沙盘/离线**不联网**（否则会朝真实 DSH 发一次 archive）。
+      // N4 复核：部分回滚（名册可能仍指向新会话）时不能归档，否则名册指向已归档会话 → 交给 PM 人工处置。
       let compensation = null;
       if (created && newId) {
-        try {
-          const { DshClient } = await import('./dsh-session.mjs');
-          await new DshClient(engine || undefined).workspaceArchiveSession({ sessionId: newId, stopActivity: true });
-          compensation = { archivedNewSession: true, sessionId: newId };
-        } catch (err) {
-          compensation = { archivedNewSession: false, sessionId: newId, why: String((err && err.message) || err) };
+        if (process.env.TEAM_SELFTEST === '1') {
+          compensation = { archivedNewSession: false, skipped: 'SELFTEST', sessionId: newId, why: '沙盘不联网：未做归档补偿（无真实 DSH 可调）' };
+        } else if (rollbackInfo && rollbackInfo.full === false) {
+          compensation = { archivedNewSession: false, skipped: 'PARTIAL_ROLLBACK', sessionId: newId, why: '映射仅部分回滚（名册可能仍指向新会话）：不归档，需人工确认后清理' };
+        } else {
+          try {
+            const { DshClient } = await import('./dsh-session.mjs');
+            await new DshClient(engine || undefined).workspaceArchiveSession({ sessionId: newId, stopActivity: true });
+            compensation = { archivedNewSession: true, sessionId: newId };
+          } catch (err) {
+            compensation = { archivedNewSession: false, sessionId: newId, why: String((err && err.message) || err) };
+          }
         }
       }
       appendAudit(auditFile, {
         at: iso(now), stage: 'rotate_failed', code, result: 'fail', role, project: projectName,
-        note: `名册写入失败（${code}）：本轮不换人（${compensation && compensation.archivedNewSession ? '新会话已归档补偿' : compensation ? '新会话归档补偿失败，需人工清理' : '未新建会话，无需补偿'}）`,
+        note: `名册写入失败（${code}）：本轮不换人（${compensation && compensation.archivedNewSession ? '新会话已归档补偿'
+          : compensation ? `新会话未归档补偿（${compensation.skipped || '归档失败'}，需人工确认）`
+            : '未新建会话，无需补偿'}）`,
         reason: String(reason || 'context-full'),
-        evidence: { code, oldSessionId: oldId, newSessionId: newId, why: String((e && e.message) || e), compensation, rollback: (e && e.details && e.details.rollback) ? { full: e.details.rollback.full, skipped: e.details.rollback.skipped } : null },
+        evidence: { code, oldSessionId: oldId, newSessionId: newId, why: String((e && e.message) || e), compensation, rollback: rollbackInfo ? { full: rollbackInfo.full, skipped: rollbackInfo.skipped } : null },
       });
-      return { oldId, newId: '', others: [], failed: true, code, manualCommand: '', compensation };
+      return { oldId, newId: '', others: [], failed: true, code, manualCommand: '', compensation, orphanSessionId: (compensation && !compensation.archivedNewSession) ? newId : '' };
     }
   }
   const others = (rotateResult && rotateResult.broadcast && Array.isArray(rotateResult.broadcast.others))
@@ -853,13 +866,13 @@ export async function runAutoRotateCycle(projectName, options = {}) {
     if (pending) {
       const done = handoverDone({ projectDir, role: item.role, mailDir, sinceMs: pending.at });
       if (done.done) {
-        // P2-3 复核：交接**文件**若本身就是【】机器格式（含任一必填小节标记），必须过同一个 validateHandover；
-        // 人类八节模板（无【】标记）仍按 fa0e §5.3 的「文件更新/回执邮件」口径，不误判。
+        // P2-3 复核：交接**文件**若本身是接任包机器格式（首行 `=== 接任包 …`），必须过同一个 validateHandover；
+        // N5 复核：不能只看「正文出现某个【小节】」（人类交接里引用一句也会误判）——用首行锚点，人类八节模板不误判。
         let fileGate = null;
         try {
           const hf = path.join(projectDir, ROLE_DIRS[item.role] || item.role, '产出', '交接-最新.md');
           const txt = fs.readFileSync(hf, 'utf8');
-          if (/【(?:在途任务|未闭环事项|最近决策|建议下一步|遗留问题与坑)】/.test(txt)) {
+          if (/^\s*===\s*接任包/m.test(txt)) {
             fileGate = await checkRotateHandover({ projectName: name, role: item.role, text: txt });
           }
         } catch { /* 文件不存在/读不到：按回执邮件口径，不额外拦 */ }

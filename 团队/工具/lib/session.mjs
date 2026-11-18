@@ -837,6 +837,8 @@ export async function rotateSession({
       mode: created ? 'auto' : 'manual', created, reason, by,
       source: 'session-rotate', expectedOldId: oldId,
       offline: offlineMode, dshList: list, engineUrl: engine, failAt, now: at,
+      // P3-N9：created 通道要对账——把 createTeamSession 真正返回的 id 交给唯一写入口校验
+      createdSessionId: created ? newId : '',
       recordExtra: {
         force: Boolean(force),
         archiveGate: { archived: gate.archived, archiveId: gate.archive ? gate.archive.id : null },
@@ -934,7 +936,18 @@ export async function rotateSession({
       role: by, sessionId: newId, action: 'rotate_failed', project: name, target: role,
       note: `失败回滚：${e.message}`, data: { from: oldId, to: newId, code: e.code || '', failAt, rollback, legacyAction: 'session_rotate_failed' },
     });
-    if (e instanceof TeamError) throw e;
+    // N1 复核：TeamError（最现实是 ROTATE_MAPPING_MISMATCH）会在这里原样抛出，
+    // 而它的文案里常写「已按 F-6 回滚」——部分回滚时必须先把它改诚实，再抛。
+    if (e instanceof TeamError) {
+      if (rollback.mapsPartial) {
+        const keys = (mapRollback.skipped || []).map((x) => x.key).join('/') || '未知';
+        e.message = `【部分回滚】四处映射未完全恢复（${keys}），请先跑 session check 再继续：${String(e.message || '')}`;
+        e.details = { ...(e.details || {}), rollback, partialRollback: true, hint: 'node 团队\\工具\\team.mjs session check --project "<项目>"' };
+      } else {
+        e.details = { ...(e.details || {}), rollback };
+      }
+      throw e;
+    }
     // 部分回滚不许说「已回滚」：文案按实际结论给，并提示先跑 session check（P1-2/P3-4 复核）
     const tailMsg = rollback.mapsPartial
       ? `轮换失败：四处映射**仅部分回滚**（${(mapRollback.skipped || []).map((x) => x.key).join('/') || '未知'}），请先跑 session check 确认再操作：${e.message}`
