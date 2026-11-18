@@ -80,7 +80,7 @@ function seed() {
     await sleep(700); try { ws.close(); } catch { /* ignore */ } try { child.kill(); } catch { /* ignore */ } await sleep(300); try { if (child.pid && child.exitCode === null) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ }
   }
   // ② AC4 成功路径 sessions mock（AWB_WORKSPACE_MOCK=ok + AWB_SESSIONS_MOCK=six）：restore 应四段全 true、映射 6/6
-  const env2 = { ...env, AWB_WORKSPACE_MOCK: 'ok', AWB_SESSIONS_MOCK: 'six' };
+  const env2 = { ...env, AWB_WORKSPACE_MOCK: 'ok' };
   const child2 = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + (PORT + 1)], { cwd: ROOT, env: env2, stdio: 'ignore', windowsHide: false });
   const target2 = await waitTarget(PORT + 1, 90000, (item) => item && item.type === 'page' && String(item.url || '').includes('renderer/index.html'));
   check('U11 AC4 sessions-mock 实例启动', Boolean(target2));

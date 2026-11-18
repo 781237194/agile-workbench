@@ -7760,9 +7760,11 @@ ipcMain.handle('theme:metrics', async () => {
         );
         if (!binding.ok) warnings.push({ code: binding.code, message: binding.message });
       }
-      // 97db 测试钩子（T-20261119-032132-50f8bd）：AWB_SESSIONS_MOCK=six 或逗号 sessionId 列表
-      // → 注入会话映射（无真实 DSH/凭据时也能验 AC4 恢复成功路径：6 会话/映射 6/6）。
-      const sessionsMock = String(process.env.AWB_SESSIONS_MOCK || '').trim();
+      // 97db 测试钩子（T-20261119-032132-50f8bd / PM M-20261119-032151-f7ecb7）：
+      // AWB_WORKSPACE_MOCK=ok|reuse 时**自动** mock 6 会话（sessions 段可判）；也可用 AWB_SESSIONS_MOCK=six|id列表 显式指定。
+      const workspaceMockMode = String(process.env.AWB_WORKSPACE_MOCK || '').trim().toLowerCase();
+      const sessionsMock = String(process.env.AWB_SESSIONS_MOCK || '').trim()
+        || ((workspaceMockMode === 'ok' || workspaceMockMode === 'reuse') ? 'six' : '');
       let result;
       if (sessionsMock) {
         const mockRoleIds = Array.isArray(p.roles) && p.roles.length ? p.roles.map(String) : roleIdsForTeamMode(restoreMode);

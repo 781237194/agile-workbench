@@ -114,6 +114,25 @@ async function runScenario(name, sessionMode, port) {
   const leftoverAfterRestart = (teamAfterRestart && Array.isArray(teamAfterRestart.members) ? teamAfterRestart.members : []).filter((m) => m && m.sessionId).map((m) => m.role);
   const restartEmpty = restartMembers && restartMembers.ok === true && restartMembers.membersEmpty === true && Array.isArray(restartMembers.roles) && restartMembers.roles.length === 0;
   check(`D5 [${name}] 重启后名册仍全空 + team:members membersEmpty=true/roles=0`, leftoverAfterRestart.length === 0 && restartEmpty, { leftoverAfterRestart, restartMembers: restartMembers && { ok: restartMembers.ok, membersEmpty: restartMembers.membersEmpty, roles: restartMembers.roles && restartMembers.roles.length, projectMissing: restartMembers.projectMissing } });
+  // D6 团队台 0 行（DOM 真实渲染断言）：删除后打开团队台，成员行数必须为 0
+  let teamRows = null;
+  try {
+    const port3 = port + 120;
+    const child3 = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + port3], { cwd: ROOT, env, stdio: 'ignore', windowsHide: false });
+    const target3 = await waitTarget(port3, 90000, (item) => item && item.type === 'page' && String(item.url || '').includes('renderer/index.html'));
+    if (target3) {
+      const ws3 = new WebSocket(target3.webSocketDebuggerUrl);
+      await new Promise((resolve) => ws3.addEventListener('open', resolve, { once: true }));
+      const cdp3 = new Cdp(ws3); await cdp3.send('Runtime.enable');
+      for (let i = 0; i < 200; i += 1) { const ok = await cdp3.evaluate('document.readyState === "complete" && typeof setDrawer === "function"'); if (ok === true) break; await sleep(400); }
+      await cdp3.evaluate('setDrawer("team"); true');
+      await sleep(1800);
+      teamRows = await cdp3.evaluate('(() => { const rows = document.querySelectorAll("#team-drawer .session-row"); return { count: rows.length, drawerHidden: (() => { const d = document.querySelector("#team-drawer"); return d ? d.hidden : null; })() }; })()');
+      try { cdp3.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ }
+      await sleep(600); try { ws3.close(); } catch { /* ignore */ } try { child3.kill(); } catch { /* ignore */ }
+    } else { try { child3.kill(); } catch { /* ignore */ } }
+  } catch { teamRows = null; }
+  check(`D6 [${name}] 团队台成员行=0（DOM 真实渲染）`, Boolean(teamRows) && teamRows.count === 0, teamRows);
   try { fs.rmSync(sb, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 (async () => {
