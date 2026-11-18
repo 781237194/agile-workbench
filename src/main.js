@@ -1603,13 +1603,22 @@ async function workflowProjectContext(payload) {
  * 只合并工作流任务（source=legacy-workflow），不动用户手工建的任务；
  * 需求/任务/阶段的真相仍在 团队/状态/项目/<slug>/。
  */
+// B-20261118-211237-9ded：验收点击中复用「门预检」读到的快照给镜像回写，避免一次点击重复扫 1000+ 任务文件。
+let reuseWorkflowSnapshotForMirror = null;
+
 function mirrorWorkflowToStore(projectId, teamName, projectPath) {
   if (!projectId || !teamName) return null;
   let snapshot = null;
+  // B-20261118-211237-9ded：同一请求内复用验收门已读到的快照（2s 内且同项目），否则照旧读盘。
   try {
-    snapshot = teamTools.readWorkflowSnapshot(teamName, projectPath);
-  } catch {
-    return null;
+    const reuse = reuseWorkflowSnapshotForMirror;
+    if (reuse && reuse.snapshot && reuse.teamName === teamName && (Date.now() - reuse.at) < 2000) {
+      snapshot = reuse.snapshot;
+      reuseWorkflowSnapshotForMirror = null;
+    }
+  } catch { /* 复用失败按原逻辑读盘 */ }
+  if (!snapshot) {
+    try { snapshot = teamTools.readWorkflowSnapshot(teamName, projectPath); } catch { return null; }
   }
   if (!snapshot || !snapshot.ok) return null;
   try {
@@ -8140,6 +8149,10 @@ ipcMain.handle('theme:metrics', async () => {
   });
   const scheduleBoardRebuild = (project, reason) => boardRebuild.schedule(project, reason);
   ipcMain.handle('owner:accept', runWorkflowIpc(async (ctx, p, meta) => {
+    // B-20261118-211237-9ded：验收打点（门预检 / 落账 / 总耗时）+ 快照复用给镜像回写。
+    const acceptT0 = Date.now();
+    const acceptProfile = {};
+    let acceptGateSnapshot = null;
     // R-4f99 F-3：两种身份两种通道——Owner 本人 ui；PM 仅在有效代管下凭证据代验收 proxy。
     // 代管有效性在这里查评审代管.json；证据存在性/哈希由 team-tools 的 ownerAccept 复核（缺一即拒）。
     const role = String(p.role || 'owner');
@@ -8170,6 +8183,7 @@ ipcMain.handle('theme:metrics', async () => {
     const acceptGate = (() => {
       try {
         const snapshot = teamTools.readWorkflowSnapshot(String(acceptProject.teamName || acceptProject.name || ''), acceptProject.path) || {};
+        acceptGateSnapshot = snapshot;
         const requirementId = String(p.requirementId || '');
         const row = (Array.isArray(snapshot.requirements) ? snapshot.requirements : [])
           .find((item) => item && String(item.id || '') === requirementId) || null;
@@ -8208,6 +8222,8 @@ ipcMain.handle('theme:metrics', async () => {
         requirementId: String(p.requirementId || '')
       };
     }
+    acceptProfile.gateMs = Date.now() - acceptT0;
+    const acceptCallT0 = Date.now();
     const result = await teamTools.ownerAccept({
       ...p,
       ...proxyFields,
@@ -8220,6 +8236,9 @@ ipcMain.handle('theme:metrics', async () => {
       // Owner 确认码已废弃：直接以 role=owner 接受；旧工具内部换码由 team-tools 静默完成。
       ownerConfirmed: true
     });
+    acceptProfile.acceptMs = Date.now() - acceptCallT0;
+    acceptProfile.totalMs = Date.now() - acceptT0;
+    try { console.log('[accept-profile] ' + JSON.stringify({ ...acceptProfile, role, requirementId: String(p.requirementId || '') })); } catch { /* ignore */ }
     // R-ea86 F-E5：验收成功后 看板.json 该需求行必须变 accepted。
     // B-20261117-133419-6543：不再在本 IPC 里同步等 generateBoard（实测 939ms~3.4s，把验收拖成 6~10 秒）；
     // 改成后台去抖合并重建（同项目连点只重建一次），完成后广播 board:rebuilt 让界面自刷新，失败写审计不静默。
@@ -8235,6 +8254,12 @@ ipcMain.handle('theme:metrics', async () => {
           ? `看板在后台重建（约 ${Math.round((scheduled.debounceMs || 600) / 100) / 10} 秒后开始），完成后界面自动刷新`
           : String(scheduled.message || '看板重建未排队'),
       };
+    }
+    if (result && typeof result === 'object') {
+      result.profile = acceptProfile;
+      try {
+        if (acceptGateSnapshot) reuseWorkflowSnapshotForMirror = { snapshot: acceptGateSnapshot, teamName: ctx.teamName, at: Date.now() };
+      } catch { /* ignore */ }
     }
     return result;
   }));
