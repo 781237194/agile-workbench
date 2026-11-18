@@ -136,7 +136,8 @@ try {
   const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8').replace(/^\uFEFF/, ''));
   meta.dshWorkspaceId = dshWorkspace.workspaceId;
   meta.updatedAt = nowIso();
-  fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+  // B-20261118-163847-5e11：工作区元数据参与恢复判定，与 团队会话.json 同口径走原子写（不裸写）。
+  writeJsonAtomic(metaFile, meta, { case: 'launch-workspace-meta', allowedRoots: [workspace] });
 } catch { /* 旧目录没有 workspace.json 也继续 */ }
 const existingList = await client.list();
 // B-20261118-080052-207b：三源复用（title + 团队.json 名册 + 项目映射 团队会话.json）。
@@ -316,7 +317,9 @@ const sessionManifest = {
     reused: s.reused, model: s.model ? `${s.model.provider}/${s.model.model}` : '',
   })),
 };
-fs.writeFileSync(path.join(workspace, '团队会话.json'), JSON.stringify(sessionManifest, null, 2) + '\n', 'utf8');
+// B-20261118-163847-5e11：团队会话.json 与 session.mjs / roster-writer 是同一份状态（rotate 的恢复判定读它），
+// 必须同口径原子写（json-atomic：tmp→fsync→bak→rename + 锁 + 审计），不得裸 fs.writeFileSync。
+writeJsonAtomic(path.join(workspace, '团队会话.json'), sessionManifest, { case: 'launch-manifest', allowedRoots: [workspace] });
 const sessionMd = [
   '# 团队会话（程序生成）',
   '',
@@ -333,6 +336,7 @@ const sessionMd = [
   ...sessions.map((s) => `| ${s.name} | ${s.title} | \`${s.sessionId}\` | ${s.reused ? '复用' : '新建'} | ${s.model ? s.model.provider + '/' + s.model.model : '—'} |`),
   '',
 ].join('\n');
+// 展示件（.md）：只给人看、不参与任何判定，保留裸写（非状态文件，无需原子写语义）。
 fs.writeFileSync(path.join(workspace, '团队会话.md'), sessionMd, 'utf8');
 let indexRefreshed = false;
 try {
