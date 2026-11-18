@@ -700,6 +700,60 @@ async function runSqCheck(options = {}) {
     && (panel.rows || []).some((row) => row.queued === '0' || row.queued === '3'),
     { reasonAttr, bannerText: String(panel.bannerText || '').slice(0, 120), queued: (panel.rows || []).map((r) => r.queued) });
 
+  // ── R-20261118-131107-28b8：旧会话自动归档失败可见（面板黄点 + 摘要行后缀，渲染层只读 model） ──
+  const teamTools = require('./team-tools.js');
+  const ledgerProjectDir = path.join(stateDir, '项目', teamTools.teamSlug(teamName || '沙盘'));
+  const ledgerFile = path.join(ledgerProjectDir, '会话归档.jsonl');
+  const writeLedger = (rows) => {
+    fs.mkdirSync(path.dirname(ledgerFile), { recursive: true });
+    fs.writeFileSync(ledgerFile, rows.map((row) => JSON.stringify(row)).join('\n') + (rows.length ? '\n' : ''), 'utf8');
+    const nowDate = new Date();
+    try { fs.utimesSync(ledgerFile, nowDate, nowDate); } catch { /* mtime 刷不动也不影响内容变化 */ }
+  };
+  writeJson(snapshotFile, snapshotOf(baseRoles, Date.now()));
+  writeLedger([{
+    at: ago(30 * 1000), project: teamName || '沙盘', role: 'tester',
+    oldSessionId: 'sq-fixture-old-tester', newSessionId: 'sq-fixture-tester',
+    result: 'failed', reason: 'EACCES 写盘失败', attempts: 3, source: 'sweep', auto: true,
+  }]);
+  panel = await refresh();
+  const archiveDom = await evalJs(`(() => {
+    const live = document.querySelector('[data-live-row][data-role="tester"]');
+    const sq = document.querySelector('[data-sq-row][data-role="tester"]');
+    const summary = document.getElementById('session-queue-summary');
+    return {
+      liveFlag: live ? String(live.getAttribute('data-sq-archive-failed') || '') : '',
+      liveTitle: live ? String(live.getAttribute('title') || '') : '',
+      liveDot: live ? Boolean(live.querySelector('[data-sq-archive-dot]')) : false,
+      sqFlag: sq ? String(sq.getAttribute('data-sq-archive-failed') || '') : '',
+      flagged: document.querySelectorAll('[data-live-row][data-sq-archive-failed="1"]').length,
+      summary: summary ? String(summary.textContent || '') : '',
+    };
+  })()`);
+  check('28b8-① 归档失败 → 该角色行 data-sq-archive-failed="1" + 黄点 + title 含原因（值来自 model，不读盘）',
+    archiveDom.liveFlag === '1' && archiveDom.sqFlag === '1' && archiveDom.liveDot && /EACCES/.test(archiveDom.liveTitle),
+    archiveDom);
+  check('28b8-② 摘要行末尾「· 有 1 个归档失败」（取 model.archiveFailures.total）',
+    /· 有 1 个归档失败$/.test(String(archiveDom.summary || '')),
+    { summary: archiveDom.summary });
+  check('28b8-③ 只有失败角色亮黄点（其它角色不连带）',
+    Number(archiveDom.flagged) === 1,
+    { flagged: archiveDom.flagged });
+  writeLedger([{
+    at: ago(20 * 1000), project: teamName || '沙盘', role: 'tester',
+    oldSessionId: 'sq-fixture-old-tester', newSessionId: 'sq-fixture-tester',
+    result: 'archived', reason: 'rotate-auto', archiveId: 'A-fixture-tester',
+  }]);
+  panel = await refresh();
+  const archiveCleared = await evalJs(`(() => ({
+    flagged: document.querySelectorAll('[data-sq-archive-failed]').length,
+    summary: String((document.getElementById('session-queue-summary') || {}).textContent || ''),
+  }))()`);
+  check('28b8-④ 账本无 failed 行 → 黄点消失、摘要无「归档失败」后缀（不残留）',
+    Number(archiveCleared.flagged) === 0 && !/归档失败/.test(String(archiveCleared.summary || '')),
+    archiveCleared);
+  try { fs.rmSync(ledgerFile, { force: true }); } catch { /* 清理失败不影响结论 */ }
+
   const failed = checks.filter((row) => !row.ok);
   const report = {
     ok: failed.length === 0,

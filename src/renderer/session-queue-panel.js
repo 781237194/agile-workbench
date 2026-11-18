@@ -24,6 +24,7 @@
   const ROWS_ID = 'session-queue-rows';
   const BANNER_ID = 'session-queue-banner';
   const META_ID = 'session-queue-meta';
+  const SUMMARY_ID = 'session-queue-summary';
   const LIVE_ROWS_ID = 'session-live-rows';
   const LIVE_PUSH_ID = 'session-live-push';
   const LIVE_STALL_HINT_ID = 'session-live-stall-hint';
@@ -307,6 +308,17 @@
       }
       line.appendChild(arBox);
 
+      // R-20261118-131107-28b8：旧会话自动归档失败 → 该角色行黄点 + 可读原因（只读 model，不读盘）
+      if (row.archiveFailed) {
+        line.setAttribute('data-sq-archive-failed', '1');
+        const archiveTitle = `旧会话自动归档失败：${String(row.archiveFailedReason || '未知原因')}${row.archiveFailedAt ? `（最近尝试 ${row.archiveFailedAt}）` : ''}`;
+        line.title = archiveTitle;
+        const dot = node('span', 'sq-archive-dot', '●');
+        dot.setAttribute('data-sq-archive-dot', '1');
+        dot.title = archiveTitle;
+        line.appendChild(dot);
+      }
+
       host.appendChild(line);
     }
     if (!host.childNodes.length) {
@@ -380,6 +392,17 @@
       // R-9674：实时行同样补「最近活动」（idle 行不再只显示「空闲」；锚点与 [data-sq-row] 同口径）
       line.appendChild(activityNode(row.lastActivity, 'span'));
 
+      // R-20261118-131107-28b8：旧会话自动归档失败 → 实时行黄点（只读 model.archiveFailed / archiveFailedReason）
+      if (row.archiveFailed) {
+        const archiveTitle = `旧会话自动归档失败：${String(row.archiveFailedReason || '未知原因')}${row.archiveFailedAt ? `（最近尝试 ${row.archiveFailedAt}）` : ''}`;
+        line.setAttribute('data-sq-archive-failed', '1');
+        line.title = archiveTitle;
+        const dot = node('span', 'sq-archive-dot', '●');
+        dot.setAttribute('data-sq-archive-dot', '1');
+        dot.title = archiveTitle;
+        line.appendChild(dot);
+      }
+
       host.appendChild(line);
     }
     if (!host.childNodes.length) {
@@ -425,6 +448,31 @@
       ? `推送降级：${push.reason === 'push_unavailable' ? '壳层推送通道未接入（watch 不可用）' : (push.reason === 'push_stale' ? '超过 5 秒没有推送更新' : (push.reason || '未知原因'))}；最近成功读取：${okAt || '无记录'}`
       : `推送正常（最近更新：${okAt || '无记录'}）`;
     chip.className = 'badge ' + (degraded ? 'badge-skipped' : 'muted-badge');
+  }
+
+  /**
+   * R-20261118-131107-28b8：摘要行末尾「· 有 N 个归档失败」（取 model.archiveFailures.total）。
+   * 只读 model；N=0 时不显示后缀、不留脏 attr。黄点与摘要同源，避免两处数字打架。
+   */
+  function paintArchiveSummary() {
+    const summary = el(SUMMARY_ID);
+    if (!summary) return;
+    const model = state.model || {};
+    const rows = Array.isArray(model.rows) ? model.rows : [];
+    const failures = model.archiveFailures && typeof model.archiveFailures === 'object' ? model.archiveFailures : { total: 0, byRole: {} };
+    const total = Number(failures.total) || 0;
+    const roleText = (rows.length === 6 || !rows.length) ? '六角色' : `${rows.length} 个角色`;
+    const base = `${roleText} · 排队数 / 四态 / 失败与跳过 / 最近成功投递`;
+    summary.textContent = total > 0 ? `${base} · 有 ${total} 个归档失败` : base;
+    if (total > 0) {
+      summary.setAttribute('data-sq-archive-failures', String(total));
+      const roles = Object.keys(failures.byRole || {})
+        .map((role) => `${role}(${Number((failures.byRole[role] || {}).count) || 1})`).join('、');
+      summary.title = `旧会话自动归档失败 ${total} 条${roles ? `：${roles}` : ''}（数据源：团队/状态/项目/<项目>/会话归档.jsonl）`;
+    } else {
+      summary.removeAttribute('data-sq-archive-failures');
+      summary.title = base;
+    }
   }
 
   function paintStallHint() {
@@ -597,6 +645,7 @@
     paintSummary();
     renderBanner();
     paintBackpressure();
+    paintArchiveSummary();
     syncStopwatch();
     try {
       window.dispatchEvent(new CustomEvent('awb:session-queue-model', { detail: { at: Date.now() } }));

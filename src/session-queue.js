@@ -406,6 +406,35 @@ function readAutoRotateSummary({ auditRows, now } = {}) {
 }
 
 /**
+ * R-20261118-131107-28b8：旧会话自动归档失败聚合（纯函数，面板只读模型、不读盘）。
+ *
+ * 来源＝团队/状态/项目/<项目>/会话归档.jsonl（主进程按 mtime+size 缓存读，把 rows 传进来）。
+ * 口径（正文 §6.3 写死）：
+ *   · 只看 result==='failed' 的行；
+ *   · count = 该角色历史 failed 行数（累计，不按窗口截断）；
+ *   · lastAt / reason / oldSessionId 取该角色**最新**一条 failed 行；
+ *   · total = 全部角色 failed 行数之和（摘要行「有 N 个归档失败」用它）。
+ */
+function summarizeArchiveFailures(rows) {
+  const list = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  const byRole = {};
+  let total = 0;
+  for (const row of list) {
+    if (String(row.result || '') !== 'failed') continue;
+    const role = String(row.role || '');
+    if (!role) continue;
+    total += 1;
+    const item = byRole[role] || { count: 0, lastAt: '', reason: '', oldSessionId: '' };
+    item.count += 1;
+    item.lastAt = String(row.at || '');
+    item.reason = String(row.reason || row.error || '');
+    item.oldSessionId = String(row.oldSessionId || '');
+    byRole[role] = item;
+  }
+  return { total, byRole };
+}
+
+/**
  * 面板模型：六角色 × （排队数 / 四态 / 失败数 / 跳过数 / 最近成功投递时间）+ 降级原因。
  */
 function buildPanelModel(options = {}) {
@@ -446,6 +475,8 @@ function buildPanelModel(options = {}) {
 
   const snapRoles = readSnapshotRoles(snapshot);
   const autoRotate = readAutoRotateSummary({ auditRows: options.autoRotateRows, now });
+  // R-28b8：归档失败可见（失败不静默）；来源＝会话归档.jsonl 的 failed 行（主进程读盘后传 rows）。
+  const archiveFailures = summarizeArchiveFailures(options.archiveRows);
   // R-c9ac：停滞阈值（options.stallMs 优先；否则从 options.ui.sessionQueue.stallMs 热读；非法回落默认并标记 invalid）。
   const stallCfg = (Number.isFinite(Number(options.stallMs)) && Number(options.stallMs) > 0)
     ? { stallMs: Number(options.stallMs), invalid: Boolean(options.stallInvalid), raw: options.stallMs, reason: 'options' }
@@ -475,6 +506,10 @@ function buildPanelModel(options = {}) {
       lastFailAt: summary.lastFailAt || '',
       // R-fa0e（3a12）§六：自动换人字段（无记录时 state=idle、审计尾为空，不伪造）
       autoRotate: autoRotate.byRole[role] || { state: 'idle', reason: '', auditTail: '', error: '', usageSource: '' },
+      // R-28b8：旧会话自动归档失败（黄点；值全部来自 model，渲染层不读盘）
+      archiveFailed: Boolean((archiveFailures.byRole[role] || {}).count),
+      archiveFailedReason: String((archiveFailures.byRole[role] || {}).reason || ''),
+      archiveFailedAt: String((archiveFailures.byRole[role] || {}).lastAt || ''),
       // R-9674：最近活动（三源优先级；idle 行展示「最近活动 … · 摘要」，三源全空为「未知」）
       lastActivity: lastActivityOf({ snapshotEntry: entry, wakeRow: latestRowOf(role), taskRow: taskByRole ? taskByRole[role] : null }),
     };
@@ -498,6 +533,8 @@ function buildPanelModel(options = {}) {
     backpressure: backpressureHint((rows.find((row) => row.role === 'pm') || {}).queued),
     // R-fa0e（3a12）§六：团队台只读汇总 [data-ar-summary]
     autoRotate: { summary: autoRotate.summary, rotatedToday: autoRotate.rotatedToday, failedToday: autoRotate.failedToday },
+    // R-28b8：归档失败聚合（摘要行「· 有 N 个归档失败」+ 行级黄点都取它）
+    archiveFailures,
   };
   // R-9674 §6.3：顶部全员状态摘要（纯函数派生，渲染层只显示；不新增定时器）
   model.summary = buildActivitySummary(rows, { now });
@@ -823,6 +860,7 @@ module.exports = {
   summarizeRows,
   readSnapshotRoles,
   degradationOf,
+  summarizeArchiveFailures,
   buildPanelModel,
   backpressureHint,
   pendingInputOf,

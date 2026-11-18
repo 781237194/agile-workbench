@@ -35,6 +35,8 @@ import { requirementReviewer } from './roles.mjs';
 import { activeProxyFor } from './owner-proxy.mjs';
 // R-fa0e（T-20261117-195120-3a12）：自动换人周期拍（团队配置 autoRotate 门禁，默认 5 分钟；0/false=关）。
 import { runAutoRotateBeat } from './auto-rotate.mjs';
+// R-20261118-131107-28b8：换人后「在途延后归档」补归档，挂在每拍 tick 内（默认 30 秒一拍）。
+import { sweepDeferredArchives } from './session-archive.mjs';
 import { addDecision } from './decision-box.mjs';
 import { ROLE_QUEUE_FILE, buildRoleQueues, writeRoleQueues } from './route-queues.mjs';
 import { scenarioConfirmState } from './scenario-confirm.mjs';
@@ -851,6 +853,24 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
       status.queueError = String((e && e.message) || e);
     }
   };
+
+  // ── R-20261118-131107-28b8：换人后「在途延后归档」补归档（每拍一次，单拍最多 5 条） ──
+  // 归档失败的可见性由 session-archive 自己落账 + 通知 PM + 面板黄点；这里只负责「到期就重试」，
+  // 异常一律隔离在本 try 内，不影响路由主流程（AC3 / 边界·异常）。
+  try {
+    const swept = sweepDeferredArchives({ projectName: name, now, limit: 5 });
+    if (swept && swept.processed) {
+      out.archiveSweep = swept;
+      appendRouteLog(name, {
+        event: 'skip', source: 'status', ok: true, fromStatus: '', toStatus: '',
+        why: `archive_sweep:${swept.results.map((r) => `${r.role}=${r.result}${r.attempts ? `#${r.attempts}` : ''}`).join(',')}`,
+      });
+    }
+  } catch (e) {
+    try {
+      appendRouteLog(name, { event: 'skip', source: 'status', ok: false, fromStatus: '', toStatus: '', why: `archive_sweep_failed:${String((e && e.message) || e).slice(0, 120)}` });
+    } catch { /* 日志失败不阻断路由 */ }
+  }
 
   const wfRaw = readWorkflowRaw(name);
   if (wfRaw.corrupt) {

@@ -6276,6 +6276,28 @@ ipcMain.handle('theme:metrics', async () => {
   };
   // 快照解析失败时保留上一份可用快照（不清空面板；黄条说明原因）。
   let sqLastGood = { file: '', snapshot: null };
+  // R-20261118-131107-28b8：旧会话自动归档账本（会话归档.jsonl）——图「归档失败可见」。
+  // 与唤醒日志同法：按 mtime+size 缓存解析，绝不每次刷新全读；坏行跳过、不降级整个面板。
+  let sqArchiveCache = { file: '', key: '', rows: [] };
+  const readArchiveLogCached = (file) => {
+    if (!file) return [];
+    try {
+      const st = fs.statSync(file);
+      const key = `${st.mtimeMs}:${st.size}`;
+      if (sqArchiveCache.file === file && sqArchiveCache.key === key) return sqArchiveCache.rows;
+      if (st.size > 2 * 1024 * 1024) {
+        console.warn('SESSION_QUEUE_ARCHIVE_OVERSIZE ' + JSON.stringify({ file, bytes: st.size }));
+        return sqArchiveCache.file === file ? sqArchiveCache.rows : [];
+      }
+      const rows = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean)
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+        .filter(Boolean).slice(-500);
+      sqArchiveCache = { file, key, rows };
+      return rows;
+    } catch {
+      return sqArchiveCache.file === file ? sqArchiveCache.rows : [];
+    }
+  };
   ipcMain.handle('team:session-queue', async (_e, payload) => {
     try {
       sqStats.getSnapshotCalls += 1;
@@ -6356,6 +6378,10 @@ ipcMain.handle('theme:metrics', async () => {
       }
       // T-20261117-211833-7a30（R-a4c7）AC5②：调度建议（只读；与 CLI 同源纯函数，失败降级为空、不阻塞面板）
       let schedAdvice = null;
+      // R-20261118-131107-28b8：旧会话归档账本（只读；mtime+size 缓存）。失败行 → 面板黄点 + 摘要「有 N 个归档失败」。
+      const archiveRows = projectName
+        ? readArchiveLogCached(path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName), '会话归档.jsonl'))
+        : [];
       if (projectName) {
         try {
           const schedOut = execFileSync(process.execPath, [path.join(teamRoot, '工具', 'team.mjs'), 'sched', 'advice', '--project', projectName, '--json'], {
@@ -6408,6 +6434,7 @@ ipcMain.handle('theme:metrics', async () => {
       const model = SessionQueue.buildPanelModel({
         project: projectName,
         autoRotateRows,
+        archiveRows,
         roles: roles.length ? roles : SessionQueue.SIX_ROLES,
         roleNames,
         snapshot,
@@ -6437,6 +6464,7 @@ ipcMain.handle('theme:metrics', async () => {
       });
       model.snapshotFile = snapshotFile;
       model.wakeFile = wakeFile;
+      model.archiveFile = projectName ? path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName), '会话归档.jsonl') : '';
       model.sched = schedAdvice;
       // c9ac（T-20261118-083424-8e33）：推送通道自述（渲染层据此判 push/degraded；黄条仍走既有 data-sq-degraded）
       model.push = {

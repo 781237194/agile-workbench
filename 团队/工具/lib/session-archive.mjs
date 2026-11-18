@@ -10,9 +10,10 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
-import { nowIso, stamp, ensureDir, fail, truncate, acquireLock, releaseLock, listLocks } from './core.mjs';
-import { loadProject, projectStatePaths, listTasks } from './store.mjs';
+import { nowIso, stamp, ensureDir, fail, truncate, acquireLock, releaseLock, listLocks, TeamError } from './core.mjs';
+import { loadProject, projectStatePaths, listTasks, sendMessage } from './store.mjs';
 import { statusIsClosed, isRequirementMirrorTask } from './gates.mjs';
+import { writeJsonAtomic } from './json-atomic.mjs';
 
 export const ROUNDS_MAX = 10;
 const ARCHIVE_DIR = '会话归档';
@@ -306,8 +307,14 @@ function pmDecisionLog(projectPath, role, record, text) {
   } catch { return null; }
 }
 
-/** 归档：写 会话归档/A-<ts>-<角色>.json（9 字段 + rotatedAt/confirmedAt/frozenAt），轮次归零。 */
-export function archiveSession({ projectName, role, reason = '', self = false, auto = false, operator = 'pm', force = false }) {
+/**
+ * 归档：写 会话归档/A-<ts>-<角色>.json（9 字段 + rotatedAt/confirmedAt/frozenAt），轮次归零。
+ *
+ * R-20261118-131107-28b8：新增显式 `sessionId` 入参（默认仍取 currentSessionOf，老调用语义不变）。
+ * 换人后必须按「被替换下来的旧 sessionId」归档——否则按 currentSessionOf 会把刚建的新会话归档掉。
+ * `skipTranscript`：沙盘/夹具用（不读 DSH 转录，只写本地记录；inputTokens 记 null 而不是去猜）。
+ */
+export function archiveSession({ projectName, role, reason = '', self = false, auto = false, operator = 'pm', force = false, sessionId: explicitSessionId = '', skipTranscript = false }) {
   if (!role) fail('BAD_ROLE', '需要 --role');
   const project = loadProject(projectName);
   // B-da51（f73f 回归）：未闭环判据 = 非终态（statusIsClosed）+ 非镜像任务（type=requirement）+ owner 命中。
@@ -317,7 +324,7 @@ export function archiveSession({ projectName, role, reason = '', self = false, a
   if (open.length) fail('TASK_OPEN', `角色 ${role} 还有 ${open.length} 个未闭环任务，先 done 再归档`, { tasks: open.map((t) => t.id) });
   const locks = (listLocks() || []).filter((l) => String(l.role || '') === role && !l.stale);
   if (locks.length) fail('ROLE_BUSY', `角色 ${role} 持活动锁，先释放再归档`, { locks: locks.map((l) => l.key) });
-  const sessionId = currentSessionOf(projectName, role);
+  const sessionId = String(explicitSessionId || '').trim() || currentSessionOf(projectName, role);
   // AC18.8：未确认前不得再次 --self —— 该判定必须先于“重复归档”，否则同一会话会被 ALREADY_ARCHIVED 抢先。
   if (self) {
     const pending = listArchives(projectName).find((a) => a.role === 'pm' && a.self === true && !a.confirmedAt);
@@ -326,7 +333,7 @@ export function archiveSession({ projectName, role, reason = '', self = false, a
   const dup = listArchives(projectName).find((a) => a.role === role && String(a.sessionId || '') === String(sessionId || ''));
   if (dup && !force) fail('ALREADY_ARCHIVED', `该会话已归档：${dup.id}（如需重归档加 --force）`, { archiveId: dup.id });
   const rounds = readRounds(projectName, role).roundsSinceArchive;
-  const inputTokens = latestInputTokens({ projectName, sessionId });
+  const inputTokens = skipTranscript ? null : latestInputTokens({ projectName, sessionId });
   const at = nowIso();
   const record = {
     id: `A-${stamp()}-${role}`,
@@ -399,4 +406,330 @@ export function firstTurnUsage({ projectName, sessionId, role = '' }) {
     firstTurnInputTokens: first && Number.isFinite(Number(first.inputTokens)) ? Number(first.inputTokens) : null,
     sampledAt: nowIso(),
   };
+}
+
+/* ───────── R-20261118-131107-28b8：换人成功后自动归档旧会话（失败可见、在途可延后） ─────────
+ *
+ * 缺口（写稿时基线）：换人只有「换人前的建议」ARCHIVE_REQUIRED（已降为 advice-not-blocker），
+ * 换下来的旧会话没人归档；而 archiveSession() 只按 currentSessionOf(role) 取对象——换人后调用会把
+ * **刚建的新会话**归档掉。所以本段做四件事：
+ *   ① 显式 sessionId 归档（archiveSession 新增入参，默认值不变）；
+ *   ② 五态记录（archived / already / deferred / failed / skipped，沙盘另有 stubbed）写 会话归档.jsonl
+ *      + 回填 会话轮换/<role>.json 的 archive 段；
+ *   ③ 失败可见：审计 + stderr + 给 PM 一条 notice（不阻断已成功的换人）；
+ *   ④ 在途 deferred → routeTick 每拍 sweep 补归档，最多 3 次（初始 1 + 重试 2），第 3 次落 failed。
+ *
+ * 沙盘口径：TEAM_SELFTEST=1 默认只记账（result=stubbed），不写真归档/不读 DSH 转录；
+ * `TEAM_ARCHIVE_STUB=0|off` 显式关闭 stub（夹具要拿 archived 时用）。失败注入缝：
+ * `AWB_ARCHIVE_FAIL_ONCE=1` / `AWB_ARCHIVE_FAIL_TIMES=n`（只在 TEAM_SELFTEST=1 下生效）。
+ */
+export const ARCHIVE_LEDGER_NAME = '会话归档.jsonl';
+export const ARCHIVE_RETRY_MS = 10 * 60 * 1000;
+export const ARCHIVE_MAX_ATTEMPTS = 3;
+export const ARCHIVE_SWEEP_LIMIT = 5;
+export const ARCHIVE_RESULTS = ['archived', 'already', 'deferred', 'failed', 'skipped', 'stubbed'];
+
+export function archiveLedgerPath(projectName) {
+  return path.join(sessionStateDir(projectName), ARCHIVE_LEDGER_NAME);
+}
+
+function nowMsOf(now) {
+  if (now === null || now === undefined || now === '') return Date.now();
+  const ms = typeof now === 'number' ? now : Date.parse(String(now));
+  return Number.isFinite(ms) ? ms : Date.now();
+}
+
+/** 沙盘 stub：TEAM_SELFTEST=1 默认只记账；TEAM_ARCHIVE_STUB=0/off 显式关闭（夹具要真归档时）。 */
+export function archiveStubEnabled() {
+  const raw = String(process.env.TEAM_ARCHIVE_STUB == null ? '' : process.env.TEAM_ARCHIVE_STUB).trim().toLowerCase();
+  if (['0', 'off', 'false', 'no', 'disable', 'disabled'].includes(raw)) return false;
+  return String(process.env.TEAM_SELFTEST || '') === '1';
+}
+
+// 失败注入缝：模块级计数（同进程可控制次数；跨进程用 env 每次生效）。
+let injectedFailuresLeft = -1;
+function takeInjectedArchiveFailure() {
+  if (String(process.env.TEAM_SELFTEST || '') !== '1') return false;
+  if (injectedFailuresLeft < 0) {
+    const times = Number(process.env.AWB_ARCHIVE_FAIL_TIMES || 0);
+    injectedFailuresLeft = String(process.env.AWB_ARCHIVE_FAIL_ONCE || '') === '1'
+      ? 1
+      : (Number.isFinite(times) && times > 0 ? Math.floor(times) : 0);
+  }
+  if (injectedFailuresLeft > 0) { injectedFailuresLeft -= 1; return true; }
+  return false;
+}
+
+/** 读 会话归档.jsonl（append-only；坏行计 badLines，不静默丢）。 */
+export function readArchiveLedger(projectName) {
+  const file = archiveLedgerPath(projectName);
+  const rows = [];
+  let badLines = 0;
+  try {
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const row = JSON.parse(line);
+        if (row && typeof row === 'object') rows.push(row);
+        else badLines += 1;
+      } catch { badLines += 1; }
+    }
+  } catch { /* 文件不存在 → 空账本（首行由 append 创建） */ }
+  return { rows, badLines, file };
+}
+
+export function appendArchiveLedger(projectName, row) {
+  const file = archiveLedgerPath(projectName);
+  try {
+    ensureDir(path.dirname(file));
+    fs.appendFileSync(file, JSON.stringify(row) + '\n', 'utf8');
+    return { ok: true, file };
+  } catch (e) {
+    return { ok: false, file, why: String((e && e.message) || e) };
+  }
+}
+
+/**
+ * 会话轮换/<role>.json 增/改 archive 段（JSON 原子写）。
+ * 只在「这条归档确实属于该轮换记录」时回填（record.to === newSessionId 或 record.from === oldSessionId）——
+ * 否则会把更早一次轮换的补归档结果写到**最新一次**记录上（账实不符）。历史轮换的 S-*.json 不动。
+ */
+export function patchRotationArchive(projectName, role, archive, { newSessionId = '', oldSessionId = '' } = {}) {
+  const file = path.join(projectStatePaths(projectName).dir, '会话轮换', `${role}.json`);
+  try {
+    if (!fs.existsSync(file)) return { ok: false, why: 'rotation_record_missing', file };
+    const record = readJson(file, null);
+    if (!record) return { ok: false, why: 'rotation_record_broken', file };
+    const to = String(record.to || '');
+    const from = String(record.from || '');
+    const next = String(newSessionId || '');
+    const prev = String(oldSessionId || '');
+    const matches = (!next && !prev) || (next && to && to === next) || (prev && from && from === prev);
+    if (!matches) return { ok: false, why: 'rotation_record_not_matching', file, recordTo: to, newSessionId: next };
+    record.archive = archive;
+    writeJsonAtomic(file, record, { case: 'archive-record', project: projectName, lockTimeoutMs: 3000 });
+    return { ok: true, file };
+  } catch (e) {
+    return { ok: false, why: String((e && e.message) || e), file };
+  }
+}
+
+/** 归档失败通知 PM（notice，一条一句话可行动；同一 oldSessionId 只发一次由 finishArchiveRecord 控制）。 */
+function notifyArchiveFailed(projectName, row) {
+  try {
+    const attempts = row.attempts ? `，第 ${row.attempts} 次` : '';
+    const body = [
+      `角色 ${row.role} 的旧会话 ${row.oldSessionId || '(空)'} 自动归档失败（${row.reason || row.error || '未知原因'}${attempts}）。`,
+      `新会话：${row.newSessionId || '(未记录)'}；换人已成功，本次归档失败不阻断换人与派单。`,
+      `手动补归档：node 团队\\工具\\team.mjs session archive --project "${projectName}" --role ${row.role} --archive-session ${row.oldSessionId || '<旧会话id>'} --confirm`,
+      `账本：团队/状态/项目/${projectName}/${ARCHIVE_LEDGER_NAME}`,
+    ].join('\n');
+    sendMessage({
+      from: 'system', to: 'pm', project: projectName, type: 'notice',
+      subject: `旧会话归档失败：${row.role}`, body: truncate(body, 560),
+    });
+    return true;
+  } catch { return false; }   // PM 不可达不阻断归档结果落账
+}
+
+/**
+ * 唯一落账出口：append 账本 + 回填轮换记录 archive 段 + failed 的 stderr/PM 通知（同 oldSessionId 只通知一次）。
+ * 返回 { ok, result, ..., ledgerFile, ledgerWritten, rotationPatch, pmNotified }。
+ */
+function finishArchiveRecord(projectName, role, row) {
+  const record = { ...row };
+  // 边界·空值：archived/already 的 archiveId 缺失就写 null（字段恒在，不靠缺键表达）
+  if ((record.result === 'archived' || record.result === 'already') && record.archiveId === undefined) record.archiveId = null;
+  // 去重通知：先看账本里是否已有同一 oldSessionId 的 failed 行（含本次之前的重试），有就不再惊动 PM。
+  const alreadyFailed = record.result === 'failed'
+    ? readArchiveLedger(projectName).rows.some((r) => String(r.result || '') === 'failed'
+      && String(r.oldSessionId || '') === String(record.oldSessionId || ''))
+    : false;
+  const appended = appendArchiveLedger(projectName, record);
+  const rotationPatch = patchRotationArchive(projectName, role, {
+    result: record.result,
+    at: record.at,
+    ...(record.archiveId ? { archiveId: record.archiveId } : {}),
+    ...(record.reason ? { reason: record.reason } : {}),
+    ...(record.attempts !== undefined ? { attempts: record.attempts } : {}),
+  }, { newSessionId: record.newSessionId, oldSessionId: record.oldSessionId });
+  let pmNotified = false;
+  if (record.result === 'failed') {
+    console.error(`[archive] failed role=${role} old=${record.oldSessionId || '-'} reason=${record.reason || record.error || '-'}`);
+    if (!alreadyFailed) pmNotified = notifyArchiveFailed(projectName, record);
+  }
+  return { ok: record.result !== 'failed', ...record, ledgerFile: appended.file, ledgerWritten: appended.ok, rotationPatch, pmNotified };
+}
+
+const ARCHIVE_DEFERRABLE = new Set(['TASK_OPEN', 'ROLE_BUSY']);
+
+/**
+ * 换人成功后：用「被替换下来的旧 sessionId」归档（不重新推导；不等于当前名册会话才动手）。
+ * 返回五态之一：archived / already / deferred / failed / skipped（沙盘 stub 为 stubbed）。
+ * 绝不因归档失败阻断换人（调用方在 rotateRoster 成功之后调用）。
+ */
+export function archiveRotatedSession({
+  projectName, role, oldSessionId = '', newSessionId = '', reason = '',
+  source = 'session-rotate', auto = true, now = null, skipTranscript = false,
+}) {
+  const name = String(projectName || '');
+  const roleId = String(role || '');
+  if (!name) fail('NO_PROJECT', '需要项目名');
+  if (!roleId) fail('BAD_ROLE', '需要角色');
+  const atMs = nowMsOf(now);
+  const at = new Date(atMs).toISOString();
+  const oldId = String(oldSessionId || '').trim();
+  const newId = String(newSessionId || '').trim();
+  const base = { at, project: name, role: roleId, oldSessionId: oldId, newSessionId: newId, source: String(source || ''), auto: Boolean(auto) };
+  const current = (() => { try { return currentSessionOf(name, roleId); } catch { return ''; } })();
+  if (!oldId) {
+    // 边界·空值：oldSessionId 为空 → skipped/unchanged（detail 里注明是缺 id，不伪造来源）
+    return finishArchiveRecord(name, roleId, { ...base, result: 'skipped', reason: 'unchanged', detail: 'missing_old_session' });
+  }
+  if (current && oldId === current) return finishArchiveRecord(name, roleId, { ...base, result: 'skipped', reason: 'unchanged' });
+  if (archiveStubEnabled()) return finishArchiveRecord(name, roleId, { ...base, result: 'stubbed', reason: 'selftest_stub' });
+  // 幂等：同一 oldSessionId 只写 1 行 archived，后来的记录只写 already。
+  const ledger = readArchiveLedger(name);
+  const archivedBefore = ledger.rows.find((r) => String(r.result || '') === 'archived' && String(r.oldSessionId || '') === oldId);
+  if (archivedBefore) {
+    return finishArchiveRecord(name, roleId, { ...base, result: 'already', reason: 'ledger_archived', archiveId: archivedBefore.archiveId || null });
+  }
+  const why = String(reason || 'rotate-auto');
+  try {
+    if (takeInjectedArchiveFailure()) {
+      throw new TeamError('ARCHIVE_INJECTED_FAIL', '注入失败（AWB_ARCHIVE_FAIL_ONCE）：归档通道模拟异常', { oldSessionId: oldId, role: roleId });
+    }
+    const r = archiveSession({ projectName: name, role: roleId, sessionId: oldId, reason: why, auto: Boolean(auto), operator: 'system', skipTranscript: Boolean(skipTranscript) });
+    // 边界·降级：转录取不到 → 仍 archived（本地记录有效），reason 记 transcript_missing，不判 failed。
+    const transcriptMissing = r.record.inputTokens === null || r.record.inputTokens === undefined;
+    return finishArchiveRecord(name, roleId, {
+      ...base, result: 'archived', reason: transcriptMissing ? 'transcript_missing' : why,
+      ...(transcriptMissing ? { rotateReason: why } : {}),
+      archiveId: r.record.id, rounds: r.record.rounds,
+    });
+  } catch (e) {
+    const code = String((e && e.code) || '');
+    const details = (e && e.details) || {};
+    if (ARCHIVE_DEFERRABLE.has(code)) {
+      return finishArchiveRecord(name, roleId, {
+        ...base, result: 'deferred', reason: code, attempts: 1,
+        tasks: Array.isArray(details.tasks) ? details.tasks.slice(0, 20) : [],
+        locks: Array.isArray(details.locks) ? details.locks.slice(0, 20) : [],
+        deferredUntil: new Date(atMs + ARCHIVE_RETRY_MS).toISOString(),
+      });
+    }
+    if (code === 'ALREADY_ARCHIVED') {
+      return finishArchiveRecord(name, roleId, { ...base, result: 'already', reason: 'already_archived', archiveId: details.archiveId || null });
+    }
+    return finishArchiveRecord(name, roleId, {
+      ...base, result: 'failed', reason: code || 'archive_failed',
+      error: truncate(String((e && e.message) || e), 300),
+    });
+  }
+}
+
+/**
+ * routeTick 每拍补归档：扫账本里「到期且最新一条是 deferred」的行（按角色去重），单拍最多 5 条。
+ * 计数口径写死「3 次失败 = 初始 1 + 重试 2」：attempts 1/2 落 deferred，next=3 落 failed(retry_exhausted)。
+ * 异常隔离在调用方的 try 内；本函数自身只做账（单条失败不影响其它条）。
+ */
+export function sweepDeferredArchives({ projectName, now = Date.now(), limit = ARCHIVE_SWEEP_LIMIT } = {}) {
+  const name = String(projectName || '');
+  if (!name) fail('NO_PROJECT', '需要项目名');
+  const atMs = nowMsOf(now);
+  const at = new Date(atMs).toISOString();
+  const max = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.floor(Number(limit)) : ARCHIVE_SWEEP_LIMIT;
+  const ledger = readArchiveLedger(name);
+  // 按角色取「整份账本的**最后一行**」：只有最后一行仍是 deferred 的角色才需要补归档。
+  // 不能用「最后一条 deferred」——否则该角色后来已 archived/failed，仍会被当成 deferred 永久重试。
+  const latestByRole = new Map();
+  for (const row of ledger.rows) {
+    const role = String(row.role || '');
+    if (!role) continue;
+    latestByRole.set(role, row);
+  }
+  const latestDeferred = new Map([...latestByRole.entries()].filter(([, row]) => String(row.result || '') === 'deferred'));
+  const matched = [...latestDeferred.values()]
+    .filter((row) => {
+      const t = Date.parse(String(row.deferredUntil || ''));
+      return Number.isFinite(t) && t <= atMs;
+    })
+    .sort((a, b) => Date.parse(String(a.at || '')) - Date.parse(String(b.at || '')));
+  const due = matched.slice(0, max);
+  const results = [];
+  for (const prev of due) {
+    const role = String(prev.role || '');
+    const oldId = String(prev.oldSessionId || '').trim();
+    const newId = String(prev.newSessionId || '').trim();
+    const attempts = Math.max(1, Number(prev.attempts) || 1) + 1;
+    const base = { at, project: name, role, oldSessionId: oldId, newSessionId: newId, source: 'sweep', auto: prev.auto !== false };
+    const current = (() => { try { return currentSessionOf(name, role); } catch { return ''; } })();
+    if (!oldId || (current && oldId === current)) {
+      results.push(finishArchiveRecord(name, role, { ...base, result: 'skipped', reason: !oldId ? 'missing_old_session' : 'unchanged', attempts }));
+      continue;
+    }
+    if (archiveStubEnabled()) {
+      results.push(finishArchiveRecord(name, role, { ...base, result: 'stubbed', reason: 'selftest_stub', attempts }));
+      continue;
+    }
+    try {
+      if (takeInjectedArchiveFailure()) {
+        throw new TeamError('ARCHIVE_INJECTED_FAIL', '注入失败（AWB_ARCHIVE_FAIL_ONCE）：归档通道模拟异常', { oldSessionId: oldId, role });
+      }
+      const r = archiveSession({ projectName: name, role, sessionId: oldId, reason: String(prev.reason || 'rotate-auto'), auto: prev.auto !== false, operator: 'system', skipTranscript: false });
+      const transcriptMissing = r.record.inputTokens === null || r.record.inputTokens === undefined;
+      results.push(finishArchiveRecord(name, role, {
+        ...base, result: 'archived', reason: transcriptMissing ? 'transcript_missing' : 'retry_ok',
+        ...(transcriptMissing ? { rotateReason: 'retry_ok' } : {}),
+        archiveId: r.record.id, rounds: r.record.rounds, attempts,
+      }));
+    } catch (e) {
+      const code = String((e && e.code) || '');
+      const details = (e && e.details) || {};
+      if (ARCHIVE_DEFERRABLE.has(code)) {
+        if (attempts >= ARCHIVE_MAX_ATTEMPTS) {
+          results.push(finishArchiveRecord(name, role, {
+            ...base, result: 'failed', reason: 'retry_exhausted', attempts, error: code,
+            tasks: Array.isArray(details.tasks) ? details.tasks.slice(0, 20) : [],
+          }));
+        } else {
+          results.push(finishArchiveRecord(name, role, {
+            ...base, result: 'deferred', reason: code, attempts,
+            tasks: Array.isArray(details.tasks) ? details.tasks.slice(0, 20) : [],
+            deferredUntil: new Date(atMs + ARCHIVE_RETRY_MS).toISOString(),
+          }));
+        }
+        continue;
+      }
+      if (code === 'ALREADY_ARCHIVED') {
+        results.push(finishArchiveRecord(name, role, { ...base, result: 'already', reason: 'already_archived', archiveId: details.archiveId || null, attempts }));
+        continue;
+      }
+      results.push(finishArchiveRecord(name, role, {
+        ...base, result: 'failed', reason: code || 'archive_failed', attempts,
+        error: truncate(String((e && e.message) || e), 300),
+      }));
+    }
+  }
+  return { ok: true, project: name, at, scanned: latestDeferred.size, due: matched.length, picked: due.length, processed: results.length, results };
+}
+
+/** 面板用：每个角色最近一次 failed（count=该角色历史 failed 行数）；纯读，不写。 */
+export function summarizeArchiveFailures(rows) {
+  const list = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  const byRole = {};
+  let total = 0;
+  for (const row of list) {
+    if (String(row.result || '') !== 'failed') continue;
+    const role = String(row.role || '');
+    if (!role) continue;
+    total += 1;
+    const item = byRole[role] || { count: 0, lastAt: '', reason: '', oldSessionId: '' };
+    item.count += 1;
+    item.lastAt = String(row.at || '');
+    item.reason = String(row.reason || row.error || '');
+    item.oldSessionId = String(row.oldSessionId || '');
+    byRole[role] = item;
+  }
+  return { total, byRole };
 }

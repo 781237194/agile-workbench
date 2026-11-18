@@ -5132,6 +5132,9 @@ html[data-effect-level="reduced"] #awb-theme-particles { display: none; }
 .sq-ar-reason { color: var(--text); opacity: .9; }
 .sq-ar-tail { color: var(--dim); font-family: var(--mono); }
 .sq-ar-error { color: var(--red); font-weight: 600; }
+/* R-20261118-131107-28b8：旧会话自动归档失败 → 该角色行黄点（失败可见，不红、不阻断换人/派单） */
+.sq-archive-dot { color: #e3b341; font-size: 12px; line-height: 1; flex: 0 0 auto; cursor: help; }
+[data-sq-archive-failed="1"] { box-shadow: inset 3px 0 0 #e3b341; }
 .sq-backpressure {
   margin: 0 0 6px; padding: 6px 8px; border-radius: 5px;
   border: 1px solid var(--gold-line); background: var(--gold-soft);

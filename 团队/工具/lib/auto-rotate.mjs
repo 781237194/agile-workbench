@@ -27,7 +27,7 @@ import { PATHS } from './core.mjs';
 import { loadTeam, projectStatePaths, sendMessage } from './store.mjs';
 // B-20261118-083150-4b2f（fa0e 补丁 A）：名册写入收归唯一入口；本文件不再自己写四处映射/裸写 workbench。
 import { rotateRoster, checkRotateHandover, sweepRosterPostChecks } from './roster-writer.mjs';
-import { ROUNDS_MAX } from './session-archive.mjs';
+import { ROUNDS_MAX, archiveRotatedSession } from './session-archive.mjs';
 // B-20261117-212500-a837：换人必须真建会话（复用 session.mjs 的唯一出口），禁止在调度层自造 session id。
 import { createTeamSession, sessionUsage, usageLevelOf, sessionLimitsOf, DEFAULT_TOKEN_WARN as SESSION_TOKEN_WARN, DEFAULT_TOKEN_FORCE as SESSION_TOKEN_FORCE } from './session.mjs';
 
@@ -324,9 +324,36 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
   }
   const others = (rotateResult && rotateResult.broadcast && Array.isArray(rotateResult.broadcast.others))
     ? rotateResult.broadcast.others : [];
+  // R-20261118-131107-28b8：换人成功后自动归档「被替换下来的旧会话」。
+  // 只记结果、不阻断换人（rotate 已经成功）；失败由 archiveRotatedSession 落账 + 通知 PM + 面板黄点。
+  let archiveRow = null;
+  if (!dryRun && rotateResult) {
+    let outcome = null;
+    try {
+      outcome = archiveRotatedSession({
+        projectName, role,
+        oldSessionId: String((rotateResult.record && rotateResult.record.from) || oldId || ''),
+        newSessionId: String((rotateResult.record && rotateResult.record.to) || newId || ''),
+        reason: 'rotate-auto', source: 'auto-rotate', auto: true, now,
+      });
+    } catch (e) {
+      outcome = { ok: false, result: 'failed', reason: String((e && e.code) || 'archive_threw'), error: String((e && e.message) || e), at: iso(now) };
+    }
+    archiveRow = outcome;
+  }
   // 行级 mode/created 同时放在**顶层**（审查/验收脚本按 rot.mode / rot.created 读）与 evidence 内（明细），两处同值。
-  const rotateRow = { at: iso(now), stage: 'rotate', code: 'ROTATED', result: 'ok', role, project: projectName, mode, created, note: `已换人：${oldId || '未记录'} → ${newId}（${reason || 'context-full'}｜${mode}${created ? '/created' : ''}）`, evidence: { mode, created, ...(engine ? { engine } : {}), oldSessionId: oldId, newSessionId: newId, reason: String(reason || 'context-full'), from: oldId, to: newId, rotatedAt: iso(now), source: 'auto-rotate', ...(rotateResult && rotateResult.dshCheck ? { dshCheck: rotateResult.dshCheck } : {}), ...(rotateResult && rotateResult.bootPending ? { bootQueued: Boolean(rotateResult.bootPending.queued) } : {}), ...(archiveDeferred ? { archiveDeferred } : { archive: 'pending-daily' }) } };
+  const rotateRow = { at: iso(now), stage: 'rotate', code: 'ROTATED', result: 'ok', role, project: projectName, mode, created, note: `已换人：${oldId || '未记录'} → ${newId}（${reason || 'context-full'}｜${mode}${created ? '/created' : ''}）`, evidence: { mode, created, ...(engine ? { engine } : {}), oldSessionId: oldId, newSessionId: newId, reason: String(reason || 'context-full'), from: oldId, to: newId, rotatedAt: iso(now), source: 'auto-rotate', ...(rotateResult && rotateResult.dshCheck ? { dshCheck: rotateResult.dshCheck } : {}), ...(rotateResult && rotateResult.bootPending ? { bootQueued: Boolean(rotateResult.bootPending.queued) } : {}), ...(archiveDeferred ? { archiveDeferred } : {}), ...(archiveRow ? { archive: archiveRow.result, archiveResult: archiveRow } : (archiveDeferred ? {} : { archive: 'pending-daily' })) } };
   if (!dryRun) appendAudit(auditFile, rotateRow);
+  // R-20261118-131107-28b8 流水线独立 stage（§6.2③）：ARCHIVE_ARCHIVED / ARCHIVE_ALREADY / ARCHIVE_DEFERRED /
+  // ARCHIVE_FAILED / ARCHIVE_SKIPPED / ARCHIVE_STUBBED；写在 rotate 行之后，读账本时「rotate → archive」顺序可读。
+  if (archiveRow) {
+    appendAudit(auditFile, {
+      at: iso(now), stage: 'archive', code: `ARCHIVE_${String(archiveRow.result || 'failed').toUpperCase()}`, result: archiveRow.result === 'failed' ? 'fail' : 'ok',
+      role, project: projectName,
+      note: `旧会话自动归档：${archiveRow.result}${archiveRow.archiveId ? `（${archiveRow.archiveId}）` : ''}${archiveRow.reason ? ` · ${archiveRow.reason}` : ''}${archiveRow.result === 'deferred' ? `（在途任务 ${(archiveRow.tasks || []).length} 个，${archiveRow.deferredUntil || '-'} 起补归档）` : ''}`,
+      evidence: { oldSessionId: archiveRow.oldSessionId || oldId, newSessionId: archiveRow.newSessionId || newId, result: archiveRow.result, archiveId: archiveRow.archiveId || null, reason: archiveRow.reason || '', attempts: archiveRow.attempts === undefined ? null : archiveRow.attempts, deferredUntil: archiveRow.deferredUntil || null, tasks: archiveRow.tasks || [], error: archiveRow.error || '', ledger: archiveRow.ledgerFile || '' },
+    });
+  }
   if (!dryRun) {
     appendAudit(auditFile, { at: iso(now), stage: 'broadcast_reboot', code: 'REBOOT_BROADCAST', result: 'ok', role, project: projectName, note: `已广播 ${others.length} 个角色重 boot`, evidence: { newSessionId: newId, roles: others } });
   }

@@ -26,7 +26,7 @@ import {
 import { ROLE_DIRS, ROLE_NAMES, rolesForMode, normalizeTeamMode } from './roles.mjs';
 import { statusIsClosed, isRequirementMirrorTask } from './gates.mjs';
 import { DshClient } from './dsh-session.mjs';
-import { roundsQuery, exportTranscriptToProject, auditOutput, archiveSession, firstTurnUsage, writeBackRotated, listArchives } from './session-archive.mjs';
+import { roundsQuery, exportTranscriptToProject, auditOutput, archiveSession, firstTurnUsage, writeBackRotated, listArchives, archiveRotatedSession } from './session-archive.mjs';
 import { requireBoot } from './store.mjs';
 import { resolveDshBaseUrl, dshUrlMissingHint } from './dsh-url.mjs';
 // B-20261118-083150-4b2f（fa0e 补丁 A）：名册写入（四处映射 / 轮换记录 / BQ / 广播 / 事件）收归唯一入口，
@@ -906,6 +906,34 @@ export async function rotateSession({
       },
     });
     // 记录（含 bootPending / broadcastTo / 会话轮换两份文件）由 roster-writer 落盘；对外返回结构保持不变。
+    // R-20261118-131107-28b8：换人**成功后**用「被替换下来的旧 sessionId」自动归档——只记结果，失败不回滚换人。
+    const archiveOutcome = (() => {
+      try {
+        return archiveRotatedSession({
+          projectName: name,
+          role,
+          oldSessionId: String((result.record && result.record.from) || result.oldId || oldId || ''),
+          newSessionId: String((result.record && result.record.to) || result.newId || newId || ''),
+          reason: 'rotate-auto',
+          source: 'session-rotate',
+          auto: true,
+          now: at,
+        });
+      } catch (e) {
+        // 归档链路自身抛错也不许影响已成功的换人：记一行 failed 的等价结构返回给调用方。
+        return { ok: false, result: 'failed', reason: String((e && e.code) || 'archive_threw'), error: String((e && e.message) || e), at };
+      }
+    })();
+    if (result.record) {
+      result.record.archive = {
+        result: archiveOutcome.result,
+        at: archiveOutcome.at || at,
+        ...(archiveOutcome.archiveId ? { archiveId: archiveOutcome.archiveId } : {}),
+        ...(archiveOutcome.reason ? { reason: archiveOutcome.reason } : {}),
+        ...(archiveOutcome.attempts !== undefined ? { attempts: archiveOutcome.attempts } : {}),
+      };
+      result.record.archiveOutcome = archiveOutcome;
+    }
     return result.record;
   } catch (e) {
     // 回滚：邮件 + 任务 + 派单锁恢复到轮换前（映射已由 roster-writer 回滚），再归档本次创建的新会话。
@@ -1166,8 +1194,8 @@ export async function cmdSession(args) {
     const self = Boolean(args.self);
     if (!self && !args.confirm) fail('CONFIRM_REQUIRED', '归档需显式 --confirm（或 PM --self 后 owner confirm --archive）');
     if (self && String(args.role || '') !== 'pm') fail('BAD_ARGS', '--self 只用于 PM 自归档');
-    const r = archiveSession({ projectName, role: String(args.role || ''), reason: String(args.reason || ''), self, force: Boolean(args.force), operator: String(boot.role) });
-    const human = `已归档 ${r.record.id}（${r.record.role}，rounds=${r.record.rounds}，nextSessionId=null，rotate 后回写）\n记录：${r.file}${r.decisionLog ? '\n决策日志：' + r.decisionLog + '（待 Owner confirm）' : ''}`;
+    const r = archiveSession({ projectName, role: String(args.role || ''), reason: String(args.reason || ''), self, force: Boolean(args.force), operator: String(boot.role), sessionId: String(args['archive-session'] || '') });
+    const human = `已归档 ${r.record.id}（${r.record.role}，会话 ${r.record.sessionId || '(无)'}，rounds=${r.record.rounds}，nextSessionId=null，rotate 后回写）\n记录：${r.file}${r.decisionLog ? '\n决策日志：' + r.decisionLog + '（待 Owner confirm）' : ''}`;
     out(args, human, { ok: true, ...r });
     return;
   }
@@ -1300,6 +1328,17 @@ export async function cmdSession(args) {
       record.archiveDeferred
         ? `归档门：⚠ ARCHIVE_DEFERRED（在途任务 ${record.archiveDeferred.tasks.length} 个${record.archiveDeferred.locks.length ? `、锁 ${record.archiveDeferred.locks.length} 个` : ''}；旧会话未冻结，新会话先闭环再归档）`
         : `归档门：已归档（rotate 前 archive 成功${record.archiveGate.archiveId ? '，' + record.archiveGate.archiveId : ''}）`,
+      // R-28b8：换人成功后的「旧会话自动归档」五态（archived/already/deferred/failed/skipped/stubbed）
+      (() => {
+        const a = record.archiveOutcome || record.archive || null;
+        if (!a || !a.result) return '旧会话自动归档：未执行';
+        const tail = a.result === 'archived' ? `（${a.archiveId || '-'}）`
+          : a.result === 'deferred' ? `（在途任务 ${(a.tasks || []).length} 个，${a.deferredUntil || '-'} 起每拍补归档，最多 3 次）`
+            : a.result === 'already' ? `（${a.archiveId || '已归档过'}）`
+              : a.result === 'failed' ? `（${a.reason || a.error || '失败'}；已通知 PM，不阻断换人）`
+                : `（${a.reason || '-'}）`;
+        return `旧会话自动归档：${a.result}${tail}`;
+      })(),
       `收件箱归档消息：${record.mailArchived} 条；任务会话指向：${record.tasks.length} 个`,
       record.bootPending && record.bootPending.queued
         ? `待启动队列：已登记 ${record.bootPending.entry.id}（${record.bootPending.wake && record.bootPending.wake.ok
