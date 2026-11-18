@@ -1384,6 +1384,22 @@ function wakeHeaderFor(msg, target, { merged = 0 } = {}) {
     merged: Number(merged) || 0,
   });
 }
+/** T-20261118-090620-6e39：沙盘跳过一次性诊断——把「哪个进程、什么 env、什么原因」打出来，便于定位来源。
+ *  只在每进程第一次触发时打，避免高频消息刷屏（真实日志 8219 行里 103 条跳过的排查就靠这条）。 */
+let sandboxSkipDiagDone = false;
+function logSandboxSkipOnce({ target, project, why, caller, reason }) {
+  if (sandboxSkipDiagDone) return;
+  sandboxSkipDiagDone = true;
+  try {
+    console.warn('[wake] sandbox_skip_diag ' + JSON.stringify({
+      pid: process.pid, target, project, why: String(why || ''),
+      caller: String(caller || '').slice(0, 120), reason: String(reason || '').slice(0, 120),
+      TEAM_ROOT: String(process.env.TEAM_ROOT || ''), TEAM_PROJECTS_ROOT: String(process.env.TEAM_PROJECTS_ROOT || ''),
+      TEAM_SELFTEST: String(process.env.TEAM_SELFTEST || ''), cwd: process.cwd(),
+      hint: 'env 指到安装默认根不算沙盘；只有 TEAM_SELFTEST=1 / 指到其它根 / 拷贝树才是沙盘',
+    }));
+  } catch { /* 诊断日志失败不阻断唤醒流程 */ }
+}
 /** 单次真唤醒（含 mock/测试注入）；返回 null 表示沙盘跳过。 */
 async function tryWake({ project, target, batch, isDispatch = false, engineUrl = '', taskRow = null }) {
   // 测试注入优先级最高：显式要求“唤醒失败”时必须返回失败，不能被后面的沙盘跳过吞掉。
@@ -1429,11 +1445,16 @@ async function tryWake({ project, target, batch, isDispatch = false, engineUrl =
     // 需要沙盘真唤醒时显式 TEAM_ALLOW_SANDBOX_WAKE=1（自测/演示）。
     // 放在这里（伪消息已构造、测试注入已判过）以保持唤醒文案与留痕口径不变，只掐掉真实 DSH 调用。
     {
-      const { isSandboxTeamRoot } = await import('./core.mjs');
-      const sandbox = isSandboxTeamRoot();
+      const coreMod = await import('./core.mjs');
+      // T-B-20261118-090620-6e39：判据改为可解释的 sandboxRootInfo()（env 指到安装默认根 = 生产，不算沙盘）。
+      const sandboxInfo = typeof coreMod.sandboxRootInfo === 'function'
+        ? coreMod.sandboxRootInfo()
+        : { sandbox: coreMod.isSandboxTeamRoot(), why: '' };
+      const sandbox = sandboxInfo.sandbox;
       const allowReal = String(process.env.TEAM_ALLOW_REAL_WAKE || '') === '1' && String(process.env.TEAM_WAKE_REASON || '').trim().length >= 2;
       const allowLegacy = String(process.env.TEAM_ALLOW_SANDBOX_WAKE || '') === '1';
       if (sandbox && !allowReal && !allowLegacy) {
+        logSandboxSkipOnce({ target, project, why: sandboxInfo.why, caller: 'tryWake', reason: String(head && head.reason || '') });
         // 不真唤醒，但正文与入口语义照旧（自测/排查要能看见唤醒文案）。
         let text = '';
         try {
@@ -1445,8 +1466,8 @@ async function tryWake({ project, target, batch, isDispatch = false, engineUrl =
         } catch { text = ''; }
         // B-47c0：沙盘留痕统一由 wakeWithGuard 在成功分支写一行（skipped=sandbox_wake_skipped），
         // 这里不重复写，避免同一事件两行日志（B4 断言要求一行）。
-        console.warn(`[wake] sandbox_skip：沙盘根不唤醒真实会话（to=${target}，project=${project}；如确需真实唤醒请 TEAM_ALLOW_REAL_WAKE=1 + TEAM_WAKE_REASON=…）`);
-        return { ok: true, skipped: 'sandbox_wake_skipped', delivered: false, to: target, merged: batch.length, text, reason: 'sandbox_root' };
+        console.warn(`[wake] sandbox_skip：沙盘根不唤醒真实会话（to=${target}，project=${project}，why=${sandboxInfo.why || 'unknown'}；如确需真实唤醒请 TEAM_ALLOW_REAL_WAKE=1 + TEAM_WAKE_REASON=…）`);
+        return { ok: true, skipped: 'sandbox_wake_skipped', delivered: false, to: target, merged: batch.length, text, reason: 'sandbox_root', sandboxWhy: sandboxInfo.why || '' };
       }
       // 双保险（B-47c0 ③）：沙盘名册若来自真实团队拷贝，目标 sessionId 命中真实名册 → 即使 allowLegacy 也拒绝真实唤醒。
       if (sandbox && allowLegacy && !allowReal) {
@@ -1555,6 +1576,8 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
       appendWakeLog(project, {
         to: target, ok: true, skipped: String(result.skipped), reason,
         sandboxReason: String(result.reason || ''), merged: batch.length,
+        // T-6e39：沙盘跳过的细分原因（selftest / env_root / env_projects / copied_tree），面板据此区分文案
+        ...(result.sandboxWhy ? { sandboxWhy: String(result.sandboxWhy) } : {}),
         messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5),
       });
       return { ...(result || {}), ok: true, to: target, merged: batch.length, retried: false, reason };
@@ -7131,7 +7154,9 @@ export function cmdSkill(args) {
     const reason = String(args.reason || '').trim();
     if (reason.length < 2) fail('SKILL_SKIP_REASON_REQUIRED', '跳过 skill 提示必须写 --reason（写进 skill评估.jsonl）', {}, 1);
     const row = recordSkillEvaluation(b.project, b.role, { action: 'skip', reason });
-    out(args, `已跳过本次 skill 提示（reason=${reason}）`, { ok: true, row });
+    // R-cfca 6.3：一次 skip 三处留痕（skill评估 / 经验教训广播 / 维护评估），reason 空已在上面拒（零副作用）。
+    const extra = recordMaintenanceSkip(b.project, b.role, reason);
+    out(args, `已跳过本次 skill 提示（reason=${reason}）`, { ok: true, row, maintenance: extra });
     return;
   }
   if (sub === 'verify') {
@@ -12009,6 +12034,45 @@ export function cmdLessons(args) {
     return;
   }
   fail('BAD_SUB', 'lessons 支持 read / status [--deleted] / turns / append / fix / audit');
+}
+
+/**
+ * R-cfca 6.3：一次 skip 的三处留痕里，除 skill评估.jsonl（recordSkillEvaluation 已写）之外的两处：
+ *   ② 团队/状态/经验教训广播.jsonl：{at, role, turns, action:'skip', reason}
+ *   ③ 团队/状态/项目/<P>/维护评估.jsonl：{at, role, rounds, action:'skip'|'done', reason}
+ * 只 append，不整文件重写；写失败只在返回值里如实上报（提醒/命令本身不阻断）。
+ */
+function recordMaintenanceSkip(projectName, role, reason) {
+  const name = String(projectName || '');
+  const r = String(role || '');
+  const why = String(reason || '').trim();
+  const res = { broadcast: false, maintenance: false, rounds: null, files: [] };
+  let rounds = 0;
+  try {
+    const st = projectStatePaths(name);
+    const all = lessons.readAllTurns({ stateDir: st.dir, configPath: st.config, roleIds: [r] });
+    const row = all && all.roles ? all.roles[r] : null;
+    rounds = row && Number.isFinite(Number(row.turns)) ? Math.floor(Number(row.turns)) : 0;
+  } catch { rounds = 0; }
+  res.rounds = rounds;
+  const at = nowIso();
+  try {
+    const broadcast = path.join(PATHS.teamRoot, '状态', '经验教训广播.jsonl');
+    ensureDir(path.dirname(broadcast));
+    fs.appendFileSync(broadcast, JSON.stringify({ at, role: r, turns: rounds, action: 'skip', reason: why }) + '\n', 'utf8');
+    res.broadcast = true; res.files.push(broadcast);
+  } catch (e) {
+    console.log('[cfca] maint broadcast write failed: ' + String((e && e.message) || e));
+  }
+  try {
+    const file = path.join(projectStatePaths(name).dir, '维护评估.jsonl');
+    ensureDir(path.dirname(file));
+    fs.appendFileSync(file, JSON.stringify({ at, role: r, rounds, action: 'skip', reason: why }) + '\n', 'utf8');
+    res.maintenance = true; res.files.push(file);
+  } catch (e) {
+    console.log('[cfca] maintenance eval write failed: ' + String((e && e.message) || e));
+  }
+  return res;
 }
 
 /** a28a F9：`lessons status` 末行轮次（只读，取自 轮次计数.json 与阈值来源） */
