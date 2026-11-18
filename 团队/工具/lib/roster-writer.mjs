@@ -47,7 +47,7 @@ export const POST_CHECK_NAME = '名册变更待校验.json';
 export const POST_CHECK_TTL_MS = 60000;
 /** 与 mutateTeam 同一把锁：名册所有写入串行化（W8）。 */
 export const ROSTER_LOCK_KEY = '_team';
-export const ROSTER_LOCK_OPTS = { role: 'system', sessionId: 'system', ttlMs: 30000, waitMs: 5000, reason: 'roster write（唯一写入口）' };
+export const ROSTER_LOCK_OPTS = { role: 'system', sessionId: 'system', ttlMs: 30000, waitMs: 15000, reason: 'roster write（唯一写入口）' };
 /** 锁内再等 json-atomic 的文件锁时用更短的预算：_team 锁 TTL 30s，不能让内层等待吃穿外层锁（复核 P2-1）。 */
 const INNER_LOCK_OPTS = { lockTimeoutMs: 3000 };
 /** source 枚举：谁发起这次换人（写进统一记账，便于「这一行是谁改的」一 Command 回答）。 */

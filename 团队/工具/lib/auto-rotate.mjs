@@ -314,7 +314,7 @@ async function rotateSession({ projectName, role, now, reason, auditFile, dryRun
       appendAudit(auditFile, {
         at: iso(now), stage: 'rotate_failed', code, result: 'fail', role, project: projectName,
         note: `名册写入失败（${code}）：本轮不换人（${compensation && compensation.archivedNewSession ? '新会话已归档补偿'
-          : compensation ? `新会话未归档补偿（${compensation.skipped || '归档失败'}，需人工确认）`
+          : compensation ? `新会话未归档补偿（${compensation.skipped || '归档失败'}${compensation.sessionId ? `，待人工清理 ${compensation.sessionId}` : ''}）`
             : '未新建会话，无需补偿'}）`,
         reason: String(reason || 'context-full'),
         evidence: { code, oldSessionId: oldId, newSessionId: newId, why: String((e && e.message) || e), compensation, rollback: rollbackInfo ? { full: rollbackInfo.full, skipped: rollbackInfo.skipped } : null },

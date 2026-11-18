@@ -880,7 +880,7 @@ export async function rotateSession({
           const detail = badRows.length
             ? badRows.map((row) => `${row.role}:${(row.fields || row.mismatched || []).join('/') || '不一致'}`).join('，')
             : `ratio=${consistencyNow.ratio}（应为 ${fullRatio}），ok=${consistencyNow.ok}`;
-          fail('ROTATE_MAPPING_MISMATCH', `轮换后四处映射不一致（${detail}）；已按 F-6 回滚到旧会话 ${actualOld || '(无)'}，本轮不换人`, {
+          fail('ROTATE_MAPPING_MISMATCH', `轮换后四处映射不一致（${detail}）；本轮不换人（按 F-6 回滚，结果见 details.rollback）`, {
             role, project: name, from: actualOld, to: nextId, consistency: consistencyNow, expectedRatio: fullRatio,
           });
         }
@@ -927,10 +927,14 @@ export async function rotateSession({
       try { fs.writeFileSync(dispatchLock.file, dispatchLock.raw, 'utf8'); rollback.dispatchLock = true; } catch (err) { rollback.errors.push('派单锁恢复失败'); }
     }
     if (created) {
-      try {
-        await new DshClient(engine || undefined).workspaceArchiveSession({ sessionId: newId, stopActivity: true });
-        rollback.newSessionArchived = true;
-      } catch { rollback.errors.push('新会话归档失败'); }
+      if (process.env.TEAM_SELFTEST === '1') {
+        rollback.newSessionArchiveSkipped = 'SELFTEST（沙盘不联网，无真实 DSH 可调）';
+      } else {
+        try {
+          await new DshClient(engine || undefined).workspaceArchiveSession({ sessionId: newId, stopActivity: true });
+          rollback.newSessionArchived = true;
+        } catch { rollback.errors.push('新会话归档失败'); }
+      }
     }
     appendEvent({
       role: by, sessionId: newId, action: 'rotate_failed', project: name, target: role,
@@ -941,7 +945,9 @@ export async function rotateSession({
     if (e instanceof TeamError) {
       if (rollback.mapsPartial) {
         const keys = (mapRollback.skipped || []).map((x) => x.key).join('/') || '未知';
-        e.message = `【部分回滚】四处映射未完全恢复（${keys}），请先跑 session check 再继续：${String(e.message || '')}`;
+        // N1 复核：原文可能还留着「已回滚」类断言（例如映射不一致时在回滚前就 fail），先改诚实再前置前缀。
+        const honest = String(e.message || '').replace(/已(?:按 F-6 )?回滚到旧会话[^，；。]*/g, '回滚不完整（见 details.rollback）');
+        e.message = `【部分回滚】四处映射未完全恢复（${keys}），请先跑 session check 再继续：${honest}`;
         e.details = { ...(e.details || {}), rollback, partialRollback: true, hint: 'node 团队\\工具\\team.mjs session check --project "<项目>"' };
       } else {
         e.details = { ...(e.details || {}), rollback };
