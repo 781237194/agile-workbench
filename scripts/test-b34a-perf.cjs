@@ -242,7 +242,7 @@ const PROJECT = '沙盘项目';
   try { fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* ignore */ }
   fs.mkdirSync(EVID, { recursive: true });
   const report = {
-    task: 'T-20261118-172604-e2d8', requirement: 'R-20261118-170937-b34a', at: new Date().toISOString(),
+    task: 'T-20261118-172604-e2d8 + T-20261118-172619-c495（A 的 C1–C11 + B 的 R3/R4）', tasks: ['T-20261118-172604-e2d8', 'T-20261118-172619-c495'], requirement: 'R-20261118-170937-b34a', at: new Date().toISOString(),
     total: passed + failures.length, pass: passed, red: failures.length, failures,
     cacheStats: pc.cacheStats(),
   };
