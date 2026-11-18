@@ -16,8 +16,12 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
-const ROOT = process.cwd();
+// B-f62d 修 import：原实现 `const ROOT = process.cwd()` + `import('file:///' + win路径)`——
+// 在 Windows 上 cwd 不是仓库根或盘符路径拼成 `file:///D:\...` 都会在 import 阶段直接失败（脚本跑不起来）。
+// 改为「__dirname 上溯 + pathToFileURL」，从任意目录调用都能跑。
+const ROOT = path.resolve(__dirname, '..');
 const LIB = path.join(ROOT, '团队', '工具', 'lib');
 const PROJ = path.join(ROOT, '团队', '状态', '项目', '工作台改造修复');
 
@@ -44,11 +48,12 @@ function missingText(gate) {
 }
 
 (async () => {
-  const gates = await import('file:///' + path.join(LIB, 'gates.mjs').replace(/\\/g, '/'));
+  const gates = await import(pathToFileURL(path.join(LIB, 'gates.mjs')).href);
   ok('S0 gates 导出 CLOSED_TASK_STATUSES / taskIsClosed / gateRoleBusy',
     Array.isArray(gates.CLOSED_TASK_STATUSES) && typeof gates.taskIsClosed === 'function' && typeof gates.gateRoleBusy === 'function', {});
-  ok('S0b 终态集合正好是 done/accepted/cancelled',
-    JSON.stringify(gates.CLOSED_TASK_STATUSES) === JSON.stringify(['done', 'accepted', 'cancelled']), gates.CLOSED_TASK_STATUSES);
+  // B-f62d：终态集合现为 4 项（done/accepted/cancelled/terminated）——旧断言写 3 项会红。
+  ok('S0b 终态集合正好是 done/accepted/cancelled/terminated',
+    JSON.stringify(gates.CLOSED_TASK_STATUSES) === JSON.stringify(['done', 'accepted', 'cancelled', 'terminated']), gates.CLOSED_TASK_STATUSES);
 
   // S1：accepted×32 + 本次派单自身（working，自指豁免）→ 放行
   const selfId = 'T-self-working';
@@ -72,10 +77,15 @@ function missingText(gate) {
   ok('S3 accepted×32 + open×1 → 拦截(TASK_OPEN)', !!s3 && s3.code === 'TASK_OPEN', s3);
   ok('S3b missing 只列 open 那条，不列 accepted', JSON.stringify(idsOf(s3)) === JSON.stringify([openId]), idsOf(s3));
 
-  // S4：名下仅剩 accepted/done/cancelled → 放行（本单核心）
-  const s4tasks = acceptedBulk(32).concat([task('T-done-1', 'done'), task('T-cancelled-1', 'cancelled')]);
+  // S4：名下仅剩 accepted/done/cancelled/terminated → 放行（本单核心；B-f62d 起含 terminated）
+  const s4tasks = acceptedBulk(32).concat([
+    task('T-done-1', 'done'), task('T-cancelled-1', 'cancelled'), task('T-terminated-1', 'terminated'),
+  ]);
   const s4 = gates.gateRoleBusy({ role: 'programmer2', tasks: s4tasks, excludeTaskIds: ['T-self-working'] });
-  ok('S4 仅接受/完成/取消混排 → 放行', s4 === null, s4);
+  ok('S4 仅接受/完成/取消/终止混排 → 放行', s4 === null, s4);
+  ok('S4b terminated 也算终态（taskIsClosed({status}) true、working false）',
+    gates.taskIsClosed({ status: 'terminated' }) === true && gates.taskIsClosed({ status: 'cancelled' }) === true
+    && gates.taskIsClosed({ status: 'working' }) === false);
 
   // S5/S6：真办中的状态仍挡（不退化）
   const s5 = gates.gateRoleBusy({ role: 'programmer2', tasks: [task('T-open-reg', 'open')], excludeTaskIds: ['T-x'] });

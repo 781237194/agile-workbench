@@ -206,10 +206,32 @@ function isInside(parent, child) {
 //   统一前置：路径必须存在；fs.realpathSync 后必须在「项目目录」或「共享层（src/**、团队/工具/**）」内
 //            （拒 .. / 软链逃逸到别处）；>0 字节。
 //   截图：≥1 张，扩展名 png|jpg|jpeg|webp 且文件头魔数匹配（PNG 89 50 4E 47 / JPEG FF D8 FF / WebP RIFF....WEBP）。
-//   测试报告：正文 \bPASS\b 命中 且 \bFAIL\b 不命中（大小写不敏感）；报告日期 ≥ 时效基线（见 acceptEvidenceStaleness）。
+//   测试报告：正文 \bPASS\b 命中 且「无失败结论」（否定式判定，见 reportFailVerdictText；大小写不敏感）；
+//            报告日期 ≥ 时效基线（见 acceptEvidenceStaleness）。
 //   失败明细统一走 reason（六值）：evidence_missing / evidence_outside_project / evidence_empty /
 //   evidence_not_image / evidence_failed / evidence_stale；时效无法判定时记 warning evidence_time_unknown（不阻断）。
 // ==========================================================================
+// B-b5bc（产品 技术债核对-20261118，P1）：报告结论的否定式识别。
+// 旧实现是一刀切「\bPASS\b 命中 + \bFAIL\b 不命中」，于是「无 FAIL 命中」「不构成不通过」「FAIL 0 条」
+// 这类否定/零值表述会被误判 failed。这里复用 CLI 侧（团队/工具/lib/ops.mjs → failVerdictText）的口径：
+// 判负前先剔「否定靶词 / 零靶词 / 已处置靶词」，剩下的文本里出现强否定词或「失败 N 项」才算失败。
+// 注意：壳层是 CJS，不能 import ESM 的 ops.mjs，故本地保持同口径复制（改一处必须同步另一处，测试见
+// scripts/test-b5bc-shell-verdict.cjs 与 test-advance-report-gate）。
+const REPORT_NEGATED_FAIL_RE = /(?:不构成|不算|并非|不是|非|未见|未发现)\s*(?:不通过|未通过|FAIL|失败)/gi;
+const REPORT_ZERO_FAIL_RE = /(?:无|没有|零|(?<![A-Za-z0-9])0)\s*(?:项|个|条|次)?\s*(?:FAIL|失败|不通过|未通过)/gi;
+const REPORT_FAIL_ZERO_RE = /\bFAIL\b\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
+const REPORT_FAIL_ZERO2_RE = /(?:失败|不通过|未通过)\s*(?:数|计数|条|项)?\s*[:：=]?\s*0(?![0-9])/gi;
+const REPORT_FAIL_STRONG_RE = /(不通过|未通过|\bFAIL\b)/i;
+const REPORT_FAIL_COUNT_RE = /(?:(?:失败|不通过|未通过)\s*[（(]?\s*(?:共|共计|合计)?\s*[1-9]\d*\s*(?:项|个|条))|(?:(?:共|共计|合计)?\s*[1-9]\d*\s*(?:项|个|条)\s*(?:失败|不通过|未通过))/;
+const REPORT_FAIL_RESOLVED_RE = /(?:(?:失败|不通过|未通过)\s*[1-9]\d*\s*(?:项|个|条)|[1-9]\d*\s*(?:项|个|条)\s*(?:失败|不通过|未通过))\s*(?:已全部|均已全部|已|均已|全部)?\s*(?:修复|解决|处理|关闭|恢复)/g;
+/** 报告正文是否出现「真的失败」结论（否定句/零值不算）。与 ops.mjs failVerdictText 同口径。 */
+function reportFailVerdictText(text) {
+  let t = String(text || '');
+  t = t.replace(REPORT_NEGATED_FAIL_RE, '（否定靶词）').replace(REPORT_ZERO_FAIL_RE, '（零靶词）');
+  t = t.replace(REPORT_FAIL_ZERO_RE, '（零靶词）').replace(REPORT_FAIL_ZERO2_RE, '（零靶词）');
+  t = t.replace(REPORT_FAIL_RESOLVED_RE, '（已处置靶词）');
+  return REPORT_FAIL_STRONG_RE.test(t) || REPORT_FAIL_COUNT_RE.test(t);
+}
 /** 工作台共享层根（证据允许放在这里）：<仓库>/src 与 <仓库>/团队/工具。项目根由调用方传入。 */
 function sharedEvidenceRoots() {
   const repo = path.resolve(__dirname, '..');
@@ -274,7 +296,7 @@ function acceptEvidenceCheck(projectPath, evidence) {
     } else if (kind === 'report') {
       const text = buf.toString('utf8');
       if (!/\bPASS\b/i.test(text)) { missing.push({ path: rel, kind, reason: 'evidence_failed', note: '报告正文没有 PASS' }); continue; }
-      if (/\bFAIL\b/i.test(text)) { missing.push({ path: rel, kind, reason: 'evidence_failed', note: '报告正文出现 FAIL' }); continue; }
+      if (reportFailVerdictText(text)) { missing.push({ path: rel, kind, reason: 'evidence_failed', note: '报告正文出现 FAIL 结论（「无 FAIL / 不构成不通过 / FAIL 0 条」等否定式不计）' }); continue; }
       reportAt = latestDateInText(text);
       if (!reportAt) warnings.push({ path: rel, kind, reason: 'evidence_time_unknown', note: '报告里找不到日期' });
     }
@@ -11407,6 +11429,8 @@ module.exports = {
   // R-ea86：PM 代验收证据校验（纯函数，供 ownerAccept 与可复跑测试共用同一份判据）
   acceptEvidenceCheck,
   acceptEvidenceStaleness,
+  // B-b5bc：报告结论否定式判定（与 ops.mjs failVerdictText 同口径；导出供夹具单测）
+  reportFailVerdictText,
   // R-1dfb：派单 deadline tick / 停滞恢复 / 活跃度三列（实例能力，同时经 createTeamTools 返回对象暴露；
   // 这里显式列出是让 require('./team-tools').roleActivity 这类直取调用方也拿得到，别只藏在 defaultTools 里）
   roleActivity: defaultTools.roleActivity,

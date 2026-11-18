@@ -67,7 +67,13 @@ ok('并行通道：两条都在，live 由真实数据判定', () => {
 });
 
 ok('分叉/汇合条件标注与转义', () => {
-  assert.ok(html.includes('分叉：上一轮开发未收口时，下一轮评审并行'));
+  // B-f62d：不整句硬匹配业务文案（改文案就红），改为「关键词 + 结构」断言：
+  //   ① 存在「分叉：」标签；② 同一段里出现「未收口」条件；③ 出现「并行」；④ 汇合①② 仍在。
+  assert.ok(html.includes('分叉：'), '缺少「分叉：」标签');
+  assert.ok(/未收口/.test(html), '分叉条件里缺少「未收口」');
+  assert.ok(html.includes('并行'), '缺少「并行」说明');
+  const forkIdx = html.indexOf('分叉：');
+  assert.ok(forkIdx >= 0 && /未收口/.test(html.slice(forkIdx, forkIdx + 80)), '「未收口」不在分叉标签附近（结构不对）');
   assert.ok(html.includes('汇合①'));
   assert.ok(html.includes('汇合②'));
   const bad = FlowGraph.markup(lanes, { requirements: [{ id: '<x>', status: 'review', title: '<bad>' }] }, { text: '<script>' });
