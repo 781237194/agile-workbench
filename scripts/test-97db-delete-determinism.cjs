@@ -66,7 +66,7 @@ function seedScenario(sb, { sessionMode }) {
 async function runScenario(name, sessionMode, port) {
   const sb = path.join(ROOT, '_tmp', `97db-det-${process.pid}-${Date.now()}-${sessionMode}`);
   const envs = seedScenario(sb, { sessionMode });
-  const env = { ...process.env, AWB_DATA_DIR: envs.DATA, TEAM_ROOT: envs.TEAM, TEAM_SELFTEST: '1' };
+  const env = { ...process.env, AWB_DATA_DIR: envs.DATA, TEAM_ROOT: envs.TEAM, TEAM_PROJECTS_ROOT: envs.PROJ, TEAM_WORKBENCH_JSON: path.join(envs.DATA, 'userdata', 'workbench.json'), TEAM_SELFTEST: '1' };
   const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + port], { cwd: ROOT, env, stdio: 'ignore', windowsHide: false });
   const target = await waitTarget(port, 90000, (item) => item && item.type === 'page' && String(item.url || '').includes('renderer/index.html'));
   check(`D0 [${name}] 实例启动`, Boolean(target));
@@ -92,7 +92,28 @@ async function runScenario(name, sessionMode, port) {
   try { store = JSON.parse(fs.readFileSync(path.join(envs.DATA, 'userdata', 'workbench.json'), 'utf8')); } catch { store = null; }
   check(`D3 [${name}] workbench 项目记录已删除（第三/四处随记录消失）`, Boolean(store) && !(store.projects || []).some((p) => p && p.id === envs.pid), store && store.projects && store.projects.map((p) => p.id));
   const empty = members && members.ok === true && members.membersEmpty === true && Array.isArray(members.roles) && members.roles.length === 0;
-  check(`D4 [${name}] team:members 返回 membersEmpty=true/roles=0（团队台 0 行依据）`, empty, members && { ok: members.ok, membersEmpty: members.membersEmpty, roles: members.roles && members.roles.length, error: members.error });
+  check(`D4 [${name}] team:members 返回 membersEmpty=true/roles=0（团队台 0 行依据）`, empty, members && { ok: members.ok, membersEmpty: members.membersEmpty, roles: members.roles && members.roles.length, projectMissing: members.projectMissing });
+  // D5 重启复验（PM 要求含重启）：同一沙盘重启后名册仍全空、team:members 仍 membersEmpty=true/roles=0（不靠一次刷新掩盖）
+  let restartMembers = null;
+  try {
+    const port2 = port + 60;
+    const child2 = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + port2], { cwd: ROOT, env, stdio: 'ignore', windowsHide: false });
+    const target2 = await waitTarget(port2, 90000, (item) => item && item.type === 'page' && String(item.url || '').includes('renderer/index.html'));
+    if (target2) {
+      const ws2 = new WebSocket(target2.webSocketDebuggerUrl);
+      await new Promise((resolve) => ws2.addEventListener('open', resolve, { once: true }));
+      const cdp2 = new Cdp(ws2); await cdp2.send('Runtime.enable');
+      for (let i = 0; i < 200; i += 1) { const ok = await cdp2.evaluate('document.readyState === "complete" && Boolean(window.workbench && window.workbench.teamMembers)'); if (ok === true) break; await sleep(400); }
+      restartMembers = await cdp2.evaluate(`(async () => { try { return await window.workbench.teamMembers({ projectId: ${JSON.stringify(envs.pid)} }); } catch (e) { return { threw: String((e && e.message) || e) }; } })()`);
+      try { cdp2.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ }
+      await sleep(600); try { ws2.close(); } catch { /* ignore */ } try { child2.kill(); } catch { /* ignore */ }
+    } else { try { child2.kill(); } catch { /* ignore */ } }
+  } catch { restartMembers = null; }
+  let teamAfterRestart = null;
+  try { teamAfterRestart = JSON.parse(fs.readFileSync(path.join(envs.TEAM, '状态', '团队.json'), 'utf8')); } catch { teamAfterRestart = null; }
+  const leftoverAfterRestart = (teamAfterRestart && Array.isArray(teamAfterRestart.members) ? teamAfterRestart.members : []).filter((m) => m && m.sessionId).map((m) => m.role);
+  const restartEmpty = restartMembers && restartMembers.ok === true && restartMembers.membersEmpty === true && Array.isArray(restartMembers.roles) && restartMembers.roles.length === 0;
+  check(`D5 [${name}] 重启后名册仍全空 + team:members membersEmpty=true/roles=0`, leftoverAfterRestart.length === 0 && restartEmpty, { leftoverAfterRestart, restartMembers: restartMembers && { ok: restartMembers.ok, membersEmpty: restartMembers.membersEmpty, roles: restartMembers.roles && restartMembers.roles.length, projectMissing: restartMembers.projectMissing } });
   try { fs.rmSync(sb, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 (async () => {

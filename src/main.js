@@ -6231,8 +6231,18 @@ ipcMain.handle('theme:metrics', async () => {
       : memberRoleIds.filter((roleId) => mapped[roleId]).map((roleId) => ({ role: roleId }));
     // B-20261119-015113-2443：名册四态由后端单源判定（AC3：渲染层不自算 ok/stale）。
     const rosterMemberMap = new Map((teamTools.teamMembers() || []).map((m) => [String((m && m.role) || ''), String((m && m.sessionId) || '')]));
+    // 97db PM 口径（M-20261119-030857-103ab6）：membersEmpty 看「名册成员 sessionId 是否全空/成员是否已清」，
+    // 不看 roles 数组长度；名册全空 = 本工作区无在册成员 → roles 直接为空（团队台 0 行）。
+    const rosterMemberValues = [...rosterMemberMap.values()];
+    const rosterAllEmpty = rosterMemberMap.size === 0 || rosterMemberValues.every((sid) => !String(sid || '').trim());
+    if (rosterAllEmpty) {
+      return {
+        ok: true, project: projectName, workspace: workspacePath, roles: [], roleIds: memberRoleIds,
+        count: 0, membersEmpty: true, rosterAllEmpty: true, teamMode: normalizeTeamMode(project && project.teamMode), error: ''
+      };
+    }
     const workspaceSessionSet = new Set((project && project.workspace && Array.isArray(project.workspace.sessionIds) ? project.workspace.sessionIds : []).map(String));
-    const membersEmpty = rosterMemberMap.size === 0;
+    const membersEmpty = rosterAllEmpty;
     const roles = baseRoles.map((row) => {
       const roleId = String(row.role);
       const role = ROLE_BY_ID.get(roleId);

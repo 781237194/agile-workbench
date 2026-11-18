@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * test-97db-ghost.cjs —— R-20261119-011311-97db（B-20261119-015113-2443）验收夹具
+ * test-97db-ghost.cjs —— 注意：本夹具为纯逻辑+源码静态断言，**不替代真实 IPC 验证**；
+ *  真实 deleteProjectRecord IPC 端到端（四隔离、连跑 3 次、含重启）见 test-97db-delete-determinism.cjs。
+ * —— R-20261119-011311-97db（B-20261119-015113-2443）验收夹具
  * 覆盖：名册四态（AC2/AC3 后端单源）、删除项目四处映射清理计划（AC7）、恢复四段审计（AC4/AC5 missing）、
  * 以及壳层接线静态断言（team:members state / planProjectCleanup / 恢复审计 / 渲染层只读 state）。
  * 纯逻辑 + 源码静态断言，不启动 Electron、不写真实状态。
