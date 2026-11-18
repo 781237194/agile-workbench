@@ -39,6 +39,7 @@
     model: null,
     error: '',
     busy: false,
+    pendingRefresh: false,   // B-6705：busy 期间到达的刷新/推送合并成一次补跑（不丢事件）
     timer: null,       // 秒表（只在「抽屉可见且有 thinking 行」时存在）
     watchTimer: null,  // 降级自检（5 秒）
     mounted: false,
@@ -47,6 +48,8 @@
     stallRaw: undefined,
     lastModelAt: 0,
     pushApiBound: false,
+    pushHandler: null, // B-6705：注册的推送回调（测试钩子复用同一入口，不另造第二条通道）
+    stats: { refreshCalls: 0, busyReturns: 0, pendingRuns: 0, lastModelAtUpdates: 0 },
   };
 
   const STATE_LABEL = { fail: '失败（真的没送出去）', retry: '重试中（一次失败已排重试，先别看红）', skip: '跳过（设计内不唤醒，细分见 hover）', ok: '成功', none: '无记录' };
@@ -663,7 +666,13 @@
   }
 
   async function refresh() {
-    if (state.busy) return state.model;
+    state.stats.refreshCalls += 1;
+    // B-6705：busy 时不丢刷新请求——记 pending 并在本次结束后补跑一次（推送/点击/自检并发都可能触发）。
+    if (state.busy) {
+      state.stats.busyReturns += 1;
+      state.pendingRefresh = true;
+      return state.model;
+    }
     state.busy = true;
     try {
       // 阈值热读（每次刷新读一次 ui.sessionQueue.stallMs；不另起定时器）
@@ -677,7 +686,9 @@
         if (model && model.ok) {
           state.model = model;
           state.error = '';
+          // B-6705：新鲜度只在新模型真正拿到后才更新（旧实现放在推送回调里，busy 丢事件时会让自检误判通道健康）。
           state.lastModelAt = Date.now();
+          state.stats.lastModelAtUpdates += 1;
         } else {
           state.error = String((model && model.message) || (model && model.code) || '未知错误');
           state.model = model && Array.isArray(model.rows) ? model : null;
@@ -689,6 +700,11 @@
       state.busy = false;
     }
     render();
+    if (state.pendingRefresh) {
+      state.pendingRefresh = false;
+      state.stats.pendingRuns += 1;
+      return refresh();
+    }
     return state.model;
   }
 
@@ -697,10 +713,9 @@
     const bridge = window.workbench;
     if (!bridge || typeof bridge.onSessionQueueChanged !== 'function') return;
     try {
-      bridge.onSessionQueueChanged(() => {
-        state.lastModelAt = Date.now();
-        refresh();
-      });
+      // B-6705：推送只触发刷新；新鲜度（lastModelAt）由 refresh 成功路径更新，避免 busy 丢事件时误判通道健康。
+      state.pushHandler = () => { refresh(); };
+      bridge.onSessionQueueChanged(state.pushHandler);
       state.pushApiBound = true;
     } catch { state.pushApiBound = false; }
   }
@@ -739,6 +754,12 @@
   // 自检钩子（--sq-check / --live-check 用；只读刷新 + 读当前模型，不写任何状态）
   window.__sqRefresh = refresh;
   window.__sqModel = () => state.model;
+  // B-6705：推送/累加统计钩子——只走真实 bindPush 回调与真实 refresh，不新增数据通道。
+  window.__sqPush = () => {
+    try { if (typeof state.pushHandler === 'function') { state.pushHandler(); return true; } } catch { /* ignore */ }
+    return false;
+  };
+  window.__sqStats = () => ({ ...state.stats, busy: state.busy, pendingRefresh: state.pendingRefresh, lastModelAt: state.lastModelAt });
   window.__sqLive = () => ({
     stallMs: state.stallMs,
     stallInvalid: state.stallInvalid,

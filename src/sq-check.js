@@ -837,6 +837,36 @@ async function runSqCheck(options = {}) {
   try { fs.rmSync(autoRotateFile, { force: true }); } catch { /* 清理失败不影响结论 */ }
   writeRoster(null);
 
+  // ── B-20261118-163409-6705：busy 期间推送不丢（pendingRefresh）+ 新鲜度只随成功刷新前进 ──
+  // 走真实 bindPush 回调（window.__sqPush）与真实 refresh（window.__sqRefresh），不新增数据通道。
+  // 关抽屉把降级自检停掉（drawerVisible=false → 定时器只 return），避免 5s 自检并发刷新污染计数。
+  const burst = await evalJs(`(async () => {
+    const d = document.getElementById('session-queue-drawer');
+    const wasHidden = d ? d.hidden : true;
+    if (d) d.hidden = true;
+    for (let i = 0; i < 40; i++) { if (!window.__sqStats().busy) break; await new Promise((r) => setTimeout(r, 25)); }
+    const before = window.__sqStats();
+    const p1 = window.__sqRefresh();          // 先进入 busy
+    const pushed1 = window.__sqPush();        // busy 期间推送 1
+    const pushed2 = window.__sqPush();        // busy 期间推送 2（合并为一次补跑）
+    await p1;                                 // 补跑在同一 promise 链里，await 会等到补跑结束
+    const after = window.__sqStats();
+    if (d) d.hidden = wasHidden;
+    return { before, after, pushed1, pushed2, rows: ((window.__sqModel() || {}).rows || []).length };
+  })()`);
+  check('B6705-① busy 期间两次推送不丢：合并为 1 次补跑（pendingRuns +1、busyReturns +2、refreshCalls +4＝2 次真跑+2 次 busy 返回）',
+    burst.pushed1 === true && burst.pushed2 === true
+    && burst.after.pendingRuns - burst.before.pendingRuns === 1
+    && burst.after.busyReturns - burst.before.busyReturns === 2
+    && burst.after.refreshCalls - burst.before.refreshCalls === 4
+    && burst.after.lastModelAtUpdates - burst.before.lastModelAtUpdates === 2,
+    { before: burst.before, after: burst.after, pushed: [burst.pushed1, burst.pushed2] });
+  check('B6705-② 补跑后模型仍完整（六角色行，不是空模型）',
+    burst.rows === 6, { rows: burst.rows });
+  check('B6705-③ 新鲜度只随成功刷新前进：lastModelAtUpdates === refreshCalls - busyReturns（且 > 0）',
+    burst.after.lastModelAt > 0 && burst.after.lastModelAtUpdates === burst.after.refreshCalls - burst.after.busyReturns,
+    { stats: burst.after });
+
   const failed = checks.filter((row) => !row.ok);
   const report = {
     ok: failed.length === 0,
