@@ -11455,7 +11455,8 @@ installShellAuditSensors();
     if (dshCapabilityState.running) return dshCapabilityState.running;
     if (dshCapabilityState.record && now - dshCapabilityState.at < 5 * 60 * 1000) return dshCapabilityState.record;
     dshCapabilityState.running = (async () => {
-      const record = await probeDshCapability({ adapter: dsh, dataDir: DATA_ROOT, timeoutMs: 8000 });
+      // e379 返工：大账号（本机 510+ 会话）下 8s 太紧，探针是异步只读的，放宽到 20s。
+      const record = await probeDshCapability({ adapter: dsh, dataDir: DATA_ROOT, timeoutMs: 20000 });
       dshCapabilityState = { at: Date.now(), record, running: null };
       try { console.log('[dsh-capability] ' + capabilityLine(record) + '（reason=' + String(reason || '') + '）'); } catch { /* ignore */ }
       return record;

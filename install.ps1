@@ -90,6 +90,10 @@ $script:TotalSteps = 7
 $script:NodeRuntime = $null
 $script:IsFileInvocation = -not [string]::IsNullOrEmpty($PSCommandPath)
 $script:KeepNodeZip = $false
+# e379 返工：安装期告警收集（AC6 MCP 等不阻断项），最后写 data/install-result.json 并给界面读。
+$script:Warnings = @()
+$script:MCP = $null
+$script:Stage = '初始化'
 $script:DefaultRepoZipUrl = 'https://github.com/781237194/agile-workbench/archive/refs/heads/main.zip'
 
 # e379：从「右键运行/双击」进来时执行策略可能是 Restricted —— 先给出可直接复制的命令，
@@ -162,6 +166,8 @@ function Write-Step {
     Write-Host ''
     Write-Host ("[{0}/{1}] {2}" -f $Number, $script:TotalSteps, $Title) -ForegroundColor Cyan
     Write-InstallerLog 'INFO' ("步骤 {0}/{1}：{2}" -f $Number, $script:TotalSteps, $Title)
+    # e379 返工：记住当前阶段，失败时 data/install-result.json 要写「失败阶段」（AC4③）。
+    $script:Stage = $Title
 }
 
 function Write-InstallerNote {
@@ -934,36 +940,185 @@ function Expand-RepoZip {
     }
 }
 
+# ── e379 返工④：依赖/Electron 阶段的分段进度（AC1①「每 ≤30s 至少一行进度」）────────────
+function Get-ElectronProgressSnapshot {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+    $cacheBytes = 0
+    $distBytes = 0
+    $packageCount = 0
+    $cacheDir = Join-Path $env:LOCALAPPDATA 'electron\Cache'
+    if (Test-Path -LiteralPath $cacheDir) {
+        try {
+            $sum = (Get-ChildItem -LiteralPath $cacheDir -File -Recurse -Force -ErrorAction SilentlyContinue |
+                Measure-Object -Property Length -Sum).Sum
+            if ($sum) { $cacheBytes = [double]$sum }
+        } catch { }
+    }
+    $distDir = Join-Path $RepoRoot 'node_modules\electron\dist'
+    if (Test-Path -LiteralPath $distDir) {
+        try {
+            $sum = (Get-ChildItem -LiteralPath $distDir -File -Recurse -Force -ErrorAction SilentlyContinue |
+                Measure-Object -Property Length -Sum).Sum
+            if ($sum) { $distBytes = [double]$sum }
+        } catch { }
+    }
+    $modulesDir = Join-Path $RepoRoot 'node_modules'
+    if (Test-Path -LiteralPath $modulesDir) {
+        try {
+            $packageCount = @(Get-ChildItem -LiteralPath $modulesDir -Directory -Force -ErrorAction SilentlyContinue).Count
+        } catch { $packageCount = 0 }
+    }
+    return [pscustomobject]@{
+        CacheMB  = [Math]::Round($cacheBytes / 1MB, 1)
+        DistMB   = [Math]::Round($distBytes / 1MB, 1)
+        Packages = $packageCount
+    }
+}
+
+function Format-ProgressFacts {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+    $snap = Get-ElectronProgressSnapshot -RepoRoot $RepoRoot
+    $stage = '解析依赖'
+    if ($snap.CacheMB -gt 0 -and $snap.DistMB -le 0) { $stage = '下载 Electron' }
+    if ($snap.DistMB -gt 0) { $stage = '解压 Electron' }
+    return ("阶段：{0}；electron 缓存 {1} MB｜dist {2} MB｜node_modules {3} 个包" -f $stage, $snap.CacheMB, $snap.DistMB, $snap.Packages)
+}
+
+# 增量读取子进程重定向文件（共享读写，可以在子进程还在写的时候读）。
+function Read-InstallerNewLines {
+    param([string]$Path, [ref]$Offset)
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    $lines = @()
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            if ($stream.Length -le $Offset.Value) { return @() }
+            $stream.Position = [int64]$Offset.Value
+            $remaining = [int64]($stream.Length - $Offset.Value)
+            $take = [int]([Math]::Min([int64]1048576, $remaining))
+            $buffer = New-Object byte[] $take
+            $read = $stream.Read($buffer, 0, $take)
+            $Offset.Value = [int64]$stream.Position
+            $text = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+            if ($text.Length -gt 0) {
+                $lines = @($text -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
+            }
+        } finally {
+            $stream.Dispose()
+        }
+    } catch { return @() }
+    return $lines
+}
+
 function Invoke-LoggedCommand {
     param(
         [Parameter(Mandatory = $true)][string]$Exe,
         [string[]]$Arguments = @(),
-        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        # >0 时进入「分段进度」模式：每 N 秒打印一行进度（含已下载字节/阶段名），避免整段静默 >30s。
+        [int]$ProgressSeconds = 0,
+        [string]$PhaseName = '依赖安装'
     )
     Write-InstallerLog 'RUN' ("{0} {1}" -f (Split-Path -Leaf $Exe), ($Arguments -join ' '))
     $exit = 1
-    $previousErrorAction = $ErrorActionPreference
-    Push-Location -LiteralPath $WorkingDirectory
-    try {
-        # npm 会把 warning 写到 stderr；Stop 模式下 2>&1 会中止安装，这里必须 Continue。
-        $ErrorActionPreference = 'Continue'
-        & $Exe @Arguments 2>&1 | ForEach-Object {
-            $text = [string]$_
-            if ($null -ne $text) {
-                Write-Host "    $text"
-                if ($script:LogFile) {
-                    try {
-                        Add-Content -LiteralPath $script:LogFile -Value $text -Encoding UTF8
-                    } catch {
-                        # 日志失败不阻断安装。
+    if ($ProgressSeconds -le 0) {
+        $previousErrorAction = $ErrorActionPreference
+        Push-Location -LiteralPath $WorkingDirectory
+        try {
+            # npm 会把 warning 写到 stderr；Stop 模式下 2>&1 会中止安装，这里必须 Continue。
+            $ErrorActionPreference = 'Continue'
+            & $Exe @Arguments 2>&1 | ForEach-Object {
+                $text = [string]$_
+                if ($null -ne $text) {
+                    Write-Host "    $text"
+                    if ($script:LogFile) {
+                        try {
+                            Add-Content -LiteralPath $script:LogFile -Value $text -Encoding UTF8
+                        } catch {
+                            # 日志失败不阻断安装。
+                        }
                     }
                 }
             }
+            $exit = [int]$LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorAction
+            Pop-Location
         }
-        $exit = [int]$LASTEXITCODE
+        if ($exit -eq 0) {
+            Write-InstallerLog 'OK' ("{0} 执行完成" -f (Split-Path -Leaf $Exe))
+        } else {
+            Write-InstallerLog 'FAIL' ("{0} 退出码 {1}" -f (Split-Path -Leaf $Exe), $exit)
+        }
+        return $exit
+    }
+
+    # ── 分段进度模式（e379 返工④）────────────────────────────────────────────
+    $outFile = Join-Path ([System.IO.Path]::GetTempPath()) ('awb-install-' + [guid]::NewGuid().ToString('n') + '.out')
+    $errFile = $outFile + '.err'
+    $proc = $null
+    $previousErrorAction = $ErrorActionPreference
+    Push-Location -LiteralPath $WorkingDirectory
+    try {
+        $ErrorActionPreference = 'Continue'
+        $argLine = ($Arguments | ForEach-Object {
+            $arg = [string]$_
+            if ($arg -match '[\s"]') { '"' + ($arg -replace '"', '\"') + '"' } else { $arg }
+        }) -join ' '
+        $proc = Start-Process -FilePath $Exe -ArgumentList $argLine -WorkingDirectory $WorkingDirectory `
+            -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $startedAt = Get-Date
+        $lastBeat = $startedAt
+        [int64]$posOut = 0
+        [int64]$posErr = 0
+        $startLine = "    [进度 0s] {0} 已启动；{1}" -f $PhaseName, (Format-ProgressFacts -RepoRoot $WorkingDirectory)
+        Write-Host $startLine
+        if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value $startLine -Encoding UTF8 } catch { } }
+        while ($true) {
+            Start-Sleep -Milliseconds 700
+            foreach ($line in (Read-InstallerNewLines -Path $outFile -Offset ([ref]$posOut))) {
+                Write-Host "    $line"
+                if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 } catch { } }
+            }
+            foreach ($line in (Read-InstallerNewLines -Path $errFile -Offset ([ref]$posErr))) {
+                Write-Host "    $line"
+                if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 } catch { } }
+            }
+            $proc.Refresh()
+            if ($proc.HasExited) { break }
+            $now = Get-Date
+            if (($now - $lastBeat).TotalSeconds -ge $ProgressSeconds) {
+                $lastBeat = $now
+                $elapsed = [int]($now - $startedAt).TotalSeconds
+                $beat = "    [进度 {0}s] {1} 进行中；{2}" -f $elapsed, $PhaseName, (Format-ProgressFacts -RepoRoot $WorkingDirectory)
+                Write-Host $beat
+                if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value $beat -Encoding UTF8 } catch { } }
+            }
+        }
+        $proc.WaitForExit()
+        # 收尾再抽一次，避免最后几行还没读到就结束。
+        foreach ($line in (Read-InstallerNewLines -Path $outFile -Offset ([ref]$posOut))) {
+            Write-Host "    $line"
+            if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 } catch { } }
+        }
+        foreach ($line in (Read-InstallerNewLines -Path $errFile -Offset ([ref]$posErr))) {
+            Write-Host "    $line"
+            if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 } catch { } }
+        }
+        $exit = [int]$proc.ExitCode
+    } catch {
+        Write-InstallerLog 'WARN' ("分段进度模式执行失败：{0}" -f $_.Exception.Message)
+        $exit = 1
     } finally {
         $ErrorActionPreference = $previousErrorAction
         Pop-Location
+        foreach ($tempFile in @($outFile, $errFile)) {
+            try {
+                if ($tempFile -and (Test-Path -LiteralPath $tempFile)) {
+                    Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+        }
     }
     if ($exit -eq 0) {
         Write-InstallerLog 'OK' ("{0} 执行完成" -f (Split-Path -Leaf $Exe))
@@ -982,6 +1137,94 @@ function Remove-IncompleteTarget {
         Write-InstallerLog 'INFO' "已清理未完成的目录：$($script:TargetPath)"
     } catch {
         Write-InstallerLog 'WARN' "未能自动清理目录，可手动删除：$($script:TargetPath)"
+    }
+}
+
+# ── e379 返工①：安装期告警 + 安装结果文件（AC6①「安装结果 warnings[]」/AC4③「摘要文件」）──
+function Add-InstallerWarning {
+    param(
+        [Parameter(Mandatory = $true)][string]$Code,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$LogPath = '',
+        $Detail = $null
+    )
+    $entry = [pscustomobject]@{
+        code    = $Code
+        message = $Message
+        at      = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+        log     = $LogPath
+        detail  = $Detail
+    }
+    $script:Warnings += $entry
+    Write-InstallerLog 'WARN' ("[{0}] {1}" -f $Code, $Message)
+    return $entry
+}
+
+function Write-InstallResult {
+    param(
+        [string]$RepoRoot,
+        [bool]$Ok = $false,
+        [string]$Stage = '',
+        [string]$Next = ''
+    )
+    if (-not $RepoRoot) { return $null }
+    $dataDir = Join-Path $RepoRoot 'data'
+    try {
+        New-Item -ItemType Directory -Force -Path $dataDir -ErrorAction Stop | Out-Null
+    } catch {
+        return $null
+    }
+    $target = Join-Path $dataDir 'install-result.json'
+    # 合并既有 warnings（MCP 自检 CLI / 上一次安装写过的），不要互相覆盖。
+    $existingWarnings = @()
+    if (Test-Path -LiteralPath $target) {
+        try {
+            $rawText = [System.IO.File]::ReadAllText($target, [System.Text.Encoding]::UTF8)
+            $parsed = $rawText | ConvertFrom-Json
+            if ($parsed -and $parsed.warnings) { $existingWarnings = @($parsed.warnings) }
+        } catch { $existingWarnings = @() }
+    }
+    $merged = New-Object System.Collections.ArrayList
+    $seen = @{}
+    foreach ($row in @($existingWarnings + $script:Warnings)) {
+        if ($null -eq $row) { continue }
+        $code = [string]$row.code
+        if (-not $code) { continue }
+        $at = [string]$row.at
+        $key = $code + '@' + $at
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        [void]$merged.Add([pscustomobject]@{
+            code    = $code
+            message = [string]$row.message
+            at      = $at
+            log     = [string]$row.log
+            detail  = $row.detail
+        })
+    }
+    $payload = [pscustomobject]@{
+        ok          = $Ok
+        at          = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+        stage       = $Stage
+        next        = $Next
+        repoRoot    = $RepoRoot
+        logFile     = [string]$script:LogFile
+        warnings    = @($merged)
+        mcp         = $script:MCP
+        electron    = [pscustomobject]@{
+            exe     = (Join-Path $RepoRoot 'node_modules\electron\dist\electron.exe')
+            pathTxt = (Join-Path $RepoRoot 'node_modules\electron\path.txt')
+        }
+        nodeRuntime = $script:NodeRuntime
+        shortcut    = [string]$script:ShortcutPath
+    }
+    try {
+        $json = $payload | ConvertTo-Json -Depth 8
+        [System.IO.File]::WriteAllText($target, $json + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+        return $target
+    } catch {
+        Write-InstallerLog 'WARN' ("写安装结果失败：{0}" -f $_.Exception.Message)
+        return $null
     }
 }
 
@@ -1012,8 +1255,27 @@ function Show-Summary {
     Write-Host "    $(Join-Path $RepoRoot 'start.cmd')"
     Write-Host '  运行时不需要 Node.js：start.cmd 直接启动 Electron。'
     Write-Host ''
+    if ($script:MCP) {
+        if ($script:MCP.ok) {
+            Write-Host '  MCP 安全搜索：自检通过（initialize 成功）' -ForegroundColor DarkGray
+        } else {
+            Write-Host ("  MCP 安全搜索：自检失败（{0}）；不影响启动，详情见上面的日志" -f ([string]$script:MCP.reason)) -ForegroundColor Yellow
+        }
+    }
+    if (@($script:Warnings).Count -gt 0) {
+        Write-Host ''
+        Write-Host ("  警告（不阻断，共 {0} 条）：" -f @($script:Warnings).Count) -ForegroundColor Yellow
+        foreach ($w in $script:Warnings) {
+            Write-Host ("    · [{0}] {1}" -f $w.code, $w.message) -ForegroundColor Yellow
+            if ($w.log) { Write-Host ("      日志：{0}" -f $w.log) -ForegroundColor DarkGray }
+        }
+        Write-Host '    界面查看：更多菜单 → 关于 PM工作台 → 安装 / MCP 警告' -ForegroundColor DarkGray
+    } else {
+        Write-Host '  警告：无' -ForegroundColor DarkGray
+    }
     Write-Host '  首次启动后：左下角配置 DSH 地址 → 新建或恢复项目。'
     Write-Host '  数据位置：<仓库>\data（重跑安装器不会覆盖项目与数据）'
+    Write-Host '  安装结果文件：<仓库>\data\install-result.json（含 warnings[]，界面「关于」可看）'
     Write-InstallerLog 'OK' "安装完成：$RepoRoot"
 }
 
@@ -1232,9 +1494,18 @@ try {
     $repoRoot = $script:RepoRoot
     # e379：Electron 二进制默认从 GitHub 下载，国内网络常 10 分钟以上无任何输出。
     # 默认走 npmmirror 镜像（可用 ELECTRON_MIRROR 覆盖）；失败再用 GitHub 重试一次。
-    if (-not $env:ELECTRON_MIRROR) {
+    $mirrorDisabled = ($env:AWB_NO_MIRROR -eq '1')
+    if ($mirrorDisabled) {
+        # e379 返工②：AWB_NO_MIRROR=1 关闭镜像（需求 §6.1.3）——不再默认写 ELECTRON_MIRROR，直连 GitHub。
+        Write-InstallerLog 'INFO' 'AWB_NO_MIRROR=1：已关闭 Electron 下载镜像（默认不写 ELECTRON_MIRROR）'
+        if ($env:ELECTRON_MIRROR) {
+            Write-Host "  Electron 下载镜像：已按 AWB_NO_MIRROR=1 关闭（显式 ELECTRON_MIRROR 仍生效：$env:ELECTRON_MIRROR）"
+        } else {
+            Write-Host '  Electron 下载镜像：已按 AWB_NO_MIRROR=1 关闭（直连 GitHub，可能较慢）'
+        }
+    } elseif (-not $env:ELECTRON_MIRROR) {
         $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
-        Write-Host '  Electron 下载镜像：npmmirror（设置 ELECTRON_MIRROR 可覆盖）'
+        Write-Host '  Electron 下载镜像：npmmirror（设置 ELECTRON_MIRROR 可覆盖；AWB_NO_MIRROR=1 关闭镜像）'
     } else {
         Write-Host "  Electron 下载镜像：$env:ELECTRON_MIRROR"
     }
@@ -1292,12 +1563,12 @@ try {
         } else {
             $env:PATH = $nodeRuntimeDir
         }
-        $npmExit = Invoke-LoggedCommand -Exe $tools.NpmExe -Arguments @('install', '--no-audit', '--no-fund', '--no-color') -WorkingDirectory $repoRoot
-        if ($npmExit -ne 0 -and $env:ELECTRON_MIRROR -like '*npmmirror*') {
+        $npmExit = Invoke-LoggedCommand -Exe $tools.NpmExe -Arguments @('install', '--no-audit', '--no-fund', '--no-color') -WorkingDirectory $repoRoot -ProgressSeconds 5 -PhaseName 'npm install（依赖 + Electron）'
+        if ($npmExit -ne 0 -and -not $mirrorDisabled -and $env:ELECTRON_MIRROR -like '*npmmirror*') {
             # e379：镜像不可用时回退官方源再试一次，避免一次网络抖动就整机装败。
             Write-InstallerLog 'WARN' "镜像源安装失败（退出码 $npmExit），改用官方源重试一次"
             $env:ELECTRON_MIRROR = ''
-            $npmExit = Invoke-LoggedCommand -Exe $tools.NpmExe -Arguments @('install', '--no-audit', '--no-fund', '--no-color') -WorkingDirectory $repoRoot
+            $npmExit = Invoke-LoggedCommand -Exe $tools.NpmExe -Arguments @('install', '--no-audit', '--no-fund', '--no-color') -WorkingDirectory $repoRoot -ProgressSeconds 5 -PhaseName 'npm install（官方源重试）'
         }
     } finally {
         if ($null -ne $previousRunAsNode) {
@@ -1367,6 +1638,48 @@ try {
             ) -join [Environment]::NewLine
             throw $electronHint
         }
+    }
+
+    # ── e379 返工①：MCP 安全搜索自检（AC6）──────────────────────────────────
+    # 失败只记 warning + 可读日志（~/.dsh/logs/mcp-<ts>.log），不阻断安装、不阻断启动。
+    Write-Host ''
+    Write-Host '  MCP 安全搜索自检（web-search-safe；失败只记 warning，不阻断安装）'
+    $mcpSelfCheck = Join-Path $repoRoot 'scripts\mcp-selfcheck.cjs'
+    $mcpDataDir = Join-Path $repoRoot 'data'
+    try {
+        if ((Test-Path -LiteralPath $mcpSelfCheck) -and (Test-Path -LiteralPath $tools.NodeExe)) {
+            $mcpArgs = @($mcpSelfCheck, '--repo', $repoRoot, '--data', $mcpDataDir, '--timeout', '5000')
+            $previousMcpEap = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $mcpOut = & $tools.NodeExe @mcpArgs 2>&1
+            } finally {
+                $ErrorActionPreference = $previousMcpEap
+            }
+            foreach ($line in @($mcpOut)) {
+                if ([string]$line -and ([string]$line).Trim().Length -gt 0) { Write-Host ('    ' + [string]$line) }
+            }
+            $mcpRecordFile = Join-Path $mcpDataDir 'mcp-selfcheck.json'
+            if (Test-Path -LiteralPath $mcpRecordFile) {
+                try {
+                    $mcpRecord = [System.IO.File]::ReadAllText($mcpRecordFile, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+                    $script:MCP = $mcpRecord
+                } catch {
+                    $script:MCP = $null
+                }
+            }
+            if ($script:MCP -and -not $script:MCP.ok) {
+                Add-InstallerWarning -Code 'MCP_START_FAILED' -Message ("MCP 安全搜索自检失败（{0}）；搜索工具可能不可用，详见日志" -f ([string]$script:MCP.reason)) -LogPath ([string]$script:MCP.logPath)
+            } elseif ($script:MCP -and $script:MCP.ok) {
+                Write-InstallerLog 'OK' 'MCP 安全搜索自检通过（initialize 成功）'
+            } else {
+                Add-InstallerWarning -Code 'MCP_SELFCHECK_UNREADABLE' -Message 'MCP 自检没有产出结果文件；搜索工具可能不可用（不阻断安装）'
+            }
+        } else {
+            Add-InstallerWarning -Code 'MCP_SELFCHECK_UNAVAILABLE' -Message '缺少 scripts/mcp-selfcheck.cjs 或 Node 运行时，未做 MCP 自检；搜索工具可能不可用（不阻断安装）'
+        }
+    } catch {
+        Add-InstallerWarning -Code 'MCP_SELFCHECK_FAILED' -Message ("MCP 自检异常：{0}（不阻断安装）" -f $_.Exception.Message)
     }
 
     Write-Step 6 '创建桌面快捷方式'
@@ -1453,6 +1766,9 @@ try {
         Write-Step 7 '收尾'
     }
 
+    # e379 返工①：安装结果文件（含 warnings[]），界面「关于 PM工作台」读它显示。
+    $installResultFile = Write-InstallResult -RepoRoot $repoRoot -Ok ($script:ExitCode -eq 0) -Stage $script:Stage -Next '双击桌面「PM工作台」，或运行 start.cmd'
+    if ($installResultFile) { Write-InstallerLog 'OK' ("安装结果已写：{0}" -f $installResultFile) }
     Show-Summary -RepoRoot $repoRoot -ShortcutPath $script:ShortcutPath -NodeRuntime $script:NodeRuntime
 } catch {
     $script:ExitCode = 1
@@ -1476,6 +1792,10 @@ try {
         Write-Host '       （日志未能写入，请截图本窗口）' -ForegroundColor Yellow
     }
     Write-InstallerLog 'FAIL' $reason
+    # e379 返工①：失败也要写安装结果（含失败阶段 / 下一步 / warnings），供界面与复验读取（AC4③）。
+    if ($script:RepoRoot) {
+        [void](Write-InstallResult -RepoRoot $script:RepoRoot -Ok $false -Stage $script:Stage -Next '按上面的提示处理后重跑安装器（已下载产物会复用）')
+    }
     Remove-IncompleteTarget
 } finally {
     Write-Host ''
