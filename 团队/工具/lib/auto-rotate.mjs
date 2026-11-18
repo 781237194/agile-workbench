@@ -586,6 +586,17 @@ export function manualRotateCommand(projectName, role) {
   return `node 团队/工具/team.mjs session rotate --role ${role} --project "${projectName}"`;
 }
 
+/** B-a6d1：PM 到达换人阈值时，执行人是产品——提醒产品（PM 自己那条不再给「执行换人」指令）。 */
+function remindProductRotatePm(projectName, reason, command, note) {
+  try {
+    sendMessage({
+      from: 'system', to: 'product', project: projectName, type: 'session_rotate_warn',
+      subject: `PM 换人待执行（产品执行）：${reason}`,
+      body: `${note || `PM 已到换人阈值（${reason}）。`}\n按口径（Owner 2026-11-18）：PM 自己的换人只能由产品执行。\n步骤：①确认 PM 已写交接（八节齐）并落了交接回执；②你执行：${command}\n③换人后按流程广播其余角色重 boot（旧令牌会失效）。`,
+    });
+  } catch { /* 审计已留痕 */ }
+}
+
 /** 提醒该角色（1 条，类型 session_rotate_warn；失败不影响审计）。 */
 function remindRoleManual(projectName, role, note) {
   try {
@@ -955,15 +966,24 @@ export async function runAutoRotateCycle(projectName, options = {}) {
         }
         // B-3594：交接回执到了也只提醒 PM 手动换人，**不再自动 rotate**（Owner 14:35 口径）
         if (!dryRun) {
+          const readyNote = item.role === 'pm'
+            ? `PM 交接回执已到（${done.source}）：PM 自己的换人由产品执行，提醒产品`
+            : `${item.role} 交接回执已到（${done.source}）：按 Owner 14:35 口径只提醒，换人由 PM 手动执行`;
           appendAudit(auditFile, {
-            at: nowIso, stage: 'remind', code: 'HANDOVER_READY_REMIND_PM', result: 'ok', role: item.role, project: name,
-            note: `${item.role} 交接回执已到（${done.source}）：按 Owner 14:35 口径只提醒，换人由 PM 手动执行`,
-            evidence: { source: done.source, level: item.level, manualCommand: manualRotateCommand(name, item.role) },
+            at: nowIso, stage: 'remind', code: item.role === 'pm' ? 'HANDOVER_READY_REMIND_PRODUCT' : 'HANDOVER_READY_REMIND_PM', result: 'ok', role: item.role, project: name,
+            note: readyNote,
+            evidence: { source: done.source, level: item.level, manualCommand: manualRotateCommand(name, item.role), to: item.role === 'pm' ? 'product' : 'pm' },
           });
-          remindRoleManual(name, item.role, `交接回执已到（${done.source}）：请等 PM 手动执行换人；系统不会自动换人。`);
-          remindPmManual(name, [item.role], `交接回执已到（${done.source}）——请手动换人`, manualRotateCommand(name, item.role));
+          if (item.role === 'pm') {
+            // B-a6d1：PM 的回执到了 → 产品可以执行换人了；PM 只被告知「等产品执行」，不再收到「手动换人」指令
+            remindRoleManual(name, item.role, `交接回执已到（${done.source}）：请等产品执行换人（PM 自己的换人由产品执行）。`);
+            remindProductRotatePm(name, `PM 交接回执已到（${done.source}）`, manualRotateCommand(name, item.role), `PM 的交接回执已到（${done.source}），可以执行换人了。`);
+          } else {
+            remindRoleManual(name, item.role, `交接回执已到（${done.source}）：请等 PM 手动执行换人；系统不会自动换人。`);
+            remindPmManual(name, [item.role], `交接回执已到（${done.source}）——请手动换人`, manualRotateCommand(name, item.role));
+          }
         }
-        actions.push({ stage: 'remind', code: 'HANDOVER_READY_REMIND_PM', role: item.role, source: done.source });
+        actions.push({ stage: 'remind', code: item.role === 'pm' ? 'HANDOVER_READY_REMIND_PRODUCT' : 'HANDOVER_READY_REMIND_PM', role: item.role, source: done.source });
         continue;      }
       const waited = now - pending.at;
       if (waited > HANDOVER_TIMEOUT_MS) {
@@ -1025,10 +1045,23 @@ export async function runAutoRotateCycle(projectName, options = {}) {
         });
       } catch { /* 审计已留痕 */ }
       // B-3594：阈值命中 → 角色 + PM **各一条**提醒（PM 那条给可复制的手动换人命令）
-      remindPmManual(name, [item.role], `阈值命中（${item.kind === 'rounds' ? `轮数 ${item.rounds}/${ROUNDS_MAX}` : `${item.level} ${item.tokens}`}）待交接`, manualRotateCommand(name, item.role));
+      // B-a6d1：命中角色是 PM 时，执行人是产品——提醒发给产品（并写审计码），PM 不再收到「执行换人」指令。
+      const hitText = `阈值命中（${item.kind === 'rounds' ? `轮数 ${item.rounds}/${ROUNDS_MAX}` : `${item.level} ${item.tokens}`}）待交接`;
+      if (item.role === 'pm') {
+        appendAudit(auditFile, {
+          at: nowIso, stage: 'remind', code: 'REMIND_PRODUCT_ROTATE_PM', result: 'ok', role: 'pm', project: name,
+          note: `PM 到换人阈值：换人由产品执行，提醒产品（PM 只被告知写交接并回执产品）`,
+          evidence: { to: 'product', forRole: 'pm', manualCommand: manualRotateCommand(name, 'pm'), level: item.level, kind: item.kind },
+        });
+        remindProductRotatePm(name, hitText, manualRotateCommand(name, 'pm'));
+      } else {
+        remindPmManual(name, [item.role], hitText, manualRotateCommand(name, item.role));
+      }
     }
     actions.push({ stage: 'trigger', role: item.role, level: item.level });
-    actions.push({ stage: 'remind', role: 'pm', code: 'REMIND_PM_MANUAL_ROTATE', forRole: item.role });
+    actions.push(item.role === 'pm'
+      ? { stage: 'remind', role: 'product', code: 'REMIND_PRODUCT_ROTATE_PM', forRole: 'pm' }
+      : { stage: 'remind', role: 'pm', code: 'REMIND_PM_MANUAL_ROTATE', forRole: item.role });
   }
 
   return { ok: true, project: name, at: nowIso, mode: 'day', candidates: candidates.map((c) => `${c.role}:${c.level}`), actions, dryRun, source, auditFile };

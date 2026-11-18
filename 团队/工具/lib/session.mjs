@@ -1384,6 +1384,16 @@ export async function cmdSession(args) {
       }
       const byRole = sandboxExempt ? 'sandbox' : tokenRole;
       const rec = recordHandoverReceipt(projectName, role, { by: byRole, messageId: String(args['message-id'] || '') });
+      // B-a6d1：PM 的交接回执落账后，换人执行人是产品——给产品发一条可执行提醒（否则流程靠产品自觉）。
+      if (String(role) === 'pm') {
+        try {
+          sendMessage({
+            from: 'system', to: 'product', project: projectName, type: 'notice',
+            subject: 'PM 交接回执已到：可由产品执行换人',
+            body: `PM 的交接回执 ${rec.receipt.id} 已落（sha256 ${String(rec.receipt.sha256).slice(0, 12)}…，${rec.receipt.bytes}B）。\n按口径（Owner 2026-11-18）：PM 自己的换人只能由产品执行。\n步骤：①核对 PM 交接八节齐；②执行：node 团队\\工具\\team.mjs session rotate --role pm --project "${projectName}"；③换人后广播其余角色重 boot（旧令牌会失效）。`,
+          });
+        } catch { /* 提醒失败不影响回执落账 */ }
+      }
       out(args,
         `交接回执已记录：${rec.receipt.id} ｜ ${role} ｜ ${rec.receipt.path} ｜ ${rec.receipt.bytes}B ｜ sha256 ${rec.receipt.sha256.slice(0, 12)}…${sandboxExempt ? `（沙盘豁免：by=sandbox，未校验令牌；设 TEAM_BOOT_ENFORCE=1 可验门禁本体）` : ''}\n记录：${rec.file}\n下一步：PM 核对后 session rotate --role ${role}（rotate 会自动校验该回执 sha）`,
         { ok: true, ...rec });
