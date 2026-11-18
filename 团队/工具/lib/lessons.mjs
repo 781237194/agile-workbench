@@ -610,23 +610,42 @@ function bumpTurns(opts) {
 }
 
 /**
- * 达阈值判定 + 提示（有变更才发 / 夜间静默 / 沙盘不发 / pm 不自收 / 同轮一次）。
- * 不改 turns 之外的内容由 bumpTurns 负责；本函数只读 entry 并在必要时清零 turns。
+ * 达阈值判定 + 提示（有变更才发 / 沙盘不发 / pm 不自收 / 增量冷却）。
+ * 不改 turns 之外的内容由 bumpTurns 负责；本函数只读 entry 并在必要时刷新基线字段。
+ *
+ * B-20261118-132549-b973：旧实现用**绝对** turns > 阈值，且每次评估都往
+ * 经验教训广播.jsonl 追加一行（prompt/skip），一旦 turns 越过阈值就**逐轮自触发**。
+ * 现口径（增量冷却）：首次仍在 turns > 阈值（21 首触发、20 不发），此后必须
+ * 「距上次提醒（lastMaintenanceRounds）再走满一个阈值」才重新评估（21 → 41），
+ * 冷却期内直接返回 none（零广播行），从根上断掉逐轮刷屏。
  */
 function promptIfDue(opts) {
   const o = opts && typeof opts === 'object' ? opts : {};
   const { stateDir, teamRoot, role, entry, threshold, now, atIso } = o;
   if (!entry || !threshold) return { action: 'none' };
+  const turnsNow = Number.isFinite(Number(entry.turns)) ? Math.floor(Number(entry.turns)) : 0;
   // R-cfca 契约 6.2：严格大于阈值才触发（turns=20 不发、21 才发）。
   if (!(entry.turns > threshold.value)) return { action: 'none', turns: entry.turns, threshold: threshold.value };
   // 幂等键 role + turns：同一 turns 只发一次（不改用「人工注回」验）。
   if (Number(entry.lastMaintenanceRounds) === Number(entry.turns)) return { action: 'none', reason: 'same_round', turns: entry.turns, threshold: threshold.value };
+  // B-b973：增量冷却——距上次提醒不足一个阈值就不再评估（lmr 缺失按 0＝从未提醒）。
+  const lastRound = Number.isFinite(Number(entry.lastMaintenanceRounds)) ? Math.floor(Number(entry.lastMaintenanceRounds)) : 0;
+  const sinceLast = turnsNow - lastRound;
+  if (sinceLast < threshold.value) {
+    return {
+      action: 'none', reason: 'cooldown', turns: entry.turns, threshold: threshold.value,
+      lastMaintenanceRounds: lastRound, sinceLast, nextInTurns: threshold.value - sinceLast,
+    };
+  }
 
   const parsed = o.parsed || null;
   const auditRows = readAudit(teamRoot);
   const auditCount = auditRows.length;
 
-  // 「有变更才发」：主判据 = 登记册 sha ≠ lastNoticeSha；不可读时退化审计行数
+  // 「有变更才发」：主判据 = 登记册 sha ≠ lastNoticeSha；不可读时退化审计行数。
+  // B-b973：判据只认「登记册正文」与「经验教训审计.jsonl」（append/fix/delete 三类外部内容变更）。
+  // 提醒自身写出的 经验教训广播.jsonl（prompt/skip 行）与 维护评估.jsonl **一律不参与**判定，
+  // 否则提醒 → 新行 → 下一动作再提醒，形成自激环。
   let changed = false;
   let currentSha = null;
   if (parsed && !parsed.missing && !parsed.broken && parsed.fileSha) {
@@ -645,6 +664,10 @@ function promptIfDue(opts) {
       entry.lastMaintenanceAt = atIso;
       if (currentSha) entry.lastNoticeSha = currentSha;
       entry.lastSeenAuditSeq = auditCount;
+    } else if (action === 'skip') {
+      // B-b973：skip 也消费本轮窗口——否则「到点但无变更」会**每个动作**再写一行 skip，
+      // 依旧形成逐轮刷屏（今天 pm 的 skip turns=24/25/26 即此）。一次窗口最多一行记录。
+      entry.lastMaintenanceRounds = Number(entry.turns) || 0;
     }
     const data = readTurnsRaw(stateDir);
     if (data.ok) {
