@@ -7782,24 +7782,8 @@ ipcMain.handle('theme:metrics', async () => {
       const registeredMode = readTeamModeValue(registration && registration.teamMode);
       const storedMode = readTeamModeValue(stored && stored.teamMode);
       const restoreMode = requestedMode || registeredMode || storedMode || DEFAULT_TEAM_MODE;
-      // 97db AC4 口径（tester M-20261119-035018-ec6bda）：对「workbench 记录已删、目录仍在」的项目点恢复时，
-      // 必须先把项目记录重建回 store，否则下面的 sessions 段判据恒 false（persisted 需要 stored.id）。
-      if (!stored) {
-        try {
-          const fresh = readStore();
-          const at = now();
-          const recreated = {
-            id: id('P'), name: hit.name, path: projectDir, teamName: hit.name, teamMode: restoreMode,
-            createdAt: at, updatedAt: at, ownerReview: null,
-            tasks: [], messages: [], proposals: [], commits: [], votes: [],
-            pendingAck: [], pendingAckAt: null, events: [], workspace: null, sessionMeta: {},
-            dshWorkspaceId: null, workspacePath: null, requirements: [], workflowMirror: null, sessions: {}
-          };
-          fresh.projects.push(recreated);
-          writeStore(fresh);
-          stored = recreated;
-        } catch { /* 记录重建失败不阻断恢复；sessions 段会如实 missing */ }
-      }
+      // 97db AC4 实景口径（PM M-20261119-035043-88b0d1）：记录已删时的重建放在「会话成功之后、持久化之前」
+      // 同一事务完成（见下方 persistTeamLaunch 前），dry-run 与失败路径都不会落记录（零半写）。
       // dry-run 预览必须在任何写盘之前返回：下面的 setProjectTeamMode 会写 workbench.json、
       // 同步 团队.json 名册，并通过 ensureProjectReady 改 项目.json/workspace.json。
       // dry-run 只跑旧 launch.mjs --dry-run 拿角色计划，一个字节都不落盘。
@@ -7875,6 +7859,24 @@ ipcMain.handle('theme:metrics', async () => {
           seedVisible: p.seedVisible === true,
           engineUrl: String(p.engineUrl || dsh.baseUrl || '').trim()
         });
+      }
+      // 97db AC4 实景口径（PM M-20261119-035043-88b0d1）：记录已删、目录仍在时，在会话成功之后、持久化之前
+      // 同一事务重建 workbench 记录，再落 6 会话映射 → 四段全 true；前面任何失败路径都不创建记录（零半写）。
+      if (p.dryRun !== true && !stored) {
+        try {
+          const fresh = readStore();
+          const at = now();
+          const recreated = {
+            id: id('P'), name: hit.name, path: projectDir, teamName: hit.name, teamMode: restoreMode,
+            createdAt: at, updatedAt: at, ownerReview: null,
+            tasks: [], messages: [], proposals: [], commits: [], votes: [],
+            pendingAck: [], pendingAckAt: null, events: [], workspace: null, sessionMeta: {},
+            dshWorkspaceId: null, workspacePath: null, requirements: [], workflowMirror: null, sessions: {}
+          };
+          fresh.projects.push(recreated);
+          writeStore(fresh);
+          stored = recreated;
+        } catch { /* 记录重建失败不阻断恢复；sessions 段如实 missing */ }
       }
       if (p.dryRun !== true) persistTeamLaunch(stored ? stored.id : null, result);
       const persisted = stored && p.dryRun !== true ? requireProject(readStore(), stored.id) : null;
