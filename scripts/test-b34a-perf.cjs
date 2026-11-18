@@ -167,6 +167,78 @@ const PROJECT = '沙盘项目';
     sha(realTeamFile) === beforeReal.team && sha(realStoreFile) === beforeReal.store && Boolean(beforeReal.team),
     { before: beforeReal, after: { team: sha(realTeamFile), store: sha(realStoreFile) } });
 
+
+  /* ===== R3+R4（B，T-20261118-172619-c495）：IPC 合并 / 慢调用可观测 / 渲染层定时器可见性 ===== */
+  {
+    const coalesce = require(path.join(ROOT, 'src', 'ipc-coalesce.js'));
+    const registered = new Map();
+    const fakeHandle = (channel, handler) => { registered.set(channel, handler); };
+    const wrapped = coalesce.wrapHandle(fakeHandle, { windowMs: 300 });
+    let calls = 0;
+    wrapped('team:session-queue', async (payload) => { calls += 1; await since(20); return { ok: true, n: calls, arg: payload && payload.p }; });
+    const h = registered.get('team:session-queue');
+    const r1 = await Promise.all([h({ p: 1 }), h({ p: 1 }), h({ p: 1 })]);
+    check('B-R3① 同通道同参数 3 次并发 → 只执行 1 次，后到者复用同一 Promise 结果',
+      calls === 1 && r1[0] === r1[1] && r1[0] === r1[2] && r1[0].n === 1, { calls });
+    const r2 = await h({ p: 1 });
+    check('B-R3② 完成后立即同参再触发 → 重新执行（显式刷新拿新值，默认不复用旧结果）', calls === 2 && r2.n === 2, { calls });
+    const r3 = await h({ p: 2 });
+    check('B-R3③ 参数不同 → 各执行', calls === 3 && r3.n === 3, { calls });
+    let sendCalls = 0;
+    wrapped('team:send', async () => { sendCalls += 1; return { ok: true }; });
+    const hs = registered.get('team:send');
+    await Promise.all([hs({ x: 1 }), hs({ x: 1 })]);
+    check('B-R3④ 写通道（team:send）不合并：两次都执行', sendCalls === 2, { sendCalls });
+    const cacheReg = new Map(); let cc = 0;
+    coalesce.wrapHandle((c, f) => cacheReg.set(c, f), { windowMs: 300, cacheResultMs: 300 })('team:session-queue', async () => { cc += 1; return cc; });
+    const hc = cacheReg.get('team:session-queue');
+    await hc({ q: 1 });
+    const cached = await hc({ q: 1 });
+    check('B-R3⑤ cacheResultMs>0（显式开启）→ 完成后窗口内复用结果', cc === 1 && cached === 1, { cc });
+    const text = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    check('B-R3⑥ main.js 接线：ipc-coalesce 合并包装 + 性能日志计时（perfCache.withIpcTiming）',
+      /ipc-coalesce\.js/.test(text) && /ipcCoalesce\.wrapHandle\(ipcMain\.handle/.test(text) && /withIpcTiming\(/.test(text), {});
+
+    const gate = require(path.join(ROOT, 'src', 'renderer', 'gate.js'));
+    let hidden = true; let ran = 0;
+    const g = gate.createGate({ hidden: () => hidden });
+    g.gate(() => { ran += 1; })();
+    const hiddenRan = ran;
+    hidden = false;
+    g.gate(() => { ran += 1; })();
+    check('B-R4① 隐藏时 gate 不执行、可见时执行', hiddenRan === 0 && ran === 1, { hiddenRan, ran });
+    hidden = true; let coRan = 0;
+    const co = g.coalesce(() => { coRan += 1; return coRan; }, 300, 'k');
+    await Promise.all([co(), co()]);
+    check('B-R4② coalesce 在隐藏时不执行（不缓存隐藏期结果）', coRan === 0, { coRan });
+    hidden = false;
+    await co();
+    check('B-R4③ 恢复可见后立即执行（隐藏期结果未被复用）', coRan === 1, { coRan });
+
+    const rendererDir = path.join(ROOT, 'src', 'renderer');
+    const intervalSites = [];
+    for (const f of fs.readdirSync(rendererDir).filter((n) => n.endsWith('.js') && n !== 'gate.js')) {
+      fs.readFileSync(path.join(rendererDir, f), 'utf8').split(/\r?\n/).forEach((line, idx) => {
+        if (/setInterval\(/.test(line) && !/^\s*\/\//.test(line)) intervalSites.push({ file: f, line: idx + 1, text: line.trim() });
+      });
+    }
+    const sqSites = intervalSites.filter((s) => s.file === 'session-queue-panel.js');
+    const dispatchTicker = intervalSites.find((s) => s.file === 'app.js' && /dispatchTicker = setInterval/.test(s.text));
+    const busyTimer = intervalSites.find((s) => s.file === 'owner-review.js' && /busyTimer = setInterval/.test(s.text));
+    const gated = intervalSites.filter((s) => /r4Gate|r4Coalesce|AWBGate|gate\(/.test(s.text));
+    check('B-R4④ setInterval 盘点：渲染层业务代码共 11 处（app.js 6 / owner-review 2 / session-queue-panel 2 / workspace-clean 1）',
+      intervalSites.length === 11, intervalSites.map((s) => `${s.file}:${s.line}`));
+    check('B-R4⑤ session-queue-panel.js setInterval 恒 = 2（c9ac 契约，不得删）', sqSites.length === 2, sqSites);
+    check('B-R4⑥ 除 4 处「保留」（dispatchTicker/busyTimer/秒表/降级自检）外全部带可见性门或合并包装',
+      gated.length === intervalSites.length - 4 && Boolean(dispatchTicker) && Boolean(busyTimer)
+      && !gated.includes(dispatchTicker) && !gated.includes(busyTimer) && sqSites.length === 2,
+      { total: intervalSites.length, gated: gated.length });
+    const html = fs.readFileSync(path.join(rendererDir, 'index.html'), 'utf8');
+    check('B-R4⑦ index.html 先加载 gate.js 再 app.js',
+      html.indexOf('<script src="gate.js"></script>') > 0
+      && html.indexOf('<script src="gate.js"></script>') < html.indexOf('<script src="app.js"></script>'), {});
+  }
+
   try { fs.rmSync(SB, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* ignore */ }
   fs.mkdirSync(EVID, { recursive: true });
   const report = {
