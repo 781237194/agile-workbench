@@ -4150,12 +4150,15 @@ function resolveBoardProject(raw) {
 async function loadBoardProject(project) {
   if (!project || !project.id) return { ok: false, code: 'PROJECT_REQUIRED', why: '缺少项目' };
   if (!boardWindowAlive()) return { ok: false, code: 'BOARD_WINDOW_MISSING', message: '看板窗口不存在' };
+  // R-b34a R6补：切项目也先出骨架，再异步生成真实看板。
+  await ensureBoardWindowWithSkeleton({ title: project.name });
   const result = await teamTools.generateBoard(project);
   if (!result.ok) {
     return { ok: false, code: result.code || 'BOARD_FAILED', why: result.message || result.why || '看板生成失败' };
   }
   teamBoardProjectId = project.id;
   teamBoardProjectPath = path.resolve(String(project.path));
+  teamBoardFilePath = result.boardPath;
   setTimeout(() => {
     if (boardWindowAlive()) teamBoardWindow.loadFile(result.boardPath).catch(() => {});
   }, 0);
@@ -4178,6 +4181,74 @@ function clampBoardBounds(bounds) {
   } catch {
     return fallback;
   }
+}
+
+/* ── R-b34a R6补（T-20261118-183722-d5ec）：看板窗骨架屏 ────────────────────────
+ * 看板窗是本文件生成页（renderer 红线之外），基线 `generateBoard` 1020ms、首帧 219ms；
+ * AC4 要求「窗口可见/骨架 ≤200ms、全量 ≤800ms」。做法：
+ *   ① 窗口创建/刷新时先 loadURL 一个**内联骨架页**（data URL，零外部资源，含 [data-board-skeleton] 锚点
+ *      与 performance.mark('board:skeleton')；既有看板锚点一个不动）；
+ *   ② 真实看板仍由 teamTools.generateBoard 生成后 loadFile 填充（业务逻辑/HTML 生成一字不改）；
+ *   ③ 两个时间点（骨架可见 / 真实内容加载）写进 IPC 返回值 timings 与 性能.jsonl（kind='render'）。
+ */
+const BOARD_SKELETON_MARK = 'board:skeleton';
+let teamBoardFilePath = '';
+
+function boardSkeletonDataUrl(title) {
+  const t = String(title || '团队看板').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${t}</title>
+<style>
+html,body{margin:0;height:100%;background:#0b0c10;color:#dfe3ea;font:14px/1.6 -apple-system,"Segoe UI",system-ui,sans-serif}
+.wrap{height:100%;display:flex;flex-direction:column;gap:18px;padding:28px 32px;box-sizing:border-box}
+.h{display:flex;align-items:center;gap:10px;font-weight:650}
+.dot{width:9px;height:9px;border-radius:50%;background:#e0b25a;animation:p 1s infinite ease-in-out}
+.bar{height:16px;border-radius:6px;background:linear-gradient(90deg,#1b1f27,#262c36,#1b1f27);animation:p 1.4s infinite ease-in-out}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:6px}
+.card{height:120px;border-radius:10px;background:linear-gradient(90deg,#151920,#1e232c,#151920);animation:p 1.6s infinite ease-in-out}
+.tip{margin-top:auto;color:#7f8794;font-size:12px}
+@keyframes p{0%{opacity:.55}50%{opacity:1}100%{opacity:.55}}
+</style></head>
+<body><div class="wrap" data-board-skeleton="1">
+  <div class="h"><span class="dot"></span><span>看板加载中…</span></div>
+  <div class="bar" style="width:38%"></div>
+  <div class="bar" style="width:62%"></div>
+  <div class="grid"><div class="card"></div><div class="card"></div><div class="card"></div></div>
+  <div class="bar" style="width:82%"></div>
+  <div class="tip data-board-skeleton-tip">正在生成看板数据（首次约 1 秒，之后走缓存）</div>
+</div>
+<script>try{performance.mark('${BOARD_SKELETON_MARK}')}catch(e){}</script></body></html>`;
+  return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+}
+
+/** 保证看板窗存在并**先显示骨架**（≤200ms 可见）；返回 {created, skeletonAt}。 */
+async function ensureBoardWindowWithSkeleton({ theme = 'dark', style = 'native', title = '团队看板' } = {}) {
+  const created = !boardWindowAlive();
+  if (created) {
+    teamBoardWindow = new BrowserWindow({
+      width: 1120, height: 780, minWidth: 440, minHeight: 320,
+      frame: false, alwaysOnTop: true, skipTaskbar: false, resizable: true, show: false,
+      backgroundColor: theme === 'light' ? '#f6f1e7' : '#0b0c10', opacity: 0.97, parent: mainWindow || undefined,
+      title: '团队看板', icon: APP_ICON,
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true, nodeIntegration: false, sandbox: false,
+        additionalArguments: ['--awb-board'], spellcheck: false
+      }
+    });
+    teamBoardWindow.on('closed', () => {
+      teamBoardWindow = null;
+      teamBoardProjectId = null;
+      teamBoardProjectPath = null;
+      teamBoardFilePath = '';
+      teamBoardExpandedBounds = null;
+    });
+  }
+  try {
+    await teamBoardWindow.loadURL(boardSkeletonDataUrl(title));
+  } catch { /* 骨架失败不阻塞真实看板 */ }
+  applyZoomToAllWindows(readZoomPref());
+  try { teamBoardWindow.show(); } catch { /* ignore */ }
+  return { created, skeletonAt: Date.now() };
 }
 
 async function boardControl(action) {
@@ -4242,8 +4313,11 @@ async function boardControl(action) {
   }
   if (normalized === 'refresh' || normalized === 'reload') {
     // 先回 IPC 再 reload：页面导航会销毁调用方上下文，直接 await reload 会让 invoke 永远不返回。
-    setTimeout(() => {
-      if (boardWindowAlive()) teamBoardWindow.webContents.reload();
+    // R-b34a R6补：刷新也先显示骨架，再加载真实看板文件（不直接 reload 旧内容）。
+    setTimeout(async () => {
+      if (!boardWindowAlive()) return;
+      try { await teamBoardWindow.loadURL(boardSkeletonDataUrl('团队看板')); } catch { /* ignore */ }
+      if (boardWindowAlive() && teamBoardFilePath) teamBoardWindow.loadFile(teamBoardFilePath).catch(() => {});
     }, 0);
     return { ok: true, action: 'refresh', scheduled: true, projectId: teamBoardProjectId || null };
   }
@@ -8172,44 +8246,32 @@ ipcMain.handle('theme:metrics', async () => {
     const store = readStore();
     const project = store.projects.find((p) => p.id === projectId);
     if (!project) throw new Error('项目不存在');
+    // R-b34a R6补：**先骨架后数据**——窗口/骨架立即可见（≤200ms），generateBoard 期间保持骨架，
+    // 完成后再 loadFile 真实看板（内容/交互/锚点全不变）。timings 回给调用方并写 性能.jsonl。
+    const startedAt = Date.now();
+    const ensured = await ensureBoardWindowWithSkeleton({ theme, style: boardStyle, title: project.name });
+    const skeletonMs = ensured.skeletonAt - startedAt;
     const result = await teamTools.generateBoard(project);
     if (!result.ok) throw new Error(result.message || result.why || '看板生成失败');
     teamBoardProjectId = project.id;
     teamBoardProjectPath = path.resolve(String(project.path));
+    teamBoardFilePath = result.boardPath;
     teamBoardTheme = theme;
-    if (boardWindowAlive()) {
-      // 复用窗口也必须重新加载：generateBoard 每次都会重写 看板.html，
-      // 只 show/focus 会让切项目后的窗口继续显示上一个项目。
-      await teamBoardWindow.loadFile(result.boardPath, { query: { theme, style: boardStyle } });
-      // B-4e18：复用窗重载后同样跟当前字号。
-      applyZoomToAllWindows(readZoomPref());
-      teamBoardWindow.show();
-      teamBoardWindow.focus();
-      return { ok: true, path: result.boardPath, projectId: project.id, reused: true, reloaded: true, theme, style: boardStyle, themeId: payloadThemeId };
-    }
-    teamBoardWindow = new BrowserWindow({
-      width: 1120, height: 780, minWidth: 440, minHeight: 320,
-      frame: false, alwaysOnTop: true, skipTaskbar: false, resizable: true, show: false,
-      backgroundColor: theme === 'light' ? '#f6f1e7' : '#0b0c10', opacity: 0.97, parent: mainWindow || undefined,
-      title: '团队看板', icon: APP_ICON,
-      webPreferences: {
-        // 看板窗口复用同一个 preload，通过 --awb-board 只暴露 window.boardWin。
-        preload: path.join(__dirname, 'preload.js'),
-        contextIsolation: true, nodeIntegration: false, sandbox: false,
-        additionalArguments: ['--awb-board'], spellcheck: false
-      }
-    });
-    teamBoardWindow.on('closed', () => {
-      teamBoardWindow = null;
-      teamBoardProjectId = null;
-      teamBoardProjectPath = null;
-      teamBoardExpandedBounds = null;
-    });
+    // 复用窗也必须重新加载：generateBoard 每次都会重写 看板.html。
     await teamBoardWindow.loadFile(result.boardPath, { query: { theme, style: boardStyle } });
-    // B-4e18：看板窗是独立 BrowserWindow，创建/重载后要跟主窗同一字号。
+    const contentMs = Date.now() - startedAt;
     applyZoomToAllWindows(readZoomPref());
     teamBoardWindow.show();
-    return { ok: true, path: result.boardPath, projectId: project.id, reused: false, reloaded: true, theme, style: boardStyle, themeId: payloadThemeId };
+    teamBoardWindow.focus();
+    const timings = { skeletonMs, contentMs, reused: !ensured.created, budget: { skeletonMs: 200, contentMs: 800 } };
+    try {
+      perfCache.recordPerf({
+        teamRoot: resolveTeamRoot(), projectName: String(project.teamName || project.name || ''),
+        kind: 'render', name: 'board:first-paint', ms: contentMs,
+        slow: skeletonMs > timings.budget.skeletonMs || contentMs > timings.budget.contentMs,
+      });
+    } catch { /* 性能日志失败不影响看板 */ }
+    return { ok: true, path: result.boardPath, projectId: project.id, reused: !ensured.created, reloaded: true, theme, style: boardStyle, themeId: payloadThemeId, timings };
   });
   ipcMain.handle('team:board-control', (event, action) => {
     assertBoardSender(event);
@@ -8218,8 +8280,11 @@ ipcMain.handle('theme:metrics', async () => {
   ipcMain.handle('team:board-refresh', (event) => {
     assertBoardSender(event);
     if (!boardWindowAlive() || !teamBoardProjectId) return { ok: false, code: 'BOARD_WINDOW_MISSING' };
-    setTimeout(() => {
-      if (boardWindowAlive()) teamBoardWindow.webContents.reload();
+    // R-b34a R6补：刷新先骨架再真实看板（与 boardControl('refresh') 同口径）。
+    setTimeout(async () => {
+      if (!boardWindowAlive()) return;
+      try { await teamBoardWindow.loadURL(boardSkeletonDataUrl('团队看板')); } catch { /* ignore */ }
+      if (boardWindowAlive() && teamBoardFilePath) teamBoardWindow.loadFile(teamBoardFilePath).catch(() => {});
     }, 0);
     return { ok: true, projectId: teamBoardProjectId, scheduled: true };
   });

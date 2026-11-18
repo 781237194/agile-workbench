@@ -175,6 +175,61 @@ async function main() {
     try {
       await evalJs("(() => { const v = document.getElementById('dsh-view'); if (v) { v.style.display = 'none'; return 'hidden'; } return 'no-webview'; })()");
     } catch (e) { put({ kind: 'hide-webview-failed', why: String(e.message || e).slice(0, 200) }); }
+    // ── R-b34a R6补（d5ec）：看板窗骨架模式 --board ─────────────────────────
+    // 从主渲染层调 window.workbench.teamBoardOld(projectId)（与「独立浮窗」按钮同一 IPC），
+    // 主进程会：先显示内联骨架（≤200ms 可见）→ generateBoard → loadFile 真实看板，返回 timings。
+    if (ARGS.includes('--board')) {
+      const wbFile = path.join(DATA, 'userdata', 'workbench.json');
+      const wb = JSON.parse(fs.readFileSync(wbFile, 'utf8'));
+      const projectId = String(wb.activeProjectId || ((wb.projects || [])[0] || {}).id || '');
+      if (!projectId) throw new Error('沙盘 workbench 里没有可用项目 id');
+      put({ kind: 'board-mode', projectId });
+      const svgStart = Date.now();
+      const result = await evalJs(`window.workbench.teamBoardOld(${JSON.stringify(projectId)})`, 90000, true);
+      const wallMs = Date.now() - svgStart;
+      put({ kind: 'board-ipc-result', result, wallMs });
+      // 找看板窗目标并截图（真实内容已填充）
+      await sleep(600);
+      const list = await getJson(PORT, '/json/list');
+      const boardTarget = (list || []).find((t) => t.type === 'page' && /看板\.html/i.test(String(t.url || '')));
+      put({ kind: 'board-target', url: boardTarget ? String(boardTarget.url).slice(0, 140) : '' });
+      let shot = '';
+      let contentProbe = null;
+      if (boardTarget) {
+        const bws = new WS(boardTarget.webSocketDebuggerUrl);
+        await bws.connect();
+        try {
+          await bws.send('Page.enable');
+          await bws.send('Runtime.enable');
+          contentProbe = (await bws.send('Runtime.evaluate', { expression: "(() => ({ title: document.title, hasSkeleton: Boolean(document.querySelector('[data-board-skeleton]')), bodyLen: document.body ? document.body.textContent.length : 0, mark: (() => { try { return performance.getEntriesByName('board:skeleton').length; } catch (e) { return -1; } })() }))()", returnByValue: true }, 15000)).result.value;
+          const cap = await bws.send('Page.captureScreenshot', { format: 'png' }, 30000);
+          const png = path.join(EVID, 'board-content.png');
+          fs.writeFileSync(png, Buffer.from(cap.data, 'base64'));
+          shot = path.relative(ROOT, png).replace(/\\/g, '/');
+        } finally { bws.close(); }
+      }
+      const timings = (result && result.timings) || {};
+      const report = {
+        task: 'T-20261118-183722-d5ec', requirement: 'R-20261118-170937-b34a', at: new Date().toISOString(),
+        note: '开发侧预检，非验收证据（tester 复验 A4 看板项）',
+        head: (() => { try { return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { return ''; } })(),
+        ipc: { ok: Boolean(result && result.ok), wallMs, timings },
+        board: contentProbe,
+        screenshot: shot,
+        isolation: { realTeamSame: sha(realTeamFile) === beforeReal.team, realWbSame: sha(realWb) === beforeReal.wb },
+        pass: {
+          skeletonVisible: Number(timings.skeletonMs) >= 0 && Number(timings.skeletonMs) <= 200,
+          contentInBudget: Number(timings.contentMs) >= 0 && Number(timings.contentMs) <= 800,
+          contentLoaded: Boolean(contentProbe && contentProbe.bodyLen > 200),
+        },
+        jsonl,
+      };
+      fs.writeFileSync(path.join(EVID, 'run-d5ec-board-skeleton.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
+      console.log(`\nD5EC_BOARD_SKELETON ${JSON.stringify(report.pass)}`);
+      console.log('证据：' + path.join(EVID, 'run-d5ec-board-skeleton.json'));
+      process.exitCode = report.pass.skeletonVisible && report.pass.contentInBudget && report.pass.contentLoaded ? 0 : 1;
+      return;
+    }
     // 等真实输入框
     let selector = null;
     for (let i = 0; i < 40; i += 1) {
