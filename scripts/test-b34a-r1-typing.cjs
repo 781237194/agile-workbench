@@ -194,6 +194,43 @@ async function main() {
       const resultWarm = await evalJs(`window.workbench.teamBoardOld(${JSON.stringify(projectId)})`, 90000, true);
       const warmWallMs = Date.now() - warmStart;
       put({ kind: 'board-ipc-result-warm', resultWarm, warmWallMs });
+      // ── 产品口径的「热开」：同进程内**关闭看板窗后重开**，≥3 次丢首次预热 ──────────
+      const findBoardTarget = async () => {
+        const listNow = await getJson(PORT, '/json/list');
+        return (listNow || []).find((t) => t.type === 'page' && /看板\.html/i.test(decodeURIComponent(String(t.url || '')))) || null;
+      };
+      const closeBoardWindow = async () => {
+        const t = await findBoardTarget();
+        if (!t) return false;
+        try {
+          const c = new WS(t.webSocketDebuggerUrl);
+          await c.connect();
+          try {
+            // 先页面内 window.close()：会走 Electron 窗口 close 事件 → 主进程改为「隐藏」，保留已渲染内容；
+            // Page.close 只在 window.close 无效时兜底。
+            try { await c.send('Runtime.evaluate', { expression: 'window.close()', returnByValue: true }, 8000); } catch { /* ignore */ }
+            await sleep(150);
+            try { await c.send('Page.close', {}, 6000); } catch { /* ignore */ }
+          } catch { /* ignore */ }
+          c.close();
+        } catch { /* ignore */ }
+        // 等目标消失
+        for (let i = 0; i < 20; i += 1) { await sleep(150); if (!(await findBoardTarget())) return true; }
+        return false;
+      };
+      const reopenRuns = [];
+      for (let round = 1; round <= 4; round += 1) {
+        const closed = await closeBoardWindow();
+        await sleep(250);
+        const t0 = Date.now();
+        let r = null;
+        try { r = await evalJs(`window.workbench.teamBoardOld(${JSON.stringify(projectId)})`, 90000, true); } catch (e) { r = { ok: false, why: String(e.message || e).slice(0, 160) }; }
+        reopenRuns.push({ round, closed, wallMs: Date.now() - t0, ok: Boolean(r && r.ok), timings: (r && r.timings) || null });
+        put({ kind: 'board-reopen', round, closed, timings: (r && r.timings) || null });
+      }
+      const warmRuns = reopenRuns.filter((x) => x.round > 1 && x.ok && x.timings).map((x) => x.timings);
+      const num = (arr) => arr.map((v) => Number(v)).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+      const pctl = (arr, p) => { const a = num(arr); return a.length ? a[Math.min(a.length - 1, Math.ceil(a.length * p) - 1)] : null; };
       // 找看板窗目标并截图（真实内容已填充）
       await sleep(600);
       const list = await getJson(PORT, '/json/list');
@@ -216,19 +253,38 @@ async function main() {
       }
       const timings = (result && result.timings) || {};
       const timingsWarm = (resultWarm && resultWarm.timings) || {};
+      const reopenSkeletonP95 = pctl(warmRuns.map((t) => t.skeletonVisibleMs), 0.95);
+      const reopenContentP95 = pctl(warmRuns.map((t) => t.contentMs), 0.95);
+      const reopenContentMedian = pctl(warmRuns.map((t) => t.contentMs), 0.5);
       const report = {
         task: 'T-20261118-183722-d5ec', requirement: 'R-20261118-170937-b34a', at: new Date().toISOString(),
         note: '开发侧预检，非验收证据（tester 复验 A4 看板项）',
         head: (() => { try { return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { return ''; } })(),
-        ipc: { cold: { ok: Boolean(result && result.ok), wallMs, timings }, warm: { ok: Boolean(resultWarm && resultWarm.ok), wallMs: warmWallMs, timings: timingsWarm } },
+        ipc: {
+          cold: { ok: Boolean(result && result.ok), wallMs, timings },
+          sameWindowReuse: { ok: Boolean(resultWarm && resultWarm.ok), wallMs: warmWallMs, timings: timingsWarm },
+          // 产品口径热开：关窗重开（丢首次预热），T2 骨架 / T3 内容分别给 p95
+          reopen: {
+            runs: reopenRuns,
+            sampleCount: warmRuns.length,
+            skeletonP95: reopenSkeletonP95,
+            contentP95: reopenContentP95,
+            contentMedian: reopenContentMedian,
+          },
+        },
         board: contentProbe,
         screenshot: shot,
         isolation: { realTeamSame: sha(realTeamFile) === beforeReal.team, realWbSame: sha(realWb) === beforeReal.wb },
         pass: {
-          // 产品裁定（A4看板窗口径裁定-20261118.md）：p95 只算热开；冷开单列硬上限 content ≤5000ms。
-          skeletonWarm: Number(timingsWarm.skeletonVisibleMs) >= 0 && Number(timingsWarm.skeletonVisibleMs) <= 200,
-          contentWarmInBudget: Number(timingsWarm.contentMs) >= 0 && Number(timingsWarm.contentMs) <= 800,
+          // 产品裁定（A4看板窗口径裁定-20261118.md）：
+          //   热开（p95）= 同进程关窗重开、丢首次预热 → T2 骨架 ≤200ms、T3 内容 ≤800ms；
+          //   冷开（新进程首开）→ T1 窗口 ≤100、T2 骨架 ≤300、T3 内容 ≤5000 且不劣化基线 >10%。
+          skeletonWarm: Number(reopenSkeletonP95) >= 0 && Number(reopenSkeletonP95) <= 200,
+          contentWarmInBudget: Number(reopenContentP95) >= 0 && Number(reopenContentP95) <= 800,
           contentColdUnderCeiling: Number(timings.contentMs) >= 0 && Number(timings.contentMs) <= 5000,
+          coldWindowUnder: Number(timings.windowMs) >= 0 && Number(timings.windowMs) <= 100,
+          coldSkeletonUnder: Number(timings.skeletonVisibleMs) >= 0 && Number(timings.skeletonVisibleMs) <= 300,
+          sampleCount: warmRuns.length,
           contentLoaded: Boolean(contentProbe && contentProbe.bodyLen > 200),
         },
         jsonl,
@@ -236,8 +292,9 @@ async function main() {
       fs.writeFileSync(path.join(EVID, 'run-d5ec-board-skeleton.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
       console.log(`\nD5EC_BOARD_SKELETON ${JSON.stringify(report.pass)}`);
       console.log('证据：' + path.join(EVID, 'run-d5ec-board-skeleton.json'));
-      // 冷/热两组都报：热开骨架≤200 + 热开 content≤800 + 冷开 content≤5000（冷骨架只记录不判红，按产品口径）。
-      process.exitCode = report.pass.skeletonWarm && report.pass.contentWarmInBudget && report.pass.contentColdUnderCeiling && report.pass.contentLoaded ? 0 : 1;
+      // 冷/热两组都报：热开=关窗重开 p95（骨架≤200/内容≤800），冷开=T1≤100/T2≤300/T3≤5000。
+      process.exitCode = report.pass.skeletonWarm && report.pass.contentWarmInBudget && report.pass.contentColdUnderCeiling
+        && report.pass.coldWindowUnder && report.pass.coldSkeletonUnder && report.pass.contentLoaded ? 0 : 1;
       return;
     }
     // 等真实输入框

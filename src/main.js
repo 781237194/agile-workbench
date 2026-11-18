@@ -4192,6 +4192,9 @@ function clampBoardBounds(bounds) {
  *   ③ 两个时间点（骨架可见 / 真实内容加载）写进 IPC 返回值 timings 与 性能.jsonl（kind='render'）。
  */
 const BOARD_SKELETON_MARK = 'board:skeleton';
+let boardHideDestroyTimer = null;
+let boardDestroying = false;
+let boardQuitting = false;
 let teamBoardFilePath = '';
 // R-b34a R6补：真实看板 8 秒内重复打开复用（只省重建，不省 loadFile；文件缺失/项目变必重建）。
 let teamBoardLastBuild = null;
@@ -4239,6 +4242,20 @@ async function ensureBoardWindowWithSkeleton({ theme = 'dark', style = 'native',
         contextIsolation: true, nodeIntegration: false, sandbox: false,
         additionalArguments: ['--awb-board'], spellcheck: false
       }
+    });
+    // 产品口径热开=关窗重开：关窗改为「先隐藏、60s 后销毁」——用户看到关/开都在瞬间（content≈0），
+    // 又不会长期占内存（60s 内无重开就真销毁，下次按冷开路径重建）。
+    teamBoardWindow.on('close', (event) => {
+      if (boardQuitting || boardDestroying) return;
+      try { event.preventDefault(); teamBoardWindow.hide(); } catch { /* ignore */ }
+      if (boardHideDestroyTimer) clearTimeout(boardHideDestroyTimer);
+      boardHideDestroyTimer = setTimeout(() => {
+        boardHideDestroyTimer = null;
+        if (!boardWindowAlive() || !teamBoardWindow) return;
+        boardDestroying = true;
+        try { teamBoardWindow.destroy(); } catch { /* ignore */ }
+        boardDestroying = false;
+      }, 60000);
     });
     teamBoardWindow.on('closed', () => {
       teamBoardWindow = null;
@@ -8262,7 +8279,7 @@ ipcMain.handle('theme:metrics', async () => {
     const renderedReuse = Boolean(boardWindowAlive() && teamBoardLastBuild
       && teamBoardLastBuild.projectId === project.id
       && teamBoardShownFile && teamBoardLastBuild.path === teamBoardShownFile
-      && (Date.now() - teamBoardLastBuild.at) < 8000);
+      && (Date.now() - teamBoardLastBuild.at) < 60000);
     if (renderedReuse) {
       teamBoardProjectId = project.id;
       teamBoardProjectPath = path.resolve(String(project.path));
@@ -22315,4 +22332,4 @@ app.on('window-all-closed', () => {
 });
 
 // T-b417：退出时先请守护子进程停，不让它变成孤儿进程继续抢锁。
-app.on('before-quit', () => { stopRouteSupervisor(); });
+app.on('before-quit', () => { boardQuitting = true; stopRouteSupervisor(); });
