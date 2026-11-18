@@ -27,10 +27,10 @@ const indexHtml = read('src/renderer/index.html');
 const anchor = read('src/renderer/perf-log-anchor.js');
 
 ok(/perf:recent/.test(perfLog), 'S1 perf-log.js 提供 perf:recent 只读 IPC', {});
-ok(/registerPerfIpc\(rawIpcHandle/.test(mainJs), 'S2 main.js 用 rawIpcHandle 注册 perf:recent（不重复计时）', {});
+ok(/registerPerfIpc\(\s*(\{\s*handle:\s*rawIpcHandle\s*\}|rawIpcHandle)/.test(mainJs), 'S2 main.js 用 rawIpcHandle 注册 perf:recent（不重复计时）', {});
 // S2b 顺序断言（P1 B-20261118-213947-0779）：注册必须发生在 rawIpcHandle 定义之后，否则 TDZ 抛错被吞、handler 未注册。
 const idxRaw = mainJs.indexOf('const rawIpcHandle');
-const idxReg = mainJs.indexOf('registerPerfIpc(rawIpcHandle');
+const idxReg = mainJs.indexOf('registerPerfIpc(');
 ok(idxRaw >= 0 && idxReg > idxRaw, 'S2b perf:recent 注册在 rawIpcHandle 定义之后（防 TDZ 静默失败）', { idxRaw, idxReg });
 // S2c 启动可观测：注册成功/失败都要有 [perf-ipc] 启动日志（tester 依据启动日志判定 AC8③ 是否可用）。
 ok(/\[perf-ipc\] registered=/.test(mainJs), 'S2c 注册结果有 [perf-ipc] registered= 启动日志（可观测）', {});
