@@ -33,13 +33,16 @@ import {
 import { loadTeam, saveTeam, projectStatePaths, loadProject, projectTeamMode, getMember, sendMessage } from './store.mjs';
 import { ROLE_NAMES } from './roles.mjs';
 import { writeJsonAtomic, updateJsonAtomic } from './json-atomic.mjs';
+// B-20261118-164055-2a44：赋值/入册/写前校验的实现已抽到 CJS 单源 roster-apply.cjs
+// （Electron 33/Node 20 的壳层 CJS 无法 require ESM，只能「ESM 引 CJS」；本文件 re-export 保持原 API 不变）。
+import rosterApply from './roster-apply.cjs';
 
 /* ── 常量 ────────────────────────────────────────────────────────────── */
 
 /** 合法会话 id 形态（与 session.mjs 的 --session 校验同一口径）。 */
-export const SESSION_ID_RE = /^session-[A-Za-z0-9-]+$/;
+export const SESSION_ID_RE = rosterApply.SESSION_ID_RE;
 /** 旧副本形态指纹（08:02 事故）：`session-auto-<角色>-<base36>`。 */
-export const LEGACY_SESSION_RE = /^session-auto-[a-z0-9]+(?:[-_.][a-z0-9]+)*$/i;
+export const LEGACY_SESSION_RE = rosterApply.LEGACY_SESSION_RE;
 /** 统一记账文件名（项目状态目录）。 */
 export const ROSTER_AUDIT_NAME = '名册变更.jsonl';
 /** 写后 60 秒存在性兜底待校验清单。 */
@@ -89,16 +92,10 @@ function isoOf(now) {
 }
 
 /* ── 纯函数：唯一的成员赋值/入册入口（W1 静态清单据此断言） ─────────────── */
+/* B-2a44：实现已移到 roster-apply.cjs（CJS 单源，壳层可直接 require）；此处 re-export 保持 API 不变。 */
 
-/** 给一个 member 对象写 sessionId（可带额外字段）。**唯一的 `.sessionId =` 落点**。 */
-export function applyMemberSession(member, sessionId, extra = {}) {
-  if (!member || typeof member !== 'object') return null;
-  member.sessionId = String(sessionId === undefined || sessionId === null ? '' : sessionId);
-  for (const [k, v] of Object.entries(extra || {})) {
-    if (v !== undefined) member[k] = v;
-  }
-  return member;
-}
+/** 给一个 member 对象写 sessionId（可带额外字段）。**唯一的 `.sessionId =` 落点**（在 roster-apply.cjs）。 */
+export const applyMemberSession = rosterApply.applyMemberSession;
 
 /** 名册里按角色写 sessionId（launch / ops / rotate 的统一入口）；角色不存在返回 null。 */
 export function setMemberSession(team, role, sessionId, extra = {}) {
@@ -110,18 +107,13 @@ export function setMemberSession(team, role, sessionId, extra = {}) {
 }
 
 /** 新增成员（唯一 `members.push` 落点）。 */
-export function pushRosterMember(team, member) {
-  if (!team || !member) return null;
-  if (!Array.isArray(team.members)) team.members = [];
-  team.members.push(member);
-  return member;
-}
+export const pushRosterMember = rosterApply.pushRosterMember;
 
 /* ── 写前校验（格式 / 旧副本 / DSH 存在性） ────────────────────────────── */
 
-export function isLegacySessionId(sessionId) {
-  return LEGACY_SESSION_RE.test(String(sessionId || '').trim());
-}
+export const isLegacySessionId = rosterApply.isLegacySessionId;
+/** 写前校验（纯函数）：空=清空、旧副本拒绝、非法形态拒绝。壳层同步名册也用它，保证同一口径。 */
+export const validateSessionId = rosterApply.validateSessionId;
 
 /** 告警 PM：名册写入被拒（不静默）。失败不阻断原始错误抛出。 */
 function alertPm({ projectName, role, reason, code, sessionId, source, by }) {

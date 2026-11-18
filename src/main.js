@@ -814,30 +814,32 @@ function syncTeamRosterSessions(sessions, options = {}) {
     const current = sessions && typeof sessions === 'object' ? sessions : {};
     const projectName = String(options.projectName || options.teamName || '').trim();
     const roleIds = roleIdsForTeamMode(options.teamMode);
-    const roleSet = new Set(roleIds);
-    let changed = false;
-    // 名册是“当前项目”的快照：本项目没有的角色必须清空 sessionId。
-    // 旧实现只改有值角色，切到没建团队的项目 B 时会把 A 的会话留在名册里。
+    // B-20261118-164055-2a44：赋值/写前校验走 team-tools → roster-apply.cjs 单源（与 roster-writer 同一实现），
+    // 不再在这里 `member.sessionId =` / `members.push(`；非法或旧副本 id 不会被写进名册。
+    const applied = (teamTools && typeof teamTools.applyRosterFromSessions === 'function')
+      ? teamTools.applyRosterFromSessions(team, current, {
+        roleIds,
+        roleNames: Object.fromEntries(roleIds.map((role) => [role, (ROLE_BY_ID.get(role) || {}).name || role])),
+        activeProject: projectName,
+      })
+      : null;
+    let changed = Boolean(applied && applied.changed);
+    // 名册是"当前项目"的快照：本项目没有的角色必须清空 sessionId（旧实现只改有值角色，切项目时会残留 A 的会话）——
+    // 上面 syncRosterSessions 已按「不在 sessions 里就清空」处理，这里只补 activeProject 的变化标记。
     if (projectName && team.activeProject !== projectName) {
       team.activeProject = projectName;
       changed = true;
     }
-    for (const member of team.members) {
-      const id = roleSet.has(member.role) && current[member.role] ? String(current[member.role]) : '';
-      if (String(member.sessionId || '') !== id) {
-        member.sessionId = id;
-        changed = true;
-      }
-    }
-    for (const role of roleIds) {
-      if (!current[role] || team.members.some((member) => member.role === role)) continue;
-      const roleInfo = ROLE_BY_ID.get(role) || { name: role };
-      team.members.push({ role, name: roleInfo.name, status: 'active', joinedAt: now(), sessionId: String(current[role]) });
-      changed = true;
+    if (applied && Array.isArray(applied.rejected) && applied.rejected.length) {
+      try {
+        if (teamTools && typeof teamTools.appendRosterAudit === 'function') {
+          teamTools.appendRosterAudit(projectName, { source: 'shell/syncTeamRosterSessions', rejected: applied.rejected });
+        }
+      } catch { /* 审计失败不阻断同步 */ }
     }
     // R-ad44 AC1①（批4b）：团队状态文件统一走 json-atomic.cjs（行为不变：仅有变化时才写，仍写整份 team）。
     if (changed) jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'syncTeamRosterSessions' });
-    return { ok: true, changed, activeProject: team.activeProject || null };
+    return { ok: true, changed, activeProject: team.activeProject || null, rejected: (applied && applied.rejected) || [] };
   } catch { /* 名册同步失败不阻断会话映射 */ }
 }
 
@@ -8247,11 +8249,17 @@ ipcMain.handle('theme:metrics', async () => {
         }
         // 名册是全局单例：只清掉“被删项目”的会话，不能把其它项目的当前名册一并清空。
         const doomedSessions = new Set(Object.values(project.sessions || {}).filter(Boolean).map(String));
-        for (const member of Array.isArray(team && team.members) ? team.members : []) {
-          if (member.sessionId && doomedSessions.has(String(member.sessionId))) {
-            member.sessionId = '';
-            teamChanged = true;
-          }
+        // B-20261118-164055-2a44：清名册同样走单源（team-tools → roster-apply.cjs），不再直接 `member.sessionId = ''`。
+        const cleared = (teamTools && typeof teamTools.clearRosterSessionsOf === 'function')
+          ? teamTools.clearRosterSessionsOf(team, doomedSessions, { activeProject: (project.teamName || project.name) })
+          : { changed: 0, roles: [] };
+        if (cleared && cleared.changed) teamChanged = true;
+        if (cleared && cleared.roles && cleared.roles.length) {
+          try {
+            if (teamTools && typeof teamTools.appendRosterAudit === 'function') {
+              teamTools.appendRosterAudit(project.teamName || project.name, { source: 'shell/project-delete', cleared: cleared.roles });
+            }
+          } catch { /* 审计失败不阻断删除 */ }
         }
         // R-ad44 AC1①（批4b）：团队状态文件统一走 json-atomic.cjs（行为不变：仅 teamChanged 时写整份 team）。
         if (teamChanged) jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'panelTeamSync' });

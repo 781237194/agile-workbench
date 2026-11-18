@@ -20,6 +20,9 @@ const crypto = require('node:crypto');
 const jsonAtomicCore = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'json-atomic.cjs'));
 // b75c：Owner 决定「绑的是不是当前正文版本」的唯一判定函数（与 CLI 的 gates.mjs 共用同一份 CJS 单源）。
 const decisionVersionCore = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'decision-version.cjs'));
+// B-20261118-164055-2a44：名册 sessionId 赋值/写前校验的 CJS 单源（rosster-writer.mjs 也 re-export 同一实现）。
+// 壳层（本文件 + src/main.js）一律走这里，不再自己 `member.sessionId =`（违反 roster-writer 单写不变量）。
+const rosterApplyCore = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'roster-apply.cjs'));
 const { execFile } = require('node:child_process');
 // R-1dfb：把 团队/工具/lib/ops.mjs（ESM）桥接进 CJS 壳层，动态 import 需要 file:// URL。
 const { pathToFileURL } = require('node:url');
@@ -1009,35 +1012,22 @@ function createTeamTools(options = {}) {
     if (!name || !sessions || typeof sessions !== 'object') return { ok: false, code: 'BAD_ROSTER' };
     const team = readJsonSafe(layout.teamFile);
     if (!team || !Array.isArray(team.members)) return { ok: false, code: 'NO_TEAM' };
-    let changed = 0;
-    if (team.activeProject !== name) { team.activeProject = name; changed += 1; }
-    // 名册必须是“当前项目”的快照：不在 sessions 里的角色一律清空 sessionId。
-    // 只补不清会让项目 B 回退到项目 A 的角色会话，旧协议就能跨项目发件/回执。
-    for (const member of team.members) {
-      const sid = sessions[member.role] ? String(sessions[member.role]) : '';
-      if (String(member.sessionId || '') !== sid) {
-        member.sessionId = sid;
-        changed += 1;
-      }
-    }
-    for (const role of ROLE_IDS) {
-      if (!sessions[role]) continue;
-      if (team.members.some((member) => member.role === role)) continue;
-      team.members.push({
-        role,
-        name: ROLE_NAMES[role] || role,
-        status: 'active',
-        joinedAt: new Date().toISOString(),
-        sessionId: String(sessions[role])
-      });
-      changed += 1;
-    }
+    // B-2a44：赋值/校验全部走 roster-apply.cjs 单源（与 roster-writer.mjs 同一实现），
+    // 不再自己 `member.sessionId =`；非法/旧副本 id 保持名册原值并审计，不静默写坏名册。
+    const result = rosterApplyCore.syncRosterSessions(team, sessions, {
+      roleIds: ROLE_IDS,
+      roleNames: ROLE_NAMES,
+      activeProject: name,
+    });
+    const changed = result.changed + (team.activeProject !== name ? 1 : 0);
+    if (result.rejected.length) appendRosterAudit(name, { source: 'team-tools/syncRoster', rejected: result.rejected });
     if (changed) {
       try { writeJsonAtomic(layout.teamFile, team); } catch (error) {
         return { ok: false, code: 'ROSTER_WRITE_FAILED', message: String(error && error.message || error).slice(0, 200) };
       }
+      appendRosterAudit(name, { source: 'team-tools/syncRoster', added: result.added, cleared: result.cleared, changed: result.changed });
     }
-    return { ok: true, code: changed ? 'ROSTER_SYNCED' : 'ROSTER_UNCHANGED', changed };
+    return { ok: true, code: changed ? 'ROSTER_SYNCED' : 'ROSTER_UNCHANGED', changed, rejected: result.rejected };
   }
 
   function registrationFor(projectName) {
@@ -4303,12 +4293,13 @@ function createTeamTools(options = {}) {
     let added = 0;
     for (const role of roleIds) {
       if (team.members.some((member) => member && member.role === role && member.status !== 'removed')) continue;
-      team.members.push({
+      // B-2a44：入册走单源（roster-apply.pushRosterMember），不再 `team.members.push(`。
+      rosterApplyCore.pushRosterMember(team, {
         role,
         name: ROLE_NAMES[role] || role,
         status: 'active',
         joinedAt: new Date().toISOString(),
-        sessionId: ''
+        sessionId: '',
       });
       added += 1;
     }
@@ -11401,6 +11392,51 @@ async function runOwnerAuthProbe(options = {}) {
 
 const defaultTools = createTeamTools();
 
+/* ── B-20261118-164055-2a44：名册同步/清理的壳层共用入口（主进程与旧协议共用同一实现） ────── */
+
+/** 团队根：与 createTeamTools 首行同源（TEAM_ROOT 优先）。 */
+function rosterTeamRoot() {
+  return process.env.TEAM_ROOT || path.join(repoRoot(), '团队');
+}
+
+/**
+ * 追加名册变更审计（append-only）：`团队/状态/项目/<项目>/名册变更.jsonl`。
+ * 与 roster-writer 的统一记账同名同目录，便于「这一行是谁改的」一条命令回查；写失败只返回 false，不阻断同步本身。
+ */
+function appendRosterAudit(projectName, row) {
+  const name = String(projectName || '').trim();
+  if (!name) return false;
+  try {
+    const dir = path.join(rosterTeamRoot(), '状态', '项目', teamSlug(name));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, '名册变更.jsonl'), `${JSON.stringify({
+      at: new Date().toISOString(),
+      by: 'shell',
+      source: 'shell',
+      project: name,
+      ...row,
+    })}\n`, 'utf8');
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * 纯变更：按项目 sessions 同步名册（赋值/校验走 roster-apply.cjs 单源）。
+ * 调用方负责读/写 团队.json（壳层用 jsonAtomicCore.writeJsonAtomic），本函数只改内存对象。
+ */
+function applyRosterFromSessions(team, sessions, options = {}) {
+  return rosterApplyCore.syncRosterSessions(team, sessions, {
+    roleIds: options.roleIds || ROLE_IDS,
+    roleNames: options.roleNames || ROLE_NAMES,
+    activeProject: options.activeProject || '',
+  });
+}
+
+/** 纯变更：删项目时清名册（只清属于被删项目的会话）。 */
+function clearRosterSessionsOf(team, doomedSessions, options = {}) {
+  return rosterApplyCore.clearRosterSessions(team, doomedSessions, { activeProject: options.activeProject || '' });
+}
+
 module.exports = {
   ...defaultTools,
   create: createTeamTools,
@@ -11428,6 +11464,11 @@ module.exports = {
   LEGACY_REVIEW_ACTIONS,
   LEGACY_STATUS_MAP,
   isInside,
+  // B-20261118-164055-2a44：名册 sessionId 赋值/写前校验的壳层共用入口（实现单源 roster-apply.cjs）
+  applyRosterFromSessions,
+  clearRosterSessionsOf,
+  appendRosterAudit,
+  validateRosterSessionId: rosterApplyCore.validateSessionId,
   // R-ea86：PM 代验收证据校验（纯函数，供 ownerAccept 与可复跑测试共用同一份判据）
   acceptEvidenceCheck,
   acceptEvidenceStaleness,
