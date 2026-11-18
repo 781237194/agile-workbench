@@ -10,7 +10,7 @@
  *   ①记录自己 spawn 的 child.pid → taskkill /PID <pid> /T /F（或 child.kill()）；
  *   ②只按 PID 精确杀，绝不 taskkill /IM electron.exe、绝不 Stop-Process -Name electron。
  *
- * 扫描范围：scripts/**.{cjs,mjs,js,ps1}（排除本文件与归档 _tmp）。
+ * 扫描范围：scripts/**.{cjs,mjs,js,ps1} + 团队/工具/** + 各项目 `<角色>/产出/**`（排除本文件与归档 _tmp）。
  * 判定：命中任何 FORBIDDEN 模式 → exit 1 并列出 文件:行。
  * 跑法：node scripts/check-no-batch-electron-kill.cjs
  */
@@ -44,6 +44,22 @@ function walk(dir, out) {
 const files = [];
 walk(path.join(ROOT, 'scripts'), files);
 walk(path.join(ROOT, '团队', '工具'), files);
+// P0 B-20261118-201515-ac99：扫描范围扩到各项目 `产出/**` 下的工装脚本——
+// 代理（agent）临时写在证据目录里的脚本同样可能按名称批量杀进程，不能只拦 scripts/。
+try {
+  const projectsRoot = path.join(ROOT, '项目');
+  for (const proj of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
+    if (!proj.isDirectory()) continue;
+    const projDir = path.join(projectsRoot, proj.name);
+    let roles = [];
+    try { roles = fs.readdirSync(projDir, { withFileTypes: true }); } catch { continue; }
+    for (const role of roles) {
+      if (!role.isDirectory()) continue;
+      const outDir = path.join(projDir, role.name, '产出');
+      try { if (fs.existsSync(outDir)) walk(outDir, files); } catch { /* 单目录不可读不影响其它 */ }
+    }
+  }
+} catch { /* 项目目录不可读时保持原扫描范围 */ }
 
 const hits = [];
 for (const file of files) {
