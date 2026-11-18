@@ -10988,8 +10988,13 @@ function renderLegacyRequirements() {
 const LEGACY_ACTIVITY_COLUMNS = [
   { key: 'commit', label: '最近提交', field: 'commitAt', fallbackReason: 'no-submit-record', hint: '团队提交记录（提交/*.json），非 git 代码提交' },
   { key: 'file', label: '最近文件写入', field: 'fileAt', fallbackReason: 'no-write-in-window', hint: '角色目录内文件 max mtime（排除索引/审计/备份/派单生成物）' },
-  { key: 'wake', label: '最后成功唤醒', field: 'wakeAt', fallbackReason: 'no-wake-ok', hint: '唤醒.jsonl 里 to=<角色> 且 ok:true 的最后一条' }
+  { key: 'wake', label: '最后成功唤醒', field: 'wakeAt', fallbackReason: 'no-wake-ok', hint: '唤醒.jsonl 里 to=<角色> 且 ok:true 的最后一条' },
+  // R-9674（AC5①/②）：第 4 列「最近活动」——时间取 lastActivityAt（HH:MM），摘要取 lastActivityText（textField）。
+  // 渲染走自定义分支：单元格＝`<HH:MM> <摘要>`，title 给 ISO + 来源 + 全量摘要（不能靠 field 硬映射，摘要在 field 里没有落点）。
+  { key: 'lastActivity', label: '最近活动', field: 'lastActivityAt', textField: 'lastActivityText', sourceField: 'lastActivitySource', fallbackReason: 'no-last-activity', hint: '三源优先级：快照 lastEventAt/lastOkAt → 唤醒.jsonl 最近一条 → 任务 done（主进程算，与 #session-live-summary 同口径）' }
 ];
+// R-9674：最近活动来源中文（title 用）
+const LEGACY_ACTIVITY_SOURCE_LABEL = { snapshot: '快照', wake: '唤醒日志', task: '任务', none: '无来源' };
 const LEGACY_ACTIVITY_STATE = { roles: {}, readAt: '', cached: false, loading: false, pending: null, error: null, lastCallAt: 0 };
 
 function legacyActivityTimeText(value) {
@@ -11023,6 +11028,24 @@ function legacyActivityRoleView(roleId) {
   const cells = {};
   for (const col of LEGACY_ACTIVITY_COLUMNS) {
     const iso = row ? String(row[col.field] || '') : '';
+    // R-9674：声明了 textField 的列走自定义渲染——单元格 = `<HH:MM> <摘要>`，title = ISO + 来源 + 全量摘要
+    if (col.textField) {
+      const text = legacyActivityTimeText(iso);
+      const summary = row ? String(row[col.textField] || '') : '';
+      if (text && summary) {
+        const src = row ? String(row[col.sourceField] || '') : '';
+        cells[col.key] = {
+          text: `${text} ${summary}`,
+          title: `${col.label}：${iso} · 来源 ${LEGACY_ACTIVITY_SOURCE_LABEL[src] || src || '未知'} · ${summary} · ${col.hint}`,
+          cls: cellClass,
+        };
+        continue;
+      }
+      const why = new Set([col.fallbackReason]);
+      if (state !== 'active') for (const reason of reasons) why.add(reason);
+      cells[col.key] = { text: '未知', title: `${col.label}：未知 · ${Array.from(why).join('、')} · ${col.hint}`, cls: cellClass };
+      continue;
+    }
     const text = legacyActivityTimeText(iso);
     if (text) {
       cells[col.key] = { text, title: `${col.label}：${iso} · ${col.hint}`, cls: cellClass };
@@ -11194,7 +11217,9 @@ function renderLegacyTeamGate() {
     const act = legacyActivityRoleView(role.id);
     const actCells = LEGACY_ACTIVITY_COLUMNS.map((col) => {
       const cell = act.cells[col.key];
-      return `<span class="${esc(cell.cls)}" data-activity-${esc(col.key)} style="flex:0 0 auto;min-width:56px;text-align:right;white-space:nowrap" title="${esc(cell.title)}">${esc(cell.text)}</span>`;
+      // R-9674：最近活动列（textField）固定 56px 并 ellipsis，全量摘要只在 title（1280 不横向滚动）
+      const extra = col.textField ? ';max-width:56px;overflow:hidden;text-overflow:ellipsis' : '';
+      return `<span class="${esc(cell.cls)}" data-activity-${esc(col.key)} style="flex:0 0 auto;min-width:56px;text-align:right;white-space:nowrap${extra}" title="${esc(cell.title)}">${esc(cell.text)}</span>`;
     }).join('');
     // R-c9ac：会话实时四列（[data-role-live]/[data-role-think]/[data-role-last-event]/[data-role-stall]），
     // 与 #session-live-section 同口径；不动既有 data-activity-* 字段。

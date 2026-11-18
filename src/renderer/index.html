@@ -748,6 +748,9 @@
                   </div>
                 </div>
                 <p class="team-status-source" id="session-live-source" data-sq-source>数据口径：runtime=dsh（快照 v2 的 active / running / pendingInput / cursor）+ delivery=wake.jsonl（投递四态与最近成功投递）。未知一律显示「—」，不显示 0；快照 5 秒无更新或 watch 不可用 → 降级（黄条见上）。</p>
+                <!-- R-9674：顶部全员状态摘要（全员空闲 → 最近活动；有人思考 → 思考 mm:ss）。
+                     锚点 data-sq-summary + data-sq-summary-mode ∈ all-idle|busy|mixed；超标降级时 data-sq-summary-cached="1"。 -->
+                <p id="session-live-summary" class="team-status-source sq-activity-summary" data-sq-summary="1" data-sq-summary-mode="unknown">全员状态摘要：等待主进程汇总…</p>
                 <div class="sq-live-head">
                   <span>角色</span><span>五态</span><span>思考时长</span><span>最近事件</span>
                   <span title="只数 placement=queued（steering/context 单列在 title 里）">排队(queued)</span>

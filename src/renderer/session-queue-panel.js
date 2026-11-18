@@ -62,6 +62,17 @@
   const AR_STATE_LABEL = { idle: '空闲', warn: '预警/已入队', pending_handover: '等交接回执', rotating: '正在换人', rebooting: '已广播重 boot', failed: '失败' };
   // R-c9ac：五态中文文案（写死；unknown=未接入）
   const LIVE_LABEL = { approval: '待审批', blocked: '阻塞', thinking: '思考中', queued: '排队', idle: '空闲', unknown: '未接入' };
+  // R-9674：最近活动来源标签（title 用；source=none 表示三源全空）
+  const SOURCE_LABEL = { snapshot: '快照', wake: '唤醒日志', task: '任务', none: '无来源' };
+
+  /** R-9674：摘要时间展示 mm-dd hh:mm（本地时区；AC2② 断言这个格式）。 */
+  function activityTimeText(iso) {
+    const ms = Date.parse(String(iso || ''));
+    if (!Number.isFinite(ms)) return '';
+    const d = new Date(ms);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
 
   const el = (id) => document.getElementById(id);
   const node = (tag, className, text) => {
@@ -171,6 +182,29 @@
     return { state: 'degraded', at: '', reason: 'push_unavailable' };
   }
 
+  /**
+   * R-9674 最近活动节点：可见文本 = `mm-dd hh:mm · 摘要`（无时间显示「未知」），
+   * 锚点 data-sq-last-activity（ISO，三源全空时为空串）/ -text（摘要 ≤24 字）/ -source（snapshot|wake|task|none）。
+   * 摘要来源标签只进 title，不塞进 -text（AC2① 断言 -text 长度 ≤25）。
+   */
+  function activityNode(activity, tag) {
+    const la = activity && typeof activity === 'object' ? activity : { at: '', text: '未知', source: 'none' };
+    const iso = String(la.at || '');
+    const text = String(la.text || '未知');
+    const source = String(la.source || 'none');
+    const timeText = iso && Number.isFinite(Date.parse(iso)) ? activityTimeText(iso) : '未知';
+    const wrap = node(tag || 'span', 'sq-last-activity', '');
+    wrap.setAttribute('data-sq-last-activity', iso);
+    wrap.setAttribute('data-sq-last-activity-text', text);
+    wrap.setAttribute('data-sq-last-activity-source', source);
+    wrap.title = `${iso ? `最近活动：${iso}` : '最近活动：无记录'} · 来源 ${SOURCE_LABEL[source] || source} · 摘要 ${text}`;
+    const timeEl = node('span', 'sq-activity-time', timeText);
+    timeEl.setAttribute('data-sq-last-activity-time', '1');
+    wrap.appendChild(timeEl);
+    wrap.appendChild(node('span', 'sq-activity-text', text ? ` · ${text}` : ''));
+    return wrap;
+  }
+
   function liveOf(row) {
     const live = row && row.live && typeof row.live === 'object' ? row.live : null;
     if (live) return live;
@@ -239,6 +273,10 @@
       lastOk.setAttribute('data-sq-last-ok', '1');
       lastOk.title = row.lastOkAt ? `最近成功投递：${row.lastOkAt}` : '窗口内没有成功投递记录';
       line.appendChild(lastOk);
+
+      // R-9674：最近活动（三源优先级：快照 lastEventAt/lastOkAt → 唤醒.jsonl → 任务 done；
+      // 三源全空必须是「未知」+ source=none，不得用「空闲」冒充）。
+      line.appendChild(activityNode(row.lastActivity, 'span'));
 
       // R-fa0e（3a12）§六：自动换人只读字段（六值 state 挂在行上 → [data-ar-state][data-role]）
       const ar = row.autoRotate || {};
@@ -339,6 +377,9 @@
       stallText.setAttribute('data-sq-stall-text', '1');
       line.appendChild(stallText);
 
+      // R-9674：实时行同样补「最近活动」（idle 行不再只显示「空闲」；锚点与 [data-sq-row] 同口径）
+      line.appendChild(activityNode(row.lastActivity, 'span'));
+
       host.appendChild(line);
     }
     if (!host.childNodes.length) {
@@ -346,6 +387,30 @@
     }
     paintPush();
     paintStallHint();
+  }
+
+  /**
+   * R-9674 §6.3：顶部全员状态摘要（文案与 mode 都由主进程纯函数给出，渲染层只写字）。
+   * 锚点：data-sq-summary（文本）+ data-sq-summary-mode ∈ all-idle|busy|mixed；
+   * 超预算降级时 shell 会给 model.activityMeta.cached=true → data-sq-summary-cached="1"（不静默）。
+   */
+  function paintSummary() {
+    const box = document.querySelector('[data-sq-summary]');
+    if (!box) return;
+    const model = state.model || {};
+    const summary = model.summary && typeof model.summary === 'object' ? model.summary : null;
+    const meta = model.activityMeta && typeof model.activityMeta === 'object' ? model.activityMeta : {};
+    if (!summary || !summary.text) {
+      box.textContent = '全员状态摘要：等待主进程汇总…';
+      box.setAttribute('data-sq-summary-mode', 'unknown');
+      box.removeAttribute('data-sq-summary-cached');
+      return;
+    }
+    box.textContent = String(summary.text);
+    box.setAttribute('data-sq-summary-mode', String(summary.mode || 'unknown'));
+    box.title = `数据源：快照 lastEventAt/lastOkAt → 唤醒.jsonl 最近一条 → 任务 done（主进程算；未知不冒充空闲）${summary.at ? ' · 最近活动时间 ' + summary.at : ''}`;
+    if (meta.cached) box.setAttribute('data-sq-summary-cached', '1');
+    else box.removeAttribute('data-sq-summary-cached');
   }
 
   function paintPush() {
@@ -529,6 +594,7 @@
     renderRows();
     renderSched();
     renderLive();
+    paintSummary();
     renderBanner();
     paintBackpressure();
     syncStopwatch();

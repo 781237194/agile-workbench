@@ -252,6 +252,8 @@ function readSnapshotRoles(snapshot) {
       pendingInput: known && Array.isArray(entry.pendingInput) ? entry.pendingInput.map((v) => String(v)) : [],
       runningSince: known && entry.runningSince ? String(entry.runningSince) : '',
       lastEventAt: known && entry.lastEventAt ? String(entry.lastEventAt) : '',
+      // R-9674 §6.1：快照 lastOkAt 作为第二顺位来源（只增字段，不改既有语义）
+      lastOkAt: known && entry.lastOkAt ? String(entry.lastOkAt) : '',
       cursor: known && entry.cursor !== undefined && entry.cursor !== null && entry.cursor !== '' ? entry.cursor : null,
     });
   };
@@ -418,12 +420,29 @@ function buildPanelModel(options = {}) {
     : parseWakeLog(options.wakeText);
 
   const wakeByRole = new Map();
+  // R-9674 §6.1②：同一遍扫里顺带记「该角色最后一条」（按 at）。
+  // 主进程若已在索引里增量维护了 byRole（append-only 时只对新行算一次），这里直接复用，避免每帧 8000+ 次 Date.parse。
+  const providedLatest = options.latestWakeRowByRole && typeof options.latestWakeRowByRole === 'object' ? options.latestWakeRowByRole : null;
+  const latestWakeByRole = new Map();
   for (const row of wake.rows) {
     const role = String((row && row.to) || '').trim();
     if (!role) continue;
     if (!wakeByRole.has(role)) wakeByRole.set(role, []);
     wakeByRole.get(role).push(row);
+    if (providedLatest) continue;
+    const atIso = wakeActivityIso(row);
+    const ms = Date.parse(atIso || '');
+    if (!Number.isFinite(ms)) continue;
+    const prev = latestWakeByRole.get(role);
+    if (!prev || ms >= prev.ms) latestWakeByRole.set(role, { ms, row });
   }
+  const latestRowOf = (role) => {
+    if (providedLatest) return providedLatest[role] || null;
+    const hit = latestWakeByRole.get(role);
+    return (hit && hit.row) || null;
+  };
+  // R-9674 §6.1③：任务源（主进程给的「每角色最新已 done 任务」，不在此处读盘）。
+  const taskByRole = options.taskByRole && typeof options.taskByRole === 'object' ? options.taskByRole : null;
 
   const snapRoles = readSnapshotRoles(snapshot);
   const autoRotate = readAutoRotateSummary({ auditRows: options.autoRotateRows, now });
@@ -456,11 +475,13 @@ function buildPanelModel(options = {}) {
       lastFailAt: summary.lastFailAt || '',
       // R-fa0e（3a12）§六：自动换人字段（无记录时 state=idle、审计尾为空，不伪造）
       autoRotate: autoRotate.byRole[role] || { state: 'idle', reason: '', auditTail: '', error: '', usageSource: '' },
+      // R-9674：最近活动（三源优先级；idle 行展示「最近活动 … · 摘要」，三源全空为「未知」）
+      lastActivity: lastActivityOf({ snapshotEntry: entry, wakeRow: latestRowOf(role), taskRow: taskByRole ? taskByRole[role] : null }),
     };
   });
 
   const health = degradationOf({ snapshot, snapshotError: options.snapshotError, now, staleMs });
-  return {
+  const model = {
     ok: true,
     project: String(options.project || (snapshot && snapshot.project) || ''),
     at: snapshot ? String(snapshot.at || '') : '',
@@ -478,6 +499,11 @@ function buildPanelModel(options = {}) {
     // R-fa0e（3a12）§六：团队台只读汇总 [data-ar-summary]
     autoRotate: { summary: autoRotate.summary, rotatedToday: autoRotate.rotatedToday, failedToday: autoRotate.failedToday },
   };
+  // R-9674 §6.3：顶部全员状态摘要（纯函数派生，渲染层只显示；不新增定时器）
+  model.summary = buildActivitySummary(rows, { now });
+  // R-9674 §6.5：缓存/降级自述（主进程填；cached=true 表示本轮超预算、复用上一份摘要）
+  model.activityMeta = Object.assign({ cached: false, source: 'model' }, options.activityMeta && typeof options.activityMeta === 'object' ? options.activityMeta : {});
+  return model;
 }
 
 /* ───────── R-c9ac：快照 v2 —— 五态 / 秒表 / 最近事件 / 停滞（纯逻辑，渲染层与团队台行共用口径） ───────── */
@@ -626,6 +652,153 @@ function backpressureHint(queued, threshold = BACKPRESSURE_THRESHOLD) {
   return { show: true, count: n, text: `对方排队 ${n} 条，先别连发` };
 }
 
+/* ───────── R-9674：最近活动（三源优先级 + 24 字摘要 + 全员摘要行，纯逻辑） ───────── */
+
+// 摘要上限 24 个字符（中文按字计，Array.from 计数，不按 UTF-16 长度）；超出才补「…」。
+const ACTIVITY_MAX_CHARS = 24;
+// 摘要时间展示：mm-dd hh:mm（本地时区，与面板其余时间文案一致）。
+const ACTIVITY_SOURCE_LABEL = { snapshot: '快照', wake: '唤醒日志', task: '任务', none: '无来源' };
+
+/** 摘要裁剪：折叠空白 → 按字符数截断（超出补一个「…」，不超不补）。 */
+function clipActivityText(value) {
+  const raw = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  const chars = Array.from(raw);
+  if (chars.length <= ACTIVITY_MAX_CHARS) return raw;
+  return chars.slice(0, ACTIVITY_MAX_CHARS).join('') + '…';
+}
+
+/** ISO 归一：非法/空 → ''（AC1 边界：lastEventAt 非法 ISO 按缺失）。兼容毫秒时间戳（rowAt 返回 ms）。 */
+function activityIso(value) {
+  if (value === null || value === undefined || value === '') return '';
+  let ms = NaN;
+  if (typeof value === 'number') ms = Number.isFinite(value) ? value : NaN;
+  else {
+    const raw = String(value).trim();
+    if (!raw) return '';
+    if (/^\d{11,}$/.test(raw)) ms = Number(raw);
+    else ms = Date.parse(raw);
+  }
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : '';
+}
+
+/** 唤醒行时间：优先 at（正文 §6.1 口径），兼容 deliveredAt/deliverAt（6bc8 AC7 旧行）。 */
+function wakeActivityIso(row) {
+  if (!row || typeof row !== 'object') return '';
+  const direct = activityIso(row.at);
+  if (direct) return direct;
+  return activityIso(rowAt(row));
+}
+
+/** 时间展示：mm-dd hh:mm（行内时间用；AC2② 断言这个格式）。 */
+function activityTimeText(iso, fallback) {
+  const ms = Date.parse(String(iso || ''));
+  if (!Number.isFinite(ms)) return String(fallback == null ? '' : fallback);
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 唤醒行摘要（§6.2）：失败 > 跳过（合并/其他）> 成功。 */
+function wakeActivityText(row) {
+  const skipped = String((row && (row.skipped != null ? row.skipped : '')) || '').trim();
+  const reason = String((row && (row.reason != null ? row.reason : row.why)) || '').trim();
+  if (skipped) {
+    const merged = /MERGE|合并/i.test(skipped) || /MERGE|合并/i.test(reason);
+    return merged ? '唤醒跳过（合并）' : '唤醒跳过';
+  }
+  const okRaw = row && (row.ok != null ? row.ok : row.delivered);
+  const ok = okRaw === true || String(okRaw).toLowerCase() === 'true';
+  return ok ? '唤醒成功' : '唤醒失败';
+}
+
+/**
+ * 单角色最近活动（§6.1 三源优先级）：
+ *   ① 快照 lastEventAt（会话状态更新）→ 快照 lastOkAt（唤醒成功）
+ *   ② 唤醒日志该角色最后一条（按 at 倒序取第 1 条合规行）
+ *   ③ 任务 done（`任务完成：<标题前 12 字>`）
+ * 三源全空 → { at:'', text:'未知', source:'none' }（不得用「空闲」冒充）。
+ */
+function lastActivityOf(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const snap = o.snapshotEntry && typeof o.snapshotEntry === 'object' ? o.snapshotEntry : null;
+  const snapEventAt = activityIso(snap && snap.lastEventAt);
+  if (snapEventAt) return { at: snapEventAt, text: clipActivityText('会话状态更新'), source: 'snapshot', sourceKey: 'lastEventAt' };
+  const snapOkAt = activityIso(snap && snap.lastOkAt);
+  if (snapOkAt) return { at: snapOkAt, text: clipActivityText('唤醒成功'), source: 'snapshot', sourceKey: 'lastOkAt' };
+  const wakeRow = o.wakeRow && typeof o.wakeRow === 'object' ? o.wakeRow : null;
+  const wakeAt = wakeActivityIso(wakeRow);
+  if (wakeAt) return { at: wakeAt, text: clipActivityText(wakeActivityText(wakeRow)), source: 'wake', sourceKey: 'wake' };
+  const taskRow = o.taskRow && typeof o.taskRow === 'object' ? o.taskRow : null;
+  const taskAt = activityIso(taskRow && (taskRow.doneAt || taskRow.updatedAt || taskRow.at));
+  if (taskAt) {
+    const title = String((taskRow && taskRow.title) || '').replace(/\s+/g, ' ').trim();
+    return { at: taskAt, text: clipActivityText('任务完成：' + Array.from(title).slice(0, 12).join('')), source: 'task', sourceKey: 'task' };
+  }
+  return { at: '', text: '未知', source: 'none', sourceKey: 'none' };
+}
+
+/**
+ * 顶部全员状态摘要（§6.3）：
+ *   · 全员 idle → mode=all-idle：`全员空闲 · 最近活动：<角色> <hh:mm> <事件>（N 分钟前）`（取最近活动时间最大的一行）
+ *   · 有人非 idle → mode=busy：`<角色> 思考中 mm:ss`（或状态文案），「、」连接最多 3 个，余「等 N 人」
+ *   · 其余（有 unknown 但无活跃）→ mode=mixed
+ *   · 有 unknown 行 → 末尾追加「· 有 N 行未接入」
+ * 纯函数：now 由调用方给，渲染层不自己算时间。
+ */
+function buildActivitySummary(rows, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const now = Number.isFinite(Number(o.now)) ? Number(o.now) : Date.now();
+  const maxBusy = Number.isFinite(Number(o.maxBusy)) && Number(o.maxBusy) > 0 ? Number(o.maxBusy) : 3;
+  const list = Array.isArray(rows) ? rows : [];
+  const labelOf = (row) => String((row && (row.name || row.role)) || '');
+  const liveOfRow = (row) => (row && row.live && typeof row.live === 'object' ? row.live : {});
+  const unknownRows = list.filter((row) => String(liveOfRow(row).state || 'unknown') === 'unknown');
+  const busyRows = list.filter((row) => {
+    const st = String(liveOfRow(row).state || 'unknown');
+    return st !== 'idle' && st !== 'unknown';
+  });
+  const tail = unknownRows.length ? ` · 有 ${unknownRows.length} 行未接入` : '';
+  if (!busyRows.length) {
+    if (unknownRows.length) {
+      // 混合：没有活跃行但有未接入行 → 不算「全员空闲」，如实写未接入
+      return { mode: 'mixed', text: `无活跃动作 · 有 ${unknownRows.length} 行未接入`, at: '', unknownCount: unknownRows.length };
+    }
+    let best = null;
+    let bestMs = -Infinity;
+    for (const row of list) {
+      const act = row && row.lastActivity && typeof row.lastActivity === 'object' ? row.lastActivity : null;
+      const ms = Date.parse(String((act && act.at) || ''));
+      if (!Number.isFinite(ms)) continue;
+      if (ms > bestMs) { bestMs = ms; best = { row, act }; }
+    }
+    if (!best) {
+      return { mode: 'all-idle', text: '全员空闲 · 最近活动：未知', at: '', unknownCount: 0 };
+    }
+    const minutes = Math.max(0, Math.round((now - bestMs) / 60000));
+    const text = `全员空闲 · 最近活动：${labelOf(best.row)} ${activityTimeText(best.act.at)} ${best.act.text}（${minutes} 分钟前）`;
+    return { mode: 'all-idle', text, at: new Date(bestMs).toISOString(), unknownCount: 0 };
+  }
+  const parts = [];
+  for (const row of busyRows.slice(0, maxBusy)) {
+    const live = liveOfRow(row);
+    const st = String(live.state || 'unknown');
+    if (st === 'thinking') {
+      // 秒表：按 runningSince 起算；缺 runningSince 显示「—」（不拿当前时间伪造起点）
+      const since = Date.parse(String(live.runningSince || ''));
+      let clock = '—';
+      if (Number.isFinite(since)) {
+        const elapsed = Math.max(0, now - since);
+        clock = `${String(Math.floor(elapsed / 60000)).padStart(2, '0')}:${String(Math.floor((elapsed % 60000) / 1000)).padStart(2, '0')}`;
+      }
+      parts.push(`${labelOf(row)} 思考中 ${clock}`);
+    } else parts.push(`${labelOf(row)} ${LIVE_STATE_LABEL[st] || st}`);
+  }
+  const rest = busyRows.length - parts.length;
+  const text = parts.join('、') + (rest > 0 ? `等 ${rest} 人` : '') + tail;
+  return { mode: 'busy', text, at: '', unknownCount: unknownRows.length };
+}
+
 module.exports = {
   SIX_ROLES,
   ROLE_LABELS,
@@ -660,4 +833,13 @@ module.exports = {
   relativeTimeText,
   byPlacementTitleOf,
   liveRowOf,
+  // R-9674：最近活动（三源优先级 / 24 字裁剪 / 全员摘要）
+  ACTIVITY_MAX_CHARS,
+  ACTIVITY_SOURCE_LABEL,
+  clipActivityText,
+  activityIso,
+  activityTimeText,
+  wakeActivityText,
+  lastActivityOf,
+  buildActivitySummary,
 };

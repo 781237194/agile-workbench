@@ -6042,7 +6042,24 @@ ipcMain.handle('theme:metrics', async () => {
       const wanted = String(p.project || p.projectName || p.name || '').trim();
       const name = String((row && (row.name || row.teamName)) || wanted || '').trim();
       if (!name) return { ok: false, code: 'NO_PROJECT', message: '还没有当前项目', project: '', readAt: '', roles: {}, cached: false };
-      return await teamTools.roleActivity(name, { force: Boolean(p.force) });
+      const activity = await teamTools.roleActivity(name, { force: Boolean(p.force) });
+      // R-9674 AC5①：团队台「最近活动」列与面板同口径（三源优先级在主进程算，渲染层只显示）。
+      try {
+        const roleIds = Object.keys((activity && activity.roles) || {});
+        const la = lastActivityByRoleOf(name, roleIds);
+        for (const role of roleIds) {
+          const row = activity.roles[role];
+          if (!row || typeof row !== 'object') continue;
+          const item = la.byRole[role] || { at: '', text: '未知', source: 'none' };
+          row.lastActivityAt = item.at;
+          row.lastActivityText = item.text;
+          row.lastActivitySource = item.source;
+        }
+        if (activity && typeof activity === 'object') activity.activityMeta = { ms: 0, cached: false };
+      } catch (e) {
+        console.warn('ROLE_ACTIVITY_LAST_FAIL ' + String((e && e.message) || e).slice(0, 200));
+      }
+      return activity;
     } catch (e) {
       return {
         ok: false, code: 'ROLE_ACTIVITY_FAILED', message: String((e && e.message) || e).slice(0, 300),
@@ -6064,20 +6081,198 @@ ipcMain.handle('theme:metrics', async () => {
   //           ② 团队/状态/项目/<项目>/唤醒.jsonl（四态/失败数/跳过数/最近成功投递时间都来自这里）。
   // 唤醒.jsonl 有 1.6MB 级（6000+ 行），按 mtime+size 缓存解析，绝不每次刷新重解析。
   const SessionQueue = require('./session-queue.js');
-  let sqWakeCache = { file: '', key: '', rows: [], badLines: 0 };
-  const readWakeLogCached = (file) => {
-    if (!file) return { rows: [], badLines: 0 };
+  // ── R-9674（T-20261118-133655-05b1）最近活动：唤醒索引 + 任务索引（§6.5 性能口径）──────────────
+  // 唤醒索引：append-only 增量读——`{mtimeMs,size,tailOffset,lines,rebuilt}`，没变就整份复用，
+  //   变了只从 tailOffset 读新增字节（只消费以 \n 结尾的完整行，残行留到下一轮）；
+  //   文件被截断/回滚（size < tailOffset）→ 丢弃 offset 全量重建并计 rebuilt=1。
+  //   byRole 在追加时同步维护（每个角色最后一条），请求路径不再 8293 行重扫。
+  let sqWakeIdx = { file: '', mtimeMs: 0, size: 0, tailOffset: 0, tailHash: '', lines: 0, rows: [], byRole: {}, badLines: 0, rebuilt: 0 };
+  const emptyWakeIdx = () => ({ file: '', mtimeMs: 0, size: 0, tailOffset: 0, tailHash: '', lines: 0, rows: [], byRole: {}, badLines: 0, rebuilt: 0 });
+  // 读文件的 [start, start+len) 字节（用于尾部指纹与增量读；不整份读入）
+  const readFileSlice = (file, start, len) => {
+    if (len <= 0) return Buffer.alloc(0);
+    try {
+      const fd = fs.openSync(file, 'r');
+      try {
+        const buf = Buffer.allocUnsafe(len);
+        const read = fs.readSync(fd, buf, 0, len, start);
+        return buf.slice(0, read);
+      } finally { try { fs.closeSync(fd); } catch { /* ignore */ } }
+    } catch { return null; }
+  };
+  const WAKE_FP_BYTES = 64;
+  const wakeTailHashOf = (file, offset) => {
+    if (!offset) return '';
+    const start = Math.max(0, offset - WAKE_FP_BYTES);
+    const buf = readFileSlice(file, start, offset - start);
+    if (!buf) return '';
+    return buf.toString('hex');
+  };
+  const pushWakeRows = (idx, text) => {
+    const lines = String(text || '').split(/\r?\n/);
+    for (const line of lines) {
+      const body = line.trim();
+      if (!body) continue;
+      let row = null;
+      try { row = JSON.parse(body); } catch { idx.badLines += 1; continue; }
+      if (!row || typeof row !== 'object') { idx.badLines += 1; continue; }
+      idx.rows.push(row);
+      idx.lines += 1;
+      const role = String(row.to || '').trim();
+      if (!role) continue;
+      const ms = Date.parse(String(row.at || row.deliveredAt || row.deliverAt || ''));
+      const prev = idx.byRole[role];
+      if (!prev || !Number.isFinite(prev.ms) || (Number.isFinite(ms) && ms >= prev.ms)) idx.byRole[role] = { row, ms: Number.isFinite(ms) ? ms : 0 };
+    }
+    // 内存上限：只留最近 20000 行（窗口统计用不到更早的），避免长时间运行后无限增长
+    if (idx.rows.length > 20000) idx.rows = idx.rows.slice(-20000);
+  };
+  const readWakeIndex = (file) => {
+    if (!file) return emptyWakeIdx();
+    let st = null;
+    try { st = fs.statSync(file); } catch { return sqWakeIdx.file === file ? sqWakeIdx : emptyWakeIdx(); }
+    const same = sqWakeIdx.file === file && sqWakeIdx.mtimeMs === st.mtimeMs && sqWakeIdx.size === st.size;
+    if (same) return sqWakeIdx;
+    const truncated = sqWakeIdx.file === file && st.size < sqWakeIdx.tailOffset;
+    // 原地重写（size 变短或**变长/同长**但内容换了）也必须识别：尾部指纹不一致 → 全量重建。
+    // 只比 mtime+size 不够——自检夹具与外部工具会整份 writeFileSync 覆盖，偏移量沿用会读到错位内容。
+    let rewritten = false;
+    if (!truncated && sqWakeIdx.file === file && sqWakeIdx.tailOffset > 0) {
+      const fp = wakeTailHashOf(file, sqWakeIdx.tailOffset);
+      if (fp !== sqWakeIdx.tailHash) rewritten = true;
+    }
+    if (sqWakeIdx.file !== file || truncated || rewritten) {
+      const rebuilt = (truncated || rewritten) ? sqWakeIdx.rebuilt + 1 : 0;
+      if (truncated || rewritten) console.warn('SESSION_QUEUE_WAKE_REBUILD ' + JSON.stringify({ file, size: st.size, tailOffset: sqWakeIdx.tailOffset, why: truncated ? 'truncated' : 'rewritten' }));
+      sqWakeIdx = Object.assign(emptyWakeIdx(), { file, rebuilt });
+    }
+    const start = sqWakeIdx.tailOffset;
+    if (st.size > start) {
+      const buf = readFileSlice(file, start, st.size - start);
+      if (!buf) return sqWakeIdx;
+      const chunk = buf.toString('utf8');
+      const lastNl = chunk.lastIndexOf('\n');
+      if (lastNl >= 0) {
+        const complete = chunk.slice(0, lastNl + 1);
+        pushWakeRows(sqWakeIdx, complete);
+        sqWakeIdx.tailOffset = start + Buffer.byteLength(complete, 'utf8');
+      }
+    }
+    sqWakeIdx.mtimeMs = st.mtimeMs;
+    sqWakeIdx.size = st.size;
+    sqWakeIdx.tailHash = wakeTailHashOf(file, sqWakeIdx.tailOffset);
+    return sqWakeIdx;
+  };
+  // 任务索引：`任务/*.json` 只在**后台分批**全量建一次（1024 文件 ≈ 240ms，绝不进请求路径）；
+  //   之后靠 任务/ 目录 fs.watch 单文件增量更新 + 目录签名（文件数/目录 mtime）兜底重建。
+  //   失效口径：①单文件 watch 事件（Windows 改内容不更新目录 mtime，这是主路径）②文件数变化 ③截断/回滚。
+  let sqTaskIdx = { dir: '', ready: false, count: 0, byRole: {}, fileMaxMtime: 0, builtAt: 0, dirty: true, error: '' };
+  let sqTaskBuild = { dir: '', token: 0, running: false };
+  const taskRowActivityOf = (row) => {
+    if (!row || String(row.status || '') !== 'done') return null;
+    const owner = String(row.owner || '').trim();
+    if (!owner) return null;
+    const at = String(row.doneAt || row.updatedAt || row.at || '');
+    const ms = Date.parse(at);
+    if (!Number.isFinite(ms)) return null;
+    return { owner, ms, at, title: String(row.title || ''), id: String(row.id || '') };
+  };
+  const noteTaskActivity = (acc, item) => {
+    if (!item) return;
+    const prev = acc[item.owner];
+    if (!prev || item.ms > prev.ms) acc[item.owner] = item;
+  };
+  const startTaskIndexBuild = (dir) => {
+    const token = (sqTaskBuild.token || 0) + 1;
+    sqTaskBuild = { dir, token, running: true };
+    let files = [];
+    try { files = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch (e) {
+      sqTaskIdx = { dir, ready: true, count: 0, byRole: {}, fileMaxMtime: 0, builtAt: Date.now(), dirty: false, error: String((e && e.message) || e).slice(0, 120) };
+      sqTaskBuild.running = false;
+      return;
+    }
+    const acc = { byRole: {}, count: 0, fileMaxMtime: 0 };
+    let i = 0;
+    const step = () => {
+      if (sqTaskBuild.token !== token) return; // 被更新的构建取代
+      const until = Math.min(files.length, i + 40);
+      for (; i < until; i += 1) {
+        const full = path.join(dir, files[i]);
+        let st = null;
+        try { st = fs.statSync(full); } catch { continue; }
+        if (st.mtimeMs > acc.fileMaxMtime) acc.fileMaxMtime = st.mtimeMs;
+        let row = null;
+        try { row = JSON.parse(fs.readFileSync(full, 'utf8').replace(/^\uFEFF/, '')); } catch { continue; }
+        noteTaskActivity(acc.byRole, taskRowActivityOf(row));
+      }
+      if (sqTaskBuild.token !== token) return;
+      if (i < files.length) { setTimeout(step, 0); return; }
+      sqTaskIdx = { dir, ready: true, count: files.length, byRole: acc.byRole, fileMaxMtime: acc.fileMaxMtime, builtAt: Date.now(), dirty: false, error: '' };
+      sqTaskBuild.running = false;
+    };
+    setTimeout(step, 0);
+  };
+  const taskIndexFor = (dir) => {
+    if (!dir) return null;
+    let count = -1;
+    let dirMtime = 0;
+    try { count = fs.readdirSync(dir).filter((n) => n.endsWith('.json')).length; } catch { return null; }
+    try { dirMtime = fs.statSync(dir).mtimeMs; } catch { /* ignore */ }
+    const stale = sqTaskIdx.dir !== dir || !sqTaskIdx.ready || sqTaskIdx.dirty
+      || (count >= 0 && count !== sqTaskIdx.count) || (dirMtime && sqTaskIdx.dirMtime && dirMtime !== sqTaskIdx.dirMtime);
+    if (stale && !sqTaskBuild.running) startTaskIndexBuild(dir);
+    if (sqTaskIdx.dir !== dir) return null;
+    sqTaskIdx.dirMtime = dirMtime;
+    return sqTaskIdx;
+  };
+  // watch 事件 → 单文件增量（只读这一个文件，不重扫目录；解析失败/文件删除 → 标脏等重建）
+  const updateTaskIndexFile = (dir, filename) => {
+    if (!dir || sqTaskIdx.dir !== dir || !sqTaskIdx.ready) return false;
+    const name = String(filename || '');
+    if (!name || !name.endsWith('.json')) return false;
+    const full = path.join(dir, name);
+    if (!fs.existsSync(full)) { sqTaskIdx.dirty = true; return false; }
+    let row = null;
+    try { row = JSON.parse(fs.readFileSync(full, 'utf8').replace(/^\uFEFF/, '')); } catch { sqTaskIdx.dirty = true; return false; }
+    const item = taskRowActivityOf(row);
+    if (!item) return false;
+    // 只关心 owner 自己的最新 done：比索引新才写（旧文件的迟到事件不倒退）
+    if (sqTaskIdx.byRole[item.owner] && sqTaskIdx.byRole[item.owner].ms >= item.ms) return false;
+    sqTaskIdx.byRole[item.owner] = item;
+    return true;
+  };
+  // 会话排队.json（最近活动的第一源）同法按 mtime+size 缓存，避免团队台三列每次全读
+  let sqSnapCache = { file: '', key: '', snapshot: null };
+  const readSnapshotCached = (file) => {
+    if (!file) return null;
     try {
       const st = fs.statSync(file);
       const key = `${st.mtimeMs}:${st.size}`;
-      if (sqWakeCache.file === file && sqWakeCache.key === key) return sqWakeCache;
-      const parsed = SessionQueue.parseWakeLog(fs.readFileSync(file, 'utf8'));
-      sqWakeCache = { file, key, rows: parsed.rows, badLines: parsed.badLines };
-      return sqWakeCache;
-    } catch {
-      // 文件不存在/读不到：按 0 行处理（面板显示「无记录」），不是故障。
-      return { rows: [], badLines: 0 };
+      if (sqSnapCache.file === file && sqSnapCache.key === key) return sqSnapCache.snapshot;
+      if (st.size > SessionQueue.SNAPSHOT_MAX_BYTES) return sqSnapCache.file === file ? sqSnapCache.snapshot : null;
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+      sqSnapCache = { file, key, snapshot: parsed && typeof parsed === 'object' ? parsed : null };
+      return sqSnapCache.snapshot;
+    } catch { return sqSnapCache.file === file ? sqSnapCache.snapshot : null; }
+  };
+  /** R-9674：单角色最近活动（供面板 model 与团队台三列共用，主进程算、渲染层只显示）。 */
+  const lastActivityByRoleOf = (projectName, roleList) => {
+    const out = {};
+    const teamRoot = resolveTeamRoot();
+    const snap = readSnapshotCached(path.join(teamRoot, '状态', '会话排队.json'));
+    const snapRoles = SessionQueue.readSnapshotRoles(snap);
+    const projDir = projectName ? path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName)) : '';
+    const wakeIdx = projDir ? readWakeIndex(path.join(projDir, '唤醒.jsonl')) : emptyWakeIdx();
+    const taskIdx = projDir ? taskIndexFor(path.join(projDir, '任务')) : null;
+    for (const role of roleList) {
+      const taskItem = taskIdx && taskIdx.byRole[role] ? taskIdx.byRole[role] : null;
+      out[role] = SessionQueue.lastActivityOf({
+        snapshotEntry: snapRoles.get(role) || null,
+        wakeRow: (wakeIdx.byRole[role] && wakeIdx.byRole[role].row) || null,
+        taskRow: taskItem ? { doneAt: taskItem.at, updatedAt: taskItem.at, title: taskItem.title, id: taskItem.id } : null,
+      });
     }
+    return { byRole: out, wakeIdx, taskIdx };
   };
   // 快照解析失败时保留上一份可用快照（不清空面板；黄条说明原因）。
   let sqLastGood = { file: '', snapshot: null };
@@ -6146,7 +6341,7 @@ ipcMain.handle('theme:metrics', async () => {
       const wakeFile = projectName
         ? path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName), '唤醒.jsonl')
         : '';
-      const wake = readWakeLogCached(wakeFile);
+      const wake = readWakeIndex(wakeFile);
       // R-fa0e（T-20261117-195120-3a12）§六：自动换人审计（只读；缺失/坏行都当「无记录」，不降级面板）
       let autoRotateRows = [];
       if (projectName) {
@@ -6202,6 +6397,14 @@ ipcMain.handle('theme:metrics', async () => {
           console.warn('SCHED_ADVICE_FALLBACK_FAILED ' + String((e && e.message) || e).slice(0, 200));
         }
       }
+      // R-9674 §6.1③/§6.5：任务索引（后台建、watch 增量；这里只取内存快照，不读盘全扫）
+      const taskDir = projectName ? path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName), '任务') : '';
+      const taskIdx = taskDir ? taskIndexFor(taskDir) : null;
+      ensureSessionQueueTaskWatch(taskDir);
+      // R-9674 §6.1②：唤醒「每角色最后一条」由索引增量维护（只对新追加行算一次），请求路径直接复用
+      const latestWakeRowByRole = {};
+      for (const [role, item] of Object.entries(wake.byRole || {})) latestWakeRowByRole[role] = item.row;
+      const modelStart = Date.now();
       const model = SessionQueue.buildPanelModel({
         project: projectName,
         autoRotateRows,
@@ -6210,10 +6413,27 @@ ipcMain.handle('theme:metrics', async () => {
         snapshot,
         snapshotError,
         wakeRows: wake.rows,
+        latestWakeRowByRole,
         badLines: wake.badLines,
+        taskByRole: taskIdx ? taskIdx.byRole : null,
         now: Date.now(),
         windowMs: Number(p.windowMs) > 0 ? Number(p.windowMs) : SessionQueue.DEFAULT_WINDOW_MS,
         staleMs: (snapshot && Number(snapshot.staleMs) > 0) ? Number(snapshot.staleMs) : SessionQueue.DEFAULT_STALE_MS,
+      });
+      // R-9674 §6.5：单次计算预算 p95 ≤50ms；超标降级为「复用上一份摘要」并标 cached=1（不静默）
+      const modelMs = Date.now() - modelStart;
+      sqActivityStats.lastMs = modelMs;
+      sqActivityStats.samples = (sqActivityStats.samples || 0) + 1;
+      if (modelMs > 50 && sqLastSummary && typeof sqLastSummary === 'object') {
+        model.summary = sqLastSummary;
+        model.activityMeta = Object.assign({}, model.activityMeta, { cached: true, cachedMs: modelMs });
+      } else {
+        sqLastSummary = model.summary;
+      }
+      model.activityMeta = Object.assign({}, model.activityMeta, {
+        ms: modelMs, cached: Boolean(model.activityMeta && model.activityMeta.cached),
+        wakeIndex: { lines: wake.lines, tailOffset: wake.tailOffset, bytes: wake.size, rebuilt: wake.rebuilt, byRole: Object.keys(wake.byRole || {}).length, badLines: wake.badLines },
+        taskIndex: taskIdx ? { ready: taskIdx.ready, count: taskIdx.count, builtAt: taskIdx.builtAt, byRole: Object.keys(taskIdx.byRole || {}).length, error: taskIdx.error, dir: taskIdx.dir } : null,
       });
       model.snapshotFile = snapshotFile;
       model.wakeFile = wakeFile;
@@ -6252,6 +6472,33 @@ ipcMain.handle('theme:metrics', async () => {
   let sqPushForce = '';
   let sqLastPushAt = new Date().toISOString();
   const sqStats = { getSnapshotCalls: 0, pushEvents: 0 };
+  // R-9674 §6.5：最近活动计算耗时样本（超标降级判据）与上一份摘要（cached 兜底）
+  const sqActivityStats = { lastMs: 0, samples: 0 };
+  let sqLastSummary = null;
+  // R-9674 AC5⑦：任务/ 目录 fs.watch（去抖 300ms，复用 team:session-queue-changed 同一广播）——
+  // 任务 status→done 后 ≤2s 面板摘要自动更新；渲染层不加定时器。
+  let sqTaskWatchDir = '';
+  let sqTaskWatch = null;
+  let sqTaskWatchTimer = null;
+  const ensureSessionQueueTaskWatch = (dir) => {
+    if (sqPushDisabled || !dir) return;
+    if (sqTaskWatch && sqTaskWatchDir === dir) return;
+    if (sqTaskWatch) { try { sqTaskWatch.close(); } catch { /* ignore */ } sqTaskWatch = null; }
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      sqTaskWatch = fs.watch(dir, (_event, filename) => {
+        const changed = String(filename || '');
+        // 先做单文件增量（只读这一个 json），再按同一事件通知渲染层
+        try { if (changed) updateTaskIndexFile(dir, changed); } catch { /* 增量失败标脏等重建 */ sqTaskIdx.dirty = true; }
+        clearTimeout(sqTaskWatchTimer);
+        sqTaskWatchTimer = setTimeout(() => notifySessionQueueChanged('task-watch'), 300);
+      });
+      sqTaskWatch.on('error', () => { try { sqTaskWatch.close(); } catch { /* ignore */ } sqTaskWatch = null; sqTaskWatchDir = ''; });
+      sqTaskWatchDir = dir;
+    } catch (error) {
+      console.warn('SESSION_QUEUE_TASK_WATCH_FAIL ' + JSON.stringify({ dir, detail: String((error && error.message) || error).slice(0, 200) }));
+    }
+  };
   if (IS_LIVE_CHECK) {
     ipcMain.handle('team:session-queue-push-mode', async (_e, payload) => {
       const mode = String((payload && payload.mode) || '');
