@@ -5169,3 +5169,8 @@ html[data-effect-level="reduced"] #awb-theme-particles { display: none; }
 .awb-skeleton-row { height: 22px; border-radius: 6px; background: linear-gradient(90deg, rgba(127,127,127,.12), rgba(127,127,127,.24), rgba(127,127,127,.12)); background-size: 200% 100%; animation: awb-skeleton-shimmer 1.2s ease-in-out infinite; }
 @keyframes awb-skeleton-shimmer { 0% { background-position: 120% 0; } 100% { background-position: -20% 0; } }
 @media (prefers-reduced-motion: reduce) { .awb-skeleton-row { animation: none; } }
+
+/* B-20261118-213848 P2：验收列表内可见提示（评审弹窗不可见时的成功/失败反馈） */
+[data-accept-list-notice] { display: block; margin: 8px 12px; padding: 8px 10px; border-radius: 6px; font-size: 13px; line-height: 1.4; }
+[data-accept-list-notice][data-accept-list-notice-kind="ok"] { background: rgba(46,160,67,.15); color: #1a7f37; border: 1px solid rgba(46,160,67,.4); }
+[data-accept-list-notice][data-accept-list-notice-kind="bad"] { background: rgba(220,53,69,.12); color: #b02a37; border: 1px solid rgba(220,53,69,.4); }

@@ -1508,6 +1508,27 @@
   // B-5f62 补：`.or-head` 在 `.or-card` 里，往 dialog 上 insertBefore(head.nextSibling) 会抛
   // NotFoundError，把成功当失败弹红条（真机验证时抓到）。改成在 head 的父节点上插入，且提示条失败不阻断主流程。
   let noticeTimer = null;
+  // B-20261118-213848 P2：验收列表(#accept-list)盖在评审弹窗之外，而 [data-or-notice] 在弹窗内 →
+  // 从「我的验收」列表点完确认后用户看不到成功提示。这里在验收列表容器顶部再挂一条可见提示（同文案，6s 收起）。
+  function acceptListNotice(text, kind = 'ok') {
+    try {
+      const box = document.getElementById('accept-list');
+      if (!box) return;
+      let bar = box.querySelector('[data-accept-list-notice]');
+      if (!bar) {
+        bar = el('div', 'accept-notice');
+        bar.setAttribute('data-accept-list-notice', '1');
+        bar.setAttribute('role', 'status');
+        box.prepend(bar);
+      }
+      bar.setAttribute('data-accept-list-notice-kind', String(kind || 'ok'));
+      bar.textContent = String(text || '');
+      bar.hidden = false;
+      if (acceptListNotice._t) clearTimeout(acceptListNotice._t);
+      acceptListNotice._t = setTimeout(() => { bar.hidden = true; }, 6000);
+    } catch { /* 提示失败不影响落账 */ }
+  }
+
   function showNotice(text) {
     const dialog = dialogEl();
     if (!dialog) return;
@@ -2261,6 +2282,7 @@
         showNotice(rejecting
           ? `已打回：${row.id}；需求回到可整改，PM 会收到打回原因`
           : `已验收：${row.id}；流程图 ≤6 秒内更新`);
+        acceptListNotice(rejecting ? `已打回：${row.id}` : `已验收：${row.id}（流程图 ≤6 秒内更新）`, 'ok');
         void Promise.resolve().then(() => loadData()).then(() => renderAcceptList()).catch(() => { /* 刷新失败不掩盖成功 */ });
       } catch (e) {
         submitting = false;
@@ -2305,6 +2327,8 @@
           err.textContent = info.detail && info.detail !== info.title ? info.title + '（' + info.detail + '）' : info.title;
           // B-1358：错误横幅把「还缺哪几项」和「去哪里补」一起给出来，不只说失败。
           appendMissingLinks(err, row);
+        // B-20261118-213848 P2：验收列表里也显示失败原因（弹窗可能不可见）。
+        acceptListNotice('验收失败：' + String(err.textContent || (e && e.message) || '未知错误'), 'bad');
         }
         ok.disabled = false;
       }

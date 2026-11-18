@@ -316,6 +316,23 @@ async function shot(cdp, file) {
       })()`);
       check('AC-10 失败路径返回 ok:false 且不抛未捕获异常（失败不落账）', Boolean(fail && !fail.threw && fail.ok === false), fail);
       report.failurePath = fail;
+      // AC-11（B-20261118-213848 P2）：成功提示在「验收列表」内可见（评审弹窗可能是隐藏的）
+      const listNotice = await inst.cdp.evaluate(`(async () => {
+        await new Promise((r) => setTimeout(r, 300));
+        const bar = document.querySelector('#accept-list [data-accept-list-notice]');
+        const dialog = document.querySelector('[data-owner-review-dialog]');
+        const rect = bar ? bar.getBoundingClientRect() : null;
+        return { has: Boolean(bar), hidden: bar ? Boolean(bar.hidden) : null, text: bar ? String(bar.textContent || '') : '', kind: bar ? bar.getAttribute('data-accept-list-notice-kind') : null, visible: Boolean(rect && rect.width > 0 && rect.height > 0), dialogHidden: dialog ? Boolean(dialog.hidden) : null };
+      })()`);
+      check('AC-11 验收列表内可见成功提示（弹窗隐藏时也能看到，P2 修复）',
+        Boolean(listNotice && listNotice.has && listNotice.hidden === false && listNotice.visible && /已验收/.test(listNotice.text)), listNotice);
+      // AC-12（P2）：perf:recent 已注册（B-20261118-213848：原位置 TDZ 导致 no handler）
+      const perfRecent = await inst.cdp.evaluate('(async () => { try { const r = await window.workbench.perfRecent({ limit: 1 }); return { ok: Boolean(r && (r.ok === true || Array.isArray(r.items))), keys: r ? Object.keys(r) : null, code: r && r.code }; } catch (e) { return { threw: true, message: String((e && e.message) || e) }; } })()');
+      const perfFailLines = (inst.stdoutLines || []).filter((l) => l.includes('PERF_IPC_REGISTER_FAILED'));
+      check('AC-12 perf:recent IPC 已注册（返回 ok/items 且主进程无 PERF_IPC_REGISTER_FAILED）',
+        Boolean(perfRecent && perfRecent.ok) && perfFailLines.length === 0, { perfRecent, perfFailLines: perfFailLines.length });
+      report.perfRecent = perfRecent;
+      report.listNotice = listNotice;
       await shot(inst.cdp, path.join(OUT, 'accept-ui-03-failure.png'));
       report.screenshots.push('accept-ui-03-failure.png');
       report.ipcProfileMs = profile ? { gateMs: profile.gateMs, acceptMs: profile.acceptMs, totalMs: profile.totalMs } : null;
