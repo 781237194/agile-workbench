@@ -51,16 +51,33 @@ const rawIpcHandle = ipcMain.handle.bind(ipcMain);
 // R-b34a 批4（测量单：workflow:state p95 1.74s、team:board p95 8.48s、metrics 均 359ms）：
 // 热点只读 IPC 加 5–10s 短 TTL 缓存（PM 2026-11-18 17:57 优先序 b/c）。写路径 writeStore 会清空该缓存，
 // 保证「写完立刻可见」；TTL 只是重复刷新时的降本，不改变 handler 返回值。
+// T-0d3b：system:metrics 的 GPU 采样缓存（nvidia-smi 每次 ~1.5s，不能放在 IPC 同步路径里）。
+const METRICS_GPU_TTL_MS = 10000;
+const metricsGpuCache = { at: 0, value: null };
+let metricsGpuSampling = false;
 const HOT_IPC_TTL_MS = {
   'workflow:state': 5000, 'team:board': 8000, 'system:metrics': 5000,
   // 批5：目录扫描类只读 IPC（presence/team-status/status/workspaces）——结果短 TTL 复用，写后 hotIpcCacheClear 立即失效；
   // files:list 已走「目录 mtime+size」指纹（dir-scan-cache），其余 handler 的 mtime 指纹接线随后续提交。
-  'team:presence': 4000, 'dsh:team-status': 6000, 'team:status': 6000,
+  // T-0d3b（IPC 二轮）：presence/team-status 走**外部进程**，每次 ~1-5s（spawn node team.mjs），
+  // 它们是「别的进程写文件」而不是本进程 writeStore，不能被 writeStore 清掉；TTL 提到 8-15s。
+  'team:presence': 8000, 'dsh:team-status': 15000, 'team:status': 15000,
   'workspace:plan': 8000, 'workspace:list': 8000,
+  // app:state 依赖 store → 随 writeStore 失效；3s 内重复调用（面板刷新/多面板同屏）直接复用。
+  'app:state': 3000,
 };
 const hotIpcCache = new Map();
 const hotIpcStats = { hits: 0, misses: 0 };
-function hotIpcCacheClear() { hotIpcCache.clear(); }
+// 这些通道的结果**不依赖本进程 store**（外部进程写文件 / 系统指标），writeStore 清缓存时保留它们，
+// 否则每次写盘都把 metrics/presence 缓存打掉，导致每次都重跑 nvidia-smi / 子进程（tester v256 实测 1.7s/5.7s）。
+const HOT_IPC_STORE_INDEPENDENT = new Set(['system:metrics', 'team:presence', 'dsh:team-status', 'team:status']);
+function hotIpcCacheClear() {
+  for (const key of Array.from(hotIpcCache.keys())) {
+    const channel = String(key).split('|')[0];
+    if (HOT_IPC_STORE_INDEPENDENT.has(channel)) continue;
+    hotIpcCache.delete(key);
+  }
+}
 function hotIpcTtlWrap(channel, handler) {
   const ttl = Number(HOT_IPC_TTL_MS[channel]) || 0;
   if (!ttl) return handler;
@@ -5216,18 +5233,28 @@ function registerIpc() {
     const systemCpu = systemCpuPercent();
     const memTotal = os.totalmem();
     const memUsed = memTotal - os.freemem();
-    let gpu = null;
-    try {
-      const { execFile } = require('node:child_process');
-      const raw = await new Promise((resolve) => {
-        execFile('nvidia-smi', ['--query-gpu=utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'], { timeout: 1500 }, (err, stdout) => resolve(err ? '' : String(stdout || '')));
-      });
-      const line = raw.trim().split(/\r?\n/)[0];
-      if (line) {
-        const [util, used, total] = line.split(',').map((n) => Number(n.trim()));
-        if ([util, used, total].every((n) => Number.isFinite(n))) gpu = { util, used, total };
-      }
-    } catch { /* no nvidia-smi */ }
+    // T-0d3b（IPC 二轮）：nvidia-smi 子进程本身要 ~1.5s（timeout 也是 1500ms），每次调用都 exec 是
+    // system:metrics 1.7s 的根因。改为**后台采样 + 缓存**：第一次调用异步触发采样并立即返回旧值/null，
+    // 之后 10s 内直接复用；采样失败只记 null，不阻塞任何调用。
+    let gpu = metricsGpuCache.value;
+    const nowMs = Date.now();
+    if (!metricsGpuSampling && nowMs - metricsGpuCache.at >= METRICS_GPU_TTL_MS) {
+      metricsGpuSampling = true;
+      try {
+        const { execFile } = require('node:child_process');
+        execFile('nvidia-smi', ['--query-gpu=utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'], { timeout: 1500 }, (err, stdout) => {
+          metricsGpuSampling = false;
+          metricsGpuCache.at = Date.now();
+          try {
+            const line = String(stdout || '').trim().split(/\r?\n/)[0];
+            const parts = line ? line.split(',').map((n) => Number(n.trim())) : [];
+            const [util, used, total] = parts;
+            metricsGpuCache.value = err || parts.length < 3 || ![util, used, total].every((n) => Number.isFinite(n))
+              ? null : { util, used, total };
+          } catch { metricsGpuCache.value = null; }
+        });
+      } catch { metricsGpuSampling = false; }
+    }
     return {
       cpu: systemCpu === null ? Math.min(100, Math.max(0, Math.round(appCpu))) : systemCpu,
       appCpu: Math.min(100, Math.max(0, Math.round(appCpu))),
