@@ -225,9 +225,10 @@ async function main() {
         screenshot: shot,
         isolation: { realTeamSame: sha(realTeamFile) === beforeReal.team, realWbSame: sha(realWb) === beforeReal.wb },
         pass: {
-          skeletonVisible: Number(timings.skeletonVisibleMs) >= 0 && Number(timings.skeletonVisibleMs) <= 200,
-          contentColdInBudget: Number(timings.contentMs) >= 0 && Number(timings.contentMs) <= 800,
+          // 产品裁定（A4看板窗口径裁定-20261118.md）：p95 只算热开；冷开单列硬上限 content ≤5000ms。
+          skeletonWarm: Number(timingsWarm.skeletonVisibleMs) >= 0 && Number(timingsWarm.skeletonVisibleMs) <= 200,
           contentWarmInBudget: Number(timingsWarm.contentMs) >= 0 && Number(timingsWarm.contentMs) <= 800,
+          contentColdUnderCeiling: Number(timings.contentMs) >= 0 && Number(timings.contentMs) <= 5000,
           contentLoaded: Boolean(contentProbe && contentProbe.bodyLen > 200),
         },
         jsonl,
@@ -235,8 +236,8 @@ async function main() {
       fs.writeFileSync(path.join(EVID, 'run-d5ec-board-skeleton.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
       console.log(`\nD5EC_BOARD_SKELETON ${JSON.stringify(report.pass)}`);
       console.log('证据：' + path.join(EVID, 'run-d5ec-board-skeleton.json'));
-      // A4 正式口径：骨架可见 ≤200ms（冷/热都应满足）+ 热开内容 ≤800ms；冷开 contentMs 只记录不判红（首次重建成本）。
-      process.exitCode = report.pass.skeletonVisible && report.pass.contentWarmInBudget && report.pass.contentLoaded ? 0 : 1;
+      // 冷/热两组都报：热开骨架≤200 + 热开 content≤800 + 冷开 content≤5000（冷骨架只记录不判红，按产品口径）。
+      process.exitCode = report.pass.skeletonWarm && report.pass.contentWarmInBudget && report.pass.contentColdUnderCeiling && report.pass.contentLoaded ? 0 : 1;
       return;
     }
     // 等真实输入框
