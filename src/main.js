@@ -270,6 +270,24 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
   const appendUpgradeRecord = (row) => {
     try { fs.mkdirSync(LOCAL_DATA, { recursive: true }); fs.appendFileSync(upgradeRecordFile(), JSON.stringify(row) + '\n', 'utf8'); return true; } catch { return false; }
   };
+  // e610 集成（T-20261119-035127-c755）：安装器 install.ps1 -Upgrade 落账在 <LOCAL_DATA>/升级记录.jsonl，
+  // 壳层只读最后一条 source=installer 的行，**不再自己写第二条**（否则一次升级两行）。
+  const readLastInstallerRecord = (sinceIso) => {
+    try {
+      const file = upgradeRecordFile();
+      if (!fs.existsSync(file)) return null;
+      const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean);
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        let row = null;
+        try { row = JSON.parse(lines[i]); } catch { continue; }
+        if (!row || row.source !== 'installer') continue;
+        // ISO 字符串可直接字典序比较（同一时区 UTC，带毫秒）
+        if (sinceIso && String(row.ts || '') < String(sinceIso)) continue;
+        return row;
+      }
+      return null;
+    } catch { return null; }
+  };
   const upgradeSandbox = () => Boolean(String(process.env.AWB_DATA_DIR || '').trim()) || Boolean(String(process.env.TEAM_SELFTEST || '').trim());
   rawIpcHandle('app:upgrade-check', async (_e, payload) => {
     const p = payload && typeof payload === 'object' ? payload : {};
@@ -308,45 +326,68 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
     if (force && !reason) return { ok: false, code: 'UPGRADE_FORCE_REASON_REQUIRED', message: '强制升级必须填写原因' };
     upgradeBusy = true;
     const current = readAppVersion().version;
-    const dryRun = p.dryRun === true || upgradeSandbox();
-    const steps = { backup: false, download: false, apply: false, selfcheck: false };
-    const ts = new Date().toISOString();
+    // 沙盘默认 dry-run；夹具可用 AWB_UPGRADE_FORCE_REAL=1 在沙盘内跑真实应用链路（仅测试用）。
+    const dryRun = p.dryRun === true || (upgradeSandbox() && process.env.AWB_UPGRADE_FORCE_REAL !== '1');
+    const feed = String(p.feed || p.source || '').trim();
+    const startedAt = new Date().toISOString();
+    const emptySteps = { backup: false, download: false, apply: false, selfcheck: false };
+    const installerScript = String(process.env.AWB_INSTALLER_PS1 || '').trim() || path.join(ROOT, 'install.ps1');
+    const installDir = String(process.env.AWB_UPGRADE_INSTALL_DIR || '').trim() || ROOT;
     try {
-      // 1) 预检 + 备份（只备份将写的那几个文件；沙盘也做，便于 AC2 断言）
-      const backupDir = path.join(LOCAL_DATA, '_backup', 'upgrade-' + ts.replace(/[:.]/g, '-'));
-      fs.mkdirSync(backupDir, { recursive: true });
-      let backedUp = 0;
-      for (const rel of ['package.json', 'dsh-plugin/cordis.patch.yml']) {
-        const src = path.join(ROOT, rel);
-        if (!fs.existsSync(src)) continue;
-        fs.copyFileSync(src, path.join(backupDir, path.basename(rel)));
-        backedUp += 1;
+      // 壳层不再自己下载/校验（用户口径：真实下载/应用/回滚都在安装器侧）：
+      // 统一调用 install.ps1 -Upgrade，参数/退出码/记录 schema 见 程序员A/产出/e610-升级集成约定-20261119.md。
+      if (!fs.existsSync(installerScript)) {
+        return { ok: false, code: 'UPGRADE_INSTALLER_MISSING', message: '找不到安装器：' + installerScript, from: current, to: latest, sha256, steps: emptySteps, dryRun, restartHint: '请重启后生效' };
       }
-      steps.backup = true;
-      // 2) 下载并校验 sha256（dryRun 只校验参数，不落盘）
-      if (dryRun) {
-        steps.download = true;
-        steps.apply = true;
-        steps.selfcheck = true;
+      const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', installerScript, '-Upgrade', '-InstallDir', installDir, '-UpgradeDataDir', LOCAL_DATA];
+      if (feed) {
+        args.push('-UpgradeFeed', feed);
       } else {
-        const dir = path.join(LOCAL_DATA, 'upgrade');
-        fs.mkdirSync(dir, { recursive: true });
-        const zipPath = path.join(dir, `${latest}.zip`);
-        const res = await fetch(url);
-        if (!res || !res.ok) throw Object.assign(new Error('下载失败 HTTP ' + (res ? res.status : 'no-response')), { code: 'UPGRADE_DOWNLOAD_FAILED' });
-        const buf = Buffer.from(await res.arrayBuffer());
-        const actual = crypto.createHash('sha256').update(buf).digest('hex');
-        if (actual !== sha256.toLowerCase()) throw Object.assign(new Error('下载校验失败 SHA_MISMATCH'), { code: 'UPGRADE_SHA_MISMATCH' });
-        fs.writeFileSync(zipPath, buf);
-        steps.download = true;
-        steps.apply = true;
-        steps.selfcheck = true;
+        args.push('-UpgradeVersion', latest, '-UpgradeSha256', sha256);
+        if (url) args.push('-UpgradeUrl', url);
       }
-      appendUpgradeRecord({ ts, from: current, to: latest, sha256, steps, ok: true, force, reason: force ? reason : '', strict: 'sandbox-dry-run' === 'x' ? false : undefined, dryRun, restartHint: '请重启后生效' });
-      return { ok: true, from: current, to: latest, sha256, steps, dryRun, restart: 'restart', restartHint: '请重启后生效', backupDir, backedUp };
+      if (force) args.push('-UpgradeForce');
+      if (reason) args.push('-UpgradeReason', reason);
+      // 沙盘 / 显式 dryRun / 没有下载地址（只给了版本信息）→ 安装器 dry-run：只校验源与参数，不下载不改文件。
+      const useDryRun = dryRun || (!url && !feed);
+      if (useDryRun) args.push('-UpgradeDryRun');
+      const run = await new Promise((resolve) => {
+        const { execFile } = require('node:child_process');
+        execFile('powershell.exe', args, { timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
+          const code = error
+            ? (typeof error.code === 'number' ? error.code : (error.killed ? 124 : 1))
+            : 0;
+          resolve({ code, stdout: String(stdout || ''), stderr: String(stderr || '') });
+        });
+      });
+      const record = readLastInstallerRecord(startedAt);
+      const tail = (text) => String(text || '').trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' ｜ ').slice(0, 300);
+      const ok = run.code === 0 && Boolean(record && record.ok === true);
+      const steps = (record && record.steps) || emptySteps;
+      const code = String((record && record.code) || (ok ? 'OK'
+        : run.code === 2 ? 'UPGRADE_PARAM_INVALID'
+          : run.code === 124 ? 'UPGRADE_TIMEOUT' : 'UPGRADE_FAILED'));
+      const message = ok
+        ? '升级完成'
+        : String((record && record.message) || tail(run.stderr) || tail(run.stdout) || '升级失败');
+      return {
+        ok,
+        code,
+        message,
+        from: String((record && record.from) || current),
+        to: String((record && record.to) || latest),
+        sha256: String((record && record.sha256) || sha256),
+        steps,
+        dryRun: Boolean(record && record.dryRun !== undefined ? record.dryRun : useDryRun),
+        restart: 'restart',
+        restartHint: String((record && record.restartHint) || '请重启后生效'),
+        rolledBack: Boolean(record && record.rolledBack),
+        backupDir: String((record && record.backupDir) || ''),
+        exitCode: run.code,
+        installerTail: tail(run.stdout)
+      };
     } catch (error) {
-      appendUpgradeRecord({ ts, from: current, to: latest, sha256, steps, ok: false, force, reason: force ? reason : '', rolledBack: true, code: (error && error.code) || 'UPGRADE_FAILED', message: String((error && error.message) || error).slice(0, 300), dryRun });
-      return { ok: false, code: (error && error.code) || 'UPGRADE_FAILED', message: String((error && error.message) || error).slice(0, 300), steps, rolledBack: true, from: current, to: latest };
+      return { ok: false, code: (error && error.code) || 'UPGRADE_FAILED', message: String((error && error.message) || error).slice(0, 300), from: current, to: latest, sha256, steps: emptySteps, dryRun, restartHint: '请重启后生效' };
     } finally { upgradeBusy = false; }
   });
 // 默认数据与 Chromium 缓存都放在仓库内，不再落到 C:\Users\...\AppData。
