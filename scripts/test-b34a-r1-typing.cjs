@@ -74,7 +74,8 @@ const env = {
   TEAM_SELFTEST: '1',
   AWB_TEAM_ROOT: TEAM,
   // 启动后台预生成（PM 2026-11-18 20:42）：自检用 2000ms 延迟；生产默认 8000ms。
-  AWB_BOARD_PREGEN_MS: ARGS.includes('--pregen-test') ? '2000' : '',
+  // 默认关闭启动预生成（否则 8s 后台 generateBoard 会污染 IPC/看板计时）；只在 --pregen-test 打开。
+  AWB_BOARD_PREGEN_MS: ARGS.includes('--pregen-test') ? '2000' : '0',
   // 严格热开（产品口径）= 关窗 → 应用自身按 TTL 销毁窗口 → 重开。自检把 TTL 调到 800ms，
   // 让「应用自身销毁后重建」这条真实路径在几秒内可复现（生产默认 60000ms 不变）。
   AWB_BOARD_HIDE_DESTROY_MS: ARGS.includes('--ttl-reopen') ? '800' : '',
@@ -379,6 +380,60 @@ async function main() {
       fs.writeFileSync(path.join(EVID, 'run-0d3b-ipc.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
       console.log('\nIPC_PERF ' + JSON.stringify(results.map((r) => ({ n: r.name, p50: r.p50, p95: r.p95, max: r.max }))));
       process.exitCode = report.pass.metrics && report.pass.presence && report.pass.workflowState && report.pass.appState ? 0 : 1;
+      return;
+    }
+    // ── P1 B-20261118-213947-0779：AC8③ perf:recent 功能验证（真实实例 + 启动日志 + 面板锚点截图）──
+    if (ARGS.includes('--ac8-check')) {
+      const wbFile3 = path.join(DATA, 'userdata', 'workbench.json');
+      const wb3 = JSON.parse(fs.readFileSync(wbFile3, 'utf8'));
+      const pid3 = String(wb3.activeProjectId || ((wb3.projects || [])[0] || {}).id || '');
+      const startedAtMs = Date.now();
+      // 1) handler 可用：真实 invoke perf:recent（渲染层 no-handler 会直接抛）
+      let perf = null; let perfError = '';
+      try { perf = await evalJs('window.workbench.perfRecent({ limit: 10 })', 30000, true); }
+      catch (e) { perfError = String((e && e.message) || e).slice(0, 200); }
+      put({ kind: 'ac8-perf-recent', ok: Boolean(perf && perf.ok), items: perf && Array.isArray(perf.items) ? perf.items.length : null, error: perfError });
+      // 2) 锚点状态（面板脚本已加载 → data-perf-log-state 非 idle/或已写 count）
+      await sleep(1200);
+      const anchorState = await evalJs(`(() => {
+        const el = document.querySelector('[data-perf-log]');
+        if (!el) return { exists: false };
+        return { exists: true, state: el.getAttribute('data-perf-log-state'), total: el.getAttribute('data-perf-log-total'),
+          count: (el.querySelector('[data-perf-log-count]') || {}).textContent || '', hidden: el.hidden,
+          text: String(el.textContent || '').slice(0, 120) };
+      })()`, 20000);
+      put({ kind: 'ac8-anchor', anchorState });
+      // 3) 截图（临时把 hidden 关掉以便截到元素真实渲染；截图后复原）
+      let shot = '';
+      try {
+        await evalJs(`(() => { const el = document.querySelector('[data-perf-log]'); if (!el) return false; el.hidden = false; el.style.position='fixed'; el.style.left='8px'; el.style.bottom='8px'; el.style.background='#111'; el.style.color='#0f0'; el.style.padding='4px 8px'; el.style.fontSize='12px'; el.style.zIndex='99999'; return true; })()`, 15000);
+        const rect = await evalJs(`(() => { const el = document.querySelector('[data-perf-log]'); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y), w: Math.max(1, Math.round(r.width)), h: Math.max(1, Math.round(r.height)) }; })()`, 15000);
+        const cap = await cdp.send('Page.captureScreenshot', { format: 'png', clip: rect ? { x: rect.x, y: rect.y, width: rect.w + 4, height: rect.h + 4, scale: 1 } : undefined }, 30000);
+        const png = path.join(EVID, 'ac8-perf-log.png');
+        fs.writeFileSync(png, Buffer.from(cap.data, 'base64'));
+        shot = path.relative(ROOT, png).replace(/\\/g, '/');
+        await evalJs(`(() => { const el = document.querySelector('[data-perf-log]'); if (!el) return false; el.hidden = true; el.style.position=''; el.style.left=''; el.style.bottom=''; el.style.background=''; el.style.color=''; el.style.padding=''; el.style.fontSize=''; el.style.zIndex=''; return true; })()`, 15000);
+      } catch (e) { put({ kind: 'ac8-shot-failed', why: String((e && e.message) || e).slice(0, 160) }); }
+      const childLines = jsonl.filter((x) => x.kind === 'child').map((x) => String(x.line || ''));
+      const regLine = childLines.find((l) => l.indexOf('[perf-ipc]') >= 0) || '';
+      const report = {
+        task: 'B-20261118-213947-0779', requirement: 'R-20261118-170937-b34a', at: new Date().toISOString(),
+        note: 'AC8③ 功能验证（隔离实例 + 真实 IPC + 启动日志 + 锚点截图）',
+        head: (() => { try { return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { return ''; } })(),
+        startupLog: regLine,
+        perfRecent: { ok: Boolean(perf && perf.ok), items: perf && Array.isArray(perf.items) ? perf.items.length : null, error: perfError, elapsedMs: Date.now() - startedAtMs },
+        anchor: anchorState,
+        screenshot: shot,
+        isolation: { realTeamSame: sha(realTeamFile) === beforeReal.team, realWbSame: sha(realWb) === beforeReal.wb },
+        pass: {
+          registeredInLog: /registered=true/.test(regLine),
+          handlerResponds: Boolean(perf && perf.ok),
+          anchorReady: Boolean(anchorState && anchorState.exists && anchorState.state === 'ok'),
+        },
+      };
+      fs.writeFileSync(path.join(EVID, 'run-ac8-perf-log.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
+      console.log('\nAC8_CHECK ' + JSON.stringify(report.pass) + ' log=' + JSON.stringify(regLine));
+      process.exitCode = report.pass.registeredInLog && report.pass.handlerResponds && report.pass.anchorReady ? 0 : 1;
       return;
     }
     // 等真实输入框

@@ -19,12 +19,6 @@ const StoreAudit = require('./store-audit.js');
 const FolderOpen = require('./folder-open.js');
 // R-20261118-170937-b34a（T-e2d8 R2）：读盘缓存 + 慢操作日志（性能-YYYYMMDD.jsonl）+ IPC 计时包装的 CJS 单源。
 const perfCache = require('./perf-cache.js');
-// T-0d3b AC8③：注册只读 perf:recent（最近慢 IPC，供界面 data-perf-log 展示）。
-// 用 rawIpcHandle 注册，避免再被计时包装重复计一次。
-try {
-  const registerPerfIpc = perfCache && perfCache.registerPerfIpc;
-  if (typeof registerPerfIpc === 'function') registerPerfIpc(rawIpcHandle, activeTeamProjectNameForPerf);
-} catch (e) { try { console.warn('PERF_IPC_REGISTER_FAILED ' + String((e && e.message) || e)); } catch { /* ignore */ } }
 // B-20261118-191527-c437（P1 稳定性）：崩溃后「复活主窗 / 恢复 webview / 不误退」的纯判定逻辑（Node 可测）。
 const CrashGuard = require('./crash-guard.js');
 // R-b34a 批5：目录扫描结果缓存（files:list 等递归扫描用；键=目录 mtime+size，3s TTL 兜底）
@@ -143,6 +137,25 @@ const ipcCoalesceMs = (() => {
   return process.env.AWB_IPC_COALESCE_MS === undefined || !Number.isFinite(raw) || raw < 0 ? 300 : raw;
 })();
 ipcMain.handle = ipcCoalesce.wrapHandle(ipcMain.handle, { windowMs: ipcCoalesceMs });
+// T-0d3b AC8③（B-20261118-213848 修复 + P1 B-20261118-213947-0779 硬化）：注册只读 perf:recent
+// （最近慢 IPC，供界面 data-perf-log 展示）。必须放在 rawIpcHandle 绑定与包装**之后**——原位置在
+// rawIpcHandle 初始化前引用它，会抛 `Cannot access 'rawIpcHandle' before initialization`，
+// 被 catch 吞掉后 handler 根本没注册、渲染层 `No handler registered for 'perf:recent'`（AC8③ 面板不可用）。
+// 硬化：①先判 rawIpcHandle 已就绪（typeof function），未就绪直接报错到日志，静默失败；
+//      ②成功后**必须**打一行 `[perf-ipc] registered=true` 作为启动可观测证据（测试/排障据此判定）。
+try {
+  const registerPerfIpc = perfCache && perfCache.registerPerfIpc;
+  if (typeof registerPerfIpc !== 'function') {
+    console.warn('[perf-ipc] registered=false reason=perf-log-missing');
+  } else if (typeof rawIpcHandle !== 'function') {
+    console.warn('[perf-ipc] registered=false reason=rawIpcHandle-not-ready');
+  } else {
+    // B-20261118-213848：perf-log 的 registerPerfIpc 期望「ipcMain 形状」(有 .handle)，传裸函数会
+    // `return false` 静默不注册（AC8③ 面板 no handler 的根因之一）——这里包一层 { handle } 传入。
+    const ok = registerPerfIpc({ handle: rawIpcHandle }, activeTeamProjectNameForPerf);
+    console.log('[perf-ipc] registered=' + Boolean(ok));
+  }
+} catch (e) { try { console.warn('PERF_IPC_REGISTER_FAILED ' + String((e && e.message) || e)); } catch { /* ignore */ } }
 // T-20261118-090620-6e39：团队工具子进程的环境。
 // 生产实例（非 TEAM_SELFTEST）不把 TEAM_ROOT / TEAM_PROJECTS_ROOT 继承给子进程——旧行为下子进程里的
 // isSandboxTeamRoot() 会因这两个 env 存在而判真，把真实唤醒当沙盘静默跳过（2026-11-18 09:04 事故：PM 摘要/升级/评审唤醒 103 条全被跳过）。

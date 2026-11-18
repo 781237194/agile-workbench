@@ -36,7 +36,14 @@
         ? `${String(last.name || last.channel || '?')} · ${Number(last.ms) || 0}ms · ${String(last.at || last.atMs || '')}`
         : '最近 24 小时没有慢 IPC 记录';
     }
-    container.textContent = `慢 IPC ${list.length} 条${last ? `；最近 ${String(last.name || last.channel || '?')} ${Number(last.ms) || 0}ms` : ''}`;
+    // 摘要写到独立 span（不能给容器直接赋 textContent：会把 count/last 子节点一起清掉）。
+    let summary = container.querySelector('[data-perf-log-summary]');
+    if (!summary) {
+      summary = document.createElement('span');
+      summary.setAttribute('data-perf-log-summary', '');
+      container.appendChild(summary);
+    }
+    summary.textContent = `慢 IPC ${list.length} 条${last ? `；最近 ${String(last.name || last.channel || '?')} ${Number(last.ms) || 0}ms` : ''}`;
   }
 
   async function refresh() {
@@ -51,11 +58,13 @@
   }
 
   const run = () => refresh();
-  const gate = window.AWBGate;
-  if (gate && typeof gate.interval === 'function') {
-    try { gate.interval(run, 30000); } catch { run(); setInterval(run, 30000); }
+  // 首次立即执行一次（不经 AWBGate：隐藏/失焦时 gate 会跳过，锚点就永远不会被填充——
+  // 隔离实例里页面常被判 hidden，这正是 AC8③ 面板「idle」不可用的原因）。
+  run();
+  const gate2 = window.AWBGate;
+  if (gate2 && typeof gate2.interval === 'function') {
+    try { gate2.interval(run, 30000); } catch { setInterval(run, 30000); }
   } else {
-    run();
     setInterval(run, 30000);
   }
 })();
