@@ -197,7 +197,7 @@ async function main() {
       // 找看板窗目标并截图（真实内容已填充）
       await sleep(600);
       const list = await getJson(PORT, '/json/list');
-      const boardTarget = (list || []).find((t) => t.type === 'page' && /看板\.html/i.test(String(t.url || '')));
+      const boardTarget = (list || []).find((t) => t.type === 'page' && /看板\.html/i.test(decodeURIComponent(String(t.url || ''))));
       put({ kind: 'board-target', url: boardTarget ? String(boardTarget.url).slice(0, 140) : '' });
       let shot = '';
       let contentProbe = null;

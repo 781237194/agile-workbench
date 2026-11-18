@@ -4195,6 +4195,8 @@ const BOARD_SKELETON_MARK = 'board:skeleton';
 let teamBoardFilePath = '';
 // R-b34a R6补：真实看板 8 秒内重复打开复用（只省重建，不省 loadFile；文件缺失/项目变必重建）。
 let teamBoardLastBuild = null;
+// 看板窗当前实际渲染的文件（热开且同一项目时不重载，直接 show/focus，content 近似 0ms）。
+let teamBoardShownFile = '';
 
 function boardSkeletonDataUrl(title) {
   const t = String(title || '团队看板').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
@@ -4247,11 +4249,13 @@ async function ensureBoardWindowWithSkeleton({ theme = 'dark', style = 'native',
     });
   }
   const windowReadyAt = Date.now();
+  // a) 缩短「点击→看到骨架」：窗口创建后**立即 show**（背景色已是看板底色，不白屏），骨架页随后加载；
+  //    loadURL 与 show 并行，不再等骨架 ready 才显示（旧顺序会把窗口创建后到骨架就绪的等待算进感知）。
+  try { teamBoardWindow.show(); } catch { /* ignore */ }
   try {
     await teamBoardWindow.loadURL(boardSkeletonDataUrl(title));
   } catch { /* 骨架失败不阻塞真实看板 */ }
   applyZoomToAllWindows(readZoomPref());
-  try { teamBoardWindow.show(); } catch { /* ignore */ }
   // 两个口径分开报：windowMs=窗口创建耗时（一次性，与热开无关）、skeletonVisibleMs=骨架页可见耗时（AC4 的 ≤200ms 指这个）。
   return { created, windowReadyAt, skeletonAt: Date.now(), windowMs: created ? windowReadyAt - startedWindowAt : 0 };
 }
@@ -8254,6 +8258,22 @@ ipcMain.handle('theme:metrics', async () => {
     // R-b34a R6补：**先骨架后数据**——窗口/骨架立即可见（≤200ms），generateBoard 期间保持骨架，
     // 完成后再 loadFile 真实看板（内容/交互/锚点全不变）。timings 回给调用方并写 性能.jsonl。
     const startedAt = Date.now();
+    // b) 热开快路径：窗口已存在、显示的正是本项目刚生成的看板、且 8s 内 → 直接 show/focus，不重载（content≈0）。
+    const renderedReuse = Boolean(boardWindowAlive() && teamBoardLastBuild
+      && teamBoardLastBuild.projectId === project.id
+      && teamBoardShownFile && teamBoardLastBuild.path === teamBoardShownFile
+      && (Date.now() - teamBoardLastBuild.at) < 8000);
+    if (renderedReuse) {
+      teamBoardProjectId = project.id;
+      teamBoardProjectPath = path.resolve(String(project.path));
+      teamBoardTheme = theme;
+      try { teamBoardWindow.show(); teamBoardWindow.focus(); } catch { /* ignore */ }
+      const timings = {
+        windowMs: 0, skeletonVisibleMs: 0, contentMs: Date.now() - startedAt, warm: true, served: 'rendered',
+        reused: true, budget: { skeletonVisibleMs: 200, contentMs: 800 },
+      };
+      return { ok: true, path: teamBoardLastBuild.path, projectId: project.id, reused: true, reloaded: false, theme, style: boardStyle, themeId: payloadThemeId, timings };
+    }
     const ensured = await ensureBoardWindowWithSkeleton({ theme, style: boardStyle, title: project.name });
     // 口径拆分（A4）：windowMs=窗口创建（一次性）、skeletonVisibleMs=骨架可见（AC4 的 ≤200ms 指这个）。
     const windowMs = ensured.windowMs || 0;
@@ -8277,6 +8297,7 @@ ipcMain.handle('theme:metrics', async () => {
     teamBoardTheme = theme;
     // 复用窗也必须重新加载：generateBoard 每次都会重写 看板.html。
     await teamBoardWindow.loadFile(result.boardPath, { query: { theme, style: boardStyle } });
+    teamBoardShownFile = result.boardPath;
     const contentMs = Date.now() - startedAt;
     applyZoomToAllWindows(readZoomPref());
     teamBoardWindow.show();
