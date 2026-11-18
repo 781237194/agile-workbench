@@ -1014,7 +1014,8 @@ function createTeamTools(options = {}) {
     const team = readJsonSafe(layout.teamFile);
     if (!team || !Array.isArray(team.members)) return { ok: false, code: 'NO_TEAM' };
     // P0 97db 持久性（T-20261119-044009-7ded）：删除墓碑命中时拒写名册（防 6s 延迟回写），并写名册守卫审计。
-    const tombGuardSync = rosterDeletionGuard.deletionTombstoneBlocksRoster({ projectName: name, stateDir: projectStatePaths(name).dir, workbenchFile: process.env.TEAM_WORKBENCH_JSON || '' });
+    // R1（T-20261119-050705-8a78）：重建豁免读真实 store（不依赖单一 env）；墓碑过期即失效。
+    const tombGuardSync = rosterDeletionGuard.deletionTombstoneBlocksRoster({ projectName: name, stateDir: projectStatePaths(name).dir, teamRoot: layout.root, workbenchFile: process.env.AWB_STORE || process.env.TEAM_WORKBENCH_JSON || '' });
     if (tombGuardSync.blocked) return { ok: true, code: 'ROSTER_SYNC_BLOCKED_TOMBSTONE', blocked: true, reason: tombGuardSync.reason };
     // B-2a44：赋值/校验全部走 roster-apply.cjs 单源（与 roster-writer.mjs 同一实现），
     // 不再自己 `member.sessionId =`；非法/旧副本 id 保持名册原值并审计，不静默写坏名册。
@@ -4295,7 +4296,7 @@ function createTeamTools(options = {}) {
     const team = readJsonSafe(layout.teamFile);
     if (!team || !Array.isArray(team.members)) return { ok: false, code: 'NO_TEAM' };
     // P0 97db 持久性（T-20261119-044009-7ded）：删除墓碑命中时拒绝补册/回写名册。
-    const tombGuardEnsure = rosterDeletionGuard.deletionTombstoneBlocksRoster({ projectName: name, stateDir: projectStateDir(name), workbenchFile: process.env.TEAM_WORKBENCH_JSON || '' });
+    const tombGuardEnsure = rosterDeletionGuard.deletionTombstoneBlocksRoster({ projectName: name, stateDir: projectStateDir(name), teamRoot: layout.root, workbenchFile: process.env.AWB_STORE || process.env.TEAM_WORKBENCH_JSON || '' });
     if (tombGuardEnsure.blocked) return { ok: true, code: 'ROSTER_SYNC_BLOCKED_TOMBSTONE', blocked: true, reason: tombGuardEnsure.reason };
     let added = 0;
     for (const role of roleIds) {

@@ -8954,7 +8954,8 @@ ipcMain.handle('theme:metrics', async () => {
     const store = readStore();
     const project = store.projects.find((x) => x.id === targetId);
     if (!project) throw new Error('项目不存在');
-    const removed = { registrations: [], activeProjectCleared: false, currentWorkspaceCleared: false };
+    // 97db P0：removed.errors[] 记录每个失败步骤（不再被外层大 try 静默吞）；partial=任一步失败。
+    const removed = { registrations: [], activeProjectCleared: false, currentWorkspaceCleared: false, errors: [], partial: false, tombstones: [], rosterCleared: [], archiveModes: [] };
     const summary = {
       tasks: Array.isArray(project.tasks) ? project.tasks.length : 0,
       proposals: Array.isArray(project.proposals) ? project.proposals.length : 0,
@@ -8977,117 +8978,135 @@ ipcMain.handle('theme:metrics', async () => {
       };
     }
     // 默认只摘本机记录，绝不动旧团队账本/任务/提案/回执。purgeTeam 仅供显式迁移工具使用。
-    if (p.purgeTeam === true || p.archiveTeam !== false) {
-    try {
-      const teamRoot = resolveTeamRoot();
-      const projectsDir = path.join(teamRoot, '状态', '项目');
-      if (fs.existsSync(projectsDir)) {
-        for (const entry of fs.readdirSync(projectsDir, { withFileTypes: true })) {
-          if (!entry.isDirectory()) continue;
-          const configPath = path.join(projectsDir, entry.name, '项目.json');
-          let config = null;
-          try { config = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch { /* ignore */ }
-          const samePath = config && config.path && path.resolve(String(config.path)).toLowerCase() === path.resolve(project.path).toLowerCase();
-          const sameName = config && [project.teamName, project.name].filter(Boolean).map(String).includes(String(config.name));
-          if (samePath || sameName) {
-            removed.registrations.push({ name: config && config.name || entry.name, path: config && config.path || '' });
-            const sourceDir = path.join(projectsDir, entry.name);
-            if (p.purgeTeam === true) {
-              fs.rmSync(sourceDir, { recursive: true, force: true });
-            } else {
-              // 归档而不是删除：旧任务/提案/回执/提交仍可从 _deleted 找回。
-              const archiveRoot = path.join(projectsDir, '_deleted');
-              fs.mkdirSync(archiveRoot, { recursive: true });
-              const archiveDir = path.join(archiveRoot, storeStamp() + '-' + entry.name);
-              fs.renameSync(sourceDir, archiveDir);
-              removed.archivedTo = archiveDir;
-            }
-          }
-        }
+    // 97db P0（T-20261119-050705-8a78）：delete 顺序重构——
+    // 先把「名册 + 墓碑 + 团队.json + 四映射」确定性落盘（每步独立 try，失败记 removed.errors[]），
+    // 最后才归档登记目录（rename 3 次退避 + 复制兜底）；归档失败绝不再吞掉前面已落盘的结果。
+    const names = [project.teamName, project.name].filter(Boolean).map(String);
+    const step = (stage, fn) => {
+      try { return fn(); } catch (error) {
+        removed.errors.push({ stage, code: String((error && error.code) || 'STEP_FAILED'), message: String((error && error.message) || error).slice(0, 300) });
+        return null;
       }
+    };
+    if (p.purgeTeam === true || p.archiveTeam !== false) {
+      const teamRoot = resolveTeamRoot();
+      // ── 步骤 1：读团队.json（失败只记录，不阻断后续名册清理）────────────────
       const teamFile = path.join(teamRoot, '状态', '团队.json');
-      if (fs.existsSync(teamFile)) {
-        const team = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
-        const names = [project.teamName, project.name].filter(Boolean).map(String);
-        let teamChanged = false;
-        if (team && names.includes(team.activeProject)) {
-          team.activeProject = null;
-          removed.activeProjectCleared = true;
-          teamChanged = true;
-        }
-        // 名册是全局单例：只清掉“被删项目”的会话，不能把其它项目的当前名册一并清空。
-        // B-20261119-015113-2443（AC7）：四处映射同事务清理——名册会话集合必须含
-        // ②项目会话清单(团队会话.json) 与 ④workspace.sessionIds，否则「只建角色未建会话」的项目删完仍有幽灵。
-        let manifestRolesForCleanup = [];
+      const team = step('team-read', () => (fs.existsSync(teamFile) ? JSON.parse(fs.readFileSync(teamFile, 'utf8')) : null));
+      // ── 步骤 2：清 activeProject + 清名册（四处映射同事务口径不变）──────────
+      const roster = step('roster-plan', () => {
+        if (!team || !Array.isArray(team.members)) return null;
+        let manifestRoles = [];
         try {
           const mf = teamTools.readSessionManifest(path.resolve(String(project.path || '')));
-          manifestRolesForCleanup = mf && Array.isArray(mf.roles) ? mf.roles : [];
-        } catch { /* 清单坏了不阻断删除 */ }
-        const cleanupPlan = projectRosterCleanup.planProjectCleanup({ team, project, manifestRoles: manifestRolesForCleanup });
-        // 97db 返工（T-20261119-025124-6af3）：删除后名册必须**确定性**清空——
-        // 若删除后不再有其它项目引用同一团队名，把名册全部 sessionId 并入清理集合（离线/无 workspace/无清单也成立），
-        // 消除「run1 清、run2 不清」的非确定结果；pendingCleanup 只用于 DSH 侧会话归档重试。
+          manifestRoles = mf && Array.isArray(mf.roles) ? mf.roles : [];
+        } catch { /* 清单坏了不阻断 */ }
+        const cleanupPlan = projectRosterCleanup.planProjectCleanup({ team: team, project, manifestRoles });
         let doomedSessions = new Set(cleanupPlan.doomsSessions);
         try {
-          const names = [project.teamName, project.name].filter(Boolean).map(String);
           const peersSameTeam = readStore().projects.filter((x) => x && x.id !== targetId && names.includes(String(x.teamName || x.name || '')));
-          const expanded = projectRosterCleanup.expandDoomedForDeletedTeam({ team, doomedSessions, peersSameTeam });
+          const expanded = projectRosterCleanup.expandDoomedForDeletedTeam({ team: team, doomedSessions, peersSameTeam });
           doomedSessions = expanded.doomed;
           if (expanded.expanded) removed.deterministicRosterClear = true;
-        } catch { /* 读库失败时退回按会话清理；名册清空由后续 pendingCleanup 不影响 */ }
-        // B-20261118-164055-2a44：清名册同样走单源（team-tools → roster-apply.cjs），不再直接 `member.sessionId = ''`。
+        } catch { /* 读库失败时退回按会话清理 */ }
+        let teamChanged = false;
+        if (names.includes(String(team.activeProject || ''))) { team.activeProject = null; removed.activeProjectCleared = true; teamChanged = true; }
         const cleared = (teamTools && typeof teamTools.clearRosterSessionsOf === 'function')
           ? teamTools.clearRosterSessionsOf(team, doomedSessions, { activeProject: (project.teamName || project.name) })
           : { changed: 0, roles: [] };
         if (cleared && cleared.changed) teamChanged = true;
         if (cleared && cleared.roles && cleared.roles.length) {
-          try {
-            if (teamTools && typeof teamTools.appendRosterAudit === 'function') {
-              teamTools.appendRosterAudit(project.teamName || project.name, { source: 'shell/project-delete', cleared: cleared.roles });
+          removed.rosterCleared = cleared.roles.slice(0, 20);
+          try { teamTools.appendRosterAudit(project.teamName || project.name, { source: 'shell/project-delete', cleared: cleared.roles }); } catch { /* 审计失败不阻断 */ }
+        }
+        return { teamChanged };
+      });
+      // ── 步骤 3：写团队.json（先于归档：归档失败不能导致名册回写）────────────
+      step('team-write', () => {
+        if (!team || !roster || !roster.teamChanged) return null;
+        jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'panelTeamSync' });
+        removed.teamWrites = (removed.teamWrites || 0) + 1;
+        return null;
+      });
+      // ── 步骤 4：写删除墓碑（R1：带 expiresAt；失败记错误但继续）──────────────
+      step('tombstone-write', () => {
+        const written = [];
+        for (const nm of names) {
+          const body = writeDeletionTombstone(nm, project.name);
+          if (body) written.push({ teamName: nm, expiresAt: body.expiresAt || null, generation: body.generation || 0 });
+        }
+        removed.tombstones = written;
+        try { scheduleRosterSettle(names); } catch { /* 清扫定时失败不阻断 */ }
+        return null;
+      });
+      // ── 步骤 5：清四映射（当前工作区 + 项目目录会话清单 + workspace 绑定）────
+      step('mappings', () => {
+        const currentFile = path.join(teamRoot, '状态', '当前工作区.json');
+        try {
+          if (fs.existsSync(currentFile)) {
+            const current = JSON.parse(fs.readFileSync(currentFile, 'utf8'));
+            if (current && current.path && path.resolve(String(current.path)).toLowerCase() === path.resolve(project.path).toLowerCase()) {
+              fs.rmSync(currentFile, { force: true });
+              removed.currentWorkspaceCleared = true;
             }
-          } catch { /* 审计失败不阻断删除 */ }
-        }
-        // R-ad44 AC1①（批4b）：团队状态文件统一走 json-atomic.cjs（行为不变：仅 teamChanged 时写整份 team）。
-        if (teamChanged) jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'panelTeamSync' });
-        // P0 97db 持久性（T-20261119-041748-0001）：删除墓碑 + 延迟/启动清扫（防止旧副本 saveTeam 回写名册）。
-        try {
-          const names = [project.teamName, project.name].filter(Boolean).map(String);
-          for (const nm of names) writeDeletionTombstone(nm, project.name);
-          scheduleRosterSettle(names);
-        } catch { /* 墓碑失败不阻断删除 */ }
-      }
-      const currentFile = path.join(teamRoot, '状态', '当前工作区.json');
-      if (fs.existsSync(currentFile)) {
-        try {
-          const current = JSON.parse(fs.readFileSync(currentFile, 'utf8'));
-          if (current && current.path && path.resolve(String(current.path)).toLowerCase() === path.resolve(project.path).toLowerCase()) {
-            fs.rmSync(currentFile, { force: true });
-            removed.currentWorkspaceCleared = true;
           }
-        } catch { /* 坏文件不阻断删除 */ }
-      }
-    } catch { /* 团队状态清理失败不阻断本地删除 */ }
-    }
-    // 项目目录里的会话清单/工作区绑定是“同名重建”的隐藏入口：必须清掉旧会话映射；
-    // workspace.json 只去掉绑定 id，保留目录仍可在重建时被 DSH 按 path 幂等复用。
-    const projectDir = path.resolve(String(project.path || ''));
-    if (p.purgeTeam === true || p.archiveTeam !== false) {
-    for (const name of ['团队会话.json', '团队会话.md']) {
-      try { fs.rmSync(path.join(projectDir, name), { force: true }); } catch { /* ignore */ }
-    }
-    try {
-      const metaFile = path.join(projectDir, 'workspace.json');
-      if (fs.existsSync(metaFile)) {
-        const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8').replace(/^\uFEFF/, ''));
-        if (meta && (meta.dshWorkspaceId || meta.engineUrl)) {
-          meta.previousWorkspaceId = meta.dshWorkspaceId || null;
-          delete meta.dshWorkspaceId;
-          delete meta.engineUrl;
-          meta.removedAt = now();
-          fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+        } catch (error) {
+          removed.errors.push({ stage: 'mappings/current-workspace', code: String((error && error.code) || 'STEP_FAILED'), message: String((error && error.message) || error).slice(0, 200) });
         }
-      }
-    } catch { /* 坏 workspace.json 不阻断删除 */ }
+        const dir = path.resolve(String(project.path || ''));
+        for (const name of ['团队会话.json', '团队会话.md']) {
+          try { fs.rmSync(path.join(dir, name), { force: true }); } catch { /* 单文件清理失败不阻断 */ }
+        }
+        try {
+          const metaFile = path.join(dir, 'workspace.json');
+          if (fs.existsSync(metaFile)) {
+            const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8').replace(/^\uFEFF/, ''));
+            if (meta && (meta.dshWorkspaceId || meta.engineUrl)) {
+              meta.previousWorkspaceId = meta.dshWorkspaceId || null;
+              delete meta.dshWorkspaceId;
+              delete meta.engineUrl;
+              meta.removedAt = now();
+              fs.writeFileSync(metaFile, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+            }
+          }
+        } catch (error) {
+          removed.errors.push({ stage: 'mappings/workspace-json', code: String((error && error.code) || 'STEP_FAILED'), message: String((error && error.message) || error).slice(0, 200) });
+        }
+        return null;
+      });
+      // ── 步骤 6：最后归档登记目录（rename 3 次退避 + 复制兜底；每条独立错误）──
+      step('archive', () => {
+        const projectsDir = path.join(teamRoot, '状态', '项目');
+        if (!fs.existsSync(projectsDir)) return null;
+        for (const entry of fs.readdirSync(projectsDir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          if (String(entry.name) === '_deleted') continue;
+          const configPath = path.join(projectsDir, entry.name, '项目.json');
+          let config = null;
+          try { config = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch { /* 配置坏了按目录名判断 */ }
+          const samePath = config && config.path && path.resolve(String(config.path)).toLowerCase() === path.resolve(project.path).toLowerCase();
+          const sameName = (config && names.includes(String(config.name))) || names.includes(String(entry.name));
+          if (!samePath && !sameName) continue;
+          removed.registrations.push({ name: (config && config.name) || entry.name, path: (config && config.path) || '' });
+          const sourceDir = path.join(projectsDir, entry.name);
+          try {
+            if (p.purgeTeam === true) { fs.rmSync(sourceDir, { recursive: true, force: true }); continue; }
+            const archiveRoot = path.join(projectsDir, '_deleted');
+            fs.mkdirSync(archiveRoot, { recursive: true });
+            const archiveDir = path.join(archiveRoot, storeStamp() + '-' + entry.name);
+            const how = renameDirWithRetry(sourceDir, archiveDir);
+            removed.archivedTo = archiveDir;
+            removed.archiveModes = [...(removed.archiveModes || []), how.mode];
+          } catch (error) {
+            removed.partial = true;
+            removed.errors.push({ stage: 'archive/' + entry.name, code: String((error && error.code) || 'ARCHIVE_FAILED'), message: String((error && error.message) || error).slice(0, 300) });
+          }
+        }
+        // 归档会把 状态/项目/<slug> 整目录搬走（墓碑随之进 _deleted）；这里在原位置补写墓碑，
+        // 保证删除后守卫仍能命中（D7/T-20261119-050705-8a78）。
+        for (const nm of names) { try { writeDeletionTombstone(nm, project.name); } catch { /* ignore */ } }
+        return null;
+      });
     }
     // await 结束：重新读库合并，避免删除期间其它快照更新被整体回退。
     const fresh = readStore();
@@ -9122,8 +9141,10 @@ ipcMain.handle('theme:metrics', async () => {
     if (boardWindowAlive() && teamBoardProjectId === targetId) {
       try { teamBoardWindow.close(); } catch { /* ignore */ }
     }
+    if (removed.errors.length) removed.partial = true;
     return {
       ok: true,
+      partial: removed.partial,
       projectId: targetId,
       removed,
       summary,
@@ -22926,11 +22947,41 @@ function syncRosterGuarded(teamName, project) {
   return teamTools.syncRoster(teamName, project && project.sessions || {});
 }
 
+// 97db P0（T-20261119-050705-8a78）：墓碑有效期（R1）与归档 rename 退避/复制兜底。
+const DELETION_TOMBSTONE_TTL_MS = 10 * 60 * 1000;
+function sleepSyncMs(ms) { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms)); } catch { /* ignore */ } }
+function renameDirWithRetry(source, dest) {
+  const injectEperm = process.env.AWB_TEST_ARCHIVE_EPERM === '1';
+  const injectCopyFail = process.env.AWB_TEST_ARCHIVE_COPY_FAIL === '1';
+  const delays = [0, 150, 500];
+  let lastError = null;
+  for (let attempt = 0; attempt < delays.length; attempt += 1) {
+    try {
+      if (delays[attempt] > 0) sleepSyncMs(delays[attempt]);
+      if (injectEperm) throw Object.assign(new Error('injected EPERM（测试注入）'), { code: 'EPERM' });
+      fs.renameSync(source, dest);
+      return { ok: true, mode: 'rename', attempts: attempt + 1 };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  // 复制兜底：跨卷 / 被占用（EPERM/EBUSY/EACCES/EXDEV）时 rename 一直失败，复制成功后再删源目录。
+  try {
+    if (injectCopyFail) throw Object.assign(new Error('injected copy failure（测试注入）'), { code: 'EPERM' });
+    fs.cpSync(source, dest, { recursive: true, force: true });
+    fs.rmSync(source, { recursive: true, force: true });
+    return { ok: true, mode: 'copy', attempts: delays.length + 1 };
+  } catch (copyError) {
+    const error = new Error('归档失败：' + String((lastError && lastError.message) || lastError) + ' / 复制兜底失败：' + String((copyError && copyError.message) || copyError));
+    error.code = String((lastError && lastError.code) || (copyError && copyError.code) || 'ARCHIVE_FAILED');
+    throw error;
+  }
+}
 function writeDeletionTombstone(teamName, projectName) {
   try {
     const file = deletionTombstoneFile(teamName);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    const body = { teamName: String(teamName), projectName: String(projectName || ""), deletedAt: new Date().toISOString(), generation: Date.now() };
+    const body = { teamName: String(teamName), projectName: String(projectName || ""), deletedAt: new Date().toISOString(), generation: Date.now(), expiresAt: new Date(Date.now() + DELETION_TOMBSTONE_TTL_MS).toISOString() };
     const tmp = file + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(body, null, 2) + "\n", "utf8");
     fs.renameSync(tmp, file);
@@ -22946,7 +22997,12 @@ function sweepRosterFromTombstone(teamName) {
     try {
       const store = readStore();
       const stillActive = (store.projects || []).some((proj) => proj && (String(proj.teamName || proj.name) === String(teamName)) && proj.path && fs.existsSync(String(proj.path)));
-      if (stillActive) return { cleared: false, reason: "project-exists" };
+      if (stillActive) {
+        // R1：同名重建成功 → 墓碑 consumed，立刻删掉，避免团队工具侧被永久拦截。
+        try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
+        try { teamTools.appendRosterAudit(String(teamName), { source: "shell/deletion-tombstone-consumed", gen: tomb.generation || 0 }); } catch { /* ignore */ }
+        return { cleared: false, reason: "project-exists", tombstoneCleared: true };
+      }
     } catch { /* 读库失败时按墓碑继续清扫 */ }
     const teamFile = path.join(resolveTeamRoot(), "状态", "团队.json");
     if (!fs.existsSync(teamFile)) return { cleared: false, reason: "no-team" };
