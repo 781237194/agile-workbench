@@ -6194,6 +6194,14 @@ ipcMain.handle('theme:metrics', async () => {
     let project = null;
     if (payload && payload.projectId) project = store.projects.find((item) => item.id === payload.projectId) || null;
     const wantedName = String((payload && (payload.project || payload.name)) || '').trim();
+    // 97db 复验修正（T-20261119-030838-a67258）：显式按 projectId 查询但项目已删除时，必须返回空名册，
+    // 不得回退到 store 里其它项目（否则删后 team:members 仍返回 6 行、membersEmpty 永远 false）。
+    if (payload && String(payload.projectId || '').trim() && !project && !wantedName) {
+      return {
+        ok: true, project: '', workspace: '', roles: [], roleIds: [], count: 0,
+        membersEmpty: true, projectMissing: true, error: ''
+      };
+    }
     if (!project && wantedName) {
       const hit = findProjectByName(wantedName);
       if (hit && hit.id) project = store.projects.find((item) => item.id === hit.id) || null;

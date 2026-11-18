@@ -67,23 +67,23 @@ function planProjectCleanup({ team, project, manifestRoles } = {}) {
 }
 
 /**
- * 删除项目时把「清理会话集合」确定性扩大（97db 返工 T-20261119-025124-6af3）：
- * 若删除后不再有其它项目引用同一团队名（peersSameTeam 为空），则把名册里**全部 sessionId**
- * 并入 doomed 集合 —— 这样不论 project.sessions 是否为空、DSH 是否离线、团队会话清单是否存在，
- * 名册都能被确定清空（run1 清 / run2 不清的非确定结果即由此消除）。
- * 返回 { doomed:Set, expanded:boolean, added:string[] }；不修改入参。
+ * 删除项目时把「清理会话集合」确定性扩大（97db 返工 T-20261119-025124-6af3、复验修正 T-20261119-030838-a67258）：
+ * 名册（团队.json）是**单团队全局名册**，删除项目即删除该团队 → **无条件**把名册里全部 sessionId 并入 doomed 集合，
+ * 不依赖 project.sessions / workspace / 团队会话清单（三者任一为空或 DSH 离线时也必须清空，tester 真跑 3 次已证
+ * 旧「仅 peers 为空才清」仍有 1/3 未清）。返回 { doomed:Set, expanded:boolean, added:string[] }；不修改入参。
  */
 function expandDoomedForDeletedTeam({ team, doomedSessions, peersSameTeam } = {}) {
   const doomed = new Set(doomedSessions instanceof Set ? [...doomedSessions].map(String) : (Array.isArray(doomedSessions) ? doomedSessions.map(String) : []));
-  const peers = Array.isArray(peersSameTeam) ? peersSameTeam.filter(Boolean) : [];
   const added = [];
-  if (peers.length === 0 && team && Array.isArray(team.members)) {
+  if (team && Array.isArray(team.members)) {
     for (const member of team.members) {
       const sid = member && member.sessionId ? String(member.sessionId) : '';
       if (sid && !doomed.has(sid)) { doomed.add(sid); added.push(sid); }
     }
   }
-  return { doomed, expanded: added.length > 0 || peers.length === 0, added };
+  // peersSameTeam 仅保留在返回体里供审计（说明是否有其它项目引用同团队名），不再影响是否清空。
+  const peers = Array.isArray(peersSameTeam) ? peersSameTeam.filter(Boolean).length : 0;
+  return { doomed, expanded: added.length > 0, added, peersSameTeam: peers };
 }
 
 /** 删除后四处映射是否真的归零（AC7 用：夹具与壳层可复用）。 */

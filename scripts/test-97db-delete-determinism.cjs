@@ -55,7 +55,9 @@ function seedScenario(sb, { sessionMode }) {
   const workspaceIds = sessionMode === 'with-sessions' ? ROLES.map((role) => 'sess-' + role) : (sessionMode === 'empty-workspace' ? [] : []);
   const store = {
     version: 1, activeProjectId: pid,
-    projects: [{ id: pid, name: '沙盘项目', teamName: PNAME, path: projDir, teamMode: 'full', sessions, workspace: { id: 'ws-1', sessionIds: workspaceIds }, tasks: [], messages: [], proposals: [], commits: [], votes: [] }],
+    projects: [{ id: pid, name: '沙盘项目', teamName: PNAME, path: projDir, teamMode: 'full', sessions, workspace: { id: 'ws-1', sessionIds: workspaceIds }, tasks: [], messages: [], proposals: [], commits: [], votes: [] },
+      // 复验修正：沙盘 store 里再放一个无关项目，模拟真实环境多项目；删除后 team:members 不得回退到它。
+      { id: 'P-other', name: '其它项目', teamName: '其它团队', path: projDir, teamMode: 'full', sessions: {}, workspace: { id: 'ws-2', sessionIds: [] }, tasks: [], messages: [], proposals: [], commits: [], votes: [] }],
     ui: {}
   };
   fs.writeFileSync(path.join(DATA, 'userdata', 'workbench.json'), JSON.stringify(store, null, 2) + '\n', 'utf8');
@@ -98,6 +100,8 @@ async function runScenario(name, sessionMode, port) {
   await runScenario('sessions 有', 'with-sessions', BASE_PORT);
   await runScenario('sessions 空+workspace 空', 'empty-sessions', BASE_PORT + 1);
   await runScenario('sessions 空（离线归档失败分支）', 'empty-offline', BASE_PORT + 2);
+  // tester 复验口径：同一场景连跑 3 次必须全清（真实 IPC + 同前置）
+  for (let i = 1; i <= 3; i += 1) await runScenario('同场景连跑 ' + i, 'empty-sessions', BASE_PORT + 2 + i);
   try { fs.writeFileSync(path.join(OUT, 'delete-determinism-run.json'), JSON.stringify({ at: new Date().toISOString(), checks: rows }, null, 2) + '\n', 'utf8'); } catch { /* ignore */ }
   const failed = rows.filter((r) => !r.ok);
   console.log('');
