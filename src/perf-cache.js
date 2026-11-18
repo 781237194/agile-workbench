@@ -229,11 +229,42 @@ function readPerfRecent(teamRoot, projectName, limit = 20) {
 /* ── IPC 计时包装（R2：慢调用可观测） ─────────────────────────────────── */
 
 /**
+ * PM 2026-11-18 18:0x 裁定 A 案：慢日志/IPC 计时的**唯一实现**是 B 的 `src/perf-log.js`。
+ * 本模块保留内置实现只为「夹具可独立跑 / module 缺失时兜底」；生产调用方（main.js）传
+ * `delegateToPerfLog: true` 即走 B 的实现（单一写入者，避免同一事件双写两份日志）。
+ */
+let perfLogModule = null;
+let perfLogTried = false;
+function perfLogAdapter() {
+  if (!perfLogTried) {
+    perfLogTried = true;
+    try { perfLogModule = require('./perf-log.js'); } catch { perfLogModule = null; }
+  }
+  return perfLogModule;
+}
+/** 适配信息（面板/夹具可查：唯一写入者是否已就位）。 */
+function perfLogAdapterInfo() {
+  const mod = perfLogAdapter();
+  return {
+    available: Boolean(mod && typeof mod.timedHandler === 'function'),
+    exports: mod ? Object.keys(mod) : [],
+    mode: mod && typeof mod.timedHandler === 'function' ? 'perf-log' : 'builtin-fallback',
+  };
+}
+
+/**
  * 包一个 ipcMain.handle 的 handler：计时；同步重活（>50ms）或总耗时 ≥100ms 记一条慢日志。
  * 不改 handler 语义/返回值，异常照常向上抛。
  * @param {(name:string)=>string} projectNameOf 取当前项目名（拿不到就跳过日志，不影响业务）
+ * @param {boolean} delegateToPerfLog A 案：true 时委托 perf-log（生产唯一写入者）；夹具默认走内置实现保持沙盘隔离
  */
-function withIpcTiming(name, handler, { projectNameOf, teamRootOf, thresholdMs = SLOW_IPC_MS } = {}) {
+function withIpcTiming(name, handler, { projectNameOf, teamRootOf, thresholdMs = SLOW_IPC_MS, delegateToPerfLog = false } = {}) {
+  if (delegateToPerfLog) {
+    const mod = perfLogAdapter();
+    if (mod && typeof mod.timedHandler === 'function') {
+      return mod.timedHandler(handler, { channel: name, projectNameOf });
+    }
+  }
   return async function timedIpcHandler(...args) {
     const started = process.hrtime.bigint();
     try {
@@ -290,4 +321,6 @@ module.exports = {
   perfStats,
   withIpcTiming,
   timeSync,
+  perfLogAdapter,
+  perfLogAdapterInfo,
 };

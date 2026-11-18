@@ -41,8 +41,10 @@ const activeTeamProjectNameForPerf = () => {
   } catch { return ''; }
 };
 const rawIpcHandle = ipcMain.handle.bind(ipcMain);
+// PM 2026-11-18 18:0x 裁定 A 案：慢日志/IPC 计时唯一实现＝B 的 src/perf-log.js（delegateToPerfLog:true）；
+// perf-cache 只在模块缺失时兜底（夹具可独立跑），避免同一事件被两套实现双写日志。
 ipcMain.handle = (channel, handler) => rawIpcHandle(channel, (typeof handler === 'function'
-  ? perfCache.withIpcTiming(channel, handler, { projectNameOf: activeTeamProjectNameForPerf, teamRootOf: resolveTeamRoot })
+  ? perfCache.withIpcTiming(channel, handler, { projectNameOf: activeTeamProjectNameForPerf, teamRootOf: resolveTeamRoot, delegateToPerfLog: true })
   : handler));
 // R-b34a R3（T-20261118-172619-c495，B 负责）：同通道 + 同参数合并（只读 allowlist，写操作绝不合并）。
 // 只合并在途重复请求（后到者复用同一 Promise）；完成后不复用结果（显式刷新必须拿新值）。AWB_IPC_COALESCE_MS=0 关闭。
