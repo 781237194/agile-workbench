@@ -51,7 +51,7 @@ function main() {
   const env = { ...process.env, TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(TEAM, '状态', '项目'), TEAM_SELFTEST: '1', ELECTRON_RUN_AS_NODE: '1' };
 
   // ② project add（真实生成）
-  const add = run(['project', 'add', '--name', PROJ, '--path', PROJROOT], env);
+  const add = run(['project', 'add', '--name', PROJ, '--dir', PROJROOT], env);
   ok(add.status === 0, '① project add 成功（新项目真实生成）', { status: add.status, stderr: add.stderr.slice(-400) });
   const projDir = path.join(PROJROOT, PROJ);
   ok(fs.existsSync(projDir), '② 项目目录存在', { projDir });
@@ -88,6 +88,7 @@ function main() {
   };
   fs.writeFileSync(path.join(EV, 'smoke-newproject.json'), JSON.stringify(out, null, 2) + '\n', 'utf8');
   console.log(`\nSMOKE_NEWPROJECT ${results.filter((r) => r.ok).length}/${results.length} PASS → 证据-ea30/smoke-newproject.json`);
+  if (process.env.SMOKE_KEEP === '1') { console.log('KEEP_SANDBOX ' + SB); return; }
   try { fs.rmSync(SB, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }); } catch { /* ignore */ }
 }
 
