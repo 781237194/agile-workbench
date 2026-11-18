@@ -41,10 +41,33 @@ const activeTeamProjectNameForPerf = () => {
   } catch { return ''; }
 };
 const rawIpcHandle = ipcMain.handle.bind(ipcMain);
+// R-b34a 批4（测量单：workflow:state p95 1.74s、team:board p95 8.48s、metrics 均 359ms）：
+// 热点只读 IPC 加 5–10s 短 TTL 缓存（PM 2026-11-18 17:57 优先序 b/c）。写路径 writeStore 会清空该缓存，
+// 保证「写完立刻可见」；TTL 只是重复刷新时的降本，不改变 handler 返回值。
+const HOT_IPC_TTL_MS = { 'workflow:state': 5000, 'team:board': 8000, 'system:metrics': 5000 };
+const hotIpcCache = new Map();
+const hotIpcStats = { hits: 0, misses: 0 };
+function hotIpcCacheClear() { hotIpcCache.clear(); }
+function hotIpcTtlWrap(channel, handler) {
+  const ttl = Number(HOT_IPC_TTL_MS[channel]) || 0;
+  if (!ttl) return handler;
+  return async function hotTtlHandler(...args) {
+    let key = channel;
+    try { key = `${channel}|${JSON.stringify(args[1] === undefined ? null : args[1])}`; } catch { key = channel; }
+    const now = Date.now();
+    const hit = hotIpcCache.get(key);
+    if (hit && now - hit.at < ttl) { hotIpcStats.hits += 1; return hit.value; }
+    hotIpcStats.misses += 1;
+    const value = await handler.apply(this, args);
+    hotIpcCache.set(key, { at: Date.now(), value });
+    if (hotIpcCache.size > 64) hotIpcCache.delete(hotIpcCache.keys().next().value);
+    return value;
+  };
+}
 // PM 2026-11-18 18:0x 裁定 A 案：慢日志/IPC 计时唯一实现＝B 的 src/perf-log.js（delegateToPerfLog:true）；
 // perf-cache 只在模块缺失时兜底（夹具可独立跑），避免同一事件被两套实现双写日志。
 ipcMain.handle = (channel, handler) => rawIpcHandle(channel, (typeof handler === 'function'
-  ? perfCache.withIpcTiming(channel, handler, { projectNameOf: activeTeamProjectNameForPerf, teamRootOf: resolveTeamRoot, delegateToPerfLog: true })
+  ? perfCache.withIpcTiming(channel, hotIpcTtlWrap(channel, handler), { projectNameOf: activeTeamProjectNameForPerf, teamRootOf: resolveTeamRoot, delegateToPerfLog: true })
   : handler));
 // R-b34a R3（T-20261118-172619-c495，B 负责）：同通道 + 同参数合并（只读 allowlist，写操作绝不合并）。
 // 只合并在途重复请求（后到者复用同一 Promise）；完成后不复用结果（显式刷新必须拿新值）。AWB_IPC_COALESCE_MS=0 关闭。
@@ -2300,6 +2323,13 @@ function atomicCopyFile(source, target) {
 // 按 mtime+size 缓存，未变直接返回。写路径（writeStore）会清缓存，读后请勿原地改再依赖缓存。
 let storeCache = { file: '', key: '', value: null };
 
+// R-b34a 批4：只读热路径专用——返回缓存共享对象（零 structuredClone），调用方**禁止修改**返回值。
+// 用于 workflow:state / team:board / system:metrics 这类只取数的 IPC；写路径仍用 readStore()（深拷贝，语义不变）。
+let readStoreSharedDepth = 0;
+function readStoreCached() {
+  readStoreSharedDepth += 1;
+  try { return readStore(); } finally { readStoreSharedDepth -= 1; }
+}
 function readStore() {
   const file = storeFile();
   const parse = (target) => {
@@ -2351,13 +2381,17 @@ function readStore() {
     const st = fs.statSync(file);
     const cacheKey = `${st.mtimeMs}:${st.size}`;
     if (storeCache.file === file && storeCache.key === cacheKey && storeCache.value) {
-      // 返回深拷贝：调用方会读-改-写 store，共享缓存对象会在写失败时留下脏缓存。
+      // R-b34a 批4（测量单：readStore 204 调用点、workflow:state p95 1.74s）：命中时不再无条件 structuredClone
+      // （2.71MB store 每次克隆约 5–15ms，是 IPC 热路径的隐性成本）。默认仍返回深拷贝保持「读-改-写」语义不变；
+      // 只读热路径用 readStoreCached() 取共享对象（零克隆）。写路径 writeStore 会清缓存，语义安全。
+      storeCache.hits += 1;
+      if (readStoreSharedDepth > 0) return storeCache.value;
       return structuredClone(storeCache.value);
     }
     const ok = parse(file);
     storeFatal = false;
-    storeCache = { file, key: cacheKey, value: ok };
-    return ok;
+    storeCache = { file, key: cacheKey, value: ok, hits: 1 };
+    return readStoreSharedDepth > 0 ? ok : structuredClone(ok);
   } catch (e) {
     const corrupt = file + '.corrupt-' + storeStamp();
     let isolated = true;
@@ -2550,6 +2584,8 @@ function writeStore(store) {
   storeCache = { file: '', key: '', value: null };
   // R-b34a：通用读盘缓存同样在写前失效（mtime/size 是第二道防线，这里保证「写后立刻可见」）。
   try { perfCache.invalidate(storeFile()); } catch { /* 缓存失效失败不阻断写盘 */ }
+  // R-b34a 批4：写后清热点 IPC 短 TTL 缓存（防「界面停在旧值」，与 mtime 双保险同向）。
+  try { hotIpcCacheClear(); } catch { /* 清缓存失败不阻断写盘 */ }
   if (storeFatal) throw new Error('状态文件损坏且没有可用备份，已阻止写入；请先处理 workbench.json.corrupt-*');
   const file = storeFile();
   // B-20261117-113926-8be3：workbench.json 的写入原来没有任何审计行（json-atomic 的 appendAudit 只认
