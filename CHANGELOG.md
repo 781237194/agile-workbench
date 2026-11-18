@@ -2,6 +2,12 @@
 
 ## 2.0.0（2026-11-18）
 
+### DSH 套装与插件市场（2026-11-18 发版当天）
+
+- 套装包更名上架：**`dsh-agile-workbench@2.0.0`**（npm 公开包）。装好原生 DSH 后一句话「帮我安装 dsh-agile-workbench」即可装齐：工作台启动器 `pm-workbench-dsh`、记忆插件 `dsh-memory-evolve`、浏览器插件 `dsh-ego-browser`、搜索 `@liustack/modsearch`、视觉 `@liustack/modlens`、安全搜索 MCP `mcp-web-search-safe`。
+- 旧包 `dsh-pm-workbench` 已标记 deprecated 并指向新包；新包自带 `cordis.patch.yml`（6 行 insert + web provider 路由），安装后重启 DSH 生效。
+- 仓库 README 更新：一句话安装、组件清单、需求流程、缺陷流程（与《团队宪法》/流程.md 第二部分一致）。
+
 发版前一轮完整闭环：**界面流畅度（缓存/异步/IPC 合并/定时器收敛/骨架屏/差量渲染）、稳定性（崩溃复活兜底）、验收体验（反馈 2.9ms、成功提示可见、慢 IPC 面板可用），以及团队工作流与模板全量对齐（宪法/流程/角色卡/skill/角色卡·宪法·铁律模板）**。
 
 ### 新增 · 性能与流畅度

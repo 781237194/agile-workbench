@@ -1,7 +1,7 @@
 {
-  "name": "dsh-pm-workbench",
-  "version": "1.0.0",
-  "description": "PM 工作台套装 bundle：一次安装装齐工作台启动器、记忆插件、浏览器插件、搜索插件与安全搜索 MCP。",
+  "name": "dsh-agile-workbench",
+  "version": "2.0.0",
+  "description": "PM工作台（Agile Workbench）套装 bundle：一次安装装齐工作台启动器、记忆插件、浏览器插件、搜索插件、视觉插件与安全搜索 MCP。",
   "type": "module",
   "files": [
     "cordis.patch.yml",
@@ -28,7 +28,8 @@
     "memory",
     "browser",
     "search",
-    "mcp"
+    "mcp",
+    "agile-workbench"
   ],
   "engines": {
     "dsh": ">=0.2.2-rc.1 <0.3.0",

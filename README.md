@@ -2,7 +2,7 @@
 
 本地优先的多角色项目工作台：Electron 桌面端 + 团队协作协议 + DSH 外部会话引擎适配层。
 
-- 当前版本：**v0.1.0**（本地基座可用，仍在迭代）
+- 当前版本：**v2.0.0**（2026-11-18 发版）
 - 运行平台：Windows / macOS / Linux（Electron 33，Node.js ≥ 20）
 - 自有代码许可证：**MIT**
 - 默认不联网、不收集遥测；唯一出站请求发往你自己配置的 DSH 地址
@@ -15,6 +15,49 @@
 - **可选插件**（装了更好，不装不坏）：`memory-evolve` 记忆、`modlens` 视觉、`web-search-safe` 搜索。
 - **缺插件自动降级**：只标 `memory:off` / `vision:off` / `search:off`，不报错、不阻断核心；`node 团队\工具\team.mjs status`（或 `doctor`）随时看 on/off、版本、数据目录与读取源。
 - **安装 / 卸载 / 回滚**：见 [`docs/可选插件.md`](docs/可选插件.md)（含双轨验证与故障处理）。
+
+
+## 一句话安装（DSH 插件市场 / 一句话搞定）
+
+装好原生 DSH 后，对 AI 说一句话即可：
+
+> **帮我安装 "dsh-agile-workbench"**
+
+或者去 DSH 的插件市场（Discover）搜索/安装 **dsh-agile-workbench**，更新同理。
+
+一句话会装齐整套组件：
+
+| # | 组件 | 作用 |
+|---|---|---|
+| 1 | **pm-workbench-dsh**（随套装） | 注册工具 `pm_workbench_open`，拉起本机 PM工作台（首次打开会自动补装工作台本体） |
+| 2 | **dsh-memory-evolve** | 跨会话记忆 / 待办 / 技能 |
+| 3 | **dsh-ego-browser** | 受控浏览器（ego lite） |
+| 4 | **@liustack/modsearch** | 联网搜索 / 读网页 / X 检索 |
+| 5 | **@liustack/modlens** | 图片视觉读取 |
+| 6 | **mcp-web-search-safe** | 只读安全搜索 / 抓取 MCP（`web_search` / `web_fetch`） |
+
+> 套装包名 `dsh-agile-workbench`（npm 上架版本 2.0.0）；旧名 `dsh-agile-workbench` 已标记 deprecated，仍可安装但不推荐。
+> 不想装插件也可以直接用桌面版：见下面「新用户最短说明」的 PowerShell 一行命令。
+
+## 需求流程与缺陷流程
+
+### 需求流程（功能 / 改造）
+
+1. **Owner 提目标** → PM 建需求，需求分析师写需求正文（用户故事、边界六类、验收标准、异常）。
+2. **产品评审**（复杂需求先由测试人员做可测性评审 TR-Q）→ 通过才继续。
+3. **Owner 评审**：Owner 本人在评审弹窗点「通过」后才允许开发；正文一改旧决定自动失效。
+4. **PM 派开发**（一次一个角色一个任务；派单前置检查通过才发）→ 开发提交 → **测试独立复验**。
+5. **Owner 验收**：需求到「待验收」后 **只能 Owner 本人**点通过；代管/PM/测试都不能代验需求（程序硬拦）。
+6. 打回走「迭代」入口，改稿后重新走 2–5。
+
+### 缺陷流程（Bug / 场景缺陷）
+
+1. 任意角色立缺陷单（复现步骤 + 验收标准），PM 定优先级：P0 当天 / P1 三天 / P2 一周 / P3 两周。
+2. PM 派开发 → 修复提交 → 测试人员复验出报告与证据。
+3. **PM 或测试人员** `task accept` 验收缺陷单（需求级验收不在此列，只能 Owner 本人）。
+4. 关联规则：提交信息带缺陷号/任务号；测试报告版本递增不覆盖；失败必须可见、不静默。
+
+> 完整流程见《团队宪法》与 [`团队/流程.md`](团队/流程.md) 第二部分「现行工作流」；角色分工、验收权限、派单纪律、证据标准都在那一节写死。
 
 ---
 
@@ -37,7 +80,7 @@ $f="$env:TEMP\pm-workbench-install.ps1"; iwr "https://cdn.jsdelivr.net/gh/781237
 只装 DSH 插件也可以，插件首次加载会自动安装 PM工作台本体、便携 Node、Electron 依赖和桌面入口：
 
 ```powershell
-dsh plugin --profile desktop add dsh-pm-workbench
+dsh plugin --profile desktop add dsh-agile-workbench
 ```
 
 安装后重启 DSH，插件会在后台启动安装器；安装完成后对 DSH 说“打开 PM工作台”，或调用 `pm_workbench_open`。

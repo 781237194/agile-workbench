@@ -1,4 +1,4 @@
-# dsh-pm-workbench —— PM工作台套装 bundle（patch-only）
+# dsh-agile-workbench —— PM工作台套装 bundle（patch-only）
 #
 # 一次 insert 装齐六类行；套装包本身不注册插件、也不 insert 自己（会循环）：
 #   1. pm-workbench-dsh    工作台启动器（工具 pm_workbench_open），随包放在 ./pm-workbench-dsh/
@@ -47,4 +47,4 @@
         #   DSH_WEB_SEARCH_SAFE_SCRIPT 安全搜索脚本（默认本包 mcp/web-search-safe.js）
         command: !!js process.env.DSH_WEB_SEARCH_SAFE_NODE || 'node'
         args:
-          - !!js process.env.DSH_WEB_SEARCH_SAFE_SCRIPT || (process.env.DSH_PROFILE_DIR + '/node_modules/dsh-pm-workbench/mcp/web-search-safe.js')
+          - !!js process.env.DSH_WEB_SEARCH_SAFE_SCRIPT || (process.env.DSH_PROFILE_DIR + '/node_modules/dsh-agile-workbench/mcp/web-search-safe.js')
