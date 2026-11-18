@@ -4294,24 +4294,8 @@ async function ensureBoardWindowWithSkeleton({ theme = 'dark', style = 'native',
   return { created, windowReadyAt, skeletonAt: shownAt, windowMs: created ? windowReadyAt - startedWindowAt : 0, segments };
 }
 
-/** PM 2026-11-18 20:26 限时优化：冷开时若磁盘 看板.html 已比其数据依赖（工作流.json / 任务目录）新，
- *  说明内容仍是最新 → 直接 loadFile，跳过 generateBoard（省 ~1s）；任何一项更新则照旧生成。
- *  只读检查、不改看板内容语义；返回 null 表示不存在/不可用。 */
-function boardHtmlFreshInfo(project) {
-  try {
-    const teamRoot = resolveTeamRoot();
-    const htmlPath = path.join(teamRoot, '看板.html');
-    const hs = fs.statSync(htmlPath);
-    if (!hs.size) return null;
-    const projectDir = path.join(teamRoot, '状态', '项目', String(project.teamName || project.name || ''));
-    const deps = [hs.mtimeMs];
-    const depFiles = [path.join(projectDir, '工作流.json'), path.join(projectDir, '任务')];
-    for (const dep of depFiles) {
-      try { deps.push(fs.statSync(dep).mtimeMs); } catch { /* 缺依赖就当不新 */ }
-    }
-    return { path: htmlPath, bytes: hs.size, mtimeMs: hs.mtimeMs, depsMaxMtime: Math.max(...deps), fresh: hs.mtimeMs >= Math.max(...deps) };
-  } catch { return null; }
-}
+// R-b34a（T-6b24）：看板 HTML 磁盘复用新鲜性——单源纯函数在 src/board-freshness.js（夹具可直测）。
+const { boardHtmlFreshInfo } = require('./board-freshness.js');
 
 async function boardControl(action) {
   if (!boardWindowAlive()) {
@@ -8345,7 +8329,7 @@ ipcMain.handle('theme:metrics', async () => {
       result = { ok: true, boardPath: teamBoardLastBuild.path };
     } else {
       // PM 2026-11-18 20:26 限时优化：看板.html 存在且比依赖新 → 跳过 generateBoard 直接 loadFile。
-      const freshInfo = boardHtmlFreshInfo(project);
+      const freshInfo = boardHtmlFreshInfo({ teamRoot: resolveTeamRoot(), project });
       if (freshInfo && freshInfo.fresh) {
         result = { ok: true, boardPath: freshInfo.path };
         skippedGenerate = true;
