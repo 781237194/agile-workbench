@@ -323,4 +323,13 @@ module.exports = {
   timeSync,
   perfLogAdapter,
   perfLogAdapterInfo,
+  // PM 2026-11-18 18:0x 裁定：慢日志/IPC 计时的 re-export 垫片加在本文件（perf-log.js 仍是唯一实现）。
+  // 调用方既可 require('./perf-cache.js').logSlow（垫片）也可直接 require('./perf-log.js')；两者同一实现。
+  get logSlow() { const m = perfLogAdapter(); return m ? m.logSlow || m.record : undefined; },
+  get logSlowOp() { const m = perfLogAdapter(); return m ? m.logSlowOp || m.logSlow || m.record : undefined; },
+  get recent() { const m = perfLogAdapter(); return m ? m.recent || m.readPerfRecent : undefined; },
+  get logPruneShards() { const m = perfLogAdapter(); return m ? m.pruneShards || m.prunePerfShards : undefined; },
+  get timedHandler() { const m = perfLogAdapter(); return m ? m.timedHandler : undefined; },
+  get wrapIpcHandle() { const m = perfLogAdapter(); return m ? m.wrapIpcHandle : undefined; },
+  get registerPerfIpc() { const m = perfLogAdapter(); return m ? m.registerPerfIpc : undefined; },
 };
