@@ -68,15 +68,19 @@ ok(manifest.version === '1.3.0'
   && manifest.previousVersion && manifest.previousVersion.version === '1.2.0',
   'A6b skill-manifest 1.3.0 + sha 一致 + 旧版归档记录', { version: manifest.version });
 
-// A7 新项目生成（真实 ensureProjectStructure）
+// A7 新项目生成（真实 ensureProjectStructure）：六张角色卡 + 铁律都要带对齐条款
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'align-proj-'));
 try {
   const res = stack.ensureProjectStructure({ name: '夹具项目', root: tmp, desc: '夹具', overwrite: true, teamMode: 'full' });
-  const roleDir = path.join(tmp, '程序员A');
-  const card = fs.existsSync(path.join(roleDir, '角色卡.md')) ? fs.readFileSync(path.join(roleDir, '角色卡.md'), 'utf8') : '';
+  const missingSix = [];
+  for (const dir of ['项目经理', '产品', '需求分析师', '程序员A', '程序员B', '测试人员']) {
+    const p = path.join(tmp, dir, '角色卡.md');
+    const cardText = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+    const miss = KEYWORDS.filter((k) => cardText.indexOf(k) < 0);
+    if (miss.length) missingSix.push({ dir, miss });
+  }
   const ironFile = fs.existsSync(path.join(tmp, '项目铁律.md')) ? fs.readFileSync(path.join(tmp, '项目铁律.md'), 'utf8') : '';
-  ok(card.indexOf('现行工作流对齐') >= 0 && KEYWORDS.every((k) => card.indexOf(k) >= 0),
-    'A7a 新项目生成的程序员A角色卡含对齐五项', { ok: Boolean(res) });
+  ok(missingSix.length === 0, 'A7a 新项目生成的六张角色卡都含对齐五项', missingSix);
   ok(/工装安全/.test(ironFile) && /测量窗口/.test(ironFile), 'A7b 新项目生成的项目铁律含工装安全/测量窗口', {});
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

@@ -11,6 +11,9 @@ import {
   TEAM_MODE_LABELS, normalizeTeamMode, rolesForMode, teamModeDescription,
   techReviewers, votersForMode, VOTE_RULE_TEXT,
 } from './roles.mjs';
+// T-20261118-222610-ea30：产品/分析师角色卡模板按最终项目卡生成
+// （生成器 scripts/gen-role-card-template.cjs；生成版优先，未登记角色回落到手写 ROLE_CARD_BODIES）。
+import { GENERATED_ROLE_CARDS } from './role-card-bodies.generated.mjs';
 
 export const DEFAULT_IRON = `# 项目铁律（默认版）
 
@@ -507,7 +510,7 @@ const ROLE_CARD_BODIES = {
 
 export function roleCard(projectName, role, mode = 'full') {
   const m = normalizeTeamMode(mode);
-  const body = ROLE_CARD_BODIES[role];
+  const body = GENERATED_ROLE_CARDS[role] || ROLE_CARD_BODIES[role];
   if (!body) return '';
   const project = String(projectName || '');
   const roleName = ROLE_NAMES[role] || role;

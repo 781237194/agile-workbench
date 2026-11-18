@@ -106,15 +106,10 @@ const readText = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { ret
     { dir: '项目经理', item: '## 换人流程（回执驱动 · 必读）', reason: 'shared-addon：换人流程节已进入模板，剥离后由本白名单兜底' },
     { dir: '*', item: '*', reason: 'project-specific：各角色按现行工作流补写项目专属小节（措辞不同、语义与 流程.md 第二部分一致）' },
   ];
-  // 模板待同步项（2026-11-18 全员对齐中，产品/需求分析师卡片被角色本人重排，模板正文尚未逐节同步）。
-  // 这里显式列出「生成卡有、项目卡没有」的小节，避免用通配符掩盖模板落后；同步后应逐条删除。
-  const ROLE_CARD_TEMPLATE_PENDING = [
-    { dir: '产品', item: '## 流程（宪法第 9 条）', reason: '角色卡已改为「流程（现行工作流 · 流程.md 第二部分）」并按新工作流重排；模板待同步（列 2.0.1）' },
-    ...['## 通则（唯一要背的一句）', '## 需求正文（本角色主交付）', '## 判定与闭环（卡必须写，程序管不了）', '## 子代理',
-      '交付文件写项目目录内；禁写 `%TEMP%`/桌面/C 盘根；临时文件放 `_tmp/`，交付前清理。', '正文默认唯一写者＝分析师',
-      '测试确认', '要 Owner 拍板的事', '提交纪律', '交接文档']
-      .map((item) => ({ dir: '需求分析师', item, reason: '分析师角色卡已按现行工作流重排（新结构与模板差异较大）；模板待同步（列 2.0.1）' })),
-  ];
+  // 模板待同步项（2026-11-18 22:30 清零）：产品/分析师模板已按最终项目卡生成
+  // （scripts/gen-role-card-template.cjs → role-card-bodies.generated.mjs），11 项全部销项。
+  // 该机制保留：以后再出现「项目卡已重排、模板未同步」时按条目登记，同步后逐条删除，禁止用通配符掩盖。
+  const ROLE_CARD_TEMPLATE_PENDING = [];
   const templatePending = (dir, item) => ROLE_CARD_TEMPLATE_PENDING.some((w) => w.dir === dir && w.item === item);
   const extraAllowed = (dir, item) => ROLE_CARD_EXTRAS.some((w) => (w.dir === dir || w.dir === '*') && (w.item === item || w.item === '*'));
   const structDiffs = [];
