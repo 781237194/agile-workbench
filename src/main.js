@@ -19,6 +19,11 @@ const StoreAudit = require('./store-audit.js');
 const FolderOpen = require('./folder-open.js');
 // R-20261118-170937-b34a（T-e2d8 R2）：读盘缓存 + 慢操作日志（性能-YYYYMMDD.jsonl）+ IPC 计时包装的 CJS 单源。
 const perfCache = require('./perf-cache.js');
+// R-b34a 批5：目录扫描结果缓存（files:list 等递归扫描用；键=目录 mtime+size，3s TTL 兜底）
+const dirScanCache = require('./dir-scan-cache.js');
+const FILES_LIST_MAX_DEPTH = 4;
+const FILES_LIST_MAX_FILES = 600;
+const FILES_LIST_TTL_MS = 3000;
 
 const ROOT = path.join(__dirname, '..');
 // B-20261116-071224-9300：团队根唯一解析器——隔离优先（AWB_TEAM_ROOT > TEAM_ROOT > layout > 仓库团队），
@@ -2586,6 +2591,7 @@ function writeStore(store) {
   try { perfCache.invalidate(storeFile()); } catch { /* 缓存失效失败不阻断写盘 */ }
   // R-b34a 批4：写后清热点 IPC 短 TTL 缓存（防「界面停在旧值」，与 mtime 双保险同向）。
   try { hotIpcCacheClear(); } catch { /* 清缓存失败不阻断写盘 */ }
+  try { dirScanCache.clear(); } catch { /* 目录扫描缓存清理失败不阻断写盘 */ }
   if (storeFatal) throw new Error('状态文件损坏且没有可用备份，已阻止写入；请先处理 workbench.json.corrupt-*');
   const file = storeFile();
   // B-20261117-113926-8be3：workbench.json 的写入原来没有任何审计行（json-atomic 的 appendAudit 只认
@@ -5010,31 +5016,10 @@ function registerIpc() {
     if (!project) throw new Error('项目不存在');
     const root = path.resolve(project.path);
     if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new Error('项目目录不存在：' + root);
-    const MAX_DEPTH = 4;
-    const MAX_FILES = 600;
-    const out = [];
-    const walk = (dir, depth) => {
-      if (depth > MAX_DEPTH || out.length >= MAX_FILES) return;
-      let entries;
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-      for (const entry of entries) {
-        if (out.length >= MAX_FILES) return;
-        if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'userdata' || entry.name === '_tmp') continue;
-        if (entry.name.includes('.awb-tmp-')) continue; // 原子写临时文件不展示
-        const abs = path.join(dir, entry.name);
-        const rel = path.relative(root, abs).replace(/\\/g, '/');
-        if (entry.isDirectory()) {
-          out.push({ rel, name: entry.name, kind: 'dir', size: 0 });
-          walk(abs, depth + 1);
-        } else {
-          let size = 0;
-          try { size = fs.statSync(abs).size; } catch { /* ignore */ }
-          out.push({ rel, name: entry.name, kind: 'file', size });
-        }
-      }
-    };
-    walk(root, 0);
-    return { ok: true, root, files: out, count: out.length, truncated: out.length >= MAX_FILES, maxDepth: MAX_DEPTH };
+    // R-b34a 批5（测量单 d）：递归扫描走目录扫描缓存——键=目录 mtime+size（顶层变化即刻失效）+ 3s TTL 兜底，
+    // 命中时不 readdir、不逐文件 stat；返回结构不变，仅多一个 cached 标记。
+    const scanned = dirScanCache.scanTreeCached(root, { maxDepth: FILES_LIST_MAX_DEPTH, maxFiles: FILES_LIST_MAX_FILES, ttlMs: FILES_LIST_TTL_MS });
+    return { ok: true, root, files: scanned.files, count: scanned.count, truncated: scanned.truncated, maxDepth: scanned.maxDepth, cached: scanned.cached };
   });
   // B-20261117-074103-75e9：同一路径 3s 内只开一次、5 分钟内已开则不再新开（尽力聚焦已有窗口）。
   const { execFile: execFileAsync } = require('node:child_process');
