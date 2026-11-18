@@ -22,6 +22,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const median = (arr) => { const a = arr.slice().sort((x, y) => x - y); return a.length ? a[Math.floor((a.length - 1) / 2)] : null; };
 const max = (arr) => (arr.length ? Math.max(...arr) : null);
 const pctl = (arr, p) => { const a = arr.slice().sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.ceil(a.length * p) - 1)] : null; };
+/** 每轮跑前记录机器上 electron 进程数（PM M-20261118-195616 要求：用于判数据是否撞上别人起停）。 */
+const countElectron = () => {
+  try {
+    const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq electron.exe', '/FO', 'CSV', '/NH'], { encoding: 'utf8', timeout: 15000 });
+    const n = out.split(/\r?\n/).filter((l) => l.toLowerCase().includes('electron.exe')).length;
+    return n;
+  } catch { return -1; }
+};
+const memFreeGB = () => { try { const m = require('node:os').freemem(); return Math.round((m / (1024 ** 3)) * 10) / 10; } catch { return null; } };
 
 (async () => {
   fs.mkdirSync(EV, { recursive: true });
@@ -29,6 +38,8 @@ const pctl = (arr, p) => { const a = arr.slice().sort((x, y) => x - y); return a
   for (let i = 1; i <= RUNS; i += 1) {
     const port = START_PORT + i * 2;
     const logFile = path.join(EV, `cold5-run-${i}.log`);
+    const electronBefore = countElectron();
+    const freeGBBefore = memFreeGB();
     let code = 0;
     try {
       execFileSync(process.execPath, [HARNESS, '--board', `--start-port=${port}`], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], timeout: 600000, encoding: 'buffer' });
@@ -41,7 +52,7 @@ const pctl = (arr, p) => { const a = arr.slice().sort((x, y) => x - y); return a
     const cold = (rep && rep.ipc && rep.ipc.cold && rep.ipc.cold.timings) || null;
     const reopens = (rep && rep.ipc && rep.ipc.reopen && rep.ipc.reopen.runs) || [];
     const hot = reopens.slice(1).map((r) => r.timings).filter(Boolean);
-    runs.push({ run: i, exit: code, cold, hotRuns: hot.length, hotContent: hot.map((t) => t.contentMs), hotSkeleton: hot.map((t) => t.skeletonVisibleMs), head: rep && rep.head });
+    runs.push({ run: i, exit: code, electronBefore, freeGBBefore, cold, hotRuns: hot.length, hotContent: hot.map((t) => t.contentMs), hotSkeleton: hot.map((t) => t.skeletonVisibleMs), head: rep && rep.head });
     try { fs.copyFileSync(REPORT, path.join(EV, `cold5-run-${i}.json`)); } catch { /* ignore */ }
     console.log(`[cold5] run${i} exit=${code} cold=${cold ? `${cold.windowMs}/${cold.skeletonVisibleMs}/${cold.contentMs}` : 'null'}`);
     await sleep(1200);
