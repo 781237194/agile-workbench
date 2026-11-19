@@ -457,7 +457,16 @@ export function archiveSession({ projectName, role, reason = '', self = false, a
   writeJson(roundsFile(projectName), all);
   const decisionLog = self ? pmDecisionLog(project.path, role, record, 'PM 自归档，待 Owner 在 owner confirm --archive 确认') : null;
   // B-20261119-133232-e6c1：归档角色后必须同步摘掉「该角色仍已就绪」的所有派生状态（名册/boot/项目映射/workbench）。
-  const cleanup = clearArchivedRoleState(projectName, role, sessionId, record.id);
+  const cleanup = clearArchivedRoleState(projectName, role, sessionId, record.id, at);
+  // B-568a：**任何** archiveSession（含 auto）都必须同时落两本账（会话归档.jsonl + 归档清理.jsonl），
+  // 两行共用 archiveId/sessionId/at 可互相对应；auto 归档 nextSessionId/rotatedAt 写 null 且 source=auto；
+  // 写失败 → AUDIT_WRITE_FAILED 显式报错（不允许静默只写一份）。
+  writeArchiveDualLedger(projectName, {
+    archiveId: record.id, role, sessionId, at,
+    source: auto ? 'auto' : 'manual',
+    nextSessionId: record.nextSessionId || null, rotatedAt: record.rotatedAt || null,
+    reason: record.reason, cleanup,
+  });
   return { ok: true, record, file, decisionLog, project: project.name, cleanup };
 }
 
@@ -555,7 +564,46 @@ function takeInjectedArchiveFailure() {
   return false;
 }
 
-/** 读 会话归档.jsonl（append-only；坏行计 badLines，不静默丢）。 */
+/**
+ * B-568a：把一行写进指定 jsonl 账本；写失败**显式抛错**（AUDIT_WRITE_FAILED），绝不允许静默只写一份。
+ */
+function appendJsonlStrict(file, row, ledgerName) {
+  try {
+    ensureDir(path.dirname(file));
+    fs.appendFileSync(file, `${JSON.stringify(row)}${String.fromCharCode(10)}`, 'utf8');
+    return true;
+  } catch (error) {
+    fail('AUDIT_WRITE_FAILED', `归档审计写入失败（${ledgerName}）：${String((error && error.message) || error).slice(0, 200)}`, { file, ledger: ledgerName });
+  }
+}
+
+/**
+ * B-568a：归档**双账**同写（主账 会话归档.jsonl + 清理账 归档清理.jsonl）。
+ * - 两行共用同一 archiveId / sessionId / at，便于事后一一对应；
+ * - 只有「旧会话→新会话」的 rotate 才有 nextSessionId/rotatedAt，其余写 null；
+ * - auto 归档标 source=auto；任一份写失败 → AUDIT_WRITE_FAILED（已写入的那份保留，报错文案点名）。
+ */
+export function writeArchiveDualLedger(projectName, { archiveId, role, sessionId, at, source, nextSessionId = null, rotatedAt = null, reason = '', cleanup = null } = {}) {
+  const stamp = at || nowIso();
+  const ledgerRow = {
+    at: stamp, project: projectName, role, archiveId: archiveId || null, sessionId: sessionId || null,
+    source: String(source || 'manual'), nextSessionId: nextSessionId || null, rotatedAt: rotatedAt || null,
+    result: 'archived', reason: truncate(reason || '', 200),
+  };
+  appendJsonlStrict(archiveLedgerPath(projectName), ledgerRow, ARCHIVE_LEDGER_NAME);
+  // 清理账由 clearArchivedRoleState 写；这里只在「没走清理（如 stub/跳过）」时补一行对应账，
+  // 保证任何 archiveSession 都有两行可对应（B-568a 的硬要求）。
+  if (cleanup === null) {
+    const cleanupFile = path.join(projectStatePaths(projectName).dir, '归档清理.jsonl');
+    appendJsonlStrict(cleanupFile, {
+      at: stamp, role, sessionId: sessionId || null, archiveId: archiveId || null, source: String(source || 'manual'),
+      steps: [{ step: 'scope', ok: true, note: '未执行清理（补记对应行）' }],
+    }, '归档清理.jsonl');
+  }
+  return ledgerRow;
+}
+
+/** 读 会话归档.jsonl（append-only；坏行计 badLines，不静默丢）。 *//** 读 会话归档.jsonl（append-only；坏行计 badLines，不静默丢）。 */
 export function readArchiveLedger(projectName) {
   const file = archiveLedgerPath(projectName);
   const rows = [];
@@ -819,7 +867,7 @@ export function sweepDeferredArchives({ projectName, now = Date.now(), limit = A
  * workbench.json projects[].sessions[role] + workspace.sessionIds 去掉该会话；工作流 boots[role] 删除 + 该角色旧 boot 令牌文件删除。
  * 审计：状态/项目/<slug>/归档清理.jsonl 追加一行。
  */
-export function clearArchivedRoleState(projectName, role, sessionId, archiveId = '') {
+export function clearArchivedRoleState(projectName, role, sessionId, archiveId = '', atOverride = '') {
   const project = loadProject(projectName);
   const steps = [];
   const warnings = [];
@@ -930,7 +978,7 @@ export function clearArchivedRoleState(projectName, role, sessionId, archiveId =
   guard('audit', () => {
     const file = path.join(projectStatePaths(projectName).dir, '归档清理.jsonl');
     ensureDir(path.dirname(file));
-    fs.appendFileSync(file, JSON.stringify({ at: nowIso(), role, sessionId: sid, archiveId, steps, warnings }) + '\n', 'utf8');
+    fs.appendFileSync(file, JSON.stringify({ at: String(atOverride || nowIso()), role, sessionId: sid, archiveId, steps, warnings }) + '\n', 'utf8');
     return { file };
   });
   return { ok: warnings.length === 0, role, sessionId: sid, steps, warnings };
