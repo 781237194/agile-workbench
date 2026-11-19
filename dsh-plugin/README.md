@@ -48,6 +48,11 @@ AI 会走 `plugin_manager` 的 `install_bundle`：装包 + 把包名注册进 pr
 
 ### 方式 B：命令行
 
+> **Desktop 版（`DeepSeek Harness.exe`）没有 `dsh` 命令**：它不在 PATH 里。Desktop 下装/升级插件请走
+> GUI「设置 → 插件」，或让本会话 AI 调 `plugin_manager`（`list_bundles` / `install_bundle` /
+> `set_bundle`）；升级需先 `remove_bundle` 再 `install_bundle`（中途插件会短暂卸载）。
+> 下面的 `dsh ...` 命令只适用于自己装过 CLI 的环境。
+
 ```powershell
 # 1) 装包（只是 pnpm add，不会注册 bundle）
 dsh plugin --profile <profile> add dsh-agile-workbench
@@ -58,6 +63,22 @@ dsh plugin --profile <profile> add dsh-agile-workbench
 ```
 
 重启 DSH / 新开会话后生效。
+
+### ⚠ 覆盖 `pm-workbench-dsh` 配置是整段替换
+
+在 profile 的 `cordis.patch.yml` 里按行 id 覆盖时，`config` **整体替换、不做深合并**——只写一个键
+（例如只写 `workbenchDir`）会把 bundle 自带的 `teamRoot` 一起抹掉，表现是面板「未接入」但不报错。
+必须把两个键都重述：
+
+```yaml
+- id: pm-workbench-dsh
+  config:
+    teamRoot: !!js process.env.AWB_TEAM_ROOT || ''
+    workbenchDir: '<你的安装目录>\PM工作台'
+```
+
+安装器会写用户变量 `AWB_TEAM_ROOT` / `PM_WORKBENCH_HOME`；插件在**运行期**解析（每次调用重新读），
+但正在运行的 DSH 进程看不到新变量——装完请重启 DSH，或直接在配置里写死路径。
 
 ### 验证
 

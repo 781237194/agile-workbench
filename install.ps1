@@ -91,7 +91,12 @@ param(
     [string]$GitHubFixTest,
     # 提权子进程内部入口（父进程 Start-Process -Verb RunAs 调用，不对外）
     [switch]$GitHubFixApplyElevated,
-    [string]$GitHubFixElevatedResult
+    [string]$GitHubFixElevatedResult,
+    # 夹具专用：electron 自愈 / Move 重试自检（只跑对应函数并输出 JSON）
+    [string]$TestElectronHeal,
+    [string]$TestElectronCacheDir,
+    [string]$TestMoveRetrySrc,
+    [string]$TestMoveRetryDst
 )
 
 $ErrorActionPreference = 'Stop'
@@ -712,31 +717,23 @@ function Install-PortableNode {
         if (Test-Path -LiteralPath $Destination) {
             throw "便携 Node 目录在安装过程中被创建，停止覆盖：$Destination"
         }
-        # e379：杀毒/索引器偶发锁住 staging 目录时 Directory.Move 会 EPERM；先退避重试 3 次，
-        # 仍失败则改用「复制到最终目录」，并把下载包留给用户重试（旧实现失败即删 zip，重试要重新下载 39MB）。
-        $moveError = $null
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
-            try {
-                [System.IO.Directory]::Move($source, $Destination)
-                $moveError = $null
-                $moved = $true
-                break
-            } catch {
-                $moveError = $_
-                Write-InstallerLog 'WARN' "便携 Node 落盘失败（第 $attempt 次）：$($_.Exception.Message)"
-                Start-Sleep -Milliseconds (200 * $attempt)
+        # P2-7（B-20261119-123400-c437）：Move/解压失败按「占用 / 权限」分类，退避重试 3 次，仍失败复制兜底；
+        # 失败时把目录状态写进 install-result.json，便于事后判断。
+        $move = Move-DirectoryWithRetry -Source $source -Destination $Destination -Attempts 3
+        if (-not $move.ok) {
+            $script:KeepNodeZip = $true
+            $script:NodeDirState = [pscustomobject]@{
+                destination = $Destination
+                exists      = (Test-Path -LiteralPath $Destination)
+                fileCount   = (try { @(Get-ChildItem -LiteralPath $Destination -Recurse -File -ErrorAction SilentlyContinue).Count } catch { 0 })
+                nodeExe     = (Test-Path -LiteralPath (Join-Path $Destination 'node.exe'))
+                errorClass  = [string]$move.errorClass
+                message     = [string]$move.message
             }
+            throw ("便携 Node.js 落盘失败（{0}：{1}）。下载包已保留，可重跑安装器：{2}" -f $move.errorClass, $move.message, $zipPath)
         }
-        if (-not $moved) {
-            try {
-                Copy-Item -LiteralPath (Join-Path $source '*') -Destination $Destination -Recurse -Force -ErrorAction Stop
-                $moved = $true
-                Write-InstallerLog 'WARN' 'Directory.Move 不可用，已改用复制方式落到最终目录'
-            } catch {
-                $script:KeepNodeZip = $true
-                throw "便携 Node.js 落盘失败：$($moveError.Exception.Message)；下载包已保留，可重跑安装器：$zipPath"
-            }
-        }
+        $moved = $true
+        if ($move.mode -eq 'copy') { Write-InstallerLog 'WARN' 'Directory.Move 不可用，已改用复制方式落到最终目录' }
 
         $final = Test-NodeRuntime -NodeExe (Join-Path $Destination 'node.exe')
         if (-not $final.Ok) {
@@ -1243,8 +1240,19 @@ function Write-InstallResult {
         mcp         = $script:MCP
         githubFix   = $script:GitHubFix
         electron    = [pscustomobject]@{
-            exe     = (Join-Path $RepoRoot 'node_modules\electron\dist\electron.exe')
-            pathTxt = (Join-Path $RepoRoot 'node_modules\electron\path.txt')
+            exe           = (Join-Path $RepoRoot 'node_modules\electron\dist\electron.exe')
+            pathTxt       = (Join-Path $RepoRoot 'node_modules\electron\path.txt')
+            missingReason = [string]$(if ($script:ElectronState) { $script:ElectronState.missingReason } else { '' })
+            healed        = [bool]$(if ($script:ElectronState) { $script:ElectronState.healed } else { $false })
+            healReason    = [string]$(if ($script:ElectronState) { $script:ElectronState.healReason } else { '' })
+            distFileCount = [int]$(if ($script:ElectronState) { $script:ElectronState.distFileCount } else { 0 })
+            pathTxtValue  = [string]$(if ($script:ElectronState) { $script:ElectronState.pathTxt } else { '' })
+            dirState      = (Get-ElectronDirState -RepoRoot $RepoRoot)
+        }
+        installerDefaults = [pscustomobject]@{
+            workbenchHome      = [string]$script:TargetPath
+            teamRoot           = [string](Join-Path $RepoRoot '团队')
+            dshRestartRequired = $true
         }
         nodeRuntime = $script:NodeRuntime
         shortcut    = [string]$script:ShortcutPath
@@ -2147,6 +2155,104 @@ function Invoke-GitHubFixTestMode {
     }
 }
 
+# ── P0-1 / P2-7（B-20261119-123400-c437）：electron 自愈 + 目录状态 + Move 退避重试 ─────────
+function Get-ElectronDirState {
+    param([string]$RepoRoot)
+    $dist = Join-Path $RepoRoot 'node_modules\electron\dist'
+    $pathTxt = Join-Path $RepoRoot 'node_modules\electron\path.txt'
+    $count = 0
+    try { if (Test-Path -LiteralPath $dist) { $count = @(Get-ChildItem -LiteralPath $dist -Force -Recurse -File -ErrorAction SilentlyContinue).Count } } catch { $count = 0 }
+    $txt = ''
+    try { if (Test-Path -LiteralPath $pathTxt) { $txt = [System.IO.File]::ReadAllText($pathTxt, [System.Text.Encoding]::UTF8).Trim() } } catch { $txt = '' }
+    return [pscustomobject]@{
+        distExists = (Test-Path -LiteralPath $dist)
+        exeExists  = (Test-Path -LiteralPath (Join-Path $dist 'electron.exe'))
+        fileCount  = [int]$count
+        pathTxt    = $txt
+    }
+}
+
+function Get-MoveFailureClass {
+    param($ErrorRecord)
+    try {
+        $msg = [string]$ErrorRecord.Exception.Message
+        if ($msg -match 'denied|拒绝访问|权限') {
+            # Access denied 时区分「占用」（文件正在被读写）与「真没权限」：尝试在目标父目录建临时文件。
+            return 'permission-or-locked'
+        }
+        if ($msg -match '因为另一个进程|being used by another process|占用|sharing violation') { return 'in-use' }
+        return 'other'
+    } catch { return 'other' }
+}
+
+function Move-DirectoryWithRetry {
+    param([string]$Source, [string]$Destination, [int]$Attempts = 3)
+    $failTimes = 0
+    try { $failTimes = [int]($env:AWB_TEST_MOVE_FAIL_TIMES) } catch { $failTimes = 0 }
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            if ($attempt -le $failTimes) { throw (New-Object System.IO.IOException ('模拟占用（测试注入，第 ' + $attempt + ' 次）：Access is denied.')) }
+            if ($attempt -gt 1) { Start-Sleep -Milliseconds (250 * $attempt) }
+            [System.IO.Directory]::Move($Source, $Destination)
+            return [pscustomobject]@{ ok = $true; attempts = $attempt; mode = 'move'; errorClass = ''; message = '' }
+        } catch {
+            $lastError = $_
+            Write-InstallerLog 'WARN' ("目录移动失败（第 {0}/{1} 次，{2}）：{3}" -f $attempt, $Attempts, (Get-MoveFailureClass $_), $_.Exception.Message)
+        }
+    }
+    # 复制兜底：Move 一直被占用/跨卷时，复制成功后再删源目录。
+    if ($env:AWB_TEST_MOVE_COPY_FAIL -eq '1') {
+        return [pscustomobject]@{ ok = $false; attempts = ($Attempts + 1); mode = ''; errorClass = 'permission-or-locked'; message = '复制兜底也失败（测试注入）' }
+    }
+    try {
+        New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+        Copy-Item -LiteralPath (Join-Path $Source '*') -Destination $Destination -Recurse -Force -ErrorAction Stop
+        return [pscustomobject]@{ ok = $true; attempts = $Attempts + 1; mode = 'copy'; errorClass = ''; message = '' }
+    } catch {
+        $cls = Get-MoveFailureClass $_
+        return [pscustomobject]@{ ok = $false; attempts = $Attempts + 1; mode = ''; errorClass = $cls; message = [string]$_.Exception.Message }
+    }
+}
+
+function Invoke-ElectronHeal {
+    param([string]$RepoRoot, [string]$CacheDir)
+    $dist = Join-Path $RepoRoot 'node_modules\electron\dist'
+    $pathTxt = Join-Path $RepoRoot 'node_modules\electron\path.txt'
+    if (Test-Path -LiteralPath (Join-Path $dist 'electron.exe')) {
+        try { [System.IO.File]::WriteAllText($pathTxt, 'electron.exe', (New-Object System.Text.UTF8Encoding($false))) } catch { }
+        return [pscustomobject]@{ ok = $true; reason = 'already-present'; cacheZip = ''; attempts = 0 }
+    }
+    $cache = $CacheDir
+    if (-not $cache) { $cache = Join-Path $env:LOCALAPPDATA 'electron\Cache' }
+    $zip = $null
+    if (Test-Path -LiteralPath $cache) {
+        $zip = Get-ChildItem -LiteralPath $cache -Recurse -Filter 'electron-v*-win32-x64.zip' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $zip) {
+            $zip = Get-ChildItem -LiteralPath $cache -Recurse -Filter 'electron-v*.zip' -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        }
+    }
+    if (-not $zip) { return [pscustomobject]@{ ok = $false; reason = 'no-cache-zip'; cacheZip = ''; attempts = 0 } }
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            if ($attempt -gt 1) { Start-Sleep -Milliseconds (300 * $attempt) }
+            New-Item -ItemType Directory -Force -Path $dist | Out-Null
+            Expand-Archive -LiteralPath $zip.FullName -DestinationPath $dist -Force -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath (Join-Path $dist 'electron.exe'))) { throw '解压完成但 electron.exe 仍缺失' }
+            [System.IO.File]::WriteAllText($pathTxt, 'electron.exe', (New-Object System.Text.UTF8Encoding($false)))
+            Write-InstallerLog 'OK' ("Electron postinstall 未生效，已从缓存 zip 自愈：{0}（第 {1} 次）" -f $zip.FullName, $attempt)
+            return [pscustomobject]@{ ok = $true; reason = 'cache-zip'; cacheZip = $zip.FullName; attempts = $attempt }
+        } catch {
+            $lastError = $_
+            Write-InstallerLog 'WARN' ("Electron 缓存自愈失败（第 {0}/3 次，{1}）：{2}" -f $attempt, (Get-MoveFailureClass $_), $_.Exception.Message)
+        }
+    }
+    return [pscustomobject]@{ ok = $false; reason = ('extract-failed: ' + [string]$lastError.Exception.Message); cacheZip = $zip.FullName; attempts = 3 }
+}
+
 function Show-Help {
     Write-Host $script:HelpText
 }
@@ -2183,6 +2289,33 @@ if ($GitHubFixApplyElevated) {
         }
     } catch { }
     exit $code
+}
+# P0-1 / P2-7（B-20261119-123400-c437）：夹具自检入口（只跑对应函数并输出 JSON）
+if ($TestElectronHeal) {
+    $healResult = Invoke-ElectronHeal -RepoRoot $TestElectronHeal -CacheDir $TestElectronCacheDir
+    $payload = [pscustomobject]@{
+        ok        = [bool]$healResult.ok
+        reason    = [string]$healResult.reason
+        cacheZip  = [string]$healResult.cacheZip
+        attempts  = [int]$healResult.attempts
+        dirState  = (Get-ElectronDirState -RepoRoot $TestElectronHeal)
+    }
+    Write-Host ('ELECTRON_HEAL_JSON ' + ($payload | ConvertTo-Json -Depth 6 -Compress))
+    if ($healResult.ok) { exit 0 }
+    exit 1
+}
+if ($TestMoveRetrySrc -and $TestMoveRetryDst) {
+    $moveResult = Move-DirectoryWithRetry -Source $TestMoveRetrySrc -Destination $TestMoveRetryDst -Attempts 3
+    $payload = [pscustomobject]@{
+        ok         = [bool]$moveResult.ok
+        attempts   = [int]$moveResult.attempts
+        mode       = [string]$moveResult.mode
+        errorClass = [string]$moveResult.errorClass
+        message    = [string]$moveResult.message
+    }
+    Write-Host ('MOVE_RETRY_JSON ' + ($payload | ConvertTo-Json -Depth 5 -Compress))
+    if ($moveResult.ok) { exit 0 }
+    exit 1
 }
 if ($Help) {
     Show-Help
@@ -2423,6 +2556,13 @@ try {
     } catch {
         Write-InstallerLog 'WARN' "写 AWB_TEAM_ROOT 失败（不影响工作台本体）：$($_.Exception.Message)"
     }
+    # P1-3（B-20261119-123400-c437）：把安装目录写进用户环境变量，启动器优先用它定位本体（与安装器默认对齐）。
+    try {
+        [Environment]::SetEnvironmentVariable('PM_WORKBENCH_HOME', $repoRoot, 'User')
+        Write-InstallerLog 'OK' "已写用户环境变量 PM_WORKBENCH_HOME=$repoRoot（启动器优先使用；运行期解析，无需重启 DSH 记录）"
+    } catch {
+        Write-InstallerLog 'WARN' "写 PM_WORKBENCH_HOME 失败（不影响启动器从默认目录发现本体）：$($_.Exception.Message)"
+    }
 
     Write-Step 5 '安装依赖（npm install）'
     $repoRoot = $script:RepoRoot
@@ -2497,6 +2637,19 @@ try {
         } else {
             $env:PATH = $nodeRuntimeDir
         }
+        # P0-1（B-20261119-123400-c437）：npm 11+ 默认不执行 electron 的 postinstall，先显式授权；
+        # 旧 npm 没有 install-scripts 子命令，失败只记 WARN 不阻断。
+        try {
+            $approveOut = & $tools.NpmExe 'install-scripts' 'approve' 'electron' '-a' 2>&1
+            $approveText = [string]($approveOut | Out-String)
+            if ($approveText -match 'Not a valid npm|Unknown command|ERR!') {
+                Write-InstallerLog 'WARN' '当前 npm 不支持 install-scripts approve（旧版本，忽略）'
+            } else {
+                Write-InstallerLog 'OK' 'npm 11 install-scripts：已授权 electron postinstall'
+            }
+        } catch {
+            Write-InstallerLog 'WARN' "npm install-scripts approve 失败（忽略，继续安装）：$($_.Exception.Message)"
+        }
         $npmExit = Invoke-LoggedCommand -Exe $tools.NpmExe -Arguments @('install', '--no-audit', '--no-fund', '--no-color') -WorkingDirectory $repoRoot -ProgressSeconds 5 -PhaseName 'npm install（依赖 + Electron）'
         if ($npmExit -ne 0 -and -not $mirrorDisabled -and $env:ELECTRON_MIRROR -like '*npmmirror*') {
             # e379：镜像不可用时回退官方源再试一次，避免一次网络抖动就整机装败。
@@ -2534,40 +2687,51 @@ try {
 
     $electronExe = Join-Path $repoRoot 'node_modules\electron\dist\electron.exe'
     $electronPathTxt = Join-Path $repoRoot 'node_modules\electron\path.txt'
+    $script:ElectronState = [ordered]@{
+        missingReason = ''
+        healed        = $false
+        healReason    = ''
+        cacheZip      = ''
+        attempts      = 0
+        distFileCount = 0
+        pathTxt       = ''
+    }
+    $electronState = Get-ElectronDirState -RepoRoot $repoRoot
+    $script:ElectronState.distFileCount = [int]$electronState.fileCount
+    $script:ElectronState.pathTxt = [string]$electronState.pathTxt
     if ((Test-Path -LiteralPath $electronExe) -and (Test-Path -LiteralPath $electronPathTxt)) {
         Write-InstallerLog 'OK' 'Electron 已就位（electron.exe + path.txt 都在）'
     } else {
-        # e379：收尾校验 + 缓存兜底——npm 失败或下载被中断时，从 Electron 本地缓存 zip 解压恢复，
-        # 避免「装完了但一启动就报缺少 electron」的静默半成品。
+        # P0-1：npm 11 拦下 postinstall 时 dist 里只有 LICENSES；先判断是不是 install-scripts 拦截，
+        # 再从缓存 zip 自愈（不联网、不重新下载），自愈失败才按真实原因报错。
         Write-InstallerLog 'WARN' "Electron 不完整：exe=$electronExe pathTxt=$electronPathTxt"
-        $electronDist = Join-Path $repoRoot 'node_modules\electron\dist'
-        $cacheDir = Join-Path $env:LOCALAPPDATA 'electron\Cache'
-        $recovered = $false
-        if (Test-Path -LiteralPath $cacheDir) {
-            $cacheZip = Get-ChildItem -LiteralPath $cacheDir -Filter 'electron-v33*.zip' -File -ErrorAction SilentlyContinue |
-                Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($cacheZip) {
-                try {
-                    New-Item -ItemType Directory -Force -Path $electronDist -ErrorAction Stop | Out-Null
-                    Expand-Archive -LiteralPath $cacheZip.FullName -DestinationPath $electronDist -Force -ErrorAction Stop
-                    if (Test-Path -LiteralPath (Join-Path $electronDist 'electron.exe')) {
-                        $recovered = $true
-                        Write-InstallerLog 'OK' "已从 Electron 缓存恢复：$($cacheZip.FullName)"
-                    }
-                } catch {
-                    Write-InstallerLog 'WARN' "从缓存解压 Electron 失败：$($_.Exception.Message)"
-                }
-            }
-        }
-        if (-not $recovered) {
+        $scriptsBlocked = $false
+        try {
+            $lsOut = & $tools.NpmExe 'install-scripts' 'ls' 2>&1 | Out-String
+            if ($lsOut -match 'electron') { $scriptsBlocked = $true }
+        } catch { $scriptsBlocked = $false }
+        $heal = Invoke-ElectronHeal -RepoRoot $repoRoot -CacheDir (Join-Path $env:LOCALAPPDATA 'electron\Cache')
+        $script:ElectronState.healed = [bool]$heal.ok
+        $script:ElectronState.healReason = [string]$heal.reason
+        $script:ElectronState.cacheZip = [string]$heal.cacheZip
+        $script:ElectronState.attempts = [int]$heal.attempts
+        if ($heal.ok) {
+            $electronState = Get-ElectronDirState -RepoRoot $repoRoot
+            $script:ElectronState.distFileCount = [int]$electronState.fileCount
+            $script:ElectronState.pathTxt = [string]$electronState.pathTxt
+            Write-InstallerLog 'OK' ("Electron 已自愈：{0} 个文件，path.txt={1}" -f $electronState.fileCount, $electronState.pathTxt)
+        } else {
+            $script:ElectronState.missingReason = if ($scriptsBlocked) { 'install-scripts-blocked' } else { 'download-failed' }
             $script:ExitCode = 1
             $electronHint = @(
                 'Electron 二进制没有就位，安装未完成（但其余步骤已装好）。'
-                "  期望文件：$electronExe",
-                '  可手动重试（在安装目录执行）：',
-                '    npm install --no-audit --no-fund',
-                '  国内网络建议先设镜像再重试：',
-                '    $env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"',
+                ("  原因码：{0}（npm 11 install-scripts 拦截 / 下载失败）" -f $script:ElectronState.missingReason)
+                ("  自愈失败原因：{0}" -f $script:ElectronState.healReason)
+                ("  目录状态：dist 存在={0}，文件数={1}，path.txt={2}" -f $electronState.distExists, $electronState.fileCount, $electronState.pathTxt)
+                "  期望文件：$electronExe"
+                '  可手动重试（在安装目录执行）：'
+                '    npm install-scripts approve electron -a'
+                '    npm install --no-audit --no-fund'
                 '  或重跑 安装PM工作台.cmd（会复用本地缓存）。'
             ) -join [Environment]::NewLine
             throw $electronHint
@@ -2703,6 +2867,8 @@ try {
     # e379 返工①：安装结果文件（含 warnings[]），界面「关于 PM工作台」读它显示。
     $installResultFile = Write-InstallResult -RepoRoot $repoRoot -Ok ($script:ExitCode -eq 0) -Stage $script:Stage -Next '双击桌面「PM工作台」，或运行 start.cmd'
     if ($installResultFile) { Write-InstallerLog 'OK' ("安装结果已写：{0}" -f $installResultFile) }
+    Write-Host ''
+    Write-Host '  DSH 连接提示：teamRoot / PM_WORKBENCH_HOME 由插件在运行期解析；若 DSH 正在运行，请重启 DSH 后再点「打开 PM工作台」。' -ForegroundColor Yellow
     Show-Summary -RepoRoot $repoRoot -ShortcutPath $script:ShortcutPath -NodeRuntime $script:NodeRuntime
 } catch {
     $script:ExitCode = 1

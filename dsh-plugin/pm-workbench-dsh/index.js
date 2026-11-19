@@ -12,7 +12,7 @@
  *   3. 插件配置 workbenchDir
  *   4. 环境变量 PM_WORKBENCH_START
  *   5. 环境变量 PM_WORKBENCH_DIR
- *   6. 默认：按「运行环境 + 安装位置」推算的候选目录（见 DEFAULT_DIRS，不含任何作者机器绝对路径）
+ *   6. 默认：按「运行环境 + 安装位置」推算的候选目录（defaultDirs()，含安装器默认 <盘符>\\PM工作台；不含任何作者机器绝对路径）
  *   7. 插件装在工作台自身依赖里（<安装目录>\node_modules\...）时，自动向上找 start.cmd 的安装目录
  *   8. 兜底：%USERPROFILE%\PM工作台、%LOCALAPPDATA%\PM工作台
  *
@@ -40,10 +40,26 @@ export const inject = ['tools', 'sessionController']
 
 const TOOL_NAME = 'pm_workbench_open'
 const START_FILE = 'start.cmd'
-const DEFAULT_DIRS = (() => {
-  // 发版清理（2026-11-19）：候选目录全部按运行环境/安装位置推算，不写死任何作者机器路径。
+// 安装器真实默认：<盘符>\PM工作台（优先 D:）。P1-3（B-20261119-123400-c437）：
+// 启动器与安装器必须能对上默认值，且不写死作者机器路径；夹具用 AWB_TEST_DRIVES 注入沙盘盘符。
+function listWorkbenchDriveCandidates() {
+  const out = []
+  const injected = String(process.env.AWB_TEST_DRIVES || '').trim()
+  const roots = injected
+    ? injected.split(';').map((item) => item.trim()).filter(Boolean)
+    : (process.platform === 'win32'
+      ? ['D:', 'C:', 'E:', 'F:', 'G:'].filter((drive) => { try { return existsSync(drive + '\\') } catch { return false } })
+      : [])
+  for (const root of roots) out.push(join(root, 'PM工作台'))
+  return out
+}
+
+// P2-6（B-20261119-123400-c437）：默认目录与 teamRoot 都按「调用期」解析，不在模块加载期缓存——
+// 安装器新写的 PM_WORKBENCH_HOME / AWB_TEAM_ROOT 不必重启 DSH 也能被下一次调用看到。
+function defaultDirs() {
   const dirs = [
     process.env.PM_WORKBENCH_HOME,
+    ...listWorkbenchDriveCandidates(),
     join(homedir(), 'PM工作台'),
     process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'PM工作台') : '',
     process.env.DSH_PROFILE_DIR ? join(dirname(process.env.DSH_PROFILE_DIR), 'PM工作台') : '',
@@ -60,7 +76,12 @@ const DEFAULT_DIRS = (() => {
     }
   } catch { /* 定位失败不影响其它候选 */ }
   return [...new Set(dirs.filter((dir) => typeof dir === 'string' && dir.trim()))]
-})()
+}
+
+/** 测试/排障用：返回当前默认候选目录（调用期解析）。 */
+export function getDefaultWorkbenchDirs() {
+  return defaultDirs()
+}
 const INSTALLER_SCRIPT_URL =
   'https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.3/install.ps1'
 const INSTALL_COMMAND =
@@ -142,8 +163,8 @@ function resolveLaunchTarget(args, config) {
     }
   }
 
-  const searched = DEFAULT_DIRS.map((dir) => join(dir, START_FILE))
-  for (const dir of DEFAULT_DIRS) {
+  const searched = defaultDirs().map((dir) => join(dir, START_FILE))
+  for (const dir of defaultDirs()) {
     const target = targetFrom(dir)
     if (target) return { ok: true, target, source: `默认路径 ${dir}` }
   }
@@ -361,9 +382,7 @@ function defaultWorkbenchDirs(pluginConfig) {
   if (pluginConfig && typeof pluginConfig.workbenchDir === 'string') push(pluginConfig.workbenchDir)
   push(process.env.AWB_WORKBENCH_DIR)
   push(process.env.PM_WORKBENCH_DIR)
-  push(DEFAULT_DIRS[0])
-  push(DEFAULT_DIRS[1])
-  push(DEFAULT_DIRS[2])
+  for (const dir of defaultDirs()) push(dir)
   return out
 }
 

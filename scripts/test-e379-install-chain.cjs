@@ -34,10 +34,10 @@ const read = (rel) => { try { return fs.readFileSync(path.join(ROOT, rel), 'utf8
   ok(inst.length > 1000, 'A1a install.ps1 可读', { bytes: inst.length });
   ok(inst.includes('ELECTRON_MIRROR') && inst.includes('npmmirror.com/mirrors/electron'), 'A1b Electron 默认镜像 npmmirror', {});
   ok(inst.includes('改用官方源重试一次'), 'A1c 镜像失败回退官方源重试', {});
-  ok(inst.includes('electron-v33*.zip') || inst.includes('electron-v33'), 'A1d Electron 收尾校验带缓存 zip 兜底', {});
+  ok(inst.includes('electron-v*-win32-x64.zip') || inst.includes('Invoke-ElectronHeal'), 'A1d Electron 收尾校验带缓存 zip 兜底（不写死版本）', {});
   ok(inst.includes('已经就位') || inst.includes('dist\\electron.exe') || inst.includes('path.txt'), 'A1e Electron 校验含 path.txt/exe 两项', {});
   ok(/Directory\]::Move\(/.test(inst) && /for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\)/.test(inst) && /Start-Sleep -Milliseconds/.test(inst), 'A1f Directory.Move 三次重试', {});
-  ok(inst.includes('Copy-Item -LiteralPath (Join-Path $source') , 'A1g Move 失败回退复制落盘', {});
+  ok(/Copy-Item -LiteralPath \(Join-Path \$(Source|source) '\*'\)/.test(inst) && /Move-DirectoryWithRetry -Source \$source/.test(inst), 'A1g Move 失败回退复制落盘', {});
   ok(inst.includes('KeepNodeZip'), 'A1h 失败时保留下载包（KeepNodeZip）', {});
   ok(inst.includes('提前创建桌面快捷方式'), 'A1i 快捷方式提前到依赖安装前', {});
   ok(inst.includes('start.cmd') && inst.includes('--check') && inst.indexOf('提前创建桌面快捷方式') < inst.indexOf("Invoke-LoggedCommand -Exe $tools.NpmExe"), 'A1j 依赖安装前先跑 start.cmd --check', {});

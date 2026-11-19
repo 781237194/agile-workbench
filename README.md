@@ -37,6 +37,24 @@
 | 6 | **mcp-web-search-safe** | 只读安全搜索 / 抓取 MCP（`web_search` / `web_fetch`） |
 
 > 套装包名 `dsh-agile-workbench`（npm 上架版本 2.2.3）；旧名 `dsh-agile-workbench` 已标记 deprecated，仍可安装但不推荐。
+>
+> **Desktop 版安装（没有 `dsh` 命令时）**：DSH Desktop 不会把 `dsh` 放进 PATH。装插件的等价路径是
+> GUI「设置 → 插件」，或本会话里让 AI 调 `plugin_manager`：`list_bundles` 看已装、`install_bundle` 装
+> `dsh-agile-workbench@2.2.3`、`set_bundle` 启停；升级是 `remove_bundle` → `install_bundle`（中途插件会短暂卸载）。
+>
+> ⚠ **覆盖插件配置是「整段替换」**：在 profile 的 `cordis.patch.yml` 里覆盖 `pm-workbench-dsh` 行时，
+> `config` 会被整体替换、不做深合并——只写 `workbenchDir` 会把 bundle 自带的 `teamRoot` 一起抹掉。
+> 必须把两个键都重述：
+>
+> ```yaml
+> - id: pm-workbench-dsh
+>   config:
+>     teamRoot: !!js process.env.AWB_TEAM_ROOT || ''
+>     workbenchDir: '<你的安装目录>\PM工作台'
+> ```
+>
+> 安装器结束会写用户变量 `AWB_TEAM_ROOT` / `PM_WORKBENCH_HOME`；插件在**运行期**解析这两个值，
+> 但正在运行的 DSH 进程看不到新变量——装完请**重启 DSH**，或直接在配置里写死路径。
 > 不想装插件也可以直接用桌面版：见下面「新用户最短说明」的 PowerShell 一行命令。
 > **版本：应用本体 v2.1.3 · 套装 `dsh-agile-workbench` 2.2.3**（实际安装版本以工作台「更多 → 检查更新」显示为准）。
 
