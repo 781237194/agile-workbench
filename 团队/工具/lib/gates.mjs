@@ -692,25 +692,71 @@ function collectLatest(dir, pattern) {
   return { name: top.name, version: top.version, sha256: hash, rel: path.relative(path.dirname(path.dirname(dir)), top.file).replace(/\\/g, '/') };
 }
 
-/** G7：测试报告——测试任务 done 前必须有对应报告；默认 auto（有报告才硬校验覆盖）。 */
+/**
+ * G7：测试报告——测试任务 done 前必须有对应报告。
+ *
+ * B-20261119-194559-1aed（PM 2026-11-19 裁定「改工具」）：
+ *   · 带需求绑定的任务只认 **该需求自己的目录** `测试人员/产出/测试报告/<需求id>/v<N>.md`
+ *     （文件名只留版本号，取版本号最大的一份），且**正文首行必须写明该需求 id**；
+ *   · 无需求绑定的任务沿用历史口径 `测试人员/产出/测试报告-v<N>.md`（按 mtime 取最新一份）；
+ *   · 历史报告不改写、不迁移：旧口径文件仍在原处，新口径按目录隔离，互不遮蔽。
+ */
 export function gateTestReport({ projectPath, task, requirementId }) {
-  const dir = path.join(path.resolve(projectPath), '测试人员', '产出');
+  const base = path.join(path.resolve(projectPath), '测试人员', '产出');
+  const reqId = String(requirementId || '').trim();
+  if (reqId) {
+    const relDir = `测试人员/产出/测试报告/${reqId}`;
+    const dir = path.join(base, '测试报告', reqId);
+    let names = [];
+    try { names = fs.readdirSync(dir).filter((name) => /^v\d+\.md$/i.test(name)); } catch { names = []; }
+    if (names.length) {
+      const rows = names.map((name) => ({
+        name,
+        version: Number((/^v(\d+)\.md$/i.exec(name) || [])[1] || 0),
+        mtime: fs.statSync(path.join(dir, name)).mtimeMs,
+      })).sort((a, b) => (b.version - a.version) || (b.mtime - a.mtime));
+      const top = rows[0];
+      const rel = `${relDir}/${top.name}`;
+      const text = readText(path.join(dir, top.name), '');
+      const firstLine = String(text.split(/\r?\n/)[0] || '');
+      if (!firstLine.includes(reqId)) {
+        return {
+          code: 'TEST_REPORT_REQUIRED', gate: 'G7', missing: [`报告首行未写明需求 ${reqId}`], file: rel, requirementId: reqId,
+          next: `把 ${rel} 首行改成「# 测试报告 · ${reqId} …」再 task done`,
+          message: `报告首行没有写明需求 id ${reqId}（首行为：${firstLine.slice(0, 60)}）`,
+        };
+      }
+      if (!/PASS|FAIL|通过|不通过/i.test(text)) {
+        return {
+          code: 'TEST_REPORT_REQUIRED', gate: 'G7', missing: ['测试报告缺 PASS/FAIL 结论'], file: rel, requirementId: reqId,
+          next: '补明确结论后再 task done',
+          message: '测试报告没有明确 PASS/FAIL 结论',
+        };
+      }
+      return null;
+    }
+    // 新口径目录还没报告时，回退历史口径（不改写历史报告；老项目/老任务不被误拦）——
+    // 一旦该需求目录里出现 vN.md，就只认它，不再看全局最新那份（消除遮蔽）。
+  }
+  // 无需求绑定，或该需求的新口径目录里还没有报告：沿用历史口径（测试人员/产出/测试报告-v<N>.md，mtime 最新一份）
   let names = [];
-  try { names = fs.readdirSync(dir).filter((name) => /^测试报告-v\d+\.md$/i.test(name)); } catch { names = []; }
+  try { names = fs.readdirSync(base).filter((name) => /^测试报告-v\d+\.md$/i.test(name)); } catch { names = []; }
   if (!names.length) {
     return {
       code: 'TEST_REPORT_REQUIRED', gate: 'G7', soft: true, missing: ['测试报告'], requirementId,
-      next: `补 测试人员/产出/测试报告-vN.md（含 PASS/FAIL 与 ${requirementId || '需求'} 覆盖）`,
-      message: '没有测试报告（仅审计，不阻断）',
+      next: reqId
+        ? `补 测试人员/产出/测试报告/${reqId}/v1.md（首行写需求 ${reqId}）或历史口径 测试人员/产出/测试报告-vN.md`
+        : '补 测试人员/产出/测试报告-vN.md（含 PASS/FAIL 结论）',
+      message: '还没有测试报告（仅审计，不阻断）',
     };
   }
-  const rows = names.map((name) => ({ name, mtime: fs.statSync(path.join(dir, name)).mtimeMs })).sort((a, b) => b.mtime - a.mtime);
-  const text = readText(path.join(dir, rows[0].name), '');
-  if (requirementId && !text.includes(String(requirementId))) {
+  const rows = names.map((name) => ({ name, mtime: fs.statSync(path.join(base, name)).mtimeMs })).sort((a, b) => b.mtime - a.mtime);
+  const text = readText(path.join(base, rows[0].name), '');
+  if (reqId && !text.includes(reqId)) {
     return {
-      code: 'TEST_REPORT_REQUIRED', gate: 'G7', missing: [`测试报告未覆盖需求 ${requirementId}`], file: `测试人员/产出/${rows[0].name}`,
-      next: '在测试报告中写明需求 id 与 PASS/FAIL 结论',
-      message: `最新测试报告没有覆盖需求 ${requirementId}`,
+      code: 'TEST_REPORT_REQUIRED', gate: 'G7', missing: [`测试报告未覆盖需求 ${reqId}`], file: `测试人员/产出/${rows[0].name}`, requirementId: reqId,
+      next: `改历史报告（不推荐）或新建 测试人员/产出/测试报告/${reqId}/v1.md（首行写需求 id）`,
+      message: `历史口径最新报告没有覆盖需求 ${reqId}`,
     };
   }
   if (!/PASS|FAIL|通过|不通过/i.test(text)) {
