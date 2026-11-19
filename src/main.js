@@ -1427,9 +1427,28 @@ async function inspectProjectSessions(project, binding = {}) {
   const ghost = [];
   const renamed = [];
   const duplicates = [];
+  // R-97db（B-190a）：**名册已归档**的角色一律计入 missing、不进 items。
+  // 根因（PM 2026-11-20 02:09 实测）：item.archived 取的是 **DSH 会话列表**的 remoteSession.archived，
+  // 我们团队「归档成员」不会让 DSH 那边归档 → item.archived 恒 false → 渲染层 verifiedCount 的
+  // items 分支（!item.archived）永远过滤不掉 → 侧栏「6/6 已核验」。名册口径必须在后端先拦掉。
+  const rosterArchivedOf = (() => {
+    try {
+      const members = (typeof teamTools !== 'undefined' && teamTools && typeof teamTools.teamMembers === 'function')
+        ? (teamTools.teamMembers() || []) : [];
+      const map = new Map();
+      for (const m of members) {
+        const role = String((m && m.role) || '');
+        const sid = String((m && m.sessionId) || '').trim();
+        if (role) map.set(role, Boolean(m && m.archived) || !sid);
+      }
+      return map;
+    } catch { return new Map(); }
+  })();
   for (const roleId of roleIds) {
     const sessionId = project.sessions && project.sessions[roleId] ? String(project.sessions[roleId]) : '';
     const remoteSession = sessionId ? byId.get(sessionId) : null;
+    // 名册已归档/未绑定 → 不算可用会话（这是「归档成员后仍 6/6」的直接根因）
+    if (rosterArchivedOf.get(roleId) === true) { missing.push(roleId); continue; }
     const here = Boolean(remoteSession) && !remoteSession.archived
       && (scoped(remoteSession) || (!membershipKnown && cwdSame(remoteSession)));
     if (!sessionId || !remoteSession || !here) {

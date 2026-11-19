@@ -73,6 +73,15 @@ function main() {
       && /rosterIds \? \(rosterIds\.has\(role\.id\) \? \(sessions\[role\.id\] \|\| null\) : null\) : \(sessions\[role\.id\] \|\| null\)/.test(seSeg),
       { seg: seSeg.slice(0, 320) });
 
+    // A4（PM 2026-11-20 02:09 线索）：dsh:team-status 的 item.archived 取的是 **DSH 会话列表**标记，
+    // 团队「归档成员」不会让 DSH 归档 → 必须在 inspectProjectSessions 里先按名册拦掉（否则 verifiedCount 永远 6/6）。
+    const ipStart = m.indexOf('async function inspectProjectSessions');
+    const ipSeg = ipStart >= 0 ? m.slice(ipStart, ipStart + 4000) : '';
+    check('A4 inspectProjectSessions 有 rosterArchivedOf：名册已归档/未绑定的角色计入 missing、不进 items',
+      ipSeg.includes('const rosterArchivedOf')
+      && /if \(rosterArchivedOf\.get\(roleId\) === true\) \{ missing\.push\(roleId\); continue; \}/.test(ipSeg),
+      { seg: ipSeg.slice(0, 260) });
+
     /* ── B 逻辑复算（等价实现，覆盖「残留映射 vs 名册」两种情形） ── */
     const roleIds6 = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
     const residual = { pm: 's1', product: 's2', analyst: 's3', programmer1: 's4', programmer2: 's5', tester: 's6' };
