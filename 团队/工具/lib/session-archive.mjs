@@ -367,7 +367,7 @@ function pmDecisionLog(projectPath, role, record, text) {
  * 换人后必须按「被替换下来的旧 sessionId」归档——否则按 currentSessionOf 会把刚建的新会话归档掉。
  * `skipTranscript`：沙盘/夹具用（不读 DSH 转录，只写本地记录；inputTokens 记 null 而不是去猜）。
  */
-export function archiveSession({ projectName, role, reason = '', self = false, auto = false, operator = 'pm', force = false, sessionId: explicitSessionId = '', skipTranscript = false }) {
+export function archiveSession({ projectName, role, reason = '', self = false, auto = false, operator = 'pm', force = false, sessionId: explicitSessionId = '', skipTranscript = false, replacementSessionId = '' }) {
   if (!role) fail('BAD_ROLE', '需要 --role');
   const project = loadProject(projectName);
   // B-da51（f73f 回归）：未闭环判据 = 非终态（statusIsClosed）+ 非镜像任务（type=requirement）+ owner 命中。
@@ -413,6 +413,18 @@ export function archiveSession({ projectName, role, reason = '', self = false, a
     return true;
   });
   if (pendingUnrotated && !force) fail('ALREADY_ARCHIVED', `该角色已有未换人的归档：${pendingUnrotated.id}（如需重归档加 --force，或先 session rotate）`, { archiveId: pendingUnrotated.id });
+  // B-20261119-203542-f32f（2026-11-19 20:33 事故）：归档「该角色当前在岗会话」且未给替代会话 →
+  // clearArchivedRoleState(archivedIsCurrent=true) 会清空名册/manifest/workbench 三处绑定 →
+  // session check 5/6 → 全体 send 被 SESSION_MAP_INCONSISTENT 拦（PM 当晚三次派单失败）。
+  // 口径：归档当前会话必须显式给出替代会话（或走 --self 自归档流程），否则零副作用拒绝。
+  const currentForReplaceGuard = (() => { try { return String(currentSessionOf(projectName, role) || ''); } catch { return ''; } })();
+  const replacementSid = String(replacementSessionId || '').trim();
+  if (sessionId && currentForReplaceGuard && sessionId === currentForReplaceGuard && !replacementSid && !self) {
+    fail('ARCHIVE_CURRENT_NEEDS_REPLACEMENT', `不能归档角色 ${role} 的当前在岗会话 ${sessionId}：会清空四处会话绑定（session check 5/6）并让全队 send 被拦。请先 session rotate 建新会话，再归档旧会话（也可显式传 --replacement <新sessionId>）`, {
+      role, sessionId, currentSessionId: currentForReplaceGuard, auto,
+      next: `node 团队\\工具\\team.mjs session rotate --role ${role} --project "${projectName}"` ,
+    });
+  }
   const rounds = readRounds(projectName, role).roundsSinceArchive;
   const inputTokens = skipTranscript ? null : latestInputTokens({ projectName, sessionId });
   const at = nowIso();

@@ -1556,7 +1556,7 @@ export async function cmdSession(args) {
     const self = Boolean(args.self);
     if (!self && !args.confirm) fail('CONFIRM_REQUIRED', '归档需显式 --confirm（或 PM --self 后 owner confirm --archive）');
     if (self && String(args.role || '') !== 'pm') fail('BAD_ARGS', '--self 只用于 PM 自归档');
-    const r = archiveSession({ projectName, role: String(args.role || ''), reason: String(args.reason || ''), self, force: Boolean(args.force), operator: String(boot.role), sessionId: String(args['archive-session'] || '') });
+    const r = archiveSession({ projectName, role: String(args.role || ''), reason: String(args.reason || ''), self, force: Boolean(args.force), replacementSessionId: String(args.replacement || ''), operator: String(boot.role), sessionId: String(args['archive-session'] || '') });
     const human = `已归档 ${r.record.id}（${r.record.role}，会话 ${r.record.sessionId || '(无)'}，rounds=${r.record.rounds}，nextSessionId=null，rotate 后回写）\n记录：${r.file}${r.decisionLog ? '\n决策日志：' + r.decisionLog + '（待 Owner confirm）' : ''}`;
     out(args, human, { ok: true, ...r });
     return;

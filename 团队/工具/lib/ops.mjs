@@ -84,7 +84,7 @@ import { assertDispatchPrecheck, DISPATCH_LOCK_MAX_INFLIGHT } from './dispatch-c
 import { checkEvidenceGate } from './evidence.mjs';
 // R-bf05（T-20261119-181230-feee）§7.2：boot 简报「角色卡模板落后:」行（只提示、绝不写卡）。
 import { rolecardStaleBriefLines } from './rolecard-cli.mjs';
-import { bumpRound, archiveSession, confirmArchive, ROUNDS_MAX } from './session-archive.mjs';
+import { bumpRound, archiveSession, confirmArchive, ROUNDS_MAX, currentSessionOf } from './session-archive.mjs';
 import {
   transitionRequirement, syncWorkflowRow, stampRejected, workflowAction, readWorkflowState, writeWorkflowState, latestValidOwnerDecision, currentDeliveryRound,
 } from './lifecycle.mjs';
@@ -7168,12 +7168,25 @@ export async function cmdTask(args) {
     try {
       roundInfo = bumpRound(b.project, String(task.owner || b.role), task.id);
       if (roundInfo && roundInfo.archived === 'triggered') {
-        const arch = archiveSession({ projectName: b.project, role: String(task.owner || b.role), reason: `阶段达 ${ROUNDS_MAX} 自动归档`, auto: true, operator: 'system' });
-        roundInfo.archive = arch.record.id;
+        // B-f32f：**自动归档不能归档正在岗的当前会话**。2026-11-19 20:33 事故：task done 轮次达 10 →
+        // 这里直接 archiveSession(未传 sessionId) → 默认归档 currentSessionOf() = 当前在岗会话 →
+        // clearArchivedRoleState 清空名册/manifest/workbench → session check 5/6 → 全队 send 被拦。
+        // 现在：当前会话在岗时**只提示**（该 rotate 了），真正的归档在 rotate 之后对旧会话做。
+        const autoRole = String(task.owner || b.role);
+        const curSid = (() => { try { return String(currentSessionOf(b.project, autoRole) || ''); } catch { return ''; } })();
+        const mySid = String(b.sessionId || '');
+        if (curSid && mySid && curSid === mySid) {
+          roundInfo.archive = '';
+          roundInfo.archiveBlocked = 'ARCHIVE_CURRENT_NEEDS_REPLACEMENT';
+          roundInfo.archiveHint = `轮次达 ${ROUNDS_MAX}：当前会话仍在岗，先 session rotate 建新会话，再归档旧会话`;
+        } else {
+          const arch = archiveSession({ projectName: b.project, role: autoRole, reason: `阶段达 ${ROUNDS_MAX} 自动归档`, auto: true, operator: 'system' });
+          roundInfo.archive = arch.record.id;
+        }
       }
     } catch (e) { roundInfo = { error: String((e && e.message) || e) }; }
     const roundHint = roundInfo && !roundInfo.error
-      ? `\n阶段：${roundInfo.rounds}/${ROUNDS_MAX}${roundInfo.archived === 'triggered' ? `（已自动归档 ${roundInfo.archive || ''}）` : ''}`
+      ? `\n阶段：${roundInfo.rounds}/${ROUNDS_MAX}${roundInfo.archived === 'triggered' ? (roundInfo.archiveBlocked ? `（需换人后再归档：${roundInfo.archiveHint || ''}）` : `（已自动归档 ${roundInfo.archive || ''}）`) : ''}`
       : '';
     const memoryHint = memoryGate && memoryGate.code === 'MEMORY_ABSENT_WARN'
       ? `\n提醒：项目记忆里没有 ${task.id} 的条目（非 P0 不阻断，下一次补写）`

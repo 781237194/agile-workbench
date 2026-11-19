@@ -2454,7 +2454,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
       project: '试点', teamMode: 'full', workspace: path.join(projectsRoot, '试点'), workspaceId: 'st-2e6b', generatedAt: new Date().toISOString(),
       roles: ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'].map((role) => ({ role, name: role, title: `团队·${role}`, sessionId: `session-st-2e6b-${role}`, reused: false, model: '' })),
     }, null, 2) + '\n');
-    const arch = JSON.parse(run(['session', 'archive', '--project', '试点', '--boot', gatePm2.token, '--role', 'product', '--confirm', '--reason', 'selftest 归档', '--json']).stdout.trim());
+    const arch = JSON.parse(run(['session', 'archive', '--project', '试点', '--boot', gatePm2.token, '--role', 'product', '--confirm', '--replacement', 'session-st-replacement', '--reason', 'selftest 归档（B-f32f：归档当前会话须显式给替代会话）', '--json']).stdout.trim());
     for (const k of ['role', 'sessionId', 'rounds', 'inputTokens', 'at', 'reason', 'nextSessionId', 'operator', 'self']) if (!(k in arch.record)) failStep('归档缺字段 ' + k);
     if (arch.record.nextSessionId !== null || arch.record.rotatedAt !== null) failStep('归档时 nextSessionId/rotatedAt 应为 null', JSON.stringify(arch.record).slice(0, 200));
     const archAgain = run(['session', 'archive', '--project', '试点', '--boot', gatePm2.token, '--role', 'product', '--confirm', '--json'], { expectFail: true });
