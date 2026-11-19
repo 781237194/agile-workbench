@@ -774,6 +774,8 @@ const {
 let teamTools = require('./team-tools');
 // B-20261119-015113-2443（97db）：名册四态/删除清四处映射/恢复四段审计的纯逻辑单源（壳层与夹具共用）。
 const projectRosterCleanup = require('./project-roster-cleanup.js');
+// B-24f0（e6c1 三条观测项）：成员数口径与「删项目后 activeProject 落点」纯逻辑（单测见 scripts/test-24f0-observability.cjs）。
+const rosterObservability = require('./roster-observability.js');
 // R-4657：缺陷验收自动化单源（CLI 与主进程 watch/tick/IPC 共用；不写第二套判据）。
 const autoAccept = require(path.join(ROOT, 'scripts', 'auto-accept.cjs'));
 // B-9b05（AC1/AC2/AC5）：验收前置两档判定与渲染层共用同一份实现——
@@ -6326,10 +6328,18 @@ ipcMain.handle('theme:metrics', async () => {
     // 不看 roles 数组长度；名册全空 = 本工作区无在册成员 → roles 直接为空（团队台 0 行）。
     const rosterMemberValues = [...rosterMemberMap.values()];
     const rosterAllEmpty = rosterMemberMap.size === 0 || rosterMemberValues.every((sid) => !String(sid || '').trim());
+    // B-24f0（e6c1 三条观测项 · PM 裁定）：成员数口径唯一为「名册行数」——归档/删项目只清会话绑定/就绪状态，
+    // 名册行保留（对应 Owner「归档应移除 boot」），所以 memberCount 不随归档变化，readyCount 会减。
+    const rosterCountsNow = rosterObservability.rosterCounts(teamTools.teamMembers() || []);
     if (rosterAllEmpty) {
       return {
         ok: true, project: projectName, workspace: workspacePath, roles: [], roleIds: memberRoleIds,
-        count: 0, membersEmpty: true, rosterAllEmpty: true, teamMode: normalizeTeamMode(project && project.teamMode), error: ''
+        count: 0,
+        // 名册行仍在（只是会话绑定被清）：成员数按名册行报，不报 0（否则界面会显示"团队没了"）。
+        memberCount: rosterCountsNow.memberCount, activeCount: rosterCountsNow.activeCount,
+        readyCount: rosterCountsNow.readyCount, archivedCount: rosterCountsNow.archivedCount,
+        unboundActiveCount: rosterCountsNow.unboundActiveCount,
+        membersEmpty: true, rosterAllEmpty: true, teamMode: normalizeTeamMode(project && project.teamMode), error: ''
       };
     }
     const workspaceSessionSet = new Set((project && project.workspace && Array.isArray(project.workspace.sessionIds) ? project.workspace.sessionIds : []).map(String));
@@ -6354,11 +6364,17 @@ ipcMain.handle('theme:metrics', async () => {
         memberArchived: Boolean((teamTools.teamMembers() || []).find((m) => m && m.role === roleId) || {}).archived
       };
     });
+    // B-24f0（e6c1 三条观测项 · PM 裁定）：成员数口径唯一为「名册行数」——归档角色只清会话绑定/就绪状态，
+    // 名册行保留（对应 Owner「归档应移除 boot」），所以 memberCount 不随归档变化，readyCount 会减。
+    // （rosterCountsNow 在上面 rosterAllEmpty 判定前已算好，两条早退路径都要带同样的计数口径。）
     if (!roles.length) {
       // 97db 返工：名册/映射都为空时必须显式告诉渲染层「无在册成员」，不得只返回 ok:false 让界面猜。
       return {
         ok: true, project: projectName, workspace: workspacePath, roles: [], roleIds: memberRoleIds,
-        count: 0, membersEmpty: true, teamMode: normalizeTeamMode(project && project.teamMode), error: ''
+        count: 0, memberCount: rosterCountsNow.memberCount, activeCount: rosterCountsNow.activeCount,
+        readyCount: rosterCountsNow.readyCount, archivedCount: rosterCountsNow.archivedCount,
+        unboundActiveCount: rosterCountsNow.unboundActiveCount,
+        membersEmpty: true, teamMode: normalizeTeamMode(project && project.teamMode), error: ''
       };
     }
     return {
@@ -6370,6 +6386,12 @@ ipcMain.handle('theme:metrics', async () => {
       membersEmpty,
       roles,
       count: roles.length,
+      // B-24f0：名册口径计数（与 roles.length 区分：roles 是"本工作区展示行"，这两个是名册真相）。
+      memberCount: rosterCountsNow.memberCount,
+      activeCount: rosterCountsNow.activeCount,
+      readyCount: rosterCountsNow.readyCount,
+      archivedCount: rosterCountsNow.archivedCount,
+      unboundActiveCount: rosterCountsNow.unboundActiveCount,
       // workspaceId 只在“清单记录了 workspace 且与项目目录一致”时采信；否则以状态库绑定为准。
       workspaceId: (manifestTrusted && manifestWorkspace && manifest && manifest.workspaceId)
         || (project && project.workspace && project.workspace.id) || null,
@@ -9105,7 +9127,11 @@ ipcMain.handle('theme:metrics', async () => {
           if (expanded.expanded) removed.deterministicRosterClear = true;
         } catch { /* 读库失败时退回按会话清理 */ }
         let teamChanged = false;
-        if (names.includes(String(team.activeProject || ''))) { team.activeProject = null; removed.activeProjectCleared = true; teamChanged = true; }
+        // B-24f0（PM 2026-11-19 裁定）：删当前项目后 activeProject 统一为「落剩余团队项目；无剩余则 null」。
+        // 旧实现无条件置 null；而且 clearRosterSessions 自己也会在「activeProject==被删项目」时置 null，
+        // 所以顺序必须是：先清名册会话（可能置 null）→ 再按裁定落点，否则我们刚落的点会被它再清掉。
+        const activeBefore = String(team.activeProject || '');
+        const activeWillClear = names.includes(activeBefore);
         const cleared = (teamTools && typeof teamTools.clearRosterSessionsOf === 'function')
           ? teamTools.clearRosterSessionsOf(team, doomedSessions, { activeProject: (project.teamName || project.name) })
           : { changed: 0, roles: [] };
@@ -9113,6 +9139,22 @@ ipcMain.handle('theme:metrics', async () => {
         if (cleared && cleared.roles && cleared.roles.length) {
           removed.rosterCleared = cleared.roles.slice(0, 20);
           try { teamTools.appendRosterAudit(project.teamName || project.name, { source: 'shell/project-delete', cleared: cleared.roles }); } catch { /* 审计失败不阻断 */ }
+        }
+        if (activeWillClear) {
+          let remainingProjects = [];
+          try {
+            remainingProjects = readStore().projects.filter((x) => x && x.id !== targetId && names.includes(String(x.teamName || x.name || '')));
+          } catch { remainingProjects = []; }
+          const next = rosterObservability.decideActiveProject({
+            currentActive: activeBefore,
+            deletedNames: names,
+            remainingProjects,
+          });
+          team.activeProject = next.activeProject;
+          removed.activeProjectCleared = next.activeProject === null;
+          removed.activeProjectReason = next.reason;
+          if (next.pickId) removed.activeProjectPickId = next.pickId;
+          teamChanged = true;
         }
         return { teamChanged };
       });
@@ -9237,8 +9279,9 @@ ipcMain.handle('theme:metrics', async () => {
     try {
       for (const win of BrowserWindow.getAllWindows()) {
         try {
+          // B-24f0：`team:roster-changed` 是死通道（无 preload 订阅、无渲染层消费者），已删除；
+          // 删除工作区后的重绘统一走既有 team:session-queue-changed（面板 + 名册 r4 推送共用这条）。
           win.webContents.send('team:session-queue-changed', { reason: 'project-deleted', projectId: targetId, at: new Date().toISOString() });
-          win.webContents.send('team:roster-changed', { reason: 'project-deleted', projectId: targetId, at: new Date().toISOString() });
         } catch { /* 窗口在销毁中 */ }
       }
     } catch { /* 广播失败不阻断删除 */ }

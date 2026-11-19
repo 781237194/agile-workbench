@@ -113,7 +113,12 @@ try {
   const deleteIdx = mainSrc.indexOf("ipcMain.handle('project:delete-record'");
   const sendIdx = mainSrc.indexOf("team:session-queue-changed', { reason: 'project-deleted'", deleteIdx);
   check('B1 delete-record 后广播 session-queue 变更', deleteIdx >= 0 && sendIdx > deleteIdx, { deleteIdx, sendIdx });
-  check('B2 delete-record 后广播 roster 变更', mainSrc.indexOf("team:roster-changed', { reason: 'project-deleted'", deleteIdx) > deleteIdx, {});
+  // B-24f0（PM 裁定）：`team:roster-changed` 曾是死通道（main 发、preload 无 on、渲染层无订阅），
+  // 已删除——这里改成「反向断言」：src 里不得再有该通道的发送调用（注释里提到它不算），
+  // 防止以后又加回一条「夹具绿但没效果」的通道。
+  const rosterChangedSender = /send\(\s*['"]team:roster-changed['"]/.test(mainSrc);
+  check('B2 delete-record 不再发死通道 team:roster-changed（B-24f0 删除；重绘统一走 session-queue-changed）',
+    deleteIdx >= 0 && !rosterChangedSender, { deleteIdx, rosterChangedSender });
   check('B3 广播位于 writeStore 之后（新状态已落盘）', sendIdx > mainSrc.indexOf('writeStore(fresh)', deleteIdx), {});
 } finally {
   fs.rmSync(SB, { recursive: true, force: true });
