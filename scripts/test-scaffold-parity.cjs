@@ -109,50 +109,54 @@ const readText = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { ret
   // 模板待同步项（2026-11-18 22:30 清零）：产品/分析师模板已按最终项目卡生成
   // （scripts/gen-role-card-template.cjs → role-card-bodies.generated.mjs），11 项全部销项。
   // 该机制保留：以后再出现「项目卡已重排、模板未同步」时按条目登记，同步后逐条删除，禁止用通配符掩盖。
-  //
-  // 2026-11-19（派单 M-20261119-170003-ce3c40，Owner 强制 §H 场景覆盖准则）：
-  // 模板侧已先落地（scaffold.sceneCoverageSection + gen 脚本 ensureSceneCoverage），
-  // 项目侧六卡需各角色本人补写（角色卡归属：各角色本人）。在补齐前按条目登记，补齐后逐条销项。
-  // 现行进度：程序员A 已补（其条目不在下表）。
-  const SCENE_COVERAGE_PENDING_ITEMS = [
+  const ROLE_CARD_TEMPLATE_PENDING = [];
+  // 2026-11-19（PM 裁定 M-20261119-173730-2c5349 · §H 按现状收口）：
+  // 上面那类「模板超前于项目卡」的**临时**待同步项已清零（不留死标记）。
+  // §H「场景覆盖准则」属**常驻强制项**：Owner 2026-11-19 要求六卡模板必须带本节，
+  // 而项目卡由各角色本人补写（角色卡归属：各角色本人）。故单列为「强制项」而不是待销项：
+  //   · 模板必须带（下面断言 genBlock/printedBlock 都有 §H 落点，少一处就红）；
+  //   · 项目卡未补期间允许 onlyGen 差异，但 reason 写死「补齐后本条删除」，避免变成永久漏口。
+  const SCENE_COVERAGE_MANDATED = [
     '## H. 场景覆盖准则（Owner 2026-11-19 强制 · 详见 团队/流程.md §H）',
     '五种「假完成」一律算未完成',
     '交互入口必须交付「全链路六段」',
     '场景矩阵六类',
     '反例锚点（Owner 原话）',
   ];
-  const SCENE_COVERAGE_PENDING_ROLE_LABEL = {
+  const SCENE_COVERAGE_ROLE_LABEL = {
     项目经理: 'PM 送审前自查',
     产品: '产品 RR 逐条核场景覆盖',
     需求分析师: '需求正文必须含「场景表」',
     程序员B: '开发交付自查三问',
     测试人员: 'TR-Q 把场景矩阵转成可执行断言',
   };
-  const ROLE_CARD_TEMPLATE_PENDING = [];
-  for (const [dir, label] of Object.entries(SCENE_COVERAGE_PENDING_ROLE_LABEL)) {
-    for (const item of SCENE_COVERAGE_PENDING_ITEMS.concat([label])) {
-      ROLE_CARD_TEMPLATE_PENDING.push({
-        dir, item,
-        reason: 'scene-coverage-pending：Owner 2026-11-19 强制 §H 已进模板，等该角色本人把本节补进项目卡后销项（派单 M-20261119-170003-ce3c40）',
-      });
-    }
-  }
+  const SCENE_COVERAGE_MANDATE_REASON = 'scene-coverage-mandate：Owner 2026-11-19 强制六卡模板带 §H（已落地）；项目卡由该角色本人补齐，补齐后本条删除';
+  const sceneCoverageMandated = (dir, item) => {
+    if (!SCENE_COVERAGE_MANDATED.includes(item) && !(SCENE_COVERAGE_ROLE_LABEL[dir] === item)) return false;
+    return true;
+  };
   const templatePending = (dir, item) => ROLE_CARD_TEMPLATE_PENDING.some((w) => w.dir === dir && w.item === item);
   const extraAllowed = (dir, item) => ROLE_CARD_EXTRAS.some((w) => (w.dir === dir || w.dir === '*') && (w.item === item || w.item === '*'));
   const structDiffs = [];
   for (const dir of roleDirs) {
     const gen = structureOf(norm(readText(path.join(OUT, dir, '角色卡.md'))));
     const real = structureOf(norm(readText(path.join(REAL, '项目', PROJECT, dir, '角色卡.md'))));
-    // a) 生成卡结构必须是本项目卡结构的子集（模板不得自创小节），但模板待同步项除外（显式列出）。
+    // a) 生成卡结构必须是本项目卡结构的子集（模板不得自创小节）；
+    //    过渡期待同步项（templatePending）与 Owner 强制项（sceneCoverageMandated）除外，两者都必须逐条具名。
     const onlyGen = gen.headings.filter((h) => !real.headings.includes(h)).concat(gen.labels.filter((l) => !real.labels.includes(l)))
-      .filter((item) => !templatePending(dir, item));
+      .filter((item) => !templatePending(dir, item) && !sceneCoverageMandated(dir, item));
     // b) 本项目卡多出来的结构必须在白名单（项目专属补充）。
     const onlyReal = real.headings.filter((h) => !gen.headings.includes(h)).concat(real.labels.filter((l) => !gen.labels.includes(l)));
     const unwhitelisted = onlyReal.filter((item) => !extraAllowed(dir, item));
     if (onlyGen.length || unwhitelisted.length) structDiffs.push({ dir, onlyGen, onlyRealUnwhitelisted: unwhitelisted, onlyReal: onlyReal.length });
   }
-  check('② 六角色卡「结构」与本项目一致（模板不自创小节；项目专属补充需白名单+理由；模板待同步项显式登记）',
-    structDiffs.length === 0, { structDiffs, templatePendingCount: ROLE_CARD_TEMPLATE_PENDING.length });
+  check('② 六角色卡「结构」与本项目一致（模板不自创小节；项目专属补充需白名单+理由；待同步项与 Owner 强制项均逐条具名）',
+    structDiffs.length === 0, {
+    structDiffs,
+    templatePendingCount: ROLE_CARD_TEMPLATE_PENDING.length,
+    sceneCoverageMandatedCount: SCENE_COVERAGE_MANDATED.length + Object.keys(SCENE_COVERAGE_ROLE_LABEL).length,
+    sceneCoverageReason: SCENE_COVERAGE_MANDATE_REASON,
+  });
 
   /* ③ 项目铁律＝DEFAULT_IRON（按需清单形态），不含空白模板字样 */
   const iron = readText(path.join(OUT, '项目铁律.md'));
