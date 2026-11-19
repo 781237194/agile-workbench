@@ -111,6 +111,10 @@ try {
   const e1 = runInstaller(['-GitHubFixTest', 'apply', '-GitHubFixHostsPath', badTarget], { AWB_TEST_GITHUBFIX_FAKE_IP: FAKE_IP, AWB_TEST_GITHUBFIX_SKIP_FLUSH: '1', AWB_TEST_GITHUBFIX_FAIL_DOWNLOAD: '1' });
   check('E1 目标不可写 → 退出非 0 且 error 可读', e1.code !== 0 && Boolean(e1.json && (e1.json.error || (e1.json.state || {}).error)), { code: e1.code, json: e1.json });
 
+  // E2 非管理员 + 真实 hosts：提权按注入跳过 → 可读失败且不写 hosts
+  const e2 = runInstaller(['-GitHubFixTest', 'apply'], { AWB_TEST_GITHUBFIX_FAKE_IP: FAKE_IP, AWB_TEST_GITHUBFIX_SKIP_FLUSH: '1', AWB_TEST_GITHUBFIX_NO_RUNAS: '1', AWB_TEST_GITHUBFIX_ELEVATED: '' });
+  const e2msg = String((e2.json && (e2.json.error || (e2.json.state || {}).error)) || '');
+  check('E2 非管理员提权失败 → 可读错误（含管理员/提权）且不写真实 hosts', e2.code !== 0 && /管理员|提权/.test(e2msg) && countMarker(readHosts(), '# ==== GitHub Fix START ====') === 0, { code: e2.code, msg: e2msg, json: e2.json });
   // F) 静态接线
   const src = fs.readFileSync(INSTALLER, 'utf8');
   check('F1 安装路径与升级路径都走 Invoke-GitHubFixedDownload', (src.match(/Invoke-GitHubFixedDownload/g) || []).length >= 3, {});

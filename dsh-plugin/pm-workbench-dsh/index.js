@@ -62,7 +62,7 @@ const DEFAULT_DIRS = (() => {
   return [...new Set(dirs.filter((dir) => typeof dir === 'string' && dir.trim()))]
 })()
 const INSTALLER_SCRIPT_URL =
-  'https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.2/install.ps1'
+  'https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.3/install.ps1'
 const INSTALL_COMMAND =
   '$f="$env:TEMP\\pm-workbench-install.ps1"; iwr "' + INSTALLER_SCRIPT_URL + '" -OutFile $f; & $f'
 const MANUAL_INSTALL_COMMAND =

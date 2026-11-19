@@ -88,7 +88,10 @@ param(
     [string]$GitHubFixHostsPath,
     [switch]$GitHubFixRestore,
     # 夹具专用隐藏开关：apply / restore / download（只跑对应动作并输出 JSON）
-    [string]$GitHubFixTest
+    [string]$GitHubFixTest,
+    # 提权子进程内部入口（父进程 Start-Process -Verb RunAs 调用，不对外）
+    [switch]$GitHubFixApplyElevated,
+    [string]$GitHubFixElevatedResult
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1940,10 +1943,44 @@ function Invoke-GitHubFixRestore {
 function Invoke-GitHubFixApply {
     param([string]$Path)
     $target = if ($Path) { $Path } else { Get-GitHubFixHostsPath }
-    if (-not (Test-GitHubFixIsAdmin) -and -not $GitHubFixHostsPath) {
-        $msg = '需要管理员权限才能修改 hosts（自动修复被跳过）。请以管理员身份重跑安装器，或手动执行 -GitHubFixRestore 清理。'
-        $script:GitHubFixState.error = $msg
-        throw $msg
+    $isElevatedChild = ($env:AWB_GITHUBFIX_ELEVATED -eq '1')
+    $isCustomHosts = -not [string]::IsNullOrWhiteSpace($GitHubFixHostsPath)
+    if (-not (Test-GitHubFixIsAdmin) -and -not $isCustomHosts -and -not $isElevatedChild) {
+        # 非管理员 + 真实 hosts：按需求尝试 RunAs 提权一次；失败/被拒 → 可读提示（不阻断安装）
+        if ($env:AWB_TEST_GITHUBFIX_NO_RUNAS -eq '1') {
+            $msg = '需要管理员权限才能修改 hosts（自动提权已按测试注入跳过）。请以管理员身份重跑安装器，或稍后重试。'
+            $script:GitHubFixState.error = $msg
+            throw $msg
+        }
+        $elevatedResult = Join-Path ([System.IO.Path]::GetTempPath()) ('githubfix-elevated-' + [Guid]::NewGuid().ToString('N') + '.json')
+        try {
+            Write-Host '  [GitHubFix] 需要管理员权限，尝试提权修复 hosts（可能弹出 UAC）…' -ForegroundColor Yellow
+            $argList = @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'),
+                '-GitHubFixApplyElevated', '-GitHubFixHostsPath', ('"' + $target + '"'),
+                '-GitHubFixElevatedResult', ('"' + $elevatedResult + '"')
+            )
+            $proc = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argList -WindowStyle Hidden -PassThru -Wait
+            $payload = $null
+            if (Test-Path -LiteralPath $elevatedResult) {
+                try { $payload = [System.IO.File]::ReadAllText($elevatedResult, [System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch { $payload = $null }
+            }
+            try { if (Test-Path -LiteralPath $elevatedResult) { Remove-Item -LiteralPath $elevatedResult -Force } } catch { }
+            if ($payload -and $payload.ok) {
+                $script:GitHubFixState.applied = $true
+                $script:GitHubFixState.chosenIp = [string]$payload.chosenIp
+                $script:GitHubFixState.hostsPath = [string]$payload.hostsPath
+                Write-Host ('  [GitHubFix] 提权修复成功：' + $script:GitHubFixState.chosenIp) -ForegroundColor Green
+                return [pscustomobject]@{ ok = $true; applied = $true; chosenIp = [string]$payload.chosenIp; hostsPath = [string]$payload.hostsPath; elevated = $true }
+            }
+            $msg = '提权修复 hosts 失败（' + [string]($payload.message) + '）；请以管理员身份重跑安装器，或手动执行 -GitHubFixRestore 清理。'
+            $script:GitHubFixState.error = $msg
+            throw $msg
+        } catch {
+            $msg = '需要管理员权限才能修改 hosts：' + $_.Exception.Message
+            $script:GitHubFixState.error = $msg
+            throw $msg
+        }
     }
     Write-Host '  [GitHubFix] 探测 GitHub 候选 IP（github.com / api / raw）…'
     $chosen = Select-GitHubFixIp -Candidates $script:GitHubFixHostCandidates -Sni 'github.com'
@@ -1965,7 +2002,6 @@ function Invoke-GitHubFixApply {
     try {
         Write-GitHubFixHostsText -Path $target -Text $newText
     } catch {
-        # 写失败：把原文恢复回去（零残留），给出可读错误
         try { if ($read.Bytes) { [System.IO.File]::WriteAllBytes($target, $read.Bytes) } } catch { }
         $msg = '写 hosts 失败：' + $_.Exception.Message
         $script:GitHubFixState.error = $msg
@@ -1975,10 +2011,9 @@ function Invoke-GitHubFixApply {
     $script:GitHubFixState.applied = $true
     $script:GitHubFixState.chosenIp = [string]$chosen.Ip
     $script:GitHubFixState.hostsPath = $target
-    Write-Host ("  [GitHubFix] 已写入 hosts 标记段：$($chosen.Ip)（gitHub.com / codeload）；api=$(if ($api) { $api.Ip } else { '未选到' }) raw=$(if ($raw) { $raw.Ip } else { '未选到' })") -ForegroundColor Green
+    Write-Host ("  [GitHubFix] 已写入 hosts 标记段：$($chosen.Ip)（github.com / codeload）；api=$(if ($api) { $api.Ip } else { '未选到' }) raw=$(if ($raw) { $raw.Ip } else { '未选到' })") -ForegroundColor Green
     return [pscustomobject]@{ ok = $true; applied = $true; chosenIp = [string]$chosen.Ip; hostsPath = $target }
 }
-
 function Invoke-GitHubFixEnsure {
     if ($NoGitHubFix) { return [pscustomobject]@{ ok = $true; applied = $false; skipped = $true; reason = 'NO_GITHUBFIX' } }
     if ($script:GitHubFixState.applied) { return [pscustomobject]@{ ok = $true; applied = $true; chosenIp = $script:GitHubFixState.chosenIp } }
@@ -2126,6 +2161,28 @@ if ($GitHubFixRestore) {
 }
 if (-not [string]::IsNullOrWhiteSpace($GitHubFixTest)) {
     exit (Invoke-GitHubFixTestMode -Mode $GitHubFixTest)
+}
+if ($GitHubFixApplyElevated) {
+    # 提权子进程：只做 hosts 修复并把结果写到 -GitHubFixElevatedResult（父进程读取）
+    $env:AWB_GITHUBFIX_ELEVATED = '1'
+    $code = 1
+    $payload = [ordered]@{ ok = $false; applied = $false; chosenIp = ''; hostsPath = ''; error = '' }
+    try {
+        $r = Invoke-GitHubFixApply -Path $GitHubFixHostsPath
+        $payload.ok = [bool]$r.ok
+        $payload.applied = [bool]$r.applied
+        $payload.chosenIp = [string]$r.chosenIp
+        $payload.hostsPath = [string]$r.hostsPath
+        if ($r.ok) { $code = 0 }
+    } catch {
+        $payload.error = [string]$_.Exception.Message
+    }
+    try {
+        if ($GitHubFixElevatedResult) {
+            [System.IO.File]::WriteAllText($GitHubFixElevatedResult, ($payload | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
+        }
+    } catch { }
+    exit $code
 }
 if ($Help) {
     Show-Help

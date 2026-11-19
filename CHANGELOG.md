@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2.1.3（2026-11-19）
+
+### 自动升级真正可用：内嵌 GitHub 连接修复 + CDN 升级包
+
+- `install.ps1` 自包含 GitHub 连接修复（无需外部工具）：内置 github/api/raw/codeload 候选 IP + TLS 探测（TLS 不可用退化 TCP 443）；下载前预检，不可达时自动写 hosts 标记段（`# ==== GitHub Fix START/END ====`）、flush DNS、重试 3 次；失败自动恢复运行前 hosts；不改 DNS 服务器/网关；新增 `-NoGitHubFix` / `-GitHubFixRestore` / `-GitHubFixHostsPath`（夹具副本，不碰真实 hosts）；`install-result.json` 与 `升级记录.jsonl` 记录 `githubFix`。
+- 版本源改为 **CDN 升级包**：`发布/版本信息.json` 指向 jsDelivr 上的 `发布/pm-workbench-<ver>.zip`（带 sha256），升级不再依赖 GitHub 直连；「立即升级」按钮恢复可用，走安装器真实下载→校验→备份→应用→回滚→重启提示。
+- 检查更新版本源：jsDelivr 优先 + GitHub raw（正确仓库）兜底，单源 8s，全部失败返回尝试源与可读原因。
+
 ## 2.1.2（2026-11-19）
 
 ### 热修：检查更新超时 / 404（默认版本源写错）
