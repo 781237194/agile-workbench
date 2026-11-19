@@ -1302,7 +1302,16 @@ async function checkUpgrade() {
     const res = await window.workbench.upgradeCheck(window.__awbUpgradeFeedSource ? { source: window.__awbUpgradeFeedSource } : {});
     UPGRADE_UI.info = res || { state: 'unavailable', message: '无法检查更新' };
   } catch (e) { UPGRADE_UI.info = { state: 'unavailable', message: '无法检查更新：' + String((e && e.message) || e) }; }
-  finally { UPGRADE_UI.checking = false; paintUpgrade(); }
+  finally {
+    UPGRADE_UI.checking = false; paintUpgrade();
+    // R-20261119：检查结果必须有全局可见反馈（菜单可能被收起；不能只在菜单内一行）。
+    try {
+      const info = UPGRADE_UI.info || {};
+      if (info.state === 'available') toast('发现新版本 ' + String(info.latest || ''), 'ok');
+      else if (info.state === 'latest') toast('已是最新版本', 'ok');
+      else toast(String(info.message || '无法检查更新'), 'bad');
+    } catch { /* ignore */ }
+  }
 }
 // ── e610 AC6：自动检查（只检查/只提示；绝不自动下载或安装）──────────────────────
 async function loadUpgradeAutoPref() {
@@ -16504,6 +16513,18 @@ function bind() {
       const willOpen = Boolean(box && box.hidden);
       setThemeMenu(willOpen);
       if (willOpen) themeMenuFocus(1);
+      return;
+    }
+    // data-more="upgrade"：在线升级子菜单（e610）。不能落到 runMoreAction —— 那里会先收起整个菜单，
+    // 导致「检查更新」点了没有任何可见反应（R-20261119 实测）。
+    if (btn.dataset.more === 'upgrade') {
+      const box = $('#more-menu [data-upgrade-menu]');
+      const willOpen = Boolean(box && box.hidden);
+      if (box) box.hidden = !willOpen;
+      if (willOpen) {
+        setMoreMenu(true);
+        try { void loadAppVersion(); paintUpgrade(); } catch { /* ignore */ }
+      }
       return;
     }
     runMoreAction(btn.dataset.more);

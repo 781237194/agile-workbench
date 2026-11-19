@@ -85,6 +85,16 @@ async function close(inst) { if (!inst) return; try { inst.cdp.send('Browser.clo
   const report = { at: new Date().toISOString(), feedBase: base, sha256: SHA, checks: rows };
   if (inst) {
     try {
+      // E10/E11（R-20261119 真实菜单交互回归）：点「检查更新」行必须展开子菜单，不能被 runMoreAction 先收起；
+      // 子菜单内点检查后结果必须可见（且菜单保持打开）。此前夹具直接点隐藏按钮，漏掉了真实点击路径。
+      const menuOpen = await inst.cdp.evaluate(`(async () => { const more = document.querySelector('#btn-more'); if (more) more.click(); await new Promise((r) => setTimeout(r, 250)); const row = document.querySelector('[data-more="upgrade"]'); if (!row) return { noRow: true }; row.click(); await new Promise((r) => setTimeout(r, 300)); const box = document.querySelector('[data-upgrade-menu]'); const menu = document.querySelector('#more-menu'); return { boxHidden: box ? box.hidden : null, menuHidden: menu ? menu.hidden : null }; })()`);
+      check('E10 点「检查更新」行 → 升级子菜单展开且主菜单保持打开', menuOpen && menuOpen.noRow !== true && menuOpen.boxHidden === false && menuOpen.menuHidden === false, menuOpen);
+      const realCheck = await inst.cdp.evaluate(`(async () => { window.__awbUpgradeFeedSource = ${JSON.stringify(base)} + '/feed-available'; const btn = document.querySelector('[data-upgrade-check]'); if (!btn) return { noBtn: true }; btn.click(); await new Promise((r) => { const t0 = Date.now(); const tick = () => { const st = document.querySelector('[data-upgrade-state]'); if (st && st.hidden === false && /可升级|已是最新|无法检查/.test(String(st.textContent || ''))) return r(); if (Date.now() - t0 > 5000) return r(); setTimeout(tick, 150); }; tick(); }); const st = document.querySelector('[data-upgrade-state]'); const box = document.querySelector('[data-upgrade-menu]'); return { state: st ? String(st.textContent || '') : '', stateHidden: st ? st.hidden : null, boxHidden: box ? box.hidden : null }; })()`);
+      check('E11 子菜单内点检查 → 结果文本可见且菜单保持展开', realCheck && /可升级|已是最新|无法检查/.test(realCheck.state || '') && realCheck.stateHidden === false && realCheck.boxHidden === false, realCheck);
+    } catch (e) { check('E10/E11 菜单交互测量未抛错', false, String((e && e.message) || e)); }
+  }
+  if (inst) {
+    try {
       const ui = 'window.__awbUpgradeFeedSource = SOURCE; const lbl = document.querySelector("[data-more=\\"upgrade\\"] .mm-text"); const st = document.querySelector("[data-upgrade-state]"); const apply = document.querySelector("[data-upgrade-apply]");';
       const drive = async (source) => inst.cdp.evaluate(`(async () => { window.__awbUpgradeFeedSource = ${JSON.stringify(source)}; const btn = document.querySelector('[data-upgrade-check]'); if (!btn) return { noBtn: true }; btn.click(); await new Promise((r) => setTimeout(r, 1200)); const lbl = document.querySelector('[data-more="upgrade"] .mm-text'); const st = document.querySelector('[data-upgrade-state]'); const apply = document.querySelector('[data-upgrade-apply]'); return { label: lbl ? String(lbl.textContent || '') : '', state: st ? String(st.textContent || '') : '', stateKind: st ? st.getAttribute('data-upgrade-state-kind') : '', applyHidden: apply ? apply.hidden : null }; })()`);
       // 版本展示

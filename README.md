@@ -2,7 +2,7 @@
 
 本地优先的多角色项目工作台：Electron 桌面端 + 团队协作协议 + DSH 外部会话引擎适配层。
 
-- 当前版本：**v2.1.0**
+- 当前版本：**v2.1.1**
 - 运行平台：Windows / macOS / Linux（Electron 33，Node.js ≥ 20）
 - 自有代码许可证：**MIT**
 - 默认不联网、不收集遥测；唯一出站请求发往你自己配置的 DSH 地址
@@ -36,9 +36,9 @@
 | 5 | **@liustack/modlens** | 图片视觉读取 |
 | 6 | **mcp-web-search-safe** | 只读安全搜索 / 抓取 MCP（`web_search` / `web_fetch`） |
 
-> 套装包名 `dsh-agile-workbench`（npm 上架版本 2.2.0）；旧名 `dsh-agile-workbench` 已标记 deprecated，仍可安装但不推荐。
+> 套装包名 `dsh-agile-workbench`（npm 上架版本 2.2.1）；旧名 `dsh-agile-workbench` 已标记 deprecated，仍可安装但不推荐。
 > 不想装插件也可以直接用桌面版：见下面「新用户最短说明」的 PowerShell 一行命令。
-> **版本：应用本体 v2.1.0 · 套装 `dsh-agile-workbench` 2.2.0**（实际安装版本以工作台「更多 → 检查更新」显示为准）。
+> **版本：应用本体 v2.1.1 · 套装 `dsh-agile-workbench` 2.2.1**（实际安装版本以工作台「更多 → 检查更新」显示为准）。
 
 ### 一句话之后会发生什么
 
