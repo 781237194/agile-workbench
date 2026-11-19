@@ -39,6 +39,11 @@ export async function cmdRolecard(args = {}) {
   const sub = String((args._ && args._[1]) || 'sync').toLowerCase();
   const project = String(args.project || '').trim();
 
+  // R-20261119-170815-fefa：手动自证入口（与注入内容逐字一致；只读，不改计数/不写审计）
+  if (sub === 'digest') {
+    const { cmdRolecardDigest } = await import('./rolecard-digest.mjs');
+    return cmdRolecardDigest({ ...args, project });
+  }
   if (sub === 'manifest') {
     if (!args.write) fail('BAD_ARGS', 'rolecard manifest 需要 --write（重建 团队/工具/模板/角色卡模板版本.json）');
     const token = String(args.boot || '').trim();
