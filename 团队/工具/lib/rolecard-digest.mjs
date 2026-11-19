@@ -120,8 +120,10 @@ export function rolecardCounterDir(projectName) {
 export function rolecardCounterFile(projectName, role) {
   return path.join(rolecardCounterDir(projectName), `${role}.json`);
 }
-export function compactSignalFile(projectName) {
-  return path.join(rolecardCounterDir(projectName), 'compact.signal');
+/** compact.signal 的**绝对路径写死**（TR-Q③ / 需求 §6.2）：`团队/状态/角色卡重读/compact.signal`
+ *  —— 团队级（压缩事件是会话级、不分项目），与按角色的计数文件 `项目/<P>/角色卡重读/<role>.json` 分开。 */
+export function compactSignalFile() {
+  return path.join(PATHS.state, '角色卡重读', 'compact.signal');
 }
 export function rolecardAuditFile(projectName) {
   return path.join(projectStatePaths(projectName).dir, '角色卡重读.jsonl');
@@ -183,8 +185,8 @@ export function appendRolecardAudit(projectName, row) {
 }
 
 /** 消费式读取 compact.signal（读到即删，残留 deleted 标记到返回值）。 */
-export function consumeCompactSignal(projectName) {
-  const file = compactSignalFile(projectName);
+export function consumeCompactSignal() {
+  const file = compactSignalFile();
   if (!fs.existsSync(file)) return null;
   let payload = null;
   try { payload = readJson(file, null); } catch { payload = null; }
@@ -213,7 +215,7 @@ export function bumpAndDecide({ projectName, role, usageTokens = null, warnThres
       const roundHit = (next % INJECT_EVERY === 0) && (next >= INJECT_EVERY);
       if (roundHit) { trigger = 'round'; reasons.push(`round:${next}`); }
       // ② 压缩信号（M3）：读到即消费
-      const compact = consumeCompactSignal(projectName);
+      const compact = consumeCompactSignal();
       if (compact) { reasons.push(`compact:${compact.deleted ? 'consumed' : 'delete_failed'}`); if (!trigger) trigger = 'compact'; }
       // ③ usage 闩锁（M5）：仅跨阈值一次
       let usageArmed = false;
@@ -269,6 +271,29 @@ export function countersOf(projectName, role) {
     injections: cur.injections,
     injectionCount: Array.isArray(cur.injections) ? cur.injections.length : 0,
   };
+}
+
+/**
+ * TR-Q② / 需求 §6.2④：读本角色 usage 与**模块唯一阈值来源**（不写死数字）。
+ * - usage 通道：`团队/状态/项目/<P>/会话用量.json`（session.mjs 的 usageFilePath，usage-hook / session usage / manual 都往这写）；
+ * - 阈值：`session.mjs → sessionLimitsOf(project).of(role).warn`（pm 60 万 / 其余 30 万，项目可覆盖）。
+ * 读不到一律返回 { tokens:null, warn:null } → 调用方只按轮次/压缩触发（降级不静默）。
+ */
+export async function usageOfRole(projectName, role) {
+  let tokens = null;
+  let warn = null;
+  try {
+    const session = await import('./session.mjs');
+    const track = session.readSessionUsageTrack(projectName);
+    const row = (track.roles || {})[String(role || '')] || null;
+    // 注意：`Number(null)===0` —— 无 row 时必须保持 null（否则会把「用量未知」当成 0 并写进闩锁）
+    const raw = row ? (row.tokens ?? row.input) : null;
+    tokens = raw == null ? null : (Number.isFinite(Number(raw)) && Number(raw) >= 0 ? Number(raw) : null);
+    const limits = session.sessionLimitsOf(projectName);
+    const lim = limits && typeof limits.of === 'function' ? limits.of(String(role || '')) : null;
+    warn = lim && Number.isFinite(Number(lim.warn)) ? Number(lim.warn) : null;
+  } catch { /* 依赖不可用 → 降级（只按轮次/压缩） */ }
+  return { tokens, warn };
 }
 
 /* ── 写操作门（§6.3） ──────────────────────────────────────────────── */

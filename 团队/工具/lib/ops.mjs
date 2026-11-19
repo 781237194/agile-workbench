@@ -61,7 +61,7 @@ import {
 import * as lessons from './lessons.mjs';
 // R-20261119-170815-fefa：角色卡周期重读（摘要生成/计数/门/审计的唯一实现）
 import {
-  rolecardDigest, rolecardDigestOf, bumpAndDecide, markInjected, countersOf,
+  rolecardDigest, rolecardDigestOf, bumpAndDecide, markInjected, countersOf, usageOfRole,
   rolecardGateState, failRolecardUnread, rolecardSoftNotice, rolecardInjectNotice,
   appendRolecardAudit, rolecardCounterFile, compactSignalFile, rolecardAuditFile,
   DIGEST_MAX_LINES, DIGEST_MAX_BYTES, INJECT_EVERY,
@@ -1108,11 +1108,19 @@ function out(args, human, json) {
 }
 /* R-20261119-170815-fefa §6.2/§6.3：写操作统一钩子（门 + 计数 + 检查点注入）。
  * 只在写命令（send --ack / ack / task claim|done）调用；读命令不调（不写计数）。
- * 返回 { notice, json }：notice 追加到人类文本尾部，json 并入 --json 返回体。 */
-function rolecardWriteHook({ b, action = 'write', usageTokens = null }) {
+ * 返回 { notice, json }：
+ *   - 人类模式：notice 直接写 **stdout**（TR-Q⑦：返回体含 [rolecard-digest]）；
+ *   - --json 模式：同一份 notice 放 json.rolecardDigestNotice（调用方合并进 out 的 json），保证与文本同源。
+ * usage 走 session.mjs 的「会话用量.json」通道，阈值取 sessionLimitsOf().of(role).warn（TR-Q②：不写死）。 */
+async function rolecardWriteHook({ b, action = 'write', args = null } = {}) {
   const role = String((b && b.role) || '');
   const projectName = String((b && b.project) || '');
   if (!role || !projectName) return { notice: '', json: null };
+  const jsonMode = Boolean(args && args.json);
+  const emit = (notice) => {
+    if (!notice) return;
+    if (!jsonMode) { try { process.stdout.write(`${notice}\n`); } catch { /* ignore */ } }
+  };
   let gate = null;
   try {
     gate = rolecardGateState({ bootDocHashes: b.docHashes, projectName, role });
@@ -1124,19 +1132,37 @@ function rolecardWriteHook({ b, action = 'write', usageTokens = null }) {
     }
     const notice = rolecardSoftNotice({ role, bootSha12: gate.bootSha12, currentSha12: gate.currentSha12, digest: gate.digest });
     appendRolecardAudit(projectName, { at: nowIso(), role, cardSha12: gate.currentSha12, trigger: 'stale_soft', shownLines: gate.digest.lineCount, opsSinceInject: -1 });
-    return { notice, json: { stale: true, enforce: false, cardSha12: gate.currentSha12, digestLines: gate.digest.lineCount } };
+    emit(notice);
+    return { notice, json: { stale: true, enforce: false, cardSha12: gate.currentSha12, digestLines: gate.digest.lineCount, rolecardDigestNotice: notice } };
   }
-  const warnThreshold = Number(process.env.AWB_ROLECARD_WARN || 0) || null;
+  let usage = { tokens: null, warn: null };
+  try { usage = await usageOfRole(projectName, role); } catch { usage = { tokens: null, warn: null }; }
   let dec = null;
-  try { dec = bumpAndDecide({ projectName, role, usageTokens, warnThreshold }); } catch { dec = null; }
+  try { dec = bumpAndDecide({ projectName, role, usageTokens: usage.tokens, warnThreshold: usage.warn }); } catch { dec = null; }
   if (!dec || !dec.inject) {
-    return { notice: '', json: { stale: false, enforce: gate.enforce, cardSha12: gate.currentSha12, opsSinceInject: dec ? dec.next : null, trigger: '' } };
+    return {
+      notice: '',
+      json: {
+        stale: false, enforce: gate.enforce, cardSha12: gate.currentSha12,
+        opsSinceInject: dec ? dec.next : null, trigger: '',
+        usageTokens: usage.tokens, usageWarn: usage.warn,
+      },
+    };
   }
   const digest = rolecardDigestOf(projectName, role);
   markInjected({ projectName, role, cardSha12: digest.cardSha12, shownLines: digest.lineCount, trigger: dec.trigger, opsSinceInject: dec.next });
+  // TR-Q①：审计记**触发值** dec.next（20/40…），计数文件里另写 0——两者不是同一字段。
   appendRolecardAudit(projectName, { at: nowIso(), role, cardSha12: digest.cardSha12, trigger: dec.trigger, shownLines: digest.lineCount, opsSinceInject: dec.next });
   const notice = rolecardInjectNotice({ role, trigger: dec.trigger, digest, n: dec.n, next: dec.next });
-  return { notice, json: { stale: false, enforce: gate.enforce, cardSha12: digest.cardSha12, digestLines: digest.lineCount, digestBytes: digest.bytes, trigger: dec.trigger, opsSinceInject: dec.next } };
+  emit(notice);
+  return {
+    notice,
+    json: {
+      stale: false, enforce: gate.enforce, cardSha12: digest.cardSha12, digestLines: digest.lineCount,
+      digestBytes: digest.bytes, trigger: dec.trigger, opsSinceInject: dec.next,
+      usageTokens: usage.tokens, usageWarn: usage.warn, rolecardDigestNotice: notice,
+    },
+  };
 }
 
 function table(rows, cols) {
@@ -5822,8 +5848,7 @@ export async function cmdSend(args) {
   const autoDispatch = autoWanted && !targetClosed;
   const isDispatch = requestedType === 'dispatch' ? autoDispatch : (requestedType ? false : autoDispatch);
   // R-fefa §6.2/§6.3：写操作钩子（门 + 计数 + 检查点）。硬门在此抛出 → 零写入。
-  const rcSend = rolecardWriteHook({ b, action: 'send --ack', usageTokens: null });
-  if (rcSend.notice) console.error(rcSend.notice);
+  const rcSend = await rolecardWriteHook({ b, action: 'send --ack', args });
   const demoted = (requestedType === 'dispatch' && !isDispatch) || (autoWanted && targetClosed);
   const msgType = requestedType && requestedType !== 'dispatch'
     ? requestedType
@@ -6036,6 +6061,7 @@ export async function cmdSend(args) {
         ? { role: to, state: targetAlive.probe.state, sessionId: targetAlive.probe.sessionId, warmup: targetAlive.warmup }
         : null,
       wakeFailed, releasedLock, wakeHeader, wakeRetry: sendWakeRetry, autoRead,
+      ...(rcSend && rcSend.json ? { rolecard: rcSend.json } : {}),
       ...(dispatchClaim ? { dispatchClaim } : {}),
       ...(dispatchPrecheck ? { dispatchPrecheck } : {}),
       ...(pendingBoot ? { pendingBoot: true, autoBoot } : {}),
@@ -6167,8 +6193,7 @@ export async function cmdAck(args) {
   assertNoWakeRemoved(args);
   const b = bootFor(args, 'ack');
   // R-fefa：ack 也是写操作（门 + 计数 + 检查点注入）；notice 走 stderr，不污染 --json。
-  const rcAck = rolecardWriteHook({ b, action: 'ack', usageTokens: null });
-  if (rcAck.notice) console.error(rcAck.notice);
+  const rcAck = await rolecardWriteHook({ b, action: 'ack', args });
   if (!args.id) fail('BAD_ID', '需要 --id');
   // R-c651 F-c651-2：ack 的唤醒路径也是重试执行者（先消化到期重试）。
   let ackWakeRetry = null;
@@ -6916,8 +6941,7 @@ export async function cmdTask(args) {
   }
   if (sub === 'claim') {
     // R-fefa：claim 是写操作（门 + 计数）
-    const rcClaim = rolecardWriteHook({ b, action: 'task claim', usageTokens: null });
-    if (rcClaim.notice) console.error(rcClaim.notice);
+    const rcClaim = await rolecardWriteHook({ b, action: 'task claim', args });
     if (!args.id) fail('BAD_ID', '需要 --id');
     const task = claimTask(b.project, String(args.id), b.role, b.sessionId);
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'task_claim', project: b.project, target: task.id, note: task.title });
@@ -6927,8 +6951,7 @@ export async function cmdTask(args) {
   }
   if (sub === 'done') {
     // R-fefa：done 是写操作（门 + 计数）
-    const rcDone = rolecardWriteHook({ b, action: 'task done', usageTokens: null });
-    if (rcDone.notice) console.error(rcDone.notice);
+    const rcDone = await rolecardWriteHook({ b, action: 'task done', args });
     if (!args.id) fail('BAD_ID', '需要 --id');
     if (!args.evidence) fail('EVIDENCE_REQUIRED', '完成任务必须带 --evidence（提交号/路径/验证输出）');
     // G7：测试任务 done 前要有测试报告；auto 模式没有报告只留痕，有报告则校验覆盖与 PASS/FAIL。

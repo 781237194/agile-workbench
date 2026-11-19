@@ -23,7 +23,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, spawn } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const TOOL = path.join(ROOT, '团队', '工具', 'team.mjs');
@@ -74,6 +74,8 @@ function runJson(args, extraEnv = {}) {
 const text = (r) => `${r.out || ''}${r.err || ''}`;
 const tokenOf = (r) => String((r.json && r.json.token) || '');
 const auditRows = () => readLines(AUDIT).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+/** TR-Q⑦：[rolecard-digest] 的载体——--json 时在 json.rolecard.rolecardDigestNotice；非 json 时在 stdout。 */
+const rcNoticeOf = (r) => String((((r.json || {}).rolecard || {}).rolecardDigestNotice) || '');
 const counterOf = (role) => readJson(path.join(COUNTER_DIR, `${role}.json`), null);
 
 const realBefore = { team: sha(REAL_TEAM), store: sha(REAL_STORE) };
@@ -96,8 +98,16 @@ try {
   const d2 = mod.rolecardDigest(fixtureCard);
   check('AC1① 夹具卡摘要 ≤10 行且 ≤600B', d1.lineCount <= 10 && d1.bytes <= 600, { lines: d1.lineCount, bytes: d1.bytes });
   check('AC1② 幂等：两次生成 sha256 相同', d1.sha256 === d2.sha256 && Boolean(d1.sha256), { a: d1.sha256.slice(0, 12), b: d2.sha256.slice(0, 12) });
-  const fixtureLines = fixtureCard.split(/\r?\n/).map((l) => l.replace(/^\s{0,3}#{1,6}\s*/, '').replace(/^\s*[-*+]\s+/, '').replace(/^\s*\d+[.)]\s+/, '').trim());
-  const badLines = d1.lines.filter((l) => !l.includes('摘要 10 行上限') && !fixtureLines.includes(l));
+  // TR-Q④：反查前先归一化（去行首标记/空白 + 统一标点），再比
+  const normLine = (t) => String(t || '')
+    .replace(/^\s{0,3}#{1,6}\s*/, '')
+    .replace(/^\s*[-*+]\s+/, '')
+    .replace(/^\s*\d+[.)]\s+/, '')
+    .replace(/[\u3000\s]+/g, ' ')
+    .replace(/[，,]/g, '，').replace(/[：:]/g, '：').replace(/[；;]/g, '；')
+    .trim();
+  const fixtureNorm = fixtureCard.split(/\r?\n/).map(normLine).filter(Boolean);
+  const badLines = d1.lines.filter((l) => !l.includes('摘要 10 行上限') && !fixtureNorm.includes(normLine(l)));
   check('AC1③ 除末行截断标记外，每行都能在夹具卡原文里反查到（0 改写）', badLines.length === 0, { badLines });
   check('AC1④ 摘要出现 §H 六类关键词（任意出现即可）',
     ['入口', '正常', '空值', '失败', '并发', '降级'].some((k) => d1.text.includes(k)), { keywords: d1.keywords, text: d1.text.slice(0, 200) });
@@ -150,8 +160,8 @@ try {
   const send1 = runJson(['send', '--boot', devTok, '--to', 'pm', '--subject', 'AC3 拍点', '--body', 'x', '--ack', '--json']);
   const c1 = counterOf(ROLE) || {};
   const a1 = auditRows().slice(audit0);
-  check('AC3① 置 19 后一次 send --ack：返回体含 [rolecard-digest]（stderr 或文本）',
-    /\[rolecard-digest\]/.test(text(send1)), { out: text(send1).slice(-400) });
+  check('AC3① 置 19 后一次 send --ack：返回体含 [rolecard-digest]（--json.rolecard 同源字段，trigger=round）',
+    /\[rolecard-digest\]/.test(rcNoticeOf(send1)) && /trigger=round/.test(rcNoticeOf(send1)), { out: text(send1).slice(-300), notice: rcNoticeOf(send1).slice(0, 200) });
   check('AC3② 审计 1 行 trigger=round 且 opsSinceInject=20',
     a1.length >= 1 && a1.some((r) => String(r.trigger) === 'round' && Number(r.opsSinceInject) === 20),
     { rows: a1 });
@@ -161,21 +171,50 @@ try {
   writeJson(path.join(COUNTER_DIR, `${ROLE}.json`), { ...c3, opsSinceInject: 39 });
   const audit1 = auditRows().length;
   const send2 = runJson(['send', '--boot', devTok, '--to', 'pm', '--subject', 'AC3 拍点2', '--body', 'y', '--ack', '--json']);
-  check('AC3④ 置 39 → 下一次（40）再触发一次', /\[rolecard-digest\]/.test(text(send2)) && Number((counterOf(ROLE) || {}).opsSinceInject) === 0,
+  check('AC3④ 置 39 → 下一次（40）再触发一次', /\[rolecard-digest\]/.test(rcNoticeOf(send2)) && Number((counterOf(ROLE) || {}).opsSinceInject) === 0,
     { counter: counterOf(ROLE), auditDelta: auditRows().length - audit1 });
 
   /* ── AC4 压缩信号（读到即删） ───────────────────────────────── */
-  const sigFile = path.join(COUNTER_DIR, 'compact.signal');
+  // TR-Q③：compact.signal 的绝对路径写死为 团队/状态/角色卡重读/compact.signal（团队级，不随项目）
+  const sigFile = path.join(TEAM, '状态', '角色卡重读', 'compact.signal');
   writeJson(sigFile, { at: new Date().toISOString(), source: 'fixture' });
   const devTok2 = tokenOf(runJson(['boot', '--role', ROLE, '--project', PROJECT, '--session', `session-fefa-${ROLE}-b`, '--json']));
   const auditBeforeCompact = auditRows().length;
   const send3 = runJson(['send', '--boot', devTok2, '--to', 'pm', '--subject', 'AC4 compact', '--body', 'z', '--ack', '--json']);
   const compactRows = auditRows().slice(auditBeforeCompact);
   check('AC4① compact.signal：一次写操作附摘要 + 审计 trigger=compact + 文件被删除（消费式）',
-    /\[rolecard-digest\]/.test(text(send3)) && compactRows.some((r) => String(r.trigger) === 'compact') && !fs.existsSync(sigFile),
+    /\[rolecard-digest\]/.test(rcNoticeOf(send3)) && compactRows.some((r) => String(r.trigger) === 'compact') && !fs.existsSync(sigFile),
     { exists: fs.existsSync(sigFile), rows: compactRows, out: text(send3).slice(-300) });
   const send4 = runJson(['send', '--boot', devTok2, '--to', 'pm', '--subject', 'AC4 二次', '--body', 'w', '--ack', '--json']);
-  check('AC4①b 第二次写操作不再触发（已消费）', !/\[rolecard-digest\]/.test(text(send4)), { out: text(send4).slice(-200) });
+  check('AC4①b 第二次写操作不再触发（已消费）', !/\[rolecard-digest\]/.test(rcNoticeOf(send4)), { out: text(send4).slice(-200) });
+
+  /* ── AC4② usage 水位（TR-Q②：走「会话用量.json」通道；阈值取 sessionLimitsOf，不写死） ── */
+  {
+    const sessionMod = await import(`file://${path.join(ROOT, '团队', '工具', 'lib', 'session.mjs').replace(/\\/g, '/')}`);
+    const warnVal = Number(sessionMod.sessionLimitsOf(PROJECT).of(ROLE).warn);
+    const usageFile = sessionMod.usageFilePath(PROJECT);
+    writeJson(usageFile, { [ROLE]: { sessionId: `session-fefa-${ROLE}`, tokens: warnVal + 1, input: warnVal + 1, at: new Date().toISOString(), source: 'fixture' } });
+    const auditBeforeUsage = auditRows().length;
+    const sendU1 = runJson(['send', '--boot', devTok2, '--to', 'pm', '--subject', 'AC4 usage1', '--body', 'u', '--ack', '--json']);
+    const uRows = auditRows().slice(auditBeforeUsage);
+    check('AC4② usage 超 warn（阈值取 sessionLimitsOf）→ trigger=usage + 写 lastUsageTokens',
+      /\[rolecard-digest\]/.test(rcNoticeOf(sendU1)) && uRows.some((r) => String(r.trigger) === 'usage')
+      && Number((counterOf(ROLE) || {}).lastUsageTokens) === warnVal + 1,
+      { warn: warnVal, rows: uRows, counter: counterOf(ROLE), out: text(sendU1).slice(-260) });
+    const sendU2 = runJson(['send', '--boot', devTok2, '--to', 'pm', '--subject', 'AC4 usage2', '--body', 'u2', '--ack', '--json']);
+    check('AC4②b 仍超 warn 时第二次写操作不再注入（usage 闩锁）', !/\[rolecard-digest\]/.test(rcNoticeOf(sendU2)), { out: text(sendU2).slice(-200) });
+    // 降回 warn 以下再升超 → 可再触发（跨阈值）
+    writeJson(usageFile, { [ROLE]: { sessionId: `session-fefa-${ROLE}`, tokens: 1, input: 1, at: new Date().toISOString(), source: 'fixture' } });
+    const sendU3 = runJson(['send', '--boot', devTok2, '--to', 'pm', '--subject', 'AC4 usage3', '--body', 'u3', '--ack', '--json']);
+    void sendU3;
+    writeJson(usageFile, { [ROLE]: { sessionId: `session-fefa-${ROLE}`, tokens: warnVal + 2, input: warnVal + 2, at: new Date().toISOString(), source: 'fixture' } });
+    const auditBeforeRe = auditRows().length;
+    const sendU4 = runJson(['send', '--boot', devTok2, '--to', 'pm', '--subject', 'AC4 usage4', '--body', 'u4', '--ack', '--json']);
+    check('AC4②c 降回 warn 以下再升超 → 再次触发（跨阈值）',
+      /\[rolecard-digest\]/.test(rcNoticeOf(sendU4)) && auditRows().slice(auditBeforeRe).some((r) => String(r.trigger) === 'usage'),
+      { rows: auditRows().slice(auditBeforeRe) });
+    try { fs.rmSync(usageFile, { force: true }); } catch { /* ignore */ }
+  }
 
   /* ── AC5 写操作门（机制单测 + 真实重 boot 复验） ──────────────
    * 注意（需求矛盾，已在实现说明 v19 §五 如实报）：角色卡本身参与 rulesHash，
@@ -213,12 +252,35 @@ try {
     dig.code === 0 && JSON.stringify(counterOf(ROLE) || {}) === beforeDigest.counter && auditRows().length === beforeDigest.audit,
     { code: dig.code, counterSame: JSON.stringify(counterOf(ROLE) || {}) === beforeDigest.counter, auditDelta: auditRows().length - beforeDigest.audit });
 
+  /* ── AC6② 并发（TR-Q⑥：阻塞等待两个子进程结束，不 sleep 猜） ── */
+  {
+    const devTokConc = tokenOf(runJson(['boot', '--role', ROLE, '--project', PROJECT, '--session', `session-fefa-${ROLE}-conc`, '--json']));
+    writeJson(path.join(COUNTER_DIR, `${ROLE}.json`), { opsSinceInject: 19, lastInjectAt: '', lastCardSha12: '', lastUsageTokens: null, injections: [] });
+    const roundBefore = auditRows().filter((r) => String(r.trigger) === 'round').length;
+    const spawnOne = () => spawn(process.execPath, [TOOL, 'send', '--boot', devTokConc, '--to', 'pm', '--subject', 'AC6 并发', '--body', 'c', '--ack'], { env: env(), cwd: SB });
+    const kids = [spawnOne(), spawnOne()];
+    const exits = await Promise.all(kids.map((child) => new Promise((resolve) => {
+      let outBuf = '';
+      child.stdout.on('data', (d) => { outBuf += String(d); });
+      child.on('close', (code) => resolve({ code, out: outBuf }));
+    })));
+    const roundAfter = auditRows().filter((r) => String(r.trigger) === 'round').length;
+    // 并发语义：一个进程在锁内看到 19→20 触发并置 0，另一个随后 0→1；关键是**只注入 1 次**（计数 ∈ {0,1}）
+    check('AC6② 两进程同时从 opsSinceInject=19 起跑 → 锁内判定，只注入 1 次（审计 round +1）',
+      roundAfter - roundBefore === 1 && [0, 1].includes(Number((counterOf(ROLE) || {}).opsSinceInject)),
+      { roundDelta: roundAfter - roundBefore, counter: counterOf(ROLE), exits: exits.map((e) => e.code) });
+    check('AC6① 并发两进程都成功写出（计数不丢：两次各 +1 被检查点消费一次后归 0）',
+      exits.every((e) => e.code === 0), { exits: exits.map((e) => e.code) });
+  }
+
   /* ── AC7 审计字段齐 + digest 与注入逐字一致 ────────────────── */
   const lastAudit = auditRows().slice(-1)[0] || {};
   check('AC7③ 审计字段齐 {at,role,cardSha12,trigger,shownLines,opsSinceInject}',
     ['at', 'role', 'cardSha12', 'trigger', 'shownLines', 'opsSinceInject'].every((k) => Object.prototype.hasOwnProperty.call(lastAudit, k)),
     { lastAudit });
-  const digText = String((dig.json || {}).text || '');
+  // TR-Q⑤：比对排除首行次数标记——只比摘要正文各行（digest.text 不含 [rolecard-digest] 首行）
+  const digText = String((dig.json || {}).text || '')
+    .split(/\r?\n/).filter((l) => !/\[rolecard-digest\]|重注入|trigger=/.test(l)).join('\n');
   const injectSend = runJson(['send', '--boot', devTok3, '--to', 'pm', '--subject', 'AC7 注入比对', '--body', 'q', '--ack', '--json'], {});
   void injectSend;
   check('AC7④ rolecard digest 文本与 boot --json 摘要逐字一致（sha256 相同）',
