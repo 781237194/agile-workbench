@@ -2586,9 +2586,11 @@ function New-MaintItem {
 }
 
 function Get-MaintResetItems {
-    param([string]$Root)
+    param([string]$Root, [switch]$KeepBackups)
     $items = @()
     $dataDir = Join-Path $Root 'data'
+    # §6.2：_backup\ 默认留；仅在显式传 -KeepBackups（正文「关掉才删」）时删
+    if ($KeepBackups) { $items += New-MaintItem 'backup' 'delete' (Join-Path $Root '_backup') }
     foreach ($rel in @('data\userdata', 'data\tmp')) {
         $items += New-MaintItem 'data' 'delete' (Join-Path $Root $rel)
     }
@@ -2618,8 +2620,10 @@ function Get-MaintResetItems {
 }
 
 function Get-MaintUninstallProgramItems {
-    param([string]$Root, [bool]$KeepData)
+    param([string]$Root, [bool]$KeepData, [switch]$KeepBackups)
     $items = @()
+    # §6.3：默认档整删 Root（_backup 随之消失）；-KeepData 档 Root 保留，只有 -KeepBackups 才单独删 _backup
+    if ($KeepBackups) { $items += New-MaintItem 'backup' 'delete' (Join-Path $Root '_backup') }
     $programRels = @('src', 'scripts', 'dsh-plugin', 'assets', 'docs', 'node_modules', '.runtime',
         'package.json', 'package-lock.json', 'install.ps1', 'start.cmd', 'launch.vbs', 'README.md',
         'CHANGELOG.md', 'NOTICE.md', 'LICENSE', '发版记录.md', '安装PM工作台.cmd',
@@ -2892,11 +2896,11 @@ function Invoke-MaintMode {
         # ① 只读扫描清单
         $items = @()
         if ($mode -eq 'reset') {
-            $items = Get-MaintResetItems $root
+            $items = Get-MaintResetItems -Root $root -KeepBackups:([bool]$KeepBackups)
         } elseif ($KeepData) {
-            $items = Get-MaintUninstallProgramItems -Root $root -KeepData $true
+            $items = Get-MaintUninstallProgramItems -Root $root -KeepData $true -KeepBackups:([bool]$KeepBackups)
         } else {
-            $items = Get-MaintUninstallProgramItems -Root $root -KeepData $false
+            $items = Get-MaintUninstallProgramItems -Root $root -KeepData $false -KeepBackups:([bool]$KeepBackups)
             if (-not $Purge) {
                 $items += New-MaintItem 'root' 'delete' $root
             } else {
@@ -2991,6 +2995,17 @@ function Invoke-MaintMode {
                 # 系统级 CAS 留给下面的专用处理
                 continue
             }
+            # APP_DATA_LOCKED：目标目录被进程占用（命令行含目录）→ 不删、记 failed+code+PID
+            if ($item.category -in @('data', 'appdata', 'team', 'selfcheck', 'backup') -and (Test-Path -LiteralPath $item.path -PathType Container)) {
+                $holders = Test-MaintDirLocked -Path $item.path
+                if ($holders) {
+                    $item.result = 'failed'
+                    $item.code = 'APP_DATA_LOCKED'
+                    $item.reason = '目标目录被占用（PID ' + (($holders | ForEach-Object { $_.pid }) -join ',') + '）；退出占用进程后重跑，或手动删除'
+                    $failed += $item
+                    continue
+                }
+            }
             $r = Remove-MaintTarget -Path $item.path
             $item.result = $r.result
             if ($r.reason) { $item.reason = $r.reason }
@@ -3040,6 +3055,30 @@ function Invoke-MaintMode {
     } finally {
         Exit-MaintLock
     }
+}
+
+# B-20261119-221506-3a6dbe：APP_DATA_LOCKED —— 目标目录若被进程占用（判定=进程命令行含该目录，与 electron 同口径），
+# 不执行删除并记 failed+code+PID；调用方据此判 RESIDUE（不静默跳过）。
+function Get-MaintPathHolders {
+    param([string]$Path)
+    $out = @()
+    try {
+        foreach ($pr in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+            $cmd = [string]$pr.CommandLine
+            if ($cmd -and $cmd.IndexOf($Path, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $out += [pscustomobject]@{ pid = [int]$pr.ProcessId; name = [string]$pr.Name }
+            }
+        }
+    } catch { }
+    return $out
+}
+
+function Test-MaintDirLocked {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $null }
+    $holders = @(Get-MaintPathHolders -Path $Path)
+    if (-not $holders.Count) { return $null }
+    return $holders
 }
 
 # 系统级六类：CAS 检查后再删（沙盘不进这里）

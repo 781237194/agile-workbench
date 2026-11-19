@@ -232,6 +232,38 @@ function listBackups(sb, root) {
       purge.status === 0 && !fs.existsSync(rootD) && Boolean(purgeJson && purgeJson.userDataDeleted === true && purgeJson.backupZip === null),
       { status: purge.status, json: purgeJson && { userDataDeleted: purgeJson.userDataDeleted, backupZip: purgeJson.backupZip } });
 
+    // ── K1 -KeepBackups 语义（正文：「_backup 默认留、-KeepBackups 关掉才删」）──
+    const rootG = path.join(sb, 'rootG');
+    seedInstallTree(rootG, sb);
+    writeFile(path.join(rootG, '_backup', 'upgrade-20260101', 'sentinel.txt'), 'keep-by-default\n');
+    const keepDefault = await runPwsh(INSTALL, ['-Reset', '-Yes', '-Confirm', '重置', ...maintArgs(rootG, sb), '-Json']);
+    check('K1a 默认（不带 -KeepBackups）：_backup 保留',
+      keepDefault.status === 0 && fs.existsSync(path.join(rootG, '_backup', 'upgrade-20260101', 'sentinel.txt')) && !(fs.readdirSync(sb).includes('backup-deleted')),
+      { status: keepDefault.status, exists: fs.existsSync(path.join(rootG, '_backup', 'upgrade-20260101', 'sentinel.txt')) });
+    const rootH = path.join(sb, 'rootH');
+    seedInstallTree(rootH, sb);
+    writeFile(path.join(rootH, '_backup', 'upgrade-20260101', 'sentinel.txt'), 'drop-me\n');
+    const keepOn = await runPwsh(INSTALL, ['-Reset', '-Yes', '-Confirm', '重置', '-KeepBackups', ...maintArgs(rootH, sb), '-Json']);
+    const keepOnJson = parseJsonOut(keepOn.stdout);
+    check('K1b 传 -KeepBackups：_backup 被删（且只在此情况下删）',
+      keepOn.status === 0 && !fs.existsSync(path.join(rootH, '_backup'))
+      && Boolean(keepOnJson && (keepOnJson.items || []).some((i) => i.category === 'backup' && i.result === 'deleted')),
+      { status: keepOn.status, exists: fs.existsSync(path.join(rootH, '_backup')) });
+
+    // ── K2 APP_DATA_LOCKED：目录被占用（命令行含目录）→ 不删 + 给 PID ──────
+    const rootI = path.join(sb, 'rootI');
+    seedInstallTree(rootI, sb);
+    const lockedDir = path.join(sb, 'lad', 'PMWorkbench');
+    const holderProc2 = spawn(process.execPath, ['-e', 'setTimeout(function(){},20000)', lockedDir], { windowsHide: true, stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 800));
+    const lockedRun = await runPwsh(INSTALL, ['-Reset', '-Yes', '-Confirm', '重置', ...maintArgs(rootI, sb), '-Json']);
+    const lockedJson2 = parseJsonOut(lockedRun.stdout);
+    const lockedItem = ((lockedJson2 && lockedJson2.items) || []).find((i) => i.code === 'APP_DATA_LOCKED');
+    try { holderProc2.kill(); } catch { /* ignore */ }
+    check('K2 APP_DATA_LOCKED：占用目录不删、code+PID 可见、exit 2',
+      lockedRun.status === 2 && Boolean(lockedItem) && /PID/.test(String(lockedItem.reason || '')) && fs.existsSync(lockedDir),
+      { status: lockedRun.status, item: lockedItem });
+
     // ── C VerifyClean ─────────────────────────────────────────────────
     const rootE = path.join(sb, 'rootE');
     seedInstallTree(rootE, sb);
