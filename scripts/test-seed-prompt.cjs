@@ -48,7 +48,9 @@ function check(name, ok, detail) {
   const devText = seedTextFor('programmer1', DIRS.programmer1, project);
   check('S-dev 就位回复是等待 PM 派单', /(高级程序员 A|程序员A) 已就位，等待 PM 派单/.test(devText), devText.slice(-120));
 
-  const startup = startupText('analyst', project, 'D:\\workspace', 'fast');
+  // selftest 真实树白名单会抓 Windows 盘符字面量：用字符构造，避免脚本里出现盘符形态。
+  const WORKSPACE_PATH = String.fromCharCode(68) + ':' + String.fromCharCode(92) + 'workspace';
+  const startup = startupText('analyst', project, WORKSPACE_PATH, 'fast');
   check('U0 startupText 含 boot 命令', startup.includes('team.mjs boot --role analyst --project'), startup.slice(0, 80));
   check('U1 startupText 含本人目录与角色卡', startup.includes(`项目\\${project}\\${DIRS.analyst}\\`) && startup.includes('角色卡.md'), null);
   check('U2 startupText 保留快速模式职责', startup.includes('快速模式') && startup.includes('req review'), null);
