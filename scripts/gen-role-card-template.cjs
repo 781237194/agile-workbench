@@ -2,7 +2,9 @@
 'use strict';
 /**
  * 生成器（T-20261118-222610-ea30）：把**最终项目角色卡**转成角色卡模板正文，产出
- * `团队/工具/lib/role-card-bodies.generated.mjs`（scaffold.roleCard 优先使用生成版）。
+ * `团队/工具/lib/scaffold.mjs` 里 `GENERATED_ROLE_CARDS` 标记块（`scaffold.roleCard()` 优先用它，
+ * 缺该角色时才回退到同文件的 `ROLE_CARD_BODIES` 手写模板）。
+ * （2026-11-19 口径更正：不再产出独立 `role-card-bodies.generated.mjs`——该文件并不存在，生成内容一律内联。）
  *
  * 口径（Owner 2026-11-18 22:01 / 产品 22:22 确认）：
  *   - 项目卡为准；只把「项目名 / 角色显示名 / 团队模式行」抽成占位符；
@@ -89,7 +91,9 @@ function sceneCoverageText(role) {
   return [...SCENE_COVERAGE_SHARED, SCENE_COVERAGE_PER_ROLE[role] || ''].filter(Boolean).join('\n');
 }
 function ensureSceneCoverage(text, role) {
-  if (text.includes('场景覆盖准则')) return text; // 项目卡已自带本节 → 不重复
+  // 判据用**实质要点**而不是「场景覆盖准则」五个字：项目卡可能只提到该词（如 analyst 卡里的一句引用），
+  // 若只按标题词判断会跳过补全 → 生成的卡缺「全链路六段/场景矩阵六类/五种假完成」。
+  if (text.includes('全链路六段') && text.includes('场景矩阵六类') && text.includes('五种「假完成」')) return text;
   return text.trimEnd() + '\n\n' + sceneCoverageText(role);
 }
 
