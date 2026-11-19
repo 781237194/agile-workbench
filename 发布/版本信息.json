@@ -1,6 +1,6 @@
 {
-  "version": "2.1.4",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.4/发布/pm-workbench-2.1.4.zip",
-  "sha256": "0a545dd64c6cd467060b7b6ea33dfd9e369c4c132dd558b7641dd49db618a788",
-  "notes": "安装/连接修复：npm11 Electron 自愈、启动器目录对齐、DSH 自动发现（System32/netstat）、开局提示词先读规则再回已就位"
+  "version": "2.1.5",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.5/发布/pm-workbench-2.1.5.zip",
+  "sha256": "adc26d55ed95404ccc184480ec20bf2553d73cbd31a41ddab19ff6fa8338182a",
+  "notes": "台账信噪比治理 + 角色卡周期重读 + 闸门语义修正：task list/req list/inbox 默认只列在办（50 行上限、统一截断提示）、待验收(done) 行；角色卡 sha12 摘要随 boot 注入与 20 拍重注入、写操作门（软/硬）；建单不自动认领（派单才 working）；G4 软硬语义统一、编写/设计类任务豁免 G3、G8 不误判跳步"
 }

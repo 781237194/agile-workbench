@@ -2,7 +2,7 @@
   "name": "pm-workbench",
   "productName": "PM工作台",
   "appId": "com.xuyefeng.pmworkbench",
-  "version": "2.1.4",
+  "version": "2.1.5",
   "description": "PM工作台（PM Workbench）：独立开源的多角色项目工作台，覆盖项目、角色、任务、看板、评审流程与 DSH 适配层",
   "main": "src/main.js",
   "type": "commonjs",
