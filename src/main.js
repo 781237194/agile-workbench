@@ -1433,24 +1433,31 @@ async function inspectProjectSessions(project, binding = {}) {
   // 根因（PM 2026-11-20 02:09 实测）：item.archived 取的是 **DSH 会话列表**的 remoteSession.archived，
   // 我们团队「归档成员」不会让 DSH 那边归档 → item.archived 恒 false → 渲染层 verifiedCount 的
   // items 分支（!item.archived）永远过滤不掉 → 侧栏「6/6 已核验」。名册口径必须在后端先拦掉。
+  // B-190a 残差（tester 03:0x 真窗口断面定位）：名册里**没有**该角色（已被归档/清出名册）时，
+  // 旧实现 `map.get(roleId) === undefined` → 不跳过 → 项目残留 sessionId 仍进 items
+  // → verifiedCount/侧栏 chip 仍 6/6。修法：以「名册缺省视为已归档」为基线，只有**在册且活跃**才置 false；
+  // 读名册失败（异常/非数组）时保持旧行为（返回 null，不拦截）。
   const rosterArchivedOf = (() => {
     try {
       const members = (typeof teamTools !== 'undefined' && teamTools && typeof teamTools.teamMembers === 'function')
-        ? (teamTools.teamMembers() || []) : [];
+        ? teamTools.teamMembers() : null;
+      if (!Array.isArray(members)) return null;
       const map = new Map();
+      for (const roleId of roleIds) map.set(roleId, true);
       for (const m of members) {
         const role = String((m && m.role) || '');
         const sid = String((m && m.sessionId) || '').trim();
-        if (role) map.set(role, Boolean(m && m.archived) || !sid);
+        const archived = Boolean(m && m.archived) || !sid;
+        if (role) map.set(role, archived);
       }
       return map;
-    } catch { return new Map(); }
+    } catch { return null; }
   })();
   for (const roleId of roleIds) {
     const sessionId = project.sessions && project.sessions[roleId] ? String(project.sessions[roleId]) : '';
     const remoteSession = sessionId ? byId.get(sessionId) : null;
-    // 名册已归档/未绑定 → 不算可用会话（这是「归档成员后仍 6/6」的直接根因）
-    if (rosterArchivedOf.get(roleId) === true) { missing.push(roleId); continue; }
+    // 名册已归档/未绑定/不在名册 → 不算可用会话（「归档成员后仍 6/6」的直接根因）
+    if (rosterArchivedOf && rosterArchivedOf.get(roleId) === true) { missing.push(roleId); continue; }
     const here = Boolean(remoteSession) && !remoteSession.archived
       && (scoped(remoteSession) || (!membershipKnown && cwdSame(remoteSession)));
     if (!sessionId || !remoteSession || !here) {

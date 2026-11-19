@@ -79,7 +79,9 @@ function main() {
     const ipSeg = ipStart >= 0 ? m.slice(ipStart, ipStart + 4000) : '';
     check('A4 inspectProjectSessions 有 rosterArchivedOf：名册已归档/未绑定的角色计入 missing、不进 items',
       ipSeg.includes('const rosterArchivedOf')
-      && /if \(rosterArchivedOf\.get\(roleId\) === true\) \{ missing\.push\(roleId\); continue; \}/.test(ipSeg),
+      // PM 2026-11-20 03:2x 修残差：名册缺省视为已归档（不在名册的残留角色必须被拦）
+      && /rosterArchivedOf\.get\(roleId\) === true\) \{ missing\.push\(roleId\); continue; \}/.test(ipSeg)
+      && /for \(const roleId of roleIds\) map\.set\(roleId, true\)/.test(ipSeg),
       { seg: ipSeg.slice(0, 260) });
 
     // A5（PM 02:22 的第 d 处 · 数据层）：归档必须真清 store 残留，不能只靠渲染层过滤。
