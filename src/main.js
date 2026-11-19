@@ -19,6 +19,8 @@ const StoreAudit = require('./store-audit.js');
 const FolderOpen = require('./folder-open.js');
 // 97db 返工补口（T-20261119-025312-f3aaba）：AWB_DSH_BASE_URL / AWB_WORKSPACE_MOCK 测试钩子纯逻辑单源。
 const workspaceMock = require('./workspace-mock.js');
+// R-d1bf / T-d230：壳层唤醒策略唯一出口（定时唤醒恒禁用，事件驱动）。
+const WakeTimerPolicy = require('./wake-timer-policy.js');
 // R-20261118-170937-b34a（T-e2d8 R2）：读盘缓存 + 慢操作日志（性能-YYYYMMDD.jsonl）+ IPC 计时包装的 CJS 单源。
 const perfCache = require('./perf-cache.js');
 // B-20261118-191527-c437（P1 稳定性）：崩溃后「复活主窗 / 恢复 webview / 不误退」的纯判定逻辑（Node 可测）。
@@ -8521,13 +8523,17 @@ ipcMain.handle('theme:metrics', async () => {
     });
   }));
   ipcMain.handle('task:done', runWorkflowIpc(async (ctx, p, meta) => {
-    return teamTools.doneWorkflowTask({
+    const doneResult = await teamTools.doneWorkflowTask({
       ...p,
       role: String(p.role || ''),
       projectName: ctx.teamName,
       projectPath: ctx.projectPath,
       sessionId: meta.sessionId
     });
+    try { queuePumpOnce('task'); } catch (error) {
+      console.warn('QUEUE_PUMP_EVENT_FAILED ' + JSON.stringify({ trigger: 'task', why: String((error && error.message) || error).slice(0, 200) }));
+    }
+    return doneResult;
   }));
   ipcMain.handle('dev:submit', runWorkflowIpc(async (ctx, p, meta) => {
     return teamTools.devSubmit({
@@ -10552,10 +10558,9 @@ ipcMain.handle('theme:metrics', async () => {
     } catch { /* wake 结果落库失败不改变已发送事实；下次对账会补 */ }
     // R-1dfb（AC1① 事件驱动）：`send --ack --task` 成功即为该批次注册一次性 deadline 定时器
     // （沙盘（TEAM_SELFTEST=1）下不注册；后端 tick 按 deadline 判定，没产生队列项时返回 checked=0，安全）。
-    if (ackRequired && taskId) {
-      try { scheduleDispatchDeadline(project.name); } catch (error) {
-        console.warn('DISPATCH_DEADLINE_REGISTER_FAILED ' + JSON.stringify({ project: project.name, why: String((error && error.message) || error).slice(0, 200) }));
-      }
+    // R-d1bf（T-d230）：取消 deadline 定时唤醒；send 事件只做一次事件驱动投递（真实必达不变）。
+    try { queuePumpOnce("send"); } catch (error) {
+      console.warn("QUEUE_PUMP_EVENT_FAILED " + JSON.stringify({ trigger: "send", why: String((error && error.message) || error).slice(0, 200) }));
     }
     return {
       ok: true,
@@ -10933,9 +10938,9 @@ ipcMain.handle('theme:metrics', async () => {
     addEvent(current, `回执 ${currentMessage.id} ← ${messageTo}（${source === 'team' ? '旧协议 · 已验证会话 ' + mappedSession : '本地镜像'}；actor=${ackActor}）`);
     writeStore(fresh);
     const board = mirrorToTeamBoard(current);
-    // R-1dfb（AC1① 事件驱动）：回执成功后同样为该批次注册一次性 deadline 定时器（同一 project 单例）。
-    try { scheduleDispatchDeadline(current.name); } catch (error) {
-      console.warn('DISPATCH_DEADLINE_REGISTER_FAILED ' + JSON.stringify({ project: current.name, why: String((error && error.message) || error).slice(0, 200) }));
+    // R-d1bf（T-d230）：取消 deadline 定时唤醒；ack 事件驱动投递一次。
+    try { queuePumpOnce("ack"); } catch (error) {
+      console.warn("QUEUE_PUMP_EVENT_FAILED " + JSON.stringify({ trigger: "ack", why: String((error && error.message) || error).slice(0, 200) }));
     }
     return {
       ok: true,
@@ -21583,169 +21588,104 @@ if (!singleInstanceLock) {
   });
 }
 
-// B-20261113-005705-a577：派单队列死锁修复。
-// 以前队列只在某角色 task done 时才泵；全队空闲时队列里的派单永远发不出去（只能人工催）。
-// 主进程加一个独立定时泵：每 60 秒对当前项目走一次 team.mjs queue pump（兜底泵）。
-// 失败写事件留痕；队列项只在真正派发成功后才移除（工具侧保证），失败/角色忙都原样保留。
-//
-// R-1dfb（AC1②，卷 §十三(三)1「tick 夹具二选一」）：tick 周期优先读 AWB_STALL_TICK_MS（默认 60000），
-// 即「AC1② 用 AWB_STALL_TICK_MS 注入」：沙盘设 AWB_STALL_TICK_MS=1000 就把 60 秒 tick 压到 1 秒（source=tick 必须打标）。
-const STALL_TICK_MS = (() => {
-  const raw = Number(process.env.AWB_STALL_TICK_MS);
-  return Number.isFinite(raw) && raw >= 200 ? Math.floor(raw) : 60 * 1000;
-})();
-const QUEUE_PUMP_INTERVAL_MS = STALL_TICK_MS;
-const queuePumpState = { timer: null, running: false, lastAt: 0, last: null };
-// R-1dfb（AC1①）：deadline 到期定时器，同一 project 只保留一个 pending（单例），触发一次即清。
-const dispatchDeadlineTimers = new Map();
+// R-d1bf（T-d230，Owner：系统定时唤醒全是噪音）：壳层不注册任何「定时唤醒」。
+// 旧实现：60s 周期泵 + deadline 一次性定时器 + 停滞恢复 tick，均会在空闲时产生 timer 唤醒。
+// 新口径：唤醒只能由事件驱动（send/ack/task/评审/需求推进），壳层只做一次投递/判定/审计。
+const queuePumpState = { started: false, running: false, lastAt: 0, last: null };
 
 /**
- * R-1dfb（AC1①，卷 §九 AC1 事件驱动夹具）：send --ack --task / ack 成功后按批次注册一次性 deadline 定时器。
- * - 延迟 = min(AWB_STALL_TICK_MS, 剩余到期时间)；壳层拿不到 item 的 deadline 时按 tick 兜底（后端 tick 自己按 deadline 判）；
- * - 必须 unref()，定时器不得拖住进程退出；同一 project 已有 pending timer 就不重复注册；只触发一次，触发即清；
- * - 沙盘（TEAM_SELFTEST=1）不注册（压测口径：不驱动任何会写邮箱/改团队状态的链路）；
- * - 该批次没产生队列项也安全：后端 tickDispatchDeadlines 返回 checked=0。
+ * deadline 定时器已取消（R-d1bf）：到点不再 setTimeout 触发 tick/唤醒，只保留审计说明。
+ * 保留同名函数避免调用方报错；实现恒不注册定时器。
  */
-function scheduleDispatchDeadline(projectName, options = {}) {
-  const name = String(projectName || '').trim();
-  if (!name || IS_SANDBOX) return null;
-  if (dispatchDeadlineTimers.has(name)) return dispatchDeadlineTimers.get(name);
-  const remainingRaw = Number(options && options.remainingMs);
-  const remainingMs = Number.isFinite(remainingRaw) && remainingRaw > 0 ? remainingRaw : STALL_TICK_MS;
-  const delayMs = Math.max(0, Math.min(STALL_TICK_MS, remainingMs));
-  const timer = setTimeout(() => {
-    dispatchDeadlineTimers.delete(name);
-    Promise.resolve()
-      .then(() => teamTools.dispatchDeadlineTick(name, { source: 'deadline' }))
-      .then((result) => {
-        console.log('DISPATCH_DEADLINE_TICK ' + JSON.stringify({
-          project: name,
-          at: now(),
-          ok: !(result && result.ok === false),
-          checked: result && Number.isFinite(Number(result.checked)) ? Number(result.checked) : null,
-          escalated: result && Array.isArray(result.escalated) ? result.escalated.length : null,
-          code: (result && result.code) || '',
-        }));
-      })
-      .catch((error) => {
-        console.warn('DISPATCH_DEADLINE_FAILED ' + JSON.stringify({ project: name, why: String((error && error.message) || error).slice(0, 200) }));
-      });
-  }, delayMs);
-  if (timer && typeof timer.unref === 'function') timer.unref();
-  dispatchDeadlineTimers.set(name, timer);
-  return timer;
-}
-
-/**
- * R-1dfb（AC1①/AC4）：60 秒泵之前先跑 deadline 兜底 tick + 停滞角色恢复。
- * 两步都 try/catch：后端未落地/抛错只留结构化结果，绝不阻断既有队列泵（既有泵行为保持不变）。
- */
-async function runStallPrePumpStep(projectName) {
-  const step = { deadlineTick: null, stalledRecovery: null };
+function scheduleDispatchDeadline(projectName) {
+  const name = String(projectName || "").trim();
+  if (!name) return null;
   try {
-    step.deadlineTick = await teamTools.dispatchDeadlineTick(projectName, { source: 'tick' });
-  } catch (error) {
-    step.deadlineTick = { ok: false, code: 'DEADLINE_TICK_FAILED', message: String((error && error.message) || error).slice(0, 200) };
-  }
-  try {
-    step.stalledRecovery = await teamTools.recoverStalledRoles(projectName);
-  } catch (error) {
-    step.stalledRecovery = { ok: false, code: 'STALL_RECOVERY_FAILED', message: String((error && error.message) || error).slice(0, 200) };
-  }
-  return step;
-}
-
-/** 把 stall 两步结果并入既有泵结果（保留原字段：ok/code/pumped/item/... 语义不变）。 */
-function mergeQueuePumpLast(pumpResult, stallStep) {
-  const base = (pumpResult && typeof pumpResult === 'object' && !Array.isArray(pumpResult))
-    ? pumpResult
-    : { ok: pumpResult !== false, value: pumpResult };
-  return {
-    ...base,
-    deadlineTick: stallStep ? stallStep.deadlineTick : null,
-    stalledRecovery: stallStep ? stallStep.stalledRecovery : null,
-  };
+    console.log("DISPATCH_DEADLINE_TIMER_DISABLED " + JSON.stringify({ project: name, at: now(), policy: WakeTimerPolicy.describePolicy().version }));
+  } catch { /* 审计失败不阻断 */ }
+  return null;
 }
 
 let claimScanLastAt = 0;
-// T-20261116-124658-303e：认领扫描挂到既有 60 秒 tick（不新起定时器）。
-// 走 CLI（team.mjs claim scan --json）而不是再实现一遍：壳与手动跑同一条命令、同一份实现。
+// T-20261116-124658-303e：认领扫描保持 CLI 单源；改为事件驱动（不再挂在 60 秒 tick 上）。
 function runClaimScanTick(projectName) {
   try {
-    const args = [ledgerTeamMjsPath(), 'claim', 'scan', '--project', String(projectName || ''), '--json'];
+    const args = [ledgerTeamMjsPath(), "claim", "scan", "--project", String(projectName || ""), "--json"];
     const run = spawnSync(process.execPath, args, {
-      cwd: path.join(__dirname, '..'),
+      cwd: path.join(__dirname, ".."),
       env: teamChildEnv(),
-      encoding: 'utf8', timeout: 20000, windowsHide: true,
+      encoding: "utf8", timeout: 20000, windowsHide: true,
     });
     claimScanLastAt = Date.now();
     if (run.status !== 0) {
-      console.warn('CLAIM_SCAN_FAILED ' + JSON.stringify({ project: projectName, code: run.status, why: String((run.stderr || run.error && run.error.message || '')).slice(0, 200) }));
+      console.warn("CLAIM_SCAN_FAILED " + JSON.stringify({ project: projectName, code: run.status, why: String((run.stderr || (run.error && run.error.message)) || "").slice(0, 200) }));
       return;
     }
-    const line = String(run.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
+    const line = String(run.stdout || "").trim().split(/\r?\n/).filter(Boolean).pop() || "";
     let parsed = null;
     try { parsed = JSON.parse(line); } catch { parsed = null; }
-    if (!parsed) { console.warn('CLAIM_SCAN_BAD_OUTPUT ' + JSON.stringify({ project: projectName, line: line.slice(0, 120) })); return; }
+    if (!parsed) { console.warn("CLAIM_SCAN_BAD_OUTPUT " + JSON.stringify({ project: projectName, line: line.slice(0, 120) })); return; }
     if (parsed.written > 0 || parsed.overdue > 0 || parsed.stalled > 0) {
-      console.log('CLAIM_SCAN ' + JSON.stringify({ project: projectName, at: claimScanLastAt, scanned: parsed.scanned, written: parsed.written, pending: parsed.pending, overdue: parsed.overdue, stalled: parsed.stalled }));
+      console.log("CLAIM_SCAN " + JSON.stringify({ project: projectName, at: claimScanLastAt, scanned: parsed.scanned, written: parsed.written, pending: parsed.pending, overdue: parsed.overdue, stalled: parsed.stalled }));
     }
   } catch (error) {
-    // 失败只记日志：认领扫描绝不能拖住派单泵。
-    console.warn('CLAIM_SCAN_FAILED ' + JSON.stringify({ project: projectName, why: String((error && error.message) || error).slice(0, 200) }));
+    console.warn("CLAIM_SCAN_FAILED " + JSON.stringify({ project: projectName, why: String((error && error.message) || error).slice(0, 200) }));
   }
 }
-function queuePumpTick() {
-  if (queuePumpState.running) return;
-  // B-20261116-105124-c5413：沙盘（TEAM_SELFTEST=1）下壳不得驱动任何会写邮箱/改团队状态的链路。
-  // 定时泵会把派单队列里的项真的投出去（写邮箱 new/ + 派单锁），压测口径要求「不写邮箱」。
-  if (IS_SANDBOX) { queuePumpState.last = { ok: true, skipped: true, reason: 'SANDBOX' }; return; }
+
+/**
+ * 事件驱动队列投递（R-d1bf）：仅在 send/ack/task/评审/需求推进等事件后调用；不注册 timer。
+ * 投递动作保留（真实消息必达），失败只留痕不重试成定时唤醒；同一时刻单飞（running 闸）。
+ */
+function queuePumpOnce(reason) {
+  const trigger = String(reason || "event");
+  if (queuePumpState.running) return queuePumpState;
+  if (IS_SANDBOX) { queuePumpState.last = { ok: true, skipped: true, reason: "SANDBOX" }; return queuePumpState; }
   let store = null;
   let project = null;
   try {
     store = readStore();
     project = store.projects.find((p) => p.id === store.activeProjectId) || store.projects[0] || null;
   } catch { project = null; }
-  if (!project || !project.name) return;
-  // 守护跟随当前项目：切工作区后 60 秒内自动换到新项目（已由本壳管着同一项目时幂等返回）。
+  if (!project || !project.name) return queuePumpState;
   if (!routeSupervisor.quitting) ensureRouteSupervisor(project);
-  // T-20261116-124658-303e：同一 tick 里跑认领扫描（10 分钟标超时、30 分钟升级），不新起定时器；
-  // 扫描失败只记日志，不阻塞队列泵。CLI 手动跑同一条命令结果一致（幂等）。
   runClaimScanTick(project.name);
-  let stallStep = { deadlineTick: null, stalledRecovery: null };
   queuePumpState.running = true;
+  queuePumpState.lastAt = Date.now();
   Promise.resolve()
-    // R-1dfb（AC1①/AC4）：先 deadline 兜底 tick + 停滞恢复（失败不阻断），再跑既有 60 秒队列泵。
-    .then(() => runStallPrePumpStep(project.name))
-    .then((step) => { stallStep = step; return teamTools.pumpDispatchQueue(project.name); })
+    .then(() => teamTools.pumpDispatchQueue(project.name))
     .then((result) => {
-      queuePumpState.lastAt = Date.now();
-      queuePumpState.last = mergeQueuePumpLast(result, stallStep);
+      queuePumpState.last = result;
       if (result && result.pumped) {
-        console.log('QUEUE_PUMP ' + JSON.stringify({ project: project.name, messageId: result.message && result.message.id, to: result.item && result.item.to, remaining: result.remaining }));
+        console.log("QUEUE_PUMP_EVENT " + JSON.stringify({ project: project.name, trigger, messageId: result.message && result.message.id, to: result.item && result.item.to, remaining: result.remaining }));
         return;
       }
       if (result && result.ok === false) {
-        const why = String(result.message || result.reason || result.code || 'QUEUE_PUMP_FAILED').slice(0, 200);
-        try { addEvent(project, '队列泵失败：' + why); writeStore(store); } catch { /* 留痕失败不阻断定时泵 */ }
-        console.warn('QUEUE_PUMP_FAILED ' + JSON.stringify({ project: project.name, code: result.code, why }));
+        const why = String(result.message || result.reason || result.code || "QUEUE_PUMP_FAILED").slice(0, 200);
+        try { addEvent(project, "队列泵失败：" + why); writeStore(store); } catch { /* ignore */ }
+        console.warn("QUEUE_PUMP_FAILED " + JSON.stringify({ project: project.name, trigger, code: result.code, why }));
       }
     })
     .catch((error) => {
       const why = String((error && error.message) || error).slice(0, 200);
-      queuePumpState.lastAt = Date.now();
-      queuePumpState.last = mergeQueuePumpLast({ ok: false, code: 'QUEUE_PUMP_FAILED', message: why }, stallStep);
-      try { addEvent(project, '队列泵失败：' + why); writeStore(store); } catch { /* ignore */ }
-      console.warn('QUEUE_PUMP_FAILED ' + JSON.stringify({ project: project.name, why }));
+      queuePumpState.last = { ok: false, code: "QUEUE_PUMP_FAILED", message: why };
+      try { addEvent(project, "队列泵失败：" + why); writeStore(store); } catch { /* ignore */ }
+      console.warn("QUEUE_PUMP_FAILED " + JSON.stringify({ project: project.name, trigger, why }));
     })
     .finally(() => { queuePumpState.running = false; });
+  return queuePumpState;
 }
+
 function startDispatchQueuePump() {
-  if (queuePumpState.timer) return queuePumpState;
-  queuePumpState.timer = setInterval(queuePumpTick, QUEUE_PUMP_INTERVAL_MS);
-  if (queuePumpState.timer && typeof queuePumpState.timer.unref === 'function') queuePumpState.timer.unref();
-  // 启动后 20 秒先跑一次（错峰，避免影响窗口首帧），之后按 tick 节拍；沙盘把 tick 压到 1 秒时首跑也提前。
-  setTimeout(queuePumpTick, Math.min(20 * 1000, QUEUE_PUMP_INTERVAL_MS));
+  if (queuePumpState.started) return queuePumpState;
+  queuePumpState.started = true;
+  // R-d1bf：启动是事件（遗留队列投递一次），不是定时唤醒——用 microtask 而不是 setTimeout。
+  queueMicrotask(() => {
+    try { queuePumpOnce("startup"); } catch (error) {
+      console.warn("QUEUE_PUMP_STARTUP_FAILED " + JSON.stringify({ why: String((error && error.message) || error).slice(0, 200) }));
+    }
+  });
+  console.log("QUEUE_PUMP_TIMER_DISABLED " + JSON.stringify(WakeTimerPolicy.describePolicy()));
   return queuePumpState;
 }
 
@@ -21894,6 +21834,8 @@ function ensureRouteSupervisor(project) {
     // 口径：teamRoot 就是仓库安装根时，剥掉 TEAM_ROOT / TEAM_PROJECTS_ROOT / TEAM_SELFTEST 再传；
     // 根是沙盘时原样继承（沙盘要的就是沙盘语义），并用 AWB_ROUTE_HOST_TEAM_ROOT 显式告知守护该用哪个根。
     const daemonEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1', AWB_ROUTE_HOST_TEAM_ROOT: teamRoot };
+    // R-d1bf（T-d230）：只为守护透传开关，壳层不额外加任何定时唤醒；守护侧读此开关禁用 tick/followup timer 唤醒。
+    daemonEnv.TEAM_ROUTE_NO_TIMER_WAKE = '1';
     try {
       const installRoot = path.join(ROOT, '团队');
       if (path.resolve(teamRoot) === path.resolve(installRoot)) {
