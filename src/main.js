@@ -1077,6 +1077,29 @@ function workspaceOf(project) {
 }
 
 /** 完整的 项目 → 工作区 → 六角色会话 映射（只读视图，随 app:state 返回）。 */
+/**
+ * R-97db（B-190a 残差，PM 2026-11-20 03:35 真窗口断面定位）：
+ * **名册口径就绪角色集合**的唯一来源——`publicMapping` 与 `publicProject` 都用它。
+ * 为什么必须抽出来：`app:state` 的 projects 走的是 `publicProject`（不是 publicMapping），
+ * 之前只有 publicMapping 带 rosterSessionIds → 渲染层 `project.rosterSessionIds` 恒 undefined
+ * → `verifiedCount` 的 allowed() 放行全部 items → 侧栏文本恒 6/6（tester 真窗口实测）。
+ * 口径：名册里该角色 sessionId 非空且未归档；读失败/不可用返回 null（渲染层退回旧行为，避免误清）。
+ */
+function rosterSessionIdsOf() {
+  try {
+    const members = (typeof teamTools !== 'undefined' && teamTools && typeof teamTools.teamMembers === 'function')
+      ? teamTools.teamMembers() : null;
+    if (!Array.isArray(members)) return null;
+    const ids = [];
+    for (const m of members) {
+      const role = String((m && m.role) || '');
+      const sid = String((m && m.sessionId) || '').trim();
+      if (role && sid && !(m && m.archived)) ids.push(role);
+    }
+    return ids;
+  } catch { return null; }
+}
+
 function publicMapping(project) {
   if (!project) return null;
   const workspace = workspaceOf(project);
@@ -1102,19 +1125,7 @@ function publicMapping(project) {
   // R-97db（B-190a）：**名册口径**的就绪角色集合——归档/删项目只清会话绑定时，
   // 渲染层（侧栏「N 人已就绪」）不能再拿 project.sessions 猜（那是残留映射，归档后不清）。
   // 口径：名册里该角色 sessionId 非空且未归档；读失败退回 null（渲染层退回旧行为）。
-  const rosterSessionIds = (() => {
-    try {
-      const members = (typeof teamTools !== 'undefined' && teamTools && typeof teamTools.teamMembers === 'function')
-        ? (teamTools.teamMembers() || []) : [];
-      const ids = [];
-      for (const m of members) {
-        const role = String((m && m.role) || '');
-        const sid = String((m && m.sessionId) || '').trim();
-        if (role && sid && !(m && m.archived)) ids.push(role);
-      }
-      return ids;
-    } catch { return null; }
-  })();
+  const rosterSessionIds = rosterSessionIdsOf();
   return {
     projectId: project.id || null,
     projectName: project.name || '',
@@ -3335,6 +3346,9 @@ function publicProject(project) {
     ...project,
     proposals,
     exists,
+    // R-97db（B-190a 残差）：名册口径就绪角色集合——app:state 的 projects 走 publicProject，
+    // 渲染层 verifiedCount/sessionEntries 都依赖这个字段；缺了它侧栏文本就恒 6/6。
+    rosterSessionIds: rosterSessionIdsOf(),
     // 团队模式与角色清单显式暴露：Fast 只有 4 个角色，界面/测试不按六角色硬编码。
     teamMode: normalizeTeamMode(project.teamMode),
     // R-b52b F-4/AC6：N 取「项目.json.roleIds」（登记为准），不是只看 teamMode；
