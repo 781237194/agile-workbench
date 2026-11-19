@@ -7120,6 +7120,9 @@ ipcMain.handle('theme:metrics', async () => {
   let sqPushForce = '';
   let sqLastPushAt = new Date().toISOString();
   const sqStats = { getSnapshotCalls: 0, pushEvents: 0 };
+  // R-a1eb（T-20261119-141958-16dd）：名册推送统计的读取入口。控制器在 ensureRosterWatch 那段建，
+  // 这里先用函数占位，避免 --live-check 的 IPC 处理器引用未初始化变量（TDZ）。
+  let rosterPushStatsOf = () => null;
   // R-9674 §6.5：最近活动计算耗时样本（超标降级判据）与上一份摘要（cached 兜底）
   const sqActivityStats = { lastMs: 0, samples: 0, recent: [] };
   // R-9674 TR-Q ②：p95 = 最近 20 次样本按升序取 nearest-rank（[ceil(0.95N)-1]），与正文口径一致
@@ -7162,7 +7165,7 @@ ipcMain.handle('theme:metrics', async () => {
       try { notifySessionQueueChanged('push-mode'); } catch { /* 广播失败不阻断 */ }
       return { ok: true, mode: sqPushForce, at: new Date().toISOString() };
     });
-    ipcMain.handle('team:live-check-stats', async () => ({ ...sqStats, pushForce: sqPushForce, pushDisabled: sqPushDisabled, watching: Boolean(sqWatch) }));
+    ipcMain.handle('team:live-check-stats', async () => ({ ...sqStats, pushForce: sqPushForce, pushDisabled: sqPushDisabled, watching: Boolean(sqWatch), rosterPush: rosterPushStatsOf() }));
   }
   const ensureSessionQueueWatch = () => {
     if (sqPushDisabled) return;
@@ -7190,6 +7193,68 @@ ipcMain.handle('theme:metrics', async () => {
     }
   };
   ensureSessionQueueWatch();
+  // R-20261119-140657-a1eb（T-20261119-141958-16dd，壳层侧②）：名册变化 → **一次**推送。
+  //  旧实现没有任何「团队/状态/团队.json」watch：条线换人（尤其批量 rotate 一次事务写名册）之后，
+  //  六角色面板/会话映射只能等 app.js 的 5 秒轮询（ROSTER_WATCH_MS），且轮询各自重画，做不到「换一批刷新一次」。
+  //  这里把名册文件事件交给 roster-push 合并器：静默 250ms 内的多次落盘合成一次 emit，签名（role/sessionId/status）
+  //  没变的事件一律丢弃；emit 只发既有通道 team:session-queue-changed（reason='roster'），
+  //  渲染层据此**一次**同步名册 + 队列面板在途合并只补跑一次（不新增 IPC 通道、不改 preload 协议）。
+  const rosterPushLib = require('./roster-push');
+  let rosterWatch = null;
+  let rosterWatchDir = '';
+  let rosterWatchLastError = '';
+  const rosterTeamFileOf = () => path.join(resolveTeamRoot(), '状态', '团队.json');
+  const readRosterTeamSafe = () => JSON.parse(fs.readFileSync(rosterTeamFileOf(), 'utf8').replace(/^\uFEFF/, ''));
+  const rosterPushLog = (payload) => {
+    try { console.log('[roster-push] ' + JSON.stringify(payload)); } catch { /* 日志打不出去不阻断推送 */ }
+  };
+  const rosterPush = rosterPushLib.createRosterPushController({
+    readTeam: readRosterTeamSafe,
+    quietMs: Number(process.env.AWB_ROSTER_PUSH_QUIET_MS || rosterPushLib.DEFAULT_QUIET_MS),
+    maxWaitMs: Number(process.env.AWB_ROSTER_PUSH_MAX_WAIT_MS || rosterPushLib.DEFAULT_MAX_WAIT_MS),
+    emit: (info) => {
+      // 一次 emit = 一次广播：队列面板 refresh + 名册 sync 各一次，不按角色重复刷。
+      notifySessionQueueChanged('roster');
+      rosterPushLog({ event: 'broadcast', broadcast: rosterPush.stats().broadcast, roles: info.roles, signature12: String(info.signature || '').slice(0, 12) });
+    },
+    onError: (error) => rosterPushLog({ event: 'error', message: String((error && error.message) || error).slice(0, 200) }),
+  });
+  rosterPushStatsOf = () => {
+    try { return { ...rosterPush.stats(), watching: Boolean(rosterWatch), watchError: rosterWatchLastError }; } catch { return null; }
+  };
+  const ensureRosterWatch = () => {
+    if (sqPushDisabled) return;
+    let dir = '';
+    try { dir = path.join(resolveTeamRoot(), '状态'); } catch { return; }
+    if (!dir) return;
+    if (rosterWatch && rosterWatchDir === dir) return;
+    if (rosterWatch) { try { rosterWatch.close(); } catch { /* ignore */ } rosterWatch = null; }
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      // 先以盘上当前名册为基线：只要「真变化」才推，避免建 watch 时的无关事件被当成换人。
+      try { rosterPush.seed(readRosterTeamSafe()); } catch { /* 名册尚未建立：等第一次写入当基线 */ }
+      rosterWatch = fs.watch(dir, (_event, filename) => {
+        const changed = String(filename || '');
+        // 只认名册本体（原子写的 团队.json.tmp / 其它状态文件不触发）。
+        if (changed && changed !== '团队.json') return;
+        rosterPush.poke();
+      });
+      rosterWatch.on('error', () => {
+        try { rosterWatch.close(); } catch { /* ignore */ }
+        rosterWatch = null;
+        rosterWatchDir = '';
+        rosterWatchLastError = 'watch_error';
+      });
+      rosterWatchDir = dir;
+      rosterWatchLastError = '';
+      // 可观测：watch 建好就留一行（夹具据此判断「壳层已进入推送模式」，不靠 sleep 猜）。
+      rosterPushLog({ event: 'watch', dir, seeded: Boolean(rosterPush.signature()) });
+    } catch (error) {
+      rosterWatchLastError = String((error && error.message) || error).slice(0, 200);
+      console.warn('ROSTER_WATCH_FAIL ' + JSON.stringify({ dir, detail: rosterWatchLastError }));
+    }
+  };
+  try { ensureRosterWatch(); } catch { /* 名册 watch 建不起来时退化为 5 秒轮询（原有兜底），不阻断启动 */ }
   // B-e731（P0）：决策箱自动刷新——主进程 fs.watch 决策箱.json（团队工具用 tmp+rename 落盘，
   // 所以要 watch 目录而不是文件），防抖 250ms 后向所有窗口广播 team:decision-box-changed。
   // 当前项目变了就换 watch 目录；每 5 秒自检一次（项目切换/目录后建都能跟上）。
@@ -10845,7 +10910,10 @@ ipcMain.handle('theme:metrics', async () => {
           if (result.identity && result.identity.ok === false) {
             warnings.push({ code: result.identity.code || 'RECEIPT_IDENTITY_FAILED', message: result.identity.message || '回执会话身份未写入 回执.jsonl' });
           }
-        } else if (['TEAM_ROLE_NOT_READY', 'NO_TEAM', 'NO_PROJECT', 'TOOL_MISSING', 'MESSAGE_NOT_FOUND', 'BOOT_REQUIRED', 'BOOT_INVALID', 'BOOT_EXPIRED', 'RULES_CHANGED', 'BOOT_FAILED', 'SESSION_ID_REQUIRED'].includes(result.code)) {
+        } else if (['TEAM_ROLE_NOT_READY', 'NO_TEAM', 'NO_PROJECT', 'TOOL_MISSING', 'MESSAGE_NOT_FOUND', 'BOOT_REQUIRED', 'BOOT_INVALID', 'BOOT_EXPIRED', 'RULES_CHANGED', 'BOOT_FAILED', 'SESSION_ID_REQUIRED',
+          // R-a1eb §6.3（T-20261119-141958-16dd）：旧会话/不在册的写被硬拒（零副作用）时，
+          // ack 按既有降级路径只记本地镜像并释放旧派单锁，不能抛成 TEAM_ACK_FAILED 让界面卡死。
+          'SESSION_REPLACED', 'NOT_IN_ROSTER'].includes(result.code)) {
           // 旧协议里查不到（团队状态重建/角色不在名册）：退回本地镜像，但必须释放旧 派单锁.json。
           warnings.push({ code: result.code, message: result.message || '旧协议回执失败，已只记本地' });
           source = message.source === 'team' ? 'team-local' : 'local';

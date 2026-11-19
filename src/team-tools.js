@@ -140,6 +140,23 @@ const TIMEOUTS = {
 const DEFAULT_BOOT_TTL_MINUTES = 480;
 const BOOT_EXPIRY_MARGIN_MS = 60 * 1000;
 const TOKEN_RETRY_CODES = ['BOOT_REQUIRED', 'BOOT_INVALID', 'BOOT_EXPIRED', 'RULES_CHANGED'];
+// R-20261119-140657-a1eb §6.3（T-20261119-141958-16dd）：会话级终态码——**绝不允许自动重签**。
+// SESSION_REPLACED（令牌里的 sessionId 已不是名册 current）/ NOT_IN_ROSTER（角色被归档或不在册）
+// 重签令牌救不回来：旧会话再 boot 一次只会把「旧会话还想写」这件事重复一遍（甚至盖掉新人），
+// 唯一正确处理是把码原样抛给调用方 + 给可读提示，让使用者去新会话/让 PM 处理。
+const SESSION_FATAL_CODES = ['SESSION_REPLACED', 'NOT_IN_ROSTER'];
+/** 会话级终态码的人类可读提示（后端没给 message 时兜底；有 message 时原样透传不动）。 */
+function sessionFatalMessage(code, detail = {}) {
+  const d = detail && typeof detail === 'object' ? detail : {};
+  const role = String(d.role || '');
+  const mine = String(d.mySessionId || d.sessionId || '').slice(0, 8);
+  const current = String(d.currentSessionId || d.current || '').slice(0, 8);
+  const ids = [mine ? `你的会话 ${mine}` : '', current ? `名册当前 ${current}` : ''].filter(Boolean).join(' / ');
+  if (code === 'NOT_IN_ROSTER') {
+    return `角色${role ? `「${role}」` : ''}不在名册或已归档（${ids || '无会话信息'}）：写操作已被拒绝且零写入；请让 PM/Owner 确认名册后在新会话 boot`;
+  }
+  return `你不是名册当前会话（${ids || '无会话信息'}）：写操作已被拒绝且零写入；请到新会话继续（旧会话已归档只读），不要在原会话重试`;
+}
 const MAX_BUFFER = 16 * 1024 * 1024;
 const TAIL_CHARS = 2000;
 // 旧版回执列表：只读文件尾部，超大 回执.jsonl 也不整块读进内存；条数上限固定。
@@ -1988,6 +2005,9 @@ function createTeamTools(options = {}) {
       project: name,
       sessionId: value.sessionId || sessionId,
       rulesHash: value.rulesHash || '',
+      // R-a1eb §6.5：名册轻量校验字段（工具层新版才有；旧工具缺省不伪造）。
+      rosterVersion: String(value.rosterVersion || ''),
+      rosterChangedSinceToken: Boolean(value.rosterChangedSinceToken),
       // 旧工具自己的简报上限是 bootBriefMaxChars（默认 2000）。这里保留完整简报，
       // 另给 briefingExcerpt 兼容旧调用方；截断成 400 会让 boot 审计看不到待办/提案。
       briefing: String(value.briefing || '').slice(0, Math.max(400, Number(teamConfig().bootBriefMaxChars || 2000))),
@@ -2048,6 +2068,15 @@ function createTeamTools(options = {}) {
     }
     if (!boot.ok) return boot;
     let result = await runner(boot.token, boot);
+    // R-a1eb §6.3：会话级终态码不重试（重签令牌＝把旧会话的写入意图再演一遍），只补可读提示。
+    if (!result.ok && SESSION_FATAL_CODES.includes(result.code)) {
+      return {
+        ...result,
+        fatal: true,
+        retryable: false,
+        message: result.message || sessionFatalMessage(result.code, result.details || result)
+      };
+    }
     if (!result.ok && TOKEN_RETRY_CODES.includes(result.code)) {
       dropBootToken(projectName, role);
       boot = await bootToken(projectName, role, { force: true, sessionId });
@@ -4686,7 +4715,12 @@ function createTeamTools(options = {}) {
       briefingHash: crypto.createHash('sha256').update(briefing).digest('hex'),
       briefingExcerpt: briefing.slice(0, 600),
       sessionId: String(boot.sessionId || sessionId || ''),
-      ...(autoBootReason ? { autoBootReason, autoBootedBy: 'workbench-shell' } : {})
+      ...(autoBootReason ? { autoBootReason, autoBootedBy: 'workbench-shell' } : {}),
+      // R-a1eb §6.5（T-20261119-141958-16dd）：名册轻量校验字段随 boot 记录落盘，界面可显示
+      // 「名册已变更，提示重 boot 一次」而**不**再因为别人被换掉就要求全员重 boot。
+      // 工具层还没实现时不伪造：rosterVersion 缺省为空串，rosterChangedSinceToken 恒 false。
+      rosterVersion: String(boot.rosterVersion || ''),
+      rosterChangedSinceToken: Boolean(boot.rosterChangedSinceToken)
     };
     const written = mutateWorkflowState(name, (state) => {
       state.boots = state.boots && typeof state.boots === 'object' ? state.boots : {};
@@ -4712,6 +4746,9 @@ function createTeamTools(options = {}) {
       token: boot.token,
       sessionId: boot.sessionId || sessionId,
       rulesHash: boot.rulesHash || '',
+      // R-a1eb §6.5：随 boot 返回两个名册字段（旧工具没有时为空串/false，不伪造）。
+      rosterVersion: String(boot.rosterVersion || ''),
+      rosterChangedSinceToken: Boolean(boot.rosterChangedSinceToken),
       briefing,
       bootRead,
       workflowWrite: written.ok ? { ok: true, file: written.file } : { ok: false, code: written.code, message: written.message },

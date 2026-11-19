@@ -6311,7 +6311,11 @@ const PANEL_SEVERITY_BLOCK_CODES = new Set([
   'TASK_OPEN',
   'LEGACY_PROTOCOL_REQUIRED',
   'PERMISSION_DENIED',
-  'PROPOSAL_SCOPE_UNHASHED'
+  'PROPOSAL_SCOPE_UNHASHED',
+  // R-20261119-140657-a1eb §6.3（T-20261119-141958-16dd）：会话级硬拒——旧会话/不在册的写操作
+  // 后端一律零副作用拒绝，界面必须按 block 显示，不能当 warn 放过去让人反复点。
+  'SESSION_REPLACED',
+  'NOT_IN_ROSTER'
 ]);
 
 /**
@@ -7626,6 +7630,12 @@ function legacyBootEvidenceMarkup() {
     const roundText = displayRound
       ? `<span class="${oldRed && ev.boot.roundMismatch ? 'bad' : 'muted'}">boot 阶段 ${displayRound}${ev.boot.roundMismatch ? '（当前记录阶段不同，仅提示）' : ''}</span>`
       : '';
+    // R-a1eb §6.2/§6.5（T-20261119-141958-16dd）：名册变了只提示，不阻塞、不要求全员重 boot。
+    //  规则哈希只含宪法+角色卡（工具层拆分后），别人换会话不会再走 RULES_CHANGED；
+    //  这里把 rosterChangedSinceToken 显示成一条 info 提示，避免使用者把它当成错误红项。
+    const rosterHint = ev.bootRecord && ev.bootRecord.rosterChangedSinceToken
+      ? `<span class="legacy-evidence-check muted" data-roster-hint="1" title="R-a1eb：名册（members[].sessionId/status）在 boot 之后变过；写操作不受影响，方便时重 boot 一次即可">名册已变更（建议重 boot 一次，不影响写）</span>`
+      : '';
     return `<article class="legacy-evidence-card ${cls}">
       <header>
         <span class="legacy-evidence-dot" style="--role-color:${esc(role.color)}"></span>
@@ -7635,6 +7645,7 @@ function legacyBootEvidenceMarkup() {
       <p class="legacy-evidence-meta">
         <span>boot 时间 ${esc(ev.boot.at ? fmtTime(ev.boot.at) : '未记录')}</span>
         ${roundText}
+        ${rosterHint}
         ${tokenLine}
       </p>
       <div class="legacy-evidence-docs">${ev.docs.map(legacyEvidenceDocChip).join('')}${ev.requirementsStale ? '<span class="legacy-evidence-doc changed" title="boot 后需求目录/需求正文发生变化">当前相关需求 变更</span>' : ''}</div>
@@ -15367,7 +15378,18 @@ async function retryDsh() {
  * 映射签名变了才重画会话相关区域（不整页 render，保留抽屉与正在填的派单表单）。
  */
 const ROSTER_WATCH_MS = 5000;
-const rosterUi = { busy: false, timer: null, lastSig: '', lastAt: 0 };
+// R-a1eb（T-20261119-141958-16dd）：名册变化改为「推送优先、轮询兜底」。
+//  push  = 壳层 roster-push 合并器发的 team:session-queue-changed(reason='roster')，一批换人只发一次；
+//  pending/coalesced = 同步在途时再来的推送只补跑一次（不按角色重复刷新）。
+const rosterUi = {
+  busy: false,
+  pending: false,
+  timer: null,
+  lastSig: '',
+  lastAt: 0,
+  pushBound: false,
+  pushStats: { events: 0, syncs: 0, pushSyncs: 0, coalesced: 0, coalescedRuns: 0, lastReason: '', lastAt: '' }
+};
 
 function rosterSignature(s) {
   const list = s && Array.isArray(s.projects) ? s.projects : [];
@@ -15375,8 +15397,13 @@ function rosterSignature(s) {
 }
 
 async function syncRosterFromDisk(opts = {}) {
-  if (!window.workbench || typeof window.workbench.state !== 'function' || rosterUi.busy) return false;
+  if (!window.workbench || typeof window.workbench.state !== 'function') return false;
+  // 合并口径：同步在途时再来的请求只记一次「待补跑」，本次结束后**只补一次**（不按角色/事件重复刷）。
+  if (rosterUi.busy) { rosterUi.pending = true; rosterUi.pushStats.coalesced += 1; return false; }
   rosterUi.busy = true;
+  // 只读统计：syncs=实际读盘重画的次数（含 5 秒轮询兜底）；pushSyncs=其中由名册推送触发的次数。
+  rosterUi.pushStats.syncs += 1;
+  if (String(opts.reason || '').startsWith('roster')) rosterUi.pushStats.pushSyncs = (rosterUi.pushStats.pushSyncs || 0) + 1;
   try {
     const next = await window.workbench.state();
     if (!next) return false;
@@ -15404,6 +15431,12 @@ async function syncRosterFromDisk(opts = {}) {
     return false;
   } finally {
     rosterUi.busy = false;
+    if (rosterUi.pending) {
+      rosterUi.pending = false;
+      rosterUi.pushStats.coalescedRuns += 1;
+      // 补跑一次即可：合并窗口内的 N 次推送已经在这里合成一次同步。
+      await syncRosterFromDisk({ ...opts, reason: String(opts.reason || '') + '+pending' }).catch(() => {});
+    }
   }
 }
 
@@ -15416,17 +15449,52 @@ function rosterWatchTick() {
   syncRosterFromDisk().catch(() => {});
 }
 
+/* R-a1eb（T-20261119-141958-16dd）：名册推送（推一次 → 同步一次）。
+ *  通道复用既有 team:session-queue-changed（壳层 roster-push 合并器发 reason='roster'），
+ *  不新增 IPC、不改 preload：面板自己也是订阅这条通道，两边各自一次、互不放大。
+ *  同步在途时只记一次补跑（见 syncRosterFromDisk），所以「批量换人 N 个角色」只刷新一次。
+ */
+function requestRosterSync(source) {
+  rosterUi.pushStats.lastReason = String(source || 'push');
+  rosterUi.pushStats.lastAt = new Date().toISOString();
+  rosterUi.lastAt = Date.now();
+  syncRosterFromDisk({ reason: String(source || 'push') }).catch(() => {});
+}
+
+function bindRosterPush() {
+  const bridge = window.workbench;
+  if (!bridge || typeof bridge.onSessionQueueChanged !== 'function') return false;
+  try {
+    bridge.onSessionQueueChanged((payload) => {
+      const reason = String((payload && payload.reason) || '');
+      // 只接名册推送：会话排队/任务 watch 等由队列面板自管，这里不重复读状态。
+      if (reason !== 'roster') return;
+      rosterUi.pushStats.events += 1;
+      requestRosterSync('roster');
+    });
+    rosterUi.pushBound = true;
+  } catch {
+    rosterUi.pushBound = false;
+  }
+  return rosterUi.pushBound;
+}
+
 function startRosterWatch() {
   if (rosterUi.timer) return;
   rosterUi.lastSig = rosterSignature(state);
   rosterUi.lastAt = Date.now();
+  // 推送优先（换人后立刻刷新、且只刷一次）；5 秒轮询保留为兜底（通道不可用时行为与旧实现一致）。
+  bindRosterPush();
   rosterUi.timer = setInterval(r4Gate(rosterWatchTick), ROSTER_WATCH_MS);
   // 自测/排查用只读钩子：当前映射签名与侧栏计数。
   window.__teamRoster = {
     sync: (opts) => syncRosterFromDisk(opts || {}),
     sig: () => rosterSignature(state),
     count: () => (document.querySelector('#team-session-count') || {}).textContent || '',
+    // 只读统计：推送次数 / 同步次数 / 合并补跑次数（夹具据此断言「一批只刷新一次」）。
+    pushStats: () => ({ ...rosterUi.pushStats, pushBound: rosterUi.pushBound, pending: rosterUi.pending }),
   };
+  window.__rosterPushStats = window.__teamRoster.pushStats;
 }
 
 function reloadDshView(opts = {}) {
