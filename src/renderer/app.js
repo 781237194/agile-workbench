@@ -1532,9 +1532,12 @@ function roleById(id) {
 
 function sessionEntries(project) {
   const sessions = (project && project.sessions) || {};
+  // R-97db（B-190a）：有后端名册快照时以名册为准——归档成员/删工作区后 project.sessions 会残留，
+  // 直接数它会让侧栏仍显示「6 人已就绪」（Owner 2026-11-20 实测回归）。
+  const rosterIds = Array.isArray(project && project.rosterSessionIds) ? new Set(project.rosterSessionIds) : null;
   return teamRoles(project).map((role) => ({
     role,
-    sessionId: sessions[role.id] || null
+    sessionId: rosterIds ? (rosterIds.has(role.id) ? (sessions[role.id] || null) : null) : (sessions[role.id] || null)
   }));
 }
 

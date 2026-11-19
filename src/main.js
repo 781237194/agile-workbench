@@ -1097,6 +1097,22 @@ function publicMapping(project) {
       updatedAt: (info && info.updatedAt) || null
     };
   });
+  // R-97db（B-190a）：**名册口径**的就绪角色集合——归档/删项目只清会话绑定时，
+  // 渲染层（侧栏「N 人已就绪」）不能再拿 project.sessions 猜（那是残留映射，归档后不清）。
+  // 口径：名册里该角色 sessionId 非空且未归档；读失败退回 null（渲染层退回旧行为）。
+  const rosterSessionIds = (() => {
+    try {
+      const members = (typeof teamTools !== 'undefined' && teamTools && typeof teamTools.teamMembers === 'function')
+        ? (teamTools.teamMembers() || []) : [];
+      const ids = [];
+      for (const m of members) {
+        const role = String((m && m.role) || '');
+        const sid = String((m && m.sessionId) || '').trim();
+        if (role && sid && !(m && m.archived)) ids.push(role);
+      }
+      return ids;
+    } catch { return null; }
+  })();
   return {
     projectId: project.id || null,
     projectName: project.name || '',
@@ -1104,6 +1120,8 @@ function publicMapping(project) {
     teamName: project.teamName || null,
     teamMode,
     roleIds,
+    // R-97db（B-190a）：名册口径的就绪角色（未归档且有 sessionId）；渲染层用它过滤 project.sessions 残留。
+    rosterSessionIds,
     workspaceId: workspace.id,
     workspacePath: workspace.path,
     workspaceBound: workspace.bound,
