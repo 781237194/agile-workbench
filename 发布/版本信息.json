@@ -1,6 +1,6 @@
 {
-  "version": "2.1.3",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.3/发布/pm-workbench-2.1.3.zip",
-  "sha256": "f92e4baf7deac7ac24db50bd8b4fb55171fc3203d1e31c8d6f5350c4f9456305",
-  "notes": "CDN 升级包（含 GitHubFix 自愈能力的安装器）：下载→校验→备份→应用→回滚→重启提示"
+  "version": "2.1.4",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.4/发布/pm-workbench-2.1.4.zip",
+  "sha256": "0a545dd64c6cd467060b7b6ea33dfd9e369c4c132dd558b7641dd49db618a788",
+  "notes": "安装/连接修复：npm11 Electron 自愈、启动器目录对齐、DSH 自动发现（System32/netstat）、开局提示词先读规则再回已就位"
 }

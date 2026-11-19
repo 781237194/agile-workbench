@@ -36,7 +36,7 @@
 
 AI 会走 `plugin_manager` 的 `install_bundle`：装包 + 把包名注册进 profile 的 `dsh.profile.bundles`。
 
-**一句话之后会自动发生（套装 `dsh-agile-workbench` 2.2.3 · 应用本体 v2.1.3）**：
+**一句话之后会自动发生（套装 `dsh-agile-workbench` 2.2.4 · 应用本体 v2.1.4）**：
 
 1. 首次打开工作台时，启动器发现本机没有本体 → 自动后台运行官方安装器（便携 Node + Electron + 应用 + 桌面快捷方式），**无需 Node、无需管理员权限**；
 2. 工作台启动/首启后执行一次 **DSH 互通探针**（只读，不写 DSH、不改 asar），结果进 `data/install-result.json` 与「关于」页，失败不阻断；

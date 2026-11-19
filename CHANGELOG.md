@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2.1.4（2026-11-19）
+
+### 按 Owner 干净机实测汇总修安装与连接（10 点中的我方项）
+
+- **安装器 Electron 自愈（P0-1）**：`npm install` 前 `npm install-scripts approve electron -a`（旧 npm 忽略）；`electron.exe` 缺失时按 `install-scripts ls` 判定原因，从 `%LOCALAPPDATA%\electron\Cache` 的 `electron-v*-win32-x64.zip`（按 mtime 最新）解压到 dist（3 次退避）+ 写 `path.txt`；`install-result.json → electron{missingReason,healed,healReason,distFileCount,dirState}`。
+- **安装重试与诊断（P2-7）**：统一 `Move-DirectoryWithRetry`（3 次退避 + 复制兜底），失败分类 in-use/permission-or-locked/other 并写目录状态。
+- **启动器目录对齐（P1-3）**：`DEFAULT_DIRS` 改调用期 `defaultDirs()`，补安装器默认 `<盘符>\PM工作台`（D: 优先遍历存在盘）；安装器写用户变量 `PM_WORKBENCH_HOME`；导出 `getDefaultWorkbenchDirs`。
+- **teamRoot 调用期解析（P2-6）**：不再加载期缓存 env，改每次调用读 env/`workbench.json`；安装器收尾提示「重启 DSH」。
+- **DSH 自动发现修复（P0-2）**：PowerShell 路径修为 `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`，旧路径仅兜底，`AWB_POWERSHELL_PATH` 可注入；wmic 缺失不再致命（记录 WMIC_MISSING 后走 `Get-CimInstance`）；扫描默认区间改 49152–65535；新增 `netstat-port` 候选（监听到 PID 反查失败时兜底）；命令尝试记录含路径+存在性，`DSH_NOT_FOUND` 诊断含 wmic/powershell/netstat；夹具 `test-dsh-discovery` 15/15（含真实本机 resolved+capability.ok=true+零写入）。
+- **建团队开局提示词（Owner 实测）**：不再只发「只回复：已就位」；改为先读《团队宪法》/《流程.md》第二部分/《项目铁律》→ `boot` 读完全部必读文件 → 读本人角色目录（角色卡/交接-最新/产出索引）→ 才回「已就位（附令牌前 8 位+已读文件数）」；抽 `lib/seed-prompt.mjs` 单一实现，夹具 `test-seed-prompt` 19/19。
+- **文档（P3-9/P3-10）**：README 增 profile `config` 整段替换警告（必须重述 teamRoot）与 Desktop 版 `plugin_manager` 操作路径。
+
 ## 2.1.3（2026-11-19）
 
 ### 自动升级真正可用：内嵌 GitHub 连接修复 + CDN 升级包
