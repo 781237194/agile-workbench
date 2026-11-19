@@ -64,6 +64,66 @@ const writeCard = (role, text) => fs.writeFileSync(cardOf(role), text, 'utf8');
     const realTeam = path.join(ROOT, '团队', '状态', '团队.json');
     const realBefore = shaFile(realTeam);
 
+    // ── B-13d7（节归属错位）：显式 begin/end 配对解析，不按「上一个标题」推断 ──────────
+    {
+      // ① 连续两节相邻：标准节之后紧跟普通节，第二节的正文不能被算进第一段 block
+      const t1 = [
+        '## A 节', '',
+        '<!-- rolecard-standard:a:begin -->', '## A 节', '正文A', '<!-- rolecard-standard:a:end -->',
+        '## B 节', '正文B',
+      ].join('\n');
+      const p1 = sync.parseCard(t1);
+      const a1 = p1.sections.find((s) => s.key === 'a');
+      const b1 = p1.sections.find((s) => s.key === 'title:B-节' || /B 节/.test(s.title));
+      check('B13d7① 连续两节相邻：节 a 只覆盖 block（不含 B 节正文）且 B 节独立',
+        Boolean(a1) && a1.standard && !/正文B/.test(a1.text) && Boolean(b1) && !b1.standard && /正文B/.test(b1.text),
+        { a: a1 && { key: a1.key, standard: a1.standard, hasB: /正文B/.test(a1.text) }, b: b1 && { key: b1.key, has: /正文B/.test(b1.text) } });
+
+      // ② 目标节在中间：A 普通节 / B 标准 block / C 普通节，B 的 begin 行不能算到 A
+      const t2 = ['## A', '正文A', '<!-- rolecard-standard:b:begin -->', '## B', '正文B', '<!-- rolecard-standard:b:end -->', '## C', '正文C'].join('\n');
+      const p2 = sync.parseCard(t2);
+      const byTitle = (p, t) => p.sections.find((s) => String(s.title).includes(t));
+      const a2 = byTitle(p2, 'A'); const b2 = byTitle(p2, 'B'); const c2 = byTitle(p2, 'C');
+      check('B13d7② 目标节在中间：A/C 不被并入，B 的 block 行首归属正确',
+        Boolean(a2 && b2 && c2) && !a2.standard && b2.standard && !c2.standard
+        && !/rolecard-standard/.test(a2.text) && /rolecard-standard:b:begin/.test(b2.text) && !/rolecard-standard/.test(c2.text),
+        { a: a2 && a2.text.slice(0, 60), b: b2 && b2.standard, c: c2 && c2.text.slice(0, 40) });
+
+      // ③ begin 在行尾：标题行末尾带 begin（单行内起止 + 跨行各一例）
+      const t3 = [
+        '## X 节 <!-- rolecard-standard:x:begin -->', '正文X', '<!-- rolecard-standard:x:end -->',
+        '## Y 节', '正文Y',
+      ].join('\n');
+      const p3 = sync.parseCard(t3);
+      const x3 = p3.sections.find((s) => s.key === 'x');
+      const y3 = p3.sections.find((s) => String(s.title).includes('Y 节'));
+      check('B13d7③ begin 在行尾（标题行内）：仍归属 x 且不吞掉 Y 节',
+        Boolean(x3) && x3.standard && !/正文Y/.test(x3.text) && Boolean(y3) && !y3.standard && /正文Y/.test(y3.text),
+        { x: x3 && x3.standard, hasY: x3 && /正文Y/.test(x3.text), y: Boolean(y3) });
+
+      // ④ 嵌套同类标记：外层 block 包内层 block，内层标题归属内层 key
+      const t4 = [
+        '<!-- rolecard-standard:outer:begin -->', '## 外节', '正文外',
+        '<!-- rolecard-standard:inner:begin -->', '## 内节', '正文内', '<!-- rolecard-standard:inner:end -->',
+        '尾部外', '<!-- rolecard-standard:outer:end -->',
+      ].join('\n');
+      const p4 = sync.parseCard(t4);
+      const inner = p4.sections.find((s) => s.key === 'inner');
+      const outer = p4.sections.find((s) => s.key === 'outer');
+      check('B13d7④ 嵌套同类标记：内层 key=inner、外层 key=outer 且都没有被错位',
+        Boolean(inner && outer) && inner.standard && outer.standard && /正文内/.test(inner.text) && !/正文外/.test(inner.text),
+        { sections: p4.sections.map((s) => ({ key: s.key, standard: s.standard })) });
+
+      // ⑤ 回归本单真实形态：apply 写出的 block（begin 行在标题前）解析后，marker 不落到前一节
+      const t5 = ['## 前一节', '正文前', '<!-- rolecard-standard:scene-coverage:begin -->', '## H. 场景覆盖准则', '正文H', '<!-- rolecard-standard:scene-coverage:end -->'].join('\n');
+      const p5 = sync.parseCard(t5);
+      const prev = p5.sections.find((s) => String(s.title).includes('前一节'));
+      const sc = p5.sections.find((s) => String(s.key).startsWith('scene-coverage'));
+      check('B13d7⑤ apply 写出的 block 不把 begin 算到前一节',
+        Boolean(prev) && !/rolecard-standard/.test(prev.text) && Boolean(sc) && sc.standard && /正文H/.test(sc.text),
+        { prevHasMarker: prev && /rolecard-standard/.test(prev.text), scKey: sc && sc.key });
+    }
+
     // 0) 沙盘建项目
     check('S0 team.mjs init', Boolean(run(['init', '--json']).json && run(['init', '--json']).json.ok));
     const proj = run(['project', 'create', '--name', project, '--dir', projDir, '--json']);

@@ -153,39 +153,127 @@ function keyOfHeading(heading, bodyText) {
  * 解析卡：`{preamble, marker, sections:[{key,title,text,start,end,standard,manual,headingLine}], manualBlocks}`。
  * 节 = 从 `## ` 标题到下一个同级或更高级标题。
  */
+/**
+ * 扫描 `<!-- rolecard-standard:<key>:begin/end -->` 配对（支持同一行内出现、支持嵌套同类标记、支持行首/行尾）。
+ * 返回 `{ key, startLine, endLine, startCol, endCol, closed }` 列表；未闭合的只返回 `closed:false` 不参与归属。
+ */
+export function blockSpansOf(lines) {
+  const stack = [];
+  const blocks = [];
+  const BEGIN = /<!--\s*rolecard-standard:([A-Za-z0-9_~-]+):begin\s*-->/g;
+  const END = /<!--\s*rolecard-standard:([A-Za-z0-9_~-]+):end\s*-->/g;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = String(lines[i] || '');
+    const marks = [];
+    BEGIN.lastIndex = 0;
+    let m;
+    while ((m = BEGIN.exec(line)) !== null) marks.push({ kind: 'begin', key: m[1], col: m.index });
+    END.lastIndex = 0;
+    while ((m = END.exec(line)) !== null) marks.push({ kind: 'end', key: m[1], col: m.index });
+    marks.sort((a, b) => a.col - b.col);
+    for (const mark of marks) {
+      if (mark.kind === 'begin') {
+        stack.push({ key: mark.key, startLine: i, startCol: mark.col });
+        continue;
+      }
+      // end：从栈顶向下找同 key（嵌套同类标记按 LIFO 配对）。
+      let hit = -1;
+      for (let k = stack.length - 1; k >= 0; k -= 1) {
+        if (stack[k].key === mark.key) { hit = k; break; }
+      }
+      if (hit < 0) continue; // 孤立 end：不归属、不抛错
+      const open = stack[hit];
+      stack.splice(hit, 1);
+      blocks.push({ key: open.key, startLine: open.startLine, endLine: i, startCol: open.startCol, endCol: mark.col, closed: true });
+    }
+  }
+  for (const open of stack) blocks.push({ key: open.key, startLine: open.startLine, endLine: lines.length - 1, startCol: open.startCol, endCol: -1, closed: false });
+  blocks.sort((a, b) => a.startLine - b.startLine || a.startCol - b.startCol);
+  return blocks;
+}
+
+/** 行 i 是否被某个已闭合 block 覆盖；返回最内层 block（行内起止也算）。 */
+function innermostBlockAt(blocks, line) {
+  let best = null;
+  for (const b of blocks) {
+    if (!b.closed) continue;
+    if (line < b.startLine || line > b.endLine) continue;
+    // 行内起止：同一行既 begin 又 end 时，只有包含标题的行才算（标题在 begin 之后同一行/后续行）。
+    if (!best || (b.endLine - b.startLine) <= (best.endLine - best.startLine)) best = b;
+  }
+  return best;
+}
+
+/**
+ * 解析卡：节归属**按显式 begin/end 配对**，不按「上一个标题」推断（B-13d7）。
+ * - 标题行落在某个已闭合 standard block 内 → 该节 = 整个 block（含 begin/end 行），key=block.key、standard=true；
+ * - 标题不在任何 block 内 → 节从标题到下一个「标题或 block 起点」，key 由 `rolecard-section`/关键词/标题 slug 决定；
+ * - 没有任何标题的 block → 作为独立节（key=block.key、title=''），仍可被替换/比对。
+ */
 export function parseCard(text) {
   const src = String(text || '');
   const lines = src.split(/\r?\n/);
   const marker = cardMarkerOf(src);
-  const starts = [];
+  const blocks = blockSpansOf(lines);
+  const closed = blocks.filter((b) => b.closed);
+  const headingIdx = [];
   for (let i = 0; i < lines.length; i += 1) {
-    if (/^##\s+\S/.test(lines[i])) starts.push(i);
+    if (/^##\s+\S/.test(lines[i])) headingIdx.push(i);
   }
-  const preambleEnd = starts.length ? starts[0] : lines.length;
+  // 每个标题的归属：在内层 block 里就用 block 的 key/跨度；否则普通节。
+  const regions = [];
+  const usedBlocks = new Set();
+  for (const h of headingIdx) {
+    const block = innermostBlockAt(closed, h);
+    if (block) {
+      if (usedBlocks.has(block)) continue; // 同一 block 内多个标题：只取第一个作为该 block 的标题
+      usedBlocks.add(block);
+      regions.push({ start: block.startLine, end: block.endLine + 1, key: block.key, keySource: 'standard', standard: true, titleLine: h, block });
+      continue;
+    }
+    // 普通节：到下一个标题或下一个未归属 block 起点为止
+    const nextHeading = headingIdx.find((x) => x > h);
+    const nextBlockStart = closed
+      .filter((b) => !usedBlocks.has(b) && b.startLine > h)
+      .map((b) => b.startLine)
+      .sort((a, b) => a - b)[0];
+    let end = lines.length;
+    if (nextHeading !== undefined) end = Math.min(end, nextHeading);
+    if (nextBlockStart !== undefined) end = Math.min(end, nextBlockStart);
+    regions.push({ start: h, end, key: '', keySource: '', standard: false, titleLine: h, block: null });
+  }
+  // 没有标题的 block：作为独立节（按行序插入）
+  for (const b of closed) {
+    if (usedBlocks.has(b)) continue;
+    usedBlocks.add(b);
+    regions.push({ start: b.startLine, end: b.endLine + 1, key: b.key, keySource: 'standard', standard: true, titleLine: -1, block: b });
+  }
+  regions.sort((a, b) => a.start - b.start);
+  // 修正普通节的 end：不能盖住后面的 region 起点
+  for (let i = 0; i < regions.length; i += 1) {
+    const r = regions[i];
+    if (!r.standard && i + 1 < regions.length) r.end = Math.min(r.end, regions[i + 1].start);
+  }
+  const preambleEnd = regions.length ? regions[0].start : lines.length;
   const preamble = lines.slice(0, preambleEnd).join('\n');
   const sections = [];
-  for (let k = 0; k < starts.length; k += 1) {
-    const start = starts[k];
-    const end = k + 1 < starts.length ? starts[k + 1] : lines.length;
-    const body = lines.slice(start, end);
+  for (const r of regions) {
+    const body = lines.slice(r.start, r.end);
     const textBlock = body.join('\n');
-    const title = String(body[0] || '').trim();
-    const keyInfo = keyOfHeading(title, textBlock);
-    const key = keyInfo.key;
-    const beginM = textBlock.match(STANDARD_BEGIN_RE);
-    const endM = textBlock.match(STANDARD_END_RE);
-    const standard = Boolean(beginM && endM && beginM[1] === endM[1]);
+    const title = r.titleLine >= 0 ? String(lines[r.titleLine] || '').trim() : '';
+    const keyInfo = r.standard ? { key: r.key, source: 'standard' } : keyOfHeading(title, textBlock);
     sections.push({
-      key,
+      key: keyInfo.key,
       keySource: keyInfo.source,
       title,
       text: textBlock,
       lines: body,
-      start,
-      end,
-      standard,
+      start: r.start,
+      end: r.end,
+      standard: Boolean(r.standard),
       manual: MANUAL_BEGIN_RE.test(textBlock),
       headingLine: title,
+      block: r.block ? { key: r.block.key, startLine: r.block.startLine, endLine: r.block.endLine } : null,
     });
   }
   const seen = new Map();
@@ -194,7 +282,7 @@ export function parseCard(text) {
     seen.set(sec.key, n);
     if (n > 1) sec.key = `${sec.key}~${n}`;
   }
-  return { text: src, lines, preamble, marker, sections, manualBlocks: (src.match(/<!--\s*manual:begin[\s\S]*?<!--\s*manual:end\s*-->/gi) || []).length };
+  return { text: src, lines, preamble, marker, sections, blocks, manualBlocks: (src.match(/<!--\s*manual:begin[\s\S]*?<!--\s*manual:end\s*-->/gi) || []).length };
 }
 
 /** 模板节：以**渲染后**模板（与新建项目同源）切节——判据 sha 仍用源文本（见 templateOf）。 */
