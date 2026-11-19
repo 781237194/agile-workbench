@@ -63,6 +63,7 @@
 #>
 [CmdletBinding()]
 param(
+    [Alias('Root')]
     [string]$InstallDir,
     [string]$ShortcutDir,
     [string]$ZipPath,
@@ -87,6 +88,26 @@ param(
     [switch]$NoGitHubFix,
     [string]$GitHubFixHostsPath,
     [switch]$GitHubFixRestore,
+    # ── R-2de7 一键重置 / 彻底卸载（T-20261119-212641-33a8）──────────────────────
+    [switch]$Reset,
+    [switch]$Uninstall,
+    [switch]$Purge,
+    [switch]$KeepData,
+    [switch]$KeepBackups,
+    [switch]$DryRun,
+    [switch]$Yes,
+    [string]$Confirm,
+    [string]$BackupTo,
+    [switch]$BackupProjects,
+    [switch]$NoBackup,
+    [switch]$NoLaunch,
+    [switch]$Json,
+    [switch]$Sandbox,
+    [switch]$KillOwn,
+    [switch]$Force,
+    [string]$DshHome,
+    [string]$LocalAppDataDir,
+    [string]$TempDir,
     # 夹具专用隐藏开关：apply / restore / download（只跑对应动作并输出 JSON）
     [string]$GitHubFixTest,
     # 提权子进程内部入口（父进程 Start-Process -Verb RunAs 调用，不对外）
@@ -2480,6 +2501,631 @@ if ($LogDir) {
 }
 if (-not $script:LogFile) {
     Start-InstallerLog -Directory (Join-Path ([System.IO.Path]::GetTempPath()) 'PMWorkbench-install-logs')
+}
+
+# ── R-2de7 一键重置 / 彻底卸载（T-20261119-212641-33a8）──────────────────────
+# 设计要点（需求正文 v3 / RR-20261119-212109-e489）：
+#   ① -BackupTo 缺省：-Sandbox 时 <Root>-maint-backup\<ts>\（Root 外同级；卸载删 Root 后备份仍在），非沙盘才桌面；
+#   ② 四道闸：dry-run 清单 → 逐字确认短语 → 备份成功才动 → 路径白名单（越界 PATH_NOT_ALLOWED 零删除）；
+#   ③ 占用不删（APP_RUNNING/APP_DATA_LOCKED+PID），-KillOwn 只按 PID 结束本安装实例（禁按名批量杀）；
+#   ④ 系统级六类 CAS，-Sandbox 只出计划并标 SKIPPED_SANDBOX（真实状态零写入）；
+#   ⑤ 并发 .awb-maint.lock，第二进程 LOCK_HELD 零删除；清单 JSON 落备份目录。
+
+function Write-MaintLine {
+    param([string]$Text, [string]$Color = 'Gray')
+    if ($script:MaintJsonMode) { return }
+    if ($Text) { Write-Host $Text -ForegroundColor $Color }
+}
+
+function Resolve-MaintRoot {
+    param([string]$InstallDir)
+    if ($InstallDir -and (Test-Path -LiteralPath $InstallDir)) { return (Resolve-Path -LiteralPath $InstallDir).Path }
+    if ($PSCommandPath) {
+        $scriptRoot = Split-Path -Parent $PSCommandPath
+        if (Test-RepoRoot $scriptRoot) { return (Resolve-Path -LiteralPath $scriptRoot).Path }
+    }
+    $cwdNow = (Get-Location).Path
+    if (Test-RepoRoot $cwdNow) { return $cwdNow }
+    return ''
+}
+
+function Get-MaintDefaultBackupRoot {
+    param([string]$Root, [bool]$Sandbox, [string]$BackupTo)
+    if ($BackupTo) { return $BackupTo }
+    if ($Sandbox) { return ($Root.TrimEnd('\') + '-maint-backup') }
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    if (-not $desktop) { $desktop = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Desktop' }
+    return $desktop
+}
+
+function Test-MaintAllowedPath {
+    param([string]$Path, [string[]]$AllowedRoots)
+    if (-not $Path) { return $false }
+    try { $full = [System.IO.Path]::GetFullPath($Path) } catch { return $false }
+    foreach ($root in $AllowedRoots) {
+        if (-not $root) { continue }
+        $r = ''
+        try { $r = [System.IO.Path]::GetFullPath($root).TrimEnd('\') } catch { continue }
+        if (-not $r) { continue }
+        if ($full.Equals($r, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+        if ($full.StartsWith($r + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Get-MaintSha12 {
+    param([string]$Path)
+    try {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.Substring(0, 12).ToLower()
+        }
+    } catch { }
+    return ''
+}
+
+function Get-MaintBytes {
+    param([string]$Path)
+    try { return (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Length } catch { return 0 }
+}
+
+function New-MaintItem {
+    param([string]$Category, [string]$Action, [string]$Path, [string]$Result = 'pending', [string]$Reason = '', [string]$Code = '')
+    $existed = Test-Path -LiteralPath $Path
+    $item = [ordered]@{
+        category = $Category
+        action   = $Action
+        path     = $Path
+        existed  = [bool]$existed
+        bytes    = $(if ($existed) { (Get-MaintBytes $Path) } else { 0 })
+        sha256_12 = $(if ($existed -and (Test-Path -LiteralPath $Path -PathType Leaf)) { (Get-MaintSha12 $Path) } else { '' })
+        result   = $Result
+    }
+    if ($Reason) { $item.reason = $Reason }
+    if ($Code) { $item.code = $Code }
+    return $item
+}
+
+function Get-MaintResetItems {
+    param([string]$Root)
+    $items = @()
+    $dataDir = Join-Path $Root 'data'
+    foreach ($rel in @('data\userdata', 'data\tmp')) {
+        $items += New-MaintItem 'data' 'delete' (Join-Path $Root $rel)
+    }
+    foreach ($name in @('dsh.json', 'dsh-capability.json', 'dsh-endpoint.jsonl', 'fx.jsonl', 'mcp-selfcheck.json')) {
+        $items += New-MaintItem 'data' 'delete' (Join-Path $dataDir $name)
+    }
+    foreach ($rel in @('团队\状态', '团队\日志')) {
+        $items += New-MaintItem 'team' 'delete' (Join-Path $Root $rel)
+    }
+    $teamDir = Join-Path $Root '团队'
+    if (Test-Path -LiteralPath $teamDir) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $teamDir -Filter '看板.*' -File -ErrorAction SilentlyContinue)) {
+            $items += New-MaintItem 'team' 'delete' $f.FullName
+        }
+    }
+    foreach ($rel in @('_tmp', '.selftest-data', '.sandbox')) {
+        $items += New-MaintItem 'selfcheck' 'delete' (Join-Path $Root $rel)
+    }
+    foreach ($d in @(Get-ChildItem -LiteralPath $Root -Directory -Filter '*-check-data' -ErrorAction SilentlyContinue)) {
+        $items += New-MaintItem 'selfcheck' 'delete' $d.FullName
+    }
+    # 「留」项：只入清单供核对（action=keep），不动
+    foreach ($rel in @('项目', '团队\产出', '团队\项目')) {
+        $items += New-MaintItem 'keep' 'keep' (Join-Path $Root $rel) 'kept'
+    }
+    return $items
+}
+
+function Get-MaintUninstallProgramItems {
+    param([string]$Root, [bool]$KeepData)
+    $items = @()
+    $programRels = @('src', 'scripts', 'dsh-plugin', 'assets', 'docs', 'node_modules', '.runtime',
+        'package.json', 'package-lock.json', 'install.ps1', 'start.cmd', 'launch.vbs', 'README.md',
+        'CHANGELOG.md', 'NOTICE.md', 'LICENSE', '发版记录.md', '安装PM工作台.cmd',
+        '卸载PM工作台.cmd', '彻底卸载PM工作台.cmd')
+    foreach ($rel in $programRels) { $items += New-MaintItem 'program' 'delete' (Join-Path $Root $rel) }
+    $items += New-MaintItem 'data' 'delete' (Join-Path $Root 'data')
+    $items += New-MaintItem 'data' 'delete' (Join-Path $Root '_tmp')
+    $items += New-MaintItem 'selfcheck' 'delete' (Join-Path $Root '.selftest-data')
+    $items += New-MaintItem 'selfcheck' 'delete' (Join-Path $Root '.sandbox')
+    $teamDir = Join-Path $Root '团队'
+    if (Test-Path -LiteralPath $teamDir) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $teamDir -Filter '看板.*' -File -ErrorAction SilentlyContinue)) {
+            $items += New-MaintItem 'team' 'delete' $f.FullName
+        }
+    }
+    foreach ($d in @(Get-ChildItem -LiteralPath $Root -Directory -Filter '*-check-data' -ErrorAction SilentlyContinue)) {
+        $items += New-MaintItem 'selfcheck' 'delete' $d.FullName
+    }
+    if ($KeepData) {
+        foreach ($rel in @('项目', '团队\产出', '团队\项目', '团队\状态')) {
+            $items += New-MaintItem 'keep' 'keep' (Join-Path $Root $rel) 'kept'
+        }
+    }
+    return $items
+}
+
+function Get-MaintOwnProcesses {
+    param([string]$Root)
+    $out = @()
+    try {
+        foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='electron.exe'" -ErrorAction SilentlyContinue)) {
+            $cmd = [string]$p.CommandLine
+            if ($cmd -and $cmd.IndexOf($Root, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $out += [pscustomobject]@{ pid = [int]$p.ProcessId; commandLine = $cmd }
+            }
+        }
+    } catch { }
+    return $out
+}
+
+function Get-MaintLockPath {
+    param([string]$Root)
+    $parent = Split-Path -Parent $Root
+    if (-not $parent) { $parent = $Root }
+    $candidate = Join-Path $Root '.awb-maint.lock'
+    # 卸载会删 Root：锁放 Root 外同级，保证卸载期间不会被自己删掉
+    if (-not (Test-Path -LiteralPath $Root)) { return (Join-Path $parent ('.awb-maint-' + [System.IO.Path]::GetFileName($Root.TrimEnd('\')) + '.lock')) }
+    return $candidate
+}
+
+function Enter-MaintLock {
+    param([string]$Root)
+    $lockFile = Get-MaintLockPath $Root
+    try {
+        $stream = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $script:MaintLockStream = $stream
+        $script:MaintLockFile = $lockFile
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Exit-MaintLock {
+    if ($script:MaintLockStream) {
+        try { $script:MaintLockStream.Dispose() } catch { }
+        $script:MaintLockStream = $null
+    }
+}
+
+function Invoke-MaintBackup {
+    param([string]$Mode, [string]$Root, [string]$BackupDir, [bool]$IncludeProjects, [switch]$NoBackup)
+    if ($NoBackup) { return [pscustomobject]@{ ok = $true; zip = $null; dir = $BackupDir; note = 'no-backup' } }
+    $src = @()
+    if ($Mode -eq 'reset') {
+        $src += (Join-Path $Root '团队\状态')
+        $src += @(Get-ChildItem -LiteralPath (Join-Path $Root '团队') -Filter '看板.*' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        $src += (Join-Path $Root 'data\userdata\workbench.json')
+        if ($IncludeProjects) { $src += (Join-Path $Root '项目') }
+    } else {
+        $src += (Join-Path $Root '项目')
+        $src += (Join-Path $Root '团队\产出')
+        $src += (Join-Path $Root '团队\状态')
+    }
+    $existing = @($src | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+    if (-not $existing.Count) { return [pscustomobject]@{ ok = $true; zip = $null; dir = $BackupDir; note = 'no-user-data' } }
+    try {
+        New-Item -ItemType Directory -Force -Path $BackupDir -ErrorAction Stop | Out-Null
+        $tag = if ($Mode -eq 'reset') { 'PM工作台-维护' } else { 'PM工作台-卸载' }
+        $zip = Join-Path $BackupDir ($tag + '-' + (Get-UpgradeStamp) + '.zip')
+        # 用 staging 保持 zip 内相对路径可读（避免整盘绝对路径进包）
+        $staging = Join-Path $BackupDir 'staging'
+        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Force -Path $staging | Out-Null
+        foreach ($p in $existing) {
+            $rel = $p.Substring($Root.TrimEnd('\').Length).TrimStart('\')
+            $target = Join-Path $staging $rel
+            $parent = Split-Path -Parent $target
+            if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+            if (Test-Path -LiteralPath $p -PathType Container) {
+                Join-Path $staging $rel | Out-Null
+                Copy-Item -LiteralPath $p -Destination $target -Recurse -Force -ErrorAction Stop
+            } else {
+                Copy-Item -LiteralPath $p -Destination $target -Force -ErrorAction Stop
+            }
+        }
+        Compress-Archive -Path (Join-Path $staging '*') -DestinationPath $zip -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+        return [pscustomobject]@{ ok = $true; zip = $zip; dir = $BackupDir; note = 'ok' }
+    } catch {
+        return [pscustomobject]@{ ok = $false; zip = $null; dir = $BackupDir; note = [string]$_.Exception.Message }
+    }
+}
+
+function Remove-MaintTarget {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject]@{ result = 'already'; reason = 'not-found' } }
+    try {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        return [pscustomobject]@{ result = 'deleted'; reason = '' }
+    } catch {
+        return [pscustomobject]@{ result = 'failed'; reason = [string]$_.Exception.Message }
+    }
+}
+
+function Get-MaintSystemItems {
+    param([string]$Root, [string]$ShortcutDir, [string]$LocalAppDataDir, [string]$TempDir, [string]$DshHome, [string]$GitHubFixHostsPath, [bool]$Sandbox)
+    $items = @()
+    # B 快捷方式：桌面 + 开始菜单，仅当指向本安装的 launch.vbs
+    $shortcutDirs = @()
+    if ($ShortcutDir) { $shortcutDirs += $ShortcutDir } else { $shortcutDirs += [Environment]::GetFolderPath('Desktop') }
+    $startMenu = Join-Path ([Environment]::GetFolderPath('Programs')) 'PM工作台.lnk'
+    foreach ($dir in $shortcutDirs) {
+        if (-not $dir) { continue }
+        $lnk = Join-Path $dir 'PM工作台.lnk'
+        $item = New-MaintItem 'shortcut' 'delete' $lnk
+        if ($item.existed) {
+            $targetOk = $false
+            try {
+                $shell = New-Object -ComObject WScript.Shell
+                $sc = $shell.CreateShortcut($lnk)
+                $targetOk = ([string]$sc.TargetPath -match '(?i)wscript\.exe$') -and ([string]$sc.Arguments -match '(?i)launch\.vbs')
+                $item.reason = if ($targetOk) { 'points-to-this-install' } else { 'SHORTCUT_OTHER_INSTALL' }
+            } catch { $item.reason = 'SHORTCUT_UNREADABLE' }
+            if (-not $targetOk) { $item.code = 'SHORTCUT_OTHER_INSTALL'; $item.result = 'skipped' }
+        }
+        $items += $item
+    }
+    if (Test-Path -LiteralPath $startMenu) { $items += (New-MaintItem 'shortcut' 'delete' $startMenu) }
+    # C env（User 级；沙盘只计划）
+    foreach ($name in @('AWB_TEAM_ROOT', 'PM_WORKBENCH_HOME')) {
+        $value = [Environment]::GetEnvironmentVariable($name, 'User')
+        $item = [ordered]@{ category = 'env'; action = 'delete'; path = $name; existed = [bool]$value; bytes = 0; sha256_12 = ''; result = 'pending'; value = [string]$value }
+        if ($value) {
+            if ($value.TrimEnd('\').ToLower() -eq $Root.TrimEnd('\').ToLower() -or $value.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $item.reason = 'points-to-this-install'
+            } else {
+                $item.code = 'ENV_POINTS_OTHER_INSTALL'; $item.result = 'skipped'; $item.reason = 'points-elsewhere'
+            }
+        }
+        $items += $item
+    }
+    # D AppData / 临时（-LocalAppDataDir / -TempDir 可指沙盘）
+    $localAppData = if ($LocalAppDataDir) { $LocalAppDataDir } else { $env:LOCALAPPDATA }
+    $tempNow = if ($TempDir) { $TempDir } else { [System.IO.Path]::GetTempPath() }
+    foreach ($p in @((Join-Path $localAppData 'PMWorkbench'), (Join-Path $localAppData 'electron\Cache'))) {
+        $items += (New-MaintItem 'appdata' 'delete' $p)
+    }
+    foreach ($pattern in @('pm-workbench-*', 'PMWorkbench-*')) {
+        foreach ($d in @(Get-ChildItem -LiteralPath $tempNow -Directory -Filter $pattern -ErrorAction SilentlyContinue)) {
+            $items += (New-MaintItem 'appdata' 'delete' $d.FullName)
+        }
+    }
+    # G hosts 标记段（-GitHubFixHostsPath 可指副本）
+    $hosts = if ($GitHubFixHostsPath) { $GitHubFixHostsPath } else { Join-Path $env:SystemRoot 'System32\drivers\etc\hosts' }
+    $hostsHas = $false
+    try { $hostsHas = [bool](([System.IO.File]::ReadAllText($hosts, [System.Text.Encoding]::UTF8)) -match '>>> PMWorkbench GitHubFix >>>') } catch { }
+    $items += [ordered]@{ category = 'hosts'; action = 'delete'; path = $hosts; existed = $hostsHas; bytes = (Get-MaintBytes $hosts); sha256_12 = (Get-MaintSha12 $hosts); result = 'pending' }
+    # F 计划任务 + HKCU Run + 启动夹
+    foreach ($name in @('PM工作台-自检', 'PMWorkbench-自检')) {
+        $taskExists = $false
+        try { $taskExists = [bool](Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) } catch { }
+        $items += [ordered]@{ category = 'task'; action = 'delete'; path = $name; existed = $taskExists; bytes = 0; sha256_12 = ''; result = 'pending' }
+    }
+    $items += [ordered]@{ category = 'startup'; action = 'delete'; path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\PM工作台'; existed = $false; bytes = 0; sha256_12 = ''; result = 'pending' }
+    # E DSH 注册（-DshHome 可指沙盘）
+    $dshRoot = if ($DshHome) { $DshHome } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.dsh' }
+    $profilesDir = Join-Path $dshRoot 'profiles'
+    foreach ($pkg in @(Get-ChildItem -LiteralPath $profilesDir -Directory -ErrorAction SilentlyContinue)) {
+        $pkgFile = Join-Path $pkg.FullName 'package.json'
+        if (-not (Test-Path -LiteralPath $pkgFile)) { continue }
+        $has = $false
+        try {
+            $text = [System.IO.File]::ReadAllText($pkgFile, [System.Text.Encoding]::UTF8)
+            $has = ($text -match 'pm-workbench-dsh') -or ($text -match 'dsh-agile-workbench')
+        } catch { }
+        $items += [ordered]@{ category = 'dsh'; action = 'delete'; path = $pkgFile; existed = $has; bytes = (Get-MaintBytes $pkgFile); sha256_12 = (Get-MaintSha12 $pkgFile); result = 'pending' }
+    }
+    if ($Sandbox) {
+        foreach ($item in $items) {
+            if ($item.category -in @('shortcut', 'env', 'hosts', 'task', 'startup', 'dsh')) {
+                $item.result = 'skipped_sandbox'
+                $item.code = 'SKIPPED_SANDBOX'
+            }
+        }
+    }
+    return $items
+}
+
+function Invoke-MaintMode {
+    param(
+        [bool]$DoReset, [bool]$DoUninstall, [bool]$Purge, [bool]$KeepData, [bool]$KeepBackups,
+        [bool]$DryRun, [bool]$Yes, [string]$Confirm, [string]$BackupTo, [bool]$IncludeProjects,
+        [bool]$NoBackup, [bool]$NoLaunch, [bool]$Json, [bool]$Sandbox, [bool]$KillOwn, [bool]$Force,
+        [string]$DshHome, [string]$LocalAppDataDir, [string]$TempDir, [string]$ShortcutDir,
+        [string]$InstallDir, [string]$GitHubFixHostsPath
+    )
+    $mode = if ($DoReset) { 'reset' } else { 'uninstall' }
+    $script:MaintJsonMode = [bool]$Json
+    $result = [ordered]@{
+        mode = $mode; at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ');
+        root = ''; dryRun = [bool]$DryRun; sandbox = [bool]$Sandbox; confirmOk = $false;
+        backupZip = $null; backupDir = ''; items = @(); verdict = 'RESIDUE';
+        partial = $false; code = ''; message = ''; userDataDeleted = $false; needsDshRestart = $false
+    }
+    $root = Resolve-MaintRoot $InstallDir
+    if (-not $root) {
+        $result.code = 'ROOT_NOT_FOUND'; $result.message = '当前目录不是 PM工作台（缺 package.json/start.cmd/src\main.js）'
+        Write-MaintLine ('  [维护被拒] ROOT_NOT_FOUND：' + $result.message) 'Red'
+        if ($Json) { Write-Host ('AWB_MAINT_JSON:' + ($result | ConvertTo-Json -Depth 6 -Compress)) }
+        return 2
+    }
+    $script:MaintRoot = $root
+    $result.root = $root
+    $backupRoot = Get-MaintDefaultBackupRoot -Root $root -Sandbox $Sandbox -BackupTo $BackupTo
+    $stamp = Get-UpgradeStamp
+    $backupTag = $(if ($mode -eq 'reset') { '维护' } else { '卸载' })
+    $backupDir = Join-Path $backupRoot ('PM工作台-' + $backupTag + '-' + $stamp)
+    $result.backupDir = $backupDir
+
+    $phrase = if ($mode -eq 'reset') { '重置' } else { '彻底卸载' }
+    if ($NoBackup -or $Purge) { $phrase = $phrase + '-无备份' }
+    $result.confirmExpected = $phrase
+    if ($DryRun) { $result.dryRun = $true }
+    $result.confirmOk = ($Confirm -eq $phrase)
+
+    Write-MaintLine ''
+    $modeTitle = $(if ($mode -eq 'reset') { '一键重置' } else { '彻底卸载' })
+    Write-MaintLine ('==================== PM工作台 · ' + $modeTitle + ' ====================') 'Cyan'
+    Write-MaintLine ('  安装目录：' + $root)
+    Write-MaintLine ('  备份目录：' + $backupDir)
+    Write-MaintLine ('  模式：' + $mode + '（dryRun=' + [bool]$DryRun + '，sandbox=' + [bool]$Sandbox + '）')
+
+    if (($DoReset -and $DoUninstall) -or ($KeepData -and $Purge) -or ($KeepData -and $DoReset) -or ($Purge -and $DoReset)) {
+        $result.code = 'BAD_ARGS'; $result.message = '-Reset/-Uninstall、-KeepData/-Purge 互斥'
+        Write-MaintLine ('  [维护被拒] BAD_ARGS：' + $result.message) 'Red'
+        if ($Json) { Write-Host ('AWB_MAINT_JSON:' + ($result | ConvertTo-Json -Depth 6 -Compress)) }
+        return 2
+    }
+
+    if (-not (Enter-MaintLock $root)) {
+        Exit-MaintLock
+        $result.code = 'LOCK_HELD'; $result.message = '另一个维护进程正在执行（.awb-maint.lock）'
+        Write-MaintLine ('  [维护被拒] LOCK_HELD：' + $result.message) 'Red'
+        if ($Json) { Write-Host ('AWB_MAINT_JSON:' + ($result | ConvertTo-Json -Depth 6 -Compress)) }
+        return 2
+    }
+
+    try {
+        # ① 只读扫描清单
+        $items = @()
+        if ($mode -eq 'reset') {
+            $items = Get-MaintResetItems $root
+        } elseif ($KeepData) {
+            $items = Get-MaintUninstallProgramItems -Root $root -KeepData $true
+        } else {
+            $items = Get-MaintUninstallProgramItems -Root $root -KeepData $false
+            if (-not $Purge) {
+                $items += New-MaintItem 'root' 'delete' $root
+            } else {
+                $items += New-MaintItem 'root' 'delete' $root
+            }
+        }
+        if ($env:AWB_MAINT_TEST_BAD_PATH) { $items += New-MaintItem 'data' 'delete' ([string]$env:AWB_MAINT_TEST_BAD_PATH) }
+        $items += Get-MaintSystemItems -Root $root -ShortcutDir $ShortcutDir -LocalAppDataDir $LocalAppDataDir -TempDir $TempDir -DshHome $DshHome -GitHubFixHostsPath $GitHubFixHostsPath -Sandbox $Sandbox
+
+        # 路径白名单
+        $allowed = @($root, ($root.TrimEnd('\') + '-maint-backup'), $backupRoot, $TempDir, $LocalAppDataDir, $ShortcutDir, $DshHome, $GitHubFixHostsPath)
+        $allowed += (Join-Path $env:SystemRoot 'System32\drivers\etc\hosts')
+        if (-not $TempDir) { $allowed += [System.IO.Path]::GetTempPath() }
+        if (-not $LocalAppDataDir) { $allowed += $env:LOCALAPPDATA }
+        if (-not $DshHome) { $allowed += (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.dsh') }
+        $bad = @()
+        foreach ($item in $items) {
+            if ($item.action -ne 'delete') { continue }
+            if ($item.category -in @('env', 'task', 'startup')) { continue }
+            if ($item.path -eq $root) { continue }
+            if (-not (Test-MaintAllowedPath -Path $item.path -AllowedRoots $allowed)) {
+                $item.result = 'failed'; $item.code = 'PATH_NOT_ALLOWED'; $bad += $item.path
+            }
+        }
+        if ($bad.Count) {
+            $result.items = $items; $result.code = 'PATH_NOT_ALLOWED'; $result.message = '越界路径：' + (($bad | Select-Object -First 3) -join '；')
+            $result.dryRun = $true
+            Write-MaintLine ('  [维护被拒] PATH_NOT_ALLOWED：' + $result.message) 'Red'
+            if ($Json) { Write-Host ('AWB_MAINT_JSON:' + ($result | ConvertTo-Json -Depth 6 -Compress)) }
+            return 2
+        }
+
+        # ② dry-run / 确认短语
+        $deletable = @($items | Where-Object { $_.action -eq 'delete' })
+        $deleteCount = @($deletable | Where-Object { $_.existed }).Count
+        Write-MaintLine ('  清单：' + $items.Count + ' 项（待删 ' + $deleteCount + ' 项，保留 ' + (@($items | Where-Object { $_.action -eq 'keep' }).Count) + ' 项）') 'DarkGray'
+        foreach ($item in $deletable) {
+            $mark = if ($item.existed) { '存在' } else { '已无' }
+            Write-MaintLine ('    [' + $item.category + '] ' + $item.action + ' ' + $item.path + '（' + $mark + '）') 'DarkGray'
+        }
+        if ($DryRun -or -not $Yes) {
+            $result.dryRun = $true
+            $result.items = $items
+            $result.code = ''
+            $result.message = 'dry-run：仅清单，未删除任何文件；确认短语：' + $phrase
+            if ($Json) { Write-Host ('AWB_MAINT_JSON:' + ($result | ConvertTo-Json -Depth 6 -Compress)) }
+            Write-MaintLine ''
+            Write-MaintLine ('  [干跑] 未删除任何文件。确认执行请加 -Yes -Confirm "' + $phrase + '"') 'Yellow'
+            return 0
+        }
+        if (-not $result.confirmOk) {
+            $result.items = $items; $result.code = 'CONFIRM_MISMATCH'; $result.message = '确认短语不符（需要：' + $phrase + '）'
+            Write-MaintLine ('  [维护被拒] CONFIRM_MISMATCH：' + $result.message) 'Red'
+            if ($Json) { Write-Host ('AWB_MAINT_JSON:' + ($result | ConvertTo-Json -Depth 6 -Compress)) }
+            return 2
+        }
+
+        # ③ 备份（重置：状态/看板/workbench；卸载：项目/团队产出/团队状态）
+        if (-not ($DryRun)) {
+            $backup = Invoke-MaintBackup -Mode $mode -Root $root -BackupDir $backupDir -IncludeProjects ([bool]$IncludeProjects) -NoBackup:([bool]$NoBackup -or [bool]$Purge)
+            if (-not $backup.ok) {
+                $result.items = $items; $result.code = 'BACKUP_FAILED'; $result.message = '备份失败（未删除任何文件）：' + $backup.note
+                Write-MaintLine ('  [维护被拒] BACKUP_FAILED：' + $backup.note) 'Red'
+                if ($Json) { Write-Host ('AWB_MAINT_JSON:' + ($result | ConvertTo-Json -Depth 6 -Compress)) }
+                return 2
+            }
+            $result.backupZip = $backup.zip
+        }
+
+        # ④ 占用检测（只认命令行含本安装目录的 electron）
+        $running = Get-MaintOwnProcesses -Root $root
+        if ($running.Count -and -not $KillOwn) {
+            $result.code = 'APP_RUNNING'; $result.message = ('检测到本安装的 Electron 在运行（PID ' + (($running | ForEach-Object { $_.pid }) -join ',') + '）；先退出或加 -KillOwn')
+            $result.items = $items
+            Write-MaintLine ('  [维护被拒] APP_RUNNING：' + $result.message) 'Red'
+            if ($Json) { Write-Host ('AWB_MAINT_JSON:' + ($result | ConvertTo-Json -Depth 6 -Compress)) }
+            return 2
+        }
+        if ($running.Count -and $KillOwn) {
+            foreach ($proc in $running) {
+                try { taskkill /PID ([string]$proc.pid) /T /F | Out-Null; $result.items += [ordered]@{ category = 'process'; action = 'kill'; path = [string]$proc.pid; existed = $true; bytes = 0; sha256_12 = ''; result = 'killed' } } catch { }
+            }
+        }
+
+        # ⑤ 执行删除（单项失败不中断）
+        $failed = @()
+        foreach ($item in $items) {
+            if ($item.action -eq 'keep') { continue }
+            if ($item.result -eq 'skipped_sandbox') { continue }
+            if ($item.result -eq 'failed') { $failed += $item; continue }
+            if ($item.action -eq 'delete' -and $item.category -in @('env', 'task', 'startup', 'hosts', 'dsh', 'shortcut')) {
+                # 系统级 CAS 留给下面的专用处理
+                continue
+            }
+            $r = Remove-MaintTarget -Path $item.path
+            $item.result = $r.result
+            if ($r.reason) { $item.reason = $r.reason }
+            if ($r.result -eq 'failed') { $failed += $item }
+        }
+        # 团队/看板 与 program/data 项已在上面循环处理；Root 整删放最后
+        $rootItem = $items | Where-Object { $_.category -eq 'root' } | Select-Object -First 1
+        if ($rootItem) {
+            # 锁文件在 Root 内且以 FileShare.None 打开，Windows 会拒绝删除整个目录 → 先释放
+            Exit-MaintLock
+            $r = Remove-MaintTarget -Path $rootItem.path
+            $rootItem.result = $r.result
+            if ($r.reason) { $rootItem.reason = $r.reason }
+            if ($r.result -eq 'failed') { $failed += $rootItem }
+        }
+
+        # ⑥ 系统级六类（沙盘只计划）
+        if (-not $Sandbox) {
+            $failed += Invoke-MaintSystemApply -Items $items
+        } else {
+            $result.needsDshRestart = $false
+        }
+
+        # ⑦ 判定
+        $remaining = @($items | Where-Object { $_.action -eq 'delete' -and $_.result -notin @('deleted', 'already', 'skipped', 'skipped_sandbox') })
+        $result.items = $items
+        $result.partial = ($failed.Count -gt 0)
+        $result.verdict = if ($remaining.Count -eq 0) { 'CLEAN' } else { 'RESIDUE' }
+        $result.userDataDeleted = [bool]($Purge -or (-not $KeepData -and $mode -eq 'uninstall'))
+        $result.code = if ($result.partial) { 'PARTIAL' } else { 'OK' }
+        $result.message = if ($result.verdict -eq 'CLEAN') { '完成（判定：干净）' } else { ('完成但仍有残留 ' + $remaining.Count + ' 项') }
+
+        # ⑧ 清单落盘
+        try {
+            New-Item -ItemType Directory -Force -Path $backupDir -ErrorAction Stop | Out-Null
+            $manifestFile = Join-Path $backupDir 'maint.json'
+            [System.IO.File]::WriteAllText($manifestFile, ($result | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+            $result.manifestFile = $manifestFile
+        } catch { }
+
+        if ($Json) { Write-Host ('AWB_MAINT_JSON:' + ($result | ConvertTo-Json -Depth 8 -Compress)) }
+        Write-MaintLine ''
+        $resultColor = $(if ($result.verdict -eq 'CLEAN') { 'Green' } else { 'Yellow' })
+        Write-MaintLine ('  结果：' + $result.message) $resultColor
+        Write-MaintLine ('  判定：' + $result.verdict + '；清单：' + $backupDir) 'DarkGray'
+        return $(if ($result.verdict -eq 'CLEAN') { 0 } else { 2 })
+    } finally {
+        Exit-MaintLock
+    }
+}
+
+# 系统级六类：CAS 检查后再删（沙盘不进这里）
+function Invoke-MaintSystemApply {
+    param($Items)
+    $failed = @()
+    foreach ($item in $Items) {
+        if ($item.action -ne 'delete' -or $item.category -notin @('shortcut', 'env', 'hosts', 'task', 'startup', 'dsh', 'appdata')) { continue }
+        if ($item.result -eq 'skipped_sandbox' -or $item.result -eq 'skipped') { continue }
+        try {
+            switch ($item.category) {
+                'shortcut' { if (Test-Path -LiteralPath $item.path) { Remove-Item -LiteralPath $item.path -Force; $item.result = 'deleted' } else { $item.result = 'already' } }
+                'env' {
+                    if ($item.existed) {
+                        $userValue = [Environment]::GetEnvironmentVariable($item.path, 'User')
+                        if ($userValue -and ($userValue.TrimEnd('\').ToLower() -eq $script:MaintRoot.TrimEnd('\').ToLower() -or $userValue.StartsWith($script:MaintRoot, [System.StringComparison]::OrdinalIgnoreCase))) {
+                            [Environment]::SetEnvironmentVariable($item.path, $null, 'User'); $item.result = 'deleted'
+                        } else { $item.result = 'skipped'; $item.code = 'ENV_POINTS_OTHER_INSTALL' }
+                    } else { $item.result = 'already' }
+                }
+                'appdata' { $r = Remove-MaintTarget -Path $item.path; $item.result = $r.result }
+                'hosts' {
+                    if (-not $item.existed) { $item.result = 'already' }
+                    else {
+                        $hostsFile = $item.path
+                        $text = [System.IO.File]::ReadAllText($hostsFile, [System.Text.Encoding]::UTF8)
+                        $pat = '(?ms)^# >>> PMWorkbench GitHubFix >>>.*?^# <<< PMWorkbench GitHubFix <<<[^\r\n]*\r?\n?'
+                        $new = [regex]::Replace($text, $pat, '')
+                        $bak = $hostsFile + '.bak-' + (Get-UpgradeStamp)
+                        Copy-Item -LiteralPath $hostsFile -Destination $bak -Force
+                        [System.IO.File]::WriteAllText($hostsFile, $new, (New-Object System.Text.UTF8Encoding($false)))
+                        $item.result = 'deleted'
+                    }
+                }
+                'task' {
+                    if ($item.existed) {
+                        try { Unregister-ScheduledTask -TaskName $item.path -Confirm:$false -ErrorAction Stop; $item.result = 'deleted' }
+                        catch { $item.result = 'failed'; $item.code = 'TASK_NEED_ADMIN' }
+                    } else { $item.result = 'already' }
+                }
+                'startup' {
+                    try {
+                        Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'PM工作台' -ErrorAction SilentlyContinue
+                        $item.result = 'deleted'
+                    } catch { $item.result = 'failed'; $item.code = 'ENV_WRITE_DENIED' }
+                }
+                'dsh' {
+                    if (-not $item.existed) { $item.result = 'already' }
+                    else {
+                        $pkgFile = $item.path
+                        $text = [System.IO.File]::ReadAllText($pkgFile, [System.Text.Encoding]::UTF8)
+                        $obj = $text | ConvertFrom-Json
+                        $changed = $false
+                        if ($obj.bundles) {
+                            $keep = @($obj.bundles | Where-Object { [string]$_ -notmatch 'pm-workbench-dsh|dsh-agile-workbench' })
+                            if ($keep.Count -ne @($obj.bundles).Count) { $obj.bundles = $keep; $changed = $true }
+                        }
+                        if ($obj.dependencies) {
+                            foreach ($name in @($obj.dependencies.PSObject.Properties.Name)) {
+                                if ($name -match 'pm-workbench-dsh|dsh-agile-workbench') { $obj.dependencies.PSObject.Properties.Remove($name); $changed = $true }
+                            }
+                        }
+                        if ($changed) {
+                            $bak = $pkgFile + '.bak-uninstall-' + (Get-UpgradeStamp)
+                            Copy-Item -LiteralPath $pkgFile -Destination $bak -Force
+                            [System.IO.File]::WriteAllText($pkgFile, ($obj | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
+                            $item.result = 'deleted'
+                        } else { $item.result = 'already'; $item.code = 'DSH_NOT_REGISTERED' }
+                    }
+                }
+            }
+        } catch {
+            $item.result = 'failed'
+            if (-not $item.code) { $item.code = 'SYS_ITEM_FAILED' }
+        }
+        if ($item.result -eq 'failed') { $failed += $item }
+    }
+    return $failed
+}
+
+
+# ── R-2de7：-Reset / -Uninstall 走维护分支（不进安装主流程）────────────────────
+if ($Reset -or $Uninstall) {
+    $maintExit = Invoke-MaintMode -DoReset ([bool]$Reset) -DoUninstall ([bool]$Uninstall) -Purge ([bool]$Purge) -KeepData ([bool]$KeepData) -KeepBackups ([bool]$KeepBackups) -DryRun ([bool]$DryRun) -Yes ([bool]$Yes) -Confirm $Confirm -BackupTo $BackupTo -IncludeProjects ([bool]$BackupProjects) -NoBackup ([bool]$NoBackup) -NoLaunch ([bool]$NoLaunch) -Json ([bool]$Json) -Sandbox ([bool]$Sandbox) -KillOwn ([bool]$KillOwn) -Force ([bool]$Force) -DshHome $DshHome -LocalAppDataDir $LocalAppDataDir -TempDir $TempDir -ShortcutDir $ShortcutDir -InstallDir $InstallDir -GitHubFixHostsPath $GitHubFixHostsPath
+    if ($script:LogFile) { Write-Host "日志：$($script:LogFile)" -ForegroundColor DarkGray }
+    exit $maintExit
 }
 
 # ── e610：-Upgrade / -UpgradeRollback 走独立分支（不进安装主流程）─────────────

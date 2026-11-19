@@ -84,6 +84,9 @@ if (IS_BOARD_WINDOW) {
     // c9ac 自检旋钮（主进程只在 --live-check 进程注册这两个 IPC；生产调用会被拒绝/未注册）。
     sessionQueuePushMode: (payload) => ipcRenderer.invoke('team:session-queue-push-mode', payload),
     liveCheckStats: () => ipcRenderer.invoke('team:live-check-stats'),
+    // R-2de7：一键重置 / 彻底卸载（干跑 → 清单 → 短语 → 执行）与残留检测
+    maintRun: (payload) => ipcRenderer.invoke('maint:run', payload),
+    maintVerify: (payload) => ipcRenderer.invoke('maint:verify', payload),
     // R-fefa（T-66b4）§6.2：压缩信号注入入口（主进程只在沙盘/--live-check/AWB_COMPACT_SIGNAL_ENABLE=1 时注册）。
     compactSignal: (payload) => ipcRenderer.invoke('team:compact-signal', payload),
     // c9ac（T-20261118-083424-8e33）：会话排队快照变化推送——主进程 fs.watch(团队/状态) 去抖 300ms 后 send，

@@ -411,6 +411,37 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
       return { ok: false, code: (error && error.code) || 'UPGRADE_FAILED', message: String((error && error.message) || error).slice(0, 300), from: current, to: latest, sha256, steps: emptySteps, dryRun, restartHint: '请重启后生效' };
     } finally { upgradeBusy = false; }
   });
+  // ── R-2de7 一键重置 / 彻底卸载（GUI 维护区；默认干跑，执行必须逐字短语）────
+  const maintSandbox = () => String(process.env.TEAM_SELFTEST || '') === '1' || String(process.env.AWB_MAINT_SANDBOX || '') === '1';
+  const runMaintScript = (scriptFile, args, timeoutMs) => new Promise((resolve) => {
+    const { execFile } = require('node:child_process');
+    execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile, ...args], { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
+      const out = String(stdout || '');
+      let json = null;
+      const at = out.indexOf('AWB_MAINT_JSON:');
+      if (at >= 0) { try { json = JSON.parse(out.slice(at + 15).trim()); } catch { json = null; } }
+      resolve({ code: error ? (typeof error.code === 'number' ? error.code : (error.killed ? 124 : 1)) : 0, stdout: out, stderr: String(stderr || ''), json });
+    });
+  });
+  rawIpcHandle('maint:run', async (_e, payload) => {
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const mode = String(p.mode || 'reset').toLowerCase() === 'uninstall' ? 'uninstall' : 'reset';
+    const dryRun = p.dryRun !== false;
+    const args = [mode === 'reset' ? '-Reset' : '-Uninstall', '-InstallDir', ROOT, '-Json'];
+    if (dryRun) args.push('-DryRun'); else args.push('-Yes');
+    if (!dryRun && p.confirm) args.push('-Confirm', String(p.confirm));
+    if (p.purge) args.push('-Purge');
+    if (p.keepData) args.push('-KeepData');
+    if (maintSandbox()) args.push('-Sandbox');
+    const r = await runMaintScript(path.join(ROOT, 'install.ps1'), args, 10 * 60 * 1000);
+    return { ok: Boolean(r.json && r.json.verdict), code: r.code, json: r.json, stdoutTail: r.stdout.slice(-500), stderrTail: r.stderr.slice(-500) };
+  });
+  rawIpcHandle('maint:verify', async (_e, payload) => {
+    const p = payload && typeof payload === 'object' ? payload : {};
+    const args = ['-VerifyClean', '-Mode', String(p.mode || 'reset'), '-Root', ROOT, '-Json'];
+    const r = await runMaintScript(path.join(ROOT, '发布', 'tools', 'awb-diag.ps1'), args, 120000);
+    return { ok: r.code === 0 || r.code === 2, code: r.code, json: r.json, stdoutTail: r.stdout.slice(-500) };
+  });
   // ── e610 AC6：自动检查（只检查/只提示小圆点，绝不自动下载或安装）────────────────
   // 开关存 workbench.json 的 ui.autoUpgradeCheck（与 ui.zoom 同一写入口）；渲染层按 intervalMs 定时只调 upgrade-check。
   const UPGRADE_AUTO_INTERVAL_MS = (() => {

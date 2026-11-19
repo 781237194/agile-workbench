@@ -1,9 +1,182 @@
-# awb-diag.ps1 —— 工作台（PM工作台 / agile-workbench）只读诊断包
+﻿# awb-diag.ps1 —— 工作台（PM工作台 / agile-workbench）只读诊断包
 # 用法（在出问题的那台笔记本上）：右键「使用 PowerShell 运行」，或：
 #   powershell -ExecutionPolicy Bypass -File awb-diag.ps1
 # 产物：桌面\awb-diag-<时间>\  以及同名 .zip（把这个 zip 发回来即可）
 # 安全：只读。不杀进程、不改配置、不读账号密码/令牌、不上传网络。
 # 2026-11-19 PM 版：针对「首开粒子特效 / boot 引导 / 幽灵团队·恢复项目 / 在线升级按钮」四项取证。
+
+param(
+    [switch]$VerifyClean,
+    [string]$Mode,
+    [string]$Root,
+    [string]$DshHome,
+    [string]$LocalAppDataDir,
+    [string]$TempDir,
+    [string]$ShortcutDir,
+    [switch]$Json
+)
+
+# ── R-2de7 §6.5：维护后的「干净」判定（只读；A–H 八类）────────────────────────
+#   A 安装目录与运行态 / B 快捷方式 / C env / D AppData / E DSH profile /
+#   F 计划任务+自启 / G hosts 标记段 / H 进程（命令行含 Root）
+#   判定行：重置且 A 类运行态全 CLEAN →「重置判定：干净」；卸载且 A–H 全 CLEAN（KEPT 算残留）→「卸载判定：干净」；
+#   机器行：VERDICT: CLEAN|RESIDUE / RESIDUE_COUNT: n；退出码 0 干净 / 2 有残留 / 1 参数或内部错。
+if ($VerifyClean) {
+    try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+    $ErrorActionPreference = 'SilentlyContinue'
+    $items = @()
+    function Add-CleanItem([string]$Kind, [string]$Category, [string]$Path, [string]$Reason = '') {
+        $item = [ordered]@{ kind = $Kind; category = $Category; path = $Path; reason = $Reason }
+        $script:CleanItems += $item
+    }
+    $script:CleanItems = @()
+    $rootPath = $Root
+    if (-not $rootPath) {
+        $cwdNow = (Get-Location).Path
+        foreach ($cand in @($cwdNow, (Split-Path -Parent $PSCommandPath), (Split-Path -Parent (Split-Path -Parent $PSCommandPath)))) {
+            if ($cand -and (Test-Path (Join-Path $cand 'package.json')) -and (Test-Path (Join-Path $cand 'start.cmd'))) { $rootPath = $cand; break }
+        }
+    }
+    $modeNow = $Mode
+    if (-not $modeNow) { $modeNow = if ($rootPath -and (Test-Path -LiteralPath $rootPath)) { 'reset' } else { 'uninstall' } }
+    if ($modeNow -notin @('reset', 'uninstall')) {
+        Write-Host '参数错误：-Mode 只能是 reset 或 uninstall'
+        exit 1
+    }
+
+    # A 安装目录与运行态
+    if ($rootPath -and (Test-Path -LiteralPath $rootPath)) {
+        $runtimeRels = @('data\userdata', 'data\tmp')
+        foreach ($rel in $runtimeRels) { if (Test-Path (Join-Path $rootPath $rel)) { Add-CleanItem 'RESIDUE' 'A' (Join-Path $rootPath $rel) '运行态目录' } }
+        foreach ($name in @('dsh.json', 'dsh-capability.json', 'dsh-endpoint.jsonl', 'fx.jsonl', 'mcp-selfcheck.json')) {
+            $p = Join-Path (Join-Path $rootPath 'data') $name
+            if (Test-Path $p) { Add-CleanItem 'RESIDUE' 'A' $p '运行态文件' }
+        }
+        foreach ($rel in @('团队\状态', '团队\日志', '_tmp', '.selftest-data', '.sandbox')) {
+            if (Test-Path (Join-Path $rootPath $rel)) { Add-CleanItem 'RESIDUE' 'A' (Join-Path $rootPath $rel) '重置应删项' }
+        }
+        foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $rootPath '团队') -Filter '看板.*' -File)) { Add-CleanItem 'RESIDUE' 'A' $f.FullName '派生看板' }
+        foreach ($d in @(Get-ChildItem -LiteralPath $rootPath -Directory -Filter '*-check-data')) { Add-CleanItem 'RESIDUE' 'A' $d.FullName '自检目录' }
+    } elseif ($modeNow -eq 'uninstall' -and $rootPath) {
+        Add-CleanItem 'CLEAN' 'A' $rootPath '安装目录已不存在'
+    }
+
+    # B 快捷方式
+    $shortcutDirs = @()
+    if ($ShortcutDir) { $shortcutDirs += $ShortcutDir } else { $shortcutDirs += [Environment]::GetFolderPath('Desktop') }
+    foreach ($dir in $shortcutDirs) {
+        if (-not $dir) { continue }
+        $lnk = Join-Path $dir 'PM工作台.lnk'
+        if (Test-Path $lnk) {
+            $pointsHere = $false
+            try {
+                $shell = New-Object -ComObject WScript.Shell
+                $sc = $shell.CreateShortcut($lnk)
+                $pointsHere = ([string]$sc.Arguments -match '(?i)launch\.vbs') -and ([string]$sc.TargetPath -match '(?i)wscript\.exe$')
+            } catch { }
+            if ($pointsHere) { Add-CleanItem 'RESIDUE' 'B' $lnk '桌面快捷方式仍在' } else { Add-CleanItem 'KEPT' 'B' $lnk '快捷方式指向别处' }
+        }
+    }
+
+    # C env
+    foreach ($name in @('AWB_TEAM_ROOT', 'PM_WORKBENCH_HOME')) {
+        $value = [Environment]::GetEnvironmentVariable($name, 'User')
+        if (-not $value) { continue }
+        if ($rootPath -and ($value.TrimEnd('\').ToLower() -eq $rootPath.TrimEnd('\').ToLower() -or $value.StartsWith($rootPath, [System.StringComparison]::OrdinalIgnoreCase))) {
+            Add-CleanItem 'RESIDUE' 'C' $name ('User env=' + $value)
+        } else {
+            Add-CleanItem 'KEPT' 'C' $name ('User env=' + $value)
+        }
+    }
+
+    # D AppData / 临时
+    $localAppData = if ($LocalAppDataDir) { $LocalAppDataDir } else { $env:LOCALAPPDATA }
+    $tempNow = if ($TempDir) { $TempDir } else { [System.IO.Path]::GetTempPath() }
+    foreach ($p in @((Join-Path $localAppData 'PMWorkbench'), (Join-Path $localAppData 'electron\Cache'))) {
+        if (Test-Path $p) { Add-CleanItem 'RESIDUE' 'D' $p 'AppData 缓存仍在' }
+    }
+    foreach ($pattern in @('pm-workbench-*', 'PMWorkbench-*')) {
+        foreach ($d in @(Get-ChildItem -LiteralPath $tempNow -Directory -Filter $pattern)) { Add-CleanItem 'RESIDUE' 'D' $d.FullName '临时目录仍在' }
+    }
+
+    # E DSH profile 注册
+    $dshRoot = if ($DshHome) { $DshHome } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.dsh' }
+    $profilesDir = Join-Path $dshRoot 'profiles'
+    foreach ($pkg in @(Get-ChildItem -LiteralPath $profilesDir -Directory)) {
+        $pkgFile = Join-Path $pkg.FullName 'package.json'
+        if (-not (Test-Path $pkgFile)) { continue }
+        $text = [System.IO.File]::ReadAllText($pkgFile, [System.Text.Encoding]::UTF8)
+        if ($text -match 'pm-workbench-dsh|dsh-agile-workbench') { Add-CleanItem 'RESIDUE' 'E' $pkgFile 'DSH profile 仍注册本插件' }
+    }
+
+    # F 计划任务 + 自启
+    foreach ($task in @(Get-ScheduledTask | Where-Object { $_.TaskName -match '^(PM工作台|PMWorkbench|AgileWorkbench)' })) {
+        Add-CleanItem 'RESIDUE' 'F' ('task:' + $task.TaskName) '计划任务仍在'
+    }
+    $runKey = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if ($runKey) {
+        foreach ($prop in @($runKey.PSObject.Properties)) {
+            if ($prop.Name -match '^(PM工作台|PMWorkbench|AgileWorkbench)' -and $prop.Name -ne 'PSPath' -and $prop.Name -ne 'PSParentPath' -and $prop.Name -ne 'PSChildName' -and $prop.Name -ne 'PSDrive' -and $prop.Name -ne 'PSProvider') {
+                Add-CleanItem 'RESIDUE' 'F' ('run:' + $prop.Name) 'HKCU Run 仍有自启项'
+            }
+        }
+    }
+    $startupDir = Join-Path ([Environment]::GetFolderPath('Programs')) 'Startup'
+    foreach ($lnk in @(Get-ChildItem -LiteralPath $startupDir -Filter '*.lnk')) {
+        if ($lnk.Name -match '^(PM工作台|PMWorkbench|AgileWorkbench)') { Add-CleanItem 'RESIDUE' 'F' $lnk.FullName '启动夹仍有快捷方式' }
+    }
+
+    # G hosts 标记段
+    $hostsFile = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+    if ($env:AWB_GITHUBFIX_HOSTS_PATH) { $hostsFile = $env:AWB_GITHUBFIX_HOSTS_PATH }
+    if (Test-Path $hostsFile) {
+        try {
+            if (([System.IO.File]::ReadAllText($hostsFile, [System.Text.Encoding]::UTF8)) -match '>>> PMWorkbench GitHubFix >>>') {
+                Add-CleanItem 'RESIDUE' 'G' $hostsFile 'hosts 仍有 GitHubFix 标记段'
+            }
+        } catch { }
+    }
+
+    # H 进程（命令行含 Root）
+    if ($rootPath) {
+        foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='electron.exe'")) {
+            $cmd = [string]$p.CommandLine
+            if ($cmd -and $cmd.IndexOf($rootPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                Add-CleanItem 'RESIDUE' 'H' ('pid:' + $p.ProcessId) '本安装的 Electron 仍在运行'
+            }
+        }
+    }
+
+    # 判定：reset 只看 A 类；uninstall 看 A–H（KEPT 算残留）
+    $scope = if ($modeNow -eq 'reset') { @('A') } else { @('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H') }
+    $relevant = @($script:CleanItems | Where-Object { $_.category -in $scope })
+    $residue = @($relevant | Where-Object { $_.kind -eq 'RESIDUE' })
+    $kept = @($relevant | Where-Object { $_.kind -eq 'KEPT' })
+    $residueCount = if ($modeNow -eq 'reset') { $residue.Count } else { $residue.Count + $kept.Count }
+    $verdict = if ($residueCount -eq 0) { 'CLEAN' } else { 'RESIDUE' }
+
+    if ($Json) {
+        [ordered]@{ mode = $modeNow; root = $rootPath; verdict = $verdict; residueCount = $residueCount; items = $script:CleanItems } | ConvertTo-Json -Depth 6
+    } else {
+        Write-Host ''
+        Write-Host ('===== PM工作台 · 干净判定（' + $modeNow + '）=====') -ForegroundColor Cyan
+        Write-Host ('  Root: ' + ($rootPath | ForEach-Object { $_ } | Out-String).Trim())
+        foreach ($it in $script:CleanItems) {
+            $label = if ($it.kind -eq 'RESIDUE') { '残留' } elseif ($it.kind -eq 'KEPT') { '保留' } else { '干净' }
+            Write-Host ('  [' + $it.category + '] [' + $label + '] ' + $it.path + ' ' + $it.reason)
+        }
+        foreach ($it in $residue) { Write-Host ('  残留项：' + $it.category + ' ' + $it.path + '（' + $it.reason + '）') -ForegroundColor Yellow }
+        if ($residueCount -eq 0) {
+            if ($modeNow -eq 'reset') { Write-Host '重置判定：干净' -ForegroundColor Green } else { Write-Host '卸载判定：干净' -ForegroundColor Green }
+        } else {
+            Write-Host ('判定：有残留（' + $residueCount + ' 项）') -ForegroundColor Yellow
+        }
+        Write-Host ('VERDICT: ' + $verdict)
+        Write-Host ('RESIDUE_COUNT: ' + $residueCount)
+    }
+    if ($verdict -eq 'CLEAN') { exit 0 }
+    exit 2
+}
 
 $ErrorActionPreference = 'SilentlyContinue'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

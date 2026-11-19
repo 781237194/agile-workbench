@@ -42,6 +42,8 @@ const UPGRADE_FILES = Object.freeze([
   'LICENSE',
   '发版记录.md',
   '安装PM工作台.cmd',
+  '卸载PM工作台.cmd',
+  '彻底卸载PM工作台.cmd',
   '团队/团队宪法.md',
   '团队/流程.md',
   '团队/项目铁律.md',

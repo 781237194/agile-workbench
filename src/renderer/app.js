@@ -1437,6 +1437,67 @@ async function startUpgrade() {
     paintUpgrade();
   }
 }
+// R-2de7：更多菜单维护区（干跑→清单→逐字短语→执行；结果区常显错误码与下一步）
+function bindMaintPanel() {
+  if (bindMaintPanel._bound) return; bindMaintPanel._bound = true;
+  const panel = document.querySelector('[data-maint-panel]');
+  if (!panel) return;
+  const listEl = panel.querySelector('[data-maint-list]');
+  const confirmLine = panel.querySelector('[data-maint-confirm-line]');
+  const confirmEl = panel.querySelector('[data-maint-confirm]');
+  const applyEl = panel.querySelector('[data-maint-apply]');
+  const verifyEl = panel.querySelector('[data-maint-verify]');
+  const resultEl = panel.querySelector('[data-maint-result]');
+  let state = { mode: 'reset', json: null };
+  const say = (msg, bad) => { if (!resultEl) return; resultEl.hidden = false; resultEl.textContent = String(msg || ''); resultEl.style.color = bad ? 'var(--bad, #d9534f)' : ''; };
+  const renderDryRun = (json) => {
+    if (!json) { say('干跑失败：没有拿到清单（看主进程日志）', true); return; }
+    state.json = json;
+    const items = Array.isArray(json.items) ? json.items : [];
+    const lines = items.filter((i) => i.action === 'delete').map((i) => (i.result === 'already' ? '（已无）' : '') + i.path);
+    if (listEl) { listEl.hidden = false; listEl.textContent = `[${json.mode}] 待处理 ${lines.length} 项：` + lines.slice(0, 8).join('；') + (lines.length > 8 ? ' …等' : ''); }
+    if (confirmLine) confirmLine.hidden = false;
+    if (applyEl) applyEl.hidden = false;
+    if (verifyEl) verifyEl.hidden = false;
+    if (confirmEl) confirmEl.placeholder = json.mode === 'reset' ? '重置' : '彻底卸载';
+    say(`干跑完成（未删除任何文件）。确认短语：${json.confirmExpected || (json.mode === 'reset' ? '重置' : '彻底卸载')}`);
+  };
+  const dryRun = async (mode) => {
+    state.mode = mode;
+    try {
+      const r = await window.workbench.maintRun({ mode, dryRun: true });
+      if (!r || !r.json) { say(`干跑失败（code=${(r && r.code) || '?'}）：${(r && r.stdoutTail) || ''}`, true); return; }
+      renderDryRun(r.json);
+    } catch (e) { say('干跑异常：' + String((e && e.message) || e), true); }
+  };
+  if (panel) panel.addEventListener('click', async (event) => {
+    const t = event.target instanceof Element ? event.target.closest('[data-maint]') : null;
+    if (t) { await dryRun(t.getAttribute('data-maint')); return; }
+    if (event.target.closest('[data-maint-apply]')) {
+      const phrase = confirmEl ? String(confirmEl.value || '').trim() : '';
+      if (!phrase) { say('先输入确认短语（重置 / 彻底卸载）', true); return; }
+      say('执行中…');
+      try {
+        const r = await window.workbench.maintRun({ mode: state.mode, dryRun: false, confirm: phrase });
+        const j = r && r.json;
+        if (j && j.verdict === 'CLEAN') say(`完成：${j.mode === 'reset' ? '重置判定：干净' : '卸载判定：干净'}；备份：${j.backupZip || '（无）'}`);
+        else say(`未完全干净（code=${(j && j.code) || (r && r.code) || '?'}）：${(j && j.message) || (r && r.stdoutTail) || ''}；可点「运行残留检测」` , true);
+        if (verifyEl) verifyEl.hidden = false;
+      } catch (e) { say('执行异常：' + String((e && e.message) || e), true); }
+      return;
+    }
+    if (event.target.closest('[data-maint-verify]')) {
+      say('检测中…');
+      try {
+        const r = await window.workbench.maintVerify({ mode: state.mode });
+        const j = r && r.json;
+        if (j) say(`${j.mode === 'reset' ? '重置判定' : '卸载判定'}：${j.verdict === 'CLEAN' ? '干净' : '有残留（' + j.residueCount + ' 项）'}` + (j.verdict === 'CLEAN' ? '' : '；详见清单'), j.verdict !== 'CLEAN');
+        else say(`残留检测失败（code=${(r && r.code) || '?'}）`, true);
+      } catch (e) { say('检测异常：' + String((e && e.message) || e), true); }
+    }
+  });
+}
+
 function bindUpgradeMenu() {
   if (bindUpgradeMenu._bound) return; bindUpgradeMenu._bound = true;
   document.addEventListener('click', (event) => {
@@ -1456,6 +1517,7 @@ function bindUpgradeMenu() {
   void loadUpgradeAutoPref();
 }
 try { if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindUpgradeMenu); else bindUpgradeMenu(); } catch { /* ignore */ }
+try { if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindMaintPanel); else bindMaintPanel(); } catch { /* 维护区不可用不阻断启动 */ }
 
 function activeProject() {
   if (!state) return null;

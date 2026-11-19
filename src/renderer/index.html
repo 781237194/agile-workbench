@@ -182,6 +182,17 @@
       <!-- e610 AC6：自动检查只更新提示（小圆点/文案），绝不自动下载或安装 -->
       <label class="mm-hint" data-upgrade-auto-line><input type="checkbox" data-upgrade-auto> 自动检查更新（只提示，不自动安装）</label>
     </div>
+    <!-- R-2de7：一键重置 / 彻底卸载（维护区；默认干跑，必须输短语） -->
+    <div class="mm-sub" data-maint-panel role="group" aria-label="重置与卸载">
+      <div class="mm-hint">维护：先干跑看清单，再输短语执行；备份默认落在安装目录外同级 &lt;Root&gt;-maint-backup</div>
+      <button type="button" role="menuitem" data-maint="reset">一键重置（清数据，留项目）</button>
+      <button type="button" role="menuitem" data-maint="uninstall">彻底卸载（备份后整删）</button>
+      <div class="mm-hint" data-maint-list hidden></div>
+      <label class="mm-hint" data-maint-confirm-line hidden>确认短语 <input type="text" data-maint-confirm maxlength="20" placeholder="输入 重置 / 彻底卸载"></label>
+      <button type="button" role="menuitem" data-maint-apply hidden>执行（危险）</button>
+      <button type="button" role="menuitem" data-maint-verify hidden>运行残留检测</button>
+      <div class="mm-hint" data-maint-result hidden role="status"></div>
+    </div>
     <button type="button" role="menuitem" data-more="team-board-window"><span class="mm-ico" aria-hidden="true">▱</span><span class="mm-text">独立看板窗口（旧版 BrowserWindow）</span></button>
     <button type="button" role="menuitem" data-more="sync"><span class="mm-ico" aria-hidden="true">⇄</span><span class="mm-text">同步团队登记 / 绑定工作区</span></button>
     <button type="button" role="menuitem" data-more="restore"><span class="mm-ico" aria-hidden="true">♻</span><span class="mm-text">恢复 / 登记已有项目</span></button>
