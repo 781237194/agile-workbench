@@ -11604,19 +11604,22 @@ installShellAuditSensors();
     const scoped = (s) => inWorkspaceOf(s, s.sessionId) || cwdSame(s);
     const statusRoleIds = projectRoleIds(project);
     const statusRoles = statusRoleIds.map((roleId) => ROLE_BY_ID.get(roleId) || { id: roleId, name: roleId });
-    // B-190a 第二处 items 源：名册里不在册/已归档的角色，items 直接标 archived（否则 verifiedCount 恒 6）。
+    // B-190a 第二处 items 源（tester 2026-11-20 03:16 真窗口定位 + 其 patch 语义对齐）：
+    // 名册里**不在册/已归档**的角色不进 items —— 与 inspectProjectSessions 同口径。
+    // 注意：只标 archived 不够（items 数仍 6，verifiedCount 的 items 分支与「X/6 已核验」仍按 6 算），
+    // 必须真的跳过（tester 实测：skip 后 two→items 2、none→items 0）。
     const rosterActive = rosterActiveRolesOf();
     const items = statusRoles.map((r) => {
+      if (rosterActive && !rosterActive.has(String(r.id))) return null;
       const sid = project.sessions && project.sessions[r.id] ? String(project.sessions[r.id]) : '';
       const s = sid ? byId.get(sid) : null;
-      const rosterArchived = Boolean(rosterActive) && !rosterActive.has(String(r.id));
       return {
         role: r.id,
         name: r.name,
         title: roleTitle(r.id),
         sessionId: sid || null,
         exists: Boolean(s),
-        archived: Boolean(s && s.archived) || rosterArchived,
+        archived: Boolean(s && s.archived),
         running: Boolean(s && s.running),
         blank: s ? Boolean(s.blank) : null,
         inWorkspace: Boolean(sid) && inWorkspaceOf(s, sid),
@@ -11625,7 +11628,7 @@ installShellAuditSensors();
         titleMismatch: Boolean(s) && sessionTitleOf(s) !== roleTitle(r.id),
         updatedAt: s ? s.updatedAt : null
       };
-    });
+    }).filter(Boolean);
     const mapped = new Set(items.map((item) => item.sessionId).filter(Boolean));
     // 用户手动归档的历史会话不算“当前工作区额外会话”；仍可在 items 里看到 archived 状态。
     const liveSessions = sessions.filter((s) => !s.archived);

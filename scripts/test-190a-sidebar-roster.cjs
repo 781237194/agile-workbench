@@ -79,11 +79,13 @@ function main() {
       { hasPublicProject: ppStart >= 0 });
 
     // PM 2026-11-20 03:56（tester 真窗口定位）：items 还有第二处源——dsh:team-status handler 现造 items，
-    // archived 旧实现只看 DSH 会话标记，团队归档不生效。断言 handler 内按名册补 archived。
-    check('A9 dsh:team-status handler 的 items 按名册补 archived',
+    // archived 旧实现只看 DSH 会话标记，团队归档不生效。语义按 tester 实证 patch：**不入 items**（而非只标 archived），
+    // 否则 items 数仍 6，「X/6 已核验」不会降。
+    check('A9 dsh:team-status handler 的 items 按名册跳过已归档角色',
       /function rosterActiveRolesOf\(/.test(m)
       && /const rosterActive = rosterActiveRolesOf\(\);/.test(m)
-      && /archived: Boolean\(s && s\.archived\) \|\| rosterArchived/.test(m),
+      && /if \(rosterActive && !rosterActive\.has\(String\(r\.id\)\)\) return null;/.test(m)
+      && /\.filter\(Boolean\)/.test(m),
       {});
 
     const seStart = a.indexOf('function sessionEntries');
