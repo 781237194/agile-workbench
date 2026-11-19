@@ -1,7 +1,8 @@
 {
-  "version": "2.1.6",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.6/发布/pm-workbench-2.1.6.zip",
-  "sha256": "4a0f10650f1a5dbd21bfada585692db7ae7e9d3bbbac48c8d385d72410c8355a",
-  "notes": "台账信噪比治理 + 角色卡周期重读 + 闸门语义修正（task/req/inbox 默认只列在办、50 行上限、待验收行；角色卡 sha12 摘要随 boot 注入与 20 拍重注入、软/硬写操作门；建单不自动认领；G4 软硬统一、编写类豁免 G3、G8 不误判跳步）；本版关键：升级包纳入 团队/（工具·模板·角色·协议·skill + 宪法·流程·项目铁律），一键升级与 git pull 对齐，且永不覆盖 团队/状态、项目/、data/（P0 B-2e6d）",
-  "size": 4818756
+  "version": "2.1.7",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.7/发布/pm-workbench-2.1.7.zip",
+  "sha256": "9a9aad1a68c3215f8077e9009694b99962bdda1b996e76a07fa0064d411f4677",
+  "size": 4913885,
+  "notes": "一键重置与彻底卸载（install.ps1 -Reset/-Uninstall/-Purge + awb-diag -VerifyClean 八类判定 + GUI 维护面板 + 四道闸 + 备份落 Root 外 <Root>-maint-backup）；Owner 决定通知打通两协议（lib/owner-decision.mjs + ops.runOwnerDecisionNotify 单一实现，旧协议 cmdOwner 也发 system notice 并唤醒）；归档双账一致（会话归档+归档清理 同 archiveId 同 at）；测试任务双建拦截（route-daemon 同需求未闭环去重）；场景矩阵软门（只审计不拦，TEAM_SCENE_ENFORCE=1 才硬）；PM 换人双闲 15 分钟程序门（WAIT_BOTH_IDLE）+ 模板同步",
+  "publishedAt": "2026-11-19T22:45:23.6839914+08:00"
 }
