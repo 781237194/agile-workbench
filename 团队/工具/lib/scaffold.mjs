@@ -741,7 +741,54 @@ export function roleCard(projectName, role, mode = 'full') {
   if (m === 'fast') text += fastCardExtras(role);
   // 2026-11-18 校准：所有角色卡模板统一追加「现行工作流对齐」附录（验收权限/代管边界/工装安全/测量窗口/文档维护）。
   text += WORKFLOW_ALIGN_SECTION;
-  return text;
+  // R-bf05（T-20261119-181230-feee）§7.4：生成侧六卡必须带版本标记（H1 下一行）。
+  return withRoleCardMarker(text, role);
+}
+
+/**
+ * R-bf05 §7.1（M1）：模板正文＝`GENERATED_ROLE_CARDS[role]` 的**源文本**（未渲染/未替换占位符）。
+ * GENERATED 缺该角色时才降级用 `ROLE_CARD_BODIES[role]` 并要求调用方标 `TEMPLATE_FALLBACK`。
+ * 说明：源文本取函数源码字符串（含 `${projectName}` 占位符原样），因此 sha 不受项目名/团队模式/追加节影响。
+ */
+export function templateSourceOf(role) {
+  const roleId = String(role || '');
+  const gen = GENERATED_ROLE_CARDS[roleId];
+  if (gen) return { role: roleId, source: String(gen), fallback: false, missing: false };
+  const body = ROLE_CARD_BODIES[roleId];
+  if (body) return { role: roleId, source: String(body), fallback: true, missing: false };
+  return { role: roleId, source: '', fallback: false, missing: true };
+}
+
+/** 模板源文本 sha256 前 12 位（卡内标记与落后判据共用同一口径）。 */
+export function templateSha12Of(role) {
+  const src = templateSourceOf(role);
+  if (src.missing) return '';
+  return crypto.createHash('sha256').update(src.source).digest('hex').slice(0, 12);
+}
+
+/** 在 H1 下一行插入 `<!-- rolecard: ... -->` 标记（已有则替换）；其余内容逐字不动。 */
+export function withRoleCardMarker(text, role) {
+  const src = String(text || '');
+  const sha12 = templateSha12Of(role);
+  if (!src || !sha12) return src;
+  let version = '1.0.0';
+  try {
+    const manifestFile = path.join(PATHS.teamRoot, '工具', '模板', '角色卡模板版本.json');
+    const data = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    const row = data && data.roles ? data.roles[role] : null;
+    if (row && row.version) version = String(row.version);
+  } catch { /* manifest 不可读 → 默认版本，判据仍按 sha12 */ }
+  const line = `<!-- rolecard: template=${role} version=${version} sha12=${sha12} generated=${new Date().toISOString().slice(0, 10)} -->`;
+  const lines = src.split(/\r?\n/);
+  const markerIdx = lines.findIndex((l) => /<!--\s*rolecard:\s*template=/.test(l));
+  if (markerIdx >= 0) { lines.splice(markerIdx, 1, line); return lines.join('\n'); }
+  const h1 = lines.findIndex((l) => /^#\s+/.test(l));
+  if (h1 < 0) return [line, '', src].join('\n');
+  // H1 下一行：保持一个空行分隔（H1 / 空行 / 标记 / 原文第二行…）
+  const head = lines.slice(0, h1 + 1);
+  const rest = lines.slice(h1 + 1);
+  while (rest.length && rest[0] === '') rest.shift();
+  return head.concat(['', line, '', ...rest]).join('\n');
 }
 
 export function roleIndex(role) {

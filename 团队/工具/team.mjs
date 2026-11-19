@@ -67,6 +67,8 @@ import { cmdFinalize } from './lib/finalize.mjs';
 import { cmdDecision } from './lib/decision-cli.mjs';
 // R-8f68：角色直连流转（批 1：只写任务行/队列/事件，不唤醒）+ 铁律 5 例外批准状态。
 import { cmdHandoff, cmdRuleException } from './lib/handoff-cli.mjs';
+// R-bf05（T-20261119-181230-feee）：角色卡/模板版本化同步（rolecard sync/status/manifest）
+import { cmdRolecard } from './lib/rolecard-cli.mjs';
 // R-b5fc F-2/F-4b：看板驱动路由守护与角色队列（逻辑在 lib/route-daemon.mjs，CLI 入口在 lib/route-cli.mjs）。
 import { cmdRoute, cmdQueues } from './lib/route-cli.mjs';
 // R-20261116-191906-7aa8：证据导出包（export/verify，唯一实现 lib/evidence-pack.mjs）。
@@ -360,6 +362,7 @@ async function main() {
     case 'workflow': cmdWorkflow(args); break;
     case 'find': cmdFind(args); break;
     case 'session': await cmdSession(args); break;
+    case 'rolecard': await cmdRolecard(args); break;
     case 'brief': cmdBrief(args); break;
     case 'subagent': cmdSubagent(args); break;
     case 'board': cmdBoard(args); break;
