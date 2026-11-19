@@ -1278,6 +1278,12 @@ function paintUpgrade() {
   if (st) { st.hidden = !info; st.textContent = info ? String(info.message || '') : ''; st.setAttribute('data-upgrade-state-kind', info ? info.state : ''); }
   const applyBtn = upgradeEl('[data-upgrade-apply]');
   if (applyBtn) applyBtn.hidden = !(info && info.state === 'available');
+  // R-20261119：kind=installer 的版本源（重跑安装器升级）暂不走壳层自动应用——隐藏「立即升级」并给可读指引，
+  // 避免点了按钮却把 .ps1 当升级包下载（下一版接入安装器重跑流程后再放开）。
+  if (info && info.state === 'available' && info.kind === 'installer') {
+    if (applyBtn) applyBtn.hidden = true;
+    if (st) st.textContent = String(info.message || '有新版本') + '（请重新运行安装脚本完成升级）';
+  }
   const err = upgradeEl('[data-upgrade-error]');
   if (err) err.hidden = !UPGRADE_UI.error;
   if (err && UPGRADE_UI.error) err.textContent = UPGRADE_UI.error;

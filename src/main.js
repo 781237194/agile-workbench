@@ -292,26 +292,45 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
   rawIpcHandle('app:upgrade-check', async (_e, payload) => {
     const p = payload && typeof payload === 'object' ? payload : {};
     const current = readAppVersion().version;
-    const source = String(p.source || '') || 'https://raw.githubusercontent.com/xuyefeng/dsh-agile-workbench/main/发布/版本信息.json';
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-    try {
-      const res = await fetch(source, { signal: controller.signal });
-      if (!res || !res.ok) return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_FEED_UNREACHABLE', message: `无法检查更新（HTTP ${res ? res.status : 'no-response'}）` };
-      const raw = await res.text();
-      let feed = null;
-      try { feed = JSON.parse(raw); } catch { return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_FEED_BAD_JSON', message: '版本源格式无法解析' }; }
-      const latest = String((feed && (feed.version || feed.latest || feed.tag)) || '').trim();
-      if (!latest) return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_FEED_EMPTY', message: '版本源为空' };
-      const sha256 = String((feed && (feed.sha256 || feed.sha)) || '').trim();
-      const url = String((feed && (feed.url || feed.download)) || '').trim();
-      const notes = String((feed && (feed.notes || feed.changelog)) || '').slice(0, 500);
-      if (!/^[0-9a-f]{64}$/i.test(sha256)) return { ok: true, state: 'missing-sha', current, latest, source, code: 'UPGRADE_SHA_MISSING', message: '源缺少校验值，暂不可升级' };
-      const cmp = semverCompare(latest, current);
-      return { ok: true, state: cmp > 0 ? 'available' : 'latest', current, latest, sha256, url, notes, source, code: cmp > 0 ? 'UPGRADE_AVAILABLE' : 'UPGRADE_LATEST', message: cmp > 0 ? `可升级：${current} → ${latest}` : '已是最新版本' };
-    } catch (error) {
-      return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_CHECK_FAILED', message: (error && error.name === 'AbortError') ? '检查更新超时（5s）' : `无法检查更新：${String((error && error.message) || error).slice(0, 160)}` };
-    } finally { clearTimeout(timer); }
+    // R-20261119 热修：旧默认源写死成不存在的作者仓库（xuyefeng）+ raw.githubusercontent（国内常被墙）→
+    // 用户点「检查更新」只会得到超时/404。改为：默认源链 = jsDelivr（可访问）→ GitHub raw（正确仓库）兜底；
+    // 每个源 8s 超时；全部失败时把「尝试过的源 + 可读原因」一起返回，不再只有一句超时。
+    const DEFAULT_UPGRADE_FEEDS = [
+      'https://cdn.jsdelivr.net/gh/781237194/agile-workbench@main/发布/版本信息.json',
+      'https://raw.githubusercontent.com/781237194/agile-workbench/main/发布/版本信息.json'
+    ];
+    const explicit = String(p.source || '').trim();
+    const sources = explicit ? [explicit] : DEFAULT_UPGRADE_FEEDS;
+    let source = sources[0];
+    let raw = null;
+    let lastError = '';
+    for (const candidate of sources) {
+      source = candidate;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetch(candidate, { signal: controller.signal });
+        if (!res || !res.ok) { lastError = `HTTP ${res ? res.status : 'no-response'}`; continue; }
+        raw = await res.text();
+        break;
+      } catch (error) {
+        lastError = (error && error.name === 'AbortError') ? '超时（8s）' : String((error && error.message) || error).slice(0, 120);
+      } finally { clearTimeout(timer); }
+    }
+    if (raw == null) {
+      return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_FEED_UNREACHABLE', message: `无法检查更新（${lastError || '源不可达'}；已尝试：${sources.join(' / ')}）` };
+    }
+    let feed = null;
+    try { feed = JSON.parse(raw); } catch { return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_FEED_BAD_JSON', message: '版本源格式无法解析' }; }
+    const latest = String((feed && (feed.version || feed.latest || feed.tag)) || '').trim();
+    if (!latest) return { ok: true, state: 'unavailable', current, source, code: 'UPGRADE_FEED_EMPTY', message: '版本源为空' };
+    const sha256 = String((feed && (feed.sha256 || feed.sha)) || '').trim();
+    const url = String((feed && (feed.url || feed.download)) || '').trim();
+    const kind = String((feed && feed.kind) || '').trim();
+    const notes = String((feed && (feed.notes || feed.changelog)) || '').slice(0, 500);
+    if (!/^[0-9a-f]{64}$/i.test(sha256)) return { ok: true, state: 'missing-sha', current, latest, source, code: 'UPGRADE_SHA_MISSING', message: '源缺少校验值，暂不可升级' };
+    const cmp = semverCompare(latest, current);
+    return { ok: true, state: cmp > 0 ? 'available' : 'latest', current, latest, sha256, url, kind, notes, source, code: cmp > 0 ? 'UPGRADE_AVAILABLE' : 'UPGRADE_LATEST', message: cmp > 0 ? `可升级：${current} → ${latest}` : '已是最新版本' };
   });
   rawIpcHandle('app:upgrade-start', async (_e, payload) => {
     const p = payload && typeof payload === 'object' ? payload : {};

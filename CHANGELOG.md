@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 2.1.2（2026-11-19）
+
+### 热修：检查更新超时 / 404（默认版本源写错）
+
+- 根因：`app:upgrade-check` 默认源写死成 `raw.githubusercontent.com/xuyefeng/dsh-agile-workbench/...`——**仓库作者名不对**（应为 `781237194`），且 raw.githubusercontent 在多数国内网络不可达 → 用户只会看到「超时（5s）」或 404。
+- 修复：默认版本源改为**源链**：优先 `cdn.jsdelivr.net/gh/781237194/agile-workbench@main/发布/版本信息.json`（CDN 可达），失败再回退 GitHub raw（正确仓库）；单源超时 8s；全部失败时返回「尝试过的源 + 可读原因」。仓库新增 `发布/版本信息.json`（version/url/sha256/kind）。
+- 安全限制：`kind=installer` 的版本源暂不显示「立即升级」按钮（避免把 .ps1 当升级包），改为提示「请重新运行安装脚本完成升级」；安装器重跑式升级后续版本接入。
+- 回归：`test-e610-upgrade` 13/13。
+
 ## 2.1.1（2026-11-19）
 
 ### 热修：更多菜单「检查更新」点了没有任何反应

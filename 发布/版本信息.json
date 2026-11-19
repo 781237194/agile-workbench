@@ -1,0 +1,7 @@
+{
+  "version": "2.1.2",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.2/install.ps1",
+  "sha256": "ee7c07c75054f656e04cd5937bbb45d00e676da66440c44efe44247849c45cd5",
+  "kind": "installer",
+  "notes": "一键升级：下载官方安装器并重跑安装（保留项目与数据）"
+}
