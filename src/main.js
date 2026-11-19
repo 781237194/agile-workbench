@@ -6397,9 +6397,25 @@ ipcMain.handle('theme:metrics', async () => {
     const memberRoleSet = new Set(memberRoleIds);
     // 角色清单以 团队会话.json 为准（旧版兼容）；sessionId 用状态库映射覆盖旧快照。
     // 没有清单时才把状态库里的当前模式角色映射当作成员清单。
-    const baseRoles = manifestRoles.length
+    // B-190a 第 3 处（PM 2026-11-20 02:56 亲自补，A 已连续 15h 收工）：
+    // baseRoles 原来只来自 项目.sessions / 团队会话.json → 归档成员后仍列出 6 行「已就绪」。
+    // 这里统一按**名册已归档**过滤：名册里该角色 archived=true 或 sessionId 为空 → 不进团队台行。
+    // 只做读侧过滤（写侧清理 project.sessions/workspace.sessionIds 属 P2 B-20261120-024721-85c5，排 2.1.10）。
+    const rosterArchivedRoles = new Set(
+      (teamTools.teamMembers() || [])
+        .filter((m) => {
+          if (!m) return false;
+          const sid = String(m.sessionId || '').trim();
+          return m.archived === true || !sid;
+        })
+        .map((m) => String(m.role || ''))
+    );
+    const baseRolesRaw = manifestRoles.length
       ? manifestRoles.filter((row) => row && memberRoleSet.has(String(row.role)) && ROLE_BY_ID.has(String(row.role)))
       : memberRoleIds.filter((roleId) => mapped[roleId]).map((roleId) => ({ role: roleId }));
+    const baseRoles = rosterArchivedRoles.size
+      ? baseRolesRaw.filter((row) => !rosterArchivedRoles.has(String(row && row.role)))
+      : baseRolesRaw;
     // B-20261119-015113-2443：名册四态由后端单源判定（AC3：渲染层不自算 ok/stale）。
     const rosterMemberMap = new Map((teamTools.teamMembers() || []).map((m) => [String((m && m.role) || ''), String((m && m.sessionId) || '')]));
     // 97db PM 口径（M-20261119-030857-103ab6）：membersEmpty 看「名册成员 sessionId 是否全空/成员是否已清」，
