@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { parseArgs, TeamError, jsonOut, textOut } from './lib/core.mjs';
 import {
-  cmdInit, cmdProject, cmdBoot, cmdSend, cmdNotify, cmdPmDispatch, cmdInbox, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
+  cmdInit, cmdProject, cmdBoot, cmdSend, cmdNotify, cmdOwnerNotify, cmdPmDispatch, cmdInbox, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
   cmdShow, cmdReview, cmdSign, cmdApply, cmdGrant, cmdIndex, cmdStatus, cmdClaim, cmdReconcile,
   cmdVerify, cmdLog, cmdLock, cmdOwnerApprove, cmdOwner, cmdRoster, cmdPilot, cmdDoctor,
   cmdReq, cmdFind, cmdBoard, cmdVote, cmdWorkflow, cmdOwnerProxyDecide, cmdQueue, cmdSkill, cmdSched,
@@ -348,6 +348,8 @@ async function main() {
     case 'memory': cmdMemory(args); break;
     case 'req': cmdReq(args); break;
     case 'lessons': cmdLessons(args); break;
+    // B-d8b8：Owner 决定通知的 CLI 入口（壳层用；与 legacy owner 走同一执行体）
+    case 'owner-notify': await cmdOwnerNotify(args); break;
     case 'owner': {
       // owner proxy status|start|end（代管开关）与 owner proxy decide（PM 代管落账，T-a01d）分开分发。
       const proxySub = String((args._ && args._[1]) || '').toLowerCase();

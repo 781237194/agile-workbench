@@ -7583,7 +7583,9 @@ function createTeamTools(options = {}) {
       // B-7e49：用 team.mjs 的 **notify**（发件人固定 system）而不是 send —— send 在 to===令牌角色 时直接 SELF_SEND 拒绝，
       // 而「Owner 决定」是系统事件，不是 PM 给自己发消息。
       const run = await withBootToken(projectName, 'pm', async (token) => runNode(layout.teamTool, [
-        'notify', '--boot', token, '--to', 'pm', '--type', 'notice', '--subject', subject, '--body', body, '--json',
+        'owner-notify', '--boot', token, '--project', projectName,
+                '--requirement', requirementId, '--status', status, '--round', String(round),
+                '--opinion', String(opinion || '').slice(0, 1000), '--channel', String(channel || 'ui'), '--json',
       ], { timeoutMs: TIMEOUTS.send }));
       const value = (run && run.value) || {};
       const messageId = String(((value.message || {}).id) || '');

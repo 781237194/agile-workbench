@@ -84,6 +84,11 @@ import { assertDispatchPrecheck, DISPATCH_LOCK_MAX_INFLIGHT } from './dispatch-c
 import { checkEvidenceGate } from './evidence.mjs';
 // R-bf05（T-20261119-181230-feee）§7.2：boot 简报「角色卡模板落后:」行（只提示、绝不写卡）。
 import { rolecardStaleBriefLines } from './rolecard-cli.mjs';
+// B-d8b8：Owner 决定通知的单一实现（文案/去重/审计在 lib/owner-decision.mjs，执行体在本文件）
+import {
+  OWNER_DECISION_NOTIFY_DEDUPE_MS, ownerDecisionNotifyKey, ownerDecisionPayload,
+  appendOwnerDecisionAudit, lastOwnerDecisionNotifiedAt, ownerDecisionNotifyMemoGet, ownerDecisionNotifyMemoSet,
+} from './owner-decision.mjs';
 import { bumpRound, archiveSession, confirmArchive, ROUNDS_MAX, currentSessionOf } from './session-archive.mjs';
 import {
   transitionRequirement, syncWorkflowRow, stampRejected, workflowAction, readWorkflowState, writeWorkflowState, latestValidOwnerDecision, currentDeliveryRound,
@@ -6242,6 +6247,67 @@ export async function cmdNotify(args) {
   });
 }
 
+/**
+ * B-d8b8：Owner 决定通知的**唯一执行体**（legacy CLI 与壳层共用）。
+ *
+ * 软要求：任何失败只写审计 `owner_decision_notify_failed`，**绝不阻断/回滚已落的账**。
+ * 去重：同 project+requirement+round 5 分钟内只发 1 条（内存 Map + 审计回读跨进程兜底）；
+ * 载体：`sendMessage({from:"system", to:"pm", type:"notice"})` + `wakeWithGuard` 唤醒（与 team.mjs notify 同源）。
+ */
+async function runOwnerDecisionNotify({ projectName, requirementId, status, round = 1, opinion = '', at = '', channel = 'ui' } = {}) {
+  const key = ownerDecisionNotifyKey({ projectName, requirementId, round });
+  try {
+    const nowMs = Date.now();
+    const memo = ownerDecisionNotifyMemoGet(key) || 0;
+    const last = memo || lastOwnerDecisionNotifiedAt(projectName, key);
+    if (last && nowMs - last < OWNER_DECISION_NOTIFY_DEDUPE_MS) {
+      appendOwnerDecisionAudit(projectName, { at: nowIso(), action: 'owner_decision_notify_skipped', reason: 'dedupe', key, status, round, lastAt: new Date(last).toISOString() });
+      return { ok: true, deduped: true, key, lastAt: new Date(last).toISOString() };
+    }
+    ownerDecisionNotifyMemoSet(key, nowMs);
+    const { subject, body } = ownerDecisionPayload({ requirementId, status, round, opinion, at, channel });
+    const msg = sendMessage({ from: 'system', to: 'pm', type: 'notice', project: projectName, subject, body });
+    let wake = null;
+    try { wake = await wakeWithGuard({ project: projectName, to: 'pm', msg, isDispatch: false, taskRow: null, reason: 'owner_decision_notify' }); } catch (e) { wake = { ok: false, why: String((e && e.message) || e) }; }
+    appendOwnerDecisionAudit(projectName, {
+      at: nowIso(), action: 'owner_decision_notified', key, status, round, messageId: msg.id, subject, ok: true,
+      wakeOk: !!(wake && wake.ok === true),
+    });
+    return { ok: true, messageId: msg.id, subject, key, wake };
+  } catch (error) {
+    const notifyErrMsg = String((error && error.message) || error).slice(0, 300);
+    appendOwnerDecisionAudit(projectName, {
+      at: nowIso(), action: 'owner_decision_notify_failed', key, status, round, error: notifyErrMsg,
+    });
+    return { ok: false, code: 'OWNER_DECISION_NOTIFY_FAILED', message: notifyErrMsg, key };
+  }
+}
+
+/** `team.mjs owner-notify --requirement <R> --status <s> --round <n> [--opinion <o>] [--channel ui]`：
+ *  供壳层在 Owner 决定落账后调用（与 legacy 走同一执行体，禁止第二份文案/去重）。 */
+export async function cmdOwnerNotify(args) {
+  const b = bootFor(args, 'owner-notify');
+  const projectName = String(args.project || b.project || '').trim();
+  if (!projectName) fail('BAD_ARGS', '需要 --project <团队项目名>');
+  const requirementId = String(args.requirement || args.id || '').trim();
+  if (!requirementId) fail('BAD_ARGS', '需要 --requirement R-...');
+  const status = String(args.status || args.decision || '').trim();
+  if (!['approved', 'skipped', 'rejected', 'accepted'].includes(status)) fail('OWNER_DECISION_INVALID', '--status 必须是 approved/skipped/rejected/accepted', { status });
+  let round = Number(String(args.round || '').trim());
+  if (!Number.isFinite(round) || round <= 0) {
+    try {
+      const wf = readWorkflowState(projectName, { fresh: true }).state || {};
+      const rowKey = Object.keys(wf.requirements || {}).find((k) => k === requirementId || String((wf.requirements[k] || {}).id || '') === requirementId);
+      round = Number((wf.requirements && wf.requirements[rowKey] && wf.requirements[rowKey].round) || 1) || 1;
+    } catch { round = 1; }
+  }
+  const res = await runOwnerDecisionNotify({
+    projectName, requirementId, status, round,
+    opinion: String(args.opinion || ''), at: nowIso(), channel: String(args.channel || 'ui'),
+  });
+  out(args, `Owner 决定通知：${requirementId} ${status} → ${res.deduped ? `已去重（上次 ${res.lastAt}）` : (res.ok ? `已通知 pm ${res.messageId}` : `失败：${res.message || res.code}`)}`, { ok: true, notify: res });
+}
+
 export async function cmdAck(args) {
   assertNoWakeRemoved(args);
   const b = bootFor(args, 'ack');
@@ -10339,6 +10405,18 @@ export async function cmdOwner(args) {
   const queue = actionRaw === 'accept' && decision === 'accepted'
     ? clearDispatchQueue(projectName, { reason: 'owner_accepted', requirementId })
     : null;
+  // B-d8b8：legacy 协议（team.mjs owner）落账成功后**同样通知 PM**——原来通知只嵌在壳层，CLI 路径绕过了它。
+  // 软要求：失败只写审计，绝不影响本次返回（落账已成功）。
+  let ownerDecisionNotify = null;
+  try {
+    ownerDecisionNotify = await runOwnerDecisionNotify({
+      projectName, requirementId, status: decision, round: Number((sync && sync.state && sync.state.requirements && sync.state.requirements[requirementId] && sync.state.requirements[requirementId].round) || 1) || 1,
+      opinion, at: nowIso(), channel,
+    });
+  } catch (error) {
+    ownerDecisionNotify = { ok: false, code: 'OWNER_DECISION_NOTIFY_FAILED', message: String((error && error.message) || error).slice(0, 300) };
+  }
+
   out(args, [
     `Owner ${label}：${requirementId} → ${decision}（${teamMode}，channel=${channel}）`,
     `需求状态：${nextStatus} ｜ 工作流相位：${sync.state ? sync.state.phase : nextPhase}`,
