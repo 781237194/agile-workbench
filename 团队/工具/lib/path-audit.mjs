@@ -35,6 +35,7 @@ export const PATH_WHITELIST = [
   { file: '团队/日志/2026-11-12.md', reason: '团队历史日志，记录当时机器路径与命令输出（只读证据，改写会失真）', pending: false },
   { file: '团队/流程.md', reason: '团队文档中的路径示例/历史记录（人工文档，非运行时代码）', pending: false },
   { file: '团队/看板.html', reason: '团队文档中的路径示例/历史记录（人工文档，非运行时代码）', pending: false },
+  { file: '团队/看板.md', reason: '团队看板 Markdown（由事件/回执自动生成的只读运行记录，含成员消息原文中的路径示例；与 看板.html 同类，非运行时代码）', pending: false },
   { file: '团队/运行手册.md', reason: '团队文档中的路径示例/历史记录（人工文档，非运行时代码）', pending: false },
   { file: '团队/项目铁律.md', reason: '团队文档中的路径示例/历史记录（人工文档，非运行时代码）', pending: false },
   { file: '团队/工具/lib/path-audit.mjs', reason: '白名单原因文本中的示例占位符（C:\\Users\\...），不是运行时路径', pending: false },

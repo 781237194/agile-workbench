@@ -96,7 +96,9 @@ param(
     [string]$TestElectronHeal,
     [string]$TestElectronCacheDir,
     [string]$TestMoveRetrySrc,
-    [string]$TestMoveRetryDst
+    [string]$TestMoveRetryDst,
+    # B-d83d2：升级应用/部署校验/回滚的夹具入口（只读沙盘目录，输出 UPGRADE_APPLY_JSON）
+    [string]$TestUpgradeApply
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1490,6 +1492,48 @@ function Invoke-UpgradeApplyTree {
     return [pscustomobject]@{ manifest = $plan; manifestFile = $manifestFile }
 }
 
+# B-d83d2（Owner 2026-11-19：升级不能只“下载成功”，必须确认新代码真的部署到位）：
+# 应用后立即校验——①安装目录 package.json.version == 目标版本；②关键入口文件存在；
+# ③升级包内 src/** 逐文件与安装目录哈希一致。任一不符即抛错，由上层 catch 回滚。
+function Invoke-UpgradeVerifyInstall {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$StagingRoot,
+        [string]$TargetVersion
+    )
+    $problems = @()
+    $pkgFile = Join-Path $RepoRoot 'package.json'
+    if (-not (Test-Path -LiteralPath $pkgFile)) { throw '部署校验失败：安装目录缺 package.json' }
+    $installedVersion = ''
+    try { $installedVersion = [string]((Get-Content -LiteralPath $pkgFile -Raw -Encoding UTF8) | ConvertFrom-Json).version } catch { $installedVersion = '' }
+    if ($TargetVersion -and ($installedVersion -ne [string]$TargetVersion)) {
+        $problems += ("版本号不符：安装目录 {0} ≠ 目标 {1}" -f $installedVersion, $TargetVersion)
+    }
+    # 关键入口：src\main.js 必须落盘；start.cmd 若升级包里有则必须落盘（不强制要求包里没有的东西，避免误伤合法发布包）。
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'src\main.js'))) { $problems += '缺少关键文件：src\main.js' }
+    if ((Test-Path -LiteralPath (Join-Path $StagingRoot 'start.cmd')) -and -not (Test-Path -LiteralPath (Join-Path $RepoRoot 'start.cmd'))) {
+        $problems += '缺少关键文件：start.cmd'
+    }
+    $checked = 0
+    $stagingSrc = Join-Path $StagingRoot 'src'
+    if (Test-Path -LiteralPath $stagingSrc) {
+        $baseLen = (Join-Path $StagingRoot '').Length
+        foreach ($f in @(Get-ChildItem -LiteralPath $stagingSrc -Recurse -File -ErrorAction SilentlyContinue)) {
+            $rel = $f.FullName.Substring($baseLen).TrimStart('\', '/')
+            $dst = Join-Path $RepoRoot $rel
+            $checked += 1
+            if (-not (Test-Path -LiteralPath $dst)) { $problems += ("未部署：{0}" -f $rel); continue }
+            $h1 = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
+            $h2 = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash
+            if ($h1 -ne $h2) { $problems += ("内容不一致：{0}" -f $rel) }
+        }
+    }
+    if ($problems.Count -gt 0) {
+        throw ('部署校验失败：' + (($problems | Select-Object -First 5) -join '；'))
+    }
+    return [pscustomobject]@{ installedVersion = $installedVersion; checkedFiles = $checked }
+}
+
 function Restore-UpgradeBackup {
     param([Parameter(Mandatory = $true)][string]$RepoRoot, [Parameter(Mandatory = $true)][string]$BackupDir)
     $manifestFile = Join-Path $BackupDir 'manifest.json'
@@ -1695,6 +1739,11 @@ function Invoke-UpgradeMode {
             throw '升级包里没有 src\main.js / install.ps1（不是完整的 PM工作台 发布包）'
         }
         $applied = Invoke-UpgradeApplyTree -RepoRoot $RepoRoot -StagingRoot $stagingRoot -BackupDir $backupDir
+        # B-d83d2：应用后立刻校验「新代码真的部署到位」；不符即抛错 → 上面的 catch 自动回滚。
+        $verify = Invoke-UpgradeVerifyInstall -RepoRoot $RepoRoot -StagingRoot $stagingRoot -TargetVersion $targetVersion
+        $baseRow.installedVersion = $verify.installedVersion
+        $baseRow.verifiedFiles = $verify.checkedFiles
+        Write-Host ("  部署校验通过：版本 {0}，逐文件哈希比对 {1} 个" -f $verify.installedVersion, $verify.checkedFiles)
         $steps.apply = $true
         $baseRow.steps = $steps
         Write-Host ("  已应用：{0} 个条目（备份清单 {1}）" -f $applied.manifest.Count, $applied.manifestFile)
@@ -2315,6 +2364,56 @@ if ($TestMoveRetrySrc -and $TestMoveRetryDst) {
     }
     Write-Host ('MOVE_RETRY_JSON ' + ($payload | ConvertTo-Json -Depth 5 -Compress))
     if ($moveResult.ok) { exit 0 }
+    exit 1
+}
+# B-d83d2（Owner 2026-11-19：升级必须真部署新代码）：夹具入口——对沙盘目录跑
+# 「应用 → 部署校验 → （可选）失败自动回滚 → （可选）验证回滚结果」，输出单行 JSON 供夹具断言。
+if (-not [string]::IsNullOrWhiteSpace($TestUpgradeApply)) {
+    $payload = [ordered]@{
+        ok = $false; mode = 'apply'; error = '';
+        installedVersion = ''; verifiedFiles = 0; manifestCount = 0;
+        rollback = $false; restoredVersion = '';
+    }
+    try {
+        $cfg = [System.IO.File]::ReadAllText($TestUpgradeApply, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        $applyInstall = [string]$cfg.installDir
+        $applyStaging = [string]$cfg.stagingDir
+        $applyBackup = [string]$cfg.backupDir
+        $applyTarget = [string]$cfg.targetVersion
+        if ([bool]$cfg.failApply) { $env:AWB_UPGRADE_FAIL_APPLY = '1' }
+        try {
+            $applied = Invoke-UpgradeApplyTree -RepoRoot $applyInstall -StagingRoot $applyStaging -BackupDir $applyBackup
+            $payload.manifestCount = @($applied.manifest).Count
+            $verify = Invoke-UpgradeVerifyInstall -RepoRoot $applyInstall -StagingRoot $applyStaging -TargetVersion $applyTarget
+            $payload.installedVersion = [string]$verify.installedVersion
+            $payload.verifiedFiles = [int]$verify.checkedFiles
+            $payload.ok = $true
+        } catch {
+            $payload.error = [string]$_.Exception.Message
+            if ([bool]$cfg.autoRollback) {
+                try {
+                    [void](Restore-UpgradeBackup -RepoRoot $applyInstall -BackupDir $applyBackup)
+                    $payload.rollback = $true
+                    $pkgFile = Join-Path $applyInstall 'package.json'
+                    if (Test-Path -LiteralPath $pkgFile) {
+                        try { $payload.restoredVersion = [string]((Get-Content -LiteralPath $pkgFile -Raw -Encoding UTF8) | ConvertFrom-Json).version } catch { }
+                    }
+                } catch { $payload.error = $payload.error + '；回滚失败：' + [string]$_.Exception.Message }
+            }
+        } finally {
+            Remove-Item Env:\AWB_UPGRADE_FAIL_APPLY -ErrorAction SilentlyContinue
+        }
+        if ([bool]$cfg.verifyRollback) {
+            try {
+                [void](Restore-UpgradeBackup -RepoRoot $applyInstall -BackupDir $applyBackup)
+                $payload.rollback = $true
+            } catch { $payload.error = $payload.error + '；回滚失败：' + [string]$_.Exception.Message }
+        }
+    } catch {
+        $payload.error = [string]$_.Exception.Message
+    }
+    Write-Host ('UPGRADE_APPLY_JSON ' + ($payload | ConvertTo-Json -Depth 5 -Compress))
+    if ($payload.ok) { exit 0 }
     exit 1
 }
 if ($Help) {

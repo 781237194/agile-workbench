@@ -1260,7 +1260,7 @@ function bindFxRealState() {
 }
 
 // e610：在线升级菜单（版本展示 / 检查 / 一步升级 / 重启提示），不新增标题栏图标。
-const UPGRADE_UI = { checking: false, starting: false, info: null, version: null, auto: { enabled: false, intervalMs: 0, timer: 0 } };
+const UPGRADE_UI = { checking: false, starting: false, info: null, version: null, forceNeeded: false, progress: '', error: '', auto: { enabled: false, intervalMs: 0, timer: 0 } };
 function upgradeEl(sel) { return document.querySelector('#more-menu ' + sel); }
 function paintUpgrade() {
   const line = upgradeEl('[data-app-version-line]');
@@ -1285,8 +1285,20 @@ function paintUpgrade() {
     if (st) st.textContent = String(info.message || '有新版本') + '（请重新运行安装脚本完成升级）';
   }
   const err = upgradeEl('[data-upgrade-error]');
-  if (err) err.hidden = !UPGRADE_UI.error;
-  if (err && UPGRADE_UI.error) err.textContent = UPGRADE_UI.error;
+  if (err) { err.hidden = !UPGRADE_UI.error; if (UPGRADE_UI.error) err.textContent = UPGRADE_UI.error; }
+  // B-d83d（P0）：点「立即升级」必须当场有可见状态；强制原因输入框只在真的需要时展示。
+  const prog = upgradeEl('[data-upgrade-progress]');
+  if (prog) {
+    const text = String(UPGRADE_UI.progress || '');
+    prog.hidden = !text;
+    if (text) prog.textContent = text;
+  }
+  const forceLine = upgradeEl('[data-upgrade-force]');
+  if (forceLine) forceLine.hidden = UPGRADE_UI.forceNeeded !== true;
+  const reasonEl = upgradeEl('[data-upgrade-reason]');
+  if (reasonEl && forceLine && !forceLine.hidden && document.activeElement !== reasonEl) {
+    try { reasonEl.focus(); } catch { /* ignore */ }
+  }
   // e610 AC6：有新版只亮小圆点（非侵入提示），不下载、不安装
   const dot = upgradeEl('[data-upgrade-dot]');
   if (dot) dot.hidden = !(info && info.state === 'available');
@@ -1358,27 +1370,72 @@ async function setUpgradeAuto(enabled) {
   paintUpgrade();
 }
 async function startUpgrade() {
-  const info = UPGRADE_UI.info;
-  if (!info || info.state !== 'available') return;
+  // B-d83d（P0 修）：原实现先读隐藏的 [data-upgrade-reason]，空就写隐藏错误并 return → 用户点「立即升级」毫无反应。
+  // 新口径：①点击立刻给可见进度/提示；②无 reason 时走非 force 升级（无在跑角色可直接升级）；
+  // ③后端明确要求强制原因时才展示并聚焦输入框；④所有错误同时进菜单 + 全局 toast。
   if (UPGRADE_UI.starting) return;
+  const info = UPGRADE_UI.info;
+  if (!info || info.state !== 'available') {
+    UPGRADE_UI.error = '当前没有可升级的版本，请先点「检查更新」';
+    UPGRADE_UI.progress = '';
+    paintUpgrade();
+    toast(UPGRADE_UI.error, 'bad');
+    return;
+  }
   const reasonEl = upgradeEl('[data-upgrade-reason]');
   const reason = reasonEl ? String(reasonEl.value || '').trim() : '';
-  if (!reason) { UPGRADE_UI.error = '强制升级必须填写原因（无角色在跑时可留空——本次按强制路径要求填写）'; paintUpgrade(); return; }
-  UPGRADE_UI.starting = true; UPGRADE_UI.error = '';
-  const btn = upgradeEl('[data-upgrade-apply]'); if (btn) btn.disabled = true;
-  const prog = upgradeEl('[data-upgrade-progress]');
-  if (prog) { prog.hidden = false; prog.textContent = '升级中：备份 → 下载校验 → 应用 → 自检…'; }
+  UPGRADE_UI.starting = true;
+  UPGRADE_UI.error = '';
+  UPGRADE_UI.forceNeeded = false;
+  UPGRADE_UI.progress = '正在准备升级…';
+  const btn = upgradeEl('[data-upgrade-apply]');
+  if (btn) btn.disabled = true;
+  paintUpgrade();
+  toast('开始升级：正在准备…', 'ok');
   try {
-    const res = await window.workbench.upgradeStart({ latest: info.latest, sha256: info.sha256, url: info.url, force: true, reason, dryRun: false });
-    if (!res || res.ok !== true) { UPGRADE_UI.error = '升级失败：' + String((res && (res.code || res.message)) || 'UPGRADE_FAILED'); }
-    else {
-      const hint = upgradeEl('[data-upgrade-restart-hint]');
-      if (hint) { hint.hidden = false; hint.textContent = res.restartHint || '请重启后生效'; }
-      await loadAppVersion();
-      UPGRADE_UI.info = { ...info, state: 'latest', message: '已升级到 ' + res.to + '，' + (res.restartHint || '请重启后生效') };
+    const res = await window.workbench.upgradeStart({
+      latest: info.latest,
+      sha256: info.sha256,
+      url: info.url,
+      force: Boolean(reason),
+      reason,
+      dryRun: false
+    });
+    if (!res || res.ok !== true) {
+      const code = String((res && res.code) || 'UPGRADE_FAILED');
+      const msg = String((res && (res.message || res.code)) || code);
+      const needReason = code === 'UPGRADE_FORCE_REASON_REQUIRED' || /强制|原因|角色.*(在跑|运行)/.test(msg);
+      UPGRADE_UI.progress = '';
+      if (needReason) {
+        UPGRADE_UI.forceNeeded = true;
+        UPGRADE_UI.error = '有角色在跑任务：请在「强制原因」里填写原因后再点「立即升级」';
+        paintUpgrade();
+        toast('需要填写强制原因才能升级', 'bad');
+        return;
+      }
+      UPGRADE_UI.error = '升级失败：' + msg;
+      paintUpgrade();
+      toast(UPGRADE_UI.error, 'bad');
+      return;
     }
-  } catch (e) { UPGRADE_UI.error = '升级失败：' + String((e && e.message) || e); }
-  finally { UPGRADE_UI.starting = false; if (btn) btn.disabled = false; paintUpgrade(); }
+    const hintText = String(res.restartHint || '请重启后生效');
+    UPGRADE_UI.progress = '升级完成：' + hintText;
+    const hint = upgradeEl('[data-upgrade-restart-hint]');
+    if (hint) { hint.hidden = false; hint.textContent = hintText; }
+    await loadAppVersion();
+    UPGRADE_UI.info = { ...info, state: 'latest', message: '已升级到 ' + String(res.to || info.latest || '') + '，' + hintText };
+    paintUpgrade();
+    toast('升级完成：' + hintText, 'ok');
+  } catch (e) {
+    UPGRADE_UI.progress = '';
+    UPGRADE_UI.error = '升级失败：' + String((e && e.message) || e);
+    paintUpgrade();
+    toast(UPGRADE_UI.error, 'bad');
+  } finally {
+    UPGRADE_UI.starting = false;
+    if (btn) btn.disabled = false;
+    paintUpgrade();
+  }
 }
 function bindUpgradeMenu() {
   if (bindUpgradeMenu._bound) return; bindUpgradeMenu._bound = true;
