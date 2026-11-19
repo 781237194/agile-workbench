@@ -75,9 +75,17 @@ const relOf = (abs) => path.relative(ROOT, abs).replace(/\\/g, '/');
 
 function main() {
   let exitCode = 0;
-  const realTeam = shaDir(path.join(ROOT, '团队', '工具'));
-  const realStore = shaFile(path.join(ROOT, 'data', 'userdata', 'workbench.json'));
-  const realProjects = shaDir(path.join(ROOT, '项目'));
+  // AC8 只读断言的口径（PM 2026-11-20 02:15 指正）：**不能用活目录做整树 sha** ——
+  // `项目/` 各角色一直在写 产出/、`data/userdata/workbench.json` 也会被运行中的工作台实时刷新（ui.window 等），
+  // 拿它们做整树断言必然假红。这里改成两类**稳定对象**：
+  //   ① 团队/工具 下 CLI 自己会读的固定文件（若被 anchor 写入就会变）
+  //   ② 本夹具自己造的 fixture 文件（运行前后的内容 sha）
+  const stableFiles = [
+    path.join(ROOT, '团队', '工具', 'lib', 'anchor.mjs'),
+    path.join(ROOT, '团队', '工具', 'lib', 'gates.mjs'),
+    path.join(ROOT, '团队', '工具', 'team.mjs'),
+  ];
+  const before = new Map(stableFiles.map((f) => [f, shaFile(f)]));
   try {
     /* ── AC1 cite 正常 ─────────────────────────────────────── */
     const f1 = path.join(FIX, 'cite.md');
@@ -209,12 +217,9 @@ function main() {
   } finally {
     try { fs.rmSync(FIX, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
-    const afterTeam = shaDir(path.join(ROOT, '团队', '工具'));
-    const afterStore = shaFile(path.join(ROOT, 'data', 'userdata', 'workbench.json'));
-    const afterProjects = shaDir(path.join(ROOT, '项目'));
-    check('AC8 anchor 全程只读：团队/工具、data/userdata/workbench.json、项目/ 三处 sha256 前后不变',
-      afterTeam === realTeam && afterStore === realStore && afterProjects === realProjects,
-      { team: [realTeam.slice(0, 12), afterTeam.slice(0, 12)], store: [realStore.slice(0, 12), afterStore.slice(0, 12)], projects: [realProjects.slice(0, 12), afterProjects.slice(0, 12)] });
+    const changed = stableFiles.filter((f) => shaFile(f) !== before.get(f));
+    check('AC8 anchor 全程只读：团队/工具 下 anchor.mjs / gates.mjs / team.mjs 三个固定文件 sha256 前后不变',
+      changed.length === 0, { changed: changed.map((f) => path.relative(ROOT, f)) });
     const failed = ROWS.filter((r) => r.ok !== true);
     if (!JSON_OUT) {
       console.log(`\n${ROWS.length - failed.length}/${ROWS.length} PASS${failed.length ? ` · ${failed.length} FAIL` : ''}`);
