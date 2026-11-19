@@ -15,6 +15,9 @@
  * 夹具 scripts/test-2e6d-team-upgrade.cjs 会逐项比对（两处不一致即红）。
  */
 
+// 4dba：zipEntryNames 现在允许直接传 zip 文件路径，因此需要 fs（旧实现只吃 Buffer，没有这行）。
+const fs = require('node:fs');
+
 /** 整目录纳入（相对仓库根，正斜杠） */
 const UPGRADE_TREE = Object.freeze([
   'src',
@@ -80,14 +83,36 @@ function isNeverPackaged(rel) {
  * 为什么自己解析：Windows 自带 bsdtar 的 `-tf` 输出走控制台代码页，中文会被解成乱码（`�Ŷ�`），
  * 拿它比对 `团队/工具/...` 永远 false。Zip 中央目录里本就是 UTF-8（或带 UTF-8 标志位），直接解析最稳。
  */
-function zipEntryNames(buf) {
-  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || []);
+function zipEntryNames(input, opts) {
+  // B-20261119-201948-4dba（PM 2026-11-20 更正）：旧实现把非 Buffer 入参直接 Buffer.from(...)，
+  // 传「文件路径字符串」时得到的是路径字节流 → 永远解析不到中央目录 → 静默返回 []。
+  // 这种「入参类型错就返回空数组」的行为很危险：自检会把「解析失败」当成「包里没有条目」，
+  // 于是守卫形同虚设（build-upside 曾用它做关键条目自检）。现在：
+  //   ① 字符串 → 当文件路径读出来（显式意图：大多数调用方以为可以传路径）；
+  //   ② Buffer/Uint8Array → 直接用；
+  //   ③ 其它类型 → 抛 BAD_ZIP_INPUT（不静默）；
+  //   ④ 解析不到 EOCD 或条目数 0 → 抛 ZIP_UNREADABLE（除非 opts.allowEmpty）。
+  //   ⑤ opts.allowEmpty=true 时才允许返回空数组（仅给「断言必须失败」的夹具用）。
+  let b;
+  if (typeof input === 'string' && input.trim()) {
+    b = fs.readFileSync(input);
+  } else if (Buffer.isBuffer(input)) {
+    b = input;
+  } else if (input instanceof Uint8Array) {
+    b = Buffer.from(input);
+  } else {
+    throw new TypeError('BAD_ZIP_INPUT：zipEntryNames 只接受 zip 文件路径或 Buffer');
+  }
+  const allowEmpty = Boolean(opts && opts.allowEmpty);
   const out = [];
   let eocd = -1;
   for (let i = b.length - 22; i >= 0 && i > b.length - 65558; i -= 1) {
     if (b.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
   }
-  if (eocd < 0) return out;
+  if (eocd < 0) {
+    if (allowEmpty) return out;
+    throw new Error('ZIP_UNREADABLE：找不到 zip 中央目录（EOCD），入参不是有效 zip');
+  }
   const count = b.readUInt16LE(eocd + 10);
   let off = b.readUInt32LE(eocd + 16);
   for (let k = 0; k < count; k += 1) {
@@ -99,6 +124,9 @@ function zipEntryNames(buf) {
     const raw = b.slice(off + 46, off + 46 + nameLen);
     out.push(raw.toString((flags & 0x800) ? 'utf8' : 'utf8'));
     off += 46 + nameLen + extraLen + commentLen;
+  }
+  if (!out.length && !allowEmpty) {
+    throw new Error('ZIP_UNREADABLE：中央目录解析出 0 个条目（包可能损坏或格式非预期）');
   }
   return out;
 }

@@ -183,6 +183,11 @@ function main() {
     const sha = crypto.createHash('sha256').update(buf).digest('hex');
     // 自检：关键条目必须在包里（防止再次漏 团队/）；用中央目录解析，避免 tar -tf 的中文乱码。
     const names = manifest.zipEntryNames(buf);
+    // 4dba 守卫：条目解析失败必须显式失败，绝不能让「解析出 0 条」被当成「包里没有违规条目」而假绿。
+    if (!Array.isArray(names) || names.length === 0) {
+      console.error('[build-upgrade-zip] 致命：无法从刚写出的 zip 解析出任何条目（守卫防止自检假绿）');
+      return 1;
+    }
     const hasRel = (rel) => names.some((n) => n.replace(/\\/g, '/').endsWith('/' + rel) || n.replace(/\\/g, '/') === topDir + '/' + rel);
     const missing = manifest.PACKAGE_ASSERT_ENTRIES.filter((rel) => !hasRel(rel));
     const leaked = names
