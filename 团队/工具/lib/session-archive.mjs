@@ -50,6 +50,57 @@ function randomId(prefix) {
   return `${prefix}-${stamp()}-${crypto.randomBytes(2).toString('hex')}`;
 }
 
+/**
+ * B-20261119-154518-196e：某个 sessionId **被替换下来的时刻**（ISO）。
+ * 来源：项目 `会话轮换/<角色>.json` 与本角色轮换记录（from==sessionId 的那条 at），再退 `会话轮换.jsonl`。
+ * 没有记录返回 ''（调用方按「不知道换人时刻」保守处理）。
+ */
+export function rotationAtForSession(projectName, role, sessionId) {
+  const target = String(sessionId || '');
+  if (!target) return '';
+  const dir = path.join(sessionStateDir(projectName), '会话轮换');
+  try {
+    const roleRow = readJson(path.join(dir, `${role}.json`), null);
+    if (roleRow && String(roleRow.from || '') === target && roleRow.at) return String(roleRow.at);
+    // 角色文件可能已被下一次换人覆盖：翻 S-*.json 历史（只看本角色）
+    for (const name of fs.readdirSync(dir)) {
+      if (!/^S-.*\.json$/i.test(name)) continue;
+      const row = readJson(path.join(dir, name), null);
+      if (!row || String(row.role || '') !== String(role)) continue;
+      if (String(row.from || '') === target && row.at) return String(row.at);
+    }
+  } catch { /* 没有轮换目录 */ }
+  try {
+    const ledger = path.join(sessionStateDir(projectName), '会话轮换.jsonl');
+    for (const line of fs.readFileSync(ledger, 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const row = JSON.parse(line);
+        if (String(row.role || '') === String(role) && String(row.from || '') === target && row.at) return String(row.at);
+      } catch { /* 跳过坏行 */ }
+    }
+  } catch { /* 没有账本 */ }
+  return '';
+}
+
+/**
+ * B-196e：这个未闭环任务算不算「(旧)会话 sessionId 自己的活」。
+ * 判定顺序（写死）：
+ *   ① 任务有 `ownerSessionId` → 精确比（rotate 的 stampTasks 会把它改成新会话，所以换人后余留任务全归新会话）；
+ *   ② 没有绑定 → 用认领时间与「会话被替换时刻」比：认领早于替换 → 属旧会话（挡归档）；晚于 → 属新会话（不挡）；
+ *   ③ 两条都判不了（无 claimedAt / 无替换时刻）→ **保守算作该会话**（不退化成放开，宁可延后可查）。
+ */
+export function taskBelongsToSession(task, sessionId, replaceAt = '') {
+  const target = String(sessionId || '');
+  if (!target) return true;
+  const bound = String((task && task.ownerSessionId) || '');
+  if (bound) return bound === target;
+  const claimMs = Date.parse(String((task && (task.claimedAt || task.createdAt)) || ''));
+  const rotMs = Date.parse(String(replaceAt || ''));
+  if (Number.isFinite(claimMs) && Number.isFinite(rotMs)) return claimMs < rotMs;
+  return true;
+}
+
 /** 当前角色会话 id：优先项目团队会话.json，再退团队.json 名册。 */
 export function currentSessionOf(projectName, role) {
   const project = loadProject(projectName);
@@ -321,12 +372,28 @@ export function archiveSession({ projectName, role, reason = '', self = false, a
   const project = loadProject(projectName);
   // B-da51（f73f 回归）：未闭环判据 = 非终态（statusIsClosed）+ 非镜像任务（type=requirement）+ owner 命中。
   // 镜像任务随需求行永久存在、f73f 起还带默认 owner（product/analyst），不能算「角色还有活」，否则归档被永久挡住。
+  //
+  // B-20261119-154518-196e（P2）：判据必须**按会话**而不是只按角色——
+  // 换人后新会话立刻接的新任务曾被算成「旧会话还有活」，旧会话归档重试 3 次即 retry_exhausted 永久失败。
+  // 现在：先由 sessionId 推导「它被替换的时刻」，再用 taskBelongsToSession() 只收「属于该会话的活」；
+  // 推导不到替换时刻（未换人/无轮换记录）时退化为原角色级判据（老行为不变，不破坏既有夹具）。
+  const targetSession = String(explicitSessionId || '').trim() || currentSessionOf(projectName, role);
+  const replacedAt = String(rotationAtForSession(projectName, role, targetSession) || '');
   const open = (listTasks(projectName) || []).filter((t) => String(t.owner || '') === role
-    && !isRequirementMirrorTask(t) && !statusIsClosed(String(t.status || 'done')));
-  if (open.length) fail('TASK_OPEN', `角色 ${role} 还有 ${open.length} 个未闭环任务，先 done 再归档`, { tasks: open.map((t) => t.id) });
+    && !isRequirementMirrorTask(t) && !statusIsClosed(String(t.status || 'done'))
+    && taskBelongsToSession(t, targetSession, replacedAt));
+  if (open.length) {
+    fail('TASK_OPEN', `角色 ${role} 还有 ${open.length} 个未闭环任务，先 done 再归档`, {
+      tasks: open.map((t) => t.id),
+      // 可排障：说明本次按「会话」还是「角色」口径判的（B-196e）
+      sessionId: targetSession || '',
+      replacedAt: replacedAt || '',
+      scope: replacedAt ? 'session' : 'role',
+    });
+  }
   const locks = (listLocks() || []).filter((l) => String(l.role || '') === role && !l.stale);
   if (locks.length) fail('ROLE_BUSY', `角色 ${role} 持活动锁，先释放再归档`, { locks: locks.map((l) => l.key) });
-  const sessionId = String(explicitSessionId || '').trim() || currentSessionOf(projectName, role);
+  const sessionId = targetSession;
   // AC18.8：未确认前不得再次 --self —— 该判定必须先于“重复归档”，否则同一会话会被 ALREADY_ARCHIVED 抢先。
   if (self) {
     const pending = listArchives(projectName).find((a) => a.role === 'pm' && a.self === true && !a.confirmedAt);
@@ -741,8 +808,21 @@ export function clearArchivedRoleState(projectName, role, sessionId, archiveId =
     catch (e) { warnings.push({ step: name, code: String((e && e.code) || 'CLEANUP_FAILED'), message: String((e && e.message) || e).slice(0, 200) }); return null; }
   };
   const sid = String(sessionId || '');
+  // B-196e 附带修（本次实测事故）：只有「归档的就是名册当前会话」时才清该角色的四处映射；
+  // 归档的是**旧会话**（角色已在新会话上）时无条件清映射会把在岗会话打空
+  // （实测：补归档 programmer1 旧会话后名册/manifest/workbench 全空 → session check 5/6 → 派单被 SESSION_MAP_INCONSISTENT 挡）。
+  // 旧会话归档仍要清「workspace.sessionIds 里的该 sid」与「该 sid 自己的 boot 令牌」，只是不动角色绑定。
+  const currentSid = (() => { try { return String(currentSessionOf(projectName, role) || ''); } catch { return ''; } })();
+  const archivedIsCurrent = !sid ? !currentSid : (!currentSid || sid === currentSid);
+  steps.push({
+    step: 'scope', ok: true,
+    archivedSessionId: sid, currentSessionId: currentSid,
+    clearsRoleBinding: archivedIsCurrent,
+    note: archivedIsCurrent ? '归档的是当前会话：清角色四处映射' : '归档的是旧会话：只清该会话残留（不动角色绑定）',
+  });
   // 1) 名册：清该角色 sessionId（保留成员本身，另由 97db 删除项目/归档团队处理）
   guard('roster', () => {
+    if (!archivedIsCurrent) return { changed: false, skipped: 'archived_session_not_current', archivedSessionId: sid, currentSessionId: currentSid };
     const team = loadTeam();
     const member = (team.members || []).find((m) => String(m.role || '') === String(role || ''));
     if (!member) return { changed: false, why: 'member_missing' };
@@ -754,6 +834,7 @@ export function clearArchivedRoleState(projectName, role, sessionId, archiveId =
   });
   // 2) 项目映射：团队会话.json roles[role]
   guard('manifest', () => {
+    if (!archivedIsCurrent) return { changed: false, skipped: 'archived_session_not_current' };
     const file = path.join(project.path, '团队会话.json');
     if (!fs.existsSync(file)) return { changed: false, why: 'missing' };
     const data = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
@@ -784,7 +865,8 @@ export function clearArchivedRoleState(projectName, role, sessionId, archiveId =
         const rowName = String(row.teamName || row.name || '');
         const same = String(row.id || '') === String(project.id || '') || names.includes(rowName);
         if (!same) continue;
-        if (row.sessions && Object.prototype.hasOwnProperty.call(row.sessions, role)) { delete row.sessions[role]; changed = true; }
+        // 旧会话归档：只动 workspace.sessionIds 里的该 sid，**不动** sessions[role]（否则在岗会话丢失）
+        if (archivedIsCurrent && row.sessions && Object.prototype.hasOwnProperty.call(row.sessions, role)) { delete row.sessions[role]; changed = true; }
         if (row.workspace && Array.isArray(row.workspace.sessionIds)) {
           const next = row.workspace.sessionIds.filter((x) => String(x) !== sid);
           if (next.length !== row.workspace.sessionIds.length) { row.workspace.sessionIds = next; changed = true; }
@@ -792,13 +874,13 @@ export function clearArchivedRoleState(projectName, role, sessionId, archiveId =
       }
       if (changed) { writeJsonAtomic(file, store); touched.push(file); }
     }
-    return { changed: touched.length > 0, files: touched };
+    return { changed: touched.length > 0, files: touched, skipped: archivedIsCurrent ? '' : 'role_binding_kept' };
   });
   // 4) 工作流 boots[role] + 该角色旧 boot 令牌
   guard('boots', () => {
     const wfFile = path.join(projectStatePaths(projectName).dir, '工作流.json');
     let wfChanged = false;
-    if (fs.existsSync(wfFile)) {
+    if (archivedIsCurrent && fs.existsSync(wfFile)) {
       const wf = JSON.parse(fs.readFileSync(wfFile, 'utf8').replace(/^\uFEFF/, ''));
       if (wf && wf.boots && Object.prototype.hasOwnProperty.call(wf.boots, role)) {
         delete wf.boots[role];
@@ -815,12 +897,14 @@ export function clearArchivedRoleState(projectName, role, sessionId, archiveId =
           const tok = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
           const sameRole = String(tok.role || '') === String(role || '');
           const sameProject = String(tok.project || '') === String(projectName || '');
+          // 旧会话归档：只删「令牌会话 == 被归档会话」的那把，绝不删在岗会话的令牌
+          const sameSession = !sid || String(tok.sessionId || '') === sid;
           // pm 令牌保留：自归档待 Owner 确认路径仍需同一令牌二次调用（selftest 契约）。
-          if (sameRole && sameProject && String(role) !== 'pm') { fs.rmSync(file, { force: true }); removedTokens.push(name); }
+          if (sameRole && sameProject && sameSession && String(role) !== 'pm') { fs.rmSync(file, { force: true }); removedTokens.push(name); }
         } catch { /* 坏令牌跳过 */ }
       }
     } catch { /* 启动目录不存在 */ }
-    return { wfChanged, removedTokens };
+    return { wfChanged, removedTokens, scope: archivedIsCurrent ? 'role' : 'session' };
   });
   // 5) 审计
   guard('audit', () => {
