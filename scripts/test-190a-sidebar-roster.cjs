@@ -61,10 +61,22 @@ function main() {
     check('A1 main.js publicMapping 定义 rosterSessionIds 且进 return',
       pmSeg.includes('const rosterSessionIds') && /\n\s*rosterSessionIds,/.test(pmSeg),
       { hasDef: pmSeg.includes('const rosterSessionIds'), hasReturn: /\n\s*rosterSessionIds,/.test(pmSeg) });
+    // PM 2026-11-20 03:35：口径抽成 rosterSessionIdsOf() 单一实现（publicMapping/publicProject 共用），
+    // 断言改为在「该函数体」里验证口径，而不是在 publicMapping 段里找内联代码。
+    const helperStart = m.indexOf('function rosterSessionIdsOf');
+    const helperSeg = helperStart >= 0 ? m.slice(helperStart, helperStart + 1200) : '';
     check('A2 口径 = sessionId 非空 且 未 archived（归档成员不计入就绪）',
-      /const sid = String\(\(m && m\.sessionId\) \|\| ''\)\.trim\(\);/.test(pmSeg)
-      && /if \(role && sid && !\(m && m\.archived\)\) ids\.push\(role\);/.test(pmSeg),
-      {});
+      /const sid = String\(\(m && m\.sessionId\) \|\| ''\)\.trim\(\);/.test(helperSeg)
+      && /if \(role && sid && !\(m && m\.archived\)\) ids\.push\(role\);/.test(helperSeg),
+      { hasHelper: helperStart >= 0 });
+
+    // PM 2026-11-20 03:40：app:state 的 projects 走 publicProject，必须同样带 rosterSessionIds，
+    // 否则侧栏文本走 verifiedCount 时过滤失效（tester 真窗口实测恒 6/6 的最后一环）。
+    const ppStart = m.indexOf('function publicProject');
+    const ppSeg = ppStart >= 0 ? m.slice(ppStart, ppStart + 3000) : '';
+    check('A8 publicProject（app:state.projects）也带 rosterSessionIds，且与 publicMapping 同源',
+      ppStart >= 0 && /rosterSessionIds: rosterSessionIdsOf\(\)/.test(ppSeg) && /function rosterSessionIdsOf\(/.test(m),
+      { hasPublicProject: ppStart >= 0 });
 
     const seStart = a.indexOf('function sessionEntries');
     const seSeg = seStart >= 0 ? a.slice(seStart, seStart + 1200) : '';
