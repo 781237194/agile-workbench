@@ -51,6 +51,7 @@ import {
   stageOfRow, idMatches, gateRoleBusy, detectPhaseJump,
   // R-75ec：任务层 Owner 门禁唯一入口与它的只读投影（避免在 ops 里出现第二套判门）。
   taskGateOf, decisionListOf, latestDecisionOf,
+  isAuthoringTask, isRequirementReviewStage,
   // B-b894：任务闭环状态唯一口径（done/accepted/cancelled/terminated），别再在 ops 里写数组。
   statusIsClosed,
   isRequirementMirrorTask,
@@ -1014,8 +1015,11 @@ function runDispatchGates({ projectName, requirementId, role, targetRole = '', a
   });
   if (g4) {
     // c65a AC3：doc 阶段派单（尚未产出正文）不应被设计/技术评审硬门自锁；仍写软审计。
-    if (!docStageDispatch && cfg.productDesign === 'hard') gateFail(projectName, record, g4);
-    gateWarn(projectName, record, g4);
+    // K1（T-20261119-165257-5203）：**编写/设计类任务**（type=task 的 doc/design）也不被 G4 硬拦——
+    // 否则「派产品做设计 / 派分析师写正文」会要求「先有设计签字」而自锁（设计产物正是这个任务要产出的）。
+    const authoringTarget = isAuthoringTask(targetTask || reqTask);
+    if (!docStageDispatch && !authoringTarget && cfg.productDesign === 'hard') gateFail(projectName, record, g4);
+    gateWarn(projectName, record, authoringTarget ? { ...g4, rule: 'G4_authoring_exempt', message: `${g4.message}（编写/设计类任务豁免 G4 硬门）` } : g4);
   }
   return row;
 }

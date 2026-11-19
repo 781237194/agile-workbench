@@ -375,12 +375,33 @@ export function currentDecisionOf(row) {
 }
 
 /**
+ * K1②（T-20261119-165257-5203，Owner 已采纳）：编写/设计类任务（`type=task` 的 doc/design）判定——**唯一口径**。
+ *
+ * 背景：本项目 TASK_TYPES 只有 requirement/task/bug/chore/scenario-bug，写正文、做设计这类活都落在 `type=task`，
+ * 一旦挂了 requirementId 就会被 G3（Owner 未落账）自锁 → 今天实际被绊三次（写正文任务结不了单）。
+ * 口径：`type==='task'` 且 title/detail 命中编写/设计语义关键词 → 视为 authoring 任务。
+ * 用途：①G3 在需求仍处评审阶段时豁免；②G8 不把这类任务算作「子任务证据」；③G4 不对这类任务硬拦（避免自锁）。
+ */
+export function isAuthoringTask(task) {
+  const t = task || {};
+  if (String(t.type || '').toLowerCase() !== 'task') return false;
+  const text = `${String(t.title || '')}\n${String(t.detail || '')}`;
+  return /编写|撰写|文档|设计|正文|评审|分析报告|说明书|规范|方案/.test(text);
+}
+
+/** K1②：需求是否仍处「需求评审阶段」——G3 对 authoring 任务的豁免区间。 */
+export function isRequirementReviewStage(status) {
+  return ['review', 'approved', 'requirement_review'].includes(String(status || ''));
+}
+
+/**
  * R-75ec：任务层 Owner 门禁的**唯一判定入口**。
  *
  * 口径（主正文 §七 + 增补卷 §二）：
  *   - 只认 `decisions` 里**最新一条**的 status ∈ approved/skipped/accepted → 通过；proxy 与 Owner 同权。
  *   - 无 `requirementId` → 放行（返回 null，调用方不写审计）。
  *   - 有 `requirementId` 但工作流没有该行（`row` 缺）→ 拒 `TASK_GATE_REQUIREMENT_MISSING`（脏数据不放行）。
+ *   - **K1②：编写/设计类任务（type=task 的 doc/design）且需求仍处评审阶段 → 放行**（见 isAuthoringTask）。
  *   - 读失败由调用方判定 fail-closed（调用方传 row=null 且 readFailed=true）。
  *   - 其余一律拒 `TASK_GATE_NOT_APPROVED`，`cause ∈ {missing,pending,rejected}`。
  * 返回 null（放行）或 {code, gateCode, cause, gate, requirementId, taskId, missing, next, message}。
@@ -389,6 +410,9 @@ export function taskGateOf({ task, row = null, readFailed = false } = {}) {
   const requirementId = String((task && task.requirementId) || '');
   const taskId = String((task && task.id) || '');
   if (!requirementId) return null;
+  // K1②：编写/设计类任务在需求仍处「需求评审」阶段豁免 G3——否则「派分析师写正文 / 产品做设计」
+  // 在 Owner 未落账前被自己的需求号自锁（今天实际被绊：写正文任务 task done 报 TASK_GATE_NOT_APPROVED）。
+  if (!readFailed && row && isAuthoringTask(task) && isRequirementReviewStage(row.status)) return null;
   const base = { gate: 'G3', gateCode: 'TASK_GATE_NOT_APPROVED', requirementId, taskId, attempted: 'task_gate' };
   if (readFailed) {
     return {
@@ -579,14 +603,16 @@ export function gateDesign({ projectPath, mode = 'full', task, state = null, com
   const root = path.resolve(projectPath);
   const evidence = mode === 'fast' ? collectLatest(path.join(root, '需求分析师', '产出'), /^需求分析-v\d+\.md$/i) : collectLatest(path.join(root, '产品', '产出'), /^(02-)?产品设计-v\d+\.md$/i);
   if (!evidence) {
-    // 没有设计产物：默认 hard 时由调用方 gateFail；auto 时只审计（Electron 自测与历史项目尚无设计证据）。
-    return { code: mode === 'fast' ? 'TECH_REVIEW_REQUIRED' : 'PRODUCT_DESIGN_REQUIRED', gate: mode === 'fast' ? 'G4f' : 'G4', soft: true, missing: [mode === 'fast' ? '技术评审记录/设计依据' : '产品设计文档'], next: mode === 'fast' ? '先跑 req review --kind tech' : '先提交产品设计并走 propose→review→sign→apply', message: '缺少设计/评审证据（仅审计，不阻断）' };
+    // K1①（T-20261119-165257-5203）：soft/hard 语义统一 —— 本函数只表达「有没有证据」：
+    //   soft:true  = 无证据（是否阻断由调用方按 项目.json.gates 决定，auto 只审计、hard 才 gateFail、off 跳过）；
+    //   soft:false = 有证据但缺签字/approve（硬缺陷，与配置无关）。
+    return { code: mode === 'fast' ? 'TECH_REVIEW_REQUIRED' : 'PRODUCT_DESIGN_REQUIRED', gate: mode === 'fast' ? 'G4f' : 'G4', soft: true, missing: [mode === 'fast' ? '技术评审记录/设计依据' : '产品设计文档'], next: mode === 'fast' ? '先跑 req review --kind tech' : '先提交产品设计并走 propose→review→sign→apply', message: '缺少设计/评审证据（是否阻断由 gates 配置决定）' };
   }
   const tr = task && task.workflow ? task.workflow.techReview : null;
   if (mode === 'fast') {
     if (!tr || String(tr.verdict || '') !== 'approve') {
       return {
-        code: 'TECH_REVIEW_REQUIRED', gate: 'G4f', missing: ['技术评审 approve'], designFile: evidence.rel,
+        code: 'TECH_REVIEW_REQUIRED', gate: 'G4f', soft: false, missing: ['技术评审 approve'], designFile: evidence.rel,
         next: '先跑 req review --kind tech --verdict approve',
         message: `fast 项目缺少技术评审 approve；先跑 req review --kind tech`,
       };
@@ -596,14 +622,14 @@ export function gateDesign({ projectPath, mode = 'full', task, state = null, com
   const design = resolveDesignSignature({ task, state, evidence, commits });
   if (!design) {
     return {
-      code: 'PRODUCT_DESIGN_REQUIRED', gate: 'G4', missing: ['产品设计评审/签字'], designFile: evidence.rel,
+      code: 'PRODUCT_DESIGN_REQUIRED', gate: 'G4', soft: false, missing: ['产品设计评审/签字'], designFile: evidence.rel,
       next: '产品设计需 propose→review→sign→apply；apply 会自动写项目 designReview（也可查提交记录）',
       message: '产品设计已存在但找不到签字证据（项目 designReview / 设计提交记录都没有）；先走设计提交与签字',
     };
   }
   if (design.sha256 && design.sha256 !== evidence.sha256) {
     return {
-      code: 'PRODUCT_DESIGN_REQUIRED', gate: 'G4', reason: 'stale', missing: ['设计已变但签字针对旧版'],
+      code: 'PRODUCT_DESIGN_REQUIRED', gate: 'G4', soft: false, reason: 'stale', missing: ['设计已变但签字针对旧版'],
       designFile: evidence.rel, recordedHash: design.sha256, currentHash: evidence.sha256,
       signatureSource: design.source || '', commitId: design.commitId || '',
       next: '设计文件已变，重走设计评审/签字',
@@ -929,9 +955,14 @@ export function detectPhaseJump({ state, row, tasks = [] } = {}) {
   if (!declared) return null;
   if (['accepted', 'terminated', 'iteration'].includes(rowStatus)) return null;
   const requirementId = String(row.id || '');
+  // K1③（T-20261119-165257-5203）：**编写/设计类任务不算「子任务证据」**。
+  // 场景：需求已 ready（可以派开发），但挂在该需求下的「写正文/做设计」任务已完成未结单（还是 working/open），
+  // 旧口径会把它算成 open 子任务 → expected=requirement_review → 需求 ready 被判 G8 跳步，把开发派单挡住。
+  // 编写类活本来就不该挂 requirementId（见《流程.md》固化条目），历史数据已挂的按此豁免。
   const kids = (Array.isArray(tasks) ? tasks : []).filter((task) => task
     && String(task.type || '') !== 'requirement'
-    && String(task.requirementId || '') === requirementId);
+    && String(task.requirementId || '') === requirementId
+    && !isAuthoringTask(task));
   if (!kids.length) return null;
   const open = kids.filter((task) => !statusIsClosed(task.status));
   let expected = '';
