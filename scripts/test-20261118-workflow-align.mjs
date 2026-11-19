@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * 夹具（T-20261118-220400-4981）：角色卡 / skill / 模板 与现行工作流对齐（Owner 2026-11-18 22:01）。
  *
@@ -64,10 +64,14 @@ const manifest = JSON.parse(read('团队/skill/基础流程/skill-manifest.json'
 const skillSha = crypto.createHash('sha256').update(read('团队/skill/基础流程/programmer1.md')).digest('hex');
 ok(mySkill.indexOf('现行工作流对齐') >= 0 && /PID/.test(mySkill) && mySkill.indexOf('验收边') >= 0,
   'A6a 我的 skill 含对齐小节（PID-only / 验收边界）', {});
-ok(manifest.version === '1.3.0'
+const mfVer = String(manifest.version || '').split('.').map(Number);
+const mfOk = mfVer[0] === 1 && mfVer[1] >= 3;
+const prevArchive = manifest.previousVersion && manifest.previousVersion.archive;
+ok(mfOk
   && manifest.files && manifest.files['programmer1.md'] === skillSha
-  && manifest.previousVersion && manifest.previousVersion.version === '1.2.0',
-  'A6b skill-manifest 1.3.0 + sha 一致 + 旧版归档记录', { version: manifest.version });
+  && manifest.previousVersion && Boolean(manifest.previousVersion.version)
+  && Boolean(prevArchive) && fs.existsSync(path.join(ROOT, prevArchive)),
+  'A6b skill-manifest ≥1.3.0 + sha 一致 + 旧版归档存在', { version: manifest.version, prev: prevArchive });
 
 // A7 新项目生成（真实 ensureProjectStructure）：六张角色卡 + 铁律都要带对齐条款
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'align-proj-'));
