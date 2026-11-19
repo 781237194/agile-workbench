@@ -60,7 +60,7 @@ function readAnchorFile(abs) {
 
 /**
  * 解析锚点文本：`路径#sha12:lineSha12`。
- * 切分口径（坑①）：按**第一个 `#`** 与**最后一个 `:`** —— Windows 盘符 `D:\...` 含冒号。
+ * 切分口径（坑①）：按**第一个 `#`** 与**最后一个 `:`** —— Windows 盘符本身含冒号（形如「盘符 + 反斜杠」），必须从右侧找冒号。
  */
 export function parseAnchor(text) {
   const raw = String(text == null ? '' : text).trim();
