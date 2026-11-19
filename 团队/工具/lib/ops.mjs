@@ -1441,6 +1441,7 @@ function consumeRepushPermit(project, role) {
 // 夹具入口（R-d1bf）：验证同角色同 dedupeKey 只留 1 行。
 export function appendWakeLogForTest(project, row) { return appendWakeLog(project, row); }
 const wakeDedupeSeen = new Set();
+let wakeRowSeq = 0;
 /** R-d1bf：唤醒留痕的 trigger 词表与同事件去重（同角色同 dedupeKey 只算 1 行，第二行记 skip:duplicate）。 */
 function appendWakeLog(project, row) {
   try {
@@ -1460,8 +1461,10 @@ function appendWakeLog(project, row) {
         wakeDedupeSeen.add(seenKey);
       }
     }
-    appendLine(file, JSON.stringify({ at, time: at, project: String(project || ''), ...base }));
-    return { duplicate: base.skipped === 'duplicate', dedupeKey: key };
+    // TR-Q 补充（R-d1bf AC5）：唤醒行 id 供「失败重试 retryOf」关联。
+    const rowId = 'W-' + Date.now().toString(36) + '-' + (wakeRowSeq += 1).toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+    appendLine(file, JSON.stringify({ at, time: at, id: rowId, project: String(project || ''), ...base }));
+    return { duplicate: base.skipped === 'duplicate', dedupeKey: key, id: rowId };
   } catch { return { duplicate: false }; }
 }
 /** 角色 id → 展示名（B-…e5d6：统一走 团队.json，ROLE_NAMES 只兜底；禁止各处硬编码）。 */
@@ -1497,8 +1500,9 @@ function logSandboxSkipOnce({ target, project, why, caller, reason }) {
 /** 单次真唤醒（含 mock/测试注入）；返回 null 表示沙盘跳过。 */
 async function tryWake({ project, target, batch, isDispatch = false, engineUrl = '', taskRow = null }) {
   // 测试注入优先级最高：显式要求“唤醒失败”时必须返回失败，不能被后面的沙盘跳过吞掉。
-  if (String(process.env.TEAM_WAKE_TEST_FAIL || '') === '1') {
-    return { ok: false, why: 'TEAM_WAKE_TEST_FAIL（测试注入）', code: 'WAKE_TEST_FAIL' };
+  // TR-Q 补充（R-d1bf AC5）：AWB_WAKE_FAIL 为对外统一的沙盘注入名（TEAM_WAKE_TEST_FAIL 保留兼容）。
+  if (String(process.env.AWB_WAKE_FAIL || process.env.TEAM_WAKE_TEST_FAIL || '') === '1') {
+    return { ok: false, why: 'AWB_WAKE_FAIL / TEAM_WAKE_TEST_FAIL（沙盘注入的唤醒失败）', code: 'WAKE_TEST_FAIL' };
   }
   const list = Array.isArray(batch) ? batch : [];
   const head = list[0] || {};
@@ -1710,8 +1714,10 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
   };
   state.targets[target] = t;
   writeWakeQueue(project, state);
-  appendWakeLog(project, { to: target, ok: false, why, messageIds, pending: 0, reason, source: 'wake', retried, retryScheduled: 1, nextAt: new Date(t.retry.dueAt).toISOString() });
-  return { ok: false, to: target, why, code: 'WAKE_FAILED', attempts: retried ? 2 : 1, attempt: 1, retryAt: t.retry.dueAt, messageIds, retried };
+  // TR-Q 补充（R-d1bf AC5）：本行为「首次失败行」，id 写进 retry.retryOf 供后续重试行关联；trigger 固定 event（非 timer）。
+  const firstFailRow = appendWakeLog(project, { to: target, ok: false, why, messageIds, pending: 0, reason, source: 'wake', trigger: 'event', retried, retryScheduled: 1, nextAt: new Date(t.retry.dueAt).toISOString() });
+  if (firstFailRow && firstFailRow.id) { t.retry.retryOf = firstFailRow.id; state.targets[target] = t; writeWakeQueue(project, state); }
+  return { ok: false, to: target, why, code: 'WAKE_FAILED', attempts: retried ? 2 : 1, attempt: 1, retryAt: t.retry.dueAt, messageIds, retried, retryOf: (firstFailRow && firstFailRow.id) || '' };
 }
 
 /**
@@ -1745,7 +1751,7 @@ registerPmCriticalWakeHook();
  */
 export async function processWakeRetries(project, { source = 'pump', engineUrl = '' } = {}) {
   const state = readWakeQueue(project);
-  const now = Date.now();
+  const now = readNowMs(); // R-d1bf §6.4：重试到期判定必须走可注入时钟
   const out = { checked: 0, retried: 0, failed: 0, gaveUp: [], skipped: 0 };
   for (const [target, t] of Object.entries(state.targets || {})) {
     const r = t && t.retry;
@@ -1772,7 +1778,7 @@ export async function processWakeRetries(project, { source = 'pump', engineUrl =
         if (!mid) continue;
         try { readMessage(target, String(mid)); } catch { /* 已读失败不阻断 */ }
       }
-      appendWakeLog(project, { to: target, ok: true, attempt, messageIds, source, retried: true, deliveredAt: nowIso() });
+      appendWakeLog(project, { to: target, ok: true, attempt, messageIds, source, retried: true, trigger: 'event', retryOf: r.retryOf || '', deliveredAt: nowIso() });
       out.retried += 1;
       continue;
     }
@@ -1782,17 +1788,17 @@ export async function processWakeRetries(project, { source = 'pump', engineUrl =
       state.targets[target] = t;
       writeWakeQueue(project, state);
       markWakeFailed(project, target, { messageId: messageIds[0] || (r.messageId || ''), why, attempt });
-      appendWakeLog(project, { to: target, ok: false, attempt, why, messageIds, source, retried: true, gaveUp: true });
+      appendWakeLog(project, { to: target, ok: false, attempt, why, messageIds, source, retried: true, trigger: 'event', retryOf: r.retryOf || '', gaveUp: true });
       out.failed += 1;
       out.gaveUp.push(target);
       continue;
     }
     const nextAttempt = attempt + 1;
     const delay = WAKE_RETRY_STAGES_MS[Math.min(nextAttempt - 1, WAKE_RETRY_STAGES_MS.length - 1)];
-    t.retry = { ...r, attempt: nextAttempt, dueAt: now + delay, why, lastAt: nowIso() };
+    t.retry = { ...r, attempt: nextAttempt, dueAt: now + delay, why, lastAt: nowIso() }; // retryOf 随 ...r 保留
     state.targets[target] = t;
     writeWakeQueue(project, state);
-    appendWakeLog(project, { to: target, ok: false, attempt, why, messageIds, source, retried: true, nextAt: new Date(now + delay).toISOString() });
+    appendWakeLog(project, { to: target, ok: false, attempt, why, messageIds, source, retried: true, trigger: 'event', retryOf: r.retryOf || '', nextAt: new Date(now + delay).toISOString() });
   }
   return out;
 }
