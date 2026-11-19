@@ -39,6 +39,20 @@ function check(name, ok, detail) {
 const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 const shaFile = (f) => { try { return sha(fs.readFileSync(f)); } catch { return '-'; } };
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+function skip(name, reason) {
+  rows.push({ name, ok: true, skipped: true, detail: 'SKIPPED: ' + String(reason || '') });
+  console.log('SKIP  ' + name + ' :: ' + String(reason || ''));
+}
+
+// 真实用户态只从环境变量取（不写死盘符；取不到就 SKIP，不回落任何绝对路径）
+const winRoot = String(process.env.SystemRoot || process.env.windir || '').trim();
+function realHostsSha() {
+  if (!winRoot) return '';
+  const hostsFile = path.join(winRoot, 'System32', 'drivers', 'etc', 'hosts');
+  const sha = shaFile(hostsFile);
+  return sha === '-' ? '' : sha;
+}
+
 function writeFile(file, text) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text, 'utf8'); }
 
 function runPwsh(file, args, opts = {}) {
@@ -117,7 +131,7 @@ function listBackups(sb, root) {
 (async () => {
   const sb = fs.mkdtempSync(path.join(os.tmpdir(), 'awb-2de7-'));
   const userStateSentinels = {
-    hosts: shaFile(path.join((process.env.SystemRoot || process.env.windir || ''), 'System32', 'drivers', 'etc', 'hosts')),
+    hosts: realHostsSha(),
   };
   try {
     // ── A 重置 ────────────────────────────────────────────────────────
@@ -254,8 +268,14 @@ function listBackups(sb, root) {
     check('D1b 渲染层 bindMaintPanel + 主进程 maint:run/maint:verify + preload maintRun',
       appJs.includes('bindMaintPanel') && mainJs.includes("rawIpcHandle('maint:run'") && mainJs.includes("rawIpcHandle('maint:verify'") && preloadJs.includes('maintRun'));
         // ── C2 真实用户态零写入 ───────────────────────────────────────────
-    check('C2 真实 hosts sha 不变（-GitHubFixHostsPath 副本，沙盘不写真实用户态）',
-      shaFile(path.join((process.env.SystemRoot || process.env.windir || ''), 'System32', 'drivers', 'etc', 'hosts')) === userStateSentinels.hosts, null);
+    if (!winRoot) {
+      skip('C2 真实 hosts sha 不变（-GitHubFixHostsPath 副本，沙盘不写真实用户态）', '未取到 SystemRoot/windir，无法读真实 hosts（不写死盘符、不冒充通过）');
+    } else if (!userStateSentinels.hosts) {
+      skip('C2 真实 hosts sha 不变（-GitHubFixHostsPath 副本，沙盘不写真实用户态）', '真实 hosts 不可读（权限/不存在），本项跳过');
+    } else {
+      check('C2 真实 hosts sha 不变（-GitHubFixHostsPath 副本，沙盘不写真实用户态）',
+        realHostsSha() === userStateSentinels.hosts, null);
+    }
   } finally {
     try { fs.rmSync(sb, { recursive: true, force: true }); } catch { /* ignore */ }
   }
