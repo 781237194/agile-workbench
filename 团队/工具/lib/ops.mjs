@@ -6189,6 +6189,49 @@ export function cmdRead(args) {
   });
 }
 
+/**
+ * B-7e49：系统通知通道（`team.mjs notify --boot <T> --to <role> --subject <s> --body <b> [--type notice]`）。
+ *
+ * 发件人固定为 `system`（不可指定其他角色，杜绝伪造）；必须有有效 boot（写操作）。
+ * 用途：Owner 决定落账后通知 PM —— `send` 的 SELF_SEND 拦截使 PM 无法给自己发消息，而这是系统事件。
+ * 送达后立即唤醒目标；唤醒失败只 appendEvent 留痕，不阻断（通知是软要求，落账才是硬要求）。
+ */
+export async function cmdNotify(args) {
+  const b = bootFor(args, 'notify');
+  const to = String(args.to || '');
+  if (!to) fail('BAD_RECIPIENT', '需要 --to <角色>');
+  const members = new Set((loadTeam().members || []).filter((m) => m && m.status === 'active').map((m) => String(m.role || '')));
+  if (!members.has(to)) fail('NO_RECIPIENT', `收件人不在团队或未激活：${to}`, { to, active: [...members] });
+  const subject = String(args.subject || '').trim();
+  if (!subject) fail('BAD_SUBJECT', '需要 --subject');
+  let body = String(args.body ?? args.text ?? '');
+  if (args['body-file']) body = readText(path.resolve(String(args['body-file'])), '');
+  if (!body.trim()) fail('EMPTY_MESSAGE', '需要 --body 或 --body-file');
+  const max = messageMaxChars();
+  if (body.length > max) fail('MESSAGE_TOO_LONG', `通知正文 ${body.length} 字，超过 ${max} 字上限`, { length: body.length, max });
+  const explicitType = String(args.type || 'notice').trim().toLowerCase();
+  const type = ['notice', 'escalation', 'question'].includes(explicitType) ? explicitType : 'notice';
+  const msg = sendMessage({ from: 'system', to, type, project: b.project, subject, body: body.trim(), ackRequired: Boolean(args.ack) });
+  let wake = null;
+  try {
+    wake = await wakeWithGuard({
+      project: b.project, to, msg, isDispatch: false,
+      engineUrl: String(args['engine-url'] || ''), taskRow: null, reason: 'system_notify',
+    });
+  } catch (e) { wake = { ok: false, why: String((e && e.message) || e) }; }
+  if (!wake || wake.ok !== true) {
+    try {
+      appendEvent({
+        role: b.role, sessionId: b.sessionId, action: 'notify_wake_failed', project: b.project, target: msg.id,
+        note: `to=${to} why=${String((wake && (wake.why || wake.code)) || 'unknown')}`,
+      });
+    } catch { /* 留痕失败不阻断 */ }
+  }
+  out(args, `已通知 ${to} ${msg.id}${wake && wake.ok === true ? '；已唤醒' : '；唤醒失败（已留痕，60 秒兜底重试）'}`, {
+    ok: true, message: msg, wake, from: 'system',
+  });
+}
+
 export async function cmdAck(args) {
   assertNoWakeRemoved(args);
   const b = bootFor(args, 'ack');

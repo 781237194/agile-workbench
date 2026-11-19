@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { parseArgs, TeamError, jsonOut, textOut } from './lib/core.mjs';
 import {
-  cmdInit, cmdProject, cmdBoot, cmdSend, cmdPmDispatch, cmdInbox, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
+  cmdInit, cmdProject, cmdBoot, cmdSend, cmdNotify, cmdPmDispatch, cmdInbox, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
   cmdShow, cmdReview, cmdSign, cmdApply, cmdGrant, cmdIndex, cmdStatus, cmdClaim, cmdReconcile,
   cmdVerify, cmdLog, cmdLock, cmdOwnerApprove, cmdOwner, cmdRoster, cmdPilot, cmdDoctor,
   cmdReq, cmdFind, cmdBoard, cmdVote, cmdWorkflow, cmdOwnerProxyDecide, cmdQueue, cmdSkill, cmdSched,
@@ -326,7 +326,9 @@ async function main() {
     case 'pm': await cmdPmDispatch(args); break; // c65a AC2：pm dispatch 原子派单
     case 'inbox': cmdInbox(args); break;
     case 'read': cmdRead(args); break;
-    case 'ack': await cmdAck(args); break;
+    // B-7e49：系统通知通道（发件人固定 system）——壳层 Owner 决定落账后通知 PM，绕开 send 的 SELF_SEND
+  case 'notify': await cmdNotify(args); break;
+  case 'ack': await cmdAck(args); break;
     case 'presence': cmdPresence(args); break;
     // T-20261118-091644-6e53：派单前置检查（PM 派单前必跑；send --ack 的程序门读它的最近一次结果）
     case 'dispatch-check': await cmdDispatchCheck(args); break;

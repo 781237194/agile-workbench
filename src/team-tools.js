@@ -7519,6 +7519,88 @@ function createTeamTools(options = {}) {
     return techReviewRequirementForContext(ctx, input, input.teamMode || ctx.teamMode);
   }
 
+  /**
+   * B-20261119-165125-7e49：Owner 决定落账后**通知 PM**（软要求：任何失败都只写审计，绝不阻断落账）。
+   * 去重：同 project+requirement+轮次 5 分钟内只发 1 条（连点不刷屏）；内存 Map 优先，进程重启后回落审计文件。
+   */
+  const OWNER_DECISION_NOTIFY_DEDUPE_MS = 5 * 60 * 1000;
+  const ownerDecisionNotifySeen = new Map();
+
+  function ownerDecisionAuditFile(projectName) {
+    try { return path.join(projectStatePaths(projectName).dir, 'owner决定通知.jsonl'); } catch { return ''; }
+  }
+
+  function appendOwnerDecisionAudit(projectName, row) {
+    try {
+      const f = ownerDecisionAuditFile(projectName);
+      if (!f) return false;
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.appendFileSync(f, JSON.stringify(row) + '\n', 'utf8');
+      return true;
+    } catch { return false; }
+  }
+
+  /** 从审计文件回读「最近一条成功通知」的时间（跨进程去重的兜底）。 */
+  function lastNotifiedAtFromAudit(projectName, key) {
+    try {
+      const f = ownerDecisionAuditFile(projectName);
+      if (!f || !fs.existsSync(f)) return 0;
+      const lines = fs.readFileSync(f, 'utf8').split(/\r?\n/).filter(Boolean).slice(-200);
+      let last = 0;
+      for (const line of lines) {
+        let row = null;
+        try { row = JSON.parse(line); } catch { continue; }
+        if (!row || row.key !== key) continue;
+        if (row.action !== 'owner_decision_notified') continue;
+        const ms = Date.parse(String(row.at || ''));
+        if (Number.isFinite(ms) && ms > last) last = ms;
+      }
+      return last;
+    } catch { return 0; }
+  }
+
+  async function notifyOwnerDecisionToPm({ projectName, requirementId, status, round, opinion, at, channel }) {
+    const key = `${projectName}|${requirementId}|${round}`;
+    try {
+      const nowMs = Date.now();
+      const memo = ownerDecisionNotifySeen.get(key) || 0;
+      const last = memo || lastNotifiedAtFromAudit(projectName, key);
+      if (last && nowMs - last < OWNER_DECISION_NOTIFY_DEDUPE_MS) {
+        appendOwnerDecisionAudit(projectName, { at: new Date().toISOString(), action: 'owner_decision_notify_skipped', reason: 'dedupe', key, status, round, lastAt: new Date(last).toISOString() });
+        return { ok: true, deduped: true, key, lastAt: new Date(last).toISOString() };
+      }
+      ownerDecisionNotifySeen.set(key, nowMs);
+      const label = status === 'approved' ? '通过' : (status === 'skipped' ? '跳过' : '打回');
+      const subject = `Owner 已${label}需求 ${requirementId}`.slice(0, 80);
+      const body = [
+        `需求：${requirementId}`,
+        `决定：${label}（${status}）｜ 轮次：${round} ｜ 时间：${at} ｜ 通道：${channel || 'ui'}`,
+        opinion ? `意见：${String(opinion).slice(0, 200)}` : '意见：（无）',
+        status === 'approved'
+          ? '下一步：需求已放行，可按当前模式派单（fast→tech_review / full→ready）。'
+          : (status === 'rejected' ? '下一步：需求已打回，等返工后重新评审。' : '下一步：已跳过 Owner 决定，由你判断是否继续。'),
+      ].join('\n').slice(0, 600);
+      // B-7e49：用 team.mjs 的 **notify**（发件人固定 system）而不是 send —— send 在 to===令牌角色 时直接 SELF_SEND 拒绝，
+      // 而「Owner 决定」是系统事件，不是 PM 给自己发消息。
+      const run = await withBootToken(projectName, 'pm', async (token) => runNode(layout.teamTool, [
+        'notify', '--boot', token, '--to', 'pm', '--type', 'notice', '--subject', subject, '--body', body, '--json',
+      ], { timeoutMs: TIMEOUTS.send }));
+      const value = (run && run.value) || {};
+      const messageId = String(((value.message || {}).id) || '');
+      const okSend = Boolean(messageId) || (run && run.ok && value.ok === true);
+      appendOwnerDecisionAudit(projectName, {
+        at: new Date().toISOString(), action: okSend ? 'owner_decision_notified' : 'owner_decision_notify_failed',
+        key, status, round, messageId, subject, ok: okSend,
+        ...(okSend ? {} : { error: String((run && (run.message || run.errorCode)) || value.code || 'send failed').slice(0, 300) }),
+      });
+      return { ok: okSend, messageId, subject, key, ...(okSend ? {} : { code: 'OWNER_DECISION_NOTIFY_FAILED' }) };
+    } catch (error) {
+      const message = String((error && error.message) || error).slice(0, 300);
+      appendOwnerDecisionAudit(projectName, { at: new Date().toISOString(), action: 'owner_decision_notify_failed', key, status, round, error: message });
+      return { ok: false, code: 'OWNER_DECISION_NOTIFY_FAILED', message };
+    }
+  }
+
   async function ownerRequirementDecision(input = {}) {
     const ctx = await ensureWorkflowProject(input);
     if (!ctx.ok) return ctx;
@@ -7691,6 +7773,20 @@ function createTeamTools(options = {}) {
       });
     });
     if (!written.ok) return written;
+    // B-7e49：**落账已成功**，此处才通知 PM（软要求：失败只写审计，不影响本次返回值）。
+    let ownerDecisionNotify = null;
+    try {
+      const roundNow = Number((() => {
+        const rowNow = findStateRequirementRow(written.state || {}, requirementId);
+        return (rowNow && rowNow.row && rowNow.row.round) || 1;
+      })() || 1);
+      ownerDecisionNotify = await notifyOwnerDecisionToPm({
+        projectName: name, requirementId, status, round: roundNow, opinion, at, channel: ownerChannel,
+      });
+    } catch (error) {
+      ownerDecisionNotify = { ok: false, code: 'OWNER_DECISION_NOTIFY_FAILED', message: String((error && error.message) || error).slice(0, 300) };
+      appendOwnerDecisionAudit(name, { at: new Date().toISOString(), action: 'owner_decision_notify_failed', key: `${name}|${requirementId}|`, status, error: String((error && error.message) || error).slice(0, 300) });
+    }
     // 壳层收口时同步需求正文/总览/任务状态，避免界面显示已进入技术评审、文档仍停在 approved。
     const statusSync = shellOwnedOwner
       ? syncRequirementStatusArtifacts(
@@ -8045,6 +8141,7 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
       file: written.file,
       workflow: written.state || null,
       projectIndex,
+      ownerDecisionNotify,
       warnings: indexWarning ? [indexWarning] : [],
     };
   }
