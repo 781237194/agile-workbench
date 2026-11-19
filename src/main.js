@@ -7,6 +7,8 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { execFileSync, spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
+// B-20261120-020530-0823：会话用量阈值判定的纯逻辑（阈值单源来自 团队/工具/lib/session.mjs）。
+const UsageThreshold = require('./usage-threshold.js');
 // R-dba4 / T-3999：评审界面「大白话」持久化的纯逻辑（本文件只做 IPC 与落盘，不碰 工作流.json）。
 const ReviewCopy = require('./review-copy.js');
 // R-c1ed F-1：渲染内存采样分片 / 保留 / 取数通道（纯逻辑，Node 可测）
@@ -11754,8 +11756,32 @@ installShellAuditSensors();
     const teamRoot = resolveTeamRoot();
     const slug = teamTools.teamSlug(name);
     const file = path.join(teamRoot, '状态', '项目', slug, '会话用量.json');
-    const warnThreshold = Number(p.warn) > 0 ? Number(p.warn) : 300000;
-    const forceThreshold = 500000;
+    // B-20261120-020530-0823（PM 2026-11-20 02:50）：阈值**不再写死** 300000/500000。
+    // 唯一来源 = 团队/工具/lib/session.mjs → sessionLimitsOf(project).of(role)：pm 60/100 万、其余 30/50 万，
+    // 项目 项目.json → sessionLimits 可覆盖。壳层若再写第二套，就会出现「pm 50 万被按 30 万判 force」这类误判。
+    // 通过动态 import 读 ESM（main.js 里已有先例：lessons.mjs / sched-advice.mjs）。
+    // 失败时**降级为 unknown** 并在 label 说明原因，绝不静默回落到写死值。
+    const explicitWarn = Number(p.warn) > 0 ? Number(p.warn) : 0;
+    let limitsOf = null;
+    let limitsError = '';
+    try {
+      const sessionLibPath = path.join(teamRoot, '工具', 'lib', 'session.mjs');
+      const sessionLib = await import(pathToFileURL(sessionLibPath).href);
+      if (sessionLib && typeof sessionLib.sessionLimitsOf === 'function') limitsOf = sessionLib.sessionLimitsOf(name);
+    } catch (error) {
+      limitsError = String((error && error.message) || error || 'IMPORT_FAILED');
+    }
+    const limitsReady = Boolean(limitsOf && typeof limitsOf.of === 'function');
+    const limitsFor = (role) => {
+      if (explicitWarn > 0) return { warn: explicitWarn, force: explicitWarn * 2, source: 'payload' };
+      if (!limitsReady) return { warn: null, force: null, source: 'unavailable' };
+      try {
+        const row = limitsOf.of(role) || {};
+        return { warn: Number(row.warn) || null, force: Number(row.force) || null, source: 'sessionLimitsOf' };
+      } catch {
+        return { warn: null, force: null, source: 'unavailable' };
+      }
+    };
     let raw = {};
     let missing = false;
     try {
@@ -11768,24 +11794,54 @@ installShellAuditSensors();
       const at = String((row && row.at) || '');
       const atMs = Date.parse(at);
       const stale = !Number.isFinite(atMs) || (nowMs - atMs) > 24 * 3600000;
-      const level = missing || stale ? 'unknown' : (tokens >= forceThreshold ? 'force' : (tokens >= warnThreshold ? 'warn' : 'ok'));
-      return { role, sessionId: String((row && row.sessionId) || ''), tokens, input: Number((row && row.input) || 0), at, source: String((row && row.source) || ''), stale, level };
+      const lim = limitsFor(role);
+      const verdict = UsageThreshold.classifyUsage({ tokens, missing, stale, limits: lim });
+      const level = verdict.level;
+      return {
+        role,
+        sessionId: String((row && row.sessionId) || ''),
+        tokens,
+        input: Number((row && row.input) || 0),
+        at,
+        source: String((row && row.source) || ''),
+        stale,
+        warn: lim.warn,
+        force: lim.force,
+        thresholdSource: lim.source,
+        level
+      };
     }).sort((a, b) => b.tokens - a.tokens);
     const tracked = roles.filter((row) => row.level !== 'unknown');
     const maxRow = tracked[0] || null;
+    // 0823 AC③：一句话文案必须说清「最高是谁 + 它的阈值 + 超几倍」，禁止拿 A 的用量比 B 的阈值。
+    const ratio = maxRow && maxRow.warn ? (maxRow.tokens / maxRow.warn) : 0;
+    const label = (() => {
+      if (!limitsReady && explicitWarn <= 0) {
+        return '会话用量不可判定（读不到 session.mjs 单源阈值' + (limitsError ? '：' + String(limitsError).slice(0, 40) : '') + '）';
+      }
+      if (!maxRow) {
+        const firstWarn = tracked[0] && tracked[0].warn ? tracked[0].warn : (explicitWarn || 0);
+        return '会话用量未知 / 阈值 ' + (firstWarn ? fmtTokens(firstWarn) : '未知');
+      }
+      return UsageThreshold.usageLabel(maxRow, fmtTokens);
+    })();
+    const severity = UsageThreshold.severityOf(roles.map((row) => row.level));
     return {
       ok: true,
       file,
       project: name,
       missing,
-      warnThreshold,
-      forceThreshold,
+      limitsReady,
+      limitsError,
+      thresholdSource: limitsReady ? 'sessionLimitsOf' : (explicitWarn > 0 ? 'payload' : 'unavailable'),
+      warnThreshold: maxRow ? maxRow.warn : (tracked[0] ? tracked[0].warn : (explicitWarn || null)),
+      forceThreshold: maxRow ? maxRow.force : (tracked[0] ? tracked[0].force : (explicitWarn ? explicitWarn * 2 : null)),
       roles,
       // 界面一行文案用它：X = 角色里最大 tokens（没有就 null → 显示"用量未知"）
       topTokens: maxRow ? maxRow.tokens : null,
       topRole: maxRow ? maxRow.role : null,
-      level: maxRow ? maxRow.level : 'unknown',
-      label: maxRow ? `会话用量 ${fmtTokens(maxRow.tokens)} / 阈值 ${fmtTokens(warnThreshold)}` : '会话用量未知 / 阈值 ' + fmtTokens(warnThreshold)
+      level: maxRow ? maxRow.level : severity,
+      label
     };
   });
 
@@ -15253,8 +15309,10 @@ async function runReviewCheck() {
     return JSON.stringify({ has: Boolean(node), hidden: node ? node.hidden : null, text: node ? node.textContent : '', threshold: node ? node.getAttribute('data-usage-threshold') : '' });
   })()`));
   report.usageDom = usageDom;
-  check('AC1 会话用量界面已实现（侧栏显示 会话用量 X / 阈值 30 万）',
-    usageDom.has === true && /会话用量/.test(usageDom.text) && /阈值/.test(usageDom.text) && String(usageDom.threshold) === '300000',
+  check('AC1 会话用量界面已实现（侧栏显示会话用量与阈值，阈值取角色单源）',
+    usageDom.has === true && /会话用量/.test(usageDom.text) && /阈值/.test(usageDom.text)
+    // 0823：阈值按角色取（pm 60 万 / 其余 30 万 / 项目可覆盖），不能再钉死 300000。
+    && Number(usageDom.threshold) > 0,
     usageDom);
 
   // 两档宽截图（1600 / 1280）
