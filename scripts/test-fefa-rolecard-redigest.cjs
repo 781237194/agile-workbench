@@ -154,6 +154,19 @@ try {
     String(devBoot.out).length <= 2000 || /角色卡: sha12/.test(String(devBoot.out)),
     { len: String(devBoot.out).length });
 
+  /* ── B-6403（P1 缺陷回归）：钩子真的在跑——写一次计数必须 +1 ──
+   * 缺陷现象：consumeCompactSignal 引用了未定义变量 → ReferenceError 被 bumpAndDecide 的 try/catch 吞掉
+   * → 计数永不 +1 → 「20 拍注入」「compact 触发」两条主触发器全失效（静默）。本条是该缺陷的硬回归断言。 */
+  {
+    writeJson(path.join(COUNTER_DIR, `${ROLE}.json`), { opsSinceInject: 0, lastInjectAt: '', lastCardSha12: '', lastUsageTokens: null, injections: [] });
+    const before = Number((counterOf(ROLE) || {}).opsSinceInject);
+    const sendOnce = runJson(['send', '--boot', devTok, '--to', 'pm', '--subject', 'B6403 计数', '--body', 'n', '--ack', '--json']);
+    const after = Number((counterOf(ROLE) || {}).opsSinceInject);
+    check('B-6403① 一次写操作后 opsSinceInject 0 → 1（钩子真的在跑，不是被 catch 吞掉的静默失败）',
+      sendOnce.code === 0 && before === 0 && after === 1,
+      { before, after, counter: counterOf(ROLE), out: text(sendOnce).slice(-260) });
+  }
+
   /* ── AC3 轮次检查点（置 19 → 一次 send --ack 触发） ─────────── */
   writeJson(path.join(COUNTER_DIR, `${ROLE}.json`), { opsSinceInject: 19, lastInjectAt: '', lastCardSha12: '', lastUsageTokens: null, injections: [] });
   const audit0 = auditRows().length;
