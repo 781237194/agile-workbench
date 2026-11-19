@@ -310,10 +310,20 @@ export function decideVerdict(input) {
     return { verdict: 'wake_first', reasons, numbers, degraded, snapshotAt: snapshot.at, snapshotStale: snapshot.stale };
   }
 
+  // B-20261119-161918-5d57：新鲜 wakeFailed 一律先修唤醒通道再派（降级路径同样适用）；
+  // 陈旧记录已在 presence 侧过期（wakeFailed=false），只在下面给「已过窗口」提示，不阻塞。
+  if (presence && presence.wakeFailed) {
+    reasons.push(`近 ${presence.wakeFailedTtlMin || 30} 分钟内有唤醒失败（${presence.wakeFailedReason || presence.wakeFailedAt || '未知'}）：先修唤醒通道再派`);
+    return { verdict: 'wake_first', reasons, numbers, degraded, snapshotAt: snapshot.at, snapshotStale: snapshot.stale };
+  }
+
   // 降级/未知：用 presence 兜底，绝不直接 go
   const idleSignals = presence && presence.unread === 0 && presence.ackPending === 0 && presence.wakeFailed !== true;
   const hasWork = tasks.count > 0;
   if (degraded) {
+    if (presence && presence.wakeFailedStale) {
+      reasons.push(`历史唤醒失败已过 ${presence.wakeFailedTtlMin || 30} 分钟窗口（${presence.wakeFailedAt || '未知'}）：不阻塞派单`);
+    }
     if (presence && (presence.unread > 0 || presence.ackPending > 0)) {
       reasons.push(`快照不可用（${degraded}），presence 有未读 ${presence.unread} / 未回执 ${presence.ackPending}：先唤醒清消息`);
       return { verdict: 'wake_first', reasons, numbers, degraded, snapshotAt: snapshot.at, snapshotStale: snapshot.stale };
@@ -346,9 +356,9 @@ export function decideVerdict(input) {
       return { verdict: 'wake_first', reasons, numbers, degraded, snapshotAt: snapshot.at, snapshotStale: snapshot.stale };
     }
   }
-  if (presence && presence.wakeFailed) {
-    reasons.push(`该角色有唤醒失败记录（${presence.wakeFailedReason || presence.wakeFailedAt || '未知'}）：先修唤醒通道再派`);
-    return { verdict: 'wake_first', reasons, numbers, degraded, snapshotAt: snapshot.at, snapshotStale: snapshot.stale };
+  if (presence && presence.wakeFailedStale) {
+    // B-20261119-161918-5d57：历史失败已过窗口 → 只作提示，不再阻塞派单。
+    reasons.push(`历史唤醒失败已过 ${presence.wakeFailedTtlMin || 30} 分钟窗口（${presence.wakeFailedAt || '未知'}）：不阻塞派单`);
   }
   reasons.push('快照新鲜、排队 0、pendingInput 空、未在 running、无派单锁、已 boot：可以派单');
   return { verdict: 'go', reasons, numbers, degraded, snapshotAt: snapshot.at, snapshotStale: snapshot.stale };

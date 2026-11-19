@@ -1806,6 +1806,8 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
     state.targets[target] = t;
     writeWakeQueue(project, state);
     appendWakeLog(project, { to: target, ok: true, deliveredAt, merged: batch.length, retried, reason, messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5), messageId: (batch[0] && batch[0].messageId) || '', ...(retryOfId ? { retryOf: retryOfId, trigger: 'event' } : {}) });
+    // B-20261119-161918-5d57：唤醒成功后必须清该角色的 wakeFailed（否则一次失败会让派单检查永久判 wake_first）。
+    clearWakeFailed(project, target);
     grantRepushPermit(project, target);
     return { ...(result || {}), ok: true, to: target, merged: batch.length, retried, deliveredAt, reason, retryOf: retryOfId };
   }
@@ -1958,8 +1960,8 @@ function markWakeFailed(project, role, { messageId = '', why = '', attempt = 0 }
     }
   } catch { /* PM 告警失败保留在 唤醒失败.json 审计 */ }
 }
-/** 唤醒恢复后清看板红点（不动历史审计）。 */
-function clearWakeFailed(project, role) {
+/** 唤醒恢复后清看板红点（不动历史审计）。B-5d57 起也由 wakeWithGuard 成功路径调用；导出供夹具直接验「成功即清」。 */
+export function clearWakeFailed(project, role) {
   // 先清唯一的真相（唤醒队列 failed），否则下一次 board 会把红点又画回来。
   try {
     const queue = readWakeQueue(project);
@@ -1999,6 +2001,8 @@ function clearWakeFailed(project, role) {
 // ==========================================================================
 const STALL_WARN_MIN = 15;
 const STALL_BAD_MIN = 30;
+// B-20261119-161918-5d57：wakeFailed 的过期窗口（分钟）——超时即视为陈旧，不再让派单检查判 wake_first。
+const WAKE_FAILED_TTL_MIN = 30;
 
 function readingRows() {
   try { return readJsonlTolerant(PATHS.reads).items || []; } catch { return []; }
@@ -2115,7 +2119,11 @@ export function presenceFor(project, { roles = [] } = {}) {
     const times = stamps.map((t) => Date.parse(String(t || ''))).filter((n) => Number.isFinite(n));
     const latest = times.length ? Math.max(...times) : 0;
     const stalledMin = times.length ? Math.max(0, Math.round((now - latest) / 60000)) : null;
-    const failed = queue[role] || (board.wakeFailed && board.wakeFailed[role]) || null;
+    const failedRaw = queue[role] || (board.wakeFailed && board.wakeFailed[role]) || null;
+    // B-20261119-161918-5d57：陈旧 wakeFailed 自动过期——超过 30 分钟不再算失败，避免历史一次失败让角色永久 wake_first。
+    const failedAtMs = Date.parse(String((failedRaw && failedRaw.at) || ''));
+    const failedStale = Boolean(failedRaw) && Number.isFinite(failedAtMs) && (now - failedAtMs) > WAKE_FAILED_TTL_MIN * 60000;
+    const failed = failedStale ? null : failedRaw;
     return {
       role,
       unread: unreadRows.length,
@@ -2130,6 +2138,8 @@ export function presenceFor(project, { roles = [] } = {}) {
       wakeFailedAt: String((failed && failed.at) || ''),
       wakeFailedMessageId: String((failed && failed.messageId) || ''),
       wakeFailedReason: String((failed && failed.why) || ''),
+      wakeFailedStale: failedStale,
+      wakeFailedTtlMin: WAKE_FAILED_TTL_MIN,
       scanned: rows.length,
     };
   });

@@ -403,7 +403,15 @@ export function archiveSession({ projectName, role, reason = '', self = false, a
   if (dup && !force) fail('ALREADY_ARCHIVED', `该会话已归档：${dup.id}（如需重归档加 --force）`, { archiveId: dup.id });
   // B-20261119-133232-e6c1：归档清理会把名册 sessionId 清空，导致第二次归档看起来像新会话；
   // 这里补「已确认但未换人」的重复归档守卫（rotate 后 rotatedAt 有值即放行），保持 ALREADY_ARCHIVED 语义。
-  const pendingUnrotated = listArchives(projectName).find((a) => String(a.role || '') === role && !a.rotatedAt && a.confirmedAt);
+  // B-20261119-164648-7405：手工补归档旧会话后 rotatedAt 常为空，但被归档 sessionId ≠ 当前会话 → 已换人，
+  // 不能再把「归档当前会话」挡成 ALREADY_ARCHIVED；只有「归档的正是当前会话」才算未换人。
+  const currentSidForGuard = (() => { try { return String(currentSessionOf(projectName, role) || ''); } catch { return ''; } })();
+  const pendingUnrotated = listArchives(projectName).find((a) => {
+    if (String(a.role || '') !== role || a.rotatedAt || !a.confirmedAt) return false;
+    const archivedSid = String(a.sessionId || '');
+    if (archivedSid && currentSidForGuard && archivedSid !== currentSidForGuard) return false;
+    return true;
+  });
   if (pendingUnrotated && !force) fail('ALREADY_ARCHIVED', `该角色已有未换人的归档：${pendingUnrotated.id}（如需重归档加 --force，或先 session rotate）`, { archiveId: pendingUnrotated.id });
   const rounds = readRounds(projectName, role).roundsSinceArchive;
   const inputTokens = skipTranscript ? null : latestInputTokens({ projectName, sessionId });
