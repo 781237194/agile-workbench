@@ -308,6 +308,23 @@ function listBackups(sb, root) {
       check('C2 真实 hosts sha 不变（-GitHubFixHostsPath 副本，沙盘不写真实用户态）',
         realHostsSha() === userStateSentinels.hosts, null);
     }
+    // ── K3/K4（B-5cce）：维护结束后不留 <Root>.awb-maint.lock ──
+    const lockA = path.join(root, '.awb-maint.lock');
+    // A4 并发用例预置了锁文件（且 holder 进程可能刚释放）→ 先清掉，否则「本次是否新建」恒为 false，K3/K4 测不到清理逻辑。
+    try { fs.rmSync(lockA, { force: true }); } catch { /* ignore */ }
+    // K3 失败路径：错短语 → 第 3 道闸拒绝（exit 2），跑完不得留下锁文件
+    const badPhrase = await runPwsh(INSTALL, ['-Reset', '-Yes', '-Confirm', '不对的短语', ...maintArgs(root, sb), '-Json']);
+    await new Promise((r) => setTimeout(r, 400));
+    check('K3 失败路径（错短语）不留 .awb-maint.lock',
+      badPhrase.status === 2 && !fs.existsSync(lockA),
+      { status: badPhrase.status, lockExists: fs.existsSync(lockA) });
+    // K4 成功路径：正常重置（-NoBackup 免备份耗时）后也不留锁
+    const okRun = await runPwsh(INSTALL, ['-Reset', '-Yes', '-Confirm', '重置', '-NoBackup', ...maintArgs(root, sb), '-Json']);
+    await new Promise((r) => setTimeout(r, 400));
+    check('K4 成功路径不留 .awb-maint.lock（重跑不新建空维护目录/空锁）',
+      !fs.existsSync(lockA),
+      { status: okRun.status, lockExists: fs.existsSync(lockA) });
+
   } finally {
     try { fs.rmSync(sb, { recursive: true, force: true }); } catch { /* ignore */ }
   }

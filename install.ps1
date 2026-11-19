@@ -2677,10 +2677,14 @@ function Get-MaintLockPath {
 function Enter-MaintLock {
     param([string]$Root)
     $lockFile = Get-MaintLockPath $Root
+    # B-5cce：记下「锁文件是否本次新建」，供 Exit-MaintLock 决定要不要删（别人持有的锁绝不删）
+    $existedBefore = $false
+    try { $existedBefore = Test-Path -LiteralPath $lockFile } catch { $existedBefore = $false }
     try {
         $stream = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
         $script:MaintLockStream = $stream
         $script:MaintLockFile = $lockFile
+        $script:MaintLockNewlyCreated = (-not $existedBefore)
         return $true
     } catch {
         return $false
@@ -2692,6 +2696,11 @@ function Exit-MaintLock {
         try { $script:MaintLockStream.Dispose() } catch { }
         $script:MaintLockStream = $null
     }
+    # B-5cce：失败路径也不留 .awb-maint.lock —— 只有「本次自己新建的」才删，别人持有的锁绝不删。
+    if ($script:MaintLockNewlyCreated -and $script:MaintLockFile) {
+        try { if (Test-Path -LiteralPath $script:MaintLockFile) { Remove-Item -LiteralPath $script:MaintLockFile -Force -ErrorAction SilentlyContinue } } catch { }
+    }
+    $script:MaintLockNewlyCreated = $false
 }
 
 function Invoke-MaintBackup {
