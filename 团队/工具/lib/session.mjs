@@ -20,7 +20,7 @@ import {
   jsonOut, textOut, truncate, stamp, listLocks, randomHex, hashFile,
 } from './core.mjs';
 import {
-  loadTeam, mutateTeam, getMember, loadProject, projectStatePaths, listTasks, saveTask,
+  loadTeam, mutateTeam, getMember, activeMembers, loadProject, projectStatePaths, listTasks, saveTask,
   projectTeamMode, projectRoleIds, sendMessage,
 } from './store.mjs';
 import { ROLE_DIRS, ROLE_NAMES, rolesForMode, normalizeTeamMode } from './roles.mjs';
@@ -31,7 +31,7 @@ import { requireBoot } from './store.mjs';
 import { resolveDshBaseUrl, dshUrlMissingHint } from './dsh-url.mjs';
 // B-20261118-083150-4b2f（fa0e 补丁 A）：名册写入（四处映射 / 轮换记录 / BQ / 广播 / 事件）收归唯一入口，
 // session rotate 与 auto-rotate 都只调它；本文件不再直接写 members[].sessionId。
-import { rotateRoster, checkRotateHandover } from './roster-writer.mjs';
+import { rotateRoster, rotateRosterBatch, checkRotateHandover } from './roster-writer.mjs';
 
 // R-2e6b AC18.4：双档水位——30 万预警（提示准备归档/换人）、50 万强制归档/换人（与 c0a6 口径一致）。
 export const DEFAULT_TOKEN_WARN = 300000;
@@ -993,7 +993,267 @@ export async function rotateSession({
   }
 }
 
-// ---------- 接任包 ----------
+/**
+ * R-a1eb §6.4：**批量换人**（一次事务写名册 → N 条 BQ → 一次广播 → N 条记录 → 整批回滚）。
+ *
+ * 与单角色 rotateSession 的关系：
+ *   · 建会话/交接校验/邮件归档/任务会话指向/派单锁/旧会话归档都沿用同一套函数；
+ *   · 唯一差别是「写名册 + 广播」合并成一次（走 roster-writer.rotateRosterBatch），
+ *     所以其余角色的旧令牌不会失效（rulesHash 已移除名册）。
+ *
+ * 失败语义：任一角色写失败 → **整批回滚**（映射字段级 CAS + 邮件/任务/锁恢复 + 新建会话归档）。
+ */
+export async function rotateSessionBatch({
+  projectName, roles = [], sessionIds = {}, all = false, force = false, offline = false, reason = '', by = 'owner',
+  failAt = '', sessionTitle = '', windowMinutes = 30, dryRun = false, createSession = null, engineUrl = '', audit = null,
+}) {
+  const name = String(projectName || '');
+  if (!name) fail('NO_PROJECT', '需要 --project');
+  const project = loadProject(name);
+  const roleIds = projectRoleIds(project);
+  const team = loadTeam();
+  let targets = Array.isArray(roles) ? roles.map((r) => String(r || '').trim()).filter(Boolean) : [];
+  if (all) {
+    targets = activeMembers(team).map((m) => String(m.role || '')).filter((r) => roleIds.includes(r));
+  }
+  if (!targets.length) fail('BAD_ARGS', '批量换人需要 --roles a,b,c 或 --all（当前一个角色都没有）', { project: name });
+  targets = [...new Set(targets)];
+  const badRoles = targets.filter((r) => !roleIds.includes(r));
+  if (badRoles.length) {
+    fail('BAD_ROLE', `角色不在项目 ${name} 的模式内（${roleIds.join('/')}）：${badRoles.join(',')}`, { roles: badRoles, modeRoles: roleIds });
+  }
+  const actorRole = String(by || '');
+  // §八：批量换人只 PM/Owner；沙盘（TEAM_SELFTEST=1 且未强制）沿用与单角色 rotate 同一豁免口径。
+  const sandboxExempt = String(process.env.TEAM_SELFTEST || '') === '1' && String(process.env.TEAM_BOOT_ENFORCE || '') !== '1';
+  if (!sandboxExempt) {
+    const denied = targets.filter((r) => !rotateAllowed(actorRole, r));
+    if (denied.length) {
+      fail('PERMISSION_DENIED', `只有 PM/Owner 能批量轮换会话；产品只能给 PM 换人（当前令牌角色 ${actorRole || '-'} → 目标 ${denied.join(',')}）`, {
+        roles: denied, project: name, tokenRole: actorRole,
+      });
+    }
+  }
+  const mapNow = sessionOfRole(name);
+  const teamIsActive = String((mapNow.team && mapNow.team.activeProject) || '') === name;
+  const oldIds = {};
+  for (const r of targets) {
+    oldIds[r] = String((teamIsActive ? mapNow.members[r] : '') || mapNow.manifest[r] || mapNow.wbSessions[r] || mapNow.members[r] || '');
+  }
+  // 幂等（§6.4）：名册已是目标会话的角色 → already_rotated 跳过；全部跳过 → BATCH_NOOP。
+  const alreadyRotated = [];
+  const pending = [];
+  for (const r of targets) {
+    const want = String((sessionIds || {})[r] || '');
+    if (want && oldIds[r] && want === oldIds[r]) alreadyRotated.push(r);
+    else pending.push(r);
+  }
+  if (!pending.length) {
+    fail('BATCH_NOOP', `批量换人无改动：${alreadyRotated.join(',')} 名册已是这些会话（零写入）`, { roles: alreadyRotated, project: name });
+  }
+  // ① 交接回执整批校验（缺一份 → 列全缺项、零写入）。沙盘默认豁免，门禁本体用 TEAM_HANDOVER_ENFORCE=1。
+  const bootSandbox = String(process.env.TEAM_SELFTEST || '') === '1';
+  const handoverEnforce = String(process.env.TEAM_HANDOVER_ENFORCE || '') === '1';
+  let handoverAudit = { actorRole, batch: true };
+  const receiptMissing = [];
+  if (!bootSandbox || handoverEnforce) {
+    for (const r of pending) {
+      const rc = checkHandoverReceipt(name, r);
+      if (!rc.ok) receiptMissing.push({ role: r, reason: rc.reason });
+    }
+    if (receiptMissing.length) {
+      fail('HANDOVER_MISSING', `批量换人前必须为每个角色落交接回执（缺 ${receiptMissing.length} 份）；先 session handover receipt --role <角色>`, {
+        project: name, missing: receiptMissing, roles: pending,
+      });
+    }
+    handoverAudit = { actorRole, batch: true, receipts: pending.map((r) => { const rc = checkHandoverReceipt(name, r); return { role: r, receiptId: rc.receipt ? rc.receipt.id : '', sha256: rc.sha256 }; }) };
+  }
+  // ② 接任包整批校验（4 个必填【】小节）：任一缺失 → 一次列全
+  const handoverBad = [];
+  for (const r of pending) {
+    try {
+      const v = await checkRotateHandover({ projectName: name, role: r, sessionId: String((sessionIds || {})[r] || '') });
+      if (v.code === 'HANDOVER_INCOMPLETE' || (v.code === '' && !v.ok)) {
+        handoverBad.push({ role: r, missing: (v.missingRequired || []).concat(v.emptyRequired || []), redFlags: v.redFlags || [] });
+      }
+    } catch { /* 其它失败不阻 rotate（与单角色同口径） */ }
+  }
+  if (handoverBad.length) {
+    fail('HANDOVER_INCOMPLETE', `批量换人：接任包缺必填小节（${handoverBad.map((x) => `${x.role}:${x.missing.join('/')}`).join('；')}）`, { project: name, bad: handoverBad });
+  }
+  // ③ 注入失败只在沙盘生效（防误用造半状态）
+  const effectiveFailAt = (failAt && process.env.TEAM_SELFTEST) ? failAt : '';
+  const engine = resolveDshBaseUrl({ override: engineUrl }).baseUrl;
+  const offlineMode = offline || Boolean(process.env.TEAM_SELFTEST);
+  const list = await listDshSessions(engine);
+  // ④ 预算新会话（指定的 or 自动建）
+  const planned = [];
+  const createdIds = {};
+  for (const r of pending) {
+    let newId = String((sessionIds || {})[r] || '');
+    let created = false;
+    if (!newId) {
+      if (offlineMode && typeof createSession !== 'function') {
+        fail('BAD_SESSION', '离线批量轮换必须用 --sessions "role=id,…" 指定可用会话 id', { roles: pending, project: name });
+      }
+      const info = await createTeamSession({
+        projectName: name, role: r, reason, oldId: oldIds[r], sessionTitle: sessionTitle || `团队·${ROLE_NAMES[r] || r}`,
+        createSession, list, project, engineUrl: engine,
+      });
+      newId = info.sessionId;
+      created = true;
+      createdIds[r] = newId;
+    }
+    planned.push({ role: r, newSessionId: newId, oldId: oldIds[r], created });
+  }
+  const entries = planned.map((p) => ({ role: p.role, from: p.oldId, to: p.newSessionId, newSessionId: p.newSessionId, oldId: p.oldId, created: p.created }));
+  if (dryRun) {
+    return {
+      batch: true, dryRun: true, project: name, roles: pending,
+      entries, alreadyRotated,
+      consistencyNow: checkSessionMap(name).ratio,
+      wouldWrite: ['团队.json（一次事务写 N 个 sessionId）', '团队会话.json', 'workbench.projects[].sessions', 'workbench.workspace.sessionIds', '会话轮换/<角色>.json × N', '名册变更.jsonl（N 行 + 1 行 batch 汇总）'],
+      broadcast: 1, bootPending: pending.length,
+      reason,
+    };
+  }
+  // ⑤ 事务：一次写名册 → 每角色事务步骤 → 收尾（N 条 BQ + 1 次广播）
+  const rollbackState = { mails: [], tasks: [], locks: [] };
+  let archivedOutcomes = [];
+  try {
+    const result = await rotateRosterBatch({
+      projectName: name,
+      entries: planned.map((p) => ({ role: p.role, newSessionId: p.newSessionId, oldId: p.oldId })),
+      mode: planned.some((p) => p.created) ? 'auto' : 'manual',
+      created: planned.every((p) => p.created),
+      reason, by: actorRole, source: 'session-rotate',
+      offline: offlineMode, dshList: list, engineUrl: engine,
+      createdIds,
+      failAt: effectiveFailAt, now: nowIso(),
+      recordExtra: {
+        force: Boolean(force),
+        batch: true,
+        ...(audit && typeof audit === 'object' ? audit : {}),
+      },
+      beforeFinalize: async ({ entries: finalEntries }) => {
+        const details = [];
+        for (const e of finalEntries) {
+          const mailPlan = collectMailChanges({ role: e.role, oldId: e.from, newId: e.to, projectName: name });
+          const originals = applyMailArchive(mailPlan, e.from, e.to);
+          rollbackState.mails.push(...originals);
+          if (effectiveFailAt === 'afterMail') fail('ROTATE_INJECTED_FAIL', '注入失败：邮件归档之后');
+          const t = stampTasks(name, e.role, e.from, e.to);
+          rollbackState.tasks.push(...(t.originals || []));
+          const lock = clearDispatchLockForRole(name, e.role);
+          if (lock && lock.cleared) rollbackState.locks.push(lock);
+          // 归档旧会话（只读保留）；失败只记，不回滚映射
+          let archived = null;
+          if (e.from && !offlineMode && list.ok) {
+            try {
+              const client = new DshClient(engine);
+              await client.workspaceArchiveSession({ sessionId: e.from, stopActivity: true });
+              archived = { ok: true, sessionId: e.from };
+            } catch (err) {
+              archived = { ok: false, sessionId: e.from, why: err.message };
+            }
+          }
+          details.push({
+            role: e.role, from: e.from, to: e.to, archived,
+            mailArchived: mailPlan.changes.length, mailArchivedIds: mailPlan.changes.map((c) => c.id),
+            mailSkipped: mailPlan.skipped.length, tasks: t.changed, dispatchLock: lock,
+          });
+        }
+        // 一致性闸门：批量换完，所有被换角色的四处映射必须一致（workbench 可用时硬判）
+        const consistencyNow = checkSessionMap(name);
+        const badRows = (consistencyNow.rows || []).filter((row) => {
+          if (!row || row.consistent !== false) return false;
+          const fields = Array.isArray(row.fields) ? row.fields : [];
+          if (fields.some((text) => String(text).includes('不一致'))) return true;
+          const anyBound = Boolean(row.teamId || row.manifestId || row.wbId);
+          return pending.includes(row.role) && anyBound;
+        });
+        if (consistencyNow.workbenchAvailable === true && badRows.length) {
+          fail('ROTATE_MAPPING_MISMATCH', `批量换人后四处映射不一致（${badRows.map((r) => `${r.role}:${(r.fields || []).join('/')}`).join('，')}）；整批回滚`, {
+            project: name, roles: pending, consistency: consistencyNow,
+          });
+        }
+        return {
+          recordExtra: {
+            batchDetails: details,
+            consistency: consistencyNow,
+            consistencyEnforced: consistencyNow.workbenchAvailable === true,
+            teamRoster: 'updated',
+          },
+          eventExtra: { batch: true, roles: pending, mailArchived: details.reduce((n, d) => n + d.mailArchived, 0) },
+        };
+      },
+    });
+    // 成功后的旧会话自动归档（只记结果，失败不回滚换人）
+    for (const e of entries) {
+      try {
+        const outcome = archiveRotatedSession({
+          projectName: name, role: e.role, oldSessionId: e.from || '', newSessionId: e.to || '',
+          reason: 'rotate-auto-batch', source: 'session-rotate', auto: true, now: nowIso(),
+        });
+        archivedOutcomes.push({ role: e.role, ...outcome });
+      } catch (err) {
+        archivedOutcomes.push({ role: e.role, ok: false, result: 'failed', reason: String((err && err.code) || 'archive_threw') });
+      }
+    }
+    return {
+      ...result,
+      batch: true,
+      alreadyRotated,
+      archivedOutcomes,
+      consistency: checkSessionMap(name),
+    };
+  } catch (e) {
+    // 回滚：邮件/任务/派单锁恢复到换人前（映射由 roster-writer 整批回滚）
+    const mapRollback = (e && e.details && e.details.rollback) || null;
+    const rollback = {
+      maps: Boolean(mapRollback && mapRollback.full === true),
+      mapsPartial: Boolean(mapRollback && mapRollback.full === false),
+      mapsDetail: mapRollback,
+      mail: 0, tasks: 0, dispatchLock: 0, newSessionsArchived: 0, errors: [],
+    };
+    for (const o of rollbackState.mails) {
+      try { fs.writeFileSync(o.file, o.raw, 'utf8'); rollback.mail += 1; } catch { rollback.errors.push(`邮件恢复失败：${path.basename(o.file)}`); }
+    }
+    for (const o of rollbackState.tasks) {
+      try { fs.writeFileSync(o.file, o.raw, 'utf8'); rollback.tasks += 1; } catch { rollback.errors.push(`任务恢复失败：${path.basename(o.file)}`); }
+    }
+    for (const l of rollbackState.locks) {
+      try { if (l.raw !== undefined) { fs.writeFileSync(l.file, l.raw, 'utf8'); rollback.dispatchLock += 1; } } catch { rollback.errors.push('派单锁恢复失败'); }
+    }
+    for (const p of planned.filter((x) => x.created)) {
+      if (process.env.TEAM_SELFTEST === '1') { rollback.newSessionArchiveSkipped = 'SELFTEST'; break; }
+      try {
+        await new DshClient(engine || undefined).workspaceArchiveSession({ sessionId: p.newSessionId, stopActivity: true });
+        rollback.newSessionsArchived += 1;
+      } catch { rollback.errors.push(`新会话归档失败：${p.role}`); }
+    }
+    try {
+      appendEvent({
+        role: actorRole, sessionId: planned.map((p) => p.newSessionId).join(','), action: 'rotate_batch_failed', project: name,
+        target: pending.join(','),
+        note: `批量换人失败回滚：${e.message}`,
+        data: { roles: pending, code: e.code || '', failAt: effectiveFailAt, rollback },
+      });
+    } catch { /* 事件失败不掩盖错误 */ }
+    if (e instanceof TeamError) {
+      if (rollback.mapsPartial) {
+        const keys = (mapRollback.skipped || []).map((x) => x.key).join('/') || '未知';
+        const honest = String(e.message || '').replace(/已(?:按 F-6 )?回滚到旧会话[^，；。]*/g, '回滚不完整（见 details.rollback）');
+        e.message = `【部分回滚】批量换人四处映射未完全恢复（${keys}），请先跑 session check 再继续：${honest}`;
+      }
+      e.details = { ...(e.details || {}), rollback };
+      throw e;
+    }
+    fail('ROTATE_FAILED', `批量换人失败${rollback.mapsPartial ? '（映射仅部分回滚，请先 session check）' : '已整批回滚'}：${e.message}`, {
+      roles: pending, code: e.code || '', rollback,
+    });
+  }
+}
+
 
 function recentDecisions(projectName) {
   const stateDir = projectStatePaths(projectName).dir;
@@ -1290,7 +1550,8 @@ export async function cmdSession(args) {
     return;
   }
   if (action === 'archive') {
-    const boot = requireBoot(String(args.boot || ''));
+    // R-a1eb §6.3：归档是写命令 → 硬校验（旧会话 → SESSION_REPLACED，零写入）
+    const boot = requireBoot(String(args.boot || ''), { write: true });
     if (!['pm', 'owner'].includes(String(boot.role || ''))) fail('PERMISSION_DENIED', `只有 PM/Owner 能归档会话（当前 ${boot.role}）`);
     const self = Boolean(args.self);
     if (!self && !args.confirm) fail('CONFIRM_REQUIRED', '归档需显式 --confirm（或 PM --self 后 owner confirm --archive）');
@@ -1374,7 +1635,8 @@ export async function cmdSession(args) {
       if (!sandboxExempt) {
         const token = String(args.boot || '').trim();
         if (!token) fail('BOOT_REQUIRED', '落交接回执必须带 --boot 启动令牌', { role, project: projectName });
-        tokenRole = String(requireBoot(token).role || '');
+        // R-a1eb §6.3：落交接回执是写命令 → 走 write 校验（沙盘豁免分支不变）
+        tokenRole = String(requireBoot(token, { write: true }).role || '');
         const allowed = tokenRole === role
           || ['pm', 'owner'].includes(tokenRole)
           || (tokenRole === 'product' && role === 'pm');
@@ -1404,8 +1666,73 @@ export async function cmdSession(args) {
     return;
   }
   if (action === 'rotate') {
+    // R-a1eb §6.4：批量入口优先（--batch / --roles a,b / --all），一次写名册 + 一次广播。
+    const batchFlag = Boolean(args.batch) || Boolean(args.roles) || Boolean(args.all) || Boolean(args.sessions);
+    if (batchFlag) {
+      const batchSandbox = String(process.env.TEAM_SELFTEST || '') === '1';
+      const batchEnforce = String(process.env.TEAM_BOOT_ENFORCE || '') === '1';
+      let batchActor = 'selftest';
+      if (!batchSandbox || batchEnforce) {
+        const bootToken = String(args.boot || '').trim();
+        if (!bootToken) fail('BOOT_REQUIRED', '批量换人必须带 --boot 启动令牌（PM/Owner）', { project: projectName });
+        // R-a1eb §6.3：写命令硬校验「令牌会话 == 名册 current」（零写入）
+        const info = requireBoot(bootToken, { write: true });
+        batchActor = String(info.role || '');
+      }
+      const batchRoles = String(args.roles || '').split(/[,\s，]/).map((x) => x.trim()).filter(Boolean);
+      const sessionMap = {};
+      for (const part of String(args.sessions || '').split(/[,\s，]/).map((x) => x.trim()).filter(Boolean)) {
+        const idx = part.indexOf('=');
+        if (idx <= 0) continue;
+        const r = part.slice(0, idx).trim();
+        const id = part.slice(idx + 1).trim();
+        if (r && id) sessionMap[r] = id;
+      }
+      if (args.session && batchRoles.length === 1) sessionMap[batchRoles[0]] = String(args.session);
+      const record = await rotateSessionBatch({
+        projectName,
+        roles: batchRoles,
+        sessionIds: sessionMap,
+        all: Boolean(args.all),
+        force: Boolean(args.force),
+        offline: Boolean(args.offline),
+        reason: String(args.reason || ''),
+        by: batchActor,
+        failAt: String(args['fail-at'] || ''),
+        sessionTitle: String(args.title || ''),
+        windowMinutes: Number(args.window || 30),
+        dryRun: Boolean(args['dry-run']),
+        audit: { actorRole: batchActor, batch: true },
+      });
+      if (record.dryRun) {
+        const lines = [
+          `批量轮换预演（dry-run，零写入）· ${projectName} ｜ ${record.roles.length} 个角色：${record.roles.join(',')}`,
+          ...record.entries.map((e, i) => `  ${i + 1}. ${e.role}: ${e.from || '(无)'} → ${e.to}`),
+          `当前四处一致性：${record.consistencyNow}`,
+          `将写：${record.wouldWrite.join('、')}`,
+          `广播：1 条（全体 active，含被换角色名）｜ 待启动队列：${record.bootPending} 条`,
+          '未写入任何文件；确认后去掉 --dry-run 执行。',
+        ];
+        out(args, lines.join('\n'), { ok: true, ...record });
+        return;
+      }
+      const lines = [
+        `已批量轮换 ${record.roles.length} 个角色：${record.roles.join(',')}`,
+        ...record.entries.map((e, i) => `  ${i + 1}. ${e.role}: ${e.from || '(无)'} → ${e.to}`),
+        record.alreadyRotated && record.alreadyRotated.length ? `已换过（跳过）：${record.alreadyRotated.join(',')}` : '',
+        `名册写入：一次事务（batchId ${record.batchId}）`,
+        `四处映射一致性：${record.consistency ? record.consistency.ratio + ' ' + (record.consistency.ok ? 'PASS' : 'FAIL') : '-'}`,
+        `广播：${record.broadcast} 条（收件人 ${(record.broadcastDetail && record.broadcastDetail.recipients || []).length}：${(record.broadcastDetail && record.broadcastDetail.recipients || []).join(',')}）`,
+        `待启动队列（BQ）：${record.bootPending} 条`,
+        `名册版本：${String(record.rosterVersionBefore || '').slice(0, 12) || '-'} → ${String(record.rosterVersionAfter || '').slice(0, 12) || '-'}`,
+        `轮换记录：${record.roles.map((r) => `会话轮换/${r}.json`).join('、')}`,
+        '注：其余角色令牌不受影响（名册已移出 rulesHash），无需重 boot。',
+      ].filter(Boolean);
+      out(args, lines.join('\n'), { ok: true, ...record });
+      return;
+    }
     const role = String(args.role || '');
-    if (!role) fail('BAD_ROLE', '需要 --role');
+    if (!role) fail('BAD_ROLE', '需要 --role（批量用 --batch --roles a,b 或 --all）');
     // B-20261118-001244-cdd0：rotate 会改四处会话映射（团队.json / 项目会话映射 / workbench），属敏感操作，
     // 必须带有效启动令牌且限定 PM/Owner——原实现只有 archive 分支调 requireBoot，rotate 空令牌也能换人。
     // 沙盘（TEAM_SELFTEST=1）默认豁免以保持既有 selftest/夹具可用；门禁本体用 TEAM_BOOT_ENFORCE=1 强制（cdd0 夹具即此）。
@@ -1416,7 +1743,7 @@ export async function cmdSession(args) {
     if (!bootSandbox || bootEnforce) {
       const bootToken = String(args.boot || '').trim();
       if (!bootToken) fail('BOOT_REQUIRED', '会话轮换必须带 --boot 启动令牌（PM/Owner，或产品换 PM）', { role, project: projectName });
-      const bootInfo = requireBoot(bootToken);
+      const bootInfo = requireBoot(bootToken, { write: true });
       actorRole = String(bootInfo.role || '');
       if (!rotateAllowed(actorRole, role)) {
         fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话；产品只能给 PM 换人、PM 不能给自己换人（当前令牌角色 ${actorRole || '-'} → 目标 ${role}）`, { role, project: projectName, tokenRole: actorRole });

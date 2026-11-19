@@ -15,7 +15,7 @@
       "file": "02-rules.cjs",
       "category": "②名册/角色卡/铁律变更",
       "needsSelftest": true,
-      "desc": "改沙盘团队宪法 → 旧令牌 RULES_CHANGED；改名册成员 → rulesHash 变化"
+      "desc": "改名册成员 → rulesHash 不变、rosterVersion 变化且旧令牌仍可写（R-a1eb）；改沙盘团队宪法 → 旧令牌 RULES_CHANGED"
     },
     {
       "name": "03-message",

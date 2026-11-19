@@ -43,6 +43,13 @@ export function parseJsonOut(text) {
   return null;
 }
 
+/**
+ * 跑一次 team.mjs（同步）。
+ * B-20261119-…/T-0cda 并入修：`boot --json` 真实项目可达 4.5MB（unread/docHashes/requirements 全量），
+ * execFileSync 默认 maxBuffer 只有 1MB → 必抛 ENOBUFS，表现为「原子派单自检必失败」。
+ * 这里抬到 64MB（比真实尖峰大一个量级），不改变任何输出协议。
+ */
+export const RUN_TEAM_MAX_BUFFER = 64 * 1024 * 1024;
 export function runTeam(args, { cwd = process.cwd(), env = process.env, timeoutMs = 120000 } = {}) {
   try {
     const out = execFileSync(process.execPath, [TEAM_MJS, ...args], {
@@ -51,6 +58,7 @@ export function runTeam(args, { cwd = process.cwd(), env = process.env, timeoutM
       encoding: 'utf8',
       windowsHide: true,
       timeout: timeoutMs,
+      maxBuffer: RUN_TEAM_MAX_BUFFER,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     return { ok: true, code: 0, out: String(out || ''), stderr: '', json: parseJsonOut(out) };

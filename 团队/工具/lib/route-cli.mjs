@@ -38,7 +38,8 @@ function needProject(args) {
 /** 令牌 → {role, project, sessionId}；写操作一律要令牌（项目协议：没有启动令牌不执行）。 */
 function bootOf(args, action) {
   if (!args.boot) fail('BOOT_REQUIRED', `需要 --boot <启动令牌>；先运行 boot（${action}）`);
-  const b = requireBoot(String(args.boot), {});
+  // R-a1eb §6.3：写命令硬校验「令牌会话 == 名册 current」（旧会话写 → SESSION_REPLACED，零写入）
+  const b = requireBoot(String(args.boot), { write: true });
   if (args.project && String(args.project) !== String(b.project || '')) {
     fail('BOOT_PROJECT_MISMATCH', `令牌项目 ${b.project} ≠ --project ${args.project}`);
   }

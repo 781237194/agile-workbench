@@ -33,7 +33,8 @@ function needProject(args) {
 
 function bootOf(args, action) {
   if (!args.boot) fail('BOOT_REQUIRED', `需要 --boot <启动令牌>（${action}）`);
-  const b = requireBoot(String(args.boot), {});
+  // R-a1eb §6.3：写命令硬校验（旧会话 → SESSION_REPLACED，零写入）
+  const b = requireBoot(String(args.boot), { write: true });
   if (args.project && String(args.project) !== String(b.project || '')) fail('BOOT_PROJECT_MISMATCH', `令牌项目 ${b.project} ≠ --project ${args.project}`);
   return b;
 }

@@ -141,7 +141,8 @@ function commitHashesOf(projectPath) {
 
 /** 终验主流程。 */
 export function finalizeRun({ projectName, token, force = false }) {
-  const boot = requireBoot(token);
+  // R-a1eb §6.3：收尾是写命令 → 硬校验（旧会话 → SESSION_REPLACED，零写入）
+  const boot = requireBoot(token, { write: true });
   const role = String(boot.role || '');
   if (!FINALIZE_ROLES.has(role)) fail('PERMISSION_DENIED', `只有 PM/Owner 能终验（当前角色 ${role}）`);
   const project = loadProject(projectName);

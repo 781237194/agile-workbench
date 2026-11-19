@@ -1013,28 +1013,44 @@ function sessionOf(args) {
   return String(args.session || process.env.DSH_SESSION_ID || 'session-unknown');
 }
 
-function tokenOf(args) {
+function tokenOf(args, opts = {}) {
   if (!args.boot) fail('BOOT_REQUIRED', '需要 --boot <启动令牌>；先运行 boot');
-  return requireBoot(String(args.boot), {});
+  return requireBoot(String(args.boot), opts && typeof opts === 'object' ? opts : {});
+}
+
+/**
+ * R-a1eb §6.2：哪些命令算「读类」（不校验「我是不是名册当前会话」）。
+ * 读类只校验 rulesHash（现行为不变）；写类额外走 SESSION_REPLACED / NOT_IN_ROSTER 硬校验。
+ * 判定顺序：先按 action，再按子命令（`task list` / `req show` 这类读子命令）。
+ */
+const BOOT_READ_ACTIONS = new Set(['inbox', 'read', 'find', 'show', 'brief', 'presence', 'dispatch-check']);
+const BOOT_READ_SUBCOMMANDS = new Set(['list', 'show', 'find', 'tree', 'stat', 'stats', 'check', 'search', 'read', 'diff', 'preview']);
+function bootCommandIsRead(args, action) {
+  const act = String(action || '').trim().toLowerCase();
+  if (BOOT_READ_ACTIONS.has(act)) return true;
+  // `proposal show/list`、`req list`、`task list` 这类：action 里已带读子命令
+  const words = act.split(/\s+/).filter(Boolean);
+  if (words.some((w) => BOOT_READ_SUBCOMMANDS.has(w) && w !== 'check')) return true;
+  const sub = String((args && args._ && args._[1]) || '').trim().toLowerCase();
+  if (sub && BOOT_READ_SUBCOMMANDS.has(sub)) return true;
+  return false;
 }
 
 function bootFor(args, action) {
-  const b = tokenOf(args);
+  // 写命令在 requireBoot 里做「我是不是名册当前会话」硬校验（零写入）；读命令不做（§6.2）。
+  const b = tokenOf(args, { write: !bootCommandIsRead(args, action) });
   if (args.role && args.role !== b.role) fail('BOOT_ROLE_MISMATCH', `令牌角色 ${b.role} ≠ --role ${args.role}`);
   if (args.project && args.project !== b.project) fail('BOOT_PROJECT_MISMATCH', `令牌项目 ${b.project} ≠ --project ${args.project}`);
-  // R-703f F-4 / AC3②：只认角色当前绑定的会话（团队.json members[].sessionId）。
-  // 旧会话再发言要丢弃并留痕，不能让它继续以角色身份落账。
-  // 判定要精确：只拦“在轮换记录里被明确写成旧会话（from）”的会话，避免名册滞后把正常会话误伤。
+  // R-703f F-4 / AC3②：旧会话再发言要丢弃，不能让它继续以角色身份落账。
+  // R-a1eb §6.3 之后**唯一硬校验在 requireBoot(write)**（任何「我 ≠ 名册 current」都拒）；
+  // 这里只保留「轮换记录里被明确记为 from」的**补充**判定，且**不再写审计**——
+  // 拒绝路径必须零写入（旧实现先 appendEvent 再 fail，违反 §6.3）。
   try {
     const team = loadTeam();
     const member = getMember(team, b.role);
     const currentId = String((member && member.sessionId) || '');
     const bootId = String(b.sessionId || '');
     if (currentId && bootId && bootId !== currentId && isRetiredSession(b.project, b.role, bootId)) {
-      appendEvent({
-        role: b.role, sessionId: bootId, action: 'session_retired_ignored', project: b.project || '',
-        note: `旧会话 ${bootId} ≠ 当前 ${currentId}；动作 ${action} 被丢弃`,
-      });
       fail('SESSION_RETIRED_IGNORED', `会话 ${bootId} 已在轮换记录里退役（当前会话 ${currentId}）；旧会话的动作被丢弃，请在新会话执行`, {
         role: b.role, sessionId: bootId, currentSessionId: currentId, action,
       });
@@ -1042,6 +1058,14 @@ function bootFor(args, action) {
   } catch (e) {
     if (e instanceof TeamError) throw e;
     /* 名册/轮换记录读取异常：不在这里扩权拦截 */
+  }
+  // 名册变更提示（不阻断）：别人换过 → 调用方可在返回值里看到 rosterChangedSinceToken；
+  // 旧令牌缺 rosterVersion → 打一条 stderr 提示（不污染 stdout 的 JSON）。
+  if (b && b.rosterChangedSinceToken) {
+    console.warn('[roster] rosterChangedSinceToken=true（名册在本次令牌之后变过：他人换人，本次写入不受影响，无需重 boot）');
+  }
+  if (b && b.rosterWarning && b.rosterWarning.code === 'ROSTER_CHANGED') {
+    console.warn(`[roster] ${b.rosterWarning.message}（当前 rosterVersion ${b.rosterWarning.currentRosterVersion}）`);
   }
   return b;
 }
@@ -4948,7 +4972,7 @@ export async function cmdBoot(args) {
   lines.push(`=== 启动简报 · ${ROLE_NAMES[role] || role} · ${projectName} ===`);
   // B-defb（Owner 2026-11-16 06:19）：令牌实际不会过期（store.mjs requireBoot 已取消 BOOT_EXPIRED，
   // expiresAt 只作审计/展示）。旧文案写「480 分钟 = 8 小时」会让 Owner 与 PM 误以为要重 boot——改成不限时。
-  lines.push(`令牌: ${token.token}（**不限时**，expiresAt 仅审计展示、不作拒绝依据；当前所有写操作都要带 --boot）｜ 哈希 rules ${shortHash(docs.rulesHash)} / index ${shortHash(docs.hashes.projectIndex)}`);
+  lines.push(`令牌: ${token.token}（**不限时**，expiresAt 仅审计展示、不作拒绝依据；当前所有写操作都要带 --boot）｜ 哈希 rules ${shortHash(docs.rulesHash)} / roster ${shortHash(docs.rosterVersion)} / index ${shortHash(docs.hashes.projectIndex)}`);
   lines.push(`身份: ${member.name}（${role}）｜ 会话: ${sessionId}`);
   // B-7b01：会话存在性校验结果必须可见（skipped 也要显式，不能静默放行）。
   if (sessionExistence.status === 'ok') lines.push(`会话校验: ok（名册会话 ${sessionExistence.rosterSessionId} 存在于 DSH）`);
@@ -5114,6 +5138,11 @@ export async function cmdBoot(args) {
   if (args.json) jsonOut({
     ok: true, token: token.token, role, project: projectName, teamMode, sessionId, rulesHash: docs.rulesHash,
     bootTtlMinutes,
+    // R-a1eb §6.5：两个哈希各给前 12 位；rosterVersion 不参与权限，只做「名册变过」提示。
+    // boot 新建令牌时它与当前名册一致 → rosterChangedSinceToken=false（旧令牌在写命令上才会看到 true）。
+    rosterVersion: docs.rosterVersion, rosterVersionShort: shortHash(docs.rosterVersion),
+    rulesHashShort: shortHash(docs.rulesHash),
+    rosterChangedSinceToken: false,
     docHashes: docs.hashes, read: bootRead, briefing, unread, tasks, proposals, grants,
     // B-20261118-004424-6c6b：简报超限处理的可观测字段（dropped=被丢的可丢行数，truncated=是否尾部硬截断）
     // 013a：dropped 含「先丢的动态块」行数（dynamicDropped 单列，便于夹具断言丢的是哪一类）

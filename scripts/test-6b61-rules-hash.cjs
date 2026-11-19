@@ -2,7 +2,7 @@
  * T-20261117-211434-34e6（R-6b61-A）夹具：rulesHash 三项 / 铁律降级 / 提示面文案。
  *
  * 断言：
- *   G1 rulesHash 只含 constitution / roleCard / teamConfig（源码块内无 iron），且三项齐备；
+ *   G1 rulesHash 主口径只含 constitution / roleCard（R-a1eb 起名册移出；降级分支才含 teamConfig），无 iron；
  *   G2 boot 必读规格：核心 3 件（宪法/项目信息/角色卡），铁律 core:false 且不在「必读-核心已读」；
  *   G3 沙盘实测：改 **项目铁律** → 哈希 rules 不变，旧令牌仍可 send（不 RULES_CHANGED）；
  *   G4 沙盘实测：改 **团队宪法** → 哈希 rules 变化（令牌失效路径仍有效）；
@@ -70,15 +70,20 @@ function cli(args) {
 const bootHash = (out) => (String(out).match(/哈希 rules\s+([0-9a-f]+)/) || [])[1] || '';
 const bootToken = (out) => (String(out).match(/令牌:\s*([0-9a-f]+)/) || [])[1] || '';
 
-check('G1 rulesHash 只含 constitution / roleCard / teamConfig（无 iron）', () => {
+check('G1 rulesHash 主口径只含 constitution / roleCard（R-a1eb 名册移出；无 teamConfig / 无 iron）', () => {
   const src = read(path.join(ROOT, '团队', '工具', 'lib', 'store.mjs'));
-  const m = src.match(/const rulesHash = sha256\(JSON\.stringify\(\{([\s\S]*?)\}\)\);/);
-  assert.ok(m, '没找到 rulesHash 计算块');
+  // R-a1eb §6.1：主口径 = `const rulesHash = rosterVersion ? sha256(JSON.stringify({constitution, roleCard})) : sha256(…含 teamConfig…)`
+  const block = /const rulesHash = rosterVersion[\s\S]{0,900}?;/.exec(src);
+  assert.ok(block, '没找到 rulesHash 主口径块（rosterVersion ? …）');
+  const m = /sha256\(JSON\.stringify\(\{([\s\S]*?)\}\)\)/.exec(block[0]);
+  assert.ok(m, '主口径块内没找到 sha256(JSON.stringify({…}))');
   const body = m[1];
-  for (const key of ['constitution', 'roleCard', 'teamConfig']) assert.ok(new RegExp(`\\b${key}:`).test(body), `缺 ${key}`);
-  assert.ok(!/\biron\s*:/.test(body), 'rulesHash 里仍有 iron');
+  for (const key of ['constitution', 'roleCard']) assert.ok(new RegExp(`\\b${key}:`).test(body), `缺 ${key}`);
+  assert.ok(!/\bteamConfig\s*:/.test(body), '主口径仍把 teamConfig 并入 rulesHash');
   assert.ok(!/iron/i.test(body), 'rulesHash 块内出现 iron 字样');
-  return '三项齐备 / 无 iron';
+  // 降级分支（§八：rosterVersion 算不出时退回旧口径）必须保留 teamConfig，且不得静默放行
+  assert.ok(/teamConfig: hashes\.teamConfig/.test(src), '降级分支应保留 teamConfig（§八 保守回退）');
+  return '两项齐备（constitution/roleCard）/ 无 iron / 降级保留 teamConfig';
 });
 
 check('G2 boot 必读规格：核心 3 件，铁律 core:false', () => {

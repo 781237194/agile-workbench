@@ -184,12 +184,13 @@ export function cmdBroadcast(args) {
     const token = String(args.boot || '');
     // 安全：令牌只用于校验，绝不写进记录（此前把 --boot 原文写进 actor，属泄露）。
     if (!token || token === 'true') fail('UNAUTHENTICATED', '播报必须带 --boot <令牌>：令牌只用于校验归属，不写入记录');
+    // R-a1eb §6.3：播报是写操作 → 硬校验「令牌会话 == 名册 current」（旧会话零写入被拒）
     let boot = null;
-    try { boot = requireBoot(token, { project: projectName }); } catch (error) { throw error; }
+    try { boot = requireBoot(token, { project: projectName, write: true }); } catch (error) { throw error; }
     if (!boot || String(boot.role || '') !== role) {
       fail('PERMISSION_DENIED', `令牌角色 ${(boot && boot.role) || '(未知)'} ≠ 声明角色 ${role}；不能播报他人产出`);
     }
-    requireBoot(token, { role, project: projectName });
+    requireBoot(token, { role, project: projectName, write: true });
     const r = broadcastEmit({
       projectName,
       role,

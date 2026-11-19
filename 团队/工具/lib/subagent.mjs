@@ -32,7 +32,8 @@ function out(args, human, json) {
 
 function bootOf(args, action) {
   if (!args.boot) fail('BOOT_REQUIRED', `需要 --boot <启动令牌>；先运行 boot（${action}）`);
-  return requireBoot(String(args.boot), {});
+  // R-a1eb §6.3：写命令硬校验（旧会话 → SESSION_REPLACED，零写入）
+  return requireBoot(String(args.boot), { write: true });
 }
 
 function recordsPath(projectName) {

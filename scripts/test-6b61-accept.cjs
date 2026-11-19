@@ -96,13 +96,18 @@ async function main() {
   fs.writeFileSync(SB.teamFile, JSON.stringify(roster, null, 2) + '\n', 'utf8');
   const add = run([TEAM_MJS, 'project', 'add', '--name', PROJECT, '--team-mode', 'full', '--by', 'owner']);
 
-  // ── AC1 static：rulesHash 恰三项、无 iron ────────────────────────────────
+  // ── AC1 static：rulesHash 主口径恰两项（R-a1eb 起名册移出）、无 iron ──────────
+  // R-a1eb §6.1 唯一口径：rulesHash = sha256(JSON({constitution, roleCard}))；
+  // 团队.json（名册）整体不再参与，降级分支（rosterVersion 算不出）才回退含 teamConfig。
   const storeSrc = readText(path.join(LIB, 'store.mjs'));
-  const rh = /const rulesHash = sha256\(JSON\.stringify\(\{([\s\S]*?)\}\)\)/.exec(storeSrc);
+  const rhBlock = /const rulesHash = rosterVersion[\s\S]{0,900}/.exec(storeSrc);
+  const rh = /sha256\(JSON\.stringify\(\{([\s\S]*?)\}\)\)/.exec(rhBlock ? rhBlock[0] : storeSrc);
   const rhKeys = rh ? (rh[1].match(/([a-zA-Z]+)\s*:/g) || []).map((x) => x.replace(/[\s:]/g, '')) : [];
-  check('① AC1 rulesHash 组成恰三项 {constitution, roleCard, teamConfig}，不含 iron（静态）',
-    rh && rhKeys.length === 3 && rhKeys.includes('constitution') && rhKeys.includes('roleCard') && rhKeys.includes('teamConfig') && !rhKeys.includes('iron'),
-    { keys: rhKeys });
+  check('① AC1 rulesHash 主口径恰两项 {constitution, roleCard}（R-a1eb 名册移出），不含 iron / 不含 teamConfig',
+    Boolean(rh) && rhKeys.length === 2 && rhKeys.includes('constitution') && rhKeys.includes('roleCard')
+    && !rhKeys.includes('iron') && !rhKeys.includes('teamConfig')
+    && /teamConfig: hashes\.teamConfig/.test(storeSrc),
+    { keys: rhKeys, fallbackKeepsTeamConfig: /teamConfig: hashes\.teamConfig/.test(storeSrc) });
 
   // ── AC1 runtime + AC2：改铁律不失效 / 改宪法失效 ─────────────────────────
   const b1 = bootTester('sess-a6b61-1');

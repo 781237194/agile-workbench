@@ -33,8 +33,64 @@ export function codeMaxBytesFor(config) {
 }
 
 // 记录「由归一 shim 抬到新默认」的 team 对象：写回时还原成旧值，保证 团队.json 不变
-// （teamConfig 哈希参与 rulesHash，写盘会让全员 boot 令牌失效；本次修复不制造无谓的 RULES_CHANGED）。
+// （R-a1eb 后名册已移出 rulesHash，但归一 shim 仍要避免无谓写盘）。
 const codeMaxShimmed = new WeakSet();
+
+/* ── R-a1eb：会话归属判定（「这个 sessionId 有没有被本项目任何映射绑过」） ───────── */
+
+function workbenchPathForCheck() {
+  const env = String(process.env.TEAM_WORKBENCH_JSON || '').trim();
+  if (env) return path.resolve(env);
+  return path.join(PATHS.workspace, 'data', 'userdata', 'workbench.json');
+}
+
+/**
+ * 该 sessionId 是否**曾经**被本项目任何映射记过（轮换记录 from/to、会话轮换.jsonl、团队会话.json、workbench）。
+ * 用途：区分「真被替换下来的旧会话」与「沙盘合成 id（从未绑定过）」。
+ * 生产环境不依赖它（生产一律硬拒），只在沙盘里避免误伤夹具造的合成会话 id。
+ */
+export function sessionEverBound({ projectName, sessionId } = {}) {
+  const target = String(sessionId || '');
+  const name = String(projectName || '');
+  if (!target || !name) return false;
+  try {
+    const dir = path.join(projectStatePaths(name).dir, '会话轮换');
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.json')) continue;
+      const row = readJson(path.join(dir, f), null);
+      if (!row) continue;
+      if (String(row.from || '') === target || String(row.to || '') === target) return true;
+      if (row.previous && (String(row.previous.from || '') === target || String(row.previous.to || '') === target)) return true;
+    }
+  } catch { /* 没有轮换目录 */ }
+  try {
+    const ledger = path.join(projectStatePaths(name).dir, '会话轮换.jsonl');
+    for (const line of fs.readFileSync(ledger, 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const r = JSON.parse(line);
+        if (String(r.from || '') === target || String(r.to || '') === target) return true;
+      } catch { /* 跳过坏行 */ }
+    }
+  } catch { /* 没有账本 */ }
+  try {
+    const project = loadProject(name);
+    const manifest = readJson(path.join(project.path, '团队会话.json'), null);
+    if (manifest && Array.isArray(manifest.roles)
+      && manifest.roles.some((r) => String((r && r.sessionId) || '') === target)) return true;
+  } catch { /* 未登记项目 */ }
+  try {
+    const wb = readJson(workbenchPathForCheck(), null);
+    for (const p of (wb && wb.projects) || []) {
+      if (!p) continue;
+      const sessions = (p.sessions && typeof p.sessions === 'object') ? p.sessions : {};
+      if (Object.values(sessions).some((v) => String(v || '') === target)) return true;
+      const ids = (p.workspace && Array.isArray(p.workspace.sessionIds)) ? p.workspace.sessionIds : [];
+      if (ids.some((v) => String(v || '') === target)) return true;
+    }
+  } catch { /* 没有 workbench */ }
+  return false;
+}
 
 /**
  * 项目团队模式：项目.json 的 teamMode 优先；老项目没有就回退 workspace.json；
@@ -627,6 +683,28 @@ export function activeMembers(team) {
   return (team.members || []).filter((m) => m.status === 'active');
 }
 
+/**
+ * R-a1eb §6.1：名册版本摘要（**只含 role/sessionId/status 三字段**）。
+ * 成员昵称/备注/顺序不变的不触发；名册从这里"轻量校验"，不再靠 rulesHash 副作用。
+ * 公式按需求正文写死（不排序、不加 mode），便于复验时逐字复算 sha256。
+ */
+export function rosterSummaryOf(team) {
+  return ((team && team.members) || []).map((m) => ({
+    role: String((m && m.role) || ''),
+    sessionId: String((m && m.sessionId) || ''),
+    status: String((m && m.status) || 'active'),
+  }));
+}
+
+/** 名册版本哈希；计算失败返回 ''（调用方按 §八 降级：保守退回 teamConfig 参与 rulesHash）。 */
+export function rosterVersionOf(team) {
+  try {
+    return sha256(JSON.stringify(rosterSummaryOf(team)));
+  } catch {
+    return '';
+  }
+}
+
 export function projectStateDir(projectName) {
   return path.join(PATHS.projectState, slug(projectName, 60));
 }
@@ -816,13 +894,21 @@ export function readDocSet(role, project) {
   }
   files.teamConfig = PATHS.team;
   hashes.teamConfig = hashFile(PATHS.team);
-  // 阶段二 A 案（Owner 2026-11-17 08:57）：项目铁律降为「按需避坑清单」，**移出 rulesHash**——
-  // 改项目级铁律不再让全员令牌失效；仍保留 constitution / roleCard / teamConfig 三项。
-  const rulesHash = sha256(JSON.stringify({
-    constitution: hashes.constitution,
-    roleCard: hashes.roleCard,
-    teamConfig: hashes.teamConfig,
-  }));
+  // 阶段二 A 案（Owner 2026-11-17 08:57）：项目铁律降为「按需避坑清单」，**移出 rulesHash**。
+  // R-a1eb（Owner 2026-11-19 14:06）：**名册（团队.json 整文件）也移出 rulesHash**——
+  // 换一个人不再让全员旧令牌失效；名册改用独立 rosterVersion 轻量校验（requireBoot 里只提示、不阻断）。
+  // 降级（需求 §八）：rosterVersion 计算不出来时，保守退回旧口径（teamConfig 参与 rulesHash），不静默放行。
+  const rosterVersion = rosterVersionOf(team);
+  const rulesHash = rosterVersion
+    ? sha256(JSON.stringify({
+      constitution: hashes.constitution,
+      roleCard: hashes.roleCard,
+    }))
+    : sha256(JSON.stringify({
+      constitution: hashes.constitution,
+      roleCard: hashes.roleCard,
+      teamConfig: hashes.teamConfig,
+    }));
   const requirements = readRequirementDocs(root);
   const peers = [];
   for (const other of activeMembers(team)) {
@@ -847,7 +933,7 @@ export function readDocSet(role, project) {
       taskDocs.push({ ...doc, task: task.id });
     }
   }
-  return { files, hashes, rulesHash, docs: records, requirements, peers, readOrder, taskDocs, team, member, project, teamMode, modeRoles };
+  return { files, hashes, rulesHash, rosterVersion, rosterSummary: rosterSummaryOf(team), docs: records, requirements, peers, readOrder, taskDocs, team, member, project, teamMode, modeRoles };
 }
 
 export function bootTokenPath(token) {
@@ -866,6 +952,8 @@ export function createBootToken({ role, project, sessionId, docs }) {
     teamMode,
     sessionId: sessionId || '',
     rulesHash: docs.rulesHash,
+    // R-a1eb §6.1：名册版本随令牌落盘——写命令只用它做「别人换过我」的提示，不参与权限判定。
+    rosterVersion: String((docs && docs.rosterVersion) || ''),
     docHashes: docs.hashes,
     projectIndexHash: docs.hashes.projectIndex,
     // read 证据随令牌落盘：谁在什么时候读了哪些文件、哈希多少，事后可复核。
@@ -927,7 +1015,15 @@ export function noteActionAfterWrite({ token, actionType, commitId, sendNotice }
 
 import * as lessons from './lessons.mjs';
 
-export function requireBoot(token, { role, project } = {}) {
+/**
+ * 启动令牌校验。
+ * - `opts.write=true`：写命令专享的**唯一硬校验**——令牌会话必须仍是名册里该角色的 current
+ *   （`SESSION_REPLACED`）且角色仍 active（`NOT_IN_ROSTER`）；拒绝路径**零写入**（本函数不写任何文件）。
+ * - 读命令（write=false，默认）不校验会话归属：旧会话仍可读，只是不能写。
+ * - `rosterVersion` **不参与权限**：只在返回体给 `rosterChangedSinceToken` 提示（别人换过，不影响我）；
+ *   仅当令牌**缺** `rosterVersion` 字段（旧令牌升级过渡）时给一次 `ROSTER_CHANGED` 警告，也不硬拒。
+ */
+export function requireBoot(token, { role, project, write = false } = {}) {
   if (!token || token === true) fail('BOOT_REQUIRED', '需要 --boot <启动令牌>；先运行 boot');
   const data = readJson(bootTokenPath(String(token)), null);
   if (!data) fail('BOOT_INVALID', `启动令牌不存在：${token}`);
@@ -943,13 +1039,67 @@ export function requireBoot(token, { role, project } = {}) {
     });
   }
   if (docs.rulesHash !== data.rulesHash) {
-    fail('RULES_CHANGED', '宪法/铁律/角色卡/成员表已变化，旧令牌作废；重新 boot', {
+    fail('RULES_CHANGED', '宪法/角色卡已变化，旧令牌作废；重新 boot', {
       token: data.token,
       expected: data.rulesHash,
       current: docs.rulesHash,
     });
   }
-  return { ...data, docs, team: docs.team, projectInfo: proj };
+  // R-a1eb §6.2：名册轻量校验（只提示，不阻断）
+  const currentRosterVersion = String(docs.rosterVersion || '');
+  const tokenRosterVersion = String(data.rosterVersion || '');
+  const rosterChangedSinceToken = Boolean(tokenRosterVersion && currentRosterVersion && tokenRosterVersion !== currentRosterVersion);
+  // §6.3：写命令唯一硬校验——我不是名册当前会话就拒（零写入、不写审计）。
+  let sessionCheck = null;
+  if (write) {
+    const member = getMember(docs.team, data.role);
+    const currentId = String((member && member.sessionId) || '');
+    const tokenId = String(data.sessionId || '');
+    if (!member || String(member.status || '') !== 'active') {
+      fail('NOT_IN_ROSTER', `角色 ${data.role} 不在名册（或已非 active）；旧会话不能写，请重 boot 或联系 PM 修正 名册`, {
+        role: data.role, project: data.project, mySessionId: tokenId.slice(0, 8), memberStatus: member ? String(member.status || '') : 'missing',
+      });
+    }
+    // §八 空值：任一侧为空（未换过的角色/旧令牌没记会话）→ 视为无令牌状态，不拦。
+    if (currentId && tokenId && tokenId !== currentId) {
+      // 生产（非沙盘）：**任何不等都硬拒**（最严格，不依赖任何历史映射）。
+      // 沙盘（TEAM_SELFTEST=1）：只拒「真被替换下来的旧会话」（该 id 曾被本项目映射绑过），
+      //   —— 沙盘夹具常 boot 出与名册不同的合成 id（如 session-st-boot-pm），那不是「旧会话」；
+      //   `TEAM_SESSION_IDENTITY_STRICT=1` 可强制沙盘也按生产口径（供安全复验）。
+      const sandbox = String(process.env.TEAM_SELFTEST || '') === '1';
+      const strict = String(process.env.TEAM_SESSION_IDENTITY_STRICT || '') === '1';
+      const loose = sandbox && !strict;
+      const reject = !loose || sessionEverBound({ projectName: data.project, sessionId: tokenId });
+      if (reject) {
+        fail('SESSION_REPLACED', `会话已被替换：令牌会话 ${tokenId.slice(0, 12)} ≠ 名册当前 ${currentId.slice(0, 12)}（角色 ${data.role}）；旧会话不能写，请在新会话执行`, {
+          role: data.role,
+          project: data.project,
+          sessionId: tokenId,
+          currentSessionId: currentId,
+          mySessionId: tokenId.slice(0, 8),
+          currentSessionIdShort: currentId.slice(0, 8),
+          everBound: true,
+          hint: '在新会话执行 boot 拿新令牌（旧会话只读不能写）',
+        });
+      }
+    }
+    sessionCheck = { role: data.role, sessionId: tokenId, currentSessionId: currentId, ok: true };
+  }
+  // 旧令牌缺 rosterVersion：提示一次「名册校验已升级」，仍不硬拒（§6.2）。
+  const rosterWarning = !tokenRosterVersion && currentRosterVersion
+    ? {
+      code: 'ROSTER_CHANGED',
+      message: '名册校验已升级（令牌缺 rosterVersion）：重 boot 一次即可，不影响本次写入',
+      currentRosterVersion: currentRosterVersion.slice(0, 12),
+    }
+    : null;
+  return {
+    ...data, docs, team: docs.team, projectInfo: proj, sessionCheck,
+    rosterVersion: currentRosterVersion,
+    rosterVersionToken: tokenRosterVersion,
+    rosterChangedSinceToken,
+    rosterWarning,
+  };
 }
 
 // ---------- 邮箱：new/cur，收件人单人读写，发件人只写 new ----------
