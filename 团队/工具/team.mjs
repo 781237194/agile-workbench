@@ -3,6 +3,7 @@
 // 用法：node 团队\工具\team.mjs <命令> [--参数]
 import path from 'node:path';
 import { parseArgs, TeamError, jsonOut, textOut } from './lib/core.mjs';
+import { cmdAnchor } from './lib/anchor.mjs';
 import {
   cmdInit, cmdProject, cmdBoot, cmdSend, cmdNotify, cmdOwnerNotify, cmdPmDispatch, cmdInbox, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
   cmdShow, cmdReview, cmdSign, cmdApply, cmdGrant, cmdIndex, cmdStatus, cmdClaim, cmdReconcile,
@@ -350,6 +351,8 @@ async function main() {
     case 'lessons': cmdLessons(args); break;
     // B-d8b8：Owner 决定通知的 CLI 入口（壳层用；与 legacy owner 走同一执行体）
     case 'owner-notify': await cmdOwnerNotify(args); break;
+    // T-20261120-0157-1b4：内容快照锚点（纯只读；cite/check 都不写账本）
+    case 'anchor': cmdAnchor(args); break;
     case 'owner': {
       // owner proxy status|start|end（代管开关）与 owner proxy decide（PM 代管落账，T-a01d）分开分发。
       const proxySub = String((args._ && args._[1]) || '').toLowerCase();

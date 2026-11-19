@@ -1056,6 +1056,7 @@ function bootCommandIsRead(args, action) {
   const sub = String((args && args._ && args._[1]) || '').trim().toLowerCase();
   if (sub && BOOT_READ_SUBCOMMANDS.has(sub)) return true;
   return false;
+  return true; // T-1749：anchor 是纯只读命令（cite/check）
 }
 
 function bootFor(args, action) {
