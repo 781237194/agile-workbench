@@ -64,6 +64,18 @@ const SUBAGENT_SECTION = `
 - 子代理只回结论 ≤300 字 + 产出路径；本人复核后才算产出。
 `.trimEnd();
 
+
+// 「PM 换人双闲门」小节（B-20261119-204845-8d91，Owner 2026-11-19 20:48 直接指令）。
+// 六卡模板里只有 pm / product 两张需要（其余角色不参与 PM 换人）。
+const PM_ROTATE_IDLE_SECTION = `
+## PM 换人的「双方闲时」门（Owner 2026-11-19 20:48 直接指令）
+
+- \`session rotate --role pm\` 有程序门 **WAIT_BOTH_IDLE**：**PM 与产品双方**近 N 分钟（\`团队.json → config.pmRotateIdleMin\`，默认 15）必须同时满足：①无新消息 ②无 running 会话 ③无名下 working 任务 ④无在途派单锁；任一不满足 → 拒绝且**零写入**，并输出缺哪一方、还差多少分钟。
+- 产品换 PM 前：先确认自己也不在跑活（规则同上），并让 PM 落交接回执（\`session handover receipt --role pm\`，八节齐全才放行）。
+- Owner 通道不受此门限制（Owner 可直接指令换人）。
+- 判定唯一实现：\`团队/工具/lib/session.mjs → pmRotateIdleState()\`；流程侧见 \`团队/流程.md §C2 第 6 条\`。
+`.trimEnd();
+
 function ensureSubagentSection(text) {
   if (text.includes('不可外包') && text.includes('可开')) return text;
   return text.trimEnd() + '\n\n' + SUBAGENT_SECTION;
@@ -113,6 +125,8 @@ function buildBody(role) {
   let text = ensureSubagentSection(ensureStructuredOutput(stripAlignSection(raw), role));
   // Owner 2026-11-19 强制：六卡都必须含「场景覆盖准则」；项目卡没写就在这里补（按角色差异化）。
   text = ensureSceneCoverage(text, role);
+  // B-8d91：PM/产品卡追加「PM 换人双闲门」节（其余角色不涉及 PM 换人）。
+  if ((role === 'pm' || role === 'product') && !text.includes('WAIT_BOTH_IDLE')) text = text.trimEnd() + '\n\n' + PM_ROTATE_IDLE_SECTION;
   // 先换占位 token，再整体转义，最后把 token 换成真正的模板插值——否则插值会被当成字面量。
   text = text.split(PROJECT).join('__PROJECT_TOKEN__');
   if (roleDisplay) text = text.split(roleDisplay).join('__ROLE_TOKEN__');

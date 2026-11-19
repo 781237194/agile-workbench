@@ -1488,6 +1488,59 @@ export function rotateAllowed(tokenRole, targetRole) {
   if (t === 'product') return target === 'pm';
   return false;
 }
+/**
+ * B-20261119-204845-8d91：PM 换人的「双方闲时」判定（唯一实现）。
+ *
+ * 四项均需满足才算闲：①近 minutes 分钟内无新消息（邮箱 new+cur 的 ts/at 最大值）；
+ * ②无 running 会话（团队/状态/会话排队.json 里该角色 running/thinking 为真）；
+ * ③名下无 working 任务；④无在途派单锁（非过期）。
+ * 返回 { ok, minutes, configValue, roles: { <role>: { idle, reasons[], lastActivityAt, remainingMin } } }。
+ * remainingMin = 距离「最近一次活动 + minutes」还差多少分钟（0 表示已闲够）。
+ */
+export function pmRotateIdleState(projectName, { minutes = null, roles = ['pm', 'product'], now = Date.now() } = {}) {
+  const team = (() => { try { return loadTeam(); } catch { return {}; } })();
+  const cfgRaw = team && team.config ? team.config.pmRotateIdleMin : null;
+  const cfgMin = Number(cfgRaw);
+  const mins = Number.isFinite(minutes) && minutes > 0 ? Number(minutes) : (Number.isFinite(cfgMin) && cfgMin > 0 ? cfgMin : 15);
+  const windowMs = mins * 60 * 1000;
+  const tasks = (() => { try { return listTasks(projectName) || []; } catch { return []; } })();
+  const locks = (() => { try { return requireLocks() || []; } catch { return []; } })();
+  const queue = (() => { try { return readJson(path.join(PATHS.state, '会话排队.json'), {}) || {}; } catch { return {}; } })();
+  const out = {};
+  for (const role of roles) {
+    const reasons = [];
+    let lastMs = 0;
+    // ① 邮箱最新消息（new + cur）
+    for (const box of ['new', 'cur']) {
+      const dir = path.join(PATHS.mail, String(role), box);
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch { names = []; }
+      for (const n of names.slice(-80)) {
+        if (!n.endsWith('.json')) continue;
+        let row = null; try { row = readJson(path.join(dir, n), null); } catch { row = null; } // 破损文件不许让门崩（降级）
+        if (!row) continue;
+        const ms = Date.parse(String(row.ts || row.at || row.deliveredAt || ''));
+        if (Number.isFinite(ms) && ms > lastMs) lastMs = ms;
+      }
+    }
+    if (lastMs && now - lastMs < windowMs) reasons.push(`近 ${mins} 分钟有新消息（最近 ${new Date(lastMs).toISOString()}）`);
+    // ② running 会话
+    const qRow = (queue && (queue[role] || (queue.roles && queue.roles[role]))) || null;
+    if (qRow && (qRow.running === true || qRow.thinking === true || Number(qRow.thinkSec || 0) > 0)) reasons.push(`有正在跑的会话（running=${qRow.running === true} / thinkSec=${Number(qRow.thinkSec || 0)}）`);
+    // ③ working 任务
+    const mine = tasks.filter((t) => String(t.owner || '') === String(role) && String(t.status || '') === 'working');
+    if (mine.length) reasons.push(`名下有 ${mine.length} 个 working 任务（${mine.slice(0, 3).map((t) => t.id).join('、')}）`);
+    // ④ 在途派单锁
+    const myLocks = locks.filter((l) => String(l.role || '') === String(role) && !l.stale);
+    if (myLocks.length) reasons.push(`持有 ${myLocks.length} 个在途派单锁`);
+    const idle = reasons.length === 0;
+    const remainingMin = idle ? 0 : Math.max(0, Math.ceil((lastMs + windowMs - now) / 60000));
+    out[role] = { idle, reasons, lastActivityAt: lastMs ? new Date(lastMs).toISOString() : '', remainingMin };
+  }
+  const ok = Object.values(out).every((r) => r && r.idle);
+  return { ok, minutes: mins, configValue: Number.isFinite(cfgMin) && cfgMin > 0 ? cfgMin : 15, roles: out };
+}
+
 
 /** B-3f02：换人优先级（档位 产品/需求0、测试1、开发2、PM3）× 接手状态 → 建议列表，只给建议。 */
 export function rotationPriority(projectName) {
@@ -1747,6 +1800,22 @@ export async function cmdSession(args) {
       actorRole = String(bootInfo.role || '');
       if (!rotateAllowed(actorRole, role)) {
         fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话；产品只能给 PM 换人、PM 不能给自己换人（当前令牌角色 ${actorRole || '-'} → 目标 ${role}）`, { role, project: projectName, tokenRole: actorRole });
+      }
+    }
+    // B-20261119-204845-8d91（Owner 直接指令）：**PM 换人必须先满足「双方闲时」**——
+    // 产品不能在 PM 忙碌、或自己正跑任务时直接换人。四项：近 N 分钟无新消息 / 无 running 会话 /
+    // 无名下 working 任务 / 无在途派单锁；N 取 团队.json → config.pmRotateIdleMin（默认 15）。
+    // 不满足 → WAIT_BOTH_IDLE 拒绝（在任何写盘之前 → 零副作用），并输出缺哪一方、还差多少分钟。
+    if (role === 'pm') {
+      const idleGate = pmRotateIdleState(projectName, { now: Date.now() });
+      if (!idleGate.ok) {
+        const busy = Object.entries(idleGate.roles).filter(([, r]) => !r.idle);
+        const detail = busy.map(([roleName, r]) => `${roleName}：${r.reasons.join('；')}${r.remainingMin ? `（约还差 ${r.remainingMin} 分钟）` : ''}`).join(' / ');
+        fail('WAIT_BOTH_IDLE', `PM 换人要求 PM 与产品双方闲时 ≥ ${idleGate.minutes} 分钟（team.json → config.pmRotateIdleMin，默认 15）：${detail}。请等双方都静下来再换人（或由 Owner 直接指令换人）`, {
+          role, project: projectName, minutes: idleGate.minutes,
+          busy: busy.map(([roleName, r]) => ({ role: roleName, reasons: r.reasons, remainingMin: r.remainingMin, lastActivityAt: r.lastActivityAt })),
+          next: '等 PM 与产品都空闲（无新消息/无 running/无 working 任务/无派单锁）后再执行；Owner 通道不设此门',
+        });
       }
     }
     // R-20261118-143558-eba2：换人前必须有人落交接回执，且回执 sha 与磁盘一致。
