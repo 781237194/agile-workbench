@@ -6627,7 +6627,26 @@ export async function cmdTask(args) {
       });
     }
     const requirementId = assertRequirementRef(b.project, args.requirement || '');
-    const task = createTask({
+    // B-30e3：建单时若同需求已有**未闭环的测试任务**，给一条提示（不阻断）——
+  // 路由守护侧已经硬拦，这里让 PM 建单当场就能看到「已有未闭环测试任务」，避免重复派。
+  let dupTestTaskHint = null;
+  try {
+    const reqIdForDup = String(args.requirement || '').trim();
+    if (reqIdForDup) {
+      const dup = (listTasks(b.project) || []).filter((t) => String(t.requirementId || '') === reqIdForDup
+        && String(t.owner || '') === 'tester' && !statusIsClosed(String(t.status || '')));
+      if (dup.length) {
+        dupTestTaskHint = {
+          count: dup.length,
+          ids: dup.slice(0, 5).map((t) => t.id),
+          statuses: dup.slice(0, 5).map((t) => String(t.status || '')),
+          message: `需求 ${reqIdForDup} 已有 ${dup.length} 条未闭环测试任务（${dup.slice(0, 3).map((t) => `${t.id}(${t.status})`).join('、')}）：确认是否真要再建一条`,
+        };
+      }
+    }
+  } catch { dupTestTaskHint = null; }
+
+  const task = createTask({
       project: b.project, title: args.title, detail, priority: args.priority,
       priorityBy: args['priority-by'] || b.role, createdBy: b.role, owner: args.owner || null, due: args.due || '',
       type: wantType, requirementId, acceptance: args.acceptance || '', story: args.story || '',
@@ -6667,7 +6686,8 @@ export async function cmdTask(args) {
         project: b.project, task: task.id, ackRequired: true, sessionId: b.sessionId,
       });
     }
-    out(args, `已建任务 ${task.id} [${task.priority}] ${task.title}${task.owner ? ' → ' + task.owner : ''}`, { ok: true, task });
+    out(args, `已建任务 ${task.id} [${task.priority}] ${task.title}${task.owner ? ' → ' + task.owner : ''}`
+      + (dupTestTaskHint ? `\n提示：${dupTestTaskHint.message}` : ''), { ok: true, task, ...(dupTestTaskHint ? { dupTestTaskHint } : {}) });
     return;
   }
   // T-e05b（2026-11-18）：任务元数据修订入口（title/priority/owner）——以前没有，标题与字段漂移只能新开单。

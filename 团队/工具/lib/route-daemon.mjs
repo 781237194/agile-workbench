@@ -333,9 +333,23 @@ export function ensureTestTask(projectName, row, tasks = [], { by = 'route-daemo
   if (String(process.env.TEAM_TASK_CREATE_FAIL || '') === '1') {
     return { ok: false, why: 'TEAM_TASK_CREATE_FAIL（测试注入）' };
   }
+  // B-30e3：**未闭环去重**（比「当轮去重」更宽）——同需求只要还有一条未闭环的 route-daemon 测试任务，
+  // 就不再新建；不同轮次的残留单也不再各建一条（原来只看 isCurrentRound，跨轮就漏）。
+  const openDup = (tasks || []).filter((t) => String(t.requirementId || '') === requirementId
+    && String(t.owner || '') === 'tester'
+    && String(t.createdBy || '') === 'route-daemon'
+    && !statusIsClosed(String(t.status || '')));
+  if (openDup.length) {
+    appendRouteLog(projectName, {
+      at: nowIso(), event: 'route_skip_duplicate', source: 'route', requirementId,
+      taskId: openDup[0].id, role: 'tester', action: 'test', ok: true, existing: openDup.length,
+    });
+    return { ok: true, reused: true, duplicateSkipped: true, task: openDup[0], existing: openDup.length };
+  }
   const cur = Number((row && (row.deliveryRound ?? row.round)) ?? 0) || 0;
   const existing = (tasks || []).filter((t) => String(t.requirementId || '') === requirementId
     && String(t.owner || '') === 'tester'
+    && !statusIsClosed(String(t.status || ''))
     && isCurrentRound(row, t));
   if (existing.length) {
     // 补单 T-eeff ④：第二拍/已存在时留痕 test_task_skipped_existing，不再重复建。
