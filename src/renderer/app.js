@@ -1558,12 +1558,17 @@ function verifiedCount(project) {
   const live = liveFor(project);
   if (!live) return null;
   const ids = new Set(teamRoleIds(project));
+  // R-97db（B-190a 打回，PM 2026-11-20 03:35）：`live.ready` 是后端**总数**（恒 6），它不知道「名册已归档」，
+  // 拿它当兜底会让 Owner 看到的「6/6 已核验」永远不降——这就是他截图里的可见症状。
+  // 有 items 时只认 items（且 items 已由后端按名册归档拦截）；没有 items 时按名册口径（rosterSessionIds）过滤 ready。
   if (Array.isArray(live.items) && live.items.length) {
     return live.items.filter((item) => ids.has(item.role) && item.sessionId && item.exists && item.inWorkspace && !item.blank && !item.archived).length;
   }
-  // 后端 ready 是六角色总数；快速模式只在没有逐角色清单时才退回它，并拒绝把隐藏角色算进来。
-  if (typeof live.ready === 'number' && !isQuickTeam(project)) return live.ready;
-  return null;
+  if (typeof live.ready !== 'number' || isQuickTeam(project)) return null;
+  const rosterIds = Array.isArray(project && project.rosterSessionIds) ? project.rosterSessionIds : null;
+  if (!rosterIds) return live.ready;
+  const scoped = rosterIds.filter((role) => ids.has(role)).length;
+  return Math.min(scoped, live.ready);
 }
 
 function liveItemFor(project, roleId) {

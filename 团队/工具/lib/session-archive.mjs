@@ -933,10 +933,15 @@ export function clearArchivedRoleState(projectName, role, sessionId, archiveId =
         const rowName = String(row.teamName || row.name || '');
         const same = String(row.id || '') === String(project.id || '') || names.includes(rowName);
         if (!same) continue;
-        // 旧会话归档：只动 workspace.sessionIds 里的该 sid，**不动** sessions[role]（否则在岗会话丢失）
+        // B-190a 打回（PM 2026-11-20 03:35）：归档**旧会话**时只摘本次 sid 不够——同一角色反复换人，
+        // 历史 sid 会一直堆在 workspace.sessionIds 里（实测积到 96 条，界面「人员到齐」就是这么长出来的）。
+        // 摘除集合 = 本次 sid ∪ （归档当前会话时）sessions[role] 的当前值；仍**不动** sessions[role] 本身（B-196e 红线）。
+        const currentOfRole = (row.sessions && Object.prototype.hasOwnProperty.call(row.sessions, role))
+          ? String(row.sessions[role] || '') : '';
         if (archivedIsCurrent && row.sessions && Object.prototype.hasOwnProperty.call(row.sessions, role)) { delete row.sessions[role]; changed = true; }
         if (row.workspace && Array.isArray(row.workspace.sessionIds)) {
-          const next = row.workspace.sessionIds.filter((x) => String(x) !== sid);
+          const doomedSids = new Set([sid, archivedIsCurrent ? currentOfRole : ''].filter(Boolean).map(String));
+          const next = row.workspace.sessionIds.filter((x) => !doomedSids.has(String(x)));
           if (next.length !== row.workspace.sessionIds.length) { row.workspace.sessionIds = next; changed = true; }
         }
       }

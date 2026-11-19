@@ -89,10 +89,36 @@ function main() {
     const arch = fs.readFileSync(path.join(ROOT, "团队", "工具", "lib", "session-archive.mjs"), "utf8");
     const caStart = arch.indexOf("function clearArchivedRoleState");
     const caSeg = caStart >= 0 ? arch.slice(caStart, caStart + 6000) : "";
-    check("A5 归档数据层清残留（session-archive.mjs）：当前会话 delete sessions[role] + sessionIds 按 sid 摘除",
+    check("A5 归档数据层清残留（session-archive.mjs）：当前会话 delete sessions[role] + sessionIds 摘该角色 sid",
       caSeg.includes("delete row.sessions[role]")
-      && caSeg.includes("row.workspace.sessionIds.filter((x) => String(x) !== sid)"),
+      && caSeg.includes("row.workspace.sessionIds.filter((x) => !doomedSids.has(String(x)))"),
       { seg: caSeg.slice(0, 200) });
+
+    // A6（PM 2026-11-20 03:35 打回第①处）：归档时 sessionIds 要摘**该角色已知的全部 sid**，
+    // 不能只摘本次那一个——同一角色反复换人时历史 sid 会一直在（实测堆到 96 条）。
+    const caSeg2 = (() => {
+      const a = fs.readFileSync(path.join(ROOT, "团队", "工具", "lib", "session-archive.mjs"), "utf8");
+      const i = a.indexOf("function clearArchivedRoleState");
+      return i >= 0 ? a.slice(i, i + 6500) : "";
+    })();
+    check("A6 归档多 sid 摘除：doomedSids = 本次 sid ∪ 当前会话 sid（archivedIsCurrent 时）",
+      caSeg2.includes("const doomedSids = new Set([sid, archivedIsCurrent ? currentOfRole : ''].filter(Boolean).map(String));")
+      && caSeg2.includes("row.workspace.sessionIds.filter((x) => !doomedSids.has(String(x)))"),
+      { seg: caSeg2.slice(0, 200) });
+    check("A6b 归档旧会话仍不删 sessions[role]（B-196e 红线：不动在岗绑定）",
+      /if \(archivedIsCurrent && row\.sessions && Object\.prototype\.hasOwnProperty\.call\(row\.sessions, role\)\) \{ delete row\.sessions\[role\]; changed = true; \}/.test(caSeg2),
+      {});
+
+    // A7（打回第②处 · Owner 可见症状「6/6 已核验」的直接根因）：verifiedCount 不得再直接返回 live.ready。
+    const vcSeg = (() => {
+      const i = a.indexOf("function verifiedCount");
+      return i >= 0 ? a.slice(i, i + 1500) : "";
+    })();
+    check("A7 verifiedCount 的 live.ready 兜底按名册过滤（不再直接 return live.ready）",
+      vcSeg.includes("rosterSessionIds")
+      && !/if \(typeof live\.ready === \"number\" && !isQuickTeam\(project\)\) return live\.ready;/.test(vcSeg)
+      && vcSeg.includes("Math.min(scoped, live.ready)"),
+      { seg: vcSeg.slice(0, 260) });
 
     /* ── B 逻辑复算（等价实现，覆盖「残留映射 vs 名册」两种情形） ── */
     const roleIds6 = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
