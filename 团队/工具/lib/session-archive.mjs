@@ -11,7 +11,9 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { nowIso, stamp, ensureDir, fail, truncate, acquireLock, releaseLock, listLocks, TeamError } from './core.mjs';
-import { loadProject, projectStatePaths, listTasks, sendMessage } from './store.mjs';
+import { loadProject, projectStatePaths, listTasks, sendMessage, loadTeam, saveTeam } from './store.mjs';
+import { setMemberSession } from './roster-writer.mjs';
+import { PATHS } from './core.mjs';
 import { statusIsClosed, isRequirementMirrorTask } from './gates.mjs';
 import { writeJsonAtomic } from './json-atomic.mjs';
 
@@ -332,6 +334,10 @@ export function archiveSession({ projectName, role, reason = '', self = false, a
   }
   const dup = listArchives(projectName).find((a) => a.role === role && String(a.sessionId || '') === String(sessionId || ''));
   if (dup && !force) fail('ALREADY_ARCHIVED', `该会话已归档：${dup.id}（如需重归档加 --force）`, { archiveId: dup.id });
+  // B-20261119-133232-e6c1：归档清理会把名册 sessionId 清空，导致第二次归档看起来像新会话；
+  // 这里补「已确认但未换人」的重复归档守卫（rotate 后 rotatedAt 有值即放行），保持 ALREADY_ARCHIVED 语义。
+  const pendingUnrotated = listArchives(projectName).find((a) => String(a.role || '') === role && !a.rotatedAt && a.confirmedAt);
+  if (pendingUnrotated && !force) fail('ALREADY_ARCHIVED', `该角色已有未换人的归档：${pendingUnrotated.id}（如需重归档加 --force，或先 session rotate）`, { archiveId: pendingUnrotated.id });
   const rounds = readRounds(projectName, role).roundsSinceArchive;
   const inputTokens = skipTranscript ? null : latestInputTokens({ projectName, sessionId });
   const at = nowIso();
@@ -363,7 +369,9 @@ export function archiveSession({ projectName, role, reason = '', self = false, a
   all[role] = row;
   writeJson(roundsFile(projectName), all);
   const decisionLog = self ? pmDecisionLog(project.path, role, record, 'PM 自归档，待 Owner 在 owner confirm --archive 确认') : null;
-  return { ok: true, record, file, decisionLog, project: project.name };
+  // B-20261119-133232-e6c1：归档角色后必须同步摘掉「该角色仍已就绪」的所有派生状态（名册/boot/项目映射/workbench）。
+  const cleanup = clearArchivedRoleState(projectName, role, sessionId, record.id);
+  return { ok: true, record, file, decisionLog, project: project.name, cleanup };
 }
 
 /** Owner 确认 PM 自归档：写 confirmedAt（值为确认时间）。 */
@@ -717,3 +725,109 @@ export function sweepDeferredArchives({ projectName, now = Date.now(), limit = A
 /** 面板用：每个角色最近一次 failed（count=该角色历史 failed 行数）；纯读，不写。
  *  注意：唯一实现在 src/session-queue.js → summarizeArchiveFailures（渲染层只读 model）；本文件不再重复实现，
  *  以免两处口径漂移。 */
+
+/**
+ * B-20261119-133232-e6c1：归档角色会话后清理「已就绪」派生状态（每步独立 try，失败记 warnings 不阻断归档）。
+ * 清：团队.json members[role].sessionId → ''；项目 团队会话.json roles[role].sessionId → ''；
+ * workbench.json projects[].sessions[role] + workspace.sessionIds 去掉该会话；工作流 boots[role] 删除 + 该角色旧 boot 令牌文件删除。
+ * 审计：状态/项目/<slug>/归档清理.jsonl 追加一行。
+ */
+export function clearArchivedRoleState(projectName, role, sessionId, archiveId = '') {
+  const project = loadProject(projectName);
+  const steps = [];
+  const warnings = [];
+  const guard = (name, fn) => {
+    try { const r = fn(); steps.push({ step: name, ok: true, ...(r && typeof r === 'object' ? r : {}) }); return r; }
+    catch (e) { warnings.push({ step: name, code: String((e && e.code) || 'CLEANUP_FAILED'), message: String((e && e.message) || e).slice(0, 200) }); return null; }
+  };
+  const sid = String(sessionId || '');
+  // 1) 名册：清该角色 sessionId（保留成员本身，另由 97db 删除项目/归档团队处理）
+  guard('roster', () => {
+    const team = loadTeam();
+    const member = (team.members || []).find((m) => String(m.role || '') === String(role || ''));
+    if (!member) return { changed: false, why: 'member_missing' };
+    const before = String(member.sessionId || '');
+    if (!before) return { changed: false, why: 'already_empty' };
+    setMemberSession(team, role, '', { bootedAt: '', readAt: '' });
+    saveTeam(team);
+    return { changed: true, before };
+  });
+  // 2) 项目映射：团队会话.json roles[role]
+  guard('manifest', () => {
+    const file = path.join(project.path, '团队会话.json');
+    if (!fs.existsSync(file)) return { changed: false, why: 'missing' };
+    const data = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+    const rows = Array.isArray(data.roles) ? data.roles : [];
+    const row = rows.find((x) => String((x && x.role) || '') === String(role || ''));
+    if (!row) return { changed: false, why: 'role_missing' };
+    const before = String(row.sessionId || '');
+    Object.assign(row, { sessionId: '', archivedAt: nowIso() });
+    writeJsonAtomic(file, data, { allowedRoots: [project.path] });
+    return { changed: Boolean(before), before };
+  });
+  // 3) workbench.json：projects[].sessions[role] + workspace.sessionIds
+  guard('workbench', () => {
+    const candidates = [
+      String(process.env.AWB_STORE || ''),
+      process.env.AWB_DATA_DIR ? path.join(String(process.env.AWB_DATA_DIR), 'userdata', 'workbench.json') : '',
+      process.env.DSH_PROFILE_DIR ? path.join(String(process.env.DSH_PROFILE_DIR), 'data', 'userdata', 'workbench.json') : '',
+      path.join(PATHS.workspace, 'data', 'userdata', 'workbench.json'),
+    ].filter(Boolean);
+    const names = [project.name, project.teamName].filter(Boolean).map(String);
+    const touched = [];
+    for (const file of [...new Set(candidates)]) {
+      if (!fs.existsSync(file)) continue;
+      const store = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+      let changed = false;
+      for (const row of (Array.isArray(store.projects) ? store.projects : [])) {
+        if (!row) continue;
+        const rowName = String(row.teamName || row.name || '');
+        const same = String(row.id || '') === String(project.id || '') || names.includes(rowName);
+        if (!same) continue;
+        if (row.sessions && Object.prototype.hasOwnProperty.call(row.sessions, role)) { delete row.sessions[role]; changed = true; }
+        if (row.workspace && Array.isArray(row.workspace.sessionIds)) {
+          const next = row.workspace.sessionIds.filter((x) => String(x) !== sid);
+          if (next.length !== row.workspace.sessionIds.length) { row.workspace.sessionIds = next; changed = true; }
+        }
+      }
+      if (changed) { writeJsonAtomic(file, store); touched.push(file); }
+    }
+    return { changed: touched.length > 0, files: touched };
+  });
+  // 4) 工作流 boots[role] + 该角色旧 boot 令牌
+  guard('boots', () => {
+    const wfFile = path.join(projectStatePaths(projectName).dir, '工作流.json');
+    let wfChanged = false;
+    if (fs.existsSync(wfFile)) {
+      const wf = JSON.parse(fs.readFileSync(wfFile, 'utf8').replace(/^\uFEFF/, ''));
+      if (wf && wf.boots && Object.prototype.hasOwnProperty.call(wf.boots, role)) {
+        delete wf.boots[role];
+        writeJsonAtomic(wfFile, wf);
+        wfChanged = true;
+      }
+    }
+    const removedTokens = [];
+    try {
+      for (const name of fs.readdirSync(PATHS.boots)) {
+        if (!name.endsWith('.json')) continue;
+        const file = path.join(PATHS.boots, name);
+        try {
+          const tok = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+          const sameRole = String(tok.role || '') === String(role || '');
+          const sameProject = String(tok.project || '') === String(projectName || '');
+          // pm 令牌保留：自归档待 Owner 确认路径仍需同一令牌二次调用（selftest 契约）。
+          if (sameRole && sameProject && String(role) !== 'pm') { fs.rmSync(file, { force: true }); removedTokens.push(name); }
+        } catch { /* 坏令牌跳过 */ }
+      }
+    } catch { /* 启动目录不存在 */ }
+    return { wfChanged, removedTokens };
+  });
+  // 5) 审计
+  guard('audit', () => {
+    const file = path.join(projectStatePaths(projectName).dir, '归档清理.jsonl');
+    ensureDir(path.dirname(file));
+    fs.appendFileSync(file, JSON.stringify({ at: nowIso(), role, sessionId: sid, archiveId, steps, warnings }) + '\n', 'utf8');
+    return { file };
+  });
+  return { ok: warnings.length === 0, role, sessionId: sid, steps, warnings };
+}

@@ -9167,7 +9167,16 @@ ipcMain.handle('theme:metrics', async () => {
       fresh.pendingCleanup = queue.slice(-50);
     }
     writeStore(fresh);
-    // 看板正显示被删项目时一起收起，避免窗口继续展示已归档项目。
+    // B-20261119-133232-e6c1：删除工作区后必须让会话排队/团队面板立即按新状态重绘，
+    // 否则壳层仍显示旧工作区与六角色「已就绪」（渲染层不清缓存、watch 可能错过落盘事件）。
+    try {
+      for (const win of BrowserWindow.getAllWindows()) {
+        try {
+          win.webContents.send('team:session-queue-changed', { reason: 'project-deleted', projectId: targetId, at: new Date().toISOString() });
+          win.webContents.send('team:roster-changed', { reason: 'project-deleted', projectId: targetId, at: new Date().toISOString() });
+        } catch { /* 窗口在销毁中 */ }
+      }
+    } catch { /* 广播失败不阻断删除 */ }
     if (boardWindowAlive() && teamBoardProjectId === targetId) {
       try { teamBoardWindow.close(); } catch { /* ignore */ }
     }
