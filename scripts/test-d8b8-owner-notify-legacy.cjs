@@ -149,6 +149,14 @@ function main() {
       && String(notices[0].from || '') === 'system' && String(notices[0].type || '') === 'notice'
       && /轮次：1/.test(String(notices[0].body || '')) && /通道：ui/.test(String(notices[0].body || '')),
       { before: mailBefore, after: mailAfter.length, subjects: notices.map((m) => m.subject), body: notices[0] && String(notices[0].body || '').slice(0, 160) });
+    // B-8235：壳层不得再有任何「第二套实现」的符号（去重常量/内存 Map/审计写/自有通知函数/审计 action 字面量）
+    {
+      const shellDup = ['OWNER_DECISION_NOTIFY_DEDUPE_MS', 'ownerDecisionNotifySeen', 'appendOwnerDecisionAudit', 'notifyOwnerDecisionToPm', 'lastNotifiedAtFromAudit', 'owner_decision_notified', 'owner_decision_notify_failed'];
+      const found = shellDup.filter((k) => shell.includes(k));
+      check('A6 壳层 0 处第二套实现符号（去重常量/Map/审计写/自有通知函数/审计 action）', found.length === 0, { found });
+      check('A7 壳层唯一路径＝调 owner-notify 且复用返回的 notify 字段',
+        /'owner-notify'/.test(shell) && /notifyRun\.value\.notify|value && notifyRun\.value\.notify/.test(shell) && /ownerDecisionNotify = \(notifyRun/.test(shell), {});
+    }
     check('B1b owner-notify 的 --json 返回体带 notify（ok + messageId 可观测）',
       Boolean((n1.json || {}).notify) && ((n1.json || {}).notify.ok === true || (n1.json || {}).notify.deduped === true),
       { json: n1.json && { ok: n1.json.ok, notify: n1.json.notify } });
