@@ -103,6 +103,15 @@ const writeCard = (role, text) => fs.writeFileSync(cardOf(role), text, 'utf8');
     check('AC2② dry-run 含 add 场景节，wrote=false', Boolean(dryRole) && (dryRole.changes || []).some((c) => c.action === 'add' && String(c.section).startsWith('scene-coverage')) && dryRole.wrote === false, dryRole && { changes: dryRole.changes, wrote: dryRole.wrote });
     check('AC2③ dry-run 不写卡（老卡 sha 不变）', shaFile(cardOf('product')) === oldSha);
 
+    // ── AC2①：boot 简报出现「角色卡模板落后:」行（三检测入口之一；只提示不写卡）──
+    const pmCardPath = cardOf('pm');
+    const pmCardBefore = fs.readFileSync(pmCardPath, 'utf8');
+    fs.writeFileSync(pmCardPath, pmCardBefore.split(/\r?\n/).filter((l) => !/<!--\s*rolecard:\s*template=/.test(l)).join('\n'), 'utf8');
+    const pmBootForBrief = run(['boot', '--role', 'pm', '--project', project, '--session', 'session-bf05-pm', '--json']);
+    const briefingText = String((pmBootForBrief.json && pmBootForBrief.json.briefing) || '');
+    check('AC2① boot 简报含「角色卡模板落后:」行（只提示、不写卡）',
+      /角色卡模板落后:/.test(briefingText) && /pm/.test(briefingText), briefingText.split(/\r?\n/).filter((l) => /角色卡模板落后/.test(l)).join(' | '));
+
     // ── AC6①：越权 PERMISSION_DENIED（programmer1 令牌改 product 卡）──────────
     const p1Boot = run(['boot', '--role', 'programmer1', '--project', project, '--session', 'session-bf05-p1', '--json']);
     const p1Tok = p1Boot.json && p1Boot.json.token;

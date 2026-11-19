@@ -143,7 +143,8 @@ export function rolecardStaleBriefLines(project, role) {
   try {
     const row = rolecardStaleOf(project, role);
     if (!row.ok || !row.stale) return [];
-    return [`角色卡模板落后: ${role}：模板 v${row.templateVersion} / 卡 v${row.cardVersion || '0'}（无标记），差异 ${row.diffCount} 处；看 diff：rolecard sync --role ${role} --dry-run`];
+    const cardVer = row.cardVersion ? row.cardVersion : '0（无标记）';
+    return [`角色卡模板落后: ${role}：模板 v${row.templateVersion} / 卡 v${cardVer}，差异 ${row.diffCount} 处；看 diff：rolecard sync --role ${role} --dry-run`];
   } catch {
     return [];
   }

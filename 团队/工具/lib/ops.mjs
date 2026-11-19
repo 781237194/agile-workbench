@@ -74,6 +74,8 @@ import { pushRosterMember } from './roster-writer.mjs';
 // T-20261118-091644-6e53：派单前置检查程序门（Owner 2026-11-18 09:15「不能靠 PM 自觉」）
 import { assertDispatchPrecheck, DISPATCH_LOCK_MAX_INFLIGHT } from './dispatch-check.mjs';
 import { checkEvidenceGate } from './evidence.mjs';
+// R-bf05（T-20261119-181230-feee）§7.2：boot 简报「角色卡模板落后:」行（只提示、绝不写卡）。
+import { rolecardStaleBriefLines } from './rolecard-cli.mjs';
 import { bumpRound, archiveSession, confirmArchive, ROUNDS_MAX } from './session-archive.mjs';
 import {
   transitionRequirement, syncWorkflowRow, stampRejected, workflowAction, readWorkflowState, writeWorkflowState, latestValidOwnerDecision, currentDeliveryRound,
@@ -5331,6 +5333,11 @@ function bootStatusBlockLines(projectName, role) {
   } catch {
     out.push('状态: 暂不可用（未回执统计读取失败）');
   }
+  // R-bf05（T-20261119-181230-feee）§7.2 三检测入口之一：boot 简报提示「角色卡模板落后:」
+  // 只读、只提示、绝不写卡；读不到就不出（不阻断 boot）。
+  try {
+    for (const line of (rolecardStaleBriefLines(projectName, String(role)) || [])) out.push(line);
+  } catch { /* 检测不可用不影响简报其余内容 */ }
   return out;
 }
 
