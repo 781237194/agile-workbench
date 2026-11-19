@@ -82,6 +82,18 @@ function main() {
       && /if \(rosterArchivedOf\.get\(roleId\) === true\) \{ missing\.push\(roleId\); continue; \}/.test(ipSeg),
       { seg: ipSeg.slice(0, 260) });
 
+    // A5（PM 02:22 的第 d 处 · 数据层）：归档必须真清 store 残留，不能只靠渲染层过滤。
+    //   d 的实现在 团队/工具/lib/session-archive.mjs → clearArchivedRoleState 的 workbench 步：
+    //   ① 只有「归档的是当前会话」才 delete row.sessions[role]（旧会话要保留在岗绑定）
+    //   ② workspace.sessionIds 一律按 sid 摘除（新旧会话都摘）
+    const arch = fs.readFileSync(path.join(ROOT, "团队", "工具", "lib", "session-archive.mjs"), "utf8");
+    const caStart = arch.indexOf("function clearArchivedRoleState");
+    const caSeg = caStart >= 0 ? arch.slice(caStart, caStart + 6000) : "";
+    check("A5 归档数据层清残留（session-archive.mjs）：当前会话 delete sessions[role] + sessionIds 按 sid 摘除",
+      caSeg.includes("delete row.sessions[role]")
+      && caSeg.includes("row.workspace.sessionIds.filter((x) => String(x) !== sid)"),
+      { seg: caSeg.slice(0, 200) });
+
     /* ── B 逻辑复算（等价实现，覆盖「残留映射 vs 名册」两种情形） ── */
     const roleIds6 = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
     const residual = { pm: 's1', product: 's2', analyst: 's3', programmer1: 's4', programmer2: 's5', tester: 's6' };
