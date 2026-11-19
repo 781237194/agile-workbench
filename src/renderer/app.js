@@ -2896,7 +2896,6 @@ function renderSessions() {
       title="${esc(titleMismatch ? `DSH 标题是「${live.currentTitle}」，应为「${roleSessionTitle(p, role.id)}」` : (sessionId ? '打开 ' + role.name + ' 的 DSH 会话操作' : '先建团队'))}">
       <span class="session-dot" style="--role-color:${esc(role.color)}" aria-hidden="true"></span>
       <span class="session-main"><b data-role-name>${esc(role.name)}</b><small>${sub}</small></span>
-      ${role.id === 'pm' ? '<span data-role-bound-session hidden></span><span data-role-binding-state></span>' : ''}
       <span class="session-state ${st.cls}" title="${esc(st.title)}">${esc(st.text)}</span>
     </div>`;
   }).join('');

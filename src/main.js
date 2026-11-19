@@ -2879,7 +2879,10 @@ function runPmIdentityReconcile(source = 'startup') {
       if (pmIdentityRetryTimer.unref) pmIdentityRetryTimer.unref();
     }
   } else {
-    sendPmIdentityState({ state: pmSid ? 'pending_activation' : 'ok', code: 'OK', sessionShort: pmSid.slice(0, 8), error: '' });
+    // B-20261119-133233-7fb9（P1）：正常分支不再发 pending_activation——PM 有绑定会话是常态，
+    // 之前恒发 pending_activation 导致左侧「项目经理」行永远显示「已绑定（会话待激活）·待激活」。
+    // 六角色状态统一由 team:members 的 memberStateOf 四态判定（渲染层同口径），这里只报 ok + 短号。
+    sendPmIdentityState({ state: 'ok', code: 'OK', sessionShort: pmSid.slice(0, 8), error: '' });
   }
   return result;
 }
