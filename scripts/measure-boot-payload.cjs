@@ -11,7 +11,9 @@
  *   node scripts/measure-boot-payload.cjs --role pm        # 单角色
  *   node scripts/measure-boot-payload.cjs --json           # 只打印 JSON（不写文件）
  *
- * 只读保证：只跑 `team.mjs boot --json`（读命令，不写账本）；不修改任何生产文件。
+ * 副作用澄清（产品 2026-11-20 04:14 复核指出，原写「只读保证」不实）：
+ *   本脚本不写业务账本，但 `boot --json` 本身会写 **启动令牌 / 阅读.jsonl / 该角色 boots 记录**
+ *   ——所以不是零写入。请挑闲窗口跑，或在沙盘里跑（TEAM_ROOT / TEAM_PROJECTS_ROOT / TEAM_WORKBENCH_JSON 全指沙盘）。
  * 产物：`测试人员/产出/证据-47ec/boot-payload.json`（默认；可用 --out 改）
  */
 const fs = require('node:fs');
