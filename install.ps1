@@ -3064,6 +3064,15 @@ function Invoke-MaintSystemApply {
                 'hosts' {
                     if (-not $item.existed) { $item.result = 'already' }
                     else {
+                        $isAdmin = $false
+                        try { $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { }
+                        if (-not $isAdmin -and -not $env:AWB_MAINT_ALLOW_HOSTS) {
+                            # 非管理员：明确给 HOSTS_NEED_ADMIN + 提权指引（不尝试写，避免误报 SYS_ITEM_FAILED）
+                            $item.result = 'failed'; $item.code = 'HOSTS_NEED_ADMIN'
+                            $item.reason = '需要管理员权限：请用「以管理员身份运行」重跑，或手动删除 hosts 中 # >>> PMWorkbench GitHubFix >>> 段'
+                            Write-MaintLine ('  [需权限] HOSTS_NEED_ADMIN：' + $item.reason) 'Yellow'
+                            continue
+                        }
                         $hostsFile = $item.path
                         $text = [System.IO.File]::ReadAllText($hostsFile, [System.Text.Encoding]::UTF8)
                         $pat = '(?ms)^# >>> PMWorkbench GitHubFix >>>.*?^# <<< PMWorkbench GitHubFix <<<[^\r\n]*\r?\n?'
