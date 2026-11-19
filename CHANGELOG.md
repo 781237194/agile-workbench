@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 2.1.0（2026-11-19）
+
+### Owner 实测六问题修复（P0/P1 全部收口）
+
+- **一句话安装真一键**：安装器零端口发现/不写 `dsh.json`/不执行探针；运行期首启只读探针（`session/list`）→ `data/dsh-capability.json` + 摘要「DSH 互通能力：有/无」；`AWB_NO_MIRROR=1` 关镜像；Electron 下载进度（≤30s 一行）；Node/Electron 缓存兜底；`dshVersion` 真实取值；MCP 失败可读（`~/.dsh/logs/mcp-*.log` + warnings + 关于页 `[data-mcp-warning]`）。
+- **首开粒子可见**：系统 `prefers-reduced-motion` 整层降级不再静默——菜单显示真实态 +「仍然开启」；强制开启 `ui.fxForce` 重启保持；性能自采样降级可恢复。
+- **boot 引导**：简报新增按角色可复制命令模板（`团队\工具\team.mjs` 前缀、≥3 条）+ 派单锁/未回执状态块 + 红线（禁止子代理代跑角色）。
+- **开局必须走团队通道**：新增 `pm dispatch` 原子命令（五步、失败列全 `missing[]`、零派单写入）；doc 阶段豁免 G2/G3/G4 并写 `dispatch_gate_skipped` 审计；`[data-channel-warn]` 未走通道告警。
+- **幽灵团队/恢复项目**：团队台按名册过滤（空名册 0 行+提示）；删除同事务清四处映射+墓碑+延迟清扫+写者守卫（防旧副本回写）；delete 六步事务化（先落盘后归档，rename 退避+复制兜底）；恢复对「记录已删、目录仍在」重建记录+6 会话映射；墓碑过期/同名重建豁免。
+- **在线升级**：更多菜单「检查更新」五态；自动检查开关只提示不下载（非侵入小圆点）；版本源必须带 sha256、缺则不下载；强制升级需 reason+审计；壳层调用 `install.ps1 -Upgrade` 真实升级+备份+回滚+重启提示。
+
+### DSH 套装
+
+- `dsh-agile-workbench@2.2.0`：launcher `pm-workbench-dsh@0.5.0`（安装路径按运行环境推算，无作者绝对路径）；一句话安装脚本钉 `v2.1.0`。
+
 ## 2.0.0（2026-11-18）
 
 ### DSH 套装与插件市场（2026-11-18 发版当天）
