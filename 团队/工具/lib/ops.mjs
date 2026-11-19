@@ -82,6 +82,8 @@ import { pushRosterMember } from './roster-writer.mjs';
 // T-20261118-091644-6e53：派单前置检查程序门（Owner 2026-11-18 09:15「不能靠 PM 自觉」）
 import { assertDispatchPrecheck, DISPATCH_LOCK_MAX_INFLIGHT } from './dispatch-check.mjs';
 import { checkEvidenceGate } from './evidence.mjs';
+// T-20261119-221909-1914：场景矩阵软门（只审计不拦；TEAM_SCENE_ENFORCE=1 才硬）
+import { gateSceneMatrix } from './gates.mjs';
 // R-bf05（T-20261119-181230-feee）§7.2：boot 简报「角色卡模板落后:」行（只提示、绝不写卡）。
 import { rolecardStaleBriefLines } from './rolecard-cli.mjs';
 // B-d8b8：Owner 决定通知的单一实现（文案/去重/审计在 lib/owner-decision.mjs，执行体在本文件）
@@ -6578,6 +6580,40 @@ export async function cmdAnswer(args) {
 
 // ========== 任务 ==========
 
+/**
+ * T-1914：场景矩阵软门审计（只写审计、返回 advisory，绝不影响 done/accept 的结果）。
+ * 硬门开关 `TEAM_SCENE_ENFORCE=1`（沙盘默认关；夹具显式开启验拒绝）。
+ */
+function sceneMatrixCheck({ projectName, task, evidenceFiles = [], action = 'done' }) {
+  try {
+    const texts = [String((task && task.detail) || '')];
+    for (const rel of (evidenceFiles || [])) {
+      try {
+        // 证据路径是项目内相对路径（如 产出/xxx.md）；从项目目录解析，兼容绝对路径。
+        const raw = String(rel || '').trim();
+        if (!raw) continue;
+        const projPath = (() => { try { return loadProject(projectName).path; } catch { return ''; } })();
+        const candidates = path.isAbsolute(raw) ? [raw] : [path.join(projPath || '', raw), path.join(process.cwd(), raw)];
+        for (const abs of candidates) {
+          if (abs && fs.existsSync(abs)) { texts.push(fs.readFileSync(abs, 'utf8')); break; }
+        }
+      } catch { /* 读不到就只靠 detail */ }
+    }
+    const gateRes = gateSceneMatrix({ text: texts.join('\n') });
+    if (!gateRes) return null;
+    const file = path.join(projectStatePaths(projectName).dir, '场景矩阵审计.jsonl');
+    try {
+      ensureDir(path.dirname(file));
+      fs.appendFileSync(file, `${JSON.stringify({
+        at: nowIso(), action, taskId: String((task && task.id) || ''), role: String((task && task.owner) || ''),
+        missing: gateRes.missing, missingLabels: gateRes.missingLabels, filled: gateRes.filled,
+        total: gateRes.total, enforced: gateRes.enforced, soft: gateRes.soft,
+      })}${String.fromCharCode(10)}`, 'utf8');
+    } catch { /* 审计写失败不影响主流程（软门） */ }
+    return gateRes;
+  } catch { return null; }
+}
+
 export async function cmdTask(args) {
   const sub = args._[1] || 'list';
   const b = bootFor(args, 'task');
@@ -7288,7 +7324,12 @@ export async function cmdTask(args) {
     const evidenceHint = evidenceGate && !evidenceGate.skipped
       ? `\n证据门：已核 ${evidenceGate.files.length} 个证据文件（sha256 已记入任务）`
       : (evidenceGate && evidenceGate.skipped ? '\n证据门：沙盘跳过（TEAM_SELFTEST=1）' : '');
-    out(args, `已完成 ${task.id}，证据：${task.evidence}${evidenceHint}${requirementAdvance ? `\n需求状态：${requirementAdvance.previous} → ${requirementAdvance.status}（phase=${requirementAdvance.phase}）` : ''}${queueHint}${roundHint}${memoryHint}${wakeHint}${warningHint}${lockHint}`, { ok: true, task, evidenceGate, requirementAdvance, dispatchQueue, tailPump, roundInfo, memory: memoryGate, wake: doneWake, warnings: doneWarnings, receiptTo: doneTo, releasedLock });
+    // T-1914：场景矩阵**软门**——缺项只写审计 + advisory，不拦；TEAM_SCENE_ENFORCE=1 才硬。
+  const sceneGate = sceneMatrixCheck({ projectName: b.project, task, evidenceFiles: (evidenceGate && evidenceGate.files) || [], action: 'done' });
+  if (sceneGate && sceneGate.enforced) {
+    gateFail(b.project, { role: b.role, action: 'task_done', taskId: task.id }, sceneGate);
+  }
+  out(args, `已完成 ${task.id}，证据：${task.evidence}${evidenceHint}${requirementAdvance ? `\n需求状态：${requirementAdvance.previous} → ${requirementAdvance.status}（phase=${requirementAdvance.phase}）` : ''}${queueHint}${roundHint}${memoryHint}${wakeHint}${warningHint}${lockHint}`, { ok: true, task, evidenceGate, requirementAdvance, dispatchQueue, tailPump, roundInfo, memory: memoryGate, wake: doneWake, warnings: doneWarnings, receiptTo: doneTo, releasedLock });
     return;
   }
   if (sub === 'priority') {
@@ -9705,6 +9746,8 @@ function cmdOwnerConfirm(args) {
  */
 function acceptDefectTask(args, { project, projectName, task, decision, opinion, proxyMode, asRole }) {
   const at = nowIso();
+  // T-1914：缺陷验收也记一笔场景矩阵审计（accept 只记录、不拦）。
+  try { sceneMatrixCheck({ projectName, task, evidenceFiles: [], action: 'accept' }); } catch { /* 软门 */ }
   const actor = String(asRole || '').trim().toLowerCase();
   // R-62b9（增补卷-62b9-1 §四 E1/E2）：测试/PM 直接验收缺陷**不要求代管**；owner 走原 ui/tty 通道。
   if (actor && !['pm', 'tester', 'owner'].includes(actor)) {

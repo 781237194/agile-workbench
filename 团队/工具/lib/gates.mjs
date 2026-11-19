@@ -701,6 +701,51 @@ function collectLatest(dir, pattern) {
  *   · 无需求绑定的任务沿用历史口径 `测试人员/产出/测试报告-v<N>.md`（按 mtime 取最新一份）；
  *   · 历史报告不改写、不迁移：旧口径文件仍在原处，新口径按目录隔离，互不遮蔽。
  */
+/**
+ * T-20261119-221909-1914：**场景矩阵软门**（Owner 拍板「先做软门」）。
+ *
+ * 扫证据报告正文的六类关键词（§H H3 场景矩阵）：入口 / 正常 / 空值或边界 / 失败或异常 / 并发或重复 / 降级或恢复。
+ * 语义：**缺项只审计 + advisory，不 fail**（soft:true）；只有 `TEAM_SCENE_ENFORCE=1` 才作为硬门。
+ * 返回 null = 六类齐（无需审计）；否则 {code,soft,missing,filled,total}。
+ */
+export const SCENE_MATRIX_CLASSES = [
+  { key: 'entry', label: '入口', re: /入口|触发路径|从哪进|从哪儿进|点进|打开路径/ },
+  { key: 'happy', label: '正常', re: /正常|正向|happy\s*path|顺利/ },
+  { key: 'edge', label: '空值/边界', re: /空值|边界|为空|空串|0\s*条|零条|超长|极端值/ },
+  { key: 'fail', label: '失败/异常', re: /失败|异常|报错|错误码|超时|不可用/ },
+  { key: 'concurrent', label: '并发/重复', re: /并发|重复|幂等|连点|重入|二次/ },
+  { key: 'degrade', label: '降级/恢复', re: /降级|恢复|回滚|兜底|重试/ },
+];
+
+export function sceneMatrixOf(text) {
+  const body = String(text || '');
+  const filled = [];
+  const missing = [];
+  for (const cls of SCENE_MATRIX_CLASSES) {
+    if (cls.re.test(body)) filled.push(cls.key); else missing.push(cls.key);
+  }
+  return { filled, missing, total: SCENE_MATRIX_CLASSES.length };
+}
+
+export function gateSceneMatrix({ text = '', enforce = null } = {}) {
+  const enforced = enforce === null ? String(process.env.TEAM_SCENE_ENFORCE || '') === '1' : Boolean(enforce);
+  const m = sceneMatrixOf(text);
+  if (!m.missing.length) return null;
+  const labels = m.missing.map((k) => (SCENE_MATRIX_CLASSES.find((c) => c.key === k) || {}).label || k);
+  return {
+    code: 'SCENE_MATRIX_MISSING',
+    gate: 'G-scene',
+    soft: !enforced,
+    enforced,
+    missing: m.missing,
+    missingLabels: labels,
+    filled: m.filled,
+    total: m.total,
+    message: `场景矩阵缺 ${m.missing.length}/${m.total} 类：${labels.join('、')}（§H H3 六类：入口/正常/空值边界/失败异常/并发重复/降级恢复）`,
+    next: '在实现说明里补「场景×结果×证据」表，覆盖缺的类别（软门只提示；下版转硬门）',
+  };
+}
+
 export function gateTestReport({ projectPath, task, requirementId }) {
   const base = path.join(path.resolve(projectPath), '测试人员', '产出');
   const reqId = String(requirementId || '').trim();
