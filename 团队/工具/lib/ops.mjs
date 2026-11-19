@@ -5909,6 +5909,32 @@ export async function cmdSend(args) {
     });
   }
   const wakeFailed = Boolean(isDispatch && wake && wake.ok !== true);
+  // K2（T-20261119-165250-e328）：**派单成功后才转 working**。
+  // 建单时 status=open / claimedAt=null（owner 只是建议承接人）；派单（send --ack --task）才是认领起点。
+  // 只在「确实是派单 + 唤醒没失败 + 没降级成通知 + 任务当前 open」时翻转，其余一律不动（幂等、零副作用）。
+  let dispatchClaim = null;
+  const dispatchTaskId = String(args.task || '').trim();
+  if (isDispatch && !demoted && !wakeFailed && dispatchTaskId) {
+    try {
+      const dispatchTask = loadTask(b.project, dispatchTaskId);
+      if (String(dispatchTask.status || '') === 'open') {
+        dispatchTask.owner = to;
+        dispatchTask.status = 'working';
+        dispatchTask.claimedAt = nowIso();
+        dispatchTask._by = b.role; dispatchTask._action = 'dispatch'; dispatchTask._note = `send --ack ${msg.id}`;
+        saveTask(b.project, dispatchTask);
+        dispatchClaim = { taskId: dispatchTaskId, status: 'working', claimedAt: dispatchTask.claimedAt, messageId: msg.id, via: 'dispatch' };
+        appendEvent({
+          role: b.role, sessionId: b.sessionId, action: 'task_dispatch_claim', project: b.project, target: dispatchTaskId,
+          note: `派单 ${msg.id} → ${to}；任务 open → working（claimedAt 记为派单时刻）`,
+        });
+      } else {
+        dispatchClaim = { taskId: dispatchTaskId, status: String(dispatchTask.status || ''), skipped: 'not_open', messageId: msg.id };
+      }
+    } catch (e) {
+      dispatchClaim = { taskId: dispatchTaskId, error: String((e && e.message) || e), messageId: msg.id };
+    }
+  }
   const suffix = wake
     ? (wake.ok
       ? (wake.skipped === 'MERGED_PENDING'
@@ -5934,6 +5960,7 @@ export async function cmdSend(args) {
         ? { role: to, state: targetAlive.probe.state, sessionId: targetAlive.probe.sessionId, warmup: targetAlive.warmup }
         : null,
       wakeFailed, releasedLock, wakeHeader, wakeRetry: sendWakeRetry, autoRead,
+      ...(dispatchClaim ? { dispatchClaim } : {}),
       ...(dispatchPrecheck ? { dispatchPrecheck } : {}),
       ...(pendingBoot ? { pendingBoot: true, autoBoot } : {}),
     });
@@ -6408,7 +6435,14 @@ export async function cmdTask(args) {
     } catch { /* 阶段标记失败不阻断建单 */ }
     appendEvent({ role: b.role, sessionId: b.sessionId, action: 'task_create', project: b.project, target: task.id, note: `${task.priority} ${task.title}`, data: { task } });
     if (task.owner) {
-      notify({ from: b.role, to: task.owner, subject: `新任务 ${task.id}`, body: clipMessage(`${task.priority} ${task.title}\n${task.detail}`), project: b.project, task: task.id, ackRequired: true, sessionId: b.sessionId });
+      // K2（T-20261119-165250-e328）：建单只发「待派单」通知，不再隐式开工。
+      // 派单由 PM 的 `send --ack --task` 触发（派单成功后才把任务转 working + 写 claimedAt）。
+      notify({
+        from: b.role, to: task.owner,
+        subject: `新任务 ${task.id}（待派单，勿开工）`,
+        body: clipMessage(`${task.priority} ${task.title}\n${task.detail}\n\n【K2 口径】本任务当前 open、未认领（--owner 只是建议承接人），**请勿开工**。等 PM 派单（send --ack --task ${task.id}）后再开工；派单成功才转 working 并记 claimedAt。`),
+        project: b.project, task: task.id, ackRequired: true, sessionId: b.sessionId,
+      });
     }
     out(args, `已建任务 ${task.id} [${task.priority}] ${task.title}${task.owner ? ' → ' + task.owner : ''}`, { ok: true, task });
     return;

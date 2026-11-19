@@ -3609,11 +3609,15 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
       return String(r.stdout || '') + String(r.stderr || '');
     };
 
-    // ① 文件不存在：不得 done，任务状态保持 working（零副作用）。
+    // ① 文件不存在：不得 done，任务状态保持未完成（零副作用）。
     const evT1 = evMkTask('证据门：文件缺失');
     if (!evFail(evT1, '产出/不存在.md').includes('EVIDENCE_FILE_MISSING')) failStep('证据门：缺失文件未返回 EVIDENCE_FILE_MISSING');
-    if (JSON.parse(read(evTaskFile(evT1))).status !== 'working') failStep('证据门：失败后任务被误标 done');
-    pass('G9：证据文件不存在 → EVIDENCE_FILE_MISSING，任务保持 working');
+    // K2（T-20261119-165250-e328）：建单不再自动认领 → 未 claim 时是 open（旧值恒为 working）。
+    // 本断言实质是「证据门失败后任务不得被标 done」，故允许 open/working 两态，单独拦 done。
+    const evT1Status = JSON.parse(read(evTaskFile(evT1))).status;
+    if (evT1Status === 'done') failStep('证据门：失败后任务被误标 done');
+    if (!['open', 'working'].includes(String(evT1Status))) failStep(`证据门：失败后任务状态异常（${evT1Status}）`);
+    pass('G9：证据文件不存在 → EVIDENCE_FILE_MISSING，任务保持未完成（open/working）');
 
     // ② 旧文件顶替：mtime 早于任务开始 → EVIDENCE_STALE。
     const evT2 = evMkTask('证据门：旧文件');

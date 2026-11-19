@@ -1435,10 +1435,14 @@ export function createTask({ project, title, detail = '', priority, priorityBy, 
     priorityBy: priorityBy || createdBy,
     priorityReason: '',
     owner: owner || null,
-    status: owner ? 'working' : 'open',
+    // K2（T-20261119-165250-e328，六人流程评估·Owner 已批）：**建任务一律 open、不写 claimedAt**。
+    // `--owner` 只作「建议承接人」，不代表已派单/已开工；真正的认领起点是 PM 派单（`send --ack --task`）
+    // 或本人 `task claim`。旧实现 `status: owner ? 'working' : 'open'` + `claimedAt: owner ? now : null`
+    // 会让「建单即被计为认领后 N 分钟没动」→ 认领停滞误报（B-196e 建单当天即被误报）。
+    status: 'open',
     createdBy,
     createdAt: nowIso(),
-    claimedAt: owner ? nowIso() : null,
+    claimedAt: null,
     due: due || '',
     doneAt: null,
     evidence: '',
