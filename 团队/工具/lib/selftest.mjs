@@ -433,7 +433,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
     if (!ack.ack || !ack.ack.id) failStep('回执没有落库');
     const ackAgain = run(['ack', '--boot', pgBoot.token, '--id', m1.message.id, '--note', '重复回执']).stdout;
     if (!ackAgain.includes('仅表示已收到') || !ackAgain.includes('task done')) failStep('ack 输出未区分已回执/已完成', ackAgain);
-    const pmInbox = json(['inbox', '--boot', pmBoot.token, '--json']);
+    const pmInbox = json(['inbox', '--boot', pmBoot.token, '--all', '--json']);
     const receiptMsg = pmInbox.messages.find((m) => m.type === 'receipt');
     if (!receiptMsg) failStep('PM 没收到回执消息');
     if (!String(receiptMsg.body || '').includes('不代表完成')) failStep('回执消息未区分已回执/已完成', String(receiptMsg.body || ''));
@@ -2937,7 +2937,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
       if (!/DECISION_CHOICE_INVALID/.test(String(badChoice9.stdout + badChoice9.stderr))) failStep('R-9db6 AC4 候选外未被拒', String(badChoice9.stdout).slice(0, 200));
       const ack9 = dAck(d1.item.id, 'A');
       if (!ack9.ok || ack9.item.status !== 'answered' || !ack9.messageId) failStep('R-9db6 AC4 正常回执失败', JSON.stringify(ack9).slice(0, 200));
-      const pmMail9 = json(['inbox', '--boot', dPm.token, '--json']).messages.filter((m) => m.type === 'owner_decision_receipt');
+      const pmMail9 = json(['inbox', '--boot', dPm.token, '--all', '--json']).messages.filter((m) => m.type === 'owner_decision_receipt');
       const hit9 = pmMail9.find((m) => String(m.body || '').includes(d1.item.id));
       if (!hit9 || !/选择|Owner 选择/.test(String(hit9.body))) failStep('R-9db6 AC4 PM 未收到 owner_decision_receipt', JSON.stringify(pmMail9.slice(-1)).slice(0, 200));
       // AC5：重复回执幂等（同一条只 1 封）
@@ -2977,7 +2977,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
       if (!bak9.length) failStep('R-9db6 AC9 损坏未留 .bak 备份', 'no backup');
       const rebuiltEvent9 = read(path.join(teamRoot, '状态', '事件.jsonl')).includes('decision_box_rebuilt');
       if (!rebuiltEvent9) failStep('R-9db6 AC9 未记 decision_box_rebuilt 事件', 'event missing');
-      const corruptMail9 = json(['inbox', '--boot', dPm.token, '--json']).messages.filter((m) => m.type === 'wake_failed' && /decision_box_corrupt/.test(String(m.body || '')));
+      const corruptMail9 = json(['inbox', '--boot', dPm.token, '--all', '--json']).messages.filter((m) => m.type === 'wake_failed' && /decision_box_corrupt/.test(String(m.body || '')));
       if (!corruptMail9.length) failStep('R-9db6 AC9 损坏未给 PM 发 wake_failed', 'mail missing');
       if (corruptList9.counts.open !== 0) failStep('R-9db6 AC9 重建后不空', JSON.stringify(corruptList9.counts));
       // AC9②：并发回执 → DECISION_BOX_CONFLICT（用现成锁占位）
@@ -3059,7 +3059,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
       if (!(failH.fallback && failH.fallback.code === 'HANDOFF_QUEUE_WRITE_FAILED')) failStep('R-8f68 写队列失败未回退 PM 卡点', JSON.stringify(failH).slice(0, 200));
       const fbEvent = read(path.join(teamRoot, '状态', '事件.jsonl')).includes('handoff_fallback');
       if (!fbEvent) failStep('R-8f68 未记 handoff_fallback 事件', 'missing');
-      const pmFallbackMail = json(['inbox', '--boot', hPm.token, '--json']).messages.filter((m) => m.type === 'escalation' && /HANDOFF_QUEUE_WRITE_FAILED/.test(String(m.body || '')));
+      const pmFallbackMail = json(['inbox', '--boot', hPm.token, '--all', '--json']).messages.filter((m) => m.type === 'escalation' && /HANDOFF_QUEUE_WRITE_FAILED/.test(String(m.body || '')));
       if (!pmFallbackMail.length) failStep('R-8f68 未给 PM 发 escalation 卡点', 'mail missing');
       // ⑨ AC5/AC8：铁律 5 例外默认 pending（批 1），批准后才变 batch2
       const rexPending = json(['rule-exception', 'status', '--project', '试点', '--json']);
@@ -3113,7 +3113,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
       if (!(wbMark.ok && Number(wbMark.marked) >= 1)) failStep('mark-all-read 未标记任何消息', JSON.stringify(wbMark).slice(0, 200));
       const wbAudit = read(path.join(teamRoot, '状态', '阅读.jsonl')).includes('mark-all-read');
       if (!wbAudit) failStep('mark-all-read 未写审计', 'audit missing');
-      const wbLeft = json(['inbox', '--boot', wbAna.token, '--project', '试点', '--json']).messages.filter((m) => !m.readAt);
+      const wbLeft = json(['inbox', '--boot', wbAna.token, '--project', '试点', '--all', '--json']).messages.filter((m) => !m.readAt);
       if (wbLeft.length) failStep('mark-all-read 后仍有未读', String(wbLeft.length));
       pass('消息投递：唤醒带正文（截断 600）+ 成功自动已读 + 失败保持未读 + 重试幂等 + mark-all-read 计数与审计');
     }
@@ -3131,7 +3131,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
       write(csFile, JSON.stringify(csRow, null, 2) + '\n');
       const pumpCs1 = JSON.parse(run(['queue', 'pump', '--project', '试点', '--json'], { envOverride: { TEAM_CLAIM_STALL_MS: '1000' } }).stdout.trim());
       if (!(pumpCs1.claimStall && pumpCs1.claimStall.alerted >= 1)) failStep('认领停滞未告警', JSON.stringify(pumpCs1.claimStall || null).slice(0, 200));
-      const csMail = json(['inbox', '--boot', csPm.token, '--json']).messages.filter((m) => m.type === 'escalation' && String(m.body || '').includes(csTask));
+      const csMail = json(['inbox', '--boot', csPm.token, '--all', '--json']).messages.filter((m) => m.type === 'escalation' && String(m.body || '').includes(csTask));
       if (!csMail.length) failStep('认领停滞未给 PM 发 escalation', 'mail missing');
       if (!/认领了/.test(String(csMail[0].body))) failStep('认领停滞告警不是人话', String(csMail[0].body).slice(0, 160));
       // 同任务同状态 10 分钟去重
@@ -3143,7 +3143,7 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
       csRow2.doneAt = new Date().toISOString();
       write(csFile, JSON.stringify(csRow2, null, 2) + '\n');
       const pumpCs3 = JSON.parse(run(['queue', 'pump', '--project', '试点', '--json'], { envOverride: { TEAM_CLAIM_STALL_MS: '1000' } }).stdout.trim());
-      const csMail2 = json(['inbox', '--boot', csPm.token, '--json']).messages.filter((m) => m.type === 'escalation' && String(m.body || '').includes(csTask));
+      const csMail2 = json(['inbox', '--boot', csPm.token, '--all', '--json']).messages.filter((m) => m.type === 'escalation' && String(m.body || '').includes(csTask));
       if (csMail2.length !== csMail.length) failStep('任务 done 后仍在告警', `${csMail.length} → ${csMail2.length}`);
       pass('认领停滞：5 分钟无变化告警 PM（人话 + role/taskId/claimedAt/状态）、同任务同状态 10 分钟去重、done 立即停');
     }

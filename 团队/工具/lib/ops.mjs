@@ -54,6 +54,8 @@ import {
   // B-b894：任务闭环状态唯一口径（done/accepted/cancelled/terminated），别再在 ops 里写数组。
   statusIsClosed,
   isRequirementMirrorTask,
+  // R-0d97：列表默认视图/截断文案的唯一生成器（三处列表 + 简报共用，ops 内不得再拼第二处）
+  applyListView, parseListLimit, resolveListLimit, donePendingLine, LIST_DEFAULT_MAX, LIST_LIMIT_MAX,
 } from './gates.mjs';
 import * as lessons from './lessons.mjs';
 import { buildDispatchPrompt, buildNoticePrompt, buildWakeHeader, buildWakeLine, isRegisteredKind } from './dispatch.mjs';
@@ -5005,7 +5007,11 @@ export async function cmdBoot(args) {
   let bootQueue = null;
   try { bootQueue = consumeBootQueue(projectName, role, sessionId); } catch (e) { bootQueue = { consumed: 0, why: String((e && e.message) || e) }; }
   const unread = listInbox(role, { project: projectName });
-  const tasks = listTasks(projectName).filter((t) => !statusIsClosed(t.status) && (!t.owner || t.owner === role));
+  const bootAllTasks = listTasks(projectName);
+  // R-0d97 §6.1：与 task list 用**同一谓词**（statusIsClosed）；scope 仍是「本人 + 无主」（§6.1 第三条）。
+  const tasks = bootAllTasks.filter((t) => !statusIsClosed(t.status) && (!t.owner || t.owner === role));
+  // R-0d97 §6.6：简报的「待验收(done)」与「待办任务」同 scope（本人 + 无主）
+  const donePending = bootAllTasks.filter((t) => String(t.status || '') === 'done' && (!t.owner || t.owner === role)).length;
   const proposals = listProposals(projectName).filter((p) => ['proposed', 'reviewing', 'signing'].includes(p.status) && p.author !== role);
   const locks = listLocks().filter((l) => !l.stale);
   const grants = activeGrants(role, projectName);
@@ -5159,6 +5165,9 @@ export async function cmdBoot(args) {
   // B-20261118-004424-6c6b：明细行进「可丢区」——超限时先丢它们，不挤掉关键行。
   for (const m of unread.slice(0, 3)) pushDrop(`  [${m.id}] ${m.from}${m.ackRequired ? ' (要回执)' : ''}: ${m.subject}`);
   lines.push(`待办任务: ${tasks.length} ｜ 待处理提案: ${proposals.length}`);
+  // R-0d97 §6.6：紧邻「待办任务」，N>0 才出（与 task list 同一文案生成器）
+  const bootDoneLine = donePendingLine(donePending);
+  if (bootDoneLine) lines.push(bootDoneLine);
   for (const t of tasks.slice(0, 3)) pushDrop(`  [${t.id}] ${t.priority} ${t.status} ${t.owner || '-'} ${t.title}`);
   for (const p of proposals.slice(0, 3)) pushDrop(`  [${p.id}] ${p.risk} ${p.status} by ${p.author}: ${p.title}`);
   pushDrop(`授权: ${grants.length ? grants.map((g) => `${g.actions.join('/')}@${g.project}:${g.scope.join(',')}`).join(' ｜ ') : '（无，需 PM grant）'}`);
@@ -5996,13 +6005,30 @@ export function cmdInbox(args) {
     out(args, `已批量标已读：${b.role} 盘点未读 ${unread.length} 条，实际标记 ${marked} 条（审计已写，含 ${messageIds.length} 个 id 可回查）`, { ok: true, role: b.role, unread: unread.length, marked, messageIds, at });
     return;
   }
-  const msgs = listInbox(b.role, { includeCur: Boolean(args.all), project: b.project });
-  const rows = msgs.map((m) => ({
+  // R-0d97 §6.1/§6.2：默认只列未读（new）；hidden 面 = 已读箱 cur 条数；50 行上限 + 统一截断文案。
+  const msgs0 = listInbox(b.role, { includeCur: true, project: b.project });
+  const newMsgs = msgs0.filter((m) => String(m.box || 'new') === 'new');
+  const useAll = Boolean(args.all);
+  const limit = resolveListLimit(args.limit);
+  if (limit === 'BAD') {
+    fail('BAD_LIMIT', `--limit 必须是 1..${LIST_LIMIT_MAX} 的整数（收到 ${args.limit}）；本次零副作用`, { limit: args.limit, max: LIST_LIMIT_MAX });
+  }
+  const hidden = useAll ? 0 : (msgs0.length - newMsgs.length);
+  const view = applyListView({ rows: useAll ? msgs0 : newMsgs, hidden, all: useAll, limit, unit: 'inbox' });
+  const rows = view.rows.map((m) => ({
     id: m.id, from: m.from, subject: m.subject, kind: messageKindOf(m), ack: m.ackRequired ? '要' : '', box: m.box, ts: hhmmss(m.ts),
   }));
-  out(args, `收件箱（${b.role}，${msgs.length} 条）\n` + table(rows, [
+  const body = table(rows, [
     { key: 'ts', label: '时间' }, { key: 'id', label: '消息' }, { key: 'from', label: '发件' }, { key: 'kind', label: '型' }, { key: 'ack', label: '回执' }, { key: 'box', label: '箱' }, { key: 'subject', label: '主题' },
-  ]), { ok: true, messages: msgs });
+  ]);
+  const lines = [`收件箱（${b.role}，${view.rows.length} 条）`];
+  if (body) lines.push(body);
+  if (view.notice) lines.push(view.notice);
+  out(args, lines.join('\n'), {
+    ok: true, messages: view.rows,
+    total: view.total, shown: view.shown, hidden: view.hidden, truncated: view.truncated,
+    limit: view.limit, filter: view.filter, skipped: 0,
+  });
 }
 
 export function cmdRead(args) {
@@ -6464,15 +6490,38 @@ export async function cmdTask(args) {
     return;
   }
   if (sub === 'list') {
-    let tasks = listTasks(b.project);
-    if (args.status) tasks = tasks.filter((t) => t.status === args.status);
-    if (args.owner) tasks = tasks.filter((t) => t.owner === args.owner);
-    if (args.cancelled) tasks = tasks.filter((t) => String(t.status || '') === 'cancelled');
-    if (!args.all) tasks = tasks.filter((t) => t.status !== 'done');
-    const rows = tasks.map((t) => ({ id: t.id, p: t.priority, status: t.status, owner: t.owner || '-', title: t.title, due: t.due || '' }));
-    out(args, `任务（${b.project}，${tasks.length}）\n` + table(rows, [
+    // R-0d97 §6.1/§6.2/§6.3：默认只列在办（复用 statusIsClosed 唯一谓词）+ 单次 50 行上限 + 统一截断文案。
+    const allTasks = listTasks(b.project);
+    const explicit = Boolean(args.status || args.owner || args.cancelled);
+    // 显式过滤在**全量**上做（不受默认隐藏影响，§6.3 叠加语义）
+    let filtered = allTasks;
+    if (args.status) filtered = filtered.filter((t) => t.status === args.status);
+    if (args.owner) filtered = filtered.filter((t) => t.owner === args.owner);
+    if (args.cancelled) filtered = filtered.filter((t) => String(t.status || '') === 'cancelled');
+    const all = Boolean(args.all);
+    // 默认视图隐藏闭环；显式过滤或 --all 时 hidden 归零（§6.2 R1 / §6.3 A 案：--all 放开隐藏且放开上限）
+    const hidden = (explicit || all) ? 0 : filtered.filter((t) => statusIsClosed(t.status)).length;
+    const visible = (explicit || all) ? filtered : filtered.filter((t) => !statusIsClosed(t.status));
+    const limit = resolveListLimit(args.limit);
+    if (limit === 'BAD') {
+      fail('BAD_LIMIT', `--limit 必须是 1..${LIST_LIMIT_MAX} 的整数（收到 ${args.limit}）；本次零副作用`, { limit: args.limit, max: LIST_LIMIT_MAX });
+    }
+    const view = applyListView({ rows: visible, hidden, all, limit, unit: 'task', explicit });
+    const rows = view.rows.map((t) => ({ id: t.id, p: t.priority, status: t.status, owner: t.owner || '-', title: t.title, due: t.due || '' }));
+    const lines = [`任务（${b.project}，${view.rows.length}）`];
+    const body = table(rows, [
       { key: 'p', label: '优先' }, { key: 'id', label: '任务' }, { key: 'status', label: '状态' }, { key: 'owner', label: 'Owner' }, { key: 'due', label: '截止' }, { key: 'title', label: '标题' },
-    ]), { ok: true, tasks });
+    ]);
+    if (body) lines.push(body);
+    // §6.6：待验收行在前、截断提示行在后（N=0 不出）
+    const doneLine = donePendingLine(allTasks.filter((t) => String(t.status || '') === 'done').length);
+    if (doneLine) lines.push(doneLine);
+    if (view.notice) lines.push(view.notice);
+    out(args, lines.join('\n'), {
+      ok: true, tasks: view.rows,
+      total: view.total, shown: view.shown, hidden: view.hidden, truncated: view.truncated,
+      limit: view.limit, filter: view.filter, skipped: 0,
+    });
     return;
   }
   // T-20261115-110400-7ac3（Owner 2026-11-15 授权）：僵尸任务/需求镜像逻辑删除 + append-only 审计。
@@ -8045,7 +8094,13 @@ export function cmdReq(args) {
     const workflowRows = (() => {
       try { return readWorkflowState(b.project).state.requirements || {}; } catch { return {}; }
     })();
-    const rows = reqs.map((r) => {
+    // R-0d97 §6.2：req list 的 hidden 面 = 0（默认不隐藏状态），但仍受 50 行上限与统一截断文案约束。
+    const limit = resolveListLimit(args.limit);
+    if (limit === 'BAD') {
+      fail('BAD_LIMIT', `--limit 必须是 1..${LIST_LIMIT_MAX} 的整数（收到 ${args.limit}）；本次零副作用`, { limit: args.limit, max: LIST_LIMIT_MAX });
+    }
+    const view = applyListView({ rows: reqs, hidden: 0, all: Boolean(args.all), limit, unit: 'req' });
+    const rows = view.rows.map((r) => {
       const kids = children.filter((c) => c.requirementId === r.id);
       const opinion = ownerOpinionDisplayOf(workflowRows[String(r.id)] || (r.workflow && typeof r.workflow === 'object' ? r.workflow : {}));
       // 同时挂回任务对象：payload.requirements 就是这批对象，--json 里逐行可见。
@@ -8060,9 +8115,17 @@ export function cmdReq(args) {
         ownerOpinion: opinion.opinion, ownerOpinionAt: opinion.at,
       };
     });
-    out(args, `需求看板（${b.project}，${reqs.length} 条）\n` + table(rows, [
+    const body = table(rows, [
       { key: 'p', label: '优先' }, { key: 'id', label: '需求' }, { key: 'status', label: '状态' }, { key: 'review', label: '需求评审' }, { key: 'tech', label: '技术评审' }, { key: 'owner', label: 'Owner' }, { key: 'title', label: '需求' }, { key: 'kids', label: '子任务' }, { key: 'done', label: '完成' },
-    ]), { ok: true, requirements: reqs, tasks: children });
+    ]);
+    const lines = [`需求看板（${b.project}，${view.rows.length} 条）`];
+    if (body) lines.push(body);
+    if (view.notice) lines.push(view.notice);
+    out(args, lines.join('\n'), {
+      ok: true, requirements: view.rows, tasks: children,
+      total: view.total, shown: view.shown, hidden: view.hidden, truncated: view.truncated,
+      limit: view.limit, filter: view.filter, skipped: 0,
+    });
     return;
   }
   if (sub === 'show') {

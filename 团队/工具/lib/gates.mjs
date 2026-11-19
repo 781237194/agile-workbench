@@ -768,6 +768,90 @@ export function taskIsClosed(task) {
   return statusIsClosed(task && task.status);
 }
 
+/* ── R-20261119-155015-0d97：列表默认视图的唯一实现（task list / req list / inbox / boot 简报共用） ── */
+
+/** §6.2：单次默认上限（三处同源）。 */
+export const LIST_DEFAULT_MAX = 50;
+/** §6.3：`--limit` 的合法上限。 */
+export const LIST_LIMIT_MAX = 2000;
+
+/**
+ * §6.3：`--limit` 解析。返回数字 = 合法；返回 `null` = 非法（调用方 fail `BAD_LIMIT`，零副作用）。
+ * 缺省/布尔占位（CLI 把裸 `--limit` 解析成 true）回落默认 50，不当作非法。
+ */
+export function parseListLimit(raw, fallback = LIST_DEFAULT_MAX) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  if (typeof raw === 'boolean') return fallback;
+  const text = String(raw).trim();
+  if (!text) return fallback;
+  const n = Number(text);
+  if (!Number.isInteger(n) || n < 1 || n > LIST_LIMIT_MAX) return null;
+  return n;
+}
+
+/**
+ * §6.3：`--limit` 的「是否显式给出」归一。
+ * 返回 `null` = 未给（由 `--all` 决定上限）；数字 = 显式上限；`'BAD'` = 非法。
+ */
+export function resolveListLimit(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  if (typeof raw === 'boolean') return null; // 裸 --limit（CLI 布尔占位）视为未给
+  const text = String(raw).trim();
+  if (!text) return null;
+  const n = Number(text);
+  if (!Number.isInteger(n) || n < 1 || n > LIST_LIMIT_MAX) return 'BAD';
+  return n;
+}
+
+/**
+ * §6.2 / §6.5：列表视图与截断提示行的**唯一生成器**（全仓唯一含「默认隐藏」文案模板的落点）。
+ *
+ * 入参：
+ *  - rows     当前视图的**可见候选行**（默认视图=已按 `!statusIsClosed` 过滤；`--all`/显式过滤=全量或过滤后全量）
+ *  - hidden   被默认视图隐藏的条数（任务=闭环数 / inbox=已读 cur 数 / req list=0；显式过滤与 `--all` 时调用方必须传 0）
+ *  - all      `--all`：未显式给 `--limit` 时不设上限（§6.3 A 案）
+ *  - limit    显式上限（`null`=未给）；`--all --limit N` 时仍以 N 为上限（§6.3「叠加」）
+ *  - unit     'task' | 'inbox' | 'req'（只有 task 面在提示里带状态父括号）
+ *  - explicit 是否给了显式过滤器（仅用于 `--json.filter` 归因）
+ *
+ * 返回：`{ rows, total, shown, hidden, truncated, limit, filter, notice }`
+ *  - `total = rows.length + hidden`（§6.2「共 N 条」= 当前视图口径的总数，保证 shown + hidden ≤ total）
+ *  - `notice` 仅在 `truncated || hidden > 0` 时非空（§6.2 唯一输出条件）
+ */
+export function applyListView({ rows, hidden = 0, all = false, limit = null, unit = 'task', explicit = false } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const hiddenCount = Math.max(0, Number(hidden) || 0);
+  const explicitLimit = (limit === null || limit === undefined) ? null : Math.max(1, Number(limit) || LIST_DEFAULT_MAX);
+  const cap = explicitLimit === null ? (all ? Infinity : LIST_DEFAULT_MAX) : explicitLimit;
+  const total = list.length + hiddenCount;
+  const shown = Math.min(list.length, cap);
+  const truncated = list.length > shown;
+  const visible = truncated ? list.slice(0, shown) : list;
+  const filter = all ? 'all' : (explicit ? 'explicit' : 'default');
+  let notice = '';
+  if (truncated || hiddenCount > 0) {
+    const note = unit === 'task' ? '（done/accepted/cancelled/terminated）' : '';
+    const hiddenPart = hiddenCount > 0 ? `；默认隐藏 ${hiddenCount} 条${note}` : '';
+    notice = `…（共 ${total} 条${hiddenPart}；已显示前 ${shown} 条。加 --all 看全量，或 --limit <N> 放大本页）`;
+  }
+  return {
+    rows: visible,
+    total,
+    shown,
+    hidden: hiddenCount,
+    truncated,
+    limit: cap === Infinity ? null : cap,
+    filter,
+    notice,
+  };
+}
+
+/** §6.6：待验收(done) 计数行文案（唯一落点）。 */
+export function donePendingLine(n) {
+  const count = Number(n) || 0;
+  return count > 0 ? `待验收(done): ${count}` : '';
+}
+
 /**
  * B-4c66：镜像任务识别——需求在 `任务/` 里的镜像行（`type=requirement`，任务 id 与 requirementId 同名）。
  * 它不是「角色在办的活」：随需求行永久存在、状态长期 open，把它算进「角色忙」会让角色永久接不了新活，
