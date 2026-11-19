@@ -78,6 +78,14 @@ function main() {
       ppStart >= 0 && /rosterSessionIds: rosterSessionIdsOf\(\)/.test(ppSeg) && /function rosterSessionIdsOf\(/.test(m),
       { hasPublicProject: ppStart >= 0 });
 
+    // PM 2026-11-20 03:56（tester 真窗口定位）：items 还有第二处源——dsh:team-status handler 现造 items，
+    // archived 旧实现只看 DSH 会话标记，团队归档不生效。断言 handler 内按名册补 archived。
+    check('A9 dsh:team-status handler 的 items 按名册补 archived',
+      /function rosterActiveRolesOf\(/.test(m)
+      && /const rosterActive = rosterActiveRolesOf\(\);/.test(m)
+      && /archived: Boolean\(s && s\.archived\) \|\| rosterArchived/.test(m),
+      {});
+
     const seStart = a.indexOf('function sessionEntries');
     const seSeg = seStart >= 0 ? a.slice(seStart, seStart + 1200) : '';
     check('A3 app.js sessionEntries 优先用 rosterSessionIds 过滤（且无该字段时回落旧行为）',

@@ -1100,6 +1100,28 @@ function rosterSessionIdsOf() {
   } catch { return null; }
 }
 
+/**
+ * B-190a 第二处 items 源（tester 2026-11-20 03:16 真窗口定位）：
+ * `dsh:team-status` 的 items 在 handler 里**现造**（不走 inspectProjectSessions），
+ * 旧实现 `archived: Boolean(s && s.archived)` 只认 DSH 会话侧 archived —— 团队「归档成员」不会让 DSH 归档，
+ * 于是 items 恒 6 条 → verifiedCount/侧栏 chip/团队台标题全按 6 算。
+ * 这里返回「名册活跃角色集合」：读名册失败/不可用 → null（调用方保持旧行为，不误伤）。
+ */
+function rosterActiveRolesOf() {
+  try {
+    const members = (typeof teamTools !== 'undefined' && teamTools && typeof teamTools.teamMembers === 'function')
+      ? teamTools.teamMembers() : null;
+    if (!Array.isArray(members)) return null;
+    const set = new Set();
+    for (const m of members) {
+      const role = String((m && m.role) || '');
+      const sid = String((m && m.sessionId) || '').trim();
+      if (role && sid && !(m && m.archived)) set.add(role);
+    }
+    return set;
+  } catch { return null; }
+}
+
 function publicMapping(project) {
   if (!project) return null;
   const workspace = workspaceOf(project);
@@ -11582,16 +11604,19 @@ installShellAuditSensors();
     const scoped = (s) => inWorkspaceOf(s, s.sessionId) || cwdSame(s);
     const statusRoleIds = projectRoleIds(project);
     const statusRoles = statusRoleIds.map((roleId) => ROLE_BY_ID.get(roleId) || { id: roleId, name: roleId });
+    // B-190a 第二处 items 源：名册里不在册/已归档的角色，items 直接标 archived（否则 verifiedCount 恒 6）。
+    const rosterActive = rosterActiveRolesOf();
     const items = statusRoles.map((r) => {
       const sid = project.sessions && project.sessions[r.id] ? String(project.sessions[r.id]) : '';
       const s = sid ? byId.get(sid) : null;
+      const rosterArchived = Boolean(rosterActive) && !rosterActive.has(String(r.id));
       return {
         role: r.id,
         name: r.name,
         title: roleTitle(r.id),
         sessionId: sid || null,
         exists: Boolean(s),
-        archived: Boolean(s && s.archived),
+        archived: Boolean(s && s.archived) || rosterArchived,
         running: Boolean(s && s.running),
         blank: s ? Boolean(s.blank) : null,
         inWorkspace: Boolean(sid) && inWorkspaceOf(s, sid),
