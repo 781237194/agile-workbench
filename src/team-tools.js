@@ -7781,11 +7781,15 @@ function createTeamTools(options = {}) {
         return (rowNow && rowNow.row && rowNow.row.round) || 1;
       })() || 1);
       ownerDecisionNotify = await notifyOwnerDecisionToPm({
-        projectName: name, requirementId, status, round: roundNow, opinion, at, channel: ownerChannel,
+        projectName: ctx.name, requirementId, status, round: roundNow, opinion, at, channel: ownerChannel,
       });
     } catch (error) {
-      ownerDecisionNotify = { ok: false, code: 'OWNER_DECISION_NOTIFY_FAILED', message: String((error && error.message) || error).slice(0, 300) };
-      appendOwnerDecisionAudit(name, { at: new Date().toISOString(), action: 'owner_decision_notify_failed', key: `${name}|${requirementId}|`, status, error: String((error && error.message) || error).slice(0, 300) });
+      const notifyErrMsg = String((error && error.message) || error).slice(0, 300);
+      ownerDecisionNotify = { ok: false, code: 'OWNER_DECISION_NOTIFY_FAILED', message: notifyErrMsg };
+      // B-42ac：审计写失败**不得吞掉落账结果**——审计本身再包一层；这里的失败只影响「有无审计行」。
+      try {
+        appendOwnerDecisionAudit(ctx.name, { at: new Date().toISOString(), action: 'owner_decision_notify_failed', key: `${ctx.name}|${requirementId}|`, status, error: notifyErrMsg });
+      } catch { /* 审计失败不影响落账与返回值 */ }
     }
     // 壳层收口时同步需求正文/总览/任务状态，避免界面显示已进入技术评审、文档仍停在 approved。
     const statusSync = shellOwnedOwner
