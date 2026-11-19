@@ -8,7 +8,7 @@ import {
   cmdShow, cmdReview, cmdSign, cmdApply, cmdGrant, cmdIndex, cmdStatus, cmdClaim, cmdReconcile,
   cmdVerify, cmdLog, cmdLock, cmdOwnerApprove, cmdOwner, cmdRoster, cmdPilot, cmdDoctor,
   cmdReq, cmdFind, cmdBoard, cmdVote, cmdWorkflow, cmdOwnerProxyDecide, cmdQueue, cmdSkill, cmdSched,
-  cmdAsk, cmdAnswer, cmdPresence, cmdMarkRead, cmdWake, cmdLessons, failLessonGate, lessonGateFor,
+  cmdAsk, cmdAnswer, cmdPresence, cmdMarkRead, cmdWake, cmdWakeStats, cmdLessons, failLessonGate, lessonGateFor,
   cmdProjectConfig, sendLessonsProgramNotice, flushLessonsProgramWakes,
 } from './lib/ops.mjs';
 import { noteActionAfterWrite } from './lib/store.mjs';
@@ -96,6 +96,8 @@ const HELP = `团队工作台 v2 · 多会话敏捷团队
   mark-read --project P --role R [--actor owner] [--boot T] [--json]
        全部已读：只补新字段口径下的未读（readAt + 阅读.jsonl kind=read）；旧箱 box=new 不动
   wake --project P --role R [--boot T] [--engine-url URL] [--json]
+  wake stats --project P [--since ISO] [--json]
+       只读统计唤醒.jsonl：{total,event,manual,legacy,timer:0}（R-d1bf：定时唤醒必须为 0）
        一键唤醒：失败自动排 5/15/30 秒重试，3 次仍失败给 PM 发 wake_failed 并在看板标红点
 
 任务 / 需求
@@ -327,7 +329,12 @@ async function main() {
     // T-20261118-091644-6e53：派单前置检查（PM 派单前必跑；send --ack 的程序门读它的最近一次结果）
     case 'dispatch-check': await cmdDispatchCheck(args); break;
     case 'mark-read': cmdMarkRead(args); break;
-    case 'wake': await cmdWake(args); break;
+    case 'wake': {
+      const wakeSub = String((args._ && args._[1]) || '').toLowerCase();
+      if (wakeSub === 'stats') { cmdWakeStats(args); break; }
+      await cmdWake(args);
+      break;
+    }
     case 'ask': await cmdAsk(args); break;
     case 'answer': await cmdAnswer(args); break;
     case 'queue': await cmdQueue(args); break;

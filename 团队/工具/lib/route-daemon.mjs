@@ -1151,10 +1151,13 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
   }
 
   // F-2 ⑤：唤醒后角色会话 idle 但队列里还有它的活 → 退避再唤醒（30/60/120 秒，最多 3 次）。
-  out.followUps = await runFollowUps(name, { status, tasks, now, engineUrl, project });
+  // R-d1bf：补催已删（定时器不再制造唤醒）。只做状态清理，不投递。
+  out.followUps = runFollowUpsCleanup(name, { status, tasks, now });
 
   // 唤醒失败的重试（5/15/30 秒，共 3 次；仍失败 → PM 收 wake_failed）。
-  out.retries = await runWakeRetries(name, { status, now, engineUrl, project });
+  // R-d1bf：唤醒失败不再由 tick 定时重试；失败已一次性记 wake_failed + 告警 PM。
+  out.retryCleanup = runRetryCleanup(name, { status, tasks, now });
+
 
   // 派生队列：每拍刷新（写失败保留上一版并告警，绝不删旧文件）。
   refreshQueue();
@@ -1194,39 +1197,23 @@ async function wakeRoute(projectName, opts) {
     status.wakes[key] = { at, lastWakeAt: at, role, action, requirementId: requirementId || '', taskId: taskId || '' };
     // 沙盘默认不排复查（否则每次验收跑都会拖出几百条 followup）；TEAM_ROUTE_SELFTEST_FOLLOWUP=1 时才排，
     // 让 AC/沙盘也能验「回执完就停」的退避再唤醒。
-    const allowSelftestFollowUp = String(process.env.TEAM_ROUTE_SELFTEST_FOLLOWUP || '') === '1';
-    // Owner 09:10：验收/决定类（accept/decide）完全不补催，首唤一次即止。
-    const ownerGateAction = ['accept', 'decide'].includes(String(action || ''));
-    if (!ownerGateAction && (result.skipped !== 'SELFTEST' || allowSelftestFollowUp)) {
-      const stages = followUpStagesMs();
-      status.followUps[key] = {
-        role, action, requirementId: requirementId || '', taskId: taskId || '',
-        fromStatus: fromStatus || '', toStatus: toStatus || '',
-        attempts: 0, dueAt: Date.now() + stages[0], at,
-      };
-    }
+    // R-d1bf：一次性唤醒，不再排补催（followup）队列。
     appendRouteLog(projectName, {
       ...base, event: 'wake', ok: true, why: '',
       wakeRef: String(result.sessionId || result.skipped || ''),
     });
     return { wake: true, key, wakeRef: result.sessionId || result.skipped || '' };
   }
-  const stages = retryStages();
   const why = String(result.why || 'wake_failed');
-  // Owner 09:10：验收/决定类不反复重试，首唤一次即止（失败只留痕）。
-  if (['accept', 'decide'].includes(String(action || ''))) {
-    appendRouteLog(projectName, { ...base, event: 'wake_failed', ok: false, why: why.slice(0, 240), wakeRef: 'no_retry_owner_gate' });
-    return { scheduled: false, key, why, noRetry: true };
-  }
-  status.retries[key] = {
-    role, action, requirementId: requirementId || '', taskId: taskId || '',
-    fromStatus: fromStatus || '', toStatus: toStatus || '', source, triggerChange,
-    attempt: 1, dueAt: Date.now() + stages[0], why, at: nowIso(),
-  };
-  appendRouteLog(projectName, {
-    ...base, event: 'wake_failed', ok: false, why: why.slice(0, 240), wakeRef: `retry:1`,
+  // R-d1bf：失败只留一条事件记录 + 一次性告警 PM，不再排定时重试。
+  appendRouteLog(projectName, { ...base, event: 'wake_failed', ok: false, why: why.slice(0, 240), wakeRef: 'no_retry_timer' });
+  alertPm(projectName, {
+    type: 'wake_failed',
+    subject: `路由唤醒失败：${role}（${requirementId || taskId || '-'}）`,
+    body: `role=${role} action=${action} 失败原因：${why}\n按 R-d1bf 不再定时重试；下一次事件（新消息/回执/状态变化）会重新唤醒。`,
+    key: `route_wake_failed|${key}`,
   });
-  return { scheduled: true, key, attempt: 1, dueAt: status.retries[key].dueAt, why };
+  return { scheduled: false, key, why, noRetry: true };
 }
 
 /**
@@ -1240,134 +1227,74 @@ function roleLooksBusy(tasks, role, now) {
 }
 
 /** F-2 ⑤：到点的 followUp 检查“角色是否还停在队列里”，是就再唤醒一次（最多 3 次）。 */
-async function runFollowUps(projectName, { status, tasks, now, engineUrl }) {
+/**
+ * R-d1bf：补催逻辑只留「状态清理」——任务已闭环 / 队列已空 / 角色忙太久 → 删队列项并留痕，
+ * **绝不投递唤醒**（本函数由 tick 调用，不允许出现任何唤醒调用）。
+ */
+function runFollowUpsCleanup(projectName, { status, tasks, now }) {
   const done = [];
-  const stages = followUpStagesMs();
   for (const [key, item] of Object.entries(status.followUps || {})) {
-    if (!item || Number(item.dueAt || 0) > now) continue;
+    if (!item) { delete status.followUps[key]; continue; }
     const role = String(item.role || '');
     const requirementId = String(item.requirementId || '');
-    // B-6f89 AC1/AC2：补催前再过陈旧守卫（任务已 done / 需求已收口 → 直接丢弃并记 skip）。
-    const staleFollow = staleWakeGuard({ projectName, action: item.action, taskId: item.taskId, requirementId, now });
-    if (staleFollow) {
-      delete status.followUps[key];
+    let why = '';
+    try {
+      const stale = staleWakeGuard({ projectName, action: item.action, taskId: item.taskId, requirementId, now });
+      if (stale) why = stale.skip;
+    } catch { /* ignore */ }
+    if (!why && item.taskId) {
+      const hitTask = tasks.find((x) => String(x.id) === String(item.taskId));
+      if (hitTask && statusIsClosed(hitTask.status)) why = 'followup_stopped_task_closed';
+    }
+    if (!why) {
+      const still = queueStillHas(projectName, role, requirementId, tasks) || Boolean(item.taskId && tasks.some((x) => String(x.id) === String(item.taskId) && !statusIsClosed(x.status)));
+      if (!still) why = 'followup_completed';
+    }
+    if (!why && roleLooksBusy(tasks, role, now)) why = 'role_busy';
+    delete status.followUps[key];
+    done.push({ key, role, action: item.action, why: why || 'followup_removed' });
+    try {
       appendRouteLog(projectName, {
         event: 'skip', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId || ''),
-        fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
-        why: staleFollow.skip, ok: true, key,
+        fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''), why: why || 'followup_removed', ok: true, key,
       });
-      done.push({ key, role, action: item.action, why: staleFollow.skip });
-      continue;
-    }
-    // 2026-11-14 修正③：补催前先校验任务状态——done/cancelled 立即停，别再催。
-    if (item.taskId) {
-      const hitTask = tasks.find((t) => String(t.id) === String(item.taskId));
-      if (hitTask && statusIsClosed(hitTask.status)) { // B-ebbc ③：accepted/terminated 也算已闭环
-        delete status.followUps[key];
-        appendRouteLog(projectName, {
-          event: 'skip', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId),
-          fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
-          why: 'followup_stopped_task_closed', ok: true, key,
-        });
-        done.push({ key, role, action: item.action, why: 'followup_stopped_task_closed' });
-        continue;
-      }
-    }
-    const still = queueStillHas(projectName, role, requirementId, tasks) || Boolean(item.taskId && tasks.some((t) => String(t.id) === String(item.taskId) && !statusIsClosed(t.status))); // B-ebbc ③
-    if (!still) {
-      delete status.followUps[key];
-      appendRouteLog(projectName, {
-        event: 'skip', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId || ''),
-        fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
-        why: 'followup_completed', ok: true, key,
-      });
-      done.push({ key, role, action: item.action, why: 'followup_completed' });
-      continue;
-    }
-    const attempts = Number(item.attempts || 0);
-    // 铁律 29：角色手上刚开工的任务还没交，就先别催（不占 3 次预算，只顺延一拍）。
-    if (roleLooksBusy(tasks, role, now)) {
-      const busySkips = Number(item.busySkips || 0) + 1;
-      if (busySkips > 20) {
-        delete status.followUps[key];
-        appendRouteLog(projectName, {
-          event: 'skip', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId || ''),
-          fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
-          why: 'followup_busy_gave_up', ok: true, key,
-        });
-        done.push({ key, role, action: item.action, why: 'followup_busy_gave_up' });
-        continue;
-      }
-      item.busySkips = busySkips;
-      item.dueAt = now + stages[Math.min(attempts, stages.length - 1)];
-      status.followUps[key] = item;
-      appendRouteLog(projectName, {
-        event: 'skip', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId || ''),
-        fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
-        why: `role_busy:${busySkips}`, ok: true, key,
-      });
-      done.push({ key, role, action: item.action, why: `role_busy:${busySkips}` });
-      continue;
-    }
-    if (attempts >= stages.length) {
-      delete status.followUps[key];
-      appendRouteLog(projectName, {
-        event: 'skip', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId || ''),
-        fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
-        why: `followup_gave_up:${attempts}`, ok: false, key,
-      });
-      // 2026-11-14 修正②：验收/决定类补催，PM 无代管时转“待 Owner 决策”提醒，不算唤醒失败。
-      const ownerGate = ['accept', 'decide'].includes(String(item.action || ''));
-      let hasProxy = null;
-      if (ownerGate) {
-        try { hasProxy = activeProxyFor(projectName, requirementId); } catch { hasProxy = null; }
-      }
-      if (ownerGate && !hasProxy) {
-        alertPm(projectName, {
-          type: 'escalation',
-          subject: `待 Owner 决策：${requirementId || '-'}（补催已停）`,
-          body: `requirementId=${requirementId || '-'}\nrole=${role}\naction=${item.action}\n状态：在等 Owner 决策，当前没有代管，PM 不能代落账。\n请提醒 Owner 到评审弹窗/评审入口处理；本条不计入 wake_failed。`,
-          key: `owner_pending|${key}`,
-        });
-      } else {
-        alertPm(projectName, {
-          type: 'wake_failed',
-          subject: `唤醒 ${attempts} 次仍无进展：${role}（${requirementId || item.taskId || '-'}）`,
-          body: `角色 ${role} 在 ${requirementId || '-'} 上已按 30/60/120 秒退避唤醒 ${attempts} 次，队列里该活仍未动。\n再叫也不会自己动，请 PM 兜底（换人/拆任务/确认是否卡在门禁）。`,
-          key: `followup_gave_up|${key}`,
-        });
-      }
-      done.push({ key, role, action: item.action, why: 'followup_gave_up' });
-      continue;
-    }
-    const text = buildRouteWakeText({
-      role, action: item.action, requirementId, taskId: String(item.taskId || ''),
-      project: projectName, fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
-    });
-    const result = await deliverRouteWake(projectName, { role, text, engineUrl });
-    const nextAttempt = attempts + 1;
-    if (result.ok) {
-      item.attempts = nextAttempt;
-      item.at = nowIso();
-      item.dueAt = now + stages[Math.min(nextAttempt, stages.length - 1)];
-      status.followUps[key] = item;
-      appendRouteLog(projectName, {
-        event: 'wake', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId || ''),
-        fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
-        ok: true, why: `followup:${nextAttempt}`, wakeRef: String(result.sessionId || result.skipped || ''), key,
-      });
-      done.push({ key, role, action: item.action, attempt: nextAttempt, why: `followup:${nextAttempt}` });
-    } else {
-      delete status.followUps[key];
-      appendRouteLog(projectName, {
-        event: 'wake_failed', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId || ''),
-        fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''),
-        ok: false, why: String(result.why || '').slice(0, 240), wakeRef: `followup:${nextAttempt}`, key,
-      });
-      done.push({ key, role, action: item.action, attempt: nextAttempt, why: 'followup_failed' });
-    }
+    } catch { /* ignore */ }
   }
   return done;
+}
+
+/** 兼容旧调用名（已无投递能力）。 */
+async function runFollowUps(projectName, ctx) {
+  return runFollowUpsCleanup(projectName, ctx);
+}
+
+/** R-d1bf：定时重试已删；这里只清理陈旧 retry 项（任务已闭环/需求已收口），绝不投递。 */
+function runRetryCleanup(projectName, { status, tasks, now }) {
+  const removed = [];
+  for (const [key, item] of Object.entries(status.retries || {})) {
+    if (!item) { delete status.retries[key]; continue; }
+    const role = String(item.role || '');
+    const requirementId = String(item.requirementId || '');
+    let why = '';
+    try {
+      const stale = staleWakeGuard({ projectName, action: item.action, taskId: item.taskId, requirementId, now });
+      if (stale) why = stale.skip;
+    } catch { /* ignore */ }
+    if (!why && item.taskId) {
+      const hitTask = (tasks || []).find((x) => String(x.id) === String(item.taskId));
+      if (hitTask && statusIsClosed(hitTask.status)) why = 'retry_stopped_task_closed';
+    }
+    if (!why) continue;
+    delete status.retries[key];
+    removed.push({ key, role, why });
+    try {
+      appendRouteLog(projectName, {
+        event: 'skip', source: 'status', requirementId, role, action: String(item.action || ''), taskId: String(item.taskId || ''),
+        fromStatus: String(item.fromStatus || ''), toStatus: String(item.toStatus || ''), why, ok: true, key,
+      });
+    } catch { /* ignore */ }
+  }
+  return removed;
 }
 
 /** 唤醒失败重试：5/15/30 秒；3 次仍失败 → PM 收 wake_failed（type 不另造）。 */

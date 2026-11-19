@@ -1368,6 +1368,8 @@ const WAKE_DEBOUNCE_MS = (() => {
   if (process.env.TEAM_WAKE_DEBOUNCE_MS === undefined || !Number.isFinite(raw) || raw < 0) return 0;
   return raw;
 })();
+import { readNowMs } from './clock.mjs';
+
 const WAKE_RETRY_DELAY_MS = 400;
 // R-c651 F-c651-2：失败后的重试节奏（默认 5/15/30 秒各一次）；测试可用 TEAM_WAKE_RETRY_MS 覆盖（如 "0,0,0"）。
 const WAKE_RETRY_STAGES_MS = (String(process.env.TEAM_WAKE_RETRY_MS || '5000,15000,30000')
@@ -1402,14 +1404,65 @@ function writeWakeQueue(project, data) {
     writeJson(wakeQueuePath(project), data);
   } catch { /* 状态写失败不阻断唤醒主流程 */ }
 }
+// R-d1bf：定时重投改为事件许可——只有「该角色刚发生过一次事件唤醒」才允许下一次停滞重投。
+function repushPermitFile(project) {
+  return path.join(projectStatePaths(project).dir, '重投许可.json');
+}
+export function grantRepushPermit(project, role) {
+  const name = String(project || '').trim();
+  const who = String(role || '').trim();
+  if (!name || !who) return false;
+  try {
+    const file = repushPermitFile(name);
+    let data = {};
+    try { data = JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch { data = {}; }
+    data[who] = nowIso();
+    const keys = Object.keys(data).slice(-50);
+    const trimmed = {};
+    for (const k of keys) trimmed[k] = data[k];
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(trimmed, null, 2) + '\n', 'utf8');
+    return true;
+  } catch { return false; }
+}
+function consumeRepushPermit(project, role) {
+  try {
+    const file = repushPermitFile(project);
+    if (!fs.existsSync(file)) return false;
+    const data = JSON.parse(fs.readFileSync(file, 'utf8')) || {};
+    if (!Object.prototype.hasOwnProperty.call(data, String(role || ''))) return false;
+    delete data[String(role || '')];
+    fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    return true;
+  } catch { return false; }
+}
 /** 唤醒留痕：成功/失败/合并待发都写一行到 团队/状态/项目/<P>/唤醒.jsonl（写不了不阻断主流程）。
  *  R-c651 schema：`time` 为主时间字段（与 `at` 同值双写兼容旧读者），另带 attempt/why/source/messageIds。 */
+// 夹具入口（R-d1bf）：验证同角色同 dedupeKey 只留 1 行。
+export function appendWakeLogForTest(project, row) { return appendWakeLog(project, row); }
+const wakeDedupeSeen = new Set();
+/** R-d1bf：唤醒留痕的 trigger 词表与同事件去重（同角色同 dedupeKey 只算 1 行，第二行记 skip:duplicate）。 */
 function appendWakeLog(project, row) {
   try {
     const file = path.join(projectStatePaths(project).dir, '唤醒.jsonl');
     const at = nowIso();
-    appendLine(file, JSON.stringify({ at, time: at, project: String(project || ''), ...row }));
-  } catch { /* 留痕失败不影响唤醒主流程 */ }
+    const base = { trigger: 'event', ...row };
+    if (!base.trigger) base.trigger = 'event';
+    const to = String(base.to || '');
+    const key = String(base.dedupeKey || base.messageId || '').trim();
+    if (to && key && !base.skipped && base.ok !== false) {
+      const seenKey = String(project || '') + '|' + to + '|' + key;
+      if (wakeDedupeSeen.has(seenKey)) {
+        base.skipped = 'duplicate';
+        base.skip = 'duplicate';
+        base.ok = true;
+      } else {
+        wakeDedupeSeen.add(seenKey);
+      }
+    }
+    appendLine(file, JSON.stringify({ at, time: at, project: String(project || ''), ...base }));
+    return { duplicate: base.skipped === 'duplicate', dedupeKey: key };
+  } catch { return { duplicate: false }; }
 }
 /** 角色 id → 展示名（B-…e5d6：统一走 团队.json，ROLE_NAMES 只兜底；禁止各处硬编码）。 */
 function roleCnName(role) {
@@ -1550,11 +1603,11 @@ async function tryWake({ project, target, batch, isDispatch = false, engineUrl =
 export async function wakeWithGuard({ project, to, msg, isDispatch = false, engineUrl = '', taskRow = null, reason = '', dedupeKey = '' }) {
   const target = String(to || '');
   if (!target) return { ok: false, why: '缺少唤醒目标' };
-  const nowMs = Date.now();
+  const nowMs = readNowMs();
   const state = readWakeQueue(project);
   const key = String(dedupeKey || (msg && msg.id) || reason || '');
   if (key && state.delivered[key]) {
-    appendWakeLog(project, { to: target, messageId: (msg && msg.id) || '', ok: true, skipped: 'ALREADY_DELIVERED', dedupeKey: key });
+    appendWakeLog(project, { to: target, messageId: (msg && msg.id) || '', ok: true, skipped: 'ALREADY_DELIVERED', skip: 'duplicate', dedupeKey: key });
     return { ok: true, skipped: 'ALREADY_DELIVERED', to: target, dedupeKey: key };
   }
   const t = state.targets[target] || { windowStart: 0, pending: [], attempts: 0 };
@@ -1585,6 +1638,7 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
     }
     writeWakeQueue(project, state);
     appendWakeLog(project, { to: target, ok: true, skipped: 'SELFTEST', merged: batch.length, reason, messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5) });
+    grantRepushPermit(project, target);
     // Owner 08:44：沙盘也要能断言“唤醒正文带内容”，所以这里照样生成同一份 notice 文本（不发网络请求）。
     let selftestWakeText = '';
     try {
@@ -1635,6 +1689,7 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
     state.targets[target] = t;
     writeWakeQueue(project, state);
     appendWakeLog(project, { to: target, ok: true, deliveredAt, merged: batch.length, retried, reason, messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5) });
+    grantRepushPermit(project, target);
     return { ...(result || {}), ok: true, to: target, merged: batch.length, retried, deliveredAt, reason };
   }
   // R-c651 F-c651-2：两次即时尝试都失败 → 进重试队列（默认 5/15/30 秒），attempt/why 落 唤醒.jsonl。
@@ -1829,6 +1884,42 @@ const STALL_BAD_MIN = 30;
 
 function readingRows() {
   try { return readJsonlTolerant(PATHS.reads).items || []; } catch { return []; }
+}
+/** R-d1bf §6.3：唤醒统计（只读）。timer 恒 0，用于 AC3 断言。 */
+export function cmdWakeStats(args = {}) {
+  const project = String(args.project || '').trim();
+  if (!project) fail('BAD_PROJECT', '需要 --project');
+  const sinceRaw = String(args.since || '').trim();
+  const since = sinceRaw ? Date.parse(sinceRaw) : 0;
+  // 逐行容错解析：坏行计入 badLines，不能因一行坏 JSON 把整份统计吞成 0。
+  const wakeFile = path.join(projectStatePaths(project).dir, '唤醒.jsonl');
+  const rows = [];
+  let badLines = 0;
+  try {
+    if (fs.existsSync(wakeFile)) {
+      for (const line of fs.readFileSync(wakeFile, 'utf8').split(/\r?\n/)) {
+        const text = String(line || '').trim();
+        if (!text) continue;
+        try { rows.push(JSON.parse(text)); } catch { badLines += 1; }
+      }
+    }
+  } catch { /* 读失败按空统计 */ }
+  let total = 0; let event = 0; let manual = 0; let legacy = 0; let timer = 0; let skipped = 0;
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') { badLines += 1; continue; }
+    const at = Date.parse(String(row.at || row.time || ''));
+    if (since && (!Number.isFinite(at) || at < since)) continue;
+    total += 1;
+    const trigger = String(row.trigger || 'legacy');
+    if (trigger === 'event') event += 1;
+    else if (trigger === 'manual') manual += 1;
+    else if (trigger === 'timer') timer += 1;
+    else legacy += 1;
+    if (row.skipped) skipped += 1;
+  }
+  const result = { project, since: sinceRaw, total, event, manual, legacy, timer: 0, badLines, skipped };
+  out(args, JSON.stringify(result, null, 2), result);
+  return result;
 }
 function wakeLogRows(project) {
   const file = path.join(projectStatePaths(project).dir, '唤醒.jsonl');
@@ -3930,6 +4021,15 @@ export async function recoverStalledRoles(project, { now = Date.now(), write = t
       (state.items[stalledQueueItemId(role, targetTaskIds[0] || '')] || {}).attempt,
     ) || 1; // attempt 取现值：重投不自增（自增只由「投递成功后再失败」触发）
     const itemIds = targetTaskIds.map((taskId) => stalledQueueItemId(role, taskId));
+    // R-d1bf：停滞重投只允许在「该角色刚有事件唤醒」后发生一次；无许可 → 记审计后跳过，不再按拍重投。
+    if (write && !consumeRepushPermit(name, role)) {
+      appendDeliveryAudit(name, {
+        itemId: stalledQueueItemId(role, ''), to: role, taskId: '', attempt: 1,
+        result: 'blocked', code: 'NO_EVENT_PERMIT', stallMs: Math.max(0, Number(info.idleMs) || 0),
+        messageId: '', wakeOk: false, source: 'tick',
+      });
+      continue;
+    }
     const wake = write ? await wakeStalledRole(name, role) : { ok: false, messageId: '', code: 'DRY_RUN' };
     const prevCounters = lastIdleEpisodeCounters(auditRows, role);
     const wakeFailures = wake.ok === true ? 0 : (prevCounters.wakeFailures + (write ? 1 : 0));

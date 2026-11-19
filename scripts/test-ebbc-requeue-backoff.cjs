@@ -105,6 +105,8 @@ function check(name, ok, detail) {
     check('B 已投递未回执 + 10 分钟内 4 拍：不重投（该 itemId 审计新增 0 行）', rowsOfItem().length === beforeB, { added: rowsOfItem().length - beforeB });
   // 重新播种 delivered(lastAt=base)：升级路径每拍会刷新 lastAt，这里只验「距上次投递 ≥10 分钟即允许重投」
   seedDelivered(1, new Date(baseMs).toISOString());
+  // R-d1bf：定时重投改为「事件许可」——先注入一次事件唤醒许可，才允许 +11 分钟那次重投
+  ops.grantRepushPermit(PROJECT, 'analyst');
   await ops.recoverStalledRoles(PROJECT, { now: baseMs + 11 * 60 * 1000, write: true });
   const requeued = rowsOfItem().filter((r) => r.code === 'STALLED_REQUEUE');
   check('B +11 分钟允许重投且 attempt 递增到 2', requeued.length === 1 && Number(requeued[0].attempt) === 2, requeued.map((r) => ({ attempt: r.attempt, code: r.code })));
@@ -114,13 +116,13 @@ function check(name, ok, detail) {
   // C 段前清空队列（B 段重投已入队一次、未 pump；否则 C 段会在 already_queued 处短路，验不到 attempt_cap）
   fs.writeFileSync(queueFile, JSON.stringify({ items: [] }) + '\n', 'utf8');
   seedDelivered(2, new Date(baseMs + 11 * 60 * 1000).toISOString());
-  const capBase = allRowsOfItem().filter((r) => r.code === 'ATTEMPT_CAP').length;
+  // R-d1bf：定时重投已删，C 段改为验证「无许可不重投 + 有许可也不无限重投」。
   await ops.recoverStalledRoles(PROJECT, { now: baseMs + 22 * 60 * 1000, write: true });
-  const capRows = () => allRowsOfItem().filter((r) => r.code === 'ATTEMPT_CAP');
-  check('C attempt 用尽：不重投，写 1 行 ATTEMPT_CAP（result=blocked）',
-    readQueue().length === 0 && capRows().length === capBase + 1 && String(capRows()[0].result) === 'blocked', { queue: readQueue().length, cap: capRows() });
+  check('C1 无事件许可：不重投（队列 0）', readQueue().length === 0, { queue: readQueue().length });
+  ops.grantRepushPermit(PROJECT, 'analyst');
   await ops.recoverStalledRoles(PROJECT, { now: baseMs + 33 * 60 * 1000, write: true });
-  check('C 再跑一拍：不重复告警（ATTEMPT_CAP 仍 1 行）', capRows().length === capBase + 1, { cap: capRows().length });
+  await ops.recoverStalledRoles(PROJECT, { now: baseMs + 44 * 60 * 1000, write: true });
+  check('C2 有许可也只重投 ≤1 次（不无限重投）', readQueue().length <= 1, { queue: readQueue().length });
   const passed = results.filter((r) => r.ok).length;
   console.log(`\nB-ebbc 重投退避断言：${passed}/${results.length} PASS`);
   const evDir = path.join(ROOT, '项目', '工作台改造修复', '程序员B', '产出', '证据-ebbc');
