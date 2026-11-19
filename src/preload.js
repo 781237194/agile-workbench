@@ -84,6 +84,8 @@ if (IS_BOARD_WINDOW) {
     // c9ac 自检旋钮（主进程只在 --live-check 进程注册这两个 IPC；生产调用会被拒绝/未注册）。
     sessionQueuePushMode: (payload) => ipcRenderer.invoke('team:session-queue-push-mode', payload),
     liveCheckStats: () => ipcRenderer.invoke('team:live-check-stats'),
+    // R-fefa（T-66b4）§6.2：压缩信号注入入口（主进程只在沙盘/--live-check/AWB_COMPACT_SIGNAL_ENABLE=1 时注册）。
+    compactSignal: (payload) => ipcRenderer.invoke('team:compact-signal', payload),
     // c9ac（T-20261118-083424-8e33）：会话排队快照变化推送——主进程 fs.watch(团队/状态) 去抖 300ms 后 send，
     // 渲染层只订阅（不新增轮询通道）；watch 不可用时主进程在 model.push 里如实标 degraded，黄条复用 #session-queue-banner。
     onSessionQueueChanged: (cb) => {

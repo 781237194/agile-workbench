@@ -774,6 +774,11 @@ const {
 let teamTools = require('./team-tools');
 // B-20261119-015113-2443（97db）：名册四态/删除清四处映射/恢复四段审计的纯逻辑单源（壳层与夹具共用）。
 const projectRosterCleanup = require('./project-roster-cleanup.js');
+// R-fefa（T-20261119-185311-66b4）壳层补充：压缩信号 compact.signal + 会话用量（usage tokens 通道）。
+const rolecardShellHook = require('./rolecard-shell-hook.js');
+// 压缩检测基线（按 sessionId 记上一次探测到的 marker）与 usage 写盘节流（30s）。
+const rolecardCompactSeen = new Map();
+let rolecardUsageSyncedAt = 0;
 // B-24f0（e6c1 三条观测项）：成员数口径与「删项目后 activeProject 落点」纯逻辑（单测见 scripts/test-24f0-observability.cjs）。
 const rosterObservability = require('./roster-observability.js');
 // R-4657：缺陷验收自动化单源（CLI 与主进程 watch/tick/IPC 共用；不写第二套判据）。
@@ -11389,6 +11394,23 @@ installShellAuditSensors();
     };
     return payload;
   });
+  // R-fefa（T-66b4）§6.2：压缩信号**可注入降级**入口。
+  // DSH 目前没有公开的压缩事件；沙盘/自检/显式开启（AWB_COMPACT_SIGNAL_ENABLE=1）时注册这个 IPC，
+  // 夹具可直接写一次 `团队/状态/角色卡重读/compact.signal`，验证「写入一次 → CLI 读到即删并注入一次」。
+  // 生产默认不注册（不暴露额外写盘面）。
+  if (String(process.env.TEAM_SELFTEST || '') === '1' || IS_LIVE_CHECK || String(process.env.AWB_COMPACT_SIGNAL_ENABLE || '') === '1') {
+    ipcMain.handle('team:compact-signal', async (_e, payload) => {
+      const p = payload && typeof payload === 'object' ? payload : {};
+      const written = rolecardShellHook.writeCompactSignal(resolveTeamRoot(), {
+        role: String(p.role || ''),
+        source: String(p.source || 'inject'),
+        at: String(p.at || new Date().toISOString()),
+        sha12: String(p.sha12 || ''),
+      });
+      return { ok: Boolean(written.ok), ...written };
+    });
+    try { console.log('[compact-signal] injectable IPC registered'); } catch { /* ignore */ }
+  }
   ipcMain.handle('dsh:team-status', async (_e, payload) => {
     const projectId = typeof payload === 'string' ? payload : (payload && payload.projectId);
     const store = readStore();
@@ -11398,6 +11420,35 @@ installShellAuditSensors();
     if (!project) throw new Error('项目不存在');
     // 只读：只用 session/list + 已记录的 workspaceId/成员快照，绝不调 workspace/create。
     const sessions = await dsh.listSessions();
+    // R-fefa（T-66b4）：一次会话列表扫描的壳层副作用（纯文件写，不联网）——
+    //   ① usage tokens → 团队/状态/项目/<slug>/会话用量.json（供 CLI usage 闩锁，30s 节流）；
+    //   ② 压缩探测 → 团队/状态/角色卡重读/compact.signal（DSH 有压缩标记才写，不造假）。
+    try {
+      const psd = teamProjectStateDir(project);
+      const roleIdsForHook = projectRoleIds(project);
+      const sessionsByRole = {};
+      for (const rid of roleIdsForHook) {
+        const sid = project.sessions && project.sessions[rid] ? String(project.sessions[rid]) : '';
+        if (sid) sessionsByRole[rid] = sid;
+      }
+      const nowMs = Date.now();
+      const skipUsage = nowMs - rolecardUsageSyncedAt < 30000;
+      const side = rolecardShellHook.syncSessionSideEffects({
+        teamRoot: resolveTeamRoot(),
+        projectStateDir: psd || '',
+        sessions,
+        sessionsByRole,
+        compactSeen: rolecardCompactSeen,
+        skipUsage,
+        at: new Date().toISOString(),
+      });
+      if (side && side.usage && side.usage.wrote) rolecardUsageSyncedAt = nowMs;
+      for (const sig of (side && side.signals) || []) {
+        console.log('[compact-signal] written=' + JSON.stringify({ ok: sig.ok, file: sig.file }));
+      }
+    } catch (error) {
+      console.warn('ROLECARD_SHELL_HOOK_FAIL ' + JSON.stringify({ detail: String((error && error.message) || error).slice(0, 200) }));
+    }
     const byId = new Map(sessions.map((s) => [String(s.sessionId), s]));
     const workspacePath = path.resolve(String(project.path));
     const workspace = workspaceOf(project);
