@@ -760,6 +760,8 @@ const autoAccept = require(path.join(ROOT, 'scripts', 'auto-accept.cjs'));
 const acceptPrereq = require(path.join(__dirname, 'renderer', 'accept-prereq.js'));
 // R-ad44（T-b7dd）：JSON 状态写的唯一实现（团队/工具/lib/json-atomic.cjs）；writeStore 内部改走它，签名/返回/失败语义不变。
 const jsonAtomicCore = require(path.join(ROOT, '团队', '工具', 'lib', 'json-atomic.cjs'));
+// 97db R4（T-20261119-050705-8a78）：名册删除态守卫单源——main 不再复制一份逻辑。
+const rosterDeletionGuard = require(path.join(ROOT, '团队', '工具', 'lib', 'roster-deletion-guard.cjs'));
 const APP_VERSION = require(path.join(ROOT, 'package.json')).version;
 // 2a69 发版：菜单里的「版本 x.y.z · <commit 短号>」用真实 git 短号，取不到就留空（界面只显示版本）。
 // 只在启动时读一次；git 缺失 / 不是仓库 / 超时都吞掉，不影响启动。
@@ -22920,28 +22922,15 @@ function teamWriteBlockedByDeletion(teamName) {
 function deletionTombstoneFile(teamName) {
   return path.join(resolveTeamRoot(), '状态', '项目', teamTools.teamSlug(String(teamName)), '删除墓碑.json');
 }
-// P0 97db 持久性（T-20261119-044009-7ded）：syncRoster 写前墓碑守卫——删除态项目禁止把名册 sessionId 写回。
+// P0 97db 持久性（T-20261119-044009-7ded / R4 单源 T-20261119-050705-8a78）：
+// 名册删除态守卫统一走 团队/工具/lib/roster-deletion-guard.cjs（与 team-tools 同一实现），
+// main 不再复制墓碑读取/审计逻辑；墓碑过期、重建豁免（真实 store 多源回退）由模块负责。
 function syncRosterGuarded(teamName, project) {
   try {
-    const tombFile = deletionTombstoneFile(teamName);
-    if (fs.existsSync(tombFile)) {
-      const tomb = JSON.parse(fs.readFileSync(tombFile, "utf8"));
-      let stillActive = false;
-      try {
-        const store = readStore();
-        stillActive = (store.projects || []).some((proj) => proj && String(proj.teamName || proj.name) === String(teamName) && proj.path && fs.existsSync(String(proj.path)));
-      } catch { stillActive = false; }
-      if (!stillActive) {
-        try {
-          const dir = path.join(resolveTeamRoot(), "状态", "项目", teamTools.teamSlug(String(teamName)));
-          fs.mkdirSync(dir, { recursive: true });
-          fs.appendFileSync(path.join(dir, "名册守卫.jsonl"), JSON.stringify({
-            at: new Date().toISOString(), project: String(teamName), action: "roster_sync_blocked",
-            reason: "deletion-tombstone", generation: Number(tomb && tomb.generation) || 0, source: "main/syncRosterGuarded"
-          }) + "\n", "utf8");
-        } catch { /* 审计失败仍拦截 */ }
-        return { ok: true, code: "ROSTER_SYNC_BLOCKED_TOMBSTONE", blocked: true };
-      }
+    const stateDir = path.join(resolveTeamRoot(), '状态', '项目', teamTools.teamSlug(String(teamName)));
+    const guard = rosterDeletionGuard.deletionTombstoneBlocksRoster({ projectName: String(teamName || ''), stateDir });
+    if (guard && guard.blocked) {
+      return { ok: true, code: 'ROSTER_SYNC_BLOCKED_TOMBSTONE', blocked: true, reason: guard.reason };
     }
   } catch { /* 守卫异常时按原逻辑写，不阻断主流程 */ }
   return teamTools.syncRoster(teamName, project && project.sessions || {});
