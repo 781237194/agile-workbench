@@ -1558,16 +1558,20 @@ function verifiedCount(project) {
   const live = liveFor(project);
   if (!live) return null;
   const ids = new Set(teamRoleIds(project));
-  // R-97db（B-190a 打回，PM 2026-11-20 03:35）：`live.ready` 是后端**总数**（恒 6），它不知道「名册已归档」，
-  // 拿它当兜底会让 Owner 看到的「6/6 已核验」永远不降——这就是他截图里的可见症状。
-  // 有 items 时只认 items（且 items 已由后端按名册归档拦截）；没有 items 时按名册口径（rosterSessionIds）过滤 ready。
+  // R-97db（B-190a 打回，PM 2026-11-20 03:37）：**两条分支都必须按名册过滤**。
+  // 旧实现 items 分支只数 live.items、兜底分支直接 return live.ready，都不看名册——
+  // 而残留的 6 条 sid 仍在 workspace.sessionIds 里（实测 96 条），所以 Owner 截图里的
+  // 「6/6 已核验」怎么都不会降。名册口径 = project.rosterSessionIds（后端按 members 里
+  // sessionId 非空且未 archived 算出）；没有该字段（旧数据）时保持旧行为，避免误清。
+  const rosterIds = Array.isArray(project && project.rosterSessionIds) ? project.rosterSessionIds : null;
+  const rosterSet = rosterIds ? new Set(rosterIds) : null;
+  const allowed = (role) => ids.has(role) && (!rosterSet || rosterSet.has(role));
   if (Array.isArray(live.items) && live.items.length) {
-    return live.items.filter((item) => ids.has(item.role) && item.sessionId && item.exists && item.inWorkspace && !item.blank && !item.archived).length;
+    return live.items.filter((item) => allowed(item.role) && item.sessionId && item.exists && item.inWorkspace && !item.blank && !item.archived).length;
   }
   if (typeof live.ready !== 'number' || isQuickTeam(project)) return null;
-  const rosterIds = Array.isArray(project && project.rosterSessionIds) ? project.rosterSessionIds : null;
-  if (!rosterIds) return live.ready;
-  const scoped = rosterIds.filter((role) => ids.has(role)).length;
+  if (!rosterSet) return live.ready;
+  const scoped = [...rosterSet].filter((role) => ids.has(role)).length;
   return Math.min(scoped, live.ready);
 }
 

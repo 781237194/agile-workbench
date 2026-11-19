@@ -120,6 +120,45 @@ function main() {
       && vcSeg.includes("Math.min(scoped, live.ready)"),
       { seg: vcSeg.slice(0, 260) });
 
+    // B4/B5（PM 2026-11-20 03:37 判据）：**真跑**生产源码里的 verifiedCount，不只看静态。
+    //   从 app.js 抠出函数体 + 注入假依赖（liveFor / teamRoleIds / isQuickTeam），按判据断言。
+    const vcSrc = (() => {
+      const i = a.indexOf("function verifiedCount(project) {");
+      if (i < 0) return "";
+      let depth = 0;
+      let j = i + "function verifiedCount(project) {".length - 1;
+      for (; j < a.length; j += 1) {
+        if (a[j] === "{") depth += 1;
+        else if (a[j] === "}") { depth -= 1; if (depth === 0) { j += 1; break; } }
+      }
+      return a.slice(i, j);
+    })();
+    const makeVerified = (live) => {
+      const deps = {
+        live,
+        teamRoleIds: () => ["pm", "product", "analyst", "programmer1", "programmer2", "tester"],
+        isQuickTeam: () => false,
+      };
+      const factory = new Function("liveFor", "teamRoleIds", "isQuickTeam", vcSrc + "\nreturn verifiedCount;");
+      return factory(() => deps.live, deps.teamRoleIds, deps.isQuickTeam);
+    };
+    const mkItems = (n) => Array.from({ length: n }, (_, k) => ({
+      role: ["pm", "product", "analyst", "programmer1", "programmer2", "tester"][k],
+      sessionId: "s" + k, exists: true, inWorkspace: true, blank: false, archived: false,
+    }));
+    const projectOf = (rosterIds) => ({ id: "p1", rosterSessionIds: rosterIds });
+    const vcR2 = makeVerified({ items: mkItems(6), ready: 6 });
+    check("B4 verifiedCount 真跑：名册 2 人 + 残留 6 条 items → 返回 2（PM 判据①）",
+      vcSrc.length > 0 && vcR2(projectOf(["pm", "tester"])) === 2,
+      { got: vcR2(projectOf(["pm", "tester"])), hasSrc: vcSrc.length > 0 });
+    check("B5 verifiedCount 真跑：名册全空 → 返回 0（PM 判据②）",
+      vcR2(projectOf([])) === 0, { got: vcR2(projectOf([])) });
+    check("B6 verifiedCount 真跑：无 rosterSessionIds（旧数据）→ 回落旧行为 = 6（不误清）",
+      vcR2(projectOf(null)) === 6, { got: vcR2(projectOf(null)) });
+    check("B7 verifiedCount 真跑：兜底分支（无 items、ready=6）名册 2 人 → 2",
+      makeVerified({ items: [], ready: 6 })(projectOf(["pm", "tester"])) === 2,
+      { got: makeVerified({ items: [], ready: 6 })(projectOf(["pm", "tester"])) });
+
     /* ── B 逻辑复算（等价实现，覆盖「残留映射 vs 名册」两种情形） ── */
     const roleIds6 = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
     const residual = { pm: 's1', product: 's2', analyst: 's3', programmer1: 's4', programmer2: 's5', tester: 's6' };
