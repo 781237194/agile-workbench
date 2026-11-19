@@ -1,7 +1,7 @@
 {
-  "version": "2.1.9",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.9/发布/pm-workbench-2.1.9.zip",
-  "sha256": "f9d3ea2249b84cb7cddb1566921382fd60ba6b173a384421a8f1433fcda652c2",
-  "size": 4952263,
-  "notes": "①幽灵团队/归档回归（P0）：侧栏「N 人已就绪」改用名册口径；dsh:team-status 按名册归档拦截（不再把团队归档当 DSH 归档）；team:members 按名册过滤已归档成员（团队台不再 6 行已就绪）；verifiedCount 的 live.ready 兜底不再直接返回后端恒 6；归档时 sessionIds 摘除集合改 doomedSids（反复换人不再堆历史 sid）。②会话用量阈值改单源（P1）：新增 src/usage-threshold.js 纯逻辑，阈值取 团队/工具/lib/session.mjs → sessionLimitsOf(project).of(role)，项目 项目.json → sessionLimits 覆盖生效；文案改为「会话用量最高：<角色> X（其阈值 Y），已超 N 倍 → 需换人」，不再跨角色混排；import 失败降级 unknown，不回落写死值。③boot --json 增 teamRoot/teamRootSource，MISSING_DOC 带缺失文件绝对路径与根来源（排障 30 秒定位）。④锚点 anchor check 假阳性修复（文件快照一致但行指纹不存在时改报 ANCHOR_STALE/exit 2，不再误报有效）。⑤发布自检加固：zipEntryNames 支持路径入参、非法入参抛 BAD_ZIP_INPUT、解析 0 条抛 ZIP_UNREADABLE，build 自检对 0 条目硬失败（此前「关键条目缺 0」可能是假绿）。⑥新增 scripts/release-verify.cjs：一条命令核「本地/tag/Release/CDN/npm/版本历史」六处一致。⑦维护区提示去掉裸占位符 <Root>（Owner 报「乱码」）。"
+  "version": "2.1.10",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.10/发布/pm-workbench-2.1.10.zip",
+  "sha256": "217b70cd3bad52a2f2d55b8206c8941192e2a39d433baa66924e44eee365d239",
+  "size": 4954676,
+  "notes": "2.1.9 遗留修复（Owner 2026-11-20 02:0x 报的 P0 残留两处）：①名册缺省视为已归档——dsh:team-status 的 items 不再把「已从名册移除的角色」当可用会话（d4d295d）；②rosterSessionIds 进 app:state 的 projects（publicProject），抽 rosterSessionIdsOf() 单函数与 publicMapping 共用——此前该字段只在 mapping 里，渲染层 verifiedCount 拿不到 → 侧栏文本恒 6/6（db27fc4）。真窗口复验（tester 断面 3007627）：名册 2 活跃+残留 6 → 侧栏 2/6、团队台 2/6、2 行；名册全归档 → 0、0/6、0 行。夹具：test-190a-sidebar 17/17（新增 A8）、team-members 8/8、0823 17/17、1749 17/17、1b4 10/10、selftest 176/176。"
 }
