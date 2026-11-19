@@ -84,6 +84,10 @@ function seedNewPackage(dir, version) {
   writeFile(path.join(dir, '团队', '工具', 'lib', 'gates.mjs'), '// new gates ' + version + '\n');
   writeFile(path.join(dir, '团队', '模板', '角色卡模板版本.json'), JSON.stringify({ schema: 1, roles: {} }, null, 2) + '\n');
   writeFile(path.join(dir, '团队', '团队宪法.md'), '# 宪法（升级包新版）\n');
+  // B-38ce：团队根三份 + 团队工具入口是 boot 硬依赖，新守卫要求包内必须齐全。
+  writeFile(path.join(dir, '团队', '流程.md'), '# 流程（升级包新版）\n');
+  writeFile(path.join(dir, '团队', '项目铁律.md'), '# 项目铁律（升级包新版）\n');
+  writeFile(path.join(dir, '团队', '工具', 'team.mjs'), '// team.mjs（升级包新版）\n');
   writeFile(path.join(dir, '发版记录.md'), '# 发版记录\n');
 }
 
@@ -174,9 +178,11 @@ function seedLegacyPackage(dir, version) {
       path.join(ROOT, 'install.ps1'), '-Upgrade', '-InstallDir', repo2, '-UpgradeDataDir', path.join(sb, 'data2'),
       '-UpgradeVersion', '2.2.1', '-UpgradeSha256', sha(legacyZip), '-UpgradeUrl', `http://127.0.0.1:${port}/legacy.zip`,
     ]);
-    check('T4 老包（不含 团队/）仍能升级成功，团队/工具 保持旧版（向后兼容）',
-      up2.status === 0 && shaFile(path.join(repo2, '团队', '工具', 'lib', 'gates.mjs')) === sha('// old gates 2.1.5\n'),
-      { status: up2.status, gateSha: shaFile(path.join(repo2, '团队', '工具', 'lib', 'gates.mjs')) });
+    // B-38ce：老包缺团队根三份 → 必须拒绝（包不完整），并且安装目录保持原样。
+    check('T4 老包（不含 团队/）被拒：exit 非 0 + 旧 gates 保持 + 文案点名缺规则文件',
+      up2.status !== 0 && shaFile(path.join(repo2, '团队', '工具', 'lib', 'gates.mjs')) === sha('// old gates 2.1.5\n')
+      && /升级包不完整|必需规则文件/.test(`${up2.stdout || ''}${up2.stderr || ''}`),
+      { status: up2.status, tail: String(`${up2.stdout || ''}${up2.stderr || ''}`).slice(-400) });
 
     // ── T5 应用失败回滚（团队文件恢复）────────────────────────────────────
     const repo3 = path.join(sb, 'app3');
@@ -192,6 +198,44 @@ function seedLegacyPackage(dir, version) {
       up3.status === 1 && Boolean(last3 && last3.rolledBack === true) && shaFile(path.join(repo3, '团队', '工具', 'lib', 'gates.mjs')) === sha('// old gates 2.1.5\n')
       && shaFile(path.join(repo3, '团队', '状态', '团队.json')) === roster3,
       { status: up3.status, last: last3 && { code: last3.code, rolledBack: last3.rolledBack } });
+    // ── T6 注入删宪法：应用阶段拒绝且安装目录恢复 ─────────────────────
+    const repo4 = path.join(sb, 'app4');
+    seedSandboxRepo(repo4, { gatesText: '// old gates 2.1.5\n', version: '2.1.5' });
+    const gate4Before = shaFile(path.join(repo4, '团队', '工具', 'lib', 'gates.mjs'));
+    const pkgDir4 = path.join(sb, 'pkg-missing-constitution', 'agile-workbench-v2.2.0');
+    seedNewPackage(pkgDir4, '2.2.0');
+    // 注入：把团队宪法从包里删掉（模拟「包是坏的/漏了宪法」）
+    fs.rmSync(path.join(pkgDir4, '团队', '团队宪法.md'), { force: true });
+    const zip4 = makeZip(path.dirname(pkgDir4), path.join(sb, 'zips', 'missing-constitution.zip'));
+    const up4 = await runPwsh([
+      path.join(ROOT, 'install.ps1'), '-Upgrade', '-InstallDir', repo4, '-UpgradeDataDir', path.join(sb, 'data4'),
+      '-UpgradeVersion', '2.2.0', '-UpgradeSha256', sha(zip4), '-UpgradeUrl', `http://127.0.0.1:${port}/missing-constitution.zip`,
+    ]);
+    check('T6 包内缺团队宪法 → 拒绝（exit 非 0）+ 文案点名 + 安装目录 gates 恢复旧哈希',
+      up4.status !== 0 && /团队宪法/.test(`${up4.stdout || ''}${up4.stderr || ''}`)
+      && shaFile(path.join(repo4, '团队', '工具', 'lib', 'gates.mjs')) === gate4Before,
+      { status: up4.status, gate: [gate4Before, shaFile(path.join(repo4, '团队', '工具', 'lib', 'gates.mjs'))], tail: String(`${up4.stdout || ''}${up4.stderr || ''}`).slice(-400) });
+
+    // ── T7 正常升级：团队根三份 + team.mjs 与包内 sha 一致 ─────────────
+    const reqRels = ['团队/团队宪法.md', '团队/流程.md', '团队/项目铁律.md', '团队/工具/team.mjs'];
+    const pkgDir7 = path.join(sb, 'pkg-full', 'agile-workbench-v2.2.0');
+    seedNewPackage(pkgDir7, '2.2.0');
+    const zip7 = makeZip(path.dirname(pkgDir7), path.join(sb, 'zips', 'full.zip'));
+    const repo7 = path.join(sb, 'app7');
+    seedSandboxRepo(repo7, { gatesText: '// old gates 2.1.5\n', version: '2.1.5' });
+    const up7 = await runPwsh([
+      path.join(ROOT, 'install.ps1'), '-Upgrade', '-InstallDir', repo7, '-UpgradeDataDir', path.join(sb, 'data7'),
+      '-UpgradeVersion', '2.2.0', '-UpgradeSha256', sha(zip7), '-UpgradeUrl', `http://127.0.0.1:${port}/full.zip`,
+    ]);
+    const reqMismatch = reqRels.filter((rel) => {
+      const a = path.join(pkgDir7, rel.split('/').join(path.sep));
+      const b = path.join(repo7, rel.split('/').join(path.sep));
+      return shaFile(a) !== shaFile(b);
+    });
+    check('T7 正常升级成功（exit 0）且团队根三份 + team.mjs 与包内 sha 一致',
+      up7.status === 0 && reqMismatch.length === 0,
+      { status: up7.status, reqMismatch, tail: String(`${up7.stdout || ""}${up7.stderr || ""}`).slice(-300) });
+
   } finally {
     try { server.close(); } catch { /* ignore */ }
     try { fs.rmSync(sb, { recursive: true, force: true }); } catch { /* ignore */ }

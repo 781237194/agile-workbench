@@ -1480,6 +1480,7 @@ function Invoke-UpgradeApplyTree {
         '团队/工具', '团队/模板', '团队/角色', '团队/协议', '团队/skill',
         'package.json', 'package-lock.json', 'install.ps1', 'start.cmd', 'launch.vbs',
         'README.md', 'CHANGELOG.md', 'NOTICE.md', 'LICENSE', '发版记录.md', '安装PM工作台.cmd',
+        '卸载PM工作台.cmd', '彻底卸载PM工作台.cmd',
         '团队/团队宪法.md', '团队/流程.md', '团队/项目铁律.md'
     )
     # 双保险：即使以后有人把用户数据目录写进白名单，这里也直接跳过（永不覆盖）。
@@ -1499,6 +1500,16 @@ function Invoke-UpgradeApplyTree {
         if (-not (Test-Path -LiteralPath $src)) { continue }
         $dst = Join-Path $RepoRoot $rel
         $plan += [pscustomobject]@{ rel = $rel; existed = (Test-Path -LiteralPath $dst) }
+    }
+    # P0 B-20261120-013826-38ce：**必需规则文件**不允许「包里没有就静默跳过」——
+    # 团队根三份（宪法/流程/项目铁律）与团队工具入口 team.mjs 是 boot 的硬依赖，缺一份装完就会 MISSING_DOC。
+    $requiredRelatives = @('团队/团队宪法.md', '团队/流程.md', '团队/项目铁律.md', '团队/工具/team.mjs')
+    $missingRequired = @()
+    foreach ($req in $requiredRelatives) {
+        if (-not (Test-Path -LiteralPath (Join-Path $StagingRoot $req))) { $missingRequired += $req }
+    }
+    if ($missingRequired.Count -gt 0) {
+        throw ('升级包不完整：缺少必需规则文件 ' + ($missingRequired -join '、') + '（禁止应用；可跑 team.mjs init 兜底生成后再升级）')
     }
     if ($plan.Count -eq 0) { throw '升级包里没有可应用的程序文件（src/package.json 等缺失）' }
     # 1) 备份：把将被替换的条目移动到 _backup/upgrade-<ts>/
@@ -1586,6 +1597,23 @@ function Invoke-UpgradeVerifyInstall {
             if ($problems.Count -ge 20) { break }
         }
         if ($teamChecked -eq 0) { $problems += '升级包含 团队/ 目录但没有任何团队文件被校验（包结构异常）' }
+    }
+    # P0 B-20261120-013826-38ce：**团队根三份 + 团队工具入口**必须显式校验（存在 + sha256 == 包内）。
+    # 上面那条「团队/ 递归校验」覆盖不到「包里根本没有这个文件」的情况（staging 里没有就不会被遍历）。
+    $requiredRelatives = @('团队/团队宪法.md', '团队/流程.md', '团队/项目铁律.md', '团队/工具/team.mjs')
+    $missingRequired = @()
+    foreach ($req in $requiredRelatives) {
+        $rel = $req -replace '/', '\'
+        $srcFile = Join-Path $StagingRoot $rel
+        $dstFile = Join-Path $RepoRoot $rel
+        if (-not (Test-Path -LiteralPath $srcFile)) { $missingRequired += ($req + '（升级包里没有）'); continue }
+        if (-not (Test-Path -LiteralPath $dstFile)) { $missingRequired += ($req + '（安装目录里没有）'); continue }
+        $hr1 = (Get-FileHash -LiteralPath $srcFile -Algorithm SHA256).Hash
+        $hr2 = (Get-FileHash -LiteralPath $dstFile -Algorithm SHA256).Hash
+        if ($hr1 -ne $hr2) { $missingRequired += ($req + '（内容与包内不一致）') }
+    }
+    if ($missingRequired.Count -gt 0) {
+        throw ('部署校验失败：必需规则文件缺失/不一致 —— ' + ($missingRequired -join '；') + '；本次升级将回滚到升级前状态；若规则文件已被误删，可跑 node 团队\工具\team.mjs init --role pm 重建后再升级')
     }
     if ($problems.Count -gt 0) {
         throw ('部署校验失败：' + (($problems | Select-Object -First 5) -join '；'))
