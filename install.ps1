@@ -82,7 +82,13 @@ param(
     [switch]$UpgradeDryRun,
     [switch]$UpgradeForce,
     [string]$UpgradeReason,
-    [string]$UpgradeRollback
+    [string]$UpgradeRollback,
+    # ── 248a GitHub 连接修复（内嵌 GitHubFix；T-20261119-102117-248a）────────────────
+    [switch]$NoGitHubFix,
+    [string]$GitHubFixHostsPath,
+    [switch]$GitHubFixRestore,
+    # 夹具专用隐藏开关：apply / restore / download（只跑对应动作并输出 JSON）
+    [string]$GitHubFixTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -137,6 +143,9 @@ PM工作台 Windows 一键安装器
   -NoShortcut          不创建桌面快捷方式
   -ZipPath <zip>       使用本地 zip，不联网下载
   -ZipUrl <url>        自定义下载地址（默认 GitHub main 分支 zip）
+  -NoGitHubFix          不自动修复 GitHub 连接（默认自动探测并在不可达时修 hosts）
+  -GitHubFixHostsPath   指定 hosts 副本（测试用；绝不写真实 hosts）
+  -GitHubFixRestore     按标记段恢复 hosts（清掉 GitHub Fix 段落）
   -ShortcutDir <目录>  快捷方式输出目录（默认当前用户桌面）
   -LogDir <目录>       日志目录
   -NonInteractive      不暂停，适合自动化（也可设 AWB_NO_PAUSE=1）
@@ -898,7 +907,9 @@ function Save-Download {
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         try {
             Write-InstallerLog 'RUN' "下载第 $attempt/2 次：$Url"
-            Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -TimeoutSec 300 -Headers @{ 'User-Agent' = 'PMWorkbench-Installer/1.0' }
+            # 夹具专用：不联网即模拟下载失败（配合 GitHub 域 URL 验证修复/恢复链路）
+    if ($env:AWB_TEST_GITHUBFIX_FAIL_DOWNLOAD -eq '1') { throw 'injected download failure（测试注入）' }
+    Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -TimeoutSec 300 -Headers @{ 'User-Agent' = 'PMWorkbench-Installer/1.0' }
             $length = (Get-Item -LiteralPath $Destination).Length
             if ($length -lt 10240) {
                 throw "下载文件太小（$length 字节），可能不是有效的 zip"
@@ -1227,6 +1238,7 @@ function Write-InstallResult {
         logFile     = [string]$script:LogFile
         warnings    = @($merged)
         mcp         = $script:MCP
+        githubFix   = $script:GitHubFix
         electron    = [pscustomobject]@{
             exe     = (Join-Path $RepoRoot 'node_modules\electron\dist\electron.exe')
             pathTxt = (Join-Path $RepoRoot 'node_modules\electron\path.txt')
@@ -1373,6 +1385,16 @@ function Write-UpgradeRecord {
     try {
         New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
         $file = Join-Path $DataDir '升级记录.jsonl'
+        # 248a：把 GitHubFix 状态并入本次升级记录（一次升级一行，不另写文件）
+        try {
+            $hasFixProp = $false
+            if ($Row -and $Row.PSObject -and $Row.PSObject.Properties) {
+                $hasFixProp = @($Row.PSObject.Properties | Where-Object { $_.Name -eq 'githubFix' }).Count -gt 0
+            }
+            if (-not $hasFixProp -and $script:GitHubFix) {
+                $Row | Add-Member -NotePropertyName githubFix -NotePropertyValue $script:GitHubFix -Force
+            }
+        } catch { }
         $json = ($Row | ConvertTo-Json -Depth 8 -Compress)
         $enc = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::AppendAllText($file, $json + [Environment]::NewLine, $enc)
@@ -1616,7 +1638,7 @@ function Invoke-UpgradeMode {
         New-Item -ItemType Directory -Force -Path $zipDir | Out-Null
         Write-Host "  下载：$targetUrl"
         $downloadStarted = Get-Date
-        Invoke-WebRequest -Uri $targetUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
+        [void](Invoke-GitHubFixedDownload -Url $targetUrl -Destination $zipPath -Attempts 3 -Label '升级 zip' -MinBytes 1)
         $sizeMb = [Math]::Round(((Get-Item -LiteralPath $zipPath).Length / 1MB), 2)
         $secs = [int]((Get-Date) - $downloadStarted).TotalSeconds
         Write-Host ("  下载完成：{0} MB，{1}s → {2}" -f $sizeMb, $secs, $zipPath)
@@ -1747,12 +1769,364 @@ function Invoke-UpgradeRollbackMode {
     return 0
 }
 
+# ── 248a：内嵌 GitHub 连接修复（GitHubFix，T-20261119-102117-248a）────────────────
+# 自包含：不依赖 D:\deepseek\GitHub连接工具\GitHubFix.ps1；能力按原工具逻辑并入本安装器。
+$script:GitHubFix = $null
+$script:GitHubFixState = [ordered]@{
+    applied   = $false
+    chosenIp  = ''
+    restored  = $false
+    hostsPath = ''
+    attempts  = 0
+    notes     = @()
+    error     = ''
+}
+$script:GitHubFixMarkerStart = '# ==== GitHub Fix START ===='
+$script:GitHubFixMarkerEnd = '# ==== GitHub Fix END ===='
+$script:GitHubFixHostCandidates = @(
+    '20.27.177.113', '20.205.243.166', '20.233.83.145', '20.200.245.247',
+    '20.26.156.215', '20.175.192.147', '140.82.112.3', '140.82.113.3',
+    '4.237.22.38'
+)
+$script:GitHubFixApiCandidates = @('20.205.243.168', '140.82.116.6', '140.82.112.6', '140.82.113.6')
+$script:GitHubFixRawCandidates = @('185.199.111.133', '185.199.110.133', '185.199.109.133', '185.199.108.133')
+
+function Get-GitHubFixHostsPath {
+    if ($GitHubFixHostsPath) {
+        try { return [System.IO.Path]::GetFullPath($GitHubFixHostsPath) } catch { return $GitHubFixHostsPath }
+    }
+    return (Join-Path $env:SystemRoot 'System32\drivers\etc\hosts')
+}
+
+function Test-GitHubFixIsAdmin {
+    try {
+        $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $p = New-Object System.Security.Principal.WindowsPrincipal($id)
+        return $p.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+function Test-GitHubFixTcp443 {
+    param([string]$Ip, [int]$TimeoutMs = 2500)
+    $tcp = $null
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $ar = $tcp.BeginConnect($Ip, 443, $null, $null)
+        if (-not $ar.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $false }
+        $tcp.EndConnect($ar)
+        return [bool]$tcp.Connected
+    } catch { return $false }
+    finally { if ($tcp) { try { $tcp.Close() } catch { } } }
+}
+
+function Test-GitHubFixTls {
+    param([string]$Ip, [string]$Sni, [int]$TimeoutMs = 3000)
+    $tcp = $null
+    $ssl = $null
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $tcp.NoDelay = $true
+        $ar = $tcp.BeginConnect($Ip, 443, $null, $null)
+        if (-not $ar.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $null }
+        $tcp.EndConnect($ar)
+        $cb = [System.Net.Security.RemoteCertificateValidationCallback] { param($a, $b, $c, $d) $true }
+        $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false, $cb)
+        $ssl.ReadTimeout = $TimeoutMs
+        $ssl.WriteTimeout = $TimeoutMs
+        $ssl.AuthenticateAsClient($Sni, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false)
+        return $true
+    } catch { return $null }
+    finally {
+        if ($ssl) { try { $ssl.Dispose() } catch { } }
+        if ($tcp) { try { $tcp.Close() } catch { } }
+    }
+}
+
+function Test-GitHubFixEndpoint {
+    param([string]$Ip, [string]$Sni, [int]$TimeoutMs = 3000)
+    # 夹具专用：不碰网络的两种注入（FAKE_IP=指定 IP 直接视为可达；FORCE_UNREACHABLE=一律不可达）
+    if ($env:AWB_TEST_GITHUBFIX_FAKE_IP -and $Ip -eq $env:AWB_TEST_GITHUBFIX_FAKE_IP) { return $true }
+    if ($env:AWB_TEST_GITHUBFIX_FORCE_UNREACHABLE -eq '1') { return $false }
+    $tls = Test-GitHubFixTls -Ip $Ip -Sni $Sni -TimeoutMs $TimeoutMs
+    if ($null -ne $tls) { return [bool]$tls }
+    # 本机 TLS 不可用（受限环境/Schannel 无凭据）→ 退化为 TCP 443 连通性判断
+    return (Test-GitHubFixTcp443 -Ip $Ip -TimeoutMs $TimeoutMs)
+}
+
+function Select-GitHubFixIp {
+    param([string[]]$Candidates, [string]$Sni, [int]$MaxTry = 5)
+    $tried = 0
+    foreach ($ip in $Candidates) {
+        if ($tried -ge $MaxTry) { break }
+        $tried++
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        if (Test-GitHubFixEndpoint -Ip $ip -Sni $Sni) {
+            $sw.Stop()
+            return [pscustomobject]@{ Ip = $ip; Ms = [int]$sw.ElapsedMilliseconds }
+        }
+    }
+    return $null
+}
+
+function Read-GitHubFixHostsText {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject]@{ Text = ''; Bytes = $null } }
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $text = ''
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+        $text = [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
+    } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
+        $text = [System.Text.Encoding]::BigEndianUnicode.GetString($bytes, 2, $bytes.Length - 2)
+    } else {
+        $skip = 0
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $skip = 3 }
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes, $skip, $bytes.Length - $skip)
+    }
+    return [pscustomobject]@{ Text = $text; Bytes = $bytes }
+}
+
+function Write-GitHubFixHostsText {
+    param([string]$Path, [string]$Text)
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Text, $enc)
+}
+
+function Get-GitHubFixStrippedText {
+    param([string]$Text)
+    $lines = @($Text -split "`r?`n")
+    $out = New-Object System.Collections.ArrayList
+    $inside = $false
+    foreach ($line in $lines) {
+        $trim = $line.Trim()
+        if ($trim -eq $script:GitHubFixMarkerStart) { $inside = $true; continue }
+        if ($trim -eq $script:GitHubFixMarkerEnd) { $inside = $false; continue }
+        if ($inside) { continue }
+        [void]$out.Add($line)
+    }
+    return (@($out) -join "`r`n")
+}
+
+function Invoke-GitHubFixFlushDns {
+    if ($env:AWB_TEST_GITHUBFIX_SKIP_FLUSH -eq '1') { return }
+    try { & ipconfig.exe /flushdns | Out-Null } catch { }
+}
+
+function Invoke-GitHubFixRestore {
+    param([string]$Path, [switch]$Quiet)
+    $target = if ($Path) { $Path } else { Get-GitHubFixHostsPath }
+    try {
+        $read = Read-GitHubFixHostsText -Path $target
+        $clean = Get-GitHubFixStrippedText -Text ([string]$read.Text)
+        $before = [string]$read.Text
+        if ($clean.TrimEnd() -ne $before.TrimEnd()) {
+            Write-GitHubFixHostsText -Path $target -Text ($clean.TrimEnd() + "`r`n")
+            $script:GitHubFixState.restored = $true
+            if (-not $Quiet) { Write-Host "  已按标记段恢复 hosts：$target" -ForegroundColor Green }
+        } else {
+            $script:GitHubFixState.restored = $true
+            if (-not $Quiet) { Write-Host "  hosts 无 GitHub Fix 标记段，无需恢复：$target" }
+        }
+        Invoke-GitHubFixFlushDns
+        $script:GitHubFixState.hostsPath = $target
+        return [pscustomobject]@{ ok = $true; restored = $true; hostsPath = $target }
+    } catch {
+        Write-Host ("  [GitHubFix] 恢复 hosts 失败：" + $_.Exception.Message) -ForegroundColor Red
+        return [pscustomobject]@{ ok = $false; code = 'GITHUB_FIX_RESTORE_FAILED'; message = [string]$_.Exception.Message; hostsPath = $target }
+    }
+}
+
+function Invoke-GitHubFixApply {
+    param([string]$Path)
+    $target = if ($Path) { $Path } else { Get-GitHubFixHostsPath }
+    if (-not (Test-GitHubFixIsAdmin) -and -not $GitHubFixHostsPath) {
+        $msg = '需要管理员权限才能修改 hosts（自动修复被跳过）。请以管理员身份重跑安装器，或手动执行 -GitHubFixRestore 清理。'
+        $script:GitHubFixState.error = $msg
+        throw $msg
+    }
+    Write-Host '  [GitHubFix] 探测 GitHub 候选 IP（github.com / api / raw）…'
+    $chosen = Select-GitHubFixIp -Candidates $script:GitHubFixHostCandidates -Sni 'github.com'
+    if (-not $chosen) {
+        $tried = (@($script:GitHubFixHostCandidates | Select-Object -First 5) -join ', ')
+        $msg = "所有候选 IP 都不可达（已试：$tried）。改 hosts 无效，请换网络或稍后重试。"
+        $script:GitHubFixState.error = $msg
+        throw $msg
+    }
+    $api = Select-GitHubFixIp -Candidates $script:GitHubFixApiCandidates -Sni 'api.github.com' -MaxTry 4
+    $raw = Select-GitHubFixIp -Candidates $script:GitHubFixRawCandidates -Sni 'raw.githubusercontent.com' -MaxTry 4
+    $read = Read-GitHubFixHostsText -Path $target
+    $clean = Get-GitHubFixStrippedText -Text ([string]$read.Text)
+    $lines = @("$($chosen.Ip) github.com", "$($chosen.Ip) codeload.github.com")
+    if ($api) { $lines += "$($api.Ip) api.github.com" }
+    if ($raw) { $lines += "$($raw.Ip) raw.githubusercontent.com" }
+    $block = $script:GitHubFixMarkerStart + "`r`n" + ($lines -join "`r`n") + "`r`n" + $script:GitHubFixMarkerEnd
+    $newText = $clean.TrimEnd() + "`r`n" + $block + "`r`n"
+    try {
+        Write-GitHubFixHostsText -Path $target -Text $newText
+    } catch {
+        # 写失败：把原文恢复回去（零残留），给出可读错误
+        try { if ($read.Bytes) { [System.IO.File]::WriteAllBytes($target, $read.Bytes) } } catch { }
+        $msg = '写 hosts 失败：' + $_.Exception.Message
+        $script:GitHubFixState.error = $msg
+        throw $msg
+    }
+    Invoke-GitHubFixFlushDns
+    $script:GitHubFixState.applied = $true
+    $script:GitHubFixState.chosenIp = [string]$chosen.Ip
+    $script:GitHubFixState.hostsPath = $target
+    Write-Host ("  [GitHubFix] 已写入 hosts 标记段：$($chosen.Ip)（gitHub.com / codeload）；api=$(if ($api) { $api.Ip } else { '未选到' }) raw=$(if ($raw) { $raw.Ip } else { '未选到' })") -ForegroundColor Green
+    return [pscustomobject]@{ ok = $true; applied = $true; chosenIp = [string]$chosen.Ip; hostsPath = $target }
+}
+
+function Invoke-GitHubFixEnsure {
+    if ($NoGitHubFix) { return [pscustomobject]@{ ok = $true; applied = $false; skipped = $true; reason = 'NO_GITHUBFIX' } }
+    if ($script:GitHubFixState.applied) { return [pscustomobject]@{ ok = $true; applied = $true; chosenIp = $script:GitHubFixState.chosenIp } }
+    try {
+        $r = Invoke-GitHubFixApply -Path $GitHubFixHostsPath
+        $script:GitHubFix = [pscustomobject]@{
+            applied   = [bool]$r.applied
+            chosenIp  = [string]$r.chosenIp
+            restored  = [bool]$script:GitHubFixState.restored
+            hostsPath = [string]$r.hostsPath
+        }
+        return $r
+    } catch {
+        Add-InstallerWarning -Code 'GITHUB_FIX_FAILED' -Message ('GitHub 连接自动修复失败：' + $_.Exception.Message)
+        $script:GitHubFix = [pscustomobject]@{
+            applied   = [bool]$script:GitHubFixState.applied
+            chosenIp  = [string]$script:GitHubFixState.chosenIp
+            restored  = [bool]$script:GitHubFixState.restored
+            hostsPath = [string]$script:GitHubFixState.hostsPath
+            error     = [string]$_.Exception.Message
+        }
+        return [pscustomobject]@{ ok = $false; applied = $false; code = 'GITHUB_FIX_FAILED'; message = [string]$_.Exception.Message }
+    }
+}
+
+function Invoke-GitHubFixDownloadOnce {
+    param([string]$Url, [string]$Destination, [int]$MinBytes = 10240)
+    try {
+        $currentProtocol = [System.Net.ServicePointManager]::SecurityProtocol
+        [System.Net.ServicePointManager]::SecurityProtocol = $currentProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+    } catch { }
+    Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -TimeoutSec 300 -Headers @{ 'User-Agent' = 'PMWorkbench-Installer/1.0' }
+    $length = (Get-Item -LiteralPath $Destination).Length
+    if ($length -lt $MinBytes) { throw "下载文件太小（$length 字节），可能不是有效的 zip" }
+    return $length
+}
+
+# 下载仓库 zip / 升级 zip 的统一入口：先预检 → 不可达则自动修 hosts → 失败重试 3 次退避。
+function Invoke-GitHubFixedDownload {
+    param([string]$Url, [string]$Destination, [int]$Attempts = 3, [string]$Label = '下载', [int]$MinBytes = 10240)
+    $delays = @(0, 2, 5, 10)
+    $lastError = $null
+    # 只有下载地址是 GitHub 域时才做连接修复（本地/镜像源不受影响，也不做无谓探测）
+    $needFix = -not $NoGitHubFix
+    try {
+        $uri = [System.Uri]$Url
+        if (-not ($uri.Host -match '(^|\.)(github\.com|githubusercontent\.com)$')) { $needFix = $false }
+    } catch { $needFix = $false }
+    if ($needFix) {
+        $probe = Test-GitHubFixEndpoint -Ip $script:GitHubFixHostCandidates[0] -Sni 'github.com' -TimeoutMs 2500
+        if (-not $probe) {
+            Write-Host '  [GitHubFix] 预检 github.com 不可达，自动应用 hosts 修复…' -ForegroundColor Yellow
+            [void](Invoke-GitHubFixEnsure)
+        }
+    }
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $script:GitHubFixState.attempts = $attempt
+        try {
+            if ($attempt -gt 1) { Start-Sleep -Seconds $delays[[Math]::Min($attempt, $delays.Count - 1)] }
+            Write-InstallerLog 'RUN' ("{0} 第 {1}/{2} 次：{3}" -f $Label, $attempt, $Attempts, $Url)
+            $len = Invoke-GitHubFixDownloadOnce -Url $Url -Destination $Destination -MinBytes $MinBytes
+            Write-InstallerLog 'OK' ("{0}完成：{1:N1} MB" -f $Label, ($len / 1MB))
+            if ($script:GitHubFixState.applied) {
+                $script:GitHubFix = [pscustomobject]@{
+                    applied   = $true
+                    chosenIp  = [string]$script:GitHubFixState.chosenIp
+                    restored  = $false
+                    hostsPath = [string]$script:GitHubFixState.hostsPath
+                }
+            }
+            return $len
+        } catch {
+            $lastError = $_
+            Write-InstallerLog 'WARN' ("{0}失败（第 {1} 次）：{2}" -f $Label, $attempt, $_.Exception.Message)
+            if ($needFix -and $attempt -eq 1) {
+                $ensure = Invoke-GitHubFixEnsure
+                if ($ensure -and $ensure.applied) { Write-Host ('  [GitHubFix] 已应用修复（' + $script:GitHubFixState.chosenIp + '），重试下载…') -ForegroundColor Green }
+            }
+        }
+    }
+    # 修复后仍失败：把 hosts 恢复到运行前原文（零残留）并抛可读错误
+    if ($script:GitHubFixState.applied) {
+        Write-Host '  [GitHubFix] 修复后仍下载失败，恢复 hosts 原文（不留标记段）…' -ForegroundColor Yellow
+        [void](Invoke-GitHubFixRestore -Path (Get-GitHubFixHostsPath) -Quiet)
+    }
+    $tried = (@($script:GitHubFixHostCandidates | Select-Object -First 5) -join ', ')
+    $msg = "下载失败（已试 $Attempts 次）；尝试过的候选 IP：$tried；最后错误：$($lastError.Exception.Message)"
+    $script:GitHubFixState.error = $msg
+    if ($script:GitHubFix) {
+        $script:GitHubFix = [pscustomobject]@{
+            applied   = $false
+            chosenIp  = [string]$script:GitHubFixState.chosenIp
+            restored  = [bool]$script:GitHubFixState.restored
+            hostsPath = [string]$script:GitHubFixState.hostsPath
+            error     = $msg
+        }
+    }
+    throw $msg
+}
+
+function Invoke-GitHubFixTestMode {
+    param([string]$Mode)
+    $state = $null
+    try {
+        if ($Mode -eq 'apply') {
+            $state = Invoke-GitHubFixApply -Path $GitHubFixHostsPath
+        } elseif ($Mode -eq 'restore') {
+            $state = Invoke-GitHubFixRestore -Path $GitHubFixHostsPath
+        } elseif ($Mode -eq 'download') {
+            $url = $ZipUrl
+            $dest = Join-Path ([System.IO.Path]::GetTempPath()) ('githubfix-test-' + [Guid]::NewGuid().ToString('N') + '.zip')
+            try { [void](Invoke-GitHubFixedDownload -Url $url -Destination $dest -Attempts 3 -Label '测试下载') }
+            catch { $state = [pscustomobject]@{ ok = $false; code = 'DOWNLOAD_FAILED'; message = [string]$_.Exception.Message } }
+            finally { try { if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force } } catch { } }
+        } else {
+            throw "未知的 -GitHubFixTest 模式：$Mode（支持 apply/restore/download）"
+        }
+        $payload = [pscustomobject]@{
+            ok        = [bool]($state -and $state.ok)
+            mode      = $Mode
+            state     = $script:GitHubFixState
+            githubFix = $script:GitHubFix
+        }
+        Write-Host ('GITHUBFIX_TEST_JSON ' + ($payload | ConvertTo-Json -Depth 6 -Compress))
+        if ($state -and $state.ok) { return 0 }
+        return 1
+    } catch {
+        $payload = [pscustomobject]@{ ok = $false; mode = $Mode; error = [string]$_.Exception.Message; state = $script:GitHubFixState }
+        Write-Host ('GITHUBFIX_TEST_JSON ' + ($payload | ConvertTo-Json -Depth 6 -Compress))
+        return 2
+    }
+}
+
 function Show-Help {
     Write-Host $script:HelpText
 }
 
 # ── 主流程 ────────────────────────────────────────────────────────────────
 
+# 248a：GitHubFix 的独立入口（恢复 / 夹具测试模式），先于安装与升级处理
+if ($GitHubFixRestore) {
+    $restoreResult = Invoke-GitHubFixRestore -Path $GitHubFixHostsPath
+    if ($restoreResult.ok) { exit 0 }
+    exit 1
+}
+if (-not [string]::IsNullOrWhiteSpace($GitHubFixTest)) {
+    exit (Invoke-GitHubFixTestMode -Mode $GitHubFixTest)
+}
 if ($Help) {
     Show-Help
     $script:ExitCode = 0
@@ -1937,7 +2311,7 @@ try {
             } else {
                 $tempZip = Join-Path ([System.IO.Path]::GetTempPath()) ('pm-workbench-main-' + [Guid]::NewGuid().ToString('N') + '.zip')
                 try {
-                    Save-Download -Url $ZipUrl -Destination $tempZip
+                    [void](Invoke-GitHubFixedDownload -Url $ZipUrl -Destination $tempZip -Attempts 3 -Label '仓库 zip')
                 } catch {
                     throw ((@(
                         '下载 GitHub 压缩包失败：'
