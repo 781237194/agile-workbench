@@ -1,8 +1,7 @@
 {
-  "version": "2.1.7",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.7/发布/pm-workbench-2.1.7.zip",
-  "sha256": "9a9aad1a68c3215f8077e9009694b99962bdda1b996e76a07fa0064d411f4677",
-  "size": 4913885,
-  "notes": "一键重置与彻底卸载（install.ps1 -Reset/-Uninstall/-Purge + awb-diag -VerifyClean 八类判定 + GUI 维护面板 + 四道闸 + 备份落 Root 外 <Root>-maint-backup）；Owner 决定通知打通两协议（lib/owner-decision.mjs + ops.runOwnerDecisionNotify 单一实现，旧协议 cmdOwner 也发 system notice 并唤醒）；归档双账一致（会话归档+归档清理 同 archiveId 同 at）；测试任务双建拦截（route-daemon 同需求未闭环去重）；场景矩阵软门（只审计不拦，TEAM_SCENE_ENFORCE=1 才硬）；PM 换人双闲 15 分钟程序门（WAIT_BOTH_IDLE）+ 模板同步",
-  "publishedAt": "2026-11-19T22:45:23.6839914+08:00"
+  "version": "2.1.8",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.8/发布/pm-workbench-2.1.8.zip",
+  "sha256": "b7237c5e94a89bf762074afb01fc1f6e92ed5a70d31f7c3e052ac3b28394da61",
+  "size": 4915906,
+  "notes": "P0 升级安全补丁：①升级前先校验升级包必需项（团队/团队宪法.md、团队/流程.md、团队/项目铁律.md、团队/工具/team.mjs）——包不完整直接拒绝，未动任何文件；②升级后显式校验四份文件「staging 有 / 安装目录有 / sha256 相等」，失败即回滚并点名缺失项；③缺失的团队根规则文件会被升级自动补回（修「装完六角色 boot 报 MISSING_DOC 团队宪法.md」）；④补齐安装器升级白名单缺的两个卸载入口脚本，与打包清单同源；⑤维护区提示去掉裸占位符 <Root>（Owner 报「乱码」）。"
 }
