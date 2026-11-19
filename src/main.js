@@ -427,7 +427,9 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
     const p = payload && typeof payload === 'object' ? payload : {};
     const mode = String(p.mode || 'reset').toLowerCase() === 'uninstall' ? 'uninstall' : 'reset';
     const dryRun = p.dryRun !== false;
-    const args = [mode === 'reset' ? '-Reset' : '-Uninstall', '-InstallDir', ROOT, '-Json'];
+    // 沙盘/自检下允许 payload.root 覆盖目标目录（仅供 tester/CDP 用假安装树判 GUI）
+    const rootOverride = p.root && maintSandbox() ? String(p.root) : '';
+    const args = [mode === 'reset' ? '-Reset' : '-Uninstall', '-InstallDir', rootOverride || ROOT, '-Json'];
     if (dryRun) args.push('-DryRun'); else args.push('-Yes');
     if (!dryRun && p.confirm) args.push('-Confirm', String(p.confirm));
     if (p.purge) args.push('-Purge');
@@ -438,7 +440,8 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
   });
   rawIpcHandle('maint:verify', async (_e, payload) => {
     const p = payload && typeof payload === 'object' ? payload : {};
-    const args = ['-VerifyClean', '-Mode', String(p.mode || 'reset'), '-Root', ROOT, '-Json'];
+    const verifyRoot = p.root && maintSandbox() ? String(p.root) : ROOT;
+    const args = ['-VerifyClean', '-Mode', String(p.mode || 'reset'), '-Root', verifyRoot, '-Json'];
     const r = await runMaintScript(path.join(ROOT, '发布', 'tools', 'awb-diag.ps1'), args, 120000);
     return { ok: r.code === 0 || r.code === 2, code: r.code, json: r.json, stdoutTail: r.stdout.slice(-500) };
   });
