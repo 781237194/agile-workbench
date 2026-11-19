@@ -109,7 +109,34 @@ const readText = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { ret
   // 模板待同步项（2026-11-18 22:30 清零）：产品/分析师模板已按最终项目卡生成
   // （scripts/gen-role-card-template.cjs → role-card-bodies.generated.mjs），11 项全部销项。
   // 该机制保留：以后再出现「项目卡已重排、模板未同步」时按条目登记，同步后逐条删除，禁止用通配符掩盖。
+  //
+  // 2026-11-19（派单 M-20261119-170003-ce3c40，Owner 强制 §H 场景覆盖准则）：
+  // 模板侧已先落地（scaffold.sceneCoverageSection + gen 脚本 ensureSceneCoverage），
+  // 项目侧六卡需各角色本人补写（角色卡归属：各角色本人）。在补齐前按条目登记，补齐后逐条销项。
+  // 现行进度：程序员A 已补（其条目不在下表）。
+  const SCENE_COVERAGE_PENDING_ITEMS = [
+    '## H. 场景覆盖准则（Owner 2026-11-19 强制 · 详见 团队/流程.md §H）',
+    '五种「假完成」一律算未完成',
+    '交互入口必须交付「全链路六段」',
+    '场景矩阵六类',
+    '反例锚点（Owner 原话）',
+  ];
+  const SCENE_COVERAGE_PENDING_ROLE_LABEL = {
+    项目经理: 'PM 送审前自查',
+    产品: '产品 RR 逐条核场景覆盖',
+    需求分析师: '需求正文必须含「场景表」',
+    程序员B: '开发交付自查三问',
+    测试人员: 'TR-Q 把场景矩阵转成可执行断言',
+  };
   const ROLE_CARD_TEMPLATE_PENDING = [];
+  for (const [dir, label] of Object.entries(SCENE_COVERAGE_PENDING_ROLE_LABEL)) {
+    for (const item of SCENE_COVERAGE_PENDING_ITEMS.concat([label])) {
+      ROLE_CARD_TEMPLATE_PENDING.push({
+        dir, item,
+        reason: 'scene-coverage-pending：Owner 2026-11-19 强制 §H 已进模板，等该角色本人把本节补进项目卡后销项（派单 M-20261119-170003-ce3c40）',
+      });
+    }
+  }
   const templatePending = (dir, item) => ROLE_CARD_TEMPLATE_PENDING.some((w) => w.dir === dir && w.item === item);
   const extraAllowed = (dir, item) => ROLE_CARD_EXTRAS.some((w) => (w.dir === dir || w.dir === '*') && (w.item === item || w.item === '*'));
   const structDiffs = [];

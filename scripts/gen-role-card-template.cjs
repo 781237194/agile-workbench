@@ -67,6 +67,32 @@ function ensureSubagentSection(text) {
   return text.trimEnd() + '\n\n' + SUBAGENT_SECTION;
 }
 
+// 「场景覆盖准则」小节（Owner 2026-11-19 强制；与 scaffold.mjs → sceneCoverageSection 同一口径）。
+// 六卡必须都带本节：生成的卡（product/analyst）在这里补，手写卡（pm/programmer1/programmer2/tester）在 scaffold 里插。
+const SCENE_COVERAGE_SHARED = [
+  '## H. 场景覆盖准则（Owner 2026-11-19 强制 · 详见 团队/流程.md §H）',
+  '',
+  '- **五种「假完成」一律算未完成**：①空壳入口（按钮/菜单/命令存在但没有真执行链）②只做正向（失败/超时/回滚/重试没实现）③只测函数（夹具只调内部函数，没走真实入口）④只写日志（用户看不到状态变化，错误只进 stderr）⑤只改当前态（重启/重开/换机就丢）。',
+  '- **交互入口必须交付「全链路六段」**：触发 → 执行 → 进度/等待可见 → 成功态 → 失败态（人话 + 错误码 + 下一步）→ 重试/回滚/手动兜底。缺任一段必须在实现说明里写「未覆盖 + 原因 + 计划」，**不得自评完成**，也不得留给 tester 去找。',
+  '- **场景矩阵六类**（开发前写、开发后自测、交付时附证据）：①首次使用（干净环境/无配置）②正常路径 ③空值/边界（0 条、超长、空串、错误类型）④越权/异常（无权限、令牌失效、文件只读、网络失败）⑤并发/重复（连点、并发写、重复提交）⑥降级/恢复（依赖缺失、服务不可用、回滚后可用）。交付物必须含一张「场景 × 结果 × 证据路径」表；缺失项写「未覆盖」，**禁止留空**。',
+  '- **反例锚点（Owner 原话）**：「检查更新能用」≠「点立即升级能真下载→校验→安装→回滚」；只做按钮 = 空壳，属缺陷。代码类交付的「可用」＝**真实入口点得动 + 失败看得见 + 重开还在**，三者缺一即未完成。',
+];
+const SCENE_COVERAGE_PER_ROLE = {
+  pm: '- **PM 送审前自查**：派单正文带「场景 × 结果 × 证据路径」要求；送 Owner 的验收材料缺场景表或缺链段说明的，不得送。',
+  product: '- **产品 RR 逐条核场景覆盖**：缺场景表、或只有正向描述的**直接打回**；评审意见必须点名缺哪一类场景（六类之一）。',
+  analyst: '- **需求正文必须含「场景表」**：入口 / 正常 / 空值 / 失败 / 并发 / 降级六行，写清用户从哪儿点进来、看到什么；只写功能名词的 AC 不合格。',
+  programmer1: '- **开发交付自查三问**：入口点得动（真实按钮/IPC/CLI，不是只调函数）？失败看得见（人话 + 错误码 + 下一步）？重开还在（已落盘）？三缺一不得自评完成。',
+  programmer2: '- **开发交付自查三问**：入口点得动（真实按钮/IPC/CLI，不是只调函数）？失败看得见（人话 + 错误码 + 下一步）？重开还在（已落盘）？三缺一不得自评完成。',
+  tester: '- **TR-Q 把场景矩阵转成可执行断言**，并标注哪些场景本期不测（写明理由）；只测正向的测试报告不算通过。',
+};
+function sceneCoverageText(role) {
+  return [...SCENE_COVERAGE_SHARED, SCENE_COVERAGE_PER_ROLE[role] || ''].filter(Boolean).join('\n');
+}
+function ensureSceneCoverage(text, role) {
+  if (text.includes('场景覆盖准则')) return text; // 项目卡已自带本节 → 不重复
+  return text.trimEnd() + '\n\n' + sceneCoverageText(role);
+}
+
 function ensureStructuredOutput(text, role) {
   if (role !== 'analyst') return text;
   if (text.includes('01-需求分析-vN.md') && text.includes('team.mjs brief')) return text;
@@ -81,6 +107,8 @@ function buildBody(role) {
   const roleNameMatch = raw.match(ROLE_NAME_RE);
   const roleDisplay = roleNameMatch ? roleNameMatch[1] : '';
   let text = ensureSubagentSection(ensureStructuredOutput(stripAlignSection(raw), role));
+  // Owner 2026-11-19 强制：六卡都必须含「场景覆盖准则」；项目卡没写就在这里补（按角色差异化）。
+  text = ensureSceneCoverage(text, role);
   // 先换占位 token，再整体转义，最后把 token 换成真正的模板插值——否则插值会被当成字面量。
   text = text.split(PROJECT).join('__PROJECT_TOKEN__');
   if (roleDisplay) text = text.split(roleDisplay).join('__ROLE_TOKEN__');
