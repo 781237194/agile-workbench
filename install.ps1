@@ -1450,13 +1450,30 @@ function Invoke-UpgradeApplyTree {
         [Parameter(Mandatory = $true)][string]$StagingRoot,
         [Parameter(Mandatory = $true)][string]$BackupDir
     )
+    # P0 B-20261119-194157-2e6d：升级包必须带「团队/」里的代码与规则（工具/模板/角色/协议/skill +
+    # 宪法/流程/项目铁律），否则一键升级后团队工具层仍是首装版、与 git pull 永久不等价。
+    # 用户数据（团队/状态、团队/日志、团队/产出、团队/项目、团队/看板.*、项目/、data/）一律不进白名单。
+    # 清单唯一来源：scripts/upgrade-package-manifest.cjs（夹具 scripts/test-2e6d-team-upgrade.cjs 逐项比对）。
     $relatives = @(
         'src', 'scripts', 'dsh-plugin', 'assets', 'docs',
+        '团队/工具', '团队/模板', '团队/角色', '团队/协议', '团队/skill',
         'package.json', 'package-lock.json', 'install.ps1', 'start.cmd', 'launch.vbs',
-        'README.md', 'CHANGELOG.md', 'NOTICE.md', 'LICENSE', '发版记录.md', '安装PM工作台.cmd'
+        'README.md', 'CHANGELOG.md', 'NOTICE.md', 'LICENSE', '发版记录.md', '安装PM工作台.cmd',
+        '团队/团队宪法.md', '团队/流程.md', '团队/项目铁律.md'
     )
+    # 双保险：即使以后有人把用户数据目录写进白名单，这里也直接跳过（永不覆盖）。
+    $userDataPrefixes = @('团队/状态', '团队/日志', '团队/产出', '团队/项目', '团队/看板', '项目', 'data', 'node_modules', '_tmp')
+    $isUserData = {
+        param([string]$Rel)
+        $p = ($Rel -replace '\\', '/').TrimStart('.', '/')
+        foreach ($prefix in $userDataPrefixes) {
+            if ($p -eq $prefix -or $p.StartsWith($prefix + '/')) { return $true }
+        }
+        return $false
+    }
     $plan = @()
     foreach ($rel in $relatives) {
+        if (& $isUserData $rel) { continue }
         $src = Join-Path $StagingRoot $rel
         if (-not (Test-Path -LiteralPath $src)) { continue }
         $dst = Join-Path $RepoRoot $rel
@@ -1527,6 +1544,27 @@ function Invoke-UpgradeVerifyInstall {
             $h2 = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash
             if ($h1 -ne $h2) { $problems += ("内容不一致：{0}" -f $rel) }
         }
+    }
+    # P0 B-20261119-194157-2e6d：团队/ 的代码与规则（工具/模板/角色/协议/skill + 宪法/流程/铁律）也要逐个校验落地，
+    # 否则「下载成功、应用却漏了团队/」这类缺陷会静默通过。用户数据目录不在 staging 里，自然不会出现在校验集合。
+    $stagingTeam = Join-Path $StagingRoot '团队'
+    if (Test-Path -LiteralPath $stagingTeam) {
+        $baseLen = (Join-Path $StagingRoot '').Length
+        $teamChecked = 0
+        $userDataPrefixes = @('团队/状态', '团队/日志', '团队/产出', '团队/项目', '团队/看板')
+        foreach ($f in @(Get-ChildItem -LiteralPath $stagingTeam -Recurse -File -ErrorAction SilentlyContinue)) {
+            $rel = $f.FullName.Substring($baseLen).TrimStart('\', '/') -replace '\\', '/'
+            if ([bool]($userDataPrefixes | Where-Object { $rel -eq $_ -or $rel.StartsWith($_ + '/') })) { continue }
+            $dst = Join-Path $RepoRoot ($rel -replace '/', '\')
+            $checked += 1
+            $teamChecked += 1
+            if (-not (Test-Path -LiteralPath $dst)) { $problems += ("未部署：{0}" -f $rel); continue }
+            $h1 = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
+            $h2 = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash
+            if ($h1 -ne $h2) { $problems += ("内容不一致：{0}" -f $rel) }
+            if ($problems.Count -ge 20) { break }
+        }
+        if ($teamChecked -eq 0) { $problems += '升级包含 团队/ 目录但没有任何团队文件被校验（包结构异常）' }
     }
     if ($problems.Count -gt 0) {
         throw ('部署校验失败：' + (($problems | Select-Object -First 5) -join '；'))
