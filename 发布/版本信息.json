@@ -1,6 +1,7 @@
 {
   "version": "2.1.5",
   "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.5/发布/pm-workbench-2.1.5.zip",
-  "sha256": "ac8998b94b9d5a604d7ff5e613342be8583e3d3214067efaa43fb9d860c6d2c4",
-  "notes": "台账信噪比治理 + 角色卡周期重读 + 闸门语义修正：task list/req list/inbox 默认只列在办（50 行上限、统一截断提示）、待验收(done) 行；角色卡 sha12 摘要随 boot 注入与 20 拍重注入、写操作门（软/硬）；建单不自动认领（派单才 working）；G4 软硬语义统一、编写/设计类任务豁免 G3、G8 不误判跳步"
+  "sha256": "61a9b546cfb31cee09512f38a5784bfcfed3d31dfcc7e0d9d54d26ac8e5606b9",
+  "notes": "台账信噪比治理 + 角色卡周期重读 + 闸门语义修正：task list/req list/inbox 默认只列在办（50 行上限、统一截断提示）、待验收(done) 行；角色卡 sha12 摘要随 boot 注入与 20 拍重注入、写操作门（软/硬）；建单不自动认领（派单才 working）；G4 软硬语义统一、编写/设计类任务豁免 G3、G8 不误判跳步；升级包已包含 团队/（工具/模板/角色/协议/skill + 宪法/流程/项目铁律），一键升级与 git pull 对齐（P0 B-2e6d）",
+  "size": 4141561
 }
