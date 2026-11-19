@@ -143,6 +143,42 @@ function main() {
       k7.json && k7.json.code === 'ANCHOR_BAD_FORMAT' && k7.status === 1
       && k7b.json && k7b.json.code === 'ANCHOR_BAD_FORMAT', { k7: k7.json && k7.json.code, k7b: k7b.json && k7b.json.code });
 
+    /* ── B-20261120-021256-e504：契约级假阳性的三条回归 ─────────── */
+    // e1：随机指纹（文件快照一致但行指纹不存在）→ 必须 STALE，不能 ok
+    const fe1 = path.join(FIX, 'e504-a.md');
+    fs.writeFileSync(fe1, 'alpha\nbeta\ngamma\n', 'utf8');
+    const ce1 = runJson(['anchor', 'cite', relOf(fe1), '--line', '2', '--json']);
+    const fakeAnchor = `${relOf(fe1)}#${ce1.json.fileSha12}:111111111111`;
+    const ke1 = runJson(['anchor', 'check', fakeAnchor, '--json']);
+    check('E1 随机行指纹 + 文件未变 → ANCHOR_STALE（exit 2），不得报 ok/matched:snapshot',
+      ke1.json && ke1.json.code === 'ANCHOR_STALE' && ke1.status === 2 && ke1.json.ok !== true,
+      { json: ke1.json, status: ke1.status });
+    // e2：删掉目标行（内容彻底没了）→ STALE
+    const fe2 = path.join(FIX, 'e504-b.md');
+    fs.writeFileSync(fe2, 'keep1\ntarget-line\nkeep2\n', 'utf8');
+    const ce2 = runJson(['anchor', 'cite', relOf(fe2), '--line', '2', '--json']);
+    fs.writeFileSync(fe2, 'keep1\nkeep2\n', 'utf8');
+    const ke2 = runJson(['anchor', 'check', String(ce2.json.anchor), '--json']);
+    check('E2 删掉目标行 → ANCHOR_STALE（exit 2）', ke2.json && ke2.json.code === 'ANCHOR_STALE' && ke2.status === 2, { json: ke2.json });
+    // e3：复制一行（同内容出现两次）→ AMBIGUOUS + candidates 长度 2
+    const fe3 = path.join(FIX, 'e504-c.md');
+    fs.writeFileSync(fe3, 'x1\ndup-target\nx2\n', 'utf8');
+    const ce3 = runJson(['anchor', 'cite', relOf(fe3), '--line', '2', '--json']);
+    fs.writeFileSync(fe3, 'x1\ndup-target\nx2\ndup-target\n', 'utf8');
+    const ke3 = runJson(['anchor', 'check', String(ce3.json.anchor), '--json']);
+    check('E3 复制一行 → ANCHOR_AMBIGUOUS（exit 2）且 candidates 恰 2 项',
+      ke3.json && ke3.json.code === 'ANCHOR_AMBIGUOUS' && ke3.status === 2
+      && Array.isArray((ke3.json.details || {}).candidates) && ke3.json.details.candidates.length === 2,
+      { json: ke3.json, status: ke3.status });
+    // e4：原来那条「快照一致」用例仍要 PASS（matched:'snapshot' 且 lineNo 正确）
+    const fe4 = path.join(FIX, 'e504-d.md');
+    fs.writeFileSync(fe4, 'r1\nsnapshot-ok\nr3\n', 'utf8');
+    const ce4 = runJson(['anchor', 'cite', relOf(fe4), '--line', '2', '--json']);
+    const ke4 = runJson(['anchor', 'check', String(ce4.json.anchor), '--json']);
+    check("E4 未改文件的正向路径仍 matched:'snapshot' 且 lineNo=2（修复未误伤）",
+      ke4.json && ke4.json.ok === true && ke4.json.matched === 'snapshot' && ke4.json.lineNo === 2,
+      { json: ke4.json });
+
     /* ── AC6 归一化 ───────────────────────────────────────── */
     const fa = path.join(FIX, 'norm-a.md');
     const fb = path.join(FIX, 'norm-b.md');

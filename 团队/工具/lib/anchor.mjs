@@ -145,31 +145,26 @@ export function cmdAnchorCheck(args) {
   const file = readAnchorFile(resolved.abs);
   if (!file) fail('ANCHOR_FILE_MISSING', `文件不存在：${resolved.rel}`, { path: resolved.rel, anchor: parsed.raw, next: '先确认文件是否移动/改名' }, 3);
   const currentFileSha12 = fileSha12Of(file.buf);
-  // 三级判定：快照 → 指纹 → 歧义（顺序写死，§6.3）
-  if (currentFileSha12 === parsed.sha12) {
-    // 快照一致：按锚点行号定位（行号来自 cite 时的位置；锚点本身不带行号，这里用指纹在文件里找唯一命中；
-    // 快照一致意味着文件没变，指纹必然且只应命中一行——若多行同内容仍要给 lineNo，取第一个）。
-    const hits = [];
-    for (let i = 0; i < file.lines.length; i += 1) {
-      if (lineSha12Of(file.lines[i]) === parsed.lineSha12) hits.push(i + 1);
-    }
-    const lineNo = hits.length ? hits[0] : 0;
-    const json = { ok: true, anchor: parsed.raw, path: resolved.rel, lineNo, matched: 'snapshot', fileSha12: currentFileSha12 };
-    anchorOut(args, `${parsed.raw} → snapshot 命中（行 ${lineNo}）`, json);
-    return;
-  }
-  // 文件变了 → 逐行指纹
+  const fileUnchanged = currentFileSha12 === parsed.sha12;
+  // B-20261120-021256-e504（PM 实测假阳性）：**任何情况下都必须逐行校验**——文件快照一致只说明「文件没变」，
+  // 不代表「锚点里的行指纹真的存在于这个文件」。旧实现「快照一致就 ok:true + lineNo:0」是契约级假阳性
+  // （随机指纹 `…#f32055807499:111111111111` 也会 ok:true），会连带架空 AC7 的 EVIDENCE_ANCHOR_STALE。
+  // 判定顺序（PM 写死）：文件快照 → 逐行 lineSha12 精确匹配 → 无匹配 STALE / 多匹配 AMBIGUOUS。
   const hits = [];
   for (let i = 0; i < file.lines.length; i += 1) {
     if (lineSha12Of(file.lines[i]) === parsed.lineSha12) hits.push(i + 1);
   }
   if (hits.length === 1) {
-    const json = { ok: true, anchor: parsed.raw, path: resolved.rel, lineNo: hits[0], matched: 'fingerprint', fileSha12: currentFileSha12 };
-    anchorOut(args, `${parsed.raw} → fingerprint 命中（行 ${hits[0]}）`, json);
+    const json = {
+      ok: true, anchor: parsed.raw, path: resolved.rel, lineNo: hits[0],
+      matched: fileUnchanged ? 'snapshot' : 'fingerprint', fileSha12: currentFileSha12,
+    };
+    const verb = fileUnchanged ? 'snapshot' : 'fingerprint';
+    anchorOut(args, `${parsed.raw} → ${verb} 命中（行 ${hits[0]}）`, json);
     return;
   }
   if (hits.length === 0) {
-    fail('ANCHOR_STALE', `锚点已失效（文件内容已变且该行内容不再存在）：${resolved.rel}`, {
+    fail('ANCHOR_STALE', `锚点已失效（该行指纹在文件里不存在${fileUnchanged ? '；文件快照一致但行指纹不匹配，说明锚点本身写错了' : ''}）：${resolved.rel}`, {
       anchor: parsed.raw, path: resolved.rel, currentFileSha12,
       next: '重新 anchor cite 生成新锚点',
     }, 2);
