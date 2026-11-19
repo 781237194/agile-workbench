@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  PATHS, TeamError, fail, nowIso, sha256, hashFile, exists, ensureDir, readText, readJson,
+  PATHS, TEAM_ROOT_SOURCE, TeamError, fail, nowIso, sha256, hashFile, exists, ensureDir, readText, readJson,
   writeText, writeJson, appendLine, readJsonl, readJsonlTolerant, slug, safeName, isInside,
   relPath, truncate, randomHex, stamp, acquireLock, releaseLock, withLock, appendEvent,
 } from './core.mjs';
@@ -878,11 +878,17 @@ export function readDocSet(role, project) {
   });
   const missing = records.filter((r) => r.required && !r.exists).map((r) => r.label);
   if (missing.length) {
+    // T-20261120-0157-1b4（2.1.9 批①）：缺文档时必须能一眼看出「读的是哪个根、缺哪个文件的绝对路径」，
+    // 否则「装完六角色 boot 全报 MISSING_DOC」只能靠猜根目录（2026-11-20 Owner 01:2x 现场即此）。
+    const missingRecords = records.filter((r0) => r0.required && !r0.exists);
     fail('MISSING_DOC', `boot 必读文件缺失：${missing.join('、')}（项目 ${project.name}）`, {
       project: project.name,
       root,
       missing,
-      hint: `node 团队\\工具\\team.mjs project ensure --name "${project.name}"`,
+      missingFiles: missingRecords.map((r0) => ({ key: r0.key, label: r0.label, path: r0.path || '', rel: r0.rel || '' })),
+      teamRoot: PATHS.teamRoot,
+      teamRootSource: TEAM_ROOT_SOURCE,
+      hint: `node 团队\\工具\\team.mjs project ensure --name "${project.name}"；若团队根文件本身缺（如 团队宪法.md），可跑 node 团队\\工具\\team.mjs init 兜底生成`,
     });
   }
   const files = {};

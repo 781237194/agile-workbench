@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
-  PATHS, TeamError, fail, nowIso, sha256, hashFile, shortHash, exists, ensureDir, readText, readJson,
+  PATHS, TEAM_ROOT_SOURCE, TeamError, fail, nowIso, sha256, hashFile, shortHash, exists, ensureDir, readText, readJson,
   writeText, writeJson, appendLine, readJsonl, readJsonlTolerant, slug, isInside, relPath,
   truncate, randomHex, stamp, asArray, acquireLock, releaseLock, heartbeatLock, lockInfo, listLocks,
   appendEvent, readEventsStrict, verifyEventChain, jsonOut, textOut, hhmmss, safeName,
@@ -5318,6 +5318,9 @@ export async function cmdBoot(args) {
   }
   if (args.json) jsonOut({
     ok: true, token: token.token, role, project: projectName, teamMode, sessionId, rulesHash: docs.rulesHash,
+    // T-20261120-0157-1b4（2.1.9 批①）：团队根与来源（process-env | user-env | default）——
+    // 「装完 boot 报缺文档」时第一眼要能确认读的是哪个根。
+    teamRoot: PATHS.teamRoot, teamRootSource: TEAM_ROOT_SOURCE,
     bootTtlMinutes,
     // R-a1eb §6.5：两个哈希各给前 12 位；rosterVersion 不参与权限，只做「名册变过」提示。
     // boot 新建令牌时它与当前名册一致 → rosterChangedSinceToken=false（旧令牌在写命令上才会看到 true）。

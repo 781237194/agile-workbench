@@ -8,9 +8,16 @@ import { fileURLToPath } from 'node:url';
 
 export const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const WORKSPACE = path.resolve(HERE, '..', '..', '..');
-export const TEAM_ROOT = process.env.TEAM_ROOT
-  ? path.resolve(process.env.TEAM_ROOT)
-  : path.join(WORKSPACE, '团队');
+// T-20261120-0157-1b4（2.1.9 批①）：根来源三选一，便于「装完 boot 报缺文档」时一眼看出读的是哪个根。
+//   process-env = 本进程的 TEAM_ROOT（工具/壳层显式传，最高优先级）
+//   user-env    = 用户环境变量 AWB_TEAM_ROOT（装机时配的根）
+//   default     = 安装默认根 <安装目录>/团队
+const __teamRootProcessEnv = String(process.env.TEAM_ROOT || '').trim();
+const __teamRootUserEnv = String(process.env.AWB_TEAM_ROOT || '').trim();
+export const TEAM_ROOT = __teamRootProcessEnv
+  ? path.resolve(__teamRootProcessEnv)
+  : (__teamRootUserEnv ? path.resolve(__teamRootUserEnv) : path.join(WORKSPACE, '团队'));
+export const TEAM_ROOT_SOURCE = __teamRootProcessEnv ? 'process-env' : (__teamRootUserEnv ? 'user-env' : 'default');
 export const INSTALL_TEAM_ROOT = path.join(WORKSPACE, '团队');
 /** B-3c03 / B-47c0 / B-20261118-090620-6e39：沙盘根判定。
  *
