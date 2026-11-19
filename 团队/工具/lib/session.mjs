@@ -47,7 +47,7 @@ export const DEFAULT_SESSION_TOKEN_LIMIT = 300000;
  *   { "sessionLimits": { "pm": { "warn": 600000, "force": 1000000 } } }
  * `session usage` / `session_rotate_warn` / auto-rotate 候选都必须用这里的结果，禁止第二套阈值。
  */
-export const ROLE_SESSION_LIMIT_DEFAULTS = Object.freeze({ pm: { warn: 600000, force: 1000000 } });
+export const ROLE_SESSION_LIMIT_DEFAULTS = Object.freeze({});
 export function sessionLimitsOf(projectName) {
   let cfg = null;
   try { cfg = readJson(projectStatePaths(String(projectName || '')).config); } catch { cfg = null; }

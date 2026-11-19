@@ -3,13 +3,14 @@
 /**
  * test-2c05-session-thresholds.cjs —— T-20261118-080102-2c05 回归夹具
  *
- * Owner 口径（2026-11-18 08:00）：**PM 允许到 2 倍阈值才换人**——pm warn=600000 / force=1000000；
+ * Owner 口径（2026-11-19 20:5x，**推翻 2026-11-18 08:00 的 PM 2 倍放宽**）：所有角色统一 30 万/50 万；
+ * 换人已改为「只提醒不强制」，到阈值只提醒 + 建议归档，不阻断工作；
  * 其余五个角色维持 warn=300000 / force=500000。阈值必须**单源**（sessionLimitsOf），
  * 禁止出现第二套（session usage / 水位提醒 / auto-rotate 候选共用）。
  *
  * 断言：
- *   T1 配置就位：项目 项目.json → sessionLimits.pm = {600000,1000000}；其余角色取默认
- *   T2 pm 判档：999999 → warn、1000000 → force、550000 → ok（**不是 force**，也还没到 60 万 warn）
+ *   T1 无项目覆盖时所有角色取 300000/500000（PM 不再 2 倍）
+ *   T2 判档：499999 → warn、500000 → force、299999 → ok、300000 → warn
  *   T3 其余角色不变：tester 300000 → warn、500000 → force、299999 → ok
  *   T4 缺配置回落默认：不存在的项目 / 未配置角色 → 300000/500000
  *   T5 auto-rotate 单源：DEFAULT_TOKEN_* === session 的默认值；collectCandidates 接受 limitsOf 且按角色判档
@@ -37,17 +38,18 @@ function ok(name, cond, detail) {
 
   // T1
   const lim = S.sessionLimitsOf(PROJECT);
-  ok('T1 项目配置 sessionLimits.pm = {warn:600000, force:1000000}；tester 取默认',
-    lim.of('pm').warn === 600000 && lim.of('pm').force === 1000000
+  ok('T1 无覆盖时 pm 与 tester 均为 300000/500000（PM 2 倍已撤销）',
+    lim.of('pm').warn === 300000 && lim.of('pm').force === 500000
     && lim.of('tester').warn === 300000 && lim.of('tester').force === 500000,
     { pm: lim.of('pm'), tester: lim.of('tester') });
 
   // T2 pm 判档
   const pm = lim.of('pm');
-  ok('T2 pm：999999→warn、1000000→force、550000→ok（不是 force）',
-    S.usageLevelOf(999999, pm.warn, pm.force) === 'warn'
-    && S.usageLevelOf(1000000, pm.warn, pm.force) === 'force'
-    && S.usageLevelOf(550000, pm.warn, pm.force) === 'ok',
+  ok('T2 pm：499999→warn、500000→force、299999→ok、300000→warn',
+    S.usageLevelOf(499999, pm.warn, pm.force) === 'warn'
+    && S.usageLevelOf(500000, pm.warn, pm.force) === 'force'
+    && S.usageLevelOf(299999, pm.warn, pm.force) === 'ok'
+    && S.usageLevelOf(300000, pm.warn, pm.force) === 'warn',
     { 999999: S.usageLevelOf(999999, pm.warn, pm.force), 1000000: S.usageLevelOf(1000000, pm.warn, pm.force), 550000: S.usageLevelOf(550000, pm.warn, pm.force) });
 
   // T3 其余角色不变
@@ -60,21 +62,21 @@ function ok(name, cond, detail) {
 
   // T4 缺配置回落
   const missing = S.sessionLimitsOf('不存在的项目-x');
-  ok('T4 缺配置/未知项目 → pm 仍是代码级 2 倍（600000/1000000），其余角色回落 300000/500000',
-    missing.of('pm').warn === 600000 && missing.of('pm').force === 1000000
+  ok('T4 缺配置/未知项目 → 所有角色回落 300000/500000',
+    missing.of('pm').warn === 300000 && missing.of('pm').force === 500000
     && missing.of('tester').warn === 300000 && missing.of('tester').force === 500000,
     { pm: missing.of('pm'), tester: missing.of('tester') });
 
   // T5 auto-rotate 单源 + 按角色判档
   const sameDefaults = AR.DEFAULT_TOKEN_WARN === S.DEFAULT_TOKEN_WARN && AR.DEFAULT_TOKEN_FORCE === S.DEFAULT_TOKEN_FORCE;
   const usage = {
-    pm: { tokens: 999999, at: new Date().toISOString() },
+    pm: { tokens: 400000, at: new Date().toISOString() },
     tester: { tokens: 500000, at: new Date().toISOString() },
     analyst: { tokens: 350000, at: new Date().toISOString() },
   };
   const cands = AR.collectCandidates({ now: Date.now(), usage, rounds: {}, memberRoles: ['pm', 'tester', 'analyst'], limitsOf: lim.of });
   const byRole = Object.fromEntries(cands.map((c) => [c.role, c.level]));
-  ok('T5 auto-rotate 默认常量与 session 同源；collectCandidates 按角色判档（pm 999999=warn、tester 500000=force、analyst 350000=warn）',
+  ok('T5 auto-rotate 默认常量与 session 同源；collectCandidates 按角色判档（pm 400000=warn、tester 500000=force、analyst 350000=warn）',
     sameDefaults && byRole.pm === 'warn' && byRole.tester === 'force' && byRole.analyst === 'warn',
     { sameDefaults, byRole });
 
@@ -86,10 +88,10 @@ function ok(name, cond, detail) {
     && /预警\/强制/.test(src), {});
   const usageRes = await S.sessionUsage({ projectName: PROJECT });
   const rowPm = (usageRes.rows || []).find((r) => r.role === 'pm') || null;
-  ok('T6b sessionUsage() 返回 thresholds + 每行实际生效 warn/force（pm 600000/1000000）',
+  ok('T6b sessionUsage() 返回 thresholds + 每行实际生效 warn/force（pm 300000/500000）',
     Boolean(usageRes.thresholds) && Boolean(rowPm)
-    && rowPm.warnThreshold === 600000 && rowPm.forceThreshold === 1000000
-    && rowPm.thresholdSource === 'project.sessionLimits',
+    && rowPm.warnThreshold === 300000 && rowPm.forceThreshold === 500000
+    && rowPm.thresholdSource === 'default',
     { thresholds: usageRes.thresholds, pmRow: rowPm && { warn: rowPm.warnThreshold, force: rowPm.forceThreshold, src: rowPm.thresholdSource } });
 
   const report = { task: 'T-20261118-080102-2c05', at: new Date().toISOString(), total: results.length, pass, red: results.length - pass, results };
