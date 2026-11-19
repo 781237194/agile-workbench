@@ -10428,6 +10428,8 @@ export async function cmdOwner(args) {
     ok: true,
     project: projectName,
     requirementId,
+    // B-316f：legacy 返回体也带通知结果（与 shell 分支字段一致，便于 tester/PM 一处判据）
+    ownerDecisionNotify,
     action: actionRaw || 'review',
     decision,
     teamMode,

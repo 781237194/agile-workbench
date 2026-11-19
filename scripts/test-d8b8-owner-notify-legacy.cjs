@@ -101,6 +101,20 @@ function main() {
       check('A2 cmdOwner 在 out 之前调用 runOwnerDecisionNotify（legacy 路径接入）',
         ownerStart >= 0 && callIdx > ownerStart && outIdx > callIdx, { ownerStart, callIdx, outIdx });
     }
+    // B-316f：两处返回体都必须带 ownerDecisionNotify（可观测性一致）
+    {
+      const ownerStart = ops.indexOf('export async function cmdOwner(args)');
+      const opsOut = ops.slice(ownerStart);
+      const shellFn = shell.indexOf('async function ownerRequirementDecision(input = {}) {');
+      const shellBody = shell.slice(shellFn, shellFn + 30000);
+      // 判据：cmdOwner 里 `let ownerDecisionNotify = null` 之后 3000 字符内出现字段 `ownerDecisionNotify,`（即 out 的 json 里带了它）
+      const defIdx = opsOut.indexOf('let ownerDecisionNotify = null');
+      check('A4 ops.mjs → cmdOwner 返回体含 ownerDecisionNotify（legacy CLI 可观测）',
+        defIdx > 0 && /^\s+ownerDecisionNotify,\s*$/m.test(opsOut.slice(defIdx, defIdx + 3000)),
+        { defIdx, tail: opsOut.slice(defIdx, defIdx + 900).slice(-400) });
+      check('A5 src/team-tools.js → ownerRequirementDecision 返回体含 ownerDecisionNotify（壳层 legacy 分支）',
+        /ownerDecisionNotify,/.test(shellBody), {});
+    }
     check('A3 壳层不再自建文案，改调 team.mjs owner-notify',
       shell.includes("'owner-notify'") && !shell.includes("'notify', '--boot', token, '--to', 'pm', '--type', 'notice', '--subject', subject"), {});
 
@@ -135,6 +149,9 @@ function main() {
       && String(notices[0].from || '') === 'system' && String(notices[0].type || '') === 'notice'
       && /轮次：1/.test(String(notices[0].body || '')) && /通道：ui/.test(String(notices[0].body || '')),
       { before: mailBefore, after: mailAfter.length, subjects: notices.map((m) => m.subject), body: notices[0] && String(notices[0].body || '').slice(0, 160) });
+    check('B1b owner-notify 的 --json 返回体带 notify（ok + messageId 可观测）',
+      Boolean((n1.json || {}).notify) && ((n1.json || {}).notify.ok === true || (n1.json || {}).notify.deduped === true),
+      { json: n1.json && { ok: n1.json.ok, notify: n1.json.notify } });
     const audit1 = readLines(AUDIT);
     check('B2 审计 owner决定通知.jsonl 记 owner_decision_notified（带 messageId）',
       audit1.some((r) => r.action === 'owner_decision_notified' && String(r.messageId || '').startsWith('M-')),

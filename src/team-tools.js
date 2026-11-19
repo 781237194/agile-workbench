@@ -7825,6 +7825,8 @@ function createTeamTools(options = {}) {
       workflow: snapshot.ok ? snapshot.workflow : null,
       snapshot: snapshot.ok ? snapshot : null,
       projectIndex,
+      // B-316f：legacy 分支也把通知结果带回（与壳层自有分支字段一致）
+      ownerDecisionNotify,
       warnings: [
         ...(Array.isArray(runValue && runValue.warnings) ? runValue.warnings : []),
         ...((statusSync && Array.isArray(statusSync.warnings)) ? statusSync.warnings : []),
