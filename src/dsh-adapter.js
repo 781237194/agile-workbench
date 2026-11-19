@@ -279,9 +279,10 @@ const DSH_DISCOVERY_MAX_CANDIDATES = 20;
 const DSH_DISCOVERY_MAX_WAVE1 = 16;
 const DSH_DISCOVERY_PROBE_CONCURRENCY = 6;
 // F-4：其它来源全落空时，才在 127.0.0.1 的这个区间做有界扫描（需求写死 6000–7000）。
-const DSH_SCAN_DEFAULT_START = 6000;
-const DSH_SCAN_DEFAULT_END = 7000;
+const DSH_SCAN_DEFAULT_START = 49152; // P1-4：DSH 随机端口落在 ephemeral 区间，不再写死 6000–7000
+const DSH_SCAN_DEFAULT_END = 65535;
 const DSH_SCAN_MAX_PROBE_PORTS = 12;
+const DSH_DISCOVERY_MAX_LISTENERS = 40; // P1-4：netstat 监听端口候选上限（进程反向匹配失败时兜底）
 
 function normalizeLocalBaseUrl(raw) {
   let text = String(raw == null ? '' : raw).trim();
@@ -568,14 +569,45 @@ async function probeDshWeb(rawUrl, options = {}) {
   };
 }
 
+function fileExistsForDiag(file) { try { return fs.existsSync(String(file || "")); } catch { return false; } }
+const commandAttempts = [];
+/** 测试钩子（默认关闭）：AWB_DSH_COMMAND_STUB = JSON { "powershell.exe": {ok,stdout,stderr,error} }，按 basename 命中。 */
+function commandStubFor(file) {
+  const rawStub = String((process.env && process.env.AWB_DSH_COMMAND_STUB) || "").trim();
+  if (!rawStub) return null;
+  let map = null;
+  try { map = JSON.parse(rawStub); } catch { return null; }
+  if (!map || typeof map !== "object") return null;
+  const key = path.basename(String(file || "")).toLowerCase();
+  const hit = map[key] || map[String(file || "")] || null;
+  if (!hit || typeof hit !== "object") return null;
+  return hit;
+}
+function recordCommandAttempt(file, extra = {}) {
+  const row = { file: String(file || ""), exists: fileExistsForDiag(file), ...extra };
+  commandAttempts.push(row);
+  if (commandAttempts.length > 40) commandAttempts.shift();
+  return row;
+}
+function getCommandAttempts() { return commandAttempts.slice(); }
+function resetCommandAttempts() { commandAttempts.length = 0; }
 function runCommand(file, args, options = {}) {
   return new Promise((resolve) => {
+    const stub = commandStubFor(file);
+    if (stub) {
+      recordCommandAttempt(file, { stub: true, ok: Boolean(stub.ok), error: String(stub.error || "") });
+      resolve({ ok: Boolean(stub.ok), stdout: String(stub.stdout == null ? "" : stub.stdout), stderr: String(stub.stderr == null ? "" : stub.stderr), error: String(stub.error || ""), stub: true });
+      return;
+    }
     execFile(file, args, {
       windowsHide: true,
       timeout: Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 6000,
       maxBuffer: Number(options.maxBuffer) > 0 ? Number(options.maxBuffer) : 8 * 1024 * 1024,
       encoding: 'utf8'
     }, (error, stdout, stderr) => {
+      const diagFile = file;
+      if (error) recordCommandAttempt(diagFile, { ok: false, error: String(error.message || error), code: String((error && error.code) || "") });
+      else recordCommandAttempt(diagFile, { ok: true });
       resolve({
         ok: !error,
         stdout: String(stdout == null ? '' : stdout),
@@ -599,7 +631,7 @@ async function listWindowsListeners(options = {}) {
   if (process.platform !== 'win32') {
     return { ok: false, code: 'DSH_PLATFORM_UNSUPPORTED', listeners: [], error: '当前平台不支持读取监听端口' };
   }
-  const netstat = windowsSystemPath(path.join('System32', 'netstat.exe'));
+  const netstat = String(process.env.AWB_NETSTAT_PATH || "").trim() || windowsSystemPath(path.join("System32", "netstat.exe"));
   const result = await runCommand(netstat, ['-ano', '-p', 'TCP'], {
     timeoutMs: Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 5000
   });
@@ -655,7 +687,11 @@ function parseWmicProcessList(text) {
 }
 
 async function listWindowsProcessesViaPowershell(options = {}) {
-  const powershell = windowsSystemPath(path.join('WindowsPowerShell', 'v1.0', 'powershell.exe'));
+  const powershellCandidates = [
+    String(process.env.AWB_POWERSHELL_PATH || "").trim(),
+    windowsSystemPath(path.join("System32", "WindowsPowerShell", "v1.0", "powershell.exe")),
+    windowsSystemPath(path.join("WindowsPowerShell", "v1.0", "powershell.exe")),
+  ].filter(Boolean);
   const script = [
     '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
     '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
@@ -664,12 +700,23 @@ async function listWindowsProcessesViaPowershell(options = {}) {
     'ConvertTo-Json -InputObject @($procs) -Depth 4 -Compress'
   ].join('\n');
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  const result = await runCommand(powershell, [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded
-  ], {
-    timeoutMs: Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 8000,
-    maxBuffer: 16 * 1024 * 1024
-  });
+  let result = null;
+  let powershellUsed = "";
+  const powershellErrors = [];
+  for (const candidate of powershellCandidates) {
+    const attempt = await runCommand(candidate, [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded
+    ], {
+      timeoutMs: Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 8000,
+      maxBuffer: 16 * 1024 * 1024
+    });
+    if (attempt.ok) { result = attempt; powershellUsed = candidate; break; }
+    powershellErrors.push(String(candidate) + "（存在=" + fileExistsForDiag(candidate) + "）：" + String(attempt.error || "失败").slice(0, 120));
+    result = result || attempt;
+  }
+  if (!result || !result.ok) {
+    return { ok: false, code: "DSH_PROCESS_QUERY_FAILED", processes: [], error: (powershellErrors.join("；") || "PowerShell 进程查询失败").slice(0, 400), candidates: powershellCandidates.map((file) => ({ file, exists: fileExistsForDiag(file) })) };
+  }
   if (!result.ok) {
     return { ok: false, code: 'DSH_PROCESS_QUERY_FAILED', processes: [], error: result.error || 'PowerShell 进程查询失败' };
   }
@@ -703,13 +750,18 @@ async function listWindowsProcesses(options = {}) {
   if (process.platform !== 'win32') {
     return { ok: false, code: 'DSH_PLATFORM_UNSUPPORTED', processes: [], error: '当前平台不支持读取进程' };
   }
-  const wmic = windowsSystemPath(path.join('System32', 'wbem', 'wmic.exe'));
+  const wmic = String(process.env.AWB_WMIC_PATH || "").trim() || windowsSystemPath(path.join("System32", "wbem", "wmic.exe"));
   const result = await runCommand(wmic, [
     'process', 'get', 'ProcessId,ParentProcessId,Name,CommandLine,CreationDate', '/format:list'
   ], {
     timeoutMs: Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 5000,
     maxBuffer: 16 * 1024 * 1024
   });
+  const wmicMissing = !fileExistsForDiag(wmic) && !(commandStubFor(wmic));
+  if (!result.ok && wmicMissing) {
+    // P0-2：Win11 24H2 起 wmic 已移除——缺失不是致命错误，直接走 Get-CimInstance（PowerShell）。
+    recordCommandAttempt(wmic, { ok: false, error: "WMIC_MISSING" });
+  }
   if (result.ok) {
     const processes = parseWmicProcessList(result.stdout);
     if (processes.length) return { ok: true, code: 'OK', processes, method: 'wmic' };
@@ -800,6 +852,13 @@ async function collectDshProcessInfo(options = {}) {
   const errors = [];
   if (!listeners.ok) errors.push(listeners.error || '监听端口读取失败');
   if (!processResult.ok) errors.push(processResult.error || '进程读取失败');
+  const listenerPorts = (listeners.ok ? listeners.listeners : []).slice(0, 80);
+  const diagnostics = {
+    netstat: { ok: Boolean(listeners.ok), error: String(listeners.error || "").slice(0, 200) },
+    processes: { ok: Boolean(processResult.ok), method: String(processResult.method || ""), error: String(processResult.error || "").slice(0, 240) },
+    commandAttempts: getCommandAttempts().slice(-12),
+  };
+  const listenerSummary = listenerPorts.map((listener) => ({ port: listener.port, pid: listener.pid, baseUrl: listener.baseUrl }));
   return {
     ok: processResult.ok,
     code: errors.length ? 'DSH_PROCESS_PARTIAL' : 'OK',
@@ -807,7 +866,9 @@ async function collectDshProcessInfo(options = {}) {
     processes: dshProcesses.map((proc) => ({ pid: proc.pid, name: proc.name })),
     ports,
     argPorts,
-    error: errors.join('；').slice(0, 240)
+    error: errors.join('；').slice(0, 240),
+    listenerPorts: listenerSummary,
+    diagnostics,
   };
 }
 
@@ -821,7 +882,8 @@ function candidateSourceLabel(source) {
     'process-arg': 'DSH 进程参数',
     'process-port': 'DSH 进程监听端口',
     default: 'DSH 默认端口',
-    'range-scan': '6000–7000 端口扫描',
+    'range-scan': '临时端口（49152–65535）扫描',
+    'netstat-port': 'netstat 监听端口',
     range: '小范围探测'
   };
   return labels[source] || source;
@@ -943,6 +1005,12 @@ async function discoverDshWeb(options = {}) {
   for (const listener of processInfo.ports || []) {
     addCandidate(candidates, seen, listener.baseUrl, 'process-port', 4, 'pid ' + listener.pid + ' 监听 ' + listener.port);
   }
+  // P1-4：进程反向匹配失败/为空时，用 netstat 监听端口兜底（比全端口扫描便宜）。
+  const listenerCandidates = (processInfo.listenerPorts || []).slice(0, DSH_DISCOVERY_MAX_LISTENERS);
+  for (const listener of listenerCandidates) {
+    addCandidate(candidates, seen, listener.baseUrl, "netstat-port", 5, "netstat 监听 " + listener.port + "（pid " + listener.pid + "）");
+  }
+
   addCandidate(candidates, seen, 'http://127.0.0.1:' + DSH_WEB_DEFAULT_PORT, 'default', 5, '默认端口');
 
   const wave1 = candidates.slice(0, Math.min(DSH_DISCOVERY_MAX_WAVE1, maxCandidates));
@@ -997,6 +1065,7 @@ async function discoverDshWeb(options = {}) {
     dshProcesses: (processInfo.processes || []).length,
     ports: (processInfo.ports || []).map((listener) => listener.port),
     argPorts: (processInfo.argPorts || []).slice(),
+    listenerPorts: (processInfo.listenerPorts || []).map((listener) => listener.port),
     error: 'error' in processInfo ? String(processInfo.error || '').slice(0, 240) : ''
   };
   const portFileSummary = portFiles.map((entry) => ({ file: entry.file, port: entry.port }));
@@ -1092,6 +1161,15 @@ async function discoverDshWeb(options = {}) {
   }
   if (portFiles.length) reasons.push('端口文件写了 ' + portFiles.map((entry) => entry.port).join('/') + '，均不可用');
   const suffix = savedBaseUrl ? '；保留原地址 ' + savedBaseUrl : '';
+  // P0-2：发现失败时把命令候选路径+存在性写进可读原因（ENOENT 可诊断）。
+  const diag = processInfo.diagnostics || {};
+  try {
+    const att = Array.isArray(diag.commandAttempts) ? diag.commandAttempts : [];
+    const parts = [];
+    for (const row of att.slice(-6)) parts.push(String(row.file) + "（存在=" + String(row.exists) + "）");
+    if (parts.length) reasons.push('诊断：' + parts.join('；'));
+    else if (diag.processes && diag.processes.error) reasons.push('诊断：' + String(diag.processes.error));
+  } catch { /* 诊断失败不阻断 */ }
   return {
     ok: false,
     state: 'failed',
@@ -1126,5 +1204,7 @@ module.exports = {
   scanLocalPortRange,
   DSH_WEB_DEFAULT_PORT,
   DSH_SCAN_DEFAULT_START,
-  DSH_SCAN_DEFAULT_END
+  DSH_SCAN_DEFAULT_END,
+  getCommandAttempts,
+  resetCommandAttempts
 };
