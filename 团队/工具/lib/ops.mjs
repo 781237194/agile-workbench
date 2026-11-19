@@ -1442,6 +1442,7 @@ function consumeRepushPermit(project, role) {
 export function appendWakeLogForTest(project, row) { return appendWakeLog(project, row); }
 const wakeDedupeSeen = new Set();
 let wakeRowSeq = 0;
+let awbWakeFailConsumed = false;
 /** R-d1bf：唤醒留痕的 trigger 词表与同事件去重（同角色同 dedupeKey 只算 1 行，第二行记 skip:duplicate）。 */
 function appendWakeLog(project, row) {
   try {
@@ -1500,9 +1501,15 @@ function logSandboxSkipOnce({ target, project, why, caller, reason }) {
 /** 单次真唤醒（含 mock/测试注入）；返回 null 表示沙盘跳过。 */
 async function tryWake({ project, target, batch, isDispatch = false, engineUrl = '', taskRow = null }) {
   // 测试注入优先级最高：显式要求“唤醒失败”时必须返回失败，不能被后面的沙盘跳过吞掉。
-  // TR-Q 补充（R-d1bf AC5）：AWB_WAKE_FAIL 为对外统一的沙盘注入名（TEAM_WAKE_TEST_FAIL 保留兼容）。
-  if (String(process.env.AWB_WAKE_FAIL || process.env.TEAM_WAKE_TEST_FAIL || '') === '1') {
-    return { ok: false, why: 'AWB_WAKE_FAIL / TEAM_WAKE_TEST_FAIL（沙盘注入的唤醒失败）', code: 'WAKE_TEST_FAIL' };
+  // TR-Q 补充（R-d1bf AC5）：AWB_WAKE_FAIL=1 只让「下一次」真实投递失败一次（沙盘生效），
+  // 随后走既有 400ms 一次性重试并带 retryOf；TEAM_WAKE_TEST_FAIL 保留旧语义（持续失败）。
+  const failInjectSandbox = String(process.env.TEAM_SELFTEST || '') === '1';
+  if (failInjectSandbox && String(process.env.AWB_WAKE_FAIL || '') === '1' && !awbWakeFailConsumed) {
+    awbWakeFailConsumed = true;
+    return { ok: false, why: 'AWB_WAKE_FAIL（沙盘注入的唤醒失败）', code: 'WAKE_TEST_FAIL' };
+  }
+  if (String(process.env.TEAM_WAKE_TEST_FAIL || '') === '1') {
+    return { ok: false, why: 'TEAM_WAKE_TEST_FAIL（测试注入）', code: 'WAKE_TEST_FAIL' };
   }
   const list = Array.isArray(batch) ? batch : [];
   const head = list[0] || {};
@@ -1641,7 +1648,7 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
       if (row.dedupeKey) state.delivered[row.dedupeKey] = Date.now();
     }
     writeWakeQueue(project, state);
-    appendWakeLog(project, { to: target, ok: true, skipped: 'SELFTEST', merged: batch.length, reason, messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5) });
+    appendWakeLog(project, { to: target, ok: true, skipped: 'SELFTEST', merged: batch.length, reason, messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5), messageId: (batch[0] && batch[0].messageId) || '', ...(retryOfId ? { retryOf: retryOfId, trigger: 'event' } : {}) });
     grantRepushPermit(project, target);
     // Owner 08:44：沙盘也要能断言“唤醒正文带内容”，所以这里照样生成同一份 notice 文本（不发网络请求）。
     let selftestWakeText = '';
@@ -1656,7 +1663,15 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
     return { ok: true, skipped: 'SELFTEST', to: target, merged: batch.length, reason, text: selftestWakeText };
   }
   let retried = false;
+  let firstFailRow = null;
   if (result.ok !== true) {
+    // TR-Q 补充（R-d1bf AC5）：先落「首次失败行」（带 id），400ms 一次性重试成功后用 retryOf 关联。
+    const failWhy = String((result && (result.why || result.code)) || '未知');
+    firstFailRow = appendWakeLog(project, {
+      to: target, ok: false, attempt: 1, why: failWhy, trigger: 'event', source: 'wake', reason,
+      messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5),
+      messageId: (batch[0] && batch[0].messageId) || '',
+    });
     t.attempts = 1;
     state.targets[target] = t;
     writeWakeQueue(project, state);
@@ -1664,6 +1679,7 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
     retried = true;
     result = await tryWake({ project, target, batch, isDispatch, engineUrl, taskRow });
   }
+  const retryOfId = (firstFailRow && firstFailRow.id) || '';
   if (result && result.ok === true) {
     // B-47c0：沙盘跳过也要留一行、且 reason 保留触发类型（receipt/dispatch/…），skipped 标明 sandbox_wake_skipped；
     // 不计 deliveredAt（没有真实投递），调用方看到 delivered:false 即可。
@@ -1681,8 +1697,9 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
         // T-6e39：沙盘跳过的细分原因（selftest / env_root / env_projects / copied_tree），面板据此区分文案
         ...(result.sandboxWhy ? { sandboxWhy: String(result.sandboxWhy) } : {}),
         messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5),
+        ...(retryOfId ? { retryOf: retryOfId, trigger: 'event' } : {}),
       });
-      return { ...(result || {}), ok: true, to: target, merged: batch.length, retried: false, reason };
+      return { ...(result || {}), ok: true, to: target, merged: batch.length, retried, retryOf: retryOfId, reason };
     }
     const deliveredAt = nowIso();
     for (const row of batch) {
@@ -1692,9 +1709,9 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
     t.attempts = 0;
     state.targets[target] = t;
     writeWakeQueue(project, state);
-    appendWakeLog(project, { to: target, ok: true, deliveredAt, merged: batch.length, retried, reason, messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5) });
+    appendWakeLog(project, { to: target, ok: true, deliveredAt, merged: batch.length, retried, reason, messageIds: batch.map((row) => row.messageId).filter(Boolean).slice(0, 5), messageId: (batch[0] && batch[0].messageId) || '', ...(retryOfId ? { retryOf: retryOfId, trigger: 'event' } : {}) });
     grantRepushPermit(project, target);
-    return { ...(result || {}), ok: true, to: target, merged: batch.length, retried, deliveredAt, reason };
+    return { ...(result || {}), ok: true, to: target, merged: batch.length, retried, deliveredAt, reason, retryOf: retryOfId };
   }
   // R-c651 F-c651-2：两次即时尝试都失败 → 进重试队列（默认 5/15/30 秒），attempt/why 落 唤醒.jsonl。
   const why = String((result && (result.why || result.code)) || '未知');
@@ -1714,10 +1731,9 @@ export async function wakeWithGuard({ project, to, msg, isDispatch = false, engi
   };
   state.targets[target] = t;
   writeWakeQueue(project, state);
-  // TR-Q 补充（R-d1bf AC5）：本行为「首次失败行」，id 写进 retry.retryOf 供后续重试行关联；trigger 固定 event（非 timer）。
-  const firstFailRow = appendWakeLog(project, { to: target, ok: false, why, messageIds, pending: 0, reason, source: 'wake', trigger: 'event', retried, retryScheduled: 1, nextAt: new Date(t.retry.dueAt).toISOString() });
-  if (firstFailRow && firstFailRow.id) { t.retry.retryOf = firstFailRow.id; state.targets[target] = t; writeWakeQueue(project, state); }
-  return { ok: false, to: target, why, code: 'WAKE_FAILED', attempts: retried ? 2 : 1, attempt: 1, retryAt: t.retry.dueAt, messageIds, retried, retryOf: (firstFailRow && firstFailRow.id) || '' };
+  // TR-Q 补充（R-d1bf AC5）：首次失败行已在前一步落盘；这里把其 id 写入 retry.retryOf，后续定时重试行据此关联。
+  if (retryOfId) { t.retry.retryOf = retryOfId; state.targets[target] = t; writeWakeQueue(project, state); }
+  return { ok: false, to: target, why, code: 'WAKE_FAILED', attempts: retried ? 2 : 1, attempt: 1, retryAt: t.retry.dueAt, messageIds, retried, retryOf: retryOfId };
 }
 
 /**

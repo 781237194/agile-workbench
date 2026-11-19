@@ -159,35 +159,30 @@ try {
   const dedupeLine = dedupeRun.out.split(/\r?\n/).find((l) => l.startsWith('DEDUPE '));
   check('AC4d appendWakeLog 可测（导出）且第二次 skip:duplicate', Boolean(dedupeLine), { err: dedupeRun.err.slice(-300) });
 
-  // ── AC5：AWB_WAKE_FAIL 注入 → 失败重试 trigger=event + retryOf 关联，timer 恒 0 ──
+  // ── AC5：AWB_WAKE_FAIL 一次注入 → 首行失败 + 400ms 重试成功行（retryOf 关联），timer 恒 0 ──
   const ac5Script = path.join(os.tmpdir(), 'd1bf-ac5.mjs');
   fs.writeFileSync(ac5Script, [
-    `import { wakeWithGuard, processWakeRetries, readDeliveryState } from ${JSON.stringify('file:///' + OPS_SRC.replace(/\\\\/g, '/'))};`,
+    `import { wakeWithGuard } from ${JSON.stringify('file:///' + OPS_SRC.replace(/\\/g, '/'))};`,
+    'const t0 = Date.now();',
     "const project = process.env.AWB_AC5_PROJECT || '';",
-    "const base = 1795200000000;",
-    "process.env.AWB_WAKE_FAIL = '1';",
-    "const first = await wakeWithGuard({ project, to: 'programmer1', msg: { id: 'M-AC5-1', kind: 'notice', from: 'pm', to: 'programmer1', subject: 'AC5' }, isDispatch: true, reason: 'ac5' });",
-    "process.env.AWB_NOW_MS = String(Number(first.retryAt || Date.now()) + 1000);",
-    "const r1 = await processWakeRetries(project, { source: 'test' });",
-    "process.env.AWB_NOW_MS = String(Number(process.env.AWB_NOW_MS) + 60 * 60 * 1000);",
-    "const r2 = await processWakeRetries(project, { source: 'test' });",
-    "process.env.AWB_NOW_MS = String(Number(process.env.AWB_NOW_MS) + 60 * 60 * 1000);",
-    "const r3 = await processWakeRetries(project, { source: 'test' });",
-    "console.log('AC5 ' + JSON.stringify({ first, r1, r2, r3 }));",
+    "const r = await wakeWithGuard({ project, to: 'programmer1', msg: { id: 'M-AC5-1', kind: 'notice', from: 'pm', to: 'programmer1', subject: 'AC5' }, isDispatch: true, reason: 'ac5' });",
+    "console.log('AC5 ' + JSON.stringify({ r, elapsedMs: Date.now() - t0 }));",
   ].join('\n'), 'utf8');
-  const ac5Env = { ...env, AWB_AC5_PROJECT: projectName, AWB_WAKE_FAIL: '1' };
+  const ac5Env = { ...env, AWB_AC5_PROJECT: projectName, AWB_WAKE_FAIL: '1', TEAM_SELFTEST: '1' };
   const ac5Run = runNode([ac5Script], ac5Env);
   const ac5Line = ac5Run.out.split(/\r?\n/).find((l) => l.startsWith('AC5 '));
   let ac5 = null;
   if (ac5Line) { try { ac5 = JSON.parse(ac5Line.slice(4)); } catch { ac5 = null; } }
   let ac5Rows = [];
   try { ac5Rows = fs.readFileSync(wakeFile, 'utf8').split(/\r?\n/).filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { ac5Rows = []; }
-  const failRows = ac5Rows.filter((r) => r && r.messageIds && r.messageIds.includes('M-AC5-1'));
-  const retryRows = failRows.filter((r) => r.retryOf);
-  check('AC5a 注入失败产生首行（ok:false 且带 id）', Boolean(ac5 && ac5.first && ac5.first.ok === false) && failRows.some((r) => r.id && r.ok === false), { first: ac5 && ac5.first, rows: failRows.length });
-  check('AC5b 重试行 trigger=event 且 retryOf=首次行 id', retryRows.length >= 1 && retryRows.every((r) => r.trigger === 'event') && retryRows.every((r) => failRows.some((f) => f.id === r.retryOf && f.ok === false)), { retryRows: retryRows.map((r) => ({ id: r.id, retryOf: r.retryOf, trigger: r.trigger })), failIds: failRows.filter((r) => r.ok === false).map((r) => r.id), ac5 });
-  check('AC5c 同一条消息重试 ≤3 行且 timer=0', retryRows.length <= 3 && ac5Rows.every((r) => r.trigger !== 'timer'), { retries: retryRows.length, timer: ac5Rows.filter((r) => r.trigger === 'timer').length });
-  check('AC5d 重试状态含 retryOf 持久化（重试队列）', Boolean(ac5 && ac5.first && ac5.first.retryOf), { retryOf: ac5 && ac5.first && ac5.first.retryOf });
+  const msgRows = ac5Rows.filter((r) => r && ((Array.isArray(r.messageIds) && r.messageIds.includes('M-AC5-1')) || r.messageId === 'M-AC5-1'));
+  const failRow = msgRows.find((r) => r.ok === false);
+  const okRow = msgRows.find((r) => r.ok === true && r.retryOf);
+  check('AC5a 首行失败（ok:false 且带 id 与 messageId）', Boolean(failRow && failRow.id && failRow.messageId === 'M-AC5-1'), { failRow, rows: msgRows.length, err: String(ac5Run.err || '').slice(-400), out: String(ac5Run.out || '').slice(-200) });
+  check('AC5b 重试成功行 retryOf=首行 id、trigger=event、同 messageId', Boolean(okRow && failRow && okRow.retryOf === failRow.id && okRow.trigger === 'event' && (okRow.messageId === 'M-AC5-1' || (Array.isArray(okRow.messageIds) && okRow.messageIds.includes('M-AC5-1')))), { okRow, failId: failRow && failRow.id });
+  check('AC5c 重试≤3 行且无 timer 行', msgRows.length >= 1 && msgRows.length <= 3 && ac5Rows.every((r) => r.trigger !== 'timer'), { rows: msgRows.length });
+  check('AC5d 唤醒在 2s 内返回（含 400ms 重试）', Boolean(ac5 && Number(ac5.elapsedMs) <= 2000), ac5 && ac5.elapsedMs);
+  check('AC5e 返回体带 retryOf', Boolean(ac5 && ac5.r && ac5.r.retryOf), ac5 && ac5.r && ac5.r.retryOf);
 
   // AC3/AC6：两拍 routeTick（注入 now，基准 / +30min）→ 唤醒新增 0 行
   const rowsBefore = (() => { try { return fs.readFileSync(wakeFile, 'utf8').split('\n').filter(Boolean).length; } catch { return 0; } })();
