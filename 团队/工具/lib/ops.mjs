@@ -70,7 +70,7 @@ import { handoverBriefLine } from './handover.mjs';
 // B-20261118-083150-4b2f（AC-W1）：名册成员入册只允许走 roster-writer 的唯一入口。
 import { pushRosterMember } from './roster-writer.mjs';
 // T-20261118-091644-6e53：派单前置检查程序门（Owner 2026-11-18 09:15「不能靠 PM 自觉」）
-import { assertDispatchPrecheck } from './dispatch-check.mjs';
+import { assertDispatchPrecheck, DISPATCH_LOCK_MAX_INFLIGHT } from './dispatch-check.mjs';
 import { checkEvidenceGate } from './evidence.mjs';
 import { bumpRound, archiveSession, confirmArchive, ROUNDS_MAX } from './session-archive.mjs';
 import {
@@ -2018,7 +2018,10 @@ export function presenceFor(project, { roles = [] } = {}) {
   return wanted.map((role) => {
     const rows = readProjectMail(role, name);
     const unreadRows = rows.filter((row) => row.state.unread);
+    // T-4ee5（K5②）：ackPending 只算「别人要这个人回执」——
+    // from===to（自己发给自己 / pm→pm 系统回执）不算未回执；旧实现把自己发的消息也计入，制造 6 条误报。
     const ackPendingRows = rows.filter((row) => row.msg.ackRequired && row.state.readEvidence
+      && String(row.msg.from || '') !== String(row.msg.to || '')
       && !acked.has(`${row.msg.id}|${role}`));
     const legacyUnread = rows.filter((row) => row.state.legacy && row.box === 'new').length;
     // 停滞＝该角色最后一次「阅读 / 回执 / 唤醒」到现在；没有证据就是 null，不补造数字。
@@ -2694,7 +2697,9 @@ function tailJsonl(file, limit = 400) {
 }
 
 /** 最近活动时间（毫秒）；取不到返回 0（按「无活动」处理，与既有 idle 判据一致）。 */
-export function lastActivityAtOf(projectName, { role = '', taskId = '' } = {}) {
+export function lastActivityAtOf(projectName, options = {}) {
+  const role = String(options.role || '');
+  const taskId = String(options.taskId || '');
   const name = String(projectName || '');
   let latest = 0;
   const bump = (ms) => { if (Number.isFinite(ms) && ms > latest) latest = ms; };
@@ -2723,7 +2728,65 @@ export function lastActivityAtOf(projectName, { role = '', taskId = '' } = {}) {
   for (const row of tailJsonl(path.join(projectStatePaths(name).dir, '阅读.jsonl'), 200)) {
     if (role && String(row.role || '') === role) bump(Date.parse(String(row.at || '')));
   }
+  // ④ 任务关联产出：该角色目录里最近一次文件写入（K5，有界扫描 roleDirLastFileWrite）。
+  //   长任务常常只在产出文件上体现进度、不写 任务/事件/回执 —— 不纳入就会把在干活的人报成「没动」。
+  //   调用方可用 `dirLatestMs` 预计算并按 role 复用，避免 claimStallCheck 对多任务重复扫目录。
+  try {
+    if (Number.isFinite(options.dirLatestMs) && options.dirLatestMs > 0) bump(options.dirLatestMs);
+    else if (role) {
+      const projectPath = (() => { try { return loadProject(name).path; } catch { return ''; } })();
+      if (projectPath) bump(Date.parse(roleDirLastFileWrite(projectPath, role)));
+    }
+  } catch { /* 目录不可读就靠其它信号 */ }
+  // ⑤ 会话转录（K5）：DSH 会话日志 / 项目已落盘转录 的最近 mtime —— 「还在出 turn」的最直接证据。
+  //   只 stat 文件、不解析内容、不 spawn 子进程；找不到就跳过（不补造信号）。
+  try {
+    const sessionId = roleCurrentSessionId(name, role);
+    if (sessionId) {
+      for (const file of transcriptCandidateFiles(name, sessionId)) {
+        try { bump(fs.statSync(file).mtimeMs); } catch { /* 缺失跳过 */ }
+      }
+    }
+  } catch { /* 转录不可得不影响其它信号 */ }
   return latest;
+}
+
+/** 角色当前会话 id（名册优先，其次项目 团队会话.json）；读不到返回 ''。只读。 */
+function roleCurrentSessionId(projectName, role) {
+  if (!role) return '';
+  try {
+    const team = loadTeam();
+    const member = (team && Array.isArray(team.members) ? team.members : []).find((m) => m && String(m.role) === String(role));
+    if (member && member.sessionId) return String(member.sessionId);
+  } catch { /* 名册读不到回落清单 */ }
+  try {
+    const project = loadProject(projectName);
+    const manifest = project && project.path ? readJson(path.join(project.path, '团队会话.json'), null) : null;
+    const row = manifest && Array.isArray(manifest.roles) ? manifest.roles.find((r) => r && String(r.role) === String(role)) : null;
+    if (row && row.sessionId) return String(row.sessionId);
+  } catch { /* ignore */ }
+  return '';
+}
+
+/** 该会话的可 stat 转录候选（项目已落盘转录 + DSH 原始会话日志）；都不存在时返回空数组。 */
+function transcriptCandidateFiles(projectName, sessionId) {
+  const sid = String(sessionId || '');
+  if (!sid) return [];
+  const files = [path.join(projectStatePaths(projectName).dir, '会话转录', `${sid}.json`)];
+  try {
+    const home = String(process.env.DSH_HOME || '').trim();
+    const root = path.join(home ? path.resolve(home) : path.join(process.env.USERPROFILE || '', '.dsh'), 'sessions');
+    if (root && fs.existsSync(root)) {
+      const wanted = `session-${sid.replace(/^session-/, '')}`;
+      for (const ws of fs.readdirSync(root)) {
+        for (const name of ['session.v4.jsonl.zstd', 'session.v4.jsonl', 'transcript.jsonl', 'session.jsonl']) {
+          const file = path.join(root, ws, wanted, name);
+          if (fs.existsSync(file)) { files.push(file); break; }
+        }
+      }
+    }
+  } catch { /* DSH_HOME 不可读就只用项目转录 */ }
+  return files;
 }
 
 /**
@@ -2743,6 +2806,18 @@ export function claimStallCheck(project, { now = Date.now() } = {}) {
   const state = (() => { try { return readJson(file, {}) || {}; } catch { return {}; } })();
   const alerted = state.alerted && typeof state.alerted === 'object' ? state.alerted : {};
   const hits = [];
+  // K5③：角色目录最近写入按 role 记忆化——同一次检查里一个角色只扫一次目录（有界扫描仍由 roleDirLastFileWrite 保证）。
+  const dirLatestMemo = new Map();
+  const projectPath = (() => { try { return loadProject(name).path; } catch { return ''; } })();
+  const dirLatestFor = (roleKey) => {
+    const key = String(roleKey || '');
+    if (!key || !projectPath) return 0;
+    if (dirLatestMemo.has(key)) return dirLatestMemo.get(key);
+    let ms = 0;
+    try { ms = Date.parse(roleDirLastFileWrite(projectPath, key)) || 0; } catch { ms = 0; }
+    dirLatestMemo.set(key, ms);
+    return ms;
+  };
   for (const task of listTasks(name)) {
     if (!task || !['task', 'bug'].includes(String(task.type || 'task'))) continue;
     if (String(task.status || '') !== 'working') continue;
@@ -2750,7 +2825,8 @@ export function claimStallCheck(project, { now = Date.now() } = {}) {
     if (Number.isNaN(claimedAt)) continue;
     const role = String(task.owner || '');
     // B-0c49①：看「最后活动」而不是「认领多久」——任务文件 mtime / 事件 / 回执 / 阅读 任一在阈值内就算在动。
-    const lastActivity = lastActivityAtOf(name, { role, taskId: String(task.id) });
+    // T-4ee5（K5）：追加「任务关联产出目录 mtime」与「会话转录 mtime」两路信号，长任务不再被误报。
+    const lastActivity = lastActivityAtOf(name, { role, taskId: String(task.id), dirLatestMs: dirLatestFor(role) });
     const idleSince = Math.max(claimedAt, Number.isFinite(lastActivity) ? lastActivity : 0);
     const age = now - idleSince;
     if (age < stallMs) continue;
@@ -2767,7 +2843,7 @@ export function claimStallCheck(project, { now = Date.now() } = {}) {
       const msg = sendMessage({
         from: 'system', to: 'pm', type: 'escalation', project: name,
         subject: `认领后 ${minutes} 分钟没动：${task.id}`,
-        body: `${ownerName} 认领了 ${task.id}，最后一次可见活动在 ${minutes} 分钟前（判据：任务文件/事件/回执/阅读 的最新时间）。\nrole=${role || '-'}\ntaskId=${task.id}\nclaimedAt=${task.claimedAt || '-'}\n最后活动=${Number.isFinite(lastActivity) && lastActivity > 0 ? new Date(lastActivity).toISOString() : '无记录'}\n当前状态=working\n请 PM 过问一下（换人/拆任务/确认卡在哪）。`,
+        body: `${ownerName} 认领了 ${task.id}，最后一次可见活动在 ${minutes} 分钟前（判据 / 依据：任务文件 mtime、事件.jsonl、回执.jsonl、阅读.jsonl、角色产出目录最近写入、当前会话转录 mtime —— 取六路最新时间，均无记录才按认领时间算）。\nrole=${role || '-'}\ntaskId=${task.id}\nclaimedAt=${task.claimedAt || '-'}\n最后活动=${Number.isFinite(lastActivity) && lastActivity > 0 ? new Date(lastActivity).toISOString() : '无记录'}\n当前状态=working\n请 PM 过问一下（换人/拆任务/确认卡在哪）。`,
         ackRequired: false,
       });
       alerted[key] = { at: nowIso(), status: String(task.status || ''), level: 'claim_stall' };
@@ -5208,25 +5284,27 @@ function buildBootGuidanceLines(projectName, role) {
 /**
  * 013a §6.1.2：boot 简报的动态状态块（派单锁 + 未回执）。
  * 只读、不写任何文件；读失败不阻断 boot（打印可读原因）。
- *   派单锁: 无 / 派单锁: <角色> ← <M-id>（剩余 N 分钟）/ 派单锁: 读取失败（<code>）
+ *   派单锁: 无 / 派单锁: <角色> ← <M-id>（剩余 N 分钟）/ 派单锁: N 条在途（上限 2）｜ <角色> ← <M-id>… / 派单锁: 读取失败（<code>）
  *   未回执: 无 / 未回执: <M-id1>, <M-id2>（最多 3 条，其余「等 N 条」）
  */
 function bootStatusBlockLines(projectName, role) {
   const out = [];
   try {
-    const file = dispatchLockPath(projectName);
-    if (!fs.existsSync(file)) {
+    const map = readDispatchLockMap(projectName);
+    if (map.corrupt) {
+      out.push('派单锁: 读取失败（DISPATCH_LOCK_CORRUPT）');
+    } else if (!map.entries.length) {
       out.push('派单锁: 无');
+    } else if (map.entries.length === 1) {
+      // 单条锁保持旧文案（既有断言/人读习惯不动）。
+      const lock = map.entries[0].lock;
+      const expiresAtMs = Date.parse(String(lock.expiresAt || '')) || 0;
+      const remainMin = expiresAtMs ? Math.max(0, Math.round((expiresAtMs - Date.now()) / 60000)) : null;
+      out.push(`派单锁: ${String(lock.to || '?')} ← ${String(lock.messageId)}${remainMin === null ? '' : `（剩余 ${remainMin} 分钟）`}`);
     } else {
-      let lock = null;
-      try { lock = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { lock = null; }
-      if (!lock || !lock.messageId) {
-        out.push('派单锁: 读取失败（DISPATCH_LOCK_CORRUPT）');
-      } else {
-        const expiresAtMs = Date.parse(String(lock.expiresAt || '')) || 0;
-        const remainMin = expiresAtMs ? Math.max(0, Math.round((expiresAtMs - Date.now()) / 60000)) : null;
-        out.push(`派单锁: ${String(lock.to || '?')} ← ${String(lock.messageId)}${remainMin === null ? '' : `（剩余 ${remainMin} 分钟）`}`);
-      }
+      // T-4ee5（K6）：跨角色并行后会有多条在途——逐条列角色+id，并给出全局在途数与上限。
+      const parts = map.entries.map((e) => `${String(e.role || e.lock.to || '?')} ← ${String(e.lock.messageId)}`);
+      out.push(`派单锁: ${map.entries.length} 条在途（上限 ${DISPATCH_LOCK_MAX_INFLIGHT}）｜ ${parts.join('；')}`);
     }
   } catch (error) {
     out.push(`派单锁: 读取失败（${String((error && error.code) || 'DISPATCH_LOCK_UNREADABLE').slice(0, 40)}）`);
@@ -5287,65 +5365,177 @@ function dispatchLockPath(project) {
 }
 // B-20261113-043841-384e：派单锁 TTL——10 分钟无人回执自动释放，避免一条未回执锁死全队。
 const DISPATCH_LOCK_TTL_MS = 10 * 60 * 1000;
-function readDispatchLock(project) {
-  try { return readJson(dispatchLockPath(project)); } catch { return null; }
+// T-20261119-165248-4ee5（K6，Owner 已采纳）：派单锁按 to 拆分——同角色串行、跨角色并行，另设全局在途上限 2。
+// 落盘格式（向后兼容）：{ schema:2, updatedAt, locks:{ <role>: {…} }, …最近一条锁的平铺镜像 }
+//   ① 旧版单锁文件（没有 locks 字段，只有 messageId/to/…）读取时按「该 to 一条锁」归一；
+//   ② 顶层平铺镜像 = 最新一条锁，旧读者（壳层 main.js / 老 selftest / 工具内未改的读点）继续可用；
+//   ③ 同一角色重复派单仍然串行（同 role 槽位被占即 PM_DISPATCH_PENDING），不同角色互不影响。
+//   全局在途上限 DISPATCH_LOCK_MAX_INFLIGHT 单源来自 dispatch-check.mjs（禁止这里再写一个数字）。
+function normalizeDispatchLockEntry(lock) {
+  if (!lock || typeof lock !== 'object' || !lock.messageId) return null;
+  return {
+    messageId: String(lock.messageId),
+    to: String(lock.to || ''),
+    task: String(lock.task || ''),
+    subject: String(lock.subject || ''),
+    ts: String(lock.ts || ''),
+    expiresAt: String(lock.expiresAt || ''),
+    targetSessionId: String(lock.targetSessionId || ''),
+  };
 }
-function writeDispatchLock(project, msg, extra = {}) {
+/** 读全部派单锁：`{ entries:[{role, lock}], legacy:boolean, corrupt:boolean }`（旧单锁文件归一为一条）。 */
+function readDispatchLockMap(project) {
+  let raw = null;
+  try { raw = readJson(dispatchLockPath(project)); } catch { return { entries: [], legacy: false, corrupt: true }; }
+  if (!raw || typeof raw !== 'object') return { entries: [], legacy: false, corrupt: false };
+  const out = [];
+  if (raw.locks && typeof raw.locks === 'object') {
+    for (const [role, lock] of Object.entries(raw.locks)) {
+      const entry = normalizeDispatchLockEntry(lock);
+      if (entry) out.push({ role: String(role || entry.to || ''), lock: entry });
+    }
+  }
+  const legacy = !(raw.locks && typeof raw.locks === 'object');
+  if (legacy) {
+    const entry = normalizeDispatchLockEntry(raw);
+    if (entry) out.push({ role: entry.to, lock: entry });
+  }
+  return { entries: out, legacy, corrupt: false };
+}
+/** 写回全部锁；空则删文件（不留空壳，保持「无锁 = 文件不存在」的既有语义）。 */
+function writeDispatchLockMap(project, entries) {
+  const list = (Array.isArray(entries) ? entries : []).filter((e) => e && e.lock && e.lock.messageId);
+  if (!list.length) {
+    try { fs.rmSync(dispatchLockPath(project), { force: true }); } catch { /* ignore */ }
+    return;
+  }
+  // 顶层镜像取最新一条（ts 最大；同一 ts 取最后写入的），旧读者据此拿到「最近那条」。
+  const newest = list.slice().sort((a, b) => {
+    const ta = Date.parse(String(a.lock.ts || '')) || 0;
+    const tb = Date.parse(String(b.lock.ts || '')) || 0;
+    return tb - ta;
+  })[0];
+  // 只有 1 条锁时**保持旧格式**（单对象，无 schema/locks）——既有夹具/自检会直接改单锁文件的
+  // expiresAt（如 selftest 的 TTL 用例）或断言「锁文件在/不在」，双格式会让它们与实现脱节。
+  if (list.length === 1) {
+    writeJson(dispatchLockPath(project), newest.lock);
+    return;
+  }
+  const locks = {};
+  for (const e of list) locks[e.role || e.lock.to] = e.lock;
   writeJson(dispatchLockPath(project), {
-    messageId: msg.id, to: msg.to, task: msg.task || '', subject: msg.subject, ts: msg.ts,
-    expiresAt: new Date(Date.now() + DISPATCH_LOCK_TTL_MS).toISOString(),
-    targetSessionId: String(extra.targetSessionId || ''),
+    schema: 2,
+    updatedAt: nowIso(),
+    locks,
+    ...newest.lock,
   });
 }
-function clearDispatchLock(project, messageId) {
-  const p = dispatchLockPath(project);
-  try {
-    const lock = readJson(p);
-    if (lock && lock.messageId === messageId) fs.rmSync(p, { force: true });
-  } catch { /* ignore */ }
-}
-/** 锁过期即释放并记事件（send / pump 入口都会先跑一次）。返回被释放的锁或 null。 */
-function releaseExpiredDispatchLock(project, { source = '' } = {}) {
-  const lock = readDispatchLock(project);
-  if (!lock || !lock.messageId) return null;
+function dispatchLockExpired(lock, now = Date.now()) {
   const expiresAt = Date.parse(String(lock.expiresAt || ''));
   const base = Number.isFinite(expiresAt) ? expiresAt : Date.parse(String(lock.ts || '')) + DISPATCH_LOCK_TTL_MS;
-  if (!Number.isFinite(base) || Date.now() < base) return null;
-  try { fs.rmSync(dispatchLockPath(project), { force: true }); } catch { /* ignore */ }
-  appendEvent({ role: 'system', action: 'dispatch_lock_expired', project, target: lock.messageId, note: `to=${lock.to} task=${lock.task || ''} source=${source}` });
-  return lock;
+  return Number.isFinite(base) && now >= base;
 }
-/** 任务完成时释放与该任务绑定的派单锁（不传 taskId 时释放任意锁）；记事件。 */
+/**
+ * 读「最近一条」派单锁（向后兼容旧调用方）。
+ * 新语义下「有没有在途锁」请用 readDispatchLockMap / findDispatchLockFor。
+ */
+function readDispatchLock(project) {
+  const map = readDispatchLockMap(project);
+  if (!map.entries.length) return null;
+  const sorted = map.entries.slice().sort((a, b) => {
+    const ta = Date.parse(String(a.lock.ts || '')) || 0;
+    const tb = Date.parse(String(b.lock.ts || '')) || 0;
+    return tb - ta;
+  });
+  return { ...sorted[0].lock, role: sorted[0].role, count: map.entries.length };
+}
+function findDispatchLockFor(project, role) {
+  const map = readDispatchLockMap(project);
+  return map.entries.find((e) => String(e.role) === String(role)) || null;
+}
+function writeDispatchLock(project, msg, extra = {}) {
+  const map = readDispatchLockMap(project);
+  const entry = {
+    messageId: String(msg.id),
+    to: String(msg.to || ''),
+    task: String(msg.task || ''),
+    subject: String(msg.subject || ''),
+    ts: String(msg.ts || ''),
+    expiresAt: new Date(Date.now() + DISPATCH_LOCK_TTL_MS).toISOString(),
+    targetSessionId: String(extra.targetSessionId || ''),
+  };
+  const next = map.entries.filter((e) => String(e.role) !== String(entry.to));
+  next.push({ role: entry.to, lock: entry });
+  writeDispatchLockMap(project, next);
+  return entry;
+}
+function clearDispatchLock(project, messageId) {
+  const map = readDispatchLockMap(project);
+  const next = map.entries.filter((e) => String(e.lock.messageId) !== String(messageId));
+  if (next.length === map.entries.length) return null;
+  writeDispatchLockMap(project, next);
+  return map.entries.find((e) => String(e.lock.messageId) === String(messageId)) || null;
+}
+/** 锁过期即释放并记事件（send / pump 入口都会先跑一次）。返回被释放的锁数组（旧调用方拿第一条）。 */
+function releaseExpiredDispatchLock(project, { source = '' } = {}) {
+  const map = readDispatchLockMap(project);
+  if (!map.entries.length) return null;
+  const now = Date.now();
+  const expired = map.entries.filter((e) => dispatchLockExpired(e.lock, now));
+  if (!expired.length) return null;
+  const keep = map.entries.filter((e) => !expired.includes(e));
+  writeDispatchLockMap(project, keep);
+  for (const e of expired) {
+    appendEvent({ role: 'system', action: 'dispatch_lock_expired', project, target: e.lock.messageId, note: `to=${e.lock.to} task=${e.lock.task || ''} source=${source}` });
+  }
+  const first = { ...expired[0].lock, role: expired[0].role, released: expired.map((e) => e.lock.messageId) };
+  return first;
+}
+/** 任务完成时释放与该任务绑定的派单锁（不传 taskId 时释放全部锁）；记事件。 */
 function releaseDispatchLockForTask(project, taskId, { source = '' } = {}) {
-  const lock = readDispatchLock(project);
-  if (!lock || !lock.messageId) return null;
-  if (taskId && String(lock.task || '') !== String(taskId)) return null;
-  try { fs.rmSync(dispatchLockPath(project), { force: true }); } catch { /* ignore */ }
-  appendEvent({ role: 'system', action: 'dispatch_lock_released', project, target: lock.messageId, note: `task=${taskId} source=${source}` });
+  const map = readDispatchLockMap(project);
+  if (!map.entries.length) return null;
+  const hits = map.entries.filter((e) => !taskId || String(e.lock.task || '') === String(taskId));
+  if (!hits.length) return null;
+  const keep = map.entries.filter((e) => !hits.includes(e));
+  writeDispatchLockMap(project, keep);
+  for (const e of hits) {
+    appendEvent({ role: 'system', action: 'dispatch_lock_released', project, target: e.lock.messageId, note: `task=${taskId} to=${e.lock.to} source=${source}` });
+  }
   // B-bbf6 ①：锁一释放就补泵一次——不依赖壳层 60 秒定时器是否在跑，保证队列项 60 秒内被投递。
   try { Promise.resolve().then(() => pumpQueueSafe(project, 'lock_released')).catch(() => {}); } catch { /* 泵失败不影响释放 */ }
-  return lock;
+  return { ...hits[0].lock, role: hits[0].role, released: hits.map((e) => e.lock.messageId) };
 }
 
 // B-405f ②：pending 锁 + 目标会话活性——5 分钟后目标会话仍不存在/0 使用，自动释放并记事件。
 // 背景：rotate 换进来的新会话 usage=0、从未 boot；派给它的单被记 pending，10 分钟 TTL 内全队派单通道被锁死。
 const DISPATCH_LOCK_INACTIVE_MS = 5 * 60 * 1000;
 async function releaseInactiveDispatchLock(project, { source = '' } = {}) {
-  const lock = readDispatchLock(project);
-  if (!lock || !lock.messageId) return null;
-  const ts = Date.parse(String(lock.ts || ''));
-  if (!Number.isFinite(ts)) return null;
-  const ageMs = Date.now() - ts;
-  if (ageMs < DISPATCH_LOCK_INACTIVE_MS) return null;
-  let probe = null;
-  try { probe = await probeRoleSession(project, String(lock.to || '')); } catch (e) { probe = { state: 'unknown', why: String((e && e.message) || e) }; }
-  if (!probe || !['missing', 'cold', 'no_session'].includes(probe.state)) return null;
-  try { fs.rmSync(dispatchLockPath(project), { force: true }); } catch { /* ignore */ }
-  appendEvent({
-    role: 'system', action: 'dispatch_lock_expired', project, target: lock.messageId,
-    note: `reason=target_inactive state=${probe.state} age=${Math.round(ageMs / 1000)}s to=${lock.to} task=${lock.task || ''} source=${source}`,
-  });
-  return { ...lock, released: true, reason: 'target_inactive', probe };
+  const map = readDispatchLockMap(project);
+  if (!map.entries.length) return null;
+  const now = Date.now();
+  const dropped = [];
+  for (const e of map.entries) {
+    const ts = Date.parse(String(e.lock.ts || ''));
+    if (!Number.isFinite(ts)) continue;
+    const ageMs = now - ts;
+    if (ageMs < DISPATCH_LOCK_INACTIVE_MS) continue;
+    let probe = null;
+    try { probe = await probeRoleSession(project, String(e.lock.to || '')); } catch (err) { probe = { state: 'unknown', why: String((err && err.message) || err) }; }
+    if (!probe || !['missing', 'cold', 'no_session'].includes(probe.state)) continue;
+    dropped.push({ entry: e, probe, ageMs });
+  }
+  if (!dropped.length) return null;
+  const droppedEntries = dropped.map((d) => d.entry);
+  writeDispatchLockMap(project, map.entries.filter((e) => !droppedEntries.includes(e)));
+  for (const d of dropped) {
+    appendEvent({
+      role: 'system', action: 'dispatch_lock_expired', project, target: d.entry.lock.messageId,
+      note: `reason=target_inactive state=${d.probe.state} age=${Math.round(d.ageMs / 1000)}s to=${d.entry.lock.to} task=${d.entry.lock.task || ''} source=${source}`,
+    });
+  }
+  const first = dropped[0];
+  return { ...first.entry.lock, role: first.entry.role, released: true, reason: 'target_inactive', probe: first.probe, releasedLocks: droppedEntries.map((e) => e.lock.messageId) };
 }
 
 /**
@@ -5612,8 +5802,11 @@ export async function cmdSend(args) {
     releaseExpiredDispatchLock(b.project, { source: 'send' });
     // B-405f ②：目标会话 5 分钟无活性（不存在/0 使用）也释放，避免锁在“从未启动的新会话”上锁死全队。
     releasedLock = await releaseInactiveDispatchLock(b.project, { source: 'send' });
-    const lock = readDispatchLock(b.project);
-    if (lock && lock.messageId) {
+    // T-4ee5（K6）：同角色串行、跨角色并行；全局在途上限 DISPATCH_LOCK_MAX_INFLIGHT。
+    const lockMap = readDispatchLockMap(b.project);
+    const sameTarget = lockMap.entries.find((e) => String(e.role) === String(to));
+    if (sameTarget && sameTarget.lock && sameTarget.lock.messageId) {
+      const lock = sameTarget.lock;
       if (args.queue) {
         const bootForQueue = await ensureBootForDispatch();
         const item = enqueueDispatch(b.project, {
@@ -5629,7 +5822,13 @@ export async function cmdSend(args) {
         });
         return;
       }
-      fail('PM_DISPATCH_PENDING', `上一条派单还没回执：${lock.messageId} → ${lock.to}（${lock.subject}）。先等回执，确认后再派下一个；要排队请加 --queue。`, { pending: lock });
+      fail('PM_DISPATCH_PENDING', `上一条派单还没回执：${lock.messageId} → ${lock.to}（${lock.subject}）。同角色串行，先等回执再派下一个；要排队请加 --queue。`, { pending: lock });
+    }
+    if (lockMap.entries.length >= DISPATCH_LOCK_MAX_INFLIGHT) {
+      const busy = lockMap.entries.map((e) => `${e.role}←${e.lock.messageId}`).join('、');
+      fail('PM_DISPATCH_GLOBAL_LIMIT', `全局在途派单已达上限 ${DISPATCH_LOCK_MAX_INFLIGHT} 条（${busy}）：等回执或清理后再派；跨角色可并行，但同时在途不超过 ${DISPATCH_LOCK_MAX_INFLIGHT}。`, {
+        limit: DISPATCH_LOCK_MAX_INFLIGHT, locks: lockMap.entries.map((e) => ({ role: e.role, messageId: e.lock.messageId })), to,
+      });
     }
   }
   // 派单时顺手把任务 owner 定为目标角色，避免任务 owner 为空、角色不知归属。

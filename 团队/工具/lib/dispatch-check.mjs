@@ -46,6 +46,9 @@ export const THINK_WAIT_SEC = 600;                   // running 且已思考 <60
 export const IDLE_WAKE_MIN = 15;                     // 15 分钟无活动且无产出变化 → wake_first
 export const VERDICTS = ['go', 'go_degraded', 'queue', 'wait', 'wake_first', 'blocked'];
 export const GO_VERDICTS = ['go', 'go_degraded'];
+// T-4ee5（K6）：派单锁按 to 拆分后保留的**全局在途上限**（同角色串行、跨角色并行，但同时在途 ≤2）。
+// 单源：ops.cmdSend 与 dispatch-check 都用这一个常量，禁止各写一份数字。
+export const DISPATCH_LOCK_MAX_INFLIGHT = 2;
 
 /* ── 路径 ─────────────────────────────────────────────────────────────── */
 export function snapshotPath() { return path.join(PATHS.state, SNAPSHOT_FILE); }
@@ -98,15 +101,56 @@ export function snapshotRowOf(snapshot, role) {
   return { row, known: row.known !== false, v2: hasV2, reason: hasV2 ? '' : '快照缺 c9ac v2 字段（running/pendingInput/runningSince）' };
 }
 
-/* ── ④ 派单锁 ─────────────────────────────────────────────────────────── */
-export function readDispatchLockState(projectName, now = Date.now()) {
+/* ── ④ 派单锁（T-4ee5/K6：按 to 拆分；兼容旧单锁文件） ───────────────── */
+function normalizeLockEntry(lock) {
+  if (!lock || typeof lock !== 'object' || !lock.messageId) return null;
+  return {
+    messageId: String(lock.messageId),
+    to: String(lock.to || ''),
+    task: String(lock.task || ''),
+    subject: String(lock.subject || ''),
+    ts: String(lock.ts || ''),
+    expiresAt: String(lock.expiresAt || ''),
+    targetSessionId: String(lock.targetSessionId || ''),
+  };
+}
+/** 读全部锁：`{entries:[{role, lock, active}], legacy}`；旧单锁文件归一为一条。 */
+export function readDispatchLockEntries(projectName, now = Date.now()) {
   const file = dispatchLockFile(projectName);
-  if (!exists(file)) return { exists: false, active: false, lockBy: '', lock: null, expired: false };
-  const lock = readJson(file, null);
-  if (!lock || typeof lock !== 'object') return { exists: true, active: false, lockBy: '', lock: null, expired: true };
-  const exp = msOf(lock.expiresAt);
-  const expired = exp !== null && exp <= now;
-  return { exists: true, active: !expired, lockBy: expired ? '' : String(lock.to || ''), lock, expired };
+  if (!exists(file)) return { entries: [], legacy: false, corrupt: false };
+  const raw = readJson(file, null);
+  if (!raw || typeof raw !== 'object') return { entries: [], legacy: false, corrupt: true };
+  const out = [];
+  const legacy = !(raw.locks && typeof raw.locks === 'object');
+  const push = (role, lock) => {
+    const entry = normalizeLockEntry(lock);
+    if (!entry) return;
+    const exp = msOf(entry.expiresAt);
+    out.push({ role: String(role || entry.to || ''), lock: entry, active: !(exp !== null && exp <= now) });
+  };
+  if (!legacy) for (const [role, lock] of Object.entries(raw.locks)) push(role, lock);
+  else push(raw.to, raw);
+  return { entries: out, legacy, corrupt: false };
+}
+export function readDispatchLockState(projectName, now = Date.now()) {
+  const read = readDispatchLockEntries(projectName, now);
+  if (!read.entries.length) {
+    return { exists: read.corrupt || exists(dispatchLockFile(projectName)), active: false, lockBy: '', lock: null, expired: read.corrupt, locks: [], entries: [], legacy: read.legacy, corrupt: read.corrupt };
+  }
+  const activeEntries = read.entries.filter((e) => e.active);
+  const primary = (activeEntries[0] || read.entries[0]).lock;
+  return {
+    exists: true,
+    active: activeEntries.length > 0,
+    // 兼容旧读者：lockBy 是「持有有效锁的角色」逗号串；精确匹配请用 entries。
+    lockBy: activeEntries.map((e) => e.role).filter(Boolean).join(','),
+    lock: primary,
+    expired: activeEntries.length === 0,
+    locks: activeEntries.map((e) => e.lock),
+    entries: activeEntries,
+    legacy: read.legacy,
+    corrupt: false,
+  };
 }
 
 /* ── ⑤ 最近唤醒 ───────────────────────────────────────────────────────── */
@@ -195,7 +239,7 @@ export function decideVerdict(input) {
   const numbers = {
     queued: null, thinkSec: null, lastAt: wake && wake.at ? wake.at : '', lastAtMs: wake ? wake.ms : null,
     staleMs: snapshot.staleMs, snapshotAgeSec: snapshot.fileAgeMs === null ? null : Math.round(snapshot.fileAgeMs / 1000),
-    lockBy: lock.lockBy || '', booted: boot.booted === true, pendingInputCount: null, workingTasks: tasks.working.length, openTasks: tasks.open.length,
+    lockBy: String((((lock.entries || []).find((e) => String(e.role) === String(role)) || {}).role) || ''), booted: boot.booted === true, pendingInputCount: null, workingTasks: tasks.working.length, openTasks: tasks.open.length,
     unread: presence ? presence.unread : null, ackPending: presence ? presence.ackPending : null, stalledMin: presence ? presence.stalledMin : null,
   };
   // 降级原因（结构性问题，先收集，不改变 blocked 判定）
@@ -220,9 +264,17 @@ export function decideVerdict(input) {
   numbers.running = running;
   numbers.pendingInput = pendingInput;
 
-  // ① blocked：派单锁 / 未 boot
-  if (lock.active && String(lock.lockBy) === String(role)) {
-    reasons.push(`派单锁在 ${ROLE_NAMES[role] || role}：${String((lock.lock || {}).messageId || '(未记 id)')}（${truncate(String((lock.lock || {}).subject || ''), 40)}）未回执，先等回执或清理锁`);
+  // ① blocked：派单锁指向该角色 / 未 boot
+  // T-4ee5（K6）：按 to 拆锁后，只有「指向本角色」的锁才 blocked；其它角色的在途锁不影响（跨角色并行）。
+  const myLock = (lock.entries || []).find((e) => String(e.role) === String(role)) || null;
+  if (myLock) {
+    reasons.push(`派单锁在 ${ROLE_NAMES[role] || role}：${String(myLock.lock.messageId || '(未记 id)')}（${truncate(String(myLock.lock.subject || ''), 40)}）未回执，先等回执或清理锁`);
+    return { verdict: 'blocked', reasons, numbers, degraded, snapshotAt: snapshot.at, snapshotStale: snapshot.stale };
+  }
+  const activeLocks = lock.entries || [];
+  if (activeLocks.length >= DISPATCH_LOCK_MAX_INFLIGHT) {
+    const busy = activeLocks.map((e) => `${e.role}←${e.lock.messageId}`).join('、');
+    reasons.push(`全局在途派单已达上限 ${DISPATCH_LOCK_MAX_INFLIGHT}（${busy}）：等回执或清理锁后再派（跨角色可并行，但同时不超过 ${DISPATCH_LOCK_MAX_INFLIGHT}）`);
     return { verdict: 'blocked', reasons, numbers, degraded, snapshotAt: snapshot.at, snapshotStale: snapshot.stale };
   }
   if (boot.booted === false) {

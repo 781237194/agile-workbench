@@ -7,7 +7,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { readWorkflowState } from './lifecycle.mjs';
-import { loadProject, projectStatePaths, listTasks, requireBoot } from './store.mjs';
+import { loadProject, projectStatePaths, listTasks, requireBoot, loadReceipts } from './store.mjs';
 import { detectOptionalPlugins } from './plugins.mjs';
 import { PATHS, nowIso, stamp, ensureDir, jsonOut, textOut, fail } from './core.mjs';
 // B-20261117-123207-ed72：未闭环任务判定改走 gates.statusIsClosed 单源。
@@ -59,6 +59,18 @@ export function finalizePrecheck(projectName) {
   const tasks = listTasks(projectName) || [];
   const openTasks = tasks.filter((t) => !statusIsClosed(t.status)).map((t) => ({ id: t.id, owner: t.owner || '', status: t.status }));
   const dispatches = [];
+  // 回执账本（只读；读不到按空集处理=保守地把消息算未回执，宁可让人再看一眼，不误判为已闭环）。
+  const ackedIds = (() => {
+    try {
+      const receipts = loadReceipts() || [];
+      const set = new Set();
+      for (const r of receipts) {
+        const id = String((r && (r.msgId || r.messageId)) || '');
+        if (id) set.add(id);
+      }
+      return set;
+    } catch { return new Set(); }
+  })();
   // 邮箱目录是 团队/状态/邮箱（PATHS.mail）；曾经误用 PATHS.team（团队.json 文件）拼路径，
   // 读到不存在的目录后静默 roles=[]，导致 AC22.4 派单前置永远 0（测试 v20 D1）。
   const mailDir = PATHS.mail;
@@ -73,11 +85,17 @@ export function finalizePrecheck(projectName) {
       let msg = null;
       try { msg = JSON.parse(fs.readFileSync(path.join(newDir, name), 'utf8').replace(/^\uFEFF/, '')); } catch { continue; }
       if (!msg) continue;
+      // T-20261119-165248-4ee5（K5-finalize，Owner 已采纳）：终验只看**真派单**——
+      // ①消息类型必须是 dispatch（落盘字段是 `type`，`kind` 只是读侧派生，旧实现只认 kind 会永远匹配不到）；
+      // ②发件人必须是 pm；③必须未回执（回执.jsonl 里有该 msgId 即算已回执）。
+      // 旧判据 `kind === 'dispatch' || /派单/.test(subject)` 会把「回执/通知里带派单二字」也算成未闭环派单
+      // （实测 8 条误判），直接卡住终验。
       const subject = String(msg.subject || '');
-      const kind = String(msg.kind || '');
-      if (kind === 'dispatch' || /派单/.test(subject)) {
-        dispatches.push({ id: msg.id || name, to: role, recipientSessionId: String(msg.recipientSessionId || '') });
-      }
+      const kind = String(msg.type || msg.kind || '');
+      const from = String(msg.from || '');
+      if (kind !== 'dispatch' || from !== 'pm') continue;
+      if (ackedIds.has(String(msg.id || ''))) continue;
+      dispatches.push({ id: msg.id || name, to: role, recipientSessionId: String(msg.recipientSessionId || ''), subject });
     }
   }
   return {

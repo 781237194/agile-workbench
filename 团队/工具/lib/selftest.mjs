@@ -2108,7 +2108,16 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
     const lockSend1 = json(['send', '--boot', gatePm2.token, '--to', 'programmer2', '--subject', '派单锁用例一', '--body', 'x', '--ack', '--task', lockTask.task.id, '--json']);
     if (lockSend1.dispatch !== true) failStep('派单锁用例未派出', JSON.stringify(lockSend1).slice(0, 200));
     if (!fs.existsSync(lockFile)) failStep('派单后未写派单锁', lockFile);
-    expectErr(['send', '--boot', gatePm2.token, '--to', 'analyst', '--subject', '应被锁拒', '--body', 'x', '--ack', '--json'], 'PM_DISPATCH_PENDING');
+    // T-20261119-165248-4ee5（K6）口径变化：旧断言「任何一条锁在=下一次派单必被拒」（PM_DISPATCH_PENDING）
+    // → 新断言三条：①同角色串行仍拒；②跨角色可并行（analyst 无锁 → 允许）；③全局在途上限 2（第三条 tester 被拒）。
+    expectErr(['send', '--boot', gatePm2.token, '--to', 'programmer2', '--subject', '同角色应当被锁拒', '--body', 'x', '--ack', '--json'], 'PM_DISPATCH_PENDING');
+    const lockCross = json(['send', '--boot', gatePm2.token, '--to', 'analyst', '--subject', '跨角色并行（K6）', '--body', 'x', '--ack', '--json']);
+    if (!lockCross.ok || lockCross.dispatch !== true) failStep('K6：跨角色被串行（应当并行）', JSON.stringify(lockCross).slice(0, 300));
+    expectErr(['send', '--boot', gatePm2.token, '--to', 'tester', '--subject', '全局在途上限（K6）', '--body', 'x', '--ack', '--json'], 'PM_DISPATCH_GLOBAL_LIMIT');
+    // 回到单锁场景继续原流程：清掉两条锁后重派 programmer2（后续 claim/done 依赖这条锁）。
+    try { fs.rmSync(lockFile, { force: true }); } catch { /* ignore */ }
+    const lockSend1b = json(['send', '--boot', gatePm2.token, '--to', 'programmer2', '--subject', '派单锁用例一（重派）', '--body', 'x', '--ack', '--task', lockTask.task.id, '--json']);
+    if (!lockSend1b.ok || lockSend1b.dispatch !== true) failStep('K6 用例收尾重派失败', JSON.stringify(lockSend1b).slice(0, 300));
     json(['task', 'claim', '--boot', qDev.token, '--id', lockTask.task.id, '--json']);
     const lockDone = json(['task', 'done', '--boot', qDev.token, '--id', lockTask.task.id, '--evidence', '派单锁用例', '--json']);
     if (!lockDone.releasedLock) failStep('任务完成未释放派单锁', JSON.stringify(lockDone).slice(0, 300));
