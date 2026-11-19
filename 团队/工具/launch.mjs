@@ -9,6 +9,8 @@ import { ROLE_NAMES, ROLES, loadTeam, mutateTeam, getMember, projectStatePaths, 
 import {
   TEAM_MODES, TEAM_MODE_LABELS, isTeamMode, normalizeTeamMode, rolesForMode, teamModeDescription, MODEL_BY_ROLE,
 } from './lib/roles.mjs';
+// R-20261119：开局提示词独立成 lib（可单测）——建团队 seed 与启动 prompt 都必须先让角色读规则+本人目录再回就位。
+import { startupText, seedTextFor } from './lib/seed-prompt.mjs';
 import { DshClient } from './lib/dsh-session.mjs';
 // B-20261118-080052-207b：三源复用判定 + 轮换记账（纯逻辑单元，Node 可测）。
 import launchReuse from './lib/launch-reuse.mjs';
@@ -30,25 +32,6 @@ function parse(argv) {
     } else out._.push(a);
   }
   return out;
-}
-
-function startupText(role, project, workspace, teamMode = 'full') {
-  const name = ROLE_NAMES[role] || role;
-  const wait = role === 'pm'
-    ? '只回一行：“PM 已就位，请老板说项目需求和场景。”'
-    : `只回一行：“${name} 已就位，等待 PM 派单。”`;
-  const fastDuty = teamMode !== 'fast' ? ''
-    : (role === 'analyst' ? '快速模式：需求评审由你执行（req review）；需要驳回 Owner 需求时可用 vote start 按实际分析师身份发起；技术评审记录由程序员A执行；投票用 vote cast。'
-      : role === 'programmer1' ? '快速模式：技术评审记录由你执行（req review --kind tech）；投票用 vote cast。'
-        : role === 'tester' ? '快速模式：投票用 vote cast；除 PM 外全员一致驳回才驳回，只按证据投票。'
-          : role === 'pm' ? '快速模式：需求评审交需求分析师，技术评审记录交程序员A；组织投票用 vote start / vote status，PM 不投票。'
-            : '');
-  return `你是「${name}」（${role}），工作区 ${workspace}。\n`
-    + `团队模式：${TEAM_MODE_LABELS[teamMode]}（${teamModeDescription(teamMode)}）。${fastDuty}\n`
-    + `全程中文思考、中文回复、中文写文档。每轮第一件事读《团队宪法》（唯一最高优先级；项目铁律按需避坑）；本回合只做两件事，不分析、不计划、不总结：\n`
-    + `1) 运行 node 团队\\工具\\team.mjs boot --role ${role} --project "${project}"\n`
-    + `2) ${wait}\n`
-    + '不要建任务、不要写文件、不要输出方案。等老板/PM 下一条明确指令。';
 }
 
 const args = parse(process.argv.slice(2));
@@ -270,7 +253,7 @@ if (seedVisible) {
     try {
       await client.prompt({
         sessionId: s.sessionId,
-        text: `你是「${s.name}」。只回复：已就位。不要分析、不要写文件、不要建任务。`,
+        text: seedTextFor(s.role, s.name, project),
         mode: 'queue',
       });
       s.seeded = true;
