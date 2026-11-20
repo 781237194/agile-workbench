@@ -65,7 +65,7 @@ const env = () => ({ ...process.env, AWB_DATA_DIR: DATA, AWB_TEAM_ROOT: TEAM, TE
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function launch() {
   const port = PORT + Math.floor(Math.random() * 100);
-  const child = cp.spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', `--remote-debugging-port=${port}`], { cwd: ROOT, env: env(), stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = cp.spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', `--remote-debugging-port=${port}`], { cwd: ROOT, env: { ...env(), AWB_START_HIDDEN: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = '';
   child.stdout.on('data', (d) => { log += d; });
   child.stderr.on('data', (d) => { log += d; });

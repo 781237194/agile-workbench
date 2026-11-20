@@ -289,6 +289,8 @@ if (IS_BOARD_WINDOW) {
     // R-20261114-001014-e29f：工作区绑定残留（额外会话）的计划/清理/清理历史；清理只解绑不删会话。
     // 703f AC1：会话用量（只读，数据源 团队/状态/项目/<项目>/会话用量.json）
     sessionUsage: (payload) => ipcRenderer.invoke('session:usage', payload),
+  // B-6e85：按 DSH 会话标题（团队·角色）重绑 project.sessions，用于 0/N 时的人工修复入口。
+  rebindSessions: (payload) => ipcRenderer.invoke('dsh:rebind-sessions', payload),
     workspacePlan: (payload) => ipcRenderer.invoke('workspace:plan', payload),
     workspaceClean: (payload) => ipcRenderer.invoke('workspace:clean', payload),
     workspaceHistory: (payload) => ipcRenderer.invoke('workspace:history', payload),

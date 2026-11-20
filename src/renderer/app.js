@@ -3004,10 +3004,12 @@ function usageCompareMarkup(view) {
 }
 async function renderSessionUsage(p) {
   const host = document.getElementById('session-usage');
+  const wrap = document.getElementById('session-usage-wrap');
+  const showWrap = (on) => { if (wrap) wrap.hidden = !on; };
   if (!host) return;
-  if (!p) { host.hidden = true; host.textContent = ''; return; }
+  if (!p) { host.hidden = true; host.textContent = ''; showWrap(false); return; }
   const api = window.workbench;
-  if (!api || typeof api.sessionUsage !== 'function') { host.hidden = true; return; }
+  if (!api || typeof api.sessionUsage !== 'function') { host.hidden = true; showWrap(false); return; }
   const projectId = String(p.id || '');
   const role = String(usageUi.projectId === projectId ? (usageUi.role || '') : (usageUi.role || ''));
   let data = usageUi.data;
@@ -3017,8 +3019,9 @@ async function renderSessionUsage(p) {
       usageUi = { projectId, role, at: Date.now(), data };
     } catch { data = null; }
   }
-  if (!data || data.ok === false) { host.hidden = true; return; }
+  if (!data || data.ok === false) { host.hidden = true; showWrap(false); return; }
   host.hidden = false;
+  showWrap(true);
   host.setAttribute('data-session-usage', '1');
   host.setAttribute('data-usage-role', String((data.focus && data.focus.role) || ''));
   host.setAttribute('data-usage-cache-key', String((data.focus && data.focus.cacheKey) || (projectId + '::' + (role || '*'))));
@@ -3051,9 +3054,20 @@ function renderSessions() {
   // B-6bb5：真无成员必须同时满足「名册行 0」与「memberCount 0」；仅行被过滤空时不算。
   const trulyEmptyRoster = rosterEmpty && Number(cache && cache.memberCount || 0) === 0;
   const allEntries = sessionEntries(p);
-  const entries = Array.isArray(rosterRows) && rosterRows.length
-    ? allEntries.filter((item) => rosterRows.some((row) => String(row.role || '') === String(item.role.id)))
+  // B-6e85（P0）：角色行必须来自「在册名册」。旧实现按 sessionEntries（会话映射派生）过滤，
+  // 映射为空时 entries=[] → 整个角色区被一句空态文案替换，Owner 看到 0/6 且角色行全消失。
+  // 现在：名册有行就按名册逐角色出行，缺映射的行用 roleById 合成，保证 6 个在册角色始终可见。
+  const roleById = new Map();
+  for (const item of allEntries) if (item && item.role) roleById.set(String(item.role.id), item.role);
+  const rosterEntries = Array.isArray(rosterRows) && rosterRows.length
+    ? rosterRows.map((row) => {
+      const roleId = String(row.role || '');
+      const role = roleById.get(roleId) || (teamRoles(p) || []).find((r) => String(r.id) === roleId) || { id: roleId, name: String((row && row.name) || roleId), color: '#888' };
+      const mapped = p && p.sessions && p.sessions[roleId] ? String(p.sessions[roleId]) : '';
+      return { role, sessionId: mapped };
+    })
     : allEntries;
+  const entries = rosterEntries;
   const ready = entries.filter((item) => item.sessionId).length;
   const rosterTotal = cache && Number(cache.memberCount) > 0 ? Number(cache.memberCount) : (Array.isArray(rosterRows) ? rosterRows.length : 0);
   const verifiedFromRows = Array.isArray(rosterRows) && rosterRows.length
@@ -3109,17 +3123,19 @@ function renderSessions() {
     return;
   }
   if (rosterFiltered) {
-    // DSH 在线但会话未映射：角色在册 ≠ 无成员，文案写清原因并给下一步。
-    const reason = String((cache && cache.filteredReason) || '') === 'archived' ? '成员已归档' : '会话尚未映射';
-    box.innerHTML = '<div class="empty-row" data-roster-filtered="1">' + total + ' 个在册角色；' + esc(reason) + '，当前显示 0/' + total
-      + '<button class="link-btn" type="button" data-dsh-retry="1">重试连接</button><button class="link-btn" type="button" data-open-new-project>＋ 建团队</button></div>';
-    if (count) count.setAttribute('data-roster-filtered', '1');
-    return;
+    // B-6e85：名册有行就照名册出行；只有真没有任何在册行时才退回空态文案。
+    if (!entries.length) {
+      const reason = String((cache && cache.filteredReason) || '') === 'archived' ? '成员已归档' : '会话尚未映射';
+      box.innerHTML = '<div class="empty-row" data-roster-filtered="1">' + total + ' 个在册角色；' + esc(reason) + '，当前显示 0/' + total
+        + '<button class="link-btn" type="button" data-dsh-retry="1">重试连接</button><button class="link-btn" type="button" data-rebind-by-title="1">按标题重绑</button><button class="link-btn" type="button" data-open-new-project>＋ 建团队</button></div>';
+      if (count) count.setAttribute('data-roster-filtered', '1');
+      return;
+    }
   }
-  if (rosterEmpty && !trulyEmptyRoster) {
+  if (rosterEmpty && !trulyEmptyRoster && !entries.length) {
     // 名册还有 N 人、只是行被过滤空：按「会话未映射」处理，不写「无在册成员」。
     box.innerHTML = '<div class="empty-row" data-roster-unmapped="1">' + total + ' 个在册角色；会话尚未映射，当前显示 0/' + total
-      + '<button class="link-btn" type="button" data-dsh-retry="1">重试连接</button></div>';
+      + '<button class="link-btn" type="button" data-dsh-retry="1">重试连接</button><button class="link-btn" type="button" data-rebind-by-title="1">按标题重绑</button></div>';
     return;
   }
   if (rosterEmpty) {
@@ -3145,8 +3161,35 @@ function renderSessions() {
       <span class="session-state ${st.cls}" title="${esc(st.title)}">${esc(st.text)}</span>
     </div>`;
   }).join('');
+  // B-6e85：0/N 必须说清真实原因（DSH 在线但会话映射缺失/标题不匹配），并给「按标题重绑」入口。
+  if (entries.length && (verified === 0 || ready < total)) {
+    const mappedN = entries.filter((item) => item.sessionId).length;
+    const reasonText = mappedN === 0
+      ? `DSH 已连接，但在册 ${total} 个角色在本地会话映射里是 0 个（project.sessions 缺失或标题未匹配），所以显示 0/${total}`
+      : `本工作区在册 ${total} 个角色，本地只映射 ${mappedN} 个；未映射的行显示「DSH 会话未创建」`;
+    box.insertAdjacentHTML('beforeend', '<div class="session-reason" data-session-reason="1" data-session-reason-code="' + (mappedN === 0 ? 'MAPPING_EMPTY' : 'MAPPING_PARTIAL') + '">'
+      + esc(reasonText) + '<button class="link-btn" type="button" data-rebind-by-title="1">按标题重绑</button></div>');
+  }
   // T-5d98：行重绘后补一次绑定状态（推送早于渲染时不会丢）。
   try { if (typeof applyPmIdentityState === 'function') applyPmIdentityState(PM_IDENTITY_LAST || {}); } catch { /* ignore */ }
+}
+
+// B-6e85：0/N 时「按标题重绑」入口——只按 DSH 会话标题（团队·角色）匹配，一次写回 project.sessions。
+async function rebindSessionsByTitle() {
+  const p = activeProject();
+  const api = window.workbench;
+  if (!p || !api || typeof api.rebindSessions !== 'function') return;
+  try {
+    const r = await api.rebindSessions({ projectId: p.id });
+    if (r && r.ok) {
+      try { if (typeof showNotice === 'function') showNotice(`已按标题重绑 ${r.bound}/${r.total} 个角色会话`, 'ok'); } catch { /* ignore */ }
+      await refresh();
+    } else {
+      try { if (typeof showNotice === 'function') showNotice('按标题重绑失败：' + String((r && (r.code || r.message)) || 'DSH_TITLE_NO_MATCH') + '（可在团队台核对会话标题）', 'bad'); } catch { /* ignore */ }
+    }
+  } catch (e) {
+    try { if (typeof showNotice === 'function') showNotice('按标题重绑失败：' + String((e && e.message) || e), 'bad'); } catch { /* ignore */ }
+  }
 }
 
 function roleSessionStatus(item) {
@@ -16685,6 +16728,14 @@ function bindDshRetryDelegation() {
   if (document.body && document.body.dataset.dshRetryBound === '1') return;
   if (document.body) document.body.dataset.dshRetryBound = '1';
   bindBlock('dsh-retry-delegation', () => document.addEventListener('click', (e) => {
+    const rebind = e.target instanceof Element ? e.target.closest('[data-rebind-by-title]') : null;
+    if (rebind) {
+      e.preventDefault();
+      if (rebind.disabled) return;
+      rebind.disabled = true;
+      void rebindSessionsByTitle().finally(() => { rebind.disabled = false; });
+      return;
+    }
     const btn = e.target instanceof Element ? e.target.closest('[data-dsh-retry]') : null;
     if (!btn) return;
     e.preventDefault();

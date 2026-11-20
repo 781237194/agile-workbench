@@ -12108,6 +12108,37 @@ installShellAuditSensors();
   // schema：{ "<role>": {sessionId, tokens, input, at, source} }；阈值取自 session.mjs 单源
   // （B-usage-semantics 起默认＝本会话累计未缓存输入 500 万/1000 万，项目 项目.json → sessionLimits 可覆盖）。
   // 文件缺失 / at 超 24h → 返回 unknown（界面显示"用量未知"），不凭空估算。
+  // B-6e85（P0）：角色区 0/N 的「按标题重绑」入口。只做一件事：把 DSH 里标题恰为「团队·<角色>」的
+  // 未归档会话写回 project.sessions（走既有 persistSessionMapping，含模式角色过滤与名册同步）。
+  // 不做“猜测式”模糊匹配；匹配不到就如实返回 DSH_TITLE_NO_MATCH，由用户去团队台核对标题。
+  ipcMain.handle('dsh:rebind-sessions', async (_e, payload) => {
+    try {
+      const projectId = String((payload && payload.projectId) || '');
+      const project = readStore().projects.find((item) => item.id === projectId);
+      if (!project) return { ok: false, code: 'PROJECT_NOT_FOUND', projectId };
+      const roleIds = roleIdsForProject(project);
+      const remote = await dsh.listSessions({ timeoutMs: 8000 });
+      const list = Array.isArray(remote) ? remote : [];
+      const bound = [];
+      const unmatched = [];
+      for (const roleId of roleIds) {
+        const want = roleTitle(roleId);
+        const hit = list.find((session) => session && !session.archived
+          && String(session.title || '').trim() === want);
+        if (hit && hit.sessionId) bound.push({ role: roleId, sessionId: String(hit.sessionId), reused: true });
+        else unmatched.push(roleId);
+      }
+      if (!bound.length) {
+        return { ok: false, code: 'DSH_TITLE_NO_MATCH', total: roleIds.length, unmatched,
+          next: '在团队台核对会话标题是否为「团队·<角色名>」，或重新建团队会话后再试' };
+      }
+      const updated = persistSessionMapping(projectId, bound, { event: `按标题重绑会话：${bound.length} 个` });
+      return { ok: Boolean(updated), bound: bound.length, total: roleIds.length, unmatched, projectId };
+    } catch (error) {
+      return { ok: false, code: 'DSH_REBIND_FAILED', message: String((error && error.message) || error || 'UNKNOWN') };
+    }
+  });
+
   ipcMain.handle('session:usage', async (_e, payload) => {
     const p = payload || {};
     const project = requireProject(readStore(), p.projectId);

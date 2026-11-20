@@ -252,8 +252,12 @@
 
         <section class="side-section sessions-section">
           <div class="side-section-head"><span>六角色会话</span><span id="session-count" class="side-count">—</span></div>
-      <div id="session-usage" class="session-usage" data-session-usage="1" hidden></div>
           <div id="role-sessions" class="role-sessions"></div>
+          <!-- B-6e85：会话用量是独立区块，放在角色行之后，不得占用/混进角色区。 -->
+          <div id="session-usage-wrap" class="session-usage-wrap">
+            <div class="session-usage-head"><span>本会话用量</span><span class="session-usage-note">未缓存输入 / 缓存读 / 阈值</span></div>
+            <div id="session-usage" class="session-usage" data-session-usage="1" hidden></div>
+          </div>
         </section>
 
         <section class="side-section projects-section">

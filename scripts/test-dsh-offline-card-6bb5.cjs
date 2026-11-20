@@ -81,7 +81,7 @@ function startMock() {
 async function launch(port, sb) {
   const child = cp.spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', `--remote-debugging-port=${port}`], {
     cwd: ROOT,
-    env: { ...process.env, AWB_DATA_DIR: sb.DATA, AWB_TEAM_ROOT: sb.TEAM, TEAM_ROOT: sb.TEAM, DSH_HOME: sb.SB, TEAM_SELFTEST: '1', AWB_DSH_BASE_URL: 'http://' + HOST + ':' + dshPort },
+    env: { ...process.env, AWB_START_HIDDEN: '1', AWB_DATA_DIR: sb.DATA, AWB_TEAM_ROOT: sb.TEAM, TEAM_ROOT: sb.TEAM, DSH_HOME: sb.SB, TEAM_SELFTEST: '1', AWB_DSH_BASE_URL: 'http://' + HOST + ':' + dshPort },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '';
@@ -112,6 +112,7 @@ async function card(h) {
     rows: Array.from(document.querySelectorAll('#role-sessions .session-row[data-role-session]')).map((r)=>r.getAttribute('data-role-session')),
     badge: ((document.querySelector('#session-count')||{}).textContent||'').trim(),
     badgeOffline: (document.querySelector('#session-count')||{}).getAttribute ? document.querySelector('#session-count').getAttribute('data-dsh-offline') : null,
+    reason: ((document.querySelector('#role-sessions [data-session-reason]')||{}).textContent||'').trim(),
     retryBound: document.body ? document.body.dataset.dshRetryBound || null : null,
     bindFailures: window.__bindFailures || null,
     refreshCount: Number(window.__refreshCount || 0)
@@ -161,8 +162,11 @@ function cleanup(sb) {
     await sleep(5000);
     const c3 = await ensureNotOffline(h, () => card(h));
     const nMatch = /(\d+) 个在册角色/.exec(c3.text);
-    check('Unmap', 'DSH 在线但会话全空：卡片写「N 个在册角色；会话尚未映射」，禁止「无在册成员」，N=6',
-      c3.unmapped && nMatch && Number(nMatch[1]) === 6 && /尚未映射|未映射/.test(c3.text) && !/无在册成员/.test(c3.text), c3);
+    // B-6e85 起：会话全空时角色区按名册出行 + 独立原因行（不再是整块空态文案）；两种形态都禁止「无在册成员」。
+    const rowsOk = c3.rows.length >= 6;
+    const reasonOk = /6 个(在册)?角色/.test(c3.reason) && /映射|未映射/.test(c3.reason) && /0\/6|0 个/.test(c3.reason || '');
+    check('Unmap', 'DSH 在线但会话全空：按名册渲染角色行并写明「N 个在册角色；会话映射 0/N」，禁止「无在册成员」，N=6',
+      (rowsOk && reasonOk && !/无在册成员/.test(c3.reason)) || (c3.unmapped && nMatch && Number(nMatch[1]) === 6 && /尚未映射|未映射/.test(c3.text) && !/无在册成员/.test(c3.text)), c3);
   } finally { kill(h); server2.close(); }
   cleanup(sb);
 
