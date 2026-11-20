@@ -2575,6 +2575,51 @@ function bindWorkflowSideEffects() {
   });
 }
 
+// a514（PM 040227）：真实窗口打字延迟探针——keydown → 下一帧可见的 p95 + longtask 计数。
+// 用法（之后由 CDP 在真窗口调用）：await window.__awbTypingProbe(3000)；返回 {latency, longtask, gateSkipped, verdict}。
+window.__awbTypingProbe = function typingProbe(durationMs) {
+  const windowMs = Math.max(500, Number(durationMs) || 3000);
+  return new Promise((resolve) => {
+    const latencies = [];
+    const longTasks = [];
+    const started = performance.now();
+    let stopped = false;
+    const gateStatsBefore = (() => { try { return window.AWBGate && AWBGate.stats ? JSON.parse(JSON.stringify(AWBGate.stats)) : null; } catch { return null; } })();
+    const onKey = () => {
+      if (stopped) return;
+      const t0 = performance.now();
+      requestAnimationFrame(() => { if (!stopped) latencies.push(Math.round((performance.now() - t0) * 10) / 10); });
+    };
+    document.addEventListener('keydown', onKey, true);
+    let observer = null;
+    try {
+      if (typeof PerformanceObserver === 'function') {
+        observer = new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) longTasks.push(entry.duration);
+        });
+        observer.observe({ entryTypes: ['longtask'] });
+      }
+    } catch { /* 浏览器不支持 longtask 时只报延迟 */ }
+    const finish = () => {
+      stopped = true;
+      try { document.removeEventListener('keydown', onKey, true); } catch { /* ignore */ }
+      try { if (observer) observer.disconnect(); } catch { /* ignore */ }
+      const gateStatsAfter = (() => { try { return window.AWBGate && AWBGate.stats ? JSON.parse(JSON.stringify(AWBGate.stats)) : null; } catch { return null; } })();
+      const gateSkipped = (gateStatsBefore && gateStatsAfter && Number.isFinite(gateStatsBefore.skippedInteraction))
+        ? Math.max(0, Number(gateStatsAfter.skippedInteraction) - Number(gateStatsBefore.skippedInteraction)) : null;
+      let summary = null;
+      try { summary = window.AWBInputLatency ? window.AWBInputLatency.typingVerdict({ latencies, longTasks, gateSkipped }) : null; } catch { summary = null; }
+      resolve({
+        durationMs: Math.round(performance.now() - started),
+        latencies, longTasks, gateSkipped,
+        summary,
+        verdict: summary ? summary.ok : (latencies.length > 0 && Math.max(...latencies) <= 50 && longTasks.every((d) => d <= 100)),
+      });
+    };
+    setTimeout(finish, windowMs);
+  });
+};
+
 async function refresh() {
   // B-231006-b81a 回归基线诊断：刷新是否真的执行（Owner 报「刷新按钮也失效」）。
   // 只读计数，不参与业务；夹具点击 #btn-refresh 后断言它递增。
