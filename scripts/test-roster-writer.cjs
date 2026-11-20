@@ -280,7 +280,7 @@ check('W3③ session rotate：广播其余 active 成员重 boot（旧实现缺�
 
 /* ── W3④ auto-rotate 路径：同一行格式 + BQ + 广播 ─────────────────────── */
 const dayBase = (() => { const d = new Date(); d.setHours(10, 0, 0, 0); return d.getTime(); })();
-writeJson(path.join(STATE, '会话用量.json'), { analyst: { sessionId: oldId('analyst'), tokens: 600000, at: new Date(dayBase).toISOString(), source: 'fixture' } });
+writeJson(path.join(STATE, '会话用量.json'), { analyst: { sessionId: oldId('analyst'), tokens: 10100000, at: new Date(dayBase).toISOString(), source: 'fixture' } });
 const c1 = cycle(dayBase);
 const handoverFile = path.join(PROJECT_DIR, ROLE_DIRS.analyst, '产出', '交接-最新.md');
 fs.mkdirSync(path.dirname(handoverFile), { recursive: true });
@@ -414,7 +414,7 @@ const rotateScript = [
     && rosterOf('tester') === w5Before.tester && jsonlRows(LEDGER).length === w5Before.ledger,
     { code: w5cli.code, out: text(w5cli).slice(0, 400) });
   // auto-rotate 路径：tester 到强制档 → 一拍发交接请求 → 写交接 → 再拍（同一注入文本）应同拒
-  writeJson(path.join(STATE, '会话用量.json'), { tester: { sessionId: w5Before.tester, tokens: 600000, at: new Date(dayBase + 10 * 60000).toISOString(), source: 'fixture' } });
+  writeJson(path.join(STATE, '会话用量.json'), { tester: { sessionId: w5Before.tester, tokens: 10100000, at: new Date(dayBase + 10 * 60000).toISOString(), source: 'fixture' } });
   const c5a = cycle(dayBase + 10 * 60000, { TEAM_ROTATE_HANDOVER_TEXT: badHandover });
   const tFile = path.join(PROJECT_DIR, ROLE_DIRS.tester, '产出', '交接-最新.md');
   fs.mkdirSync(path.dirname(tFile), { recursive: true });

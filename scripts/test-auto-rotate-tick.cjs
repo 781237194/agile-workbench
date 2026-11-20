@@ -132,7 +132,7 @@ function nextMorning(hour, minute) { const d = new Date(); d.setDate(d.getDate()
 
 (async () => {
   fs.mkdirSync(BASE, { recursive: true });
-  const usage = (now) => ({ analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(now).toISOString(), source: 'fixture' } });
+  const usage = (now) => ({ analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: new Date(now).toISOString(), source: 'fixture' } });
   const ROUNDS_LIMIT = Number(process.env.__AR_ROUNDS_LIMIT || process.env.TEAM_AUTO_ROTATE_ROUNDS || 20); // a4c7 默认 8 时也可跑：夹具轮数=limit+10
   const rounds = { product: { roundsSinceArchive: ROUNDS_LIMIT + 10 } };
 

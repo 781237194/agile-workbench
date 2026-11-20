@@ -4,7 +4,7 @@
  * test-8d91-pm-rotate-idle.cjs —— P1 B-20261119-204845-8d91 夹具（PM 换人双闲 ≥15min 程序门）
  *
  * 需求：`session rotate --role pm` 前置判定 `WAIT_BOTH_IDLE`——PM 与 product 双方近 N 分钟
- * 无新消息 / 无 running 会话 / 无名下 working 任务 / 无在途派单锁，任一不满足 → 拒绝且零写入，
+ * 无本人发出的消息（收到的与系统自动通知不计）/ 无 running 会话 / 无名下 working 任务 / 无在途派单锁，任一不满足 → 拒绝且零写入，
  * 并输出缺哪一方 + 还差多少分钟；N 取 `团队.json → config.pmRotateIdleMin`（默认 15，不写死）。
  *
  * 六类场景：
@@ -108,15 +108,21 @@ async function main() {
     seedTeam({});
     const t0 = Date.now();
     check('③a config 缺失 → 默认 15 分钟', Number(mod.pmRotateIdleState(PROJECT, {}).minutes) === 15, {});
-    // 给 pm 造一条「10 分钟前」的消息：15 分钟窗口内 busy、1 分钟窗口外 idle
-    const mailDir = path.join(TEAM, '状态', '邮箱', 'pm', 'new');
+    // B-f25d：只有**本人发出**的消息算活跃 → 给 pm 造一条「10 分钟前 pm 发给 product」的消息
+    // （落在 product 邮箱）：15 分钟窗口内 busy、1 分钟窗口外 idle。
+    const mailDir = path.join(TEAM, '状态', '邮箱', 'product', 'new');
     fs.mkdirSync(mailDir, { recursive: true });
     const oldTs = new Date(t0 - 10 * 60 * 1000).toISOString();
-    writeJson(path.join(mailDir, `${oldTs.replace(/[:.]/g, '-')}-M-s8d91-1.json`), { id: 'M-s8d91-1', from: 'product', to: 'pm', type: 'notice', subject: 's', body: 'b', project: PROJECT, ts: oldTs, at: oldTs });
+    writeJson(path.join(mailDir, `${oldTs.replace(/[:.]/g, '-')}-M-s8d91-1.json`), { id: 'M-s8d91-1', from: 'pm', to: 'product', type: 'notice', subject: 's', body: 'b', project: PROJECT, ts: oldTs, at: oldTs });
     const g15 = mod.pmRotateIdleState(PROJECT, { minutes: 15, now: t0 });
     const g1 = mod.pmRotateIdleState(PROJECT, { minutes: 1, now: t0 });
-    check('③b 同一份 10 分钟前消息：15 分钟窗口内 busy、1 分钟窗口内 idle（窗口边界生效）',
-      g15.roles.pm.idle === false && /新消息/.test(g15.roles.pm.reasons.join('')) && g1.roles.pm.idle === true,
+    check('③b 同一份 10 分钟前「本人发出」的消息：15 分钟窗口内 busy、1 分钟窗口内 idle（窗口边界生效）',
+      // B-f25d：判据只看本人发出（from===role、扫全队邮箱）；收到的不算。
+      // 语义断言不放宽：①本人发出仍算活跃（idle=false）②窗口外恢复 idle（g1.idle=true）。
+      g15.roles.pm.idle === false
+      && /本人发出过消息/.test(g15.roles.pm.reasons.join(''))
+      && /收到的消息与系统自动通知不计/.test(g15.roles.pm.reasons.join(''))
+      && g1.roles.pm.idle === true,
       { g15: g15.roles.pm, g1: g1.roles.pm });
     check('③c busy 时输出还差多少分钟（remainingMin > 0）',
       Number(g15.roles.pm.remainingMin) > 0, { remainingMin: g15.roles.pm.remainingMin });

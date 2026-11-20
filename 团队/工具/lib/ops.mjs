@@ -6848,10 +6848,22 @@ export async function cmdTask(args) {
     if (!reason) fail('REASON_REQUIRED', 'task reap 必须带 --reason（清什么、依据哪条授权）');
     const purge = Boolean(args.purge);
     if (purge && !args.confirm) fail('CONFIRM_REQUIRED', '物理删除必须 --purge 且带 --confirm 二次确认');
-    const ids = asArray(args.ids).map((x) => String(x || '').trim()).filter(Boolean);
+    // B-reap-ids：--ids 支持「逗号 / 空白（含全角逗号）」分隔，支持重复传 --ids（parseArgs 会给数组）；
+    // 切完去空、去重、保留传入顺序。旧实现把 `T-a,T-b` 整个当一个 id → 两个都不匹配，
+    // 输出「处理 0，变化 0」却不报错 = 静默无效（本缺陷核心）。单 id 旧用法语义不变。
+    const ids = [];
+    for (const raw of asArray(args.ids)) {
+      for (const piece of String(raw == null ? '' : raw).split(/[\s,，]+/)) {
+        const id = piece.trim();
+        if (id && !ids.includes(id)) ids.push(id);
+      }
+    }
     const filter = String(args.filter || '').trim();
     if (!ids.length && !filter) fail('BAD_ARGS', '需要 --ids T-... 或 --filter legacy|mirror|closed-req');
     const all = listTasks(b.project);
+    // 不存在的 id 必须显式报出来（missing），不能静默算「处理 0」。
+    const knownIds = new Set(all.map((t) => String(t.id || '')));
+    const missing = ids.filter((id) => !knownIds.has(id));
     let picked = all;
     if (ids.length) picked = all.filter((t) => ids.includes(String(t.id || '')));
     else if (filter === 'legacy') picked = all.filter((t) => /^T-20261112-/.test(String(t.id || '')));
@@ -6891,11 +6903,16 @@ export async function cmdTask(args) {
       try { appendLine(auditPath, JSON.stringify(row)); } catch { /* 审计失败不阻断主流程，但下面会提示 */ }
       rows.push({ id: task.id, action: purge ? 'purged' : 'cancelled', fromStatus, toStatus: row.toStatus });
     }
-    appendEvent({ role: b.role, sessionId: b.sessionId, action: 'task_reap', project: b.project, target: '', note: `filter=${filter || '-'} ids=${ids.join(',') || '-'} ${purge ? 'purge' : 'cancel'} ${rows.length}` });
+    appendEvent({ role: b.role, sessionId: b.sessionId, action: 'task_reap', project: b.project, target: '', note: `filter=${filter || '-'} ids=${ids.join(',') || '-'} missing=${missing.join(',') || '-'} ${purge ? 'purge' : 'cancel'} ${rows.length}` });
     const changed = rows.filter((r) => r.action !== 'noop').length;
     const lines = rows.map((r) => '- ' + r.id + '：' + r.fromStatus + ' → ' + r.toStatus + '（' + r.action + '）').join('\n');
-    const summary = 'task reap（' + b.project + '）' + (purge ? '物理删除' : '逻辑删除') + '：处理 ' + rows.length + '，变化 ' + changed + '，NOOP ' + (rows.length - changed);
-    out(args, summary + '\n' + lines, { ok: true, rows, auditFile: auditPath });
+    // B-reap-ids：missing 既进摘要（人眼先看到数量）也单独成行（可 grep 到具体 id），--json 给 missing 数组。
+    const missingNote = missing.length ? '，missing ' + missing.length + '（' + missing.join('、') + '）' : '';
+    const summary = 'task reap（' + b.project + '）' + (purge ? '物理删除' : '逻辑删除') + '：处理 ' + rows.length + '，变化 ' + changed + '，NOOP ' + (rows.length - changed) + missingNote;
+    const missingLine = missing.length
+      ? '\nmissing: ' + missing.join(', ') + '（当前项目没有这些 id，未做任何处理；检查是否拼错或已被清理）'
+      : '';
+    out(args, summary + '\n' + lines + missingLine, { ok: true, rows, missing, requestedIds: ids, auditFile: auditPath });
     return;
   }
   if (sub === 'show') {

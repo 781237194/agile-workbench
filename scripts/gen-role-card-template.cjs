@@ -38,6 +38,65 @@ function stripAlignSection(text) {
   return out.join('\n').trimEnd();
 }
 
+function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+/**
+ * 处理项目卡里的 `<!-- rolecard-standard:<key>:begin/end -->` 块（rolecard sync 的产物）：
+ * - **重复块整块丢弃**：PM 对已手写「场景覆盖准则」的卡跑 sync 时，会多出一份 `scene-coverage~2` 标准块，
+ *   内容与手写节重复；原样搬进模板会让新项目卡里出现两份场景覆盖。
+ * - 其余块**解包保留正文**（标记本身不进模板）。
+ */
+function stripSyncBlocks(text) {
+  const src = String(text || '');
+  // 逐个 begin 找同 key 的 end（不用回溯引用：反斜杠数字会和前面的字母连起来，
+  // 被净树 selftest 的「Windows 盘符路径」检查误判成一个盘符路径）。
+  const BEGIN = /<!--\s*rolecard-standard:([A-Za-z0-9_~-]+):begin\s*-->/g;
+  const blocks = [];
+  let m;
+  while ((m = BEGIN.exec(src)) !== null) {
+    const key = m[1];
+    const endRe = new RegExp('<!--\\s*rolecard-standard:' + key + ':end\\s*-->', 'g');
+    endRe.lastIndex = m.index + m[0].length;
+    const e = endRe.exec(src);
+    if (!e) continue; // 未闭合：保持原样
+    blocks.push({
+      key,
+      full: src.slice(m.index, e.index + e[0].length),
+      body: src.slice(m.index + m[0].length, e.index),
+      index: m.index,
+    });
+    BEGIN.lastIndex = e.index + e[0].length;
+  }
+  if (!blocks.length) return src;
+  const restText = blocks.reduce((acc, b) => acc.replace(b.full, ''), src);
+  let out = '';
+  let cursor = 0;
+  for (const b of blocks) {
+    out += src.slice(cursor, b.index);
+    const heading = (String(b.body).match(/^##\s+(.+?)\s*$/m) || [])[1] || '';
+    const dup = Boolean(heading) && new RegExp('^##\\s+' + escapeRe(heading) + '\\s*$', 'm').test(restText);
+    out += dup ? '' : b.body;
+    cursor = b.index + b.full.length;
+  }
+  out += src.slice(cursor);
+  return out;
+}
+
+/**
+ * 摘掉残留的「同步账本标记」行：`<!-- rolecard-standard:<key>:begin/end -->`、`<!-- rolecard-section:<key> -->`、
+ * `<!-- rolecard: template=... -->`。模板要的是**纯正文**。
+ */
+function stripSyncMarkers(text) {
+  const lines = String(text || '').split(/\r?\n/).filter((line) => {
+    const l = String(line || '').trim();
+    if (/^<!--\s*rolecard-standard:[A-Za-z0-9_~-]+:(?:begin|end)\s*-->$/.test(l)) return false;
+    if (/^<!--\s*rolecard-section:[A-Za-z0-9_~-]+\s*-->$/.test(l)) return false;
+    if (/^<!--\s*rolecard:\s*template=.*-->$/.test(l)) return false;
+    return true;
+  });
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+
 function escapeTemplate(text) {
   return text
     .replace(/\\/g, '\\\\')
@@ -81,6 +140,57 @@ function ensureSubagentSection(text) {
   return text.trimEnd() + '\n\n' + SUBAGENT_SECTION;
 }
 
+// 「子代理使用边界」小节（团队/流程.md §D2，Owner 2026-11-20 11:5x 强制；六卡统一）。
+// 口径来源＝流程.md §D2 原文（结论/允许/禁止/补三件事/根因/传播要求四条）；不在这里另造措辞——
+// 改流程先改 §D2，再同步本常量并重生成（`node scripts/gen-role-card-template.cjs <六个角色>`）。
+// 传播路径：新建项目卡由本模板生成；已存在项目卡由 `rolecard sync` 的标准节 `subagent-boundary` 增补
+// （`团队/工具/lib/rolecard-sync.mjs` 的 SECTION_KEYWORDS/STANDARD_TITLES）。
+const SUBAGENT_BOUNDARY_SECTION = `
+<!-- rolecard-standard:subagent-boundary:begin -->
+## 子代理使用边界（流程.md §D2）
+
+> Owner 2026-11-20 11:5x 强制（「子代理容易跳过监管」）；本节与 \`团队/流程.md §D2\` 同源，六角色一致。
+
+- **结论**：子代理不得承担会产生代码/夹具提交的活（不得产生代码提交或夹具提交）；代码与夹具改动一律走角色（六角色消息流）。
+- **允许**（不产生提交、不需要角色身份）：①只读测量与取证（跑夹具取数、量体积、抓断面、读账本）②发布机制操作（推 tag / 建 Release / purge / npm publish / \`release-verify\`）及其重试等待 ③长等待型任务（等网络窗口、等长跑结束）。
+- **禁止**（必须由角色本人做，且留下 \`M-*\` 回执）：①修改 \`src/**\`、\`团队/工具/lib/**\`、\`scripts/**\` 等任何被 git 跟踪的实现或夹具文件 ②不得自证已修好（自行判定「修好了」）——必须经 tester 复验 + PM 按证据验收 ③代替开发角色认领/提交缺陷单。
+- **若已用子代理产生提交（本次教训）**：同一天补三件事——①立缺陷单（写明「实现归属＝PM 代做」）②向对应开发角色发交账消息请其复核 ③开 tester 复验单，PM 只在 test_done 且证据齐后验收。禁止只留提交不留单。
+- **根因**：子代理没有令牌、不写回执、不挂 working 任务，绕过了「派单回执 → 实现 → 测试复验 → 验收」这条唯一可追溯链；当时看不出问题，事后无法对账。
+- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。
+<!-- rolecard-standard:subagent-boundary:end -->
+`.trimEnd();
+
+/**
+ * 六卡统一「子代理使用边界」节。
+ *
+ * 该节是**模板拥有**的标准节：无论项目卡是缺失、还是 PM 已 `rolecard sync` 过的旧措辞，都先摘掉再按当前
+ * 常量重写——否则「项目卡已被同步过」会让本函数变成 no-op，模板永远停在旧措辞（本单实测：PM 12:30 同步
+ * 五张卡后，重生成模板拿到的还是旧文案，AC 关键词 `不得产生代码提交` / `自证已修好` 落不进去）。
+ * 卡侧落后属预期：升级/同步时再跑一次 `rolecard sync` 即可（sha12 判定，幂等）。
+ */
+function stripSubagentBoundarySection(text) {
+  let src = String(text || '');
+  // ① PM 已 `rolecard sync` 过的卡：整块（begin..end 标记 + 标题 + 正文）一起摘掉。
+  //    只按标题摘会留下**孤儿 begin 标记**，parseCard 会从该标记起把后面的正常节吞进这个 block
+  //    （本单实测：场景覆盖准则被算成 subagent-boundary，二次 sync 报假 add/keep）。
+  src = src.replace(/\n?<!--\s*rolecard-standard:subagent-boundary:begin\s*-->\n?[\s\S]*?<!--\s*rolecard-standard:subagent-boundary:end\s*-->\n?/g, '\n');
+  // ② 无标记的旧节：按标题摘到下一个 `## ` 标题。
+  const HEADING = '## 子代理使用边界';
+  const i = src.indexOf(HEADING);
+  if (i >= 0) {
+    const rest = src.slice(i + HEADING.length);
+    const m = /\n##\s+/.exec(rest);
+    const end = m ? i + HEADING.length + m.index : src.length;
+    src = src.slice(0, i) + src.slice(end);
+  }
+  return src.replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+
+function ensureSubagentBoundarySection(text) {
+  const base = stripSubagentBoundarySection(text);
+  return base + '\n\n' + SUBAGENT_BOUNDARY_SECTION.replace(/^\n+/, '');
+}
+
 // 「场景覆盖准则」小节（Owner 2026-11-19 强制；与 scaffold.mjs → sceneCoverageSection 同一口径）。
 // 六卡必须都带本节：生成的卡（product/analyst）在这里补，手写卡（pm/programmer1/programmer2/tester）在 scaffold 里插。
 const SCENE_COVERAGE_SHARED = [
@@ -122,9 +232,12 @@ function buildBody(role) {
   const raw = fs.readFileSync(cardPath, 'utf8');
   const roleNameMatch = raw.match(ROLE_NAME_RE);
   const roleDisplay = roleNameMatch ? roleNameMatch[1] : '';
-  let text = ensureSubagentSection(ensureStructuredOutput(stripAlignSection(raw), role));
+  let text = ensureSubagentSection(ensureStructuredOutput(stripSyncMarkers(stripAlignSection(stripSyncBlocks(raw))), role));
   // Owner 2026-11-19 强制：六卡都必须含「场景覆盖准则」；项目卡没写就在这里补（按角色差异化）。
   text = ensureSceneCoverage(text, role);
+  // 流程.md §D2（Owner 2026-11-20 12:0x）：六卡统一补「子代理使用边界」节——新建项目靠本模板，
+  // 已存在项目靠 `rolecard sync` 的标准节 `subagent-boundary`。
+  text = ensureSubagentBoundarySection(text);
   // B-8d91：PM/产品卡追加「PM 换人双闲门」节（其余角色不涉及 PM 换人）。
   if ((role === 'pm' || role === 'product') && !text.includes('WAIT_BOTH_IDLE')) text = text.trimEnd() + '\n\n' + PM_ROTATE_IDLE_SECTION;
   // 先换占位 token，再整体转义，最后把 token 换成真正的模板插值——否则插值会被当成字面量。

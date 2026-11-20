@@ -214,7 +214,7 @@ function dayTimeMs() { const d = new Date(); d.setHours(10, 0, 0, 0); return d.g
 // ── 7 条断言 ────────────────────────────────────────────────────────────────
 async function case1() {
   const now = dayTimeMs();
-  const sb = new Sandbox('c1-threshold').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, input: 500000, at: new Date(now).toISOString(), source: 'fixture' } } });
+  const sb = new Sandbox('c1-threshold').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, input: 10100000, at: new Date(now).toISOString(), source: 'fixture' } } });
   try {
     const before = snap({ team: sb.teamFile });
     const r1 = sb.runCycle(now);
@@ -231,7 +231,7 @@ async function case1() {
 
 async function case2() {
   const now = dayTimeMs();
-  const sb = new Sandbox('c2-handover').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(now).toISOString(), source: 'fixture' } } });
+  const sb = new Sandbox('c2-handover').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: new Date(now).toISOString(), source: 'fixture' } } });
   try {
     const oldId = sb.sessionOf('analyst');
     const r1 = sb.runCycle(now);
@@ -254,7 +254,7 @@ async function case2() {
 
 async function case3() {
   const now = dayTimeMs();
-  const sb = new Sandbox('c3-timeout').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(now).toISOString(), source: 'fixture' } } });
+  const sb = new Sandbox('c3-timeout').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: new Date(now).toISOString(), source: 'fixture' } } });
   try {
     const r1 = sb.runCycle(now);
     const oldId = sb.sessionOf('analyst');
@@ -273,7 +273,7 @@ function nightFixture(name, hour, minute) {
   const d = new Date(); d.setHours(hour, minute, 0, 0);
   const now = d.getTime();
   const sb = new Sandbox(name).seed({
-    usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(now).toISOString(), source: 'fixture' } },
+    usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: new Date(now).toISOString(), source: 'fixture' } },
     rounds: { product: { roundsSinceArchive: 30 } },
   });
   return { sb, now };
@@ -311,7 +311,7 @@ async function case6() {
   const day = new Date(nightMs); day.setDate(day.getDate() + 1); day.setHours(8, 5, 0, 0);
   const dayMs = day.getTime();
   const sb = new Sandbox('c6-nextday').seed({
-    usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(nightMs).toISOString(), source: 'fixture' } },
+    usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: new Date(nightMs).toISOString(), source: 'fixture' } },
     rounds: { product: { roundsSinceArchive: 30 } },
   });
   try {
@@ -350,11 +350,11 @@ async function case6() {
 
 async function case7() {
   // 反例（PM 2026-11-17 20:03 M-20261117-200342-df2f29 明确要求保留）：
-  // 次日 08:05 窗口内，即使阈值命中（force 520000 / 轮数 30），只要**昨夜没有入队记账**，本窗口不得换任何人。
+  // 次日 08:05 窗口内，即使阈值命中（force 10100000 / 轮数 30），只要**昨夜没有入队记账**，本窗口不得换任何人。
   const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(8, 5, 0, 0);
   const now = d.getTime();
   const sb = new Sandbox('c7-nextday-noqueue').seed({
-    usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(now).toISOString(), source: 'fixture' } },
+    usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: new Date(now).toISOString(), source: 'fixture' } },
     rounds: { product: { roundsSinceArchive: 30 } },
   });
   try {
@@ -391,7 +391,7 @@ async function case8() {
 // AC5 轮换四测用例（PM 2026-11-17 21:10 裁定：由测试补，不计开发）
 async function case9() {
   const now = dayTimeMs();
-  const sb = new Sandbox('c9-rotate-four').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(now).toISOString(), source: 'fixture' } } });
+  const sb = new Sandbox('c9-rotate-four').seed({ usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: new Date(now).toISOString(), source: 'fixture' } } });
   try {
     const oldId = sb.sessionOf('analyst');
     sb.runCycle(now);                       // ① 触发交接请求

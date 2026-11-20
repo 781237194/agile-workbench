@@ -38,12 +38,17 @@ export const LOCK_TTL_MS = 30000;
 export const SECTION_KEYWORDS = [
   { key: 'scene-coverage', keywords: ['场景覆盖'] },
   { key: 'workflow-align', keywords: ['现行工作流对齐', '工作流对齐'] },
+  // 流程.md §D2（Owner 2026-11-20 12:0x）：已存在项目卡靠该 key 识别/增补「子代理使用边界」节。
+  // 关键词必须含「使用边界」四字——只写「子代理」会误命中各卡已有的「## 子代理」节。
+  { key: 'subagent-boundary', keywords: ['子代理使用边界'] },
 ];
 
 /** 需求 §7.4 逐字标题（模板标准节；用于 rename 建议与新增标题）。 */
 export const STANDARD_TITLES = {
   'scene-coverage': '## 场景覆盖准则（§H，Owner 2026-11-19 强制）',
   'workflow-align': '## 现行工作流对齐（2026-11-18 校准 · 发版基线）',
+  // 与 scaffold 模板（gen-role-card-template.cjs → SUBAGENT_BOUNDARY_SECTION）的标题逐字一致。
+  'subagent-boundary': '## 子代理使用边界（流程.md §D2）',
 };
 
 export function manifestPath() {
@@ -484,10 +489,14 @@ export function buildMergedCard(plan) {
   const rendered = [];
   const begin = (key) => `<!-- rolecard-standard:${key}:begin -->`;
   const end = (key) => `<!-- rolecard-standard:${key}:end -->`;
+  // 只剥标题行与尾部空白，**保留标题后的空行**：写入块必须与模板节正文逐字一致，否则二次 sync 会把
+  // 「少一个空行」判成 CONTENT_DIFF，永久不收敛（§D2 subagent-boundary 幂等断言 D4 踩到过）。
+  // B-9bc4：模板节现在自带 `<!-- rolecard-standard:<key>:begin/end -->` 包裹（模板里就能看到成对标记），
+  // 所以还要剥掉首尾的 standard 标记行；否则 apply 会把 begin 行当正文写进去 → 二次 sync 报冲突。
   const bodyOf = (text) => String(text || '')
+    .replace(/^<!--\s*rolecard-standard:[A-Za-z0-9_~-]+:begin\s*-->\s*\n?/, '')
     .replace(/^#+\s+[^\n]*\n?/, '')
-    .replace(/^[ \t]*\n/, '')
-    .replace(/^\n+/, '')
+    .replace(/\n?<!--\s*rolecard-standard:[A-Za-z0-9_~-]+:end\s*-->\s*$/, '')
     .replace(/\s+$/, '');
   const sectionText = (sec) => [begin(sec.key), sec.title, bodyOf(sec.text), end(sec.key)].join('\n');
   // 1) 替换已有的受标记/同 key 节（按 parse 得到的 start/end 行区间倒序重建）

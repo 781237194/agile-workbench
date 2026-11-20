@@ -142,7 +142,7 @@ function main() {
   const iso = (ms) => new Date(ms).toISOString();
 
   /* A. role=pm 命中强制档 → 提醒产品，不给 PM 执行指令 */
-  const A = makeSandbox('A-pm', { usage: { pm: { sessionId: 'sess-old-pm', tokens: 1200000, at: iso(now), source: 'fixture' } } });
+  const A = makeSandbox('A-pm', { usage: { pm: { sessionId: 'sess-old-pm', tokens: 10100000, at: iso(now), source: 'fixture' } } });
   const rosterBefore = sha(A.rosterFile);
   const outA = runCycle(A, now);
   const rowsA = A.rows();
@@ -166,7 +166,7 @@ function main() {
     { rows: rowsA.map((r) => r.stage), rosterSame: sha(A.rosterFile) === rosterBefore });
 
   /* B. 非 pm 角色（analyst）行为不变 */
-  const B = makeSandbox('B-analyst', { usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: iso(now), source: 'fixture' } } });
+  const B = makeSandbox('B-analyst', { usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: iso(now), source: 'fixture' } } });
   const outB = runCycle(B, now);
   const pmMailsB = B.mails('pm');
   const productMailsB = B.mails('product');

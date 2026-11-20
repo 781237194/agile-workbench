@@ -21,8 +21,10 @@
  *     B3 通过动态 import session.mjs 取 sessionLimitsOf（单源）
  *     B4 import 失败路径存在降级（limitsError / limitsReady），不是静默写死
  *   C 单源一致性（真读 session.mjs）
- *     C1 pm 的 warn/force 严格大于其余角色（当前 60/100 万 vs 30/50 万）
+ *     C1 默认阈值全体一致（不再有角色特例；PM 2× 已按 Owner 指令移除）
  *     C2 传入项目 sessionLimits 覆盖时，of(role) 返回覆盖值
+ *     C3 默认阈值等于规范：**本会话累计预算 500 万/1000 万**（B-usage-semantics；
+ *        旧值 30/50 万是「单次上下文预算」量级，比累计值必然「超 15 倍」，2026-11-20 11:2x 按 Owner 口径改）
  */
 const fs = require('node:fs');
 const os = require('node:os');
@@ -106,14 +108,14 @@ check('B4 import 失败有降级（limitsError/limitsReady），不是静默写�
     const pm = limits.of('pm');
     const dev = limits.of('programmer1');
     const over = limits.of('programmer2');
-    check('C1 默认阈值全体一致 = 30/50 万（PM 2× 已在 2026-11-20 c60ee64 按 Owner 指令移除）',
+    check('C1 默认阈值全体一致（不再有角色特例；PM 2× 已按 Owner 指令移除）',
       Number(pm.warn) === Number(dev.warn) && Number(pm.force) === Number(dev.force),
       { pm, dev });
     check('C2 项目 项目.json → sessionLimits 覆盖生效',
       Number(over.warn) === 400000 && Number(over.force) === 700000,
       { over });
-    check('C3 默认阈值等于规范（普通角色 30/50 万）',
-      Number(dev.warn) === 300000 && Number(dev.force) === 500000, { dev });
+    check('C3 默认阈值等于规范（六个角色统一：本会话累计输入 500 万预警 / 1000 万建议换人）',
+      Number(dev.warn) === 5000000 && Number(dev.force) === 10000000, { dev });
   } finally {
     try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* ignore */ }
   }
