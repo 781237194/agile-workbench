@@ -48,8 +48,8 @@ function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); 
  */
 function stripSyncBlocks(text) {
   const src = String(text || '');
-  // 逐个 begin 找同 key 的 end（不用回溯引用：正则里 `\1` 会与前面的字母组成 `d:\1` 这种形态，
-  // 被净树 selftest 的「Windows 盘符路径」检查误判）。
+  // 逐个 begin 找同 key 的 end（不用回溯引用：反斜杠数字会和前面的字母连起来，
+  // 被净树 selftest 的「Windows 盘符路径」检查误判成一个盘符路径）。
   const BEGIN = /<!--\s*rolecard-standard:([A-Za-z0-9_~-]+):begin\s*-->/g;
   const blocks = [];
   let m;
