@@ -84,10 +84,22 @@ async function main() {
   let exitCode = 0;
   const realBefore = { team: sha(REAL_TEAM), store: sha(REAL_STORE) };
   Object.assign(process.env, env());
+  // R-b789 §6.4：门禁要求「会话排队.json 快照可用」——先播种一份新鲜快照（schema:2，roles[]，running:false）。
+  const seedQueue = () => {
+    const file = path.join(TEAM, '状态', '会话排队.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const at = new Date().toISOString();
+    const roles = ['pm', 'product'].map((role) => ({
+      role, sessionId: `session-s8d91-${role}`, known: true, queued: 0, state: 'ok', stale: false, active: true,
+      running: false, runningSince: null, pendingInput: [], lastEventAt: at,
+    }));
+    fs.writeFileSync(file, JSON.stringify({ schema: 2, at, project: PROJECT, staleMs: 120000, degraded: null, roles }, null, 2) + '\n', 'utf8');
+  };
   try {
     check('S0 沙盘 init', run(['init']).code === 0, {});
     check('S1 沙盘建项目', run(['project', 'add', '--name', PROJECT, '--team-mode', 'full']).code === 0, {});
     seedTeam({});
+    seedQueue();
     const projMeta = readJson(path.join(STATE, '项目.json'), {});
     const projDir = String(projMeta.path || path.join(PROJECTS, PROJECT));
     writeJson(path.join(projDir, '团队会话.json'), { project: PROJECT, teamMode: 'full', workspace: projDir, roles: ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'].map((role) => ({ role, sessionId: `session-s8d91-${role}` })) });

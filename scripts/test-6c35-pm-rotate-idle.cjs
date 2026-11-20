@@ -88,6 +88,7 @@ const { pathToFileURL } = require('node:url');
 
 /** 子进程里 import session.mjs 后调 pmRotateIdleState(PROJECT)（默认 now/roles）。 */
 function probe() {
+  writeFreshQueue();   // R-b789：每次判定前刷新快照（at=now），否则新门禁判 snapshot_stale
   const r = spawnSync(process.execPath, ['-e', childScript()], {
     encoding: 'utf8', env: childEnv(), timeout: 120000, cwd: SB, maxBuffer: 16 * 1024 * 1024,
   });
@@ -133,20 +134,28 @@ function clearMail() {
   fs.rmSync(path.join(TEAM, '状态', '邮箱'), { recursive: true, force: true });
 }
 
-/** B-f174：会话排队.json schema:2（roles 为数组）——真实形态；旧代码按对象取 → running 判据恒假。 */
-function putQueue(roleState) {
+/** R-b789 §6.4：门禁现在要求「会话排队.json 快照可用」——每次 probe 前写一份新鲜快照（默认空 roles）。 */
+let queueOverride = [];
+function writeFreshQueue() {
   const file = path.join(TEAM, '状态', '会话排队.json');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const at = new Date().toISOString();
-  const roles = Object.entries(roleState).map(([role, st]) => ({
-    role, sessionId: `session-6c35-${role}`, known: true, queued: 0, state: 'ok', stale: false, active: true,
-    running: Boolean(st && st.running), runningSince: st && st.running ? at : null, pendingInput: [], lastEventAt: at,
-  }));
-  fs.writeFileSync(file, JSON.stringify({ schema: 2, at, project: PROJECT, staleMs: 120000, degraded: null, roles }, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(file, JSON.stringify({ schema: 2, at, project: PROJECT, staleMs: 120000, degraded: null, roles: queueOverride }, null, 2) + '\n', 'utf8');
   return file;
 }
 
+/** B-f174：会话排队.json schema:2（roles 为数组）——真实形态；旧代码按对象取 → running 判据恒假。 */
+function putQueue(roleState) {
+  const at = new Date().toISOString();
+  queueOverride = Object.entries(roleState).map(([role, st]) => ({
+    role, sessionId: `session-6c35-${role}`, known: true, queued: 0, state: 'ok', stale: false, active: true,
+    running: Boolean(st && st.running), runningSince: st && st.running ? at : null, pendingInput: [], lastEventAt: at,
+  }));
+  return writeFreshQueue();
+}
+
 function clearQueue() {
+  queueOverride = [];
   fs.rmSync(path.join(TEAM, '状态', '会话排队.json'), { force: true });
 }
 

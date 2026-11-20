@@ -1533,7 +1533,7 @@ export function rotateAllowed(tokenRole, targetRole) {
  * 返回 { ok, minutes, configValue, roles: { <role>: { idle, reasons[], lastActivityAt, remainingMin } } }。
  * remainingMin = 距离「最近一次活动 + minutes」还差多少分钟（0 表示已闲够）。
  */
-export function pmRotateIdleState(projectName, { minutes = null, roles = ['pm', 'product'], now = Date.now() } = {}) {
+export function pmRotateIdleState(projectName, { minutes = null, roles = ['pm', 'product'], now = Date.now(), actorRole = '', actorSessionId = '' } = {}) {
   const team = (() => { try { return loadTeam(); } catch { return {}; } })();
   const cfgRaw = team && team.config ? team.config.pmRotateIdleMin : null;
   const cfgMin = Number(cfgRaw);
@@ -1541,8 +1541,36 @@ export function pmRotateIdleState(projectName, { minutes = null, roles = ['pm', 
   const windowMs = mins * 60 * 1000;
   const tasks = (() => { try { return listTasks(projectName) || []; } catch { return []; } })();
   const locks = (() => { try { return requireLocks() || []; } catch { return []; } })();
-  const queue = (() => { try { return readJson(path.join(PATHS.state, '会话排队.json'), {}) || {}; } catch { return {}; } })();
+  // R-b789 §6.4（e'）：会话排队.json 读数可用性——只读一次，缺失/坏 JSON/at 缺失/自带 degraded/超容差
+  // 一律保守拒绝（不得静默当空闲）；容差 snapshotMaxAgeMs = max(2×staleMs, 240000)，at 龄 ≤150s 不判陈旧。
+  const queueFile = path.join(PATHS.state, '会话排队.json');
+  const snap = (() => {
+    let raw = null;
+    let code = '';
+    try { raw = JSON.parse(fs.readFileSync(queueFile, 'utf8')); }
+    catch (e) { code = e && e.code === 'ENOENT' ? 'snapshot_missing' : 'snapshot_unreadable'; }
+    if (code) return { code, queue: null, ageMs: null, staleMs: null, snapshotMaxAgeMs: null };
+    const staleMsRaw = Number(raw && raw.staleMs);
+    const staleMs = Number.isFinite(staleMsRaw) && staleMsRaw > 0 ? staleMsRaw : 120000;
+    const snapshotMaxAgeMs = Math.max(2 * staleMs, 240000);
+    const atMs = Date.parse(String((raw && raw.at) || ''));
+    const ageMs = Number.isFinite(atMs) ? now - atMs : null;
+    if (!Number.isFinite(atMs)) return { code: 'snapshot_unreadable', queue: raw, ageMs: null, staleMs, snapshotMaxAgeMs };
+    if (String((raw && raw.degraded) || '').trim()) return { code: 'snapshot_reported', queue: raw, ageMs, staleMs, snapshotMaxAgeMs };
+    if (ageMs > snapshotMaxAgeMs && ageMs > 150000) return { code: 'snapshot_stale', queue: raw, ageMs, staleMs, snapshotMaxAgeMs };
+    return { code: '', queue: raw, ageMs, staleMs, snapshotMaxAgeMs };
+  })();
+  const degraded = snap.code ? {
+    code: snap.code,
+    ageMs: snap.ageMs, staleMs: snap.staleMs, snapshotMaxAgeMs: snap.snapshotMaxAgeMs,
+    reason: `快照不可用（${snap.code}）：ageMs=${snap.ageMs === null ? '-' : snap.ageMs} / staleMs=${snap.staleMs === null ? '-' : snap.staleMs} / snapshotMaxAgeMs=${snap.snapshotMaxAgeMs === null ? '-' : snap.snapshotMaxAgeMs}；先确认壳层/插件在写 团队/状态/会话排队.json`,
+  } : null;
+  const queue = snap.queue;
   const out = {};
+  if (degraded) {
+    for (const role of roles) out[role] = { idle: false, reasons: [degraded.reason], lastActivityAt: '', remainingMin: 0, remainingSec: 0, skippedSelf: false };
+    return { ok: false, code: degraded.code, minutes: mins, configValue: Number.isFinite(cfgMin) && cfgMin > 0 ? cfgMin : 15, actorRole, actorSessionId, degraded, roles: out };
+  }
   for (const role of roles) {
     const reasons = [];
     let lastMs = 0;
@@ -1583,7 +1611,9 @@ export function pmRotateIdleState(projectName, { minutes = null, roles = ['pm', 
       if (Array.isArray(qRoles)) return qRoles.find((r) => r && String(r.role || '') === String(role)) || null;
       return (queue && (queue[role] || (qRoles && qRoles[role]))) || null;
     })();
-    if (qRow && (qRow.running === true || qRow.thinking === true || Number(qRow.thinkSec || 0) > 0)) reasons.push(`有正在跑的会话（running=${qRow.running === true} / thinkSec=${Number(qRow.thinkSec || 0)}）`);
+    // R-b789 §6.1（a）：执行者自身豁免——只跳 ②，且只跳自己（actorSessionId 与快照该 role 的 sessionId 相等）。
+    const skippedSelf = Boolean(actorSessionId) && Boolean(qRow) && String(qRow.sessionId || '') === String(actorSessionId);
+    if (qRow && !skippedSelf && (qRow.running === true || qRow.thinking === true || Number(qRow.thinkSec || 0) > 0)) reasons.push(`有正在跑的会话（running=${qRow.running === true} / thinkSec=${Number(qRow.thinkSec || 0)}）`);
     // ③ working 任务
     const mine = tasks.filter((t) => String(t.owner || '') === String(role) && String(t.status || '') === 'working');
     if (mine.length) reasons.push(`名下有 ${mine.length} 个 working 任务（${mine.slice(0, 3).map((t) => t.id).join('、')}）`);
@@ -1591,11 +1621,13 @@ export function pmRotateIdleState(projectName, { minutes = null, roles = ['pm', 
     const myLocks = locks.filter((l) => String(l.role || '') === String(role) && !l.stale);
     if (myLocks.length) reasons.push(`持有 ${myLocks.length} 个在途派单锁`);
     const idle = reasons.length === 0;
-    const remainingMin = idle ? 0 : Math.max(0, Math.ceil((lastMs + windowMs - now) / 60000));
-    out[role] = { idle, reasons, lastActivityAt: lastMs ? new Date(lastMs).toISOString() : '', remainingMin };
+    // R-b789 §6.3（d）：剩余时间给到整秒（14 分 59 秒 → 1..899，不得凑成 900）；remainingMin 保留旧字段。
+    const remainingSec = lastMs ? Math.max(0, Math.ceil((lastMs + windowMs - now) / 1000)) : 0;
+    const remainingMin = remainingSec > 0 ? Math.ceil(remainingSec / 60) : 0;
+    out[role] = { idle, reasons, lastActivityAt: lastMs ? new Date(lastMs).toISOString() : '', remainingMin, remainingSec, skippedSelf };
   }
   const ok = Object.values(out).every((r) => r && r.idle);
-  return { ok, minutes: mins, configValue: Number.isFinite(cfgMin) && cfgMin > 0 ? cfgMin : 15, roles: out };
+  return { ok, minutes: mins, configValue: Number.isFinite(cfgMin) && cfgMin > 0 ? cfgMin : 15, actorRole, actorSessionId, degraded: null, roles: out };
 }
 
 
@@ -1851,11 +1883,13 @@ export async function cmdSession(args) {
     const bootSandbox = String(process.env.TEAM_SELFTEST || '') === '1';
     const bootEnforce = String(process.env.TEAM_BOOT_ENFORCE || '') === '1';
     let actorRole = 'selftest';
+    let actorSessionId = '';
     if (!bootSandbox || bootEnforce) {
       const bootToken = String(args.boot || '').trim();
       if (!bootToken) fail('BOOT_REQUIRED', '会话轮换必须带 --boot 启动令牌（PM/Owner，或产品换 PM）', { role, project: projectName });
       const bootInfo = requireBoot(bootToken, { write: true });
       actorRole = String(bootInfo.role || '');
+      actorSessionId = String(bootInfo.sessionId || '');
       if (!rotateAllowed(actorRole, role)) {
         fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话；产品只能给 PM 换人、PM 不能给自己换人（当前令牌角色 ${actorRole || '-'} → 目标 ${role}）`, { role, project: projectName, tokenRole: actorRole });
       }
@@ -1864,18 +1898,26 @@ export async function cmdSession(args) {
     // 产品不能在 PM 忙碌、或自己正跑任务时直接换人。四项：近 N 分钟无新消息 / 无 running 会话 /
     // 无名下 working 任务 / 无在途派单锁；N 取 团队.json → config.pmRotateIdleMin（默认 15）。
     // 不满足 → WAIT_BOTH_IDLE 拒绝（在任何写盘之前 → 零副作用），并输出缺哪一方、还差多少分钟。
+    let idleGate = null;
     if (role === 'pm') {
-      const idleGate = pmRotateIdleState(projectName, { now: Date.now() });
+      idleGate = pmRotateIdleState(projectName, { now: Date.now(), actorRole, actorSessionId });
       if (!idleGate.ok) {
         const busy = Object.entries(idleGate.roles).filter(([, r]) => !r.idle);
-        const detail = busy.map(([roleName, r]) => `${roleName}：${r.reasons.join('；')}${r.remainingMin ? `（约还差 ${r.remainingMin} 分钟）` : ''}`).join(' / ');
-        fail('WAIT_BOTH_IDLE', `PM 换人要求 PM 与产品双方闲时 ≥ ${idleGate.minutes} 分钟（team.json → config.pmRotateIdleMin，默认 15）：${detail}。请等双方都静下来再换人（或由 Owner 直接指令换人）`, {
+        const secText = (s) => { const n = Math.max(0, Number(s) || 0); return `${Math.floor(n / 60)} 分 ${n % 60} 秒`; };
+        const detail = busy.map(([roleName, r]) => `${roleName}：${r.reasons.join('；')}${r.remainingSec ? `（约还差 ${secText(r.remainingSec)}）` : ''}`).join(' / ');
+        fail('WAIT_BOTH_IDLE', `PM 换人要求 PM 与产品双方闲时 ≥ ${idleGate.minutes} 分钟（team.json → config.pmRotateIdleMin，默认 15）：${detail}`, {
           role, project: projectName, minutes: idleGate.minutes,
-          busy: busy.map(([roleName, r]) => ({ role: roleName, reasons: r.reasons, remainingMin: r.remainingMin, lastActivityAt: r.lastActivityAt })),
-          next: '等 PM 与产品都空闲（无新消息/无 running/无 working 任务/无派单锁）后再执行；Owner 通道不设此门',
+          actorRole: idleGate.actorRole, actorSessionId: idleGate.actorSessionId,
+          degraded: idleGate.degraded || null,
+          busy: busy.map(([roleName, r]) => ({ role: roleName, reasons: r.reasons, remainingMin: r.remainingMin, remainingSec: r.remainingSec, skippedSelf: r.skippedSelf, lastActivityAt: r.lastActivityAt })),
+          next: '等 PM 与产品都空闲（无新消息/无 running/无 working 任务/无派单锁）后再执行；先 dispatch-check 看在途锁',
         });
       }
     }
+    const idleGateJson = idleGate ? {
+      ok: idleGate.ok, minutes: idleGate.minutes, actorRole: idleGate.actorRole, actorSessionId: idleGate.actorSessionId,
+      skippedSelf: Object.entries(idleGate.roles).filter(([, r]) => r.skippedSelf).map(([roleName]) => roleName),
+    } : null;
     // R-20261118-143558-eba2：换人前必须有人落交接回执，且回执 sha 与磁盘一致。
     // 沙盘默认豁免（既有 selftest 的 4 处 rotate 无回执），门禁本体用 TEAM_HANDOVER_ENFORCE=1 强制。
     const handoverEnforce = String(process.env.TEAM_HANDOVER_ENFORCE || '') === '1';
@@ -1931,7 +1973,7 @@ export async function cmdSession(args) {
         `归档门：${record.archiveGate.archived ? '已归档（可 rotate）' : (record.archiveGate.inFlight ? '未归档，有在途任务/锁 → 将按 ARCHIVE_DEFERRED 放行' : '未归档且无在途任务 → 将拒绝 ARCHIVE_REQUIRED')}`,
         '未写入任何文件；确认后去掉 --dry-run 执行。',
       ];
-      out(args, lines.join('\n'), { ok: true, ...record });
+      out(args, lines.join('\n'), { ok: true, ...record, ...(idleGateJson ? { idleGate: idleGateJson } : {}) });
       return;
     }
     const lines = [
@@ -1974,7 +2016,7 @@ export async function cmdSession(args) {
         lines.push(`派单队列对齐：改投新会话 ${queueReconcile.rebased.length} 条，作废 ${queueReconcile.discarded.length} 条（已留审计）`);
       }
     } catch (e) { queueReconcile = { ok: false, why: String((e && e.message) || e) }; }
-    out(args, lines.join('\n'), { ok: true, ...record, archiveWriteBack, queueReconcile });
+    out(args, lines.join('\n'), { ok: true, ...record, archiveWriteBack, queueReconcile, ...(idleGateJson ? { idleGate: idleGateJson } : {}) });
     return;
   }
   fail('BAD_ACTION', `会话命令只支持 usage | check | rotate | handover（收到 ${action || '(空)'}）`);
