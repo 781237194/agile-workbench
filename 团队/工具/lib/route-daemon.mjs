@@ -56,6 +56,18 @@ export const ROUTE_EVENTS = Object.freeze(['state_change', 'wake', 'skip', 'wake
 /** 事件源：F-3b 四类，表外不存在。 */
 export const ROUTE_SOURCES = Object.freeze(['status', 'trq', 'decisions', 'task']);
 
+/**
+ * Owner 2026-11-20 决定：**看板路由唤醒默认关闭**（不是关派单唤醒）。
+ * 保留 buildRouteWakeText / deliverRouteWake 实现，只在唤醒调用点短路；
+ * 默认不得开启；开启须 Owner 书面同意并记录决策编号。**此注释不得删除。**
+ * 开启方式：进程环境 TEAM_ROUTE_WAKE=on（排障用）。
+ */
+export function routeWakeEnabled(env = process.env) {
+  return String((env && env.TEAM_ROUTE_WAKE) || '').toLowerCase() === 'on';
+}
+/** 关闭时的固定原因串（日志/返回可判）。 */
+export const ROUTE_WAKE_DISABLED_WHY = 'route_wake_disabled';
+
 const DEFAULT_TICK_MS = 30 * 1000;
 const DEFAULT_IDEMPOTENT_HOURS = 24;
 const DEFAULT_FOLLOWUP_MS = 30 * 1000;
@@ -1045,9 +1057,15 @@ export async function routeTick(projectName, { engineUrl = '', now = Date.now(),
             role: 'pm', action: 'bug_escalation', requirementId: event.requirementId || '',
             taskId: event.taskId, project: name, fromStatus: base.fromStatus, toStatus: base.toStatus,
           });
-          const escWake = await deliverRouteWake(name, { role: 'pm', text: escText, engineUrl });
+          // Owner 2026-11-20：看板路由唤醒默认关闭 → 升级唤醒也不得发（保留实现；开关同源）。
+          const escWake = routeWakeEnabled()
+            ? await deliverRouteWake(name, { role: 'pm', text: escText, engineUrl })
+            : { ok: false, disabled: true, skipped: ROUTE_WAKE_DISABLED_WHY, why: ROUTE_WAKE_DISABLED_WHY };
           status.wakes[escKey] = { at: nowIso(), lastWakeAt: nowIso(), role: 'pm', action: 'bug_escalation', requirementId: event.requirementId || '', taskId: event.taskId };
-          if (escWake.ok) {
+          if (escWake.disabled) {
+            appendRouteLog(name, { ...base, event: 'skip', role: 'pm', action: 'bug_escalation', key: escKey, ok: true, why: ROUTE_WAKE_DISABLED_WHY });
+            out.skips.push({ ...base, role: 'pm', action: 'bug_escalation', why: ROUTE_WAKE_DISABLED_WHY });
+          } else if (escWake.ok) {
             appendRouteLog(name, {
               ...base, event: 'wake', role: 'pm', action: 'bug_escalation', key: escKey, ok: true,
               why: `reopenCount=${reopen}`, wakeRef: String(alert.messageId || escWake.sessionId || escWake.skipped || ''),
@@ -1270,13 +1288,25 @@ export function reportWakeFailure(projectName, { role = '', action = '', require
   return { logged: Boolean(log), alert, why, upstreamUrl: upstream, upstreamSource, errorCode: errCode, attempts: tried };
 }
 
-/** 单次路由唤醒：幂等 → 发 → 记日志 → 排 followUp / 重试。 */
-async function wakeRoute(projectName, opts) {
+/**
+ * 单次路由唤醒：幂等 → 发 → 记日志 → 排 followUp / 重试。
+ * 导出仅供夹具与排障直接验「默认关闭 / 显式开启」两向（生产由 routeTick 调用）。
+ */
+export async function wakeRoute(projectName, opts) {
   const {
     role, action, requirementId, taskId, fromStatus, toStatus, key, status, windowMs, now, engineUrl,
     source = 'status', triggerChange = '',
   } = opts;
   const base = { source, requirementId: requirementId || '', fromStatus: fromStatus || '', toStatus: toStatus || '', role, action, taskId: taskId || '', triggerChange, key };
+  // Owner 2026-11-20 决定：看板路由唤醒默认关闭（保留实现，只在此调用点短路）。
+  // 默认不得开启；开启须 Owner 书面同意并记录决策编号。**此注释不得删除。**
+  if (!routeWakeEnabled()) {
+    appendRouteLog(projectName, {
+      ...base, event: 'skip', ok: true, why: ROUTE_WAKE_DISABLED_WHY,
+      reason: 'Owner 2026-11-20 关闭看板路由唤醒（TEAM_ROUTE_WAKE=on 才开）',
+    });
+    return { skipped: ROUTE_WAKE_DISABLED_WHY, why: ROUTE_WAKE_DISABLED_WHY, key, disabled: true };
+  }
   const last = status.wakes[key];
   if (last && withinWindow(last.lastWakeAt, windowMs, now)) {
     appendRouteLog(projectName, { ...base, event: 'skip', why: 'duplicate', ok: true });
