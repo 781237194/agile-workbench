@@ -48,18 +48,33 @@ function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); 
  */
 function stripSyncBlocks(text) {
   const src = String(text || '');
-  const BLOCK = /<!--\s*rolecard-standard:([A-Za-z0-9_~-]+):begin\s*-->([\s\S]*?)<!--\s*rolecard-standard:\1:end\s*-->/g;
+  // 逐个 begin 找同 key 的 end（不用回溯引用：正则里 `\1` 会与前面的字母组成 `d:\1` 这种形态，
+  // 被净树 selftest 的「Windows 盘符路径」检查误判）。
+  const BEGIN = /<!--\s*rolecard-standard:([A-Za-z0-9_~-]+):begin\s*-->/g;
   const blocks = [];
   let m;
-  while ((m = BLOCK.exec(src)) !== null) blocks.push({ key: m[1], full: m[0], body: m[2], index: m.index });
+  while ((m = BEGIN.exec(src)) !== null) {
+    const key = m[1];
+    const endRe = new RegExp('<!--\\s*rolecard-standard:' + key + ':end\\s*-->', 'g');
+    endRe.lastIndex = m.index + m[0].length;
+    const e = endRe.exec(src);
+    if (!e) continue; // 未闭合：保持原样
+    blocks.push({
+      key,
+      full: src.slice(m.index, e.index + e[0].length),
+      body: src.slice(m.index + m[0].length, e.index),
+      index: m.index,
+    });
+    BEGIN.lastIndex = e.index + e[0].length;
+  }
   if (!blocks.length) return src;
-  const rest = blocks.reduce((acc, b) => acc.replace(b.full, ''), src);
+  const restText = blocks.reduce((acc, b) => acc.replace(b.full, ''), src);
   let out = '';
   let cursor = 0;
   for (const b of blocks) {
     out += src.slice(cursor, b.index);
     const heading = (String(b.body).match(/^##\s+(.+?)\s*$/m) || [])[1] || '';
-    const dup = Boolean(heading) && new RegExp('^##\\s+' + escapeRe(heading) + '\\s*$', 'm').test(rest);
+    const dup = Boolean(heading) && new RegExp('^##\\s+' + escapeRe(heading) + '\\s*$', 'm').test(restText);
     out += dup ? '' : b.body;
     cursor = b.index + b.full.length;
   }
