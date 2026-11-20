@@ -20,6 +20,10 @@ const ROOT = path.resolve(__dirname, '..');
 const JSON_OUT = process.argv.includes('--json');
 const { cdnVerdict, cdnFallbackVerdict, classifyNetworkError, httpGetWithRedirects } = require(path.join(ROOT, 'scripts', 'cdn-diagnose.cjs'));
 const ROWS = [];
+const COMMIT = (() => { try { return require('node:child_process').execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { return 'unknown'; } })();
+const AT = new Date().toISOString();
+// 证据可溯源：日志头必须带「现树提交号 + 时间」；PM 021130 要求。
+console.log('# 98ea cdn-diag @ ' + AT + ' commit=' + COMMIT + ' node=' + process.version);
 function check(name, ok, detail) {
   ROWS.push({ name, ok: Boolean(ok), detail: ok ? undefined : detail });
   if (!JSON_OUT) console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : ' · ' + String(JSON.stringify(detail)).slice(0, 700)}`);
@@ -55,9 +59,16 @@ function unitSection() {
   }
   check('A6 内容不一致不走网络分类（同大小不同内容 → CDN_SHA_MISMATCH）',
     cdnVerdict({ status: 200, bodyLength: 4096, localSha: sha(Buffer.from('A'.repeat(4096))), downloadedSha: sha(Buffer.from('B'.repeat(4096))) }).category === 'CDN_SHA_MISMATCH', {});
-  check('A7 404 → CDN_HTTP_ERROR', cdnVerdict({ status: 404, bodyLength: 120, localSha: 'x', downloadedSha: 'y' }).category === 'CDN_HTTP_ERROR', {});
+  const http404 = cdnVerdict({ status: 404, bodyLength: 120, localSha: 'x', downloadedSha: 'y' });
+  check('A7 404 → CDN_HTTP_ERROR 且 detail.httpStatus=404', http404.category === 'CDN_HTTP_ERROR' && Number(http404.detail && http404.detail.httpStatus) === 404, http404);
   check('A8 空 body → CDN_BAD_RESPONSE', cdnVerdict({ status: 200, bodyLength: 0, localSha: 'x', downloadedSha: '' }).category === 'CDN_BAD_RESPONSE', {});
   check('A9 成功 → CDN_OK', cdnVerdict({ status: 200, bodyLength: 10, localSha: 'x', downloadedSha: 'x' }).ok === true, {});
+  // PM 021130①：旧常量名在夹具里必须为 0；名字用拼接构造，避免断言自己命中自己。
+  const self = fs.readFileSync(__filename, 'utf8');
+  const bannedDns = 'CDN_DNS_' + 'FAILED';
+  const bannedRedirect = 'CDN_REDIRECT_' + 'BLOCKED';
+  check('A10 夹具不含旧常量名（实现为准：CDN_DNS_FAIL / CDN_REDIRECT_UNREACHABLE）',
+    !self.includes(bannedDns) && !self.includes(bannedRedirect), {});
 
   // B. --cdn-fallback github（PM 015009）：不能静默 PASS
   const cdnFail = cdnVerdict({ error: err('read ECONNRESET', 'ECONNRESET') });
@@ -89,8 +100,12 @@ async function liveSection() {
     } catch (e) { caught = e; }
     check('C1 301→不可达：抛错且带 redirects 链', Boolean(caught) && Array.isArray(caught.redirects) && caught.redirects.length === 1, { error: caught && String(caught.message), redirects: caught && caught.redirects });
     const diag = cdnVerdict({ error: caught || new Error('missing'), redirects: (caught && caught.redirects) || [] });
+    const chain = (diag.detail && diag.detail.redirects) || [];
+    const has301 = chain.some((r) => r && Number(r.status) === 301 && /raw\.zip/.test(String(r.to || '')) && /127\.0\.0\.1/.test(String(r.from || '')));
     check('C2 分类必须是 CDN_REDIRECT_UNREACHABLE（不是裸 ECONNRESET）', diag.category === 'CDN_REDIRECT_UNREACHABLE', diag);
-    check('C3 提示含 raw.githubusercontent 与代理/网络说明', /raw\.githubusercontent/.test(diag.hint) && /代理|网络/.test(diag.hint), { hint: diag.hint });
+    check('C2b detail.redirects 必须含 301 的 from→to 链', has301, { chain, diag });
+    check('C3 提示含 raw.githubusercontent / 代理或网络 / --skip-cdn 三个关键词',
+      /raw\.githubusercontent/.test(diag.hint) && /代理|网络/.test(diag.hint) && /--skip-cdn/.test(diag.hint), { hint: diag.hint });
     await new Promise((r) => redirectServer.close(r));
   } else {
     check('C0 mock 重定向服务启动', false, {});

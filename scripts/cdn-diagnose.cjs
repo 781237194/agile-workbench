@@ -37,10 +37,10 @@ function cdnVerdict({ status = 0, bodyLength = 0, localSha = '', downloadedSha =
     return { ok: false, ...cls };
   }
   if (status < 200 || status >= 300) {
-    return { ok: false, category: 'CDN_HTTP_ERROR', code: 'CDN_HTTP_' + status, hint: CDN_HINTS.CDN_HTTP_ERROR, detail: { status, redirects: redirects.slice(0, 8) } };
+    return { ok: false, category: 'CDN_HTTP_ERROR', code: 'CDN_HTTP_' + status, hint: CDN_HINTS.CDN_HTTP_ERROR, detail: { status, httpStatus: status, redirects: redirects.slice(0, 8) } };
   }
   if (!bodyLength) {
-    return { ok: false, category: 'CDN_BAD_RESPONSE', code: 'CDN_EMPTY_BODY', hint: CDN_HINTS.CDN_BAD_RESPONSE, detail: { status, redirects: redirects.slice(0, 8) } };
+    return { ok: false, category: 'CDN_BAD_RESPONSE', code: 'CDN_EMPTY_BODY', hint: CDN_HINTS.CDN_BAD_RESPONSE, detail: { status, httpStatus: status, redirects: redirects.slice(0, 8) } };
   }
   if (!localSha || !downloadedSha) {
     return { ok: false, category: 'CDN_BAD_RESPONSE', code: 'CDN_SHA_UNAVAILABLE', hint: CDN_HINTS.CDN_BAD_RESPONSE, detail: { status } };
