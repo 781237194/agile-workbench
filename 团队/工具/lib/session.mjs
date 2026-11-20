@@ -1519,11 +1519,17 @@ export function pmRotateIdleState(projectName, { minutes = null, roles = ['pm', 
         if (!n.endsWith('.json')) continue;
         let row = null; try { row = readJson(path.join(dir, n), null); } catch { row = null; } // 破损文件不许让门崩（降级）
         if (!row) continue;
+        // B-20261120-110351-6c35（Owner 2026-11-20 11:01 指令）：旧实现把**系统自动通知**也算活跃——
+        // 路由泵 wake 摘要、名册变更广播、认领停滞提醒每条都是 from=system，投一条就把 15 分钟倒计时重置，
+        // PM 结构上永远等不到静默窗（实测 10:51–10:56 换完 5 个角色后，产品给 PM 换人反复被
+        // WAIT_BOTH_IDLE 拒）。口径改为：**排除 from=system 的自动通知**，人与角色之间的往来照旧算活跃；
+        // running 会话 / working 任务 / 在途派单锁三条硬判据不变。
+        if (String(row.from || '') === 'system') continue;
         const ms = Date.parse(String(row.ts || row.at || row.deliveredAt || ''));
         if (Number.isFinite(ms) && ms > lastMs) lastMs = ms;
       }
     }
-    if (lastMs && now - lastMs < windowMs) reasons.push(`近 ${mins} 分钟有新消息（最近 ${new Date(lastMs).toISOString()}）`);
+    if (lastMs && now - lastMs < windowMs) reasons.push(`近 ${mins} 分钟有真人/角色往来消息（最近 ${new Date(lastMs).toISOString()}；系统自动通知不计）`);
     // ② running 会话
     const qRow = (queue && (queue[role] || (queue.roles && queue.roles[role]))) || null;
     if (qRow && (qRow.running === true || qRow.thinking === true || Number(qRow.thinkSec || 0) > 0)) reasons.push(`有正在跑的会话（running=${qRow.running === true} / thinkSec=${Number(qRow.thinkSec || 0)}）`);
