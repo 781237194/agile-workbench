@@ -11,7 +11,9 @@
  *      不挡旧会话归档 → `session archive --archive-session <old>` 成功，写 9 字段 + rotatedAt 回写。
  *   A2 换人**之前**认领、且无 ownerSessionId 的未闭环任务 → 仍挡（TASK_OPEN，scope=session）。
  *   A3 任务带 `ownerSessionId` 时精确判：ownerSessionId=<new> 不挡；=<old> 挡。
- *   A4 没有轮换记录的会话（未换人）→ 退化原角色级判据（TASK_OPEN，scope=role），老行为不变。
+ *   A4 没有轮换记录的会话（未换人）→ 仍 TASK_OPEN（保守挡），但 scope 如实为 session
+ *      （B-20261120-143331-d475 / PM 2026-11-20 14:41 口径：判据只要落在「按会话」上就是 session，
+ *        replacedAt 为空表示「查不到替换时刻」，不再用它冒充 scope）。
  *   A5 TASK_OPEN 的 details 带 `{sessionId, replacedAt, scope}`（可排障）。
  *   A6 端到端：真实 rotate → 旧会话自动归档 archived；新会话接新任务后**再次补归档**同 old 会话不影响已归档记录语义。
  *   A7 镜像任务（type=requirement）与终态任务不计入（既有口径不回归）。
@@ -190,8 +192,9 @@ try {
   seedTask('T-196e-anytask', { claimedAt: '2026-11-19T05:00:00.000Z' });
   const a4 = runJson(['session', 'archive', '--boot', pmTok, '--project', PROJECT, '--role', ROLE,
     '--archive-session', OLD_ID, '--confirm', '--reason', 'B-196e 无轮换记录', '--json']);
-  check('A4 无轮换记录的会话 → 退化角色级判据（仍 TASK_OPEN，scope=role）',
-    a4.code !== 0 && /TASK_OPEN/.test(text(a4)) && Boolean(a4.json && a4.json.details && a4.json.details.scope === 'role'),
+  check('A4 无轮换记录的会话 → 仍保守挡（TASK_OPEN），details.scope 如实为 session、replacedAt 为空',
+    a4.code !== 0 && /TASK_OPEN/.test(text(a4)) && Boolean(a4.json && a4.json.details && a4.json.details.scope === 'session'
+      && !a4.json.details.replacedAt),
     { code: a4.code, details: a4.json && a4.json.details });
 
   /* ── A7 镜像/终态任务不计入 ────────────────────────────────────── */

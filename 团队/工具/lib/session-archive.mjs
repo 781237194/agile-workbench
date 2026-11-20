@@ -388,7 +388,11 @@ export function archiveSession({ projectName, role, reason = '', self = false, a
       // 可排障：说明本次按「会话」还是「角色」口径判的（B-196e）
       sessionId: targetSession || '',
       replacedAt: replacedAt || '',
-      scope: replacedAt ? 'session' : 'role',
+      // B-20261120-143331-d475（PM 口径修正）：判据只要落在「按会话」上（taskBelongsToSession 的
+      // ① ownerSessionId 精确比 / ② 与替换时刻比 / ③ 保守算该会话），scope 就应如实为 session；
+      // 旧写法用「能否解析出 replacedAt」当 scope，导致 ownerSessionId 精确判定的场景被误报成 role。
+      scope: targetSession ? 'session' : 'role',
+      judgedBy: replacedAt ? 'ownerSessionId-or-claimedAt' : 'ownerSessionId-or-conservative',
     });
   }
   const locks = (listLocks() || []).filter((l) => String(l.role || '') === role && !l.stale);

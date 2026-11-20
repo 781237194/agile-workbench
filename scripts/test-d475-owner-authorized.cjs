@@ -148,7 +148,8 @@ async function main() {
     });
     const pmTok = tokenOf(runJson(['boot', '--role', 'pm', '--project', PROJECT, '--session', 'session-475-pm', '--json']));
     const prodTok = tokenOf(runJson(['boot', '--role', 'product', '--project', PROJECT, '--session', 'session-475-product', '--json']));
-    check('S2 沙盘 pm/product boot 成功', Boolean(pmTok && prodTok), { pm: Boolean(pmTok), product: Boolean(prodTok) });
+    const analystTok = tokenOf(runJson(['boot', '--role', 'analyst', '--project', PROJECT, '--session', 'session-475-analyst', '--json']));
+    check('S2 沙盘 pm/product/analyst boot 成功', Boolean(pmTok && prodTok && analystTok), { pm: Boolean(pmTok), product: Boolean(prodTok), analyst: Boolean(analystTok) });
 
     const mod = await import(`file://${SESSION_SRC.replace(/\\/g, '/')}`);
     const g0 = mod.pmRotateIdleState(PROJECT, {});
@@ -173,56 +174,65 @@ async function main() {
     /* ── ④ 拒绝分支：缺 reason / 超长 / 无权限 / 无令牌 → 零写入 ── */
     seedPmMail(Date.now() - 60 * 1000, 'M-475-busy');   // 让 pm 处于 busy，证明绕过是「确有门要绕」
     const beforeRefuse = snap();
-    const rNoReason = runJson(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-x1', '--owner-authorized', '--boot', pmTok, '--offline', '--json'], { TEAM_BOOT_ENFORCE: '1' });
+    const rNoReason = runJson(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-x1', '--owner-authorized', '--boot', prodTok, '--offline', '--json'], { TEAM_BOOT_ENFORCE: '1' });
     check('④a 缺 --reason → BYPASS_REASON_REQUIRED', codeOf(rNoReason) === 'BYPASS_REASON_REQUIRED', { code: codeOf(rNoReason), out: text(rNoReason).slice(0, 300) });
-    const rTooLong = runJson(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-x2', '--owner-authorized', '--reason', 'x'.repeat(201), '--boot', pmTok, '--offline', '--json'], { TEAM_BOOT_ENFORCE: '1' });
+    const rTooLong = runJson(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-x2', '--owner-authorized', '--reason', 'x'.repeat(201), '--boot', prodTok, '--offline', '--json'], { TEAM_BOOT_ENFORCE: '1' });
     check('④b --reason 超 200 字 → BYPASS_REASON_TOO_LONG', codeOf(rTooLong) === 'BYPASS_REASON_TOO_LONG', { code: codeOf(rTooLong), out: text(rTooLong).slice(0, 300) });
-    const rProduct = runJson(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-x3', '--owner-authorized', '--reason', '产品试图绕门', '--boot', prodTok, '--offline', '--json'], { TEAM_BOOT_ENFORCE: '1' });
-    check('④c 产品令牌用 --owner-authorized → PERMISSION_DENIED（仅 pm/owner）', codeOf(rProduct) === 'PERMISSION_DENIED', { code: codeOf(rProduct), out: text(rProduct).slice(0, 300) });
+    // 授权集合 = product/pm/owner：分析师即使能拿令牌也不在后门集合内（且 rotateAllowed 本就不让它换 PM）
+    const rUnauthorized = runJson(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-x3', '--owner-authorized', '--reason', '分析师试图绕门', '--boot', analystTok, '--offline', '--json'], { TEAM_BOOT_ENFORCE: '1' });
+    check('④c 非授权角色（analyst）用 --owner-authorized → PERMISSION_DENIED', codeOf(rUnauthorized) === 'PERMISSION_DENIED', { code: codeOf(rUnauthorized), out: text(rUnauthorized).slice(0, 300) });
+    // 目标限制不放宽：pm 令牌带后门也不能给自己换（rotateAllowed(pm,pm)=false）
+    const rPmSelf = runJson(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-x5', '--owner-authorized', '--reason', 'pm 自换（应拒）', '--boot', pmTok, '--offline', '--json'], { TEAM_BOOT_ENFORCE: '1' });
+    check('④d pm 令牌 + --owner-authorized 换自己 → PERMISSION_DENIED（目标限制沿用 rotateAllowed，不放宽）',
+      codeOf(rPmSelf) === 'PERMISSION_DENIED', { code: codeOf(rPmSelf), out: text(rPmSelf).slice(0, 300) });
     const rNoBoot = runJson(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-x4', '--owner-authorized', '--reason', '无令牌', '--offline', '--json'], { TEAM_BOOT_ENFORCE: '1' });
-    check('④d 无 boot 令牌 → BOOT_REQUIRED', codeOf(rNoBoot) === 'BOOT_REQUIRED', { code: codeOf(rNoBoot), out: text(rNoBoot).slice(0, 240) });
+    check('④e 无 boot 令牌 → BOOT_REQUIRED', codeOf(rNoBoot) === 'BOOT_REQUIRED', { code: codeOf(rNoBoot), out: text(rNoBoot).slice(0, 240) });
     const afterRefuse = snap();
-    check('④e 四种拒绝全部零写入：团队.json / 团队会话.json / workbench.json sha256 不变',
+    check('④f 五种拒绝全部零写入：团队.json / 团队会话.json / workbench.json sha256 不变',
       beforeRefuse.team === afterRefuse.team && beforeRefuse.manifest === afterRefuse.manifest && beforeRefuse.store === afterRefuse.store,
       { beforeRefuse, afterRefuse });
 
-    /* ── ② 正向：pm 忙也能换（显式 Owner 授权），四处留审计 ── */
+    /* ── ② 正向：pm 忙也能换（product 带 Owner 授权换 PM —— 唯一现实场景），四处留审计 ── */
     const gBusy = mod.pmRotateIdleState(PROJECT, {});
     check('②a 前置：此刻默认门确实会拒（pm busy），证明绕过不是空转', gBusy.ok === false, { pm: gBusy.roles.pm });
     const REASON = 'Owner 2026-11-20 14:3x 授权：PM 与产品窗口归零，显式跳过闲时门（夹具）';
     // 人类输出走 dry-run（零写入、且在真换人之前——换人后旧令牌会被 SESSION_REPLACED 挡）；
     // --json 模式只打 JSON，人类文本判据必须另跑一次。
-    const humanOut = run(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-dry', '--owner-authorized', '--reason', REASON, '--boot', pmTok, '--offline', '--dry-run'], { TEAM_BOOT_ENFORCE: '1' });
+    const humanOut = run(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-dry', '--owner-authorized', '--reason', REASON, '--boot', prodTok, '--offline', '--dry-run'], { TEAM_BOOT_ENFORCE: '1' });
     check('②d 人类输出点名「将按 Owner 授权跳过」/bypass 码/reason（dry-run 零写入）',
       text(humanOut).includes(BYPASS) && /将按 Owner 授权跳过/.test(text(humanOut)) && text(humanOut).includes('Owner 2026-11-20 14:3x 授权'),
       { out: text(humanOut).slice(0, 600) });
-    const rot = runJson(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-new', '--owner-authorized', '--reason', REASON, '--boot', pmTok, '--offline', '--json'], { TEAM_BOOT_ENFORCE: '1' });
-    check('②b --owner-authorized + pm 令牌 → 换人成功（默认门被显式跳过）',
+    const rot = runJson(['session', 'rotate', '--role', 'pm', '--session', 'session-475-pm-new', '--owner-authorized', '--reason', REASON, '--boot', prodTok, '--offline', '--json'], { TEAM_BOOT_ENFORCE: '1' });
+    check('②b product 令牌 + --owner-authorized（target=pm）→ 换人成功（默认门被显式跳过）',
       rot.code === 0 && String((rot.json || {}).from || '') === 'session-475-pm' && String((rot.json || {}).to || '') === 'session-475-pm-new',
       { code: rot.code, json: { from: (rot.json || {}).from, to: (rot.json || {}).to }, out: text(rot).slice(0, 400) });
     check('②c JSON idleGate 以「跳过」形状暴露（skipped=true + bypass 码）',
       Boolean(rot.json && rot.json.idleGate && rot.json.idleGate.skipped === true && rot.json.idleGate.bypass === BYPASS && rot.json.idleGate.reason === REASON),
       { idleGate: rot.json && rot.json.idleGate });
-    // 人类输出走 dry-run（零写入）：--json 模式只打 JSON，人类文本判据必须另跑一次
     const rec = readJson(recordFile, null);
-    check('②e 轮换记录 会话轮换/pm.json 带 bypass/bypassReason/bypassBy/bypassAt',
-      Boolean(rec && rec.bypass === BYPASS && rec.bypassReason === REASON && rec.bypassBy === 'pm' && rec.bypassAt),
-      { record: rec && { bypass: rec.bypass, bypassReason: rec.bypassReason, bypassBy: rec.bypassBy, bypassAt: rec.bypassAt } });
+    check('②e 轮换记录 会话轮换/pm.json 带 bypass+actorRole+target+reason+at+actorSessionId',
+      Boolean(rec && rec.bypass === BYPASS && rec.bypassReason === REASON && rec.bypassBy === 'product'
+        && rec.bypassActorRole === 'product' && rec.bypassTarget === 'pm'
+        && rec.bypassActorSessionId === 'session-475-product' && rec.bypassAt),
+      { record: rec && { bypass: rec.bypass, actorRole: rec.bypassActorRole, target: rec.bypassTarget, by: rec.bypassBy, at: rec.bypassAt, sid: rec.bypassActorSessionId } });
     const ledgerRows = jsonlRows(ledgerFile);
     const ledgerLast = ledgerRows[ledgerRows.length - 1] || {};
-    check('②f 会话轮换.jsonl 末行带四处字段',
-      ledgerLast.bypass === BYPASS && ledgerLast.bypassReason === REASON && ledgerLast.bypassBy === 'pm' && Boolean(ledgerLast.bypassAt),
+    check('②f 会话轮换.jsonl 末行带同一组字段',
+      ledgerLast.bypass === BYPASS && ledgerLast.bypassReason === REASON && ledgerLast.bypassActorRole === 'product'
+      && ledgerLast.bypassTarget === 'pm' && ledgerLast.bypassActorSessionId === 'session-475-product' && Boolean(ledgerLast.bypassAt),
       { last: ledgerLast });
     const auditRows = jsonlRows(rosterAuditFile).filter((r) => r && r.event === 'roster_rotate' && r.role === 'pm');
     const auditLast = auditRows[auditRows.length - 1] || {};
-    check('②g 名册变更.jsonl 的 roster_rotate 行带四处字段',
-      auditLast.bypass === BYPASS && auditLast.bypassReason === REASON && auditLast.bypassBy === 'pm' && Boolean(auditLast.bypassAt),
+    check('②g 名册变更.jsonl 的 roster_rotate 行带同一组字段',
+      auditLast.bypass === BYPASS && auditLast.bypassReason === REASON && auditLast.bypassActorRole === 'product'
+      && auditLast.bypassTarget === 'pm' && auditLast.bypassActorSessionId === 'session-475-product' && Boolean(auditLast.bypassAt),
       { last: auditLast });
     const bypassRows = jsonlRows(bypassAuditFile);
     const bypassRow = bypassRows[bypassRows.length - 1] || {};
-    check('②h 专用审计 owner授权换人.jsonl 落一行（event/bypass/reason/by/at/from/to）',
+    check('②h 专用审计 owner授权换人.jsonl 落一行（actorRole/target/reason/at/actorSessionId/from/to）',
       bypassRows.length === 1 && bypassRow.event === 'owner_authorized_rotate' && bypassRow.bypass === BYPASS
-      && bypassRow.reason === REASON && bypassRow.by === 'pm' && Boolean(bypassRow.at)
+      && bypassRow.reason === REASON && bypassRow.actorRole === 'product' && bypassRow.target === 'pm'
+      && bypassRow.actorSessionId === 'session-475-product' && Boolean(bypassRow.at)
       && bypassRow.from === 'session-475-pm' && bypassRow.to === 'session-475-pm-new',
       { rows: bypassRows });
 

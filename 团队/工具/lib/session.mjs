@@ -40,10 +40,26 @@ import { readNowMs } from './clock.mjs';
 export const OWNER_BYPASS_CODE = 'OWNER_AUTHORIZED_SKIP_IDLE_GATE';
 export const OWNER_BYPASS_REASON_MAX = 200;
 export const OWNER_BYPASS_AUDIT_NAME = 'owner授权换人.jsonl';
+/** 可用正式后门的角色集合（PM 2026-11-20 14:41 口径修正：product/pm/owner）。 */
+export const OWNER_BYPASS_ROLES = ['product', 'pm', 'owner'];
 
 /** 专用审计落点：项目状态/owner授权换人.jsonl（append-only，一行一次绕过）。 */
 export function ownerBypassAuditPath(projectName) {
   return path.join(projectStatePaths(String(projectName || '')).dir, OWNER_BYPASS_AUDIT_NAME);
+}
+
+/** 三处账本共用的绕过字段集（bypass + actorRole + target + reason + at + actorSessionId）。 */
+function ownerBypassFields(bypass) {
+  const b = bypass || {};
+  return {
+    bypass: String(b.code || OWNER_BYPASS_CODE),
+    bypassReason: String(b.reason || ''),
+    bypassBy: String(b.by || b.actorRole || ''),
+    bypassAt: String(b.at || ''),
+    bypassActorRole: String(b.actorRole || b.by || ''),
+    bypassTarget: String(b.target || ''),
+    bypassActorSessionId: String(b.actorSessionId || ''),
+  };
 }
 
 function appendOwnerBypassAudit(projectName, row) {
@@ -901,28 +917,13 @@ export async function rotateSession({
         archiveGate: { archived: gate.archived, archiveId: gate.archive ? gate.archive.id : null },
         archiveDeferred,
         // B-20261120-143331-d475：Owner 授权绕过闲时门 → 轮换记录落账（三处之一）
-        ...(ownerBypass ? {
-          bypass: String(ownerBypass.code || OWNER_BYPASS_CODE),
-          bypassReason: String(ownerBypass.reason || ''),
-          bypassBy: String(ownerBypass.by || ''),
-          bypassAt: String(ownerBypass.at || ''),
-        } : {}),
+        ...(ownerBypass ? ownerBypassFields(ownerBypass) : {}),
         // R-20261118-143558-eba2：审计——谁换的（令牌角色）、交接回执与交接文件 sha。
         ...(audit && typeof audit === 'object' ? audit : {}),
       },
       // B-20261120-143331-d475：会话轮换.jsonl（三处之二）与 名册变更.jsonl（三处之三）同带绕过字段
-      jsonlExtra: ownerBypass ? {
-        bypass: String(ownerBypass.code || OWNER_BYPASS_CODE),
-        bypassReason: String(ownerBypass.reason || ''),
-        bypassBy: String(ownerBypass.by || ''),
-        bypassAt: String(ownerBypass.at || ''),
-      } : {},
-      auditExtra: ownerBypass ? {
-        bypass: String(ownerBypass.code || OWNER_BYPASS_CODE),
-        bypassReason: String(ownerBypass.reason || ''),
-        bypassBy: String(ownerBypass.by || ''),
-        bypassAt: String(ownerBypass.at || ''),
-      } : {},
+      jsonlExtra: ownerBypass ? ownerBypassFields(ownerBypass) : {},
+      auditExtra: ownerBypass ? ownerBypassFields(ownerBypass) : {},
       // 其余事务步骤（邮件归档 / 任务会话指向 / 派单锁 / 旧会话归档 / 一致性闸门）在映射写完之后、
       // 记账之前执行；抛错即由 roster-writer 回滚映射，本文件的 catch 再恢复邮件/任务/锁。
       beforeFinalize: async ({ oldId: actualOld, newId: nextId, mapResult }) => {
@@ -996,6 +997,8 @@ export async function rotateSession({
           bypass: String(ownerBypass.code || OWNER_BYPASS_CODE),
           reason: String(ownerBypass.reason || ''),
           by: String(ownerBypass.by || by || ''),
+          actorRole: String(ownerBypass.actorRole || ownerBypass.by || ''),
+          target: String(ownerBypass.target || role || ''),
           bypassAt: String(ownerBypass.at || ''),
           project: name,
           role,
@@ -1770,7 +1773,11 @@ export async function cmdSession(args) {
     const self = Boolean(args.self);
     if (!self && !args.confirm) fail('CONFIRM_REQUIRED', '归档需显式 --confirm（或 PM --self 后 owner confirm --archive）');
     if (self && String(args.role || '') !== 'pm') fail('BAD_ARGS', '--self 只用于 PM 自归档');
-    const r = archiveSession({ projectName, role: String(args.role || ''), reason: String(args.reason || ''), self, force: Boolean(args.force), replacementSessionId: String(args.replacement || ''), operator: String(boot.role), sessionId: String(args['archive-session'] || '') });
+    // B-20261120-143331-d475（PM 口径修正）：归档「哪个会话」以前只认 --archive-session，写 --session 会被静默忽略
+    // 并退回 currentSessionOf（当前在岗会话）——于是「归档旧会话」实际归档的是新会话，任务判据也就按新会话算，
+    // 表现为 TASK_OPEN/scope=role。这里把 --session 作为 --archive-session 的别名（显式 --archive-session 优先）。
+    const archiveTargetSession = String(args['archive-session'] || args.session || '');
+    const r = archiveSession({ projectName, role: String(args.role || ''), reason: String(args.reason || ''), self, force: Boolean(args.force), replacementSessionId: String(args.replacement || ''), operator: String(boot.role), sessionId: archiveTargetSession });
     const human = `已归档 ${r.record.id}（${r.record.role}，会话 ${r.record.sessionId || '(无)'}，rounds=${r.record.rounds}，nextSessionId=null，rotate 后回写）\n记录：${r.file}${r.decisionLog ? '\n决策日志：' + r.decisionLog + '（待 Owner confirm）' : ''}`;
     out(args, human, { ok: true, ...r });
     return;
@@ -1962,12 +1969,10 @@ export async function cmdSession(args) {
       const bootInfo = requireBoot(bootToken, { write: true });
       actorRole = String(bootInfo.role || '');
       actorSessionId = String(bootInfo.sessionId || '');
-      // B-20261120-143331-d475：Owner 授权的正式后门要能覆盖「PM 自换」这一结构性死锁——
-      // 旧口径只允许产品换 PM，而产品无权用后门（Owner 口径：仅 pm/owner），于是唯一的实际执行者
-      // 是拿着 Owner 授权的 PM 自己。仅当显式 --owner-authorized 时才放宽这一格（默认门完全不变）。
-      const pmSelfAuthorized = Boolean(args['owner-authorized']) && String(actorRole) === 'pm' && String(role) === 'pm';
-      if (!rotateAllowed(actorRole, role) && !pmSelfAuthorized) {
-        fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话；产品只能给 PM 换人、PM 不能给自己换人（当前令牌角色 ${actorRole || '-'} → 目标 ${role}）${Boolean(args['owner-authorized']) ? '；--owner-authorized 也只放宽 PM 自换这一格' : ''}`, { role, project: projectName, tokenRole: actorRole, ownerAuthorized: Boolean(args['owner-authorized']) });
+      // B-20261120-143331-d475（PM 口径修正 2026-11-20 14:41）：**目标限制完全沿用 rotateAllowed()，不放宽**；
+      // --owner-authorized 只决定「谁可以用后门」（product/pm/owner），不改变「谁能换谁」。
+      if (!rotateAllowed(actorRole, role)) {
+        fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话；产品只能给 PM 换人、PM 不能给自己换人（当前令牌角色 ${actorRole || '-'} → 目标 ${role}）`, { role, project: projectName, tokenRole: actorRole, ownerAuthorized: Boolean(args['owner-authorized']) });
       }
     }
     // B-20261119-204845-8d91（Owner 直接指令）：**PM 换人必须先满足「双方闲时」**——
@@ -1992,13 +1997,16 @@ export async function cmdSession(args) {
           role, project: projectName, bypass: OWNER_BYPASS_CODE, maxChars: OWNER_BYPASS_REASON_MAX, length: Array.from(bypassReason).length,
         });
       }
-      if (!['pm', 'owner'].includes(String(actorRole || ''))) {
-        fail('PERMISSION_DENIED', `--owner-authorized 仅 PM/Owner 可用（当前令牌角色 ${actorRole || '-'}）；普通换人请去掉该参数走默认门`, {
-          role, project: projectName, tokenRole: actorRole || '', allow: ['pm', 'owner'], bypass: OWNER_BYPASS_CODE,
+      // PM 口径修正：授权集合 = product/pm/owner。原「仅 pm/owner」把唯一现实场景（product 换 PM）排除，
+      // 通道结构上不可达；目标限制仍由 rotateAllowed 决定，不因本参数放宽。
+      if (!OWNER_BYPASS_ROLES.includes(String(actorRole || ''))) {
+        fail('PERMISSION_DENIED', `--owner-authorized 仅 ${OWNER_BYPASS_ROLES.join('/')} 可用（当前令牌角色 ${actorRole || '-'}）；普通换人请去掉该参数走默认门`, {
+          role, project: projectName, tokenRole: actorRole || '', allow: OWNER_BYPASS_ROLES, bypass: OWNER_BYPASS_CODE,
         });
       }
       ownerBypass = {
         code: OWNER_BYPASS_CODE, reason: bypassReason, by: String(actorRole || ''),
+        actorRole: String(actorRole || ''), target: String(role || ''),
         at: nowIso(), actorSessionId: String(actorSessionId || ''),
         minutes: null,
       };
