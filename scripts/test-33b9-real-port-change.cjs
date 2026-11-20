@@ -145,6 +145,13 @@ async function shot(cdp, file) {
 }
 
 (async () => {
+  // AC⑧ 硬约束：真窗口并发起跑前可用内存 ≥8GB，否则拒绝起跑并说明。
+  const freeGB = os.freemem() / (1024 ** 3);
+  if (freeGB < 8) {
+    console.log('REFUSED_LOW_MEMORY freeGB=' + freeGB.toFixed(2) + '（要求 ≥8GB；本单不冒险起真窗口，防止拖慢 Owner 工作台）');
+    process.exitCode = 2;
+    return;
+  }
   fs.mkdirSync(OUT, { recursive: true });
   const real = await findRealDshPort();
   console.log('real DSH port=' + real.port + ' listeners=' + real.listeners);
