@@ -41,6 +41,14 @@ const vProd = view.usageViewOf('product', product);
 check('②a 切角色后展示模型随角色变（角色名与数值都变）',
   vPm.role === 'pm' && vProd.role === 'product' && vPm.breakdown.input === pm.input && vProd.breakdown.input === product.input
   && vPm.breakdown.input !== vProd.breakdown.input, { pm: vPm.label, product: vProd.label });
+const analyst = { input: 250848, cacheRead: 41000000, output: 91500, tokens: 41242348 };
+const vAnalyst = view.usageViewOf('analyst', analyst);
+check('②a2 三个角色各看一次：展示模型/数值两两不同，且各自对照误差 ≤5%',
+  vPm.breakdown.input !== vProd.breakdown.input && vProd.breakdown.input !== vAnalyst.breakdown.input
+  && vPm.role === 'pm' && vProd.role === 'product' && vAnalyst.role === 'analyst'
+  && [vPm, vProd, vAnalyst].every((v) => v.rows.every((r) => r.within5)), {
+  pm: vPm.breakdown, product: vProd.breakdown, analyst: vAnalyst.breakdown,
+});
 const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
 check('②b 渲染层有角色 chip 接线（点击 → 清缓存 + 重取）',
   /data-usage-role-pick/.test(appSrc) && /usageUi = \{ projectId: usageUi\.projectId, role, at: 0, data: null \}/.test(appSrc), {});
