@@ -4,9 +4,9 @@
  * T-20261118-002151-61f5 夹具：fa0e 会话用量缺失/过期 → 回落实时值（session usage 同一函数，判档 usageLevelOf 单源）。
  *
  * 判据（PM M-20261118-002204-e4e498）：
- *   ① 会话用量.json 缺失 → 用 TEAM_DSH_FAKE 的实时 tokens 触发（force），审计标 usageSource=live；
+ *   ① 会话用量.json 缺失 → 用 TEAM_DSH_FAKE 的实时 tokens 触发（force 10,100,000），审计标 usageSource=live；
  *   ② 文件新鲜 → 用文件值，标 usageSource=file，不产生实时回退行、不联网；
- *   ③ 文件过期（>24h）→ 回落实时值（warn 档 320000 → 只提醒，标 live）；
+ *   ③ 文件过期（>24h）→ 回落实时值（warn 档 5,100,000 → 只提醒，标 live）；
  *   ④ 文件缺失且实时也取不到 → 逐角色 USAGE_UNAVAILABLE（usageSource=none），不静默；
  *   ⑤ 面板：buildPanelModel 的 autoRotate.usageSource 能读到 live。
  *
@@ -100,7 +100,7 @@ const nowIso = (ms) => new Date(Number(ms)).toISOString();
 
 /* ── ① 文件缺失 → 实时回退 force 触发 ── */
 {
-  const sb = makeSandbox('missing-live-force', { dshFake: liveFake(520000) });
+  const sb = makeSandbox('missing-live-force', { dshFake: liveFake(10100000) });
   const run = cycle(sb, daytime);
   const rows = sb.rows();
   const cycleRow = rows.filter((r) => String(r.code) === 'CYCLE').pop() || {};
@@ -111,10 +111,10 @@ const nowIso = (ms) => new Date(Number(ms)).toISOString();
   check('U1 缺失文件 → 实时回退：cycle.usageSources.live 含 analyst', run.entryOk && (ev.usageSources || {}).live && ev.usageSources.live.includes('analyst'),
     { entryOk: run.entryOk, error: run.error, usageSources: ev.usageSources, result: run.result });
   check('U2 缺失文件 → 审计出现 USAGE_LIVE_FALLBACK（roles 含 analyst + tokens）',
-    fallback.length === 1 && (fallback[0].evidence.roles || []).some((x) => x.role === 'analyst' && Number(x.tokens) === 520000),
+    fallback.length === 1 && (fallback[0].evidence.roles || []).some((x) => x.role === 'analyst' && Number(x.tokens) === 10100000),
     { fallback });
-  check('U3 token 触发仍生效（force），trigger.evidence.usageSource=live、tokens=520000',
-    String(tr.code || '') === 'HANDOVER_REQUESTED' && tr.evidence && String(tr.evidence.usageSource) === 'live' && Number(tr.evidence.tokens) === 520000,
+  check('U3 token 触发仍生效（force），trigger.evidence.usageSource=live、tokens=10100000',
+    String(tr.code || '') === 'HANDOVER_REQUESTED' && tr.evidence && String(tr.evidence.usageSource) === 'live' && Number(tr.evidence.tokens) === 10100000,
     { trigger: tr });
   check('U4 有实时值的角色不再写 USAGE_UNAVAILABLE', !rows.some((r) => String(r.code) === 'USAGE_UNAVAILABLE' && String(r.role) === 'analyst'), { rows: rows.map((r) => `${r.stage}/${r.code}/${r.role}`) });
   // ⑤ 面板取数
@@ -130,7 +130,7 @@ const nowIso = (ms) => new Date(Number(ms)).toISOString();
 
 /* ── ② 文件新鲜 → 用文件值（不联网、不产生回退行） ── */
 {
-  const sb = makeSandbox('file-fresh', { usage: { analyst: { role: 'analyst', sessionId: 'sess-old-analyst', tokens: 520000, at: nowIso(daytime - 5 * 60 * 1000), source: 'fixture' } } });
+  const sb = makeSandbox('file-fresh', { usage: { analyst: { role: 'analyst', sessionId: 'sess-old-analyst', tokens: 10100000, at: nowIso(daytime - 5 * 60 * 1000), source: 'fixture' } } });
   const run = cycle(sb, daytime);
   const rows = sb.rows();
   const ev = (rows.filter((r) => String(r.code) === 'CYCLE').pop() || {}).evidence || {};
@@ -144,8 +144,8 @@ const nowIso = (ms) => new Date(Number(ms)).toISOString();
 /* ── ③ 文件过期（>24h）→ 回落实时值（warn 档只提醒） ── */
 {
   const sb = makeSandbox('file-stale-live-warn', {
-    usage: { analyst: { role: 'analyst', sessionId: 'sess-old-analyst', tokens: 520000, at: nowIso(daytime - 25 * HOUR), source: 'fixture' } },
-    dshFake: liveFake(320000),
+    usage: { analyst: { role: 'analyst', sessionId: 'sess-old-analyst', tokens: 10100000, at: nowIso(daytime - 25 * HOUR), source: 'fixture' } },
+    dshFake: liveFake(5100000),
   });
   const run = cycle(sb, daytime);
   const rows = sb.rows();
@@ -154,7 +154,7 @@ const nowIso = (ms) => new Date(Number(ms)).toISOString();
   check('U8 文件过期 → 回落实时值：usageSources.live 含 analyst、usageSources.file 不含',
     run.entryOk && (ev.usageSources || {}).live && ev.usageSources.live.includes('analyst') && !((ev.usageSources || {}).file || []).includes('analyst'),
     { entryOk: run.entryOk, error: run.error, usageSources: ev.usageSources });
-  check('U9 实时值 320000 走 usageLevelOf 单源判 warn（只提醒、WARN_ONLY.evidence.usageSource=live，不发交接）',
+  check('U9 实时值 5100000 走 usageLevelOf 单源判 warn（只提醒、WARN_ONLY.evidence.usageSource=live，不发交接）',
     warnOnly.length === 1 && warnOnly[0].evidence && String(warnOnly[0].evidence.usageSource) === 'live' && !rows.some((r) => String(r.stage) === 'trigger' && String(r.role) === 'analyst'),
     { warnOnly, rows: rows.map((r) => `${r.stage}/${r.code}/${r.role}`) });
 }

@@ -155,7 +155,7 @@ const { pathToFileURL } = require('node:url');
   /* ① 阈值命中：只提醒（角色 1 + PM 1），0 rotate，名册/workbench 不变 */
   {
     const sb = makeSandbox('c1-remind', {
-      usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, input: 500000, at: iso(now), source: 'fixture' } },
+      usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, input: 10100000, at: iso(now), source: 'fixture' } },
       config: { enabled: true, intervalMs: 300000 },
     });
     try {
@@ -180,7 +180,7 @@ const { pathToFileURL } = require('node:url');
   /* ② enabled=false：连提醒也不发（零审计、零邮箱） */
   {
     const sb = makeSandbox('c2-disabled', {
-      usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: iso(now), source: 'fixture' } },
+      usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: iso(now), source: 'fixture' } },
       config: { enabled: false },
     });
     try {
@@ -210,7 +210,7 @@ const { pathToFileURL } = require('node:url');
   /* ③ 交接文件更新 + 回执 → 仍只提醒，不换人 */
   {
     const sb = makeSandbox('c3-handover', {
-      usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: iso(now), source: 'fixture' } },
+      usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: iso(now), source: 'fixture' } },
       config: { enabled: true },
     });
     try {
@@ -241,7 +241,7 @@ const { pathToFileURL } = require('node:url');
   /* ④ PM 手动 rotate（唯一执行入口）→ 四处映射 6/6 */
   {
     const sb = makeSandbox('c4-manual-rotate', {
-      usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 520000, at: iso(now), source: 'fixture' } },
+      usage: { analyst: { sessionId: 'sess-old-analyst', tokens: 10100000, at: iso(now), source: 'fixture' } },
       config: { enabled: true },
     });
     try {

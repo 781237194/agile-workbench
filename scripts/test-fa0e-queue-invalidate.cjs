@@ -100,7 +100,7 @@ function cycle(sb, nowMs, { dryRun = false } = {}) {
   try { return { entryOk: true, result: JSON.parse(line.split('@@9CFF@@')[1]) }; } catch (e) { return { entryOk: false, error: String(e.message || e) }; }
 }
 
-const usageNight = { analyst: { role: 'analyst', sessionId: 'sess-old-analyst', tokens: 520000, at: new Date(NIGHT).toISOString(), source: 'fixture' } };
+const usageNight = { analyst: { role: 'analyst', sessionId: 'sess-old-analyst', tokens: 10100000, at: new Date(NIGHT).toISOString(), source: 'fixture' } };
 const roundsNight = { product: { role: 'product', roundsSinceArchive: 30, updatedAt: new Date(NIGHT).toISOString() } };
 
 /* ── ① 入队后手换 → 次日窗口作废（ALREADY_ROTATED），另一个角色仍换 ── */
