@@ -15596,6 +15596,12 @@ async function retryDshFromCard(btn) {
     }
     toast('DSH 已连接，正在刷新会话…', 'ok');
     await refresh();
+    // 并发兜底：初始 dshStatus 可能在重试前发出、重试后才带着「离线」返回；这里再取一次最新状态并重画会话区，
+    // 避免「点重试成功但卡片仍停在离线」的竞态（夹具 DSH 离线→恢复即覆盖）。
+    try {
+      const again = await window.workbench.dshStatus();
+      if (again && again.status) { state.dsh = again.status; renderDsh(again.status); renderSessions(); }
+    } catch { /* 二次核验失败不阻断主刷新 */ }
     const p = activeProject();
     if (p) { try { await loadDshTeamStatus({ force: true }); } catch { /* 核验失败不阻断卡片恢复 */ } }
   } catch (e) {
