@@ -610,12 +610,21 @@ app.setPath('sessionData', USER_DATA);
 app.setPath('temp', TEMP_ROOT);
 // 自测隔离：store 和团队状态都落在沙盘根，不碰真实团队状态与用户项目。
 if (IS_SELFTEST) {
+  // P0（2026-11-20 14:18 事故）：用户级 AWB_TEAM_ROOT 指向真实仓库时，旧实现只把 TEAM_ROOT 指进沙盘，
+  // resolveTeamRoot() 的 AWB_TEAM_ROOT 优先级更高 → 自测把真实 团队.json 整表写回（activeProject=沙盘项目、
+  // 六角色 sessionId 清空）。口径：解析出的团队根不在 SELFTEST_ROOT 内就硬拒（零写入），见 src/selftest-isolation.js。
   process.env.AWB_STORE = path.join(SELFTEST_ROOT, 'workbench.json');
   process.env.TEAM_ROOT = path.join(SELFTEST_ROOT, '团队');
   // B-25c7 基线修复：自测沙盘必须给团队工具子进程传 TEAM_SELFTEST=1，
   // 否则 lessons 门禁（LESSONS_UNREAD，R-51de 接入 req create）会在第 10–14 轮级联红；
   // 与 lessons.mjs「selftest/沙盘默认豁免、TEAM_LESSONS_ENFORCE=1 可强制开启」一致。
   process.env.TEAM_SELFTEST = '1';
+  const selftestIsolation = require('./selftest-isolation');
+  const selftestResolvedRoot = resolveTeamRoot();
+  if (!selftestIsolation.checkSelftestIsolation({ resolved: selftestResolvedRoot, selftestRoot: SELFTEST_ROOT })) {
+    console.error('REAL_ROOT_SELFTEST_REFUSED ' + JSON.stringify({ resolved: selftestResolvedRoot, selftestRoot: SELFTEST_ROOT, hint: '真实根禁止 --selftest；清掉 AWB_TEAM_ROOT 或显式设置 AWB_SELFTEST_ROOT' }));
+    process.exit(1);
+  }
 }
 // b55c 自检同理：状态库与团队状态都落在独立沙盘，绝不碰真实团队/项目。
 if (IS_B55C_CHECK) {
@@ -1279,7 +1288,22 @@ function syncTeamRosterSessions(sessions, options = {}) {
       } catch { /* 审计失败不阻断同步 */ }
     }
     // R-ad44 AC1①（批4b）：团队状态文件统一走 json-atomic.cjs（行为不变：仅有变化时才写，仍写整份 team）。
-    if (changed && !teamWriteBlockedByDeletion(projectName)) jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'syncTeamRosterSessions' });
+    if (changed && !teamWriteBlockedByDeletion(projectName)) {
+      jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'syncTeamRosterSessions' });
+      // P0（2026-11-20 14:18）：团队.json 整表写回必须留一行审计，否则「谁把 activeProject/名册改成了什么」无法对账。
+      try {
+        if (teamTools && typeof teamTools.appendRosterAudit === 'function') {
+          teamTools.appendRosterAudit(projectName, {
+            event: 'roster_mirror_rewrite',
+            source: 'shell/syncTeamRosterSessions',
+            activeProject: team.activeProject || null,
+            members: Array.isArray(team.members) ? team.members.length : 0,
+            added: (applied && applied.added) || [],
+            cleared: (applied && applied.cleared) || [],
+          });
+        }
+      } catch { /* 审计失败不阻断同步 */ }
+    }
     return { ok: true, changed, activeProject: team.activeProject || null, rejected: (applied && applied.rejected) || [] };
   } catch { /* 名册同步失败不阻断会话映射 */ }
 }
