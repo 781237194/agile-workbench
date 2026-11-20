@@ -1621,12 +1621,14 @@ export async function runSelftest({ keep = false, tmp = '', reset = false, stepT
     json(['ack', '--boot', gateDev.token, '--id', g4Ok.message.id, '--note', '已回执', '--json']);
     pass('D3/G4：full 缺设计签字派单被拒（PRODUCT_DESIGN_REQUIRED）；补齐后放行');
 
-    // G5 TASK_OPEN：programmer2 有未闭环任务时再派 → TASK_OPEN
+    // G5 TASK_OPEN：programmer2 有「真在办」任务时再派 → TASK_OPEN
+    // B-20261120-151452-2eb3（K2 口径）：create 出来、未派单的 open 待办不再算占用 → 这里必须先 claim 成 working；
+    // 判据本身不弱化——status=working 或 claimedAt 非空仍必须挡（只是不再把积压待办当占用）。
     const busyTask = json(['task', 'create', '--boot', gatePm2.token, '--title', 'G5 占用任务', '--priority', 'P1', '--requirement', gateReqId, '--owner', 'programmer2', '--json']);
-    const g5Task = json(['task', 'create', '--boot', gatePm2.token, '--title', 'G5 派单夹具', '--priority', 'P1', '--requirement', gateReqId, '--json']);
-    expectErr(['send', '--boot', gatePm2.token, '--to', 'programmer2', '--subject', 'G5反例', '--body', 'x', '--ack', '--task', g5Task.task.id], 'TASK_OPEN');
     const gateDev2 = json(['boot', '--role', 'programmer2', '--project', '试点', '--session', 'selftest-g5-dev2', '--json']);
     json(['task', 'claim', '--boot', gateDev2.token, '--id', busyTask.task.id, '--json']);
+    const g5Task = json(['task', 'create', '--boot', gatePm2.token, '--title', 'G5 派单夹具', '--priority', 'P1', '--requirement', gateReqId, '--json']);
+    expectErr(['send', '--boot', gatePm2.token, '--to', 'programmer2', '--subject', 'G5反例', '--body', 'x', '--ack', '--task', g5Task.task.id], 'TASK_OPEN');
     json(['task', 'done', '--boot', gateDev2.token, '--id', busyTask.task.id, '--evidence', 'G5 收口', '--json']);
     // 收口占用任务会按新规则把需求推到 dev_done（阶段=测试）；G5 夹具仍验派单阶段，显式回到 ready。
     const wfG5 = JSON.parse(read(path.join(stateShiDian, '工作流.json')));

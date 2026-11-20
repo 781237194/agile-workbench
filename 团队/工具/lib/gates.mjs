@@ -998,6 +998,11 @@ export function gateRoleBusy({ role, tasks = [], locks = [], excludeTaskIds = []
     if (taskIsClosed(task)) return false;
     // R-75ec：被 Owner 门冻结（blocked）的任务不占角色——角色已被要求停手，不能再因此挡住新派单。
     if (String(task.status || '') === 'blocked') return false;
+    // B-20261120-151452-2eb3（K2 之后口径）：G5 只统计「真在办」——status=working 或 claimedAt 非空。
+    // 背景：K2（B-e328）之后 task create 只建单（status=open、claimedAt=null、--owner 只是建议承接人），
+    // 旧口径把这类「未派单的积压待办」也算占用 → 角色一次只能挂 1 条待办，PM 必须先 park 全部积压才能派单。
+    // 未派单的 open 待办不占角色；一旦派单（send --ack --task → working+claimedAt）或本人 claim，就照旧计入。
+    if (String(task.status || '') !== 'working' && !String(task.claimedAt || '').trim()) return false;
     if (skip.has(String(task.id || ''))) return false;
     // working 幽灵：只有调用方显式给 staleWorkingMs（队列 pump）才跳过，普通派单仍严格 G5。
     if (staleWorkingMs > 0 && String(task.status || '') === 'working') {
