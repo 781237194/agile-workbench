@@ -67,6 +67,7 @@ function runJson(args, extra = {}) {
   return { ...r, json };
 }
 const text = (r) => `${r.out || ''}${r.err || ''}`;
+const codeOf = (r) => String((r.json && r.json.code) || '');
 const tokenOf = (r) => String(((r.json || {}).token) || '');
 
 async function main() {
@@ -87,7 +88,8 @@ async function main() {
     writeJson(STORE, { projects: [{ id: 'c1-p1', name: PROJECT, teamName: PROJECT, path: projDir, sessions: Object.fromEntries(ROLES.map((r) => [r, `session-c1-${r}`])), workspace: { path: projDir, sessionIds: ROLES.map((r) => `session-c1-${r}`) } }], activeProjectId: 'c1-p1' });
     const pmTok = tokenOf(runJson(['boot', '--role', 'pm', '--project', PROJECT, '--session', 'session-c1-pm', '--json']));
     const devTok = tokenOf(runJson(['boot', '--role', 'programmer1', '--project', PROJECT, '--session', 'session-c1-programmer1', '--json']));
-    check('S2 沙盘 pm/programmer1 boot 成功', Boolean(pmTok && devTok), {});
+    const prodTok = tokenOf(runJson(['boot', '--role', 'product', '--project', PROJECT, '--session', 'session-c1-product', '--json']));
+    check('S2 沙盘 pm/programmer1/product boot 成功', Boolean(pmTok && devTok && prodTok), {});
 
     const daemon = await import(`file://${DAEMON_SRC.replace(/\\/g, '/')}`);
 
@@ -142,6 +144,64 @@ async function main() {
     check('③c 该唤醒行不是看板路由行（trigger/source 与 route 无关）',
       wakeRows3.every((r) => !/route/i.test(String(r.source || '')) || String(r.trigger || '') === 'event'),
       { rows: wakeRows3 });
+
+    /* ── ⑤ 反向证据①：需求评审结果通知（走 ops 的 send/wakeWithGuard 另一条通道，与看板唤醒无关） ── */
+    // 造一条需求行（评审结果落账的对象），再跑评审；看板唤醒默认关闭期间：
+    //  - 若确认有 PM 通知：必须带 唤醒.jsonl 行，且不得出现 route 行；
+    //  - 若工具层本就没有「评审结果 → PM」发送点：如实记录为「无通知」并把证据留给壳层路径（由 PM 指认/真窗口补）。
+    const reqId = 'R-20261120-999999-c114';
+    writeJson(path.join(STATE, '任务', `${reqId}.json`), {
+      id: reqId, project: PROJECT, type: 'requirement', requirementId: reqId, title: '反向证据需求',
+      detail: '', acceptance: 'AC1', story: '', priority: 'P1', owner: 'product', status: 'open',
+      createdBy: 'pm', createdAt: new Date().toISOString(), claimedAt: null, due: '', doneAt: null, evidence: '',
+      workflow: { requirementStatus: 'review', round: 1 }, rev: 1, history: [],
+    });
+    writeJson(path.join(STATE, '工作流.json'), {
+      schema: 2, project: PROJECT, phase: 'requirement_review', round: 1, events: [],
+      requirements: {
+        [reqId]: {
+          id: reqId, title: '反向证据需求', status: 'review', round: 1, priority: 'P1',
+          productReview: null, ownerReview: null, decisions: [], trq: null,
+        },
+      },
+      boots: {},
+    });
+    const pmMailDir = path.join(TEAM, '状态', '邮箱', 'pm');
+    const pmMailCount = () => {
+      let n = 0;
+      for (const box of ['new', 'cur']) {
+        try { n += fs.readdirSync(path.join(pmMailDir, box)).filter((x) => x.endsWith('.json')).length; } catch { /* 空箱 */ }
+      }
+      return n;
+    };
+    const mailBefore = pmMailCount();
+    const wakeBeforeReview = jsonl(WAKE_LOG).length;
+    const routeBeforeReview = jsonl(ROUTE_LOG).length;
+    const review = runJson(['req', 'review', '--boot', prodTok, '--id', reqId, '--verdict', 'approve', '--comments', '空值/异常/权限/并发/降级/模式 均覆盖', '--json']);
+    const wakeReview = jsonl(WAKE_LOG).slice(wakeBeforeReview);
+    const routeReview = jsonl(ROUTE_LOG).slice(routeBeforeReview);
+    const reviewNotified = pmMailCount() > mailBefore;
+    if (!JSON_OUT) console.log(`INFO  ⑤ 观察：req review code=${codeOf(review) || '-'} ｜ PM 邮箱新增=${reviewNotified ? 'Y' : 'N'} ｜ 唤醒新增=${wakeReview.length} ｜ 路由新增=${routeReview.length}`);
+    check('⑤a 需求评审结果通知：不得混入看板路由唤醒（路由守护.jsonl 无 wake 行）',
+      !routeReview.some((r) => String(r.event) === 'wake'), { routeRows: routeReview });
+    check('⑤b 需求评审结果：PM 被叫醒（唤醒.jsonl 新增行）且全部来自事件通道（trigger=event）',
+      reviewNotified === true && wakeReview.length >= 1 && wakeReview.every((r) => String(r.trigger || '') === 'event'),
+      { notified: reviewNotified, wakeRows: wakeReview, reviewCode: codeOf(review) });
+    check('⑤c 需求评审结果的 PM 通知走 send 通道（PM 邮箱确有新增），与看板路由无关',
+      reviewNotified === true && !routeReview.some((r) => String(r.event) === 'wake'),
+      { reviewNotified, routeRows: routeReview.length });
+
+    /* ── ⑥ 反向证据②：Owner 决定通知（runOwnerDecisionNotify → send + wakeWithGuard） ── */
+    const wakeBeforeNotify = jsonl(WAKE_LOG).length;
+    const notify = runJson(['owner-notify', '--boot', pmTok, '--project', PROJECT, '--requirement', reqId, '--status', 'approved', '--round', '1', '--channel', 'ui', '--json']);
+    const wakeNotify = jsonl(WAKE_LOG).slice(wakeBeforeNotify);
+    const notifyRes = (notify.json || {}).notify || {};
+    check('⑥a Owner 决定通知：PM 被叫醒（唤醒.jsonl 新增 to=pm 行）',
+      notify.code === 0 && wakeNotify.some((r) => String(r.to || '') === 'pm' || String(r.role || '') === 'pm'),
+      { code: notify.code, wakeRows: wakeNotify, notify: notifyRes, out: text(notify).slice(0, 300) });
+    check('⑥b Owner 决定通知的唤醒来自事件通道（trigger=event），不是看板路由',
+      wakeNotify.every((r) => String(r.trigger || '') === 'event'), { wakeRows: wakeNotify });
+    check('⑥c 该通知同时落 PM 邮箱（send 通道正常）', pmMailCount() > mailBefore, { before: mailBefore, after: pmMailCount() });
 
     /* ── ④ 保留实现（不删函数）与注释锚点 ── */
     check('④a buildRouteWakeText / deliverRouteWake 仍导出（实现保留）',
