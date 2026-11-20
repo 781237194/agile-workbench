@@ -107,10 +107,14 @@ function kill(h) { try { cp.execFileSync('taskkill', ['/PID', String(h.child.pid
   let h = await launch();
   try {
     await sleep(3500);
-    const d1 = await domNow(h);
+    // 负载高时首屏 IPC 可能慢：轮询到行/项目就绪（§K 复跑要求计数稳定，不靠固定 sleep 猜）
+    let d1 = null;
+    for (let i = 0; i < 40; i += 1) { d1 = await domNow(h); if (d1.name === '工作台改造修复' && (d1.rows >= 6 || /6 个在册角色/.test(d1.roleHtml || ''))) break; await sleep(500); }
     const tm = await h.evalJs(`(async()=>{try{const r=await window.workbench.teamMembers({projectId:(state&&state.activeProjectId)||'P-b98f4eb7'});return {ok:r&&r.ok,count:r&&r.count,rows:(r&&r.rows||[]).length,code:r&&r.code};}catch(e){return {error:String(e&&e.message||e)}}})()`);
     check('E1', '首屏数据齐备：显示「工作台改造修复」+ 六角色会话行 ≥6 + 项目数 2，无「未选择工作区」',
-      d1.name === '工作台改造修复' && d1.rows >= 6 && !/未选择工作区/.test(d1.name) && String(d1.projects) === '2', { d1, tm, exceptions: h.exceptions, log: h.log().slice(-500) });
+      // B-6bb5 后：沙盘 DSH_WEB_URL=127.0.0.1:1 必离线，卡片走「6 个在册角色；DSH 当前离线」，此时无 6 个 session-row 是正确行为；
+    // 数据齐备的判据改为「项目名正确 + 名册 6 人可见（行或离线卡 6 个在册角色）+ 项目数 2」。
+    d1.name === '工作台改造修复' && (d1.rows >= 6 || /6 个在册角色/.test(d1.roleHtml || '')) && !/未选择工作区/.test(d1.name) && String(d1.projects) === '2', { d1, tm, exceptions: h.exceptions, log: h.log().slice(-500) });
     // E2：真实点击左侧第二个项目卡片
     await h.evalJs(`(function(){ const el = document.querySelector('.project-item[data-project="P-second-3d23"]'); if (!el) return 'NO_ITEM'; el.click(); return 'CLICKED'; })()`);
     let d2 = null;
@@ -122,14 +126,16 @@ function kill(h) { try { cp.execFileSync('taskkill', ['/PID', String(h.child.pid
   h = await launch();
   try {
     await sleep(3500);
-    const d3 = await domNow(h);
+    let d3 = null;
+    for (let i = 0; i < 40; i += 1) { d3 = await domNow(h); if (d3.name === '第二工作区') break; await sleep(500); }
     check('E3', '重启后读回「第二工作区」（写盘 activeProjectId 生效）', d3.name === '第二工作区', { d3, exceptions: h.exceptions });
-    // E4 指向不存在的项目：写坏 activeProjectId 后刷新页面
+    // E4 指向不存在的项目：先停实例再改盘（避免运行中壳层写回 store 把 P-dead 覆盖），再新起实例断言。
+    kill(h);
     const st = JSON.parse(fs.readFileSync(STORE, 'utf8'));
     st.activeProjectId = 'P-dead-3d23';
     fs.writeFileSync(STORE, JSON.stringify(st, null, 2), 'utf8');
-    await h.send('Page.enable', {});
-    await h.send('Page.reload', { ignoreCache: true });
+    h = await launch(PORT + 151);
+    await sleep(3000);
     let d4 = null; let rawState = null;
     for (let i = 0; i < 40; i += 1) {
       await sleep(500);

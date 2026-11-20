@@ -53,6 +53,9 @@ function seedSandbox({ rosterMode }) {
   if (rosterMode === 'unmap') for (const m of (team.members || [])) m.sessionId = '';
   if (rosterMode === 'empty') team.members = [];
   fs.writeFileSync(teamFile, JSON.stringify(team, null, 1), 'utf8');
+  // 壳层启动时可能用 store 映射回填写回名册（沙盘会变回 6 人）；真空名册用例把文件设只读，
+  // 让「真无成员」保持可测（生产不会走到这个状态，仅为夹具构造）。
+  if (rosterMode === 'empty') { try { fs.chmodSync(teamFile, 0o444); } catch { /* ignore */ } }
   fs.writeFileSync(path.join(DATA, 'dsh.json'), JSON.stringify({ version: 1, baseUrl: 'http://' + HOST + ':' + dshPort, source: 'user', pinned: true, updatedAt: new Date().toISOString() }, null, 2), 'utf8');
   // 沙盘 DSH 凭据：用运行期拼接写 key 名与值，避免夹具字面量命中 selftest 的「盘符/敏感词」白名单检查。
   const NL = String.fromCharCode(10);
@@ -114,6 +117,13 @@ async function card(h) {
     refreshCount: Number(window.__refreshCount || 0)
   })`);
 }
+async function ensureNotOffline(h, getCard) {
+  let c = await getCard();
+  if (!c || !c.offline) return c;
+  await h.evalJs(`document.querySelector('#role-sessions [data-dsh-retry]')?.click(); 'ok'`);
+  for (let i = 0; i < 30; i += 1) { await sleep(500); c = await getCard(); if (c && !c.offline) break; }
+  return c;
+}
 function cleanup(sb) {
   try { cp.execFileSync('cmd', ['/c', 'rmdir', path.join(sb.TEAM, '工具')], { stdio: 'ignore' }); } catch { /* ignore */ }
   try { fs.rmSync(sb.SB, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -149,7 +159,7 @@ function cleanup(sb) {
   h = await launch(10031 + Math.floor(Math.random() * 80), sb);
   try {
     await sleep(5000);
-    const c3 = await card(h);
+    const c3 = await ensureNotOffline(h, () => card(h));
     const nMatch = /(\d+) 个在册角色/.exec(c3.text);
     check('Unmap', 'DSH 在线但会话全空：卡片写「N 个在册角色；会话尚未映射」，禁止「无在册成员」，N=6',
       c3.unmapped && nMatch && Number(nMatch[1]) === 6 && /尚未映射|未映射/.test(c3.text) && !/无在册成员/.test(c3.text), c3);
@@ -162,8 +172,9 @@ function cleanup(sb) {
   h = await launch(10131 + Math.floor(Math.random() * 80), sb);
   try {
     await sleep(5000);
-    const c4 = await card(h);
-    check('Empty', '真无成员：才允许写「本工作区无在册成员」', c4.empty && /无在册成员/.test(c4.text), c4);
+    const c4 = await ensureNotOffline(h, () => card(h));
+    const tm4 = await h.evalJs(`(async()=>{try{const pid=(document.querySelector('.project-item.active')||{}).dataset; const r=await window.workbench.teamMembers({projectId:(pid&&pid.project)||undefined}); return {ok:r&&r.ok,count:r&&r.count,memberCount:r&&r.memberCount,membersEmpty:r&&r.membersEmpty,filteredOut:r&&r.filteredOut,roles:(r&&r.roles||[]).length,project:r&&r.project,code:r&&r.code};}catch(e){return {error:String(e&&e.message||e)}}})()`);
+    check('Empty', '真无成员：才允许写「本工作区无在册成员」', c4.empty && /无在册成员/.test(c4.text), { c4, tm4 });
   } finally { kill(h); server3.close(); }
   if (KEEP) console.log('KEEP_SANDBOX=' + sb.SB); else cleanup(sb);
 })().catch((e) => check('EX', '断面未抛异常', false, { error: String((e && e.stack) || e) })).finally(() => {
