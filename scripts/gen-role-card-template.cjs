@@ -146,6 +146,7 @@ function ensureSubagentSection(text) {
 // 传播路径：新建项目卡由本模板生成；已存在项目卡由 `rolecard sync` 的标准节 `subagent-boundary` 增补
 // （`团队/工具/lib/rolecard-sync.mjs` 的 SECTION_KEYWORDS/STANDARD_TITLES）。
 const SUBAGENT_BOUNDARY_SECTION = `
+<!-- rolecard-standard:subagent-boundary:begin -->
 ## 子代理使用边界（流程.md §D2）
 
 > Owner 2026-11-20 11:5x 强制（「子代理容易跳过监管」）；本节与 \`团队/流程.md §D2\` 同源，六角色一致。
@@ -156,6 +157,7 @@ const SUBAGENT_BOUNDARY_SECTION = `
 - **若已用子代理产生提交（本次教训）**：同一天补三件事——①立缺陷单（写明「实现归属＝PM 代做」）②向对应开发角色发交账消息请其复核 ③开 tester 复验单，PM 只在 test_done 且证据齐后验收。禁止只留提交不留单。
 - **根因**：子代理没有令牌、不写回执、不挂 working 任务，绕过了「派单回执 → 实现 → 测试复验 → 验收」这条唯一可追溯链；当时看不出问题，事后无法对账。
 - **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。
+<!-- rolecard-standard:subagent-boundary:end -->
 `.trimEnd();
 
 /**

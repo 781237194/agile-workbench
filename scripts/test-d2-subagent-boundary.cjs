@@ -55,6 +55,16 @@ function run(args) {
   return { status: r.status, stdout: String(r.stdout || ''), stderr: String(r.stderr || ''), text: String(r.stdout || '') + String(r.stderr || ''), json };
 }
 function stripSection(text, heading) {
+  // 优先按标准块整块删（模板自 §D2 起把该节包在 begin/end 里）
+  const key = 'subagent-boundary';
+  const begin = `<!-- rolecard-standard:${key}:begin -->`;
+  const endTag = `<!-- rolecard-standard:${key}:end -->`;
+  const b = text.indexOf(begin);
+  if (b >= 0) {
+    const e = text.indexOf(endTag, b + begin.length);
+    if (e >= 0) return (text.slice(0, b) + text.slice(e + endTag.length)).replace(/\n{3,}/g, '\n\n');
+  }
+  // 旧式（无标记）节：按标题删到下一个 ## 标题
   const i = text.indexOf(heading);
   if (i < 0) return text;
   const rest = text.slice(i + heading.length);
@@ -131,6 +141,34 @@ function cleanup() {
     const sec = parsed.sections.find((s) => s.key === 'subagent-boundary');
     check('A6', '模板节可被 parseCard 识别为独立 key=subagent-boundary（不落到前一节）',
       Boolean(sec) && String(sec.title).trim() === HEADING && String(sec.text).includes('不得承担会产生代码'), { keys: parsed.sections.map((s) => s.key) });
+    // B-20261120-123253-9bc4（PM 12:33 实跑 18/20）：模板里 standard 节必须 begin/end 成对。
+    // 之前的实现把该节写成纯文本、却残留了项目卡 sync 留下的 begin 行（6 begin / 0 end），
+    // parseCard 会把后面的 §H 整段吞进 subagent-boundary（dry-run 报 keep / apply 出 ~2）。
+    {
+      const pairBad = [];
+      let totalBegin = 0;
+      let totalEnd = 0;
+      const keyOf = (s) => (String(s).match(/:([A-Za-z0-9_~-]+):(?:begin|end)/) || [])[1];
+      for (const r of roles) {
+        const t = scaffold.roleCard('夹具新项目', r, 'full');
+        const begins = t.match(/<!--\s*rolecard-standard:([A-Za-z0-9_~-]+):begin\s*-->/g) || [];
+        const ends = t.match(/<!--\s*rolecard-standard:([A-Za-z0-9_~-]+):end\s*-->/g) || [];
+        const bc = new Map();
+        const ec = new Map();
+        begins.forEach((x) => bc.set(keyOf(x), (bc.get(keyOf(x)) || 0) + 1));
+        ends.forEach((x) => ec.set(keyOf(x), (ec.get(keyOf(x)) || 0) + 1));
+        for (const k of new Set([...bc.keys(), ...ec.keys()])) {
+          if ((bc.get(k) || 0) !== (ec.get(k) || 0)) pairBad.push(`${r}:${k} begin=${bc.get(k) || 0} end=${ec.get(k) || 0}`);
+        }
+        totalBegin += begins.length;
+        totalEnd += ends.length;
+        const d2b = begins.filter((x) => String(x).includes(':subagent-boundary:')).length;
+        const d2e = ends.filter((x) => String(x).includes(':subagent-boundary:')).length;
+        if (d2b !== 1 || d2e !== 1) pairBad.push(`${r}:subagent-boundary begin=${d2b} end=${d2e}`);
+      }
+      check('A7', '模板里每个 standard 节 begin 与 end 成对（六角色合计 begin=end=6；subagent-boundary 每角色 1/1）',
+        pairBad.length === 0 && totalBegin === totalEnd && totalBegin === 6, { pairBad, totalBegin, totalEnd });
+    }
   }
 
   /* ── B 措辞与 团队/流程.md §D2 一致（改流程忘改模板 → 红） ───────── */
@@ -183,8 +221,25 @@ function cleanup() {
     const projDir = path.join(PROJECTS, PROJECT);
     const cardOf = (role) => path.join(projDir, ROLE_DIRS[role], '角色卡.md');
 
-    const newCards = roles.filter((r) => !fs.readFileSync(cardOf(r), 'utf8').includes(HEADING));
-    check('D1', '新项目生成：六张角色卡自带该节（新建项目路径生效）', newCards.length === 0, { missing: newCards });
+    const newCards = roles.filter((r) => {
+      const c = fs.readFileSync(cardOf(r), 'utf8');
+      return !c.includes(HEADING)
+        || !c.includes('<!-- rolecard-standard:subagent-boundary:begin -->')
+        || !c.includes('<!-- rolecard-standard:subagent-boundary:end -->');
+    });
+    check('D1', '新项目生成：六张角色卡自带该节且 begin/end 成对（新建项目路径生效）', newCards.length === 0, { missing: newCards });
+
+    // B-9bc4 AC②：新建项目的 sync dry-run 对该节必须是 keep（不是把 §H 吞进去、也不是 ~2）
+    {
+      const dryNew = run(['rolecard', 'sync', '--project', PROJECT, '--role', 'programmer1', '--dry-run', '--json']);
+      const row = (dryNew.json && dryNew.json.roles && dryNew.json.roles[0]) || {};
+      const chg = (row.changes || []).filter((c) => String(c.section || '').startsWith('subagent-boundary'));
+      const conflict = (row.conflicts || []).filter((c) => String(c.section || '').startsWith('subagent-boundary'));
+      check('D1b', '新建项目 dry-run：subagent-boundary 只有一条 keep（无 add/conflict/~2）',
+        dryNew.status === 0 && chg.length === 1 && chg[0].action === 'keep' && conflict.length === 0
+        && !(row.changes || []).some((c) => String(c.section) === 'subagent-boundary~2'),
+        { changes: row.changes, conflicts: row.conflicts, text: dryNew.text.slice(0, 240) });
+    }
 
     // 模拟「升级前的旧卡」：删节 + 删标记（真实六卡当前就无标记、无该节）。
     // 注意：角色卡进 rulesHash → 必须先改卡再 boot，否则本角色令牌立刻 RULES_CHANGED（这本身也验证了「改卡只失效本人令牌」）。

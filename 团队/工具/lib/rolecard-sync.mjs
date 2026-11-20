@@ -491,8 +491,12 @@ export function buildMergedCard(plan) {
   const end = (key) => `<!-- rolecard-standard:${key}:end -->`;
   // 只剥标题行与尾部空白，**保留标题后的空行**：写入块必须与模板节正文逐字一致，否则二次 sync 会把
   // 「少一个空行」判成 CONTENT_DIFF，永久不收敛（§D2 subagent-boundary 幂等断言 D4 踩到过）。
+  // B-9bc4：模板节现在自带 `<!-- rolecard-standard:<key>:begin/end -->` 包裹（模板里就能看到成对标记），
+  // 所以还要剥掉首尾的 standard 标记行；否则 apply 会把 begin 行当正文写进去 → 二次 sync 报冲突。
   const bodyOf = (text) => String(text || '')
+    .replace(/^<!--\s*rolecard-standard:[A-Za-z0-9_~-]+:begin\s*-->\s*\n?/, '')
     .replace(/^#+\s+[^\n]*\n?/, '')
+    .replace(/\n?<!--\s*rolecard-standard:[A-Za-z0-9_~-]+:end\s*-->\s*$/, '')
     .replace(/\s+$/, '');
   const sectionText = (sec) => [begin(sec.key), sec.title, bodyOf(sec.text), end(sec.key)].join('\n');
   // 1) 替换已有的受标记/同 key 节（按 parse 得到的 start/end 行区间倒序重建）

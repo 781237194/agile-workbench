@@ -82,6 +82,7 @@ const GENERATED_ROLE_CARDS = {
 - **反例锚点（Owner 原话）**：「检查更新能用」≠「点立即升级能真下载→校验→安装→回滚」；只做按钮 = 空壳，属缺陷。代码类交付的「可用」＝**真实入口点得动 + 失败看得见 + 重开还在**，三者缺一即未完成。｜**每次交付必附场景矩阵**（T-1914 软门起）：每份实现说明/测试报告都带「场景 × 结果 × 证据路径」表，\`task done\` 会扫六类关键词并写 \`场景矩阵审计.jsonl\`（软门只提示不拦；\`TEAM_SCENE_ENFORCE=1\` 才硬）。
 - **PM 送审前自查**：派单正文带「场景 × 结果 × 证据路径」要求；送 Owner 的验收材料缺场景表或缺链段说明的，不得送。
 
+<!-- rolecard-standard:subagent-boundary:begin -->
 ## 子代理使用边界（流程.md §D2）
 
 > Owner 2026-11-20 11:5x 强制（「子代理容易跳过监管」）；本节与 \`团队/流程.md §D2\` 同源，六角色一致。
@@ -91,7 +92,8 @@ const GENERATED_ROLE_CARDS = {
 - **禁止**（必须由角色本人做，且留下 \`M-*\` 回执）：①修改 \`src/**\`、\`团队/工具/lib/**\`、\`scripts/**\` 等任何被 git 跟踪的实现或夹具文件 ②不得自证已修好（自行判定「修好了」）——必须经 tester 复验 + PM 按证据验收 ③代替开发角色认领/提交缺陷单。
 - **若已用子代理产生提交（本次教训）**：同一天补三件事——①立缺陷单（写明「实现归属＝PM 代做」）②向对应开发角色发交账消息请其复核 ③开 tester 复验单，PM 只在 test_done 且证据齐后验收。禁止只留提交不留单。
 - **根因**：子代理没有令牌、不写回执、不挂 working 任务，绕过了「派单回执 → 实现 → 测试复验 → 验收」这条唯一可追溯链；当时看不出问题，事后无法对账。
-- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。`,
+- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。
+<!-- rolecard-standard:subagent-boundary:end -->`,
   product: (projectName, roleName, modeDetail, fast) => `# ${roleName} · 角色卡
 
 - 项目：${projectName}
@@ -233,6 +235,7 @@ const GENERATED_ROLE_CARDS = {
 - **反例锚点（Owner 原话）**：「检查更新能用」≠「点立即升级能真下载→校验→安装→回滚」；只做按钮 = 空壳，属缺陷。代码类交付的「可用」＝**真实入口点得动 + 失败看得见 + 重开还在**，三者缺一即未完成。｜**每次交付必附场景矩阵**（T-1914 软门起）：每份实现说明/测试报告都带「场景 × 结果 × 证据路径」表，\`task done\` 会扫六类关键词并写 \`场景矩阵审计.jsonl\`（软门只提示不拦；\`TEAM_SCENE_ENFORCE=1\` 才硬）。
 - **产品 RR 逐条核场景覆盖**：缺场景表、或只有正向描述的**直接打回**；评审意见必须点名缺哪一类场景（六类之一）。
 
+<!-- rolecard-standard:subagent-boundary:begin -->
 ## 子代理使用边界（流程.md §D2）
 
 > Owner 2026-11-20 11:5x 强制（「子代理容易跳过监管」）；本节与 \`团队/流程.md §D2\` 同源，六角色一致。
@@ -242,7 +245,8 @@ const GENERATED_ROLE_CARDS = {
 - **禁止**（必须由角色本人做，且留下 \`M-*\` 回执）：①修改 \`src/**\`、\`团队/工具/lib/**\`、\`scripts/**\` 等任何被 git 跟踪的实现或夹具文件 ②不得自证已修好（自行判定「修好了」）——必须经 tester 复验 + PM 按证据验收 ③代替开发角色认领/提交缺陷单。
 - **若已用子代理产生提交（本次教训）**：同一天补三件事——①立缺陷单（写明「实现归属＝PM 代做」）②向对应开发角色发交账消息请其复核 ③开 tester 复验单，PM 只在 test_done 且证据齐后验收。禁止只留提交不留单。
 - **根因**：子代理没有令牌、不写回执、不挂 working 任务，绕过了「派单回执 → 实现 → 测试复验 → 验收」这条唯一可追溯链；当时看不出问题，事后无法对账。
-- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。`,
+- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。
+<!-- rolecard-standard:subagent-boundary:end -->`,
   analyst: (projectName, roleName, modeDetail, fast) => `# ${roleName} · 角色卡
 
 - 项目：${projectName} ｜ 角色 id：analyst ｜ 模式以 \`团队/状态/团队.json\` 为准
@@ -307,6 +311,7 @@ const GENERATED_ROLE_CARDS = {
 - **反例锚点（Owner 原话）**：「检查更新能用」≠「点立即升级能真下载→校验→安装→回滚」；只做按钮 = 空壳，属缺陷。代码类交付的「可用」＝**真实入口点得动 + 失败看得见 + 重开还在**，三者缺一即未完成。｜**每次交付必附场景矩阵**（T-1914 软门起）：每份实现说明/测试报告都带「场景 × 结果 × 证据路径」表，\`task done\` 会扫六类关键词并写 \`场景矩阵审计.jsonl\`（软门只提示不拦；\`TEAM_SCENE_ENFORCE=1\` 才硬）。
 - **需求正文必须含「场景表」**：入口 / 正常 / 空值 / 失败 / 并发 / 降级六行，写清用户从哪儿点进来、看到什么；只写功能名词的 AC 不合格。
 
+<!-- rolecard-standard:subagent-boundary:begin -->
 ## 子代理使用边界（流程.md §D2）
 
 > Owner 2026-11-20 11:5x 强制（「子代理容易跳过监管」）；本节与 \`团队/流程.md §D2\` 同源，六角色一致。
@@ -316,7 +321,8 @@ const GENERATED_ROLE_CARDS = {
 - **禁止**（必须由角色本人做，且留下 \`M-*\` 回执）：①修改 \`src/**\`、\`团队/工具/lib/**\`、\`scripts/**\` 等任何被 git 跟踪的实现或夹具文件 ②不得自证已修好（自行判定「修好了」）——必须经 tester 复验 + PM 按证据验收 ③代替开发角色认领/提交缺陷单。
 - **若已用子代理产生提交（本次教训）**：同一天补三件事——①立缺陷单（写明「实现归属＝PM 代做」）②向对应开发角色发交账消息请其复核 ③开 tester 复验单，PM 只在 test_done 且证据齐后验收。禁止只留提交不留单。
 - **根因**：子代理没有令牌、不写回执、不挂 working 任务，绕过了「派单回执 → 实现 → 测试复验 → 验收」这条唯一可追溯链；当时看不出问题，事后无法对账。
-- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。`,
+- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。
+<!-- rolecard-standard:subagent-boundary:end -->`,
   programmer1: (projectName, roleName, modeDetail, fast) => `# ${roleName} · 角色卡
 
 - 项目：${projectName}
@@ -381,6 +387,7 @@ Owner 原话：「今天叫你们做个检查更新和一键升级，结果做�
 - **开发交付自查三问**：入口点得动（真实按钮/IPC/CLI，不是只调函数）？失败看得见（人话 + 错误码 + 下一步）？重开还在（已落盘）？三缺一不得自评完成。
 - **反例锚点（Owner 原话）**：「检查更新能用」≠「点立即升级能真下载→校验→安装→回滚」；只做按钮 = 空壳，属缺陷。代码类交付的「可用」＝**真实入口点得动 + 失败看得见 + 重开还在**，三者缺一即未完成。
 
+<!-- rolecard-standard:subagent-boundary:begin -->
 ## 子代理使用边界（流程.md §D2）
 
 > Owner 2026-11-20 11:5x 强制（「子代理容易跳过监管」）；本节与 \`团队/流程.md §D2\` 同源，六角色一致。
@@ -390,7 +397,8 @@ Owner 原话：「今天叫你们做个检查更新和一键升级，结果做�
 - **禁止**（必须由角色本人做，且留下 \`M-*\` 回执）：①修改 \`src/**\`、\`团队/工具/lib/**\`、\`scripts/**\` 等任何被 git 跟踪的实现或夹具文件 ②不得自证已修好（自行判定「修好了」）——必须经 tester 复验 + PM 按证据验收 ③代替开发角色认领/提交缺陷单。
 - **若已用子代理产生提交（本次教训）**：同一天补三件事——①立缺陷单（写明「实现归属＝PM 代做」）②向对应开发角色发交账消息请其复核 ③开 tester 复验单，PM 只在 test_done 且证据齐后验收。禁止只留提交不留单。
 - **根因**：子代理没有令牌、不写回执、不挂 working 任务，绕过了「派单回执 → 实现 → 测试复验 → 验收」这条唯一可追溯链；当时看不出问题，事后无法对账。
-- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。`,
+- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。
+<!-- rolecard-standard:subagent-boundary:end -->`,
   programmer2: (projectName, roleName, modeDetail, fast) => `# ${roleName} · 角色卡
 
 - 项目：${projectName}
@@ -506,6 +514,7 @@ Owner 原话：「今天叫你们做个检查更新和一键升级，结果做�
 - **反例锚点（Owner 原话）**：「检查更新能用」≠「点立即升级能真下载→校验→安装→回滚」；只做按钮 = 空壳，属缺陷。代码类交付的「可用」＝**真实入口点得动 + 失败看得见 + 重开还在**，三者缺一即未完成。｜**每次交付必附场景矩阵**（T-1914 软门起）：每份实现说明/测试报告都带「场景 × 结果 × 证据路径」表，\`task done\` 会扫六类关键词并写 \`场景矩阵审计.jsonl\`（软门只提示不拦；\`TEAM_SCENE_ENFORCE=1\` 才硬）。
 - **开发交付自查三问**：入口点得动（真实按钮/IPC/CLI，不是只调函数）？失败看得见（人话 + 错误码 + 下一步）？重开还在（已落盘）？三缺一不得自评完成。
 
+<!-- rolecard-standard:subagent-boundary:begin -->
 ## 子代理使用边界（流程.md §D2）
 
 > Owner 2026-11-20 11:5x 强制（「子代理容易跳过监管」）；本节与 \`团队/流程.md §D2\` 同源，六角色一致。
@@ -515,7 +524,8 @@ Owner 原话：「今天叫你们做个检查更新和一键升级，结果做�
 - **禁止**（必须由角色本人做，且留下 \`M-*\` 回执）：①修改 \`src/**\`、\`团队/工具/lib/**\`、\`scripts/**\` 等任何被 git 跟踪的实现或夹具文件 ②不得自证已修好（自行判定「修好了」）——必须经 tester 复验 + PM 按证据验收 ③代替开发角色认领/提交缺陷单。
 - **若已用子代理产生提交（本次教训）**：同一天补三件事——①立缺陷单（写明「实现归属＝PM 代做」）②向对应开发角色发交账消息请其复核 ③开 tester 复验单，PM 只在 test_done 且证据齐后验收。禁止只留提交不留单。
 - **根因**：子代理没有令牌、不写回执、不挂 working 任务，绕过了「派单回执 → 实现 → 测试复验 → 验收」这条唯一可追溯链；当时看不出问题，事后无法对账。
-- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。`,
+- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。
+<!-- rolecard-standard:subagent-boundary:end -->`,
   tester: (projectName, roleName, modeDetail, fast) => `# ${roleName} · 角色卡
 
 - 项目：${projectName} ｜ 角色 id：tester ｜ 团队模式：完整六角色（PM/产品/分析师/程序员A/程序员B/${roleName}）
@@ -590,6 +600,7 @@ Owner 原话：「今天叫你们做个检查更新和一键升级，结果做�
 - **反例锚点（Owner 原话）**：「检查更新能用」≠「点立即升级能真下载→校验→安装→回滚」；只做按钮 = 空壳，属缺陷。代码类交付的「可用」＝**真实入口点得动 + 失败看得见 + 重开还在**，三者缺一即未完成。｜**每次交付必附场景矩阵**（T-1914 软门起）：每份实现说明/测试报告都带「场景 × 结果 × 证据路径」表，\`task done\` 会扫六类关键词并写 \`场景矩阵审计.jsonl\`（软门只提示不拦；\`TEAM_SCENE_ENFORCE=1\` 才硬）。
 - **TR-Q 把场景矩阵转成可执行断言**，并标注哪些场景本期不测（写明理由）；只测正向的测试报告不算通过。
 
+<!-- rolecard-standard:subagent-boundary:begin -->
 ## 子代理使用边界（流程.md §D2）
 
 > Owner 2026-11-20 11:5x 强制（「子代理容易跳过监管」）；本节与 \`团队/流程.md §D2\` 同源，六角色一致。
@@ -599,7 +610,8 @@ Owner 原话：「今天叫你们做个检查更新和一键升级，结果做�
 - **禁止**（必须由角色本人做，且留下 \`M-*\` 回执）：①修改 \`src/**\`、\`团队/工具/lib/**\`、\`scripts/**\` 等任何被 git 跟踪的实现或夹具文件 ②不得自证已修好（自行判定「修好了」）——必须经 tester 复验 + PM 按证据验收 ③代替开发角色认领/提交缺陷单。
 - **若已用子代理产生提交（本次教训）**：同一天补三件事——①立缺陷单（写明「实现归属＝PM 代做」）②向对应开发角色发交账消息请其复核 ③开 tester 复验单，PM 只在 test_done 且证据齐后验收。禁止只留提交不留单。
 - **根因**：子代理没有令牌、不写回执、不挂 working 任务，绕过了「派单回执 → 实现 → 测试复验 → 验收」这条唯一可追溯链；当时看不出问题，事后无法对账。
-- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。`,
+- **传播要求（Owner 2026-11-20 12:0x：「升级版本或者其他用户，也能同步更新」）**：①本节必须同时进 \`团队/工具/lib/scaffold.mjs → GENERATED_ROLE_CARDS\`（新建项目卡）并跑 \`node scripts/gen-role-card-template.cjs\` 重生成；②已存在项目卡用 \`rolecard sync\` 标准节 \`subagent-boundary\` 同步（逐角色 \`team.mjs rolecard sync --role <r> --apply --boot <T>\`，默认 dry-run 先看 changes/conflicts，幂等；\`--apply --all\` 当前不允许，按角色逐个执行）；③\`团队/流程.md\` 与 \`团队/工具/**\` 必须在升级包清单内（\`scripts/upgrade-package-manifest.cjs\`），发布前用 \`node scripts/release-verify.cjs <版本>\` 核对包 sha；④只改本机文档、没进模板与升级包 = 视为未落地。
+<!-- rolecard-standard:subagent-boundary:end -->`,
 };
 // === GENERATED_ROLE_CARDS_END ===
 
