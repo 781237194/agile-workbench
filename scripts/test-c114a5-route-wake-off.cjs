@@ -132,7 +132,48 @@ async function main() {
       routeRows2.some((r) => String(r.event) === 'wake'), { rows: routeRows2 });
     delete process.env.TEAM_ROUTE_WAKE;
 
-    /* ── ③ 派单唤醒不受影响（默认关闭状态下仍要能叫醒人） ── */
+    /* ── ⑦ 已闭环/冻结任务：即使显式开启也不得唤醒（PM 2026-11-20 16:08 追加） ── */
+    const closedId = 'B-20261120-999999-c114';
+    const blockedId = 'B-20261120-999998-c114';
+    writeJson(path.join(STATE, '任务', `${closedId}.json`), {
+      id: closedId, project: PROJECT, type: 'bug', title: '已闭环任务（夹具）', priority: 'P1',
+      owner: 'programmer1', status: 'accepted', claimedAt: new Date().toISOString(), reopenCount: 0,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), history: [],
+    });
+    writeJson(path.join(STATE, '任务', `${blockedId}.json`), {
+      id: blockedId, project: PROJECT, type: 'bug', title: '被冻结任务（夹具）', priority: 'P1',
+      owner: 'programmer1', status: 'blocked', claimedAt: new Date().toISOString(), reopenCount: 0,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), history: [],
+    });
+    process.env.TEAM_ROUTE_WAKE = 'on';   // 显式开启也必须被状态守卫挡住
+    const wakeBeforeClosed = jsonl(WAKE_LOG).length;
+    const routeBeforeClosed = jsonl(ROUTE_LOG).length;
+    const rAccepted = await daemon.wakeRoute(PROJECT, { ...optOf('c114a5-closed-1'), taskId: closedId });
+    const rBlocked = await daemon.wakeRoute(PROJECT, { ...optOf('c114a5-blocked-1'), taskId: blockedId });
+    const routeClosed = jsonl(ROUTE_LOG).slice(routeBeforeClosed);
+    const wakeClosed = jsonl(WAKE_LOG).slice(wakeBeforeClosed);
+    check('⑦a 显式开启下，accepted/blocked 任务仍被拒（skipped=task_closed，带 taskStatus）',
+      rAccepted && rAccepted.skipped === 'task_closed' && rAccepted.taskStatus === 'accepted'
+      && rBlocked && rBlocked.skipped === 'task_closed' && rBlocked.taskStatus === 'blocked',
+      { accepted: rAccepted, blocked: rBlocked });
+    check('⑦b 路由守护.jsonl 记 skip(why=task_closed) 且无 wake 行',
+      routeClosed.filter((r) => String(r.event) === 'skip' && String(r.why) === 'task_closed').length === 2
+      && !routeClosed.some((r) => String(r.event) === 'wake'),
+      { rows: routeClosed.map((r) => `${r.event}/${r.why}`) });
+    check('⑦c 唤醒.jsonl 不新增任何行（闭环任务不再叫人）', wakeClosed.length === 0, { wakeRows: wakeClosed });
+    // 对照：同一开关下「在办任务」仍能唤醒（证明守卫是按状态，不是把开关变空转）
+    const openId = 'B-20261120-999997-c114';
+    writeJson(path.join(STATE, '任务', `${openId}.json`), {
+      id: openId, project: PROJECT, type: 'bug', title: '在办任务（对照）', priority: 'P1',
+      owner: 'programmer1', status: 'working', claimedAt: new Date().toISOString(), reopenCount: 0,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), history: [],
+    });
+    const routeBeforeOpen = jsonl(ROUTE_LOG).length;
+    const rOpen = await daemon.wakeRoute(PROJECT, { ...optOf('c114a5-open-control'), taskId: openId });
+    const routeOpen = jsonl(ROUTE_LOG).slice(routeBeforeOpen);
+    check('⑦d 对照：同一开关下在办任务仍照常唤醒（守卫按状态，不是把开关变空转）',
+      rOpen && rOpen.wake === true && routeOpen.some((r) => String(r.event) === 'wake'), { r: rOpen, rows: routeOpen });
+    delete process.env.TEAM_ROUTE_WAKE;
     const created = runJson(['task', 'create', '--boot', pmTok, '--title', '派单唤醒夹具任务', '--priority', 'P2', '--type', 'task', '--owner', 'programmer1', '--json']);
     const taskId = String(((created.json || {}).task || {}).id || '');
     check('③a 造出待派单任务', created.code === 0 && Boolean(taskId), { out: text(created).slice(0, 200) });

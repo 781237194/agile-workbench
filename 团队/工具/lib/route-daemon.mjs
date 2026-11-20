@@ -550,6 +550,8 @@ export function planForBugTask(task) {
 
 /** 需求收口状态：这些状态下不再对任何任务发唤醒（含任务 done 之前就排队的陈旧项）。 */
 export const ROUTE_CLOSED_REQUIREMENT_STATUSES = Object.freeze(['accepted', 'done', 'terminated', 'rejected', 'iteration']);
+/** B-20261120-160330-bcbf：唤醒前校验任务状态——这些状态下**任何开关都不再唤醒**（闭环 + 冻结）。 */
+export const ROUTE_CLOSED_TASK_STATUSES = Object.freeze(['done', 'accepted', 'cancelled', 'terminated', 'blocked']);
 /** 任务 done 后 30 秒内不再发同一任务的 fix 唤醒（AC2）。 */
 export const ROUTE_STALE_DONE_MS = 30 * 1000;
 
@@ -1306,6 +1308,21 @@ export async function wakeRoute(projectName, opts) {
       reason: 'Owner 2026-11-20 关闭看板路由唤醒（TEAM_ROUTE_WAKE=on 才开）',
     });
     return { skipped: ROUTE_WAKE_DISABLED_WHY, why: ROUTE_WAKE_DISABLED_WHY, key, disabled: true };
+  }
+  // B-20261120-160330-bcbf（PM 2026-11-20 16:08 追加）：唤醒前必须校验任务状态——
+  // 已闭环（done/accepted/cancelled/terminated）或被冻结（blocked）的任务不再叫人，
+  // **即使显式开启 TEAM_ROUTE_WAKE=on 也不发**；与既有 skip 机制同口径（记 skip 行，不误报 wake_failed）。
+  if (String(taskId || '')) {
+    let taskNow = null;
+    try { taskNow = readTaskFresh(projectName, String(taskId)); } catch { taskNow = null; }
+    const taskStatus = String((taskNow && taskNow.status) || '');
+    if (taskStatus && ROUTE_CLOSED_TASK_STATUSES.includes(taskStatus)) {
+      appendRouteLog(projectName, {
+        ...base, event: 'skip', ok: true, why: 'task_closed',
+        reason: `任务 ${taskId} 状态=${taskStatus}：已闭环/冻结，不再唤醒（看板唤醒守卫）`,
+      });
+      return { skipped: 'task_closed', why: 'task_closed', key, taskStatus };
+    }
   }
   const last = status.wakes[key];
   if (last && withinWindow(last.lastWakeAt, windowMs, now)) {
