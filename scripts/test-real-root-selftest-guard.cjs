@@ -1,22 +1,23 @@
 'use strict';
 /**
- * 夹具：真实根禁止 --selftest 写 团队.json（P0，2026-11-20 14:18 事故）
+ * 夹具：真实根禁止 --selftest（P0 B-20261120-142335-ba8e，PM 14:39 追加「继承污染」）
  *
- * 事故：用户级 `AWB_TEAM_ROOT` 指向真实仓库时，`--selftest` 只把 `TEAM_ROOT` 指进沙盘；
- * `resolveTeamRoot()` 的 AWB_TEAM_ROOT 优先级更高 → 自测里的 `syncTeamRosterSessions()`
- * 把真实 `团队/状态/团队.json` 整表写回（activeProject 变沙盘项目、六角色 sessionId 清空）。
+ * 事故：宿主用户级 env `AWB_TEAM_ROOT`（以及 TEAM_ROOT/AWB_STORE/AWB_DATA_DIR）会被 Electron 子进程继承；
+ * `resolveTeamRoot()` 的 AWB_TEAM_ROOT 优先级高于 `--selftest` 注入的 TEAM_ROOT → 自测
+ * `syncTeamRosterSessions()` 把真实 `团队/状态/团队.json` 整表写回（activeProject/sessionId 被沙盘覆盖）。
  *
- * 口径（PM M-20261120-142936-df781c ①「强制沙盘根 或 REAL_ROOT_SELFTEST_REFUSED」）：
- * 硬拒——解析出的团队根不在 SELFTEST_ROOT 内时，`--selftest` 立刻 `REAL_ROOT_SELFTEST_REFUSED`
- * 退出（零写入），真实根不再被当沙盘。
+ * 口径（PM M-20261120-142936-df781c ①「强制沙盘根 或 REAL_ROOT_SELFTEST_REFUSED」+ 14:39 继承污染）：
+ * 硬拒——解析出的团队根不在 SELFTEST_ROOT 内时立刻 `REAL_ROOT_SELFTEST_REFUSED`（零写入）；
+ * 硬拒文案带 `inherited`（四个键里指向真实仓库的项），便于运维定位。
  *
- * 本夹具（按 PM ②「证明跑完真实 团队.json sha 不变」用**真实根**跑）：
- *   U1–U4  `src/selftest-isolation.js` 单测
- *   S1–S3  静态接线（守卫 + REAL_ROOT_SELFTEST_REFUSED + roster_mirror_rewrite 审计）
- *   I1–I5  AWB_TEAM_ROOT=真实仓库团队根，连跑两次 `--selftest`：每次 exit=1 + 硬拒文案、
- *          真实 团队.json sha 不变、沙盘无团队状态（零写入）、总耗时 < 3 分钟
+ * 夹具（用真实根跑，按 PM ②「证明跑完真实 团队.json 与 workbench.json sha 不变」）：
+ *   U1–U5  隔离模块单测（包含判定/大小写/空值/继承污染识别）
+ *   S1–S4  静态接线（守卫、硬拒、写回审计、AWB_DATA_DIR 改道）
+ *   I1–I6  AWB_TEAM_ROOT/TEAM_ROOT/AWB_STORE/AWB_DATA_DIR 全指真实根，连跑两次 --selftest：
+ *          每次 exit=1 + 硬拒 + inherited 含四项、真实 团队.json/workbench.json sha 不变、
+ *          沙盘零写入、总耗时 <3 分钟
  *
- * 安全：跑前把真实 团队.json 备份到进程内存；万一 sha 变了立即写回并判失败（本夹具自身不制造残留）。
+ * 安全：跑前备份真实 团队.json；若被任何路径改动 → 写回备份并判失败（本夹具自身不留残留）。
  * 跑法：node scripts/test-real-root-selftest-guard.cjs [--runs 2] [--timeout-ms 120000]
  */
 const fs = require('node:fs');
@@ -39,22 +40,33 @@ function check(id, title, ok, detail) {
 }
 
 const iso = require(path.join(ROOT, 'src', 'selftest-isolation.js'));
-const REAL_TEAM_FILE = path.join(ROOT, '团队', '状态', '团队.json');
+const REAL_TEAM_ROOT = path.join(ROOT, '团队');
+const REAL_TEAM_FILE = path.join(REAL_TEAM_ROOT, '状态', '团队.json');
+const REAL_STORE = path.join(ROOT, 'data', 'userdata', 'workbench.json');
+const REAL_DATA = path.join(ROOT, 'data');
 const sandbox = fs.mkdtempSync(path.join(path.dirname(ROOT), '_selftest-guard-'));
-// 安全网：真实 团队.json 备份（万一守卫失效，跑完立刻写回并判失败）
 const realBackup = fs.readFileSync(REAL_TEAM_FILE);
 const realBefore = sha(realBackup);
+const storeBefore = shaFile(REAL_STORE);
 
 try {
   /* ── U：隔离模块单测 ─────────────────────────────────────── */
   {
-    check('U1', '模块导出 checkSelftestIsolation/isInsideRoot（纯函数、无 Electron 依赖）',
-      typeof iso.checkSelftestIsolation === 'function' && typeof iso.isInsideRoot === 'function', Object.keys(iso));
+    check('U1', '模块导出 checkSelftestIsolation/isInsideRoot/inheritedRealRoots（纯函数、无 Electron 依赖）',
+      ['checkSelftestIsolation', 'isInsideRoot', 'inheritedRealRoots'].every((k) => typeof iso[k] === 'function'), Object.keys(iso));
     check('U2', '包含判定：沙盘内路径通过、真实团队根被拒',
       iso.checkSelftestIsolation({ resolved: path.join(sandbox, '团队'), selftestRoot: sandbox }) === true
-      && iso.checkSelftestIsolation({ resolved: path.join(ROOT, '团队'), selftestRoot: sandbox }) === false, { sandbox });
+      && iso.checkSelftestIsolation({ resolved: REAL_TEAM_ROOT, selftestRoot: sandbox }) === false, { sandbox });
     check('U3', '包含判定大小写不敏感（Windows 盘符/大小写）', iso.isInsideRoot(sandbox, path.join(sandbox, '团队').toUpperCase()) === true, {});
     check('U4', '空 resolved 判失败（宁可拒绝）', iso.checkSelftestIsolation({ resolved: '', selftestRoot: sandbox }) === false, {});
+    const list = iso.inheritedRealRoots(
+      { AWB_TEAM_ROOT: REAL_TEAM_ROOT, TEAM_ROOT: REAL_TEAM_ROOT, AWB_STORE: REAL_STORE, AWB_DATA_DIR: REAL_DATA },
+      { realTeamRoot: REAL_TEAM_ROOT, realStore: REAL_STORE, realDataDir: REAL_DATA },
+    );
+    check('U5', '继承污染识别：四个键全指真实根时全部命中；沙盘 env 不命中',
+      list.length === 4 && list.some((x) => x.startsWith('AWB_TEAM_ROOT=')) && list.some((x) => x.startsWith('AWB_DATA_DIR='))
+      && iso.inheritedRealRoots({ AWB_TEAM_ROOT: path.join(sandbox, '团队') }, { realTeamRoot: REAL_TEAM_ROOT, realStore: REAL_STORE, realDataDir: REAL_DATA }).length === 0,
+      { list });
   }
 
   /* ── S：静态接线 ─────────────────────────────────────────── */
@@ -62,19 +74,21 @@ try {
     const src = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
     check('S1', "main.js 的 IS_SELFTEST 分支调 checkSelftestIsolation（解析出的根必须在 SELFTEST_ROOT 内）",
       /require\('\.\/selftest-isolation'\)/.test(src) && /checkSelftestIsolation\(\{\s*resolved:\s*selftestResolvedRoot/.test(src), {});
-    check('S2', 'main.js 有 REAL_ROOT_SELFTEST_REFUSED 硬拒（process.exit(1)，零写入）',
-      /REAL_ROOT_SELFTEST_REFUSED/.test(src) && /process\.exit\(1\)/.test(src), {});
+    check('S2', 'main.js 有 REAL_ROOT_SELFTEST_REFUSED 硬拒（process.exit(1)，零写入）+ inherited 清单',
+      /REAL_ROOT_SELFTEST_REFUSED/.test(src) && /process\.exit\(1\)/.test(src) && /inherited:\s*selftestInherited/.test(src), {});
     check('S3', '团队.json 整表写回留 roster_mirror_rewrite 审计（syncTeamRosterSessions）',
       /roster_mirror_rewrite/.test(src) && /syncTeamRosterSessions'/.test(src), {});
+    check('S4', '自测把 AWB_DATA_DIR 也指进沙盘（防宿主继承真实 data/）',
+      /process\.env\.AWB_DATA_DIR = SELFTEST_ROOT/.test(src), {});
   }
 
-  /* ── I：真实根连跑两次（应快速硬拒） ─────────────────────── */
+  /* ── I：继承污染 + 真实根连跑两次（应快速硬拒） ───────────── */
   const env = { ...process.env };
-  env.AWB_TEAM_ROOT = path.join(ROOT, '团队');
-  env.TEAM_ROOT = path.join(ROOT, '团队');
-  env.TEAM_PROJECTS_ROOT = path.join(ROOT, '项目');
+  env.AWB_TEAM_ROOT = REAL_TEAM_ROOT;
+  env.TEAM_ROOT = REAL_TEAM_ROOT;
+  env.AWB_STORE = REAL_STORE;
+  env.AWB_DATA_DIR = REAL_DATA;
   env.AWB_SELFTEST_ROOT = sandbox;
-  env.AWB_DATA_DIR = path.join(sandbox, 'data');
   delete env.TEAM_SELFTEST;
 
   const perRun = [];
@@ -85,21 +99,22 @@ try {
     });
     const elapsedMs = Date.now() - t0;
     const out = String(r.stdout || '') + String(r.stderr || '');
-    const after = shaFile(REAL_TEAM_FILE);
-    perRun.push({ run, code: r.status, signal: r.signal, elapsedMs, refused: /REAL_ROOT_SELFTEST_REFUSED/.test(out), after });
-    check(`I${run}a`, `第 ${run} 次 --selftest（AWB_TEAM_ROOT=真实团队根）：exit=1 且输出 REAL_ROOT_SELFTEST_REFUSED`,
-      r.status === 1 && /REAL_ROOT_SELFTEST_REFUSED/.test(out), { code: r.status, signal: r.signal, refused: perRun[run - 1].refused });
-    check(`I${run}b`, `第 ${run} 次 --selftest 后：真实 团队.json sha 不变（禁写真实根）`,
-      after === realBefore, { before: realBefore, after, elapsedMs });
+    const inheritedOk = ['AWB_TEAM_ROOT=', 'TEAM_ROOT=', 'AWB_STORE=', 'AWB_DATA_DIR='].every((k) => new RegExp('inherited[^\\]]*' + k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(out));
+    perRun.push({ run, code: r.status, signal: r.signal, elapsedMs, refused: /REAL_ROOT_SELFTEST_REFUSED/.test(out), inheritedOk });
+    check(`I${run}a`, `第 ${run} 次 --selftest：exit=1 + REAL_ROOT_SELFTEST_REFUSED + inherited 含四键`,
+      r.status === 1 && /REAL_ROOT_SELFTEST_REFUSED/.test(out) && inheritedOk, { code: r.status, refused: perRun[run - 1].refused, inheritedOk });
+    check(`I${run}b`, `第 ${run} 次 --selftest 后：真实 团队.json 与 workbench.json sha 均不变`,
+      shaFile(REAL_TEAM_FILE) === realBefore && shaFile(REAL_STORE) === storeBefore,
+      { teamBefore: realBefore, teamAfter: shaFile(REAL_TEAM_FILE), storeBefore, storeAfter: shaFile(REAL_STORE) });
   }
   check('I3', '零写入：沙盘目录里没有 团队/状态/团队.json（拒绝发生在任何写盘之前）',
     !fs.existsSync(path.join(sandbox, '团队', '状态', '团队.json')), { sandbox });
-  check('I4', '连跑结束：真实 团队.json 仍逐字节不变', shaFile(REAL_TEAM_FILE) === realBefore, { before: realBefore, after: shaFile(REAL_TEAM_FILE) });
+  check('I4', '连跑结束：真实 团队.json / workbench.json 仍逐字节不变',
+    shaFile(REAL_TEAM_FILE) === realBefore && shaFile(REAL_STORE) === storeBefore, {});
   const totalMs = perRun.reduce((a, x) => a + x.elapsedMs, 0);
   check(`I5 连跑 ${RUNS} 次总耗时 ${totalMs}ms（<180000 = 3 分钟内连跑两次）`, totalMs < 180000, perRun.map((x) => x.elapsedMs));
   console.log('SELFTEST_GUARD_RUNS ' + JSON.stringify({ runs: perRun, totalMs }));
 } finally {
-  // 安全网：真实 团队.json 若被任何路径改动 → 写回备份（并已在上面判 FAIL）
   try {
     const now = fs.readFileSync(REAL_TEAM_FILE);
     if (sha(now) !== realBefore) {

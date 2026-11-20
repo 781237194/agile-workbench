@@ -11,6 +11,10 @@
  * 采用**硬拒**——解析出的团队根不在 SELFTEST_ROOT 内时，`--selftest` 立刻
  * `REAL_ROOT_SELFTEST_REFUSED` 退出（零写入），不再默默把真实根当沙盘用。
  *
+ * PM 2026-11-20 14:39 追加：宿主 env 继承污染不止 AWB_TEAM_ROOT——`TEAM_ROOT`、`AWB_STORE`、
+ * `AWB_DATA_DIR` 也会被子进程继承。`inheritedRealRoots()` 把这四个键里指向真实仓库的挑出来，
+ * 一起写进硬拒文案，便于运维一眼定位。
+ *
  * 纯函数、无 Electron 依赖：夹具可直接 require 做单测。
  */
 const path = require('node:path');
@@ -27,4 +31,26 @@ function checkSelftestIsolation({ resolved, selftestRoot }) {
   return isInsideRoot(selftestRoot, resolved);
 }
 
-module.exports = { isInsideRoot, checkSelftestIsolation };
+/**
+ * 找出继承自宿主 env、但指向真实仓库的根（四键）。
+ * @param {object} env              process.env 或任意 env 对象
+ * @param {object} real             { realTeamRoot, realStore, realDataDir }
+ * @returns {string[]}              ['AWB_TEAM_ROOT=...', 'TEAM_ROOT=...', ...]
+ */
+function inheritedRealRoots(env, real = {}) {
+  const checks = [
+    ['AWB_TEAM_ROOT', real.realTeamRoot],
+    ['TEAM_ROOT', real.realTeamRoot],
+    ['AWB_STORE', real.realStore],
+    ['AWB_DATA_DIR', real.realDataDir],
+  ];
+  const out = [];
+  for (const [key, realPath] of checks) {
+    const v = String((env && env[key]) || '').trim();
+    if (!v || !realPath) continue;
+    if (isInsideRoot(realPath, v)) out.push(`${key}=${v}`);
+  }
+  return out;
+}
+
+module.exports = { isInsideRoot, checkSelftestIsolation, inheritedRealRoots };
