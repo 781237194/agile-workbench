@@ -22,6 +22,7 @@ const JSON_OUT = process.argv.includes('--json');
 const argOf = (name, fallback = '') => { const i = process.argv.indexOf(name); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback; };
 const ROOT = path.resolve(argOf('--root', path.resolve(__dirname, '..')));
 const RUNS = Math.max(1, Number(argOf('--runs', '3')) || 3);
+const ROUNDS = Math.max(1, Number(argOf('--rounds', '3')) || 3);
 const OUT = argOf('--out', '') ? path.resolve(argOf('--out', '')) : '';
 const ROWS = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -246,24 +247,49 @@ async function launchOnce(box, { port, envExtra, waitMarksMs }) {
 async function main() {
   const port0 = await freePort();
   const box = seedSandbox('cold');
-  // 冷启动 3 次（各自新数据目录，模拟首次打开；不设 env、无 dsh.json）
+  // 冷启动：ROUNDS 轮 × 每轮 RUNS 次（各自新数据目录，模拟首次打开；不设 env、无 dsh.json）。
   const cold = [];
-  for (let i = 0; i < RUNS; i += 1) {
-    const b = seedSandbox('cold' + i);
-    const r = await launchOnce(b, { port: port0 + i, envExtra: {}, waitMarksMs: 12000 });
-    cold.push(r);
-    if (!r.ok) { check('冷启动第 ' + (i + 1) + ' 次能起来', false, r); break; }
-    check('冷启动第 ' + (i + 1) + ' 次：首屏标记存在（' + r.firstScreenWall + 'ms）', r.firstScreenWall !== null, { marks: r.marks });
-    try { fs.rmSync(b.sb, { recursive: true, force: true }); } catch { /* ignore */ }
+  const rounds = [];
+  for (let round = 0; round < ROUNDS; round += 1) {
+    const roundRows = [];
+    for (let i = 0; i < RUNS; i += 1) {
+      const b = seedSandbox('cold-r' + round + '-' + i);
+      await new Promise((res) => setTimeout(res, 700)); // 运行间冷却，避免自造并发抖动
+      const r = await launchOnce(b, { port: port0 + (round * RUNS + i), envExtra: {}, waitMarksMs: 12000 });
+      cold.push({ ...r, round, index: i });
+      roundRows.push(r);
+      const tag = '冷启 第' + (round + 1) + '轮/第' + (i + 1) + '次';
+      if (!r.ok) { check(tag + ' 能起来', false, r); }
+      else {
+        const procFirst = Number(r.startup && r.startup.marks && r.startup.marks.firstScreenMs);
+        const disc = Number(r.discoveryMs);
+        if (!JSON_OUT) console.log('  · ' + tag + '：首屏(进程起算)=' + procFirst + 'ms 发现链=' + disc + 'ms 墙钟=' + r.firstScreenWall + 'ms');
+      }
+      try { fs.rmSync(b.sb, { recursive: true, force: true }); } catch { /* ignore */ }
+      if (!r.ok) break;
+    }
+    const okRows = roundRows.filter((r) => r.ok);
+    rounds.push({
+      round: round + 1,
+      firstScreen: okRows.map((r) => Number(r.startup && r.startup.marks && r.startup.marks.firstScreenMs)).filter((n) => Number.isFinite(n)),
+      discovery: okRows.map((r) => Number(r.discoveryMs)).filter((n) => Number.isFinite(n)),
+    });
   }
   const coldOk = cold.filter((r) => r.ok);
   const coldFirst = coldOk.map((r) => r.firstScreenWall).filter((n) => Number.isFinite(n));
   const coldDiscovery = coldOk.map((r) => r.discoveryMs).filter((n) => Number.isFinite(n));
   const coldProcFirst = coldOk.map((r) => Number(r.startup && r.startup.marks && r.startup.marks.firstScreenMs)).filter((n) => Number.isFinite(n));
-  check('冷启动：首屏可用（进程启动起算）中位 ≤2000ms（' + median(coldProcFirst) + 'ms）', median(coldProcFirst) !== null && median(coldProcFirst) <= 2000, { coldProcFirst, wall: coldFirst });
-  check('冷启动：整条启动墙钟已记录（中位 ' + median(coldFirst) + 'ms，含 electron 进程自举）', median(coldFirst) !== null, { coldFirst });
-  check('冷启动：发现链中位 ≤1500ms（' + median(coldDiscovery) + 'ms）', median(coldDiscovery) !== null && median(coldDiscovery) <= 1500, { coldDiscovery });
+  const medFirst = median(coldProcFirst);
+  const medDisc = median(coldDiscovery);
+  const worstFirst = coldProcFirst.length ? Math.max(...coldProcFirst) : null;
+  const worstDisc = coldDiscovery.length ? Math.max(...coldDiscovery) : null;
+  check('冷启动：首屏可用（进程启动起算）中位 ≤2000ms（' + medFirst + 'ms；最差 ' + worstFirst + 'ms）', medFirst !== null && medFirst <= 2000, { coldProcFirst, rounds });
+  check('冷启动：发现链中位 ≤1500ms（' + medDisc + 'ms；最差 ' + worstDisc + 'ms）', medDisc !== null && medDisc <= 1500, { coldDiscovery, rounds });
+  check('冷启动：最差单次首屏 ≤2500ms（' + worstFirst + 'ms，抖动上限）', worstFirst !== null && worstFirst <= 2500, { coldProcFirst, rounds });
   check('冷启动：无环境变量时 discovery 走真发现（stats 存在）', coldOk.some((r) => r.discovery && r.discovery.stats), {});
+  if (!JSON_OUT) {
+    for (const row of rounds) console.log('  轮次中位 ' + row.round + '：首屏 ' + median(row.firstScreen) + 'ms / 发现 ' + median(row.discovery) + 'ms');
+  }
 
   // 离线（无 DSH 可连、无 env、无 dsh.json）：≤3s 给离线 + 已尝试源 + 重试入口
   const offlineBox = seedSandbox('offline');
@@ -309,7 +335,16 @@ async function main() {
   try { fs.rmSync(box.sb, { recursive: true, force: true }); } catch { /* ignore */ }
   if (OUT) {
     fs.mkdirSync(OUT, { recursive: true });
-    fs.writeFileSync(path.join(OUT, 'startup-measure.json'), JSON.stringify({ root: ROOT, at: new Date().toISOString(), cold: coldOk.map((r) => ({ firstScreenWall: r.firstScreenWall, discoveryMs: r.discoveryMs, startup: r.startup, marks: r.marks, stdoutTail: r.stdoutTail })), offline: { wallMs: offline.wallMs, dsh: offline.dsh, startup: offline.startup }, rows: ROWS }, null, 2) + '\n', 'utf8');
+    fs.writeFileSync(path.join(OUT, 'startup-measure.json'), JSON.stringify({ root: ROOT, at: new Date().toISOString(), cold: coldOk.map((r) => ({
+    round: r.round, index: r.index,
+    firstScreenWall: r.firstScreenWall, discoveryMs: r.discoveryMs,
+    startup: r.startup, marks: r.marks,
+    discoveryStats: r.startup && r.startup.discoveryStats ? r.startup.discoveryStats : null,
+    backgroundDiscovery: r.startup && r.startup.backgroundDiscovery ? r.startup.backgroundDiscovery : null,
+    stdoutTail: r.stdoutTail,
+  })),
+  rounds,
+  coldSummary: { medianFirstScreenMs: medFirst, medianDiscoveryMs: medDisc, worstFirstScreenMs: worstFirst, worstDiscoveryMs: worstDisc }, offline: { wallMs: offline.wallMs, dsh: offline.dsh, startup: offline.startup }, rows: ROWS }, null, 2) + '\n', 'utf8');
   }
   const failed = ROWS.filter((r) => !r.ok).length;
   if (JSON_OUT) console.log(JSON.stringify({ total: ROWS.length, passed: ROWS.length - failed, failed: ROWS.filter((r) => !r.ok).map((r) => r.name), rows: ROWS }, null, 2));

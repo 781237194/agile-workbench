@@ -5738,6 +5738,7 @@ function startupSummary() {
     discoveryMs,
     discoveryStats: startupMarks.discovery && startupMarks.discovery.stats ? startupMarks.discovery.stats : null,
     discoveryCode: startupMarks.discovery ? String(startupMarks.discovery.code || '') : '',
+    backgroundDiscovery: startupMarks.backgroundDiscovery || null,
     handshakeMs,
     dshOnline: startupMarks.dshOnline,
     meets: {
@@ -11748,10 +11749,13 @@ installShellAuditSensors();
       if (firstStartupCheck) markStartup('discoveryStart');
       // B-4fdd：启动首轮用 fast 预算（跳过昂贵的进程发现，靠端口文件/env/扫描），离线也要 ≤3s 给结果。
       discovery = await maybeAutoDiscoverDsh('status', firstStartupCheck ? { fast: true, probeTimeoutMs: 250 } : {});
-      startupMarks.discovery = discovery && discovery.durationMs !== undefined
-        ? { durationMs: Number(discovery.durationMs) || 0, code: String(discovery.code || ''), stats: discovery.stats || null }
-        : { durationMs: 0, code: String((discovery && discovery.code) || ''), stats: (discovery && discovery.stats) || null };
-      if (firstStartupCheck) markStartup('discoveryEnd', { code: startupMarks.discovery.code, durationMs: startupMarks.discovery.durationMs });
+      // 只有首轮启动发现写进 startup（后续 background/手动重发现不得覆盖，否则离群值会污染四段数据）。
+      if (firstStartupCheck) {
+        startupMarks.discovery = discovery && discovery.durationMs !== undefined
+          ? { durationMs: Number(discovery.durationMs) || 0, code: String(discovery.code || ''), stats: discovery.stats || null }
+          : { durationMs: 0, code: String((discovery && discovery.code) || ''), stats: (discovery && discovery.stats) || null };
+        markStartup('discoveryEnd', { code: startupMarks.discovery.code, durationMs: startupMarks.discovery.durationMs });
+      }
       if (discovery && discovery.ok) {
         finalStatus = discovery.status || await dsh.check({ timeoutMs: 6000 });
       } else if (discovery && !discovery.skipped) {
@@ -11774,6 +11778,17 @@ installShellAuditSensors();
     void runDshCapabilityProbe('status');
     // e379 AC6：首次状态检查顺带做一次 MCP 自检（每进程一次，失败只记 warning，不阻断）。
     if (!mcpSelfCheckState.record && !mcpSelfCheckState.running) void runMcpSelfCheckRuntime('status');
+    // B-4fdd：首轮 fast 不扫描 → 首屏后后台跑一次完整发现（含扫描）；成功就 adopt 并让界面下次刷新看到在线。
+    // 只在启动首个检查、且当前离线时排一次，避免每次 dsh:status 都触发。
+    if (firstStartupCheck && !finalStatus.online) {
+      startupMarks.backgroundDiscovery = { scheduledAt: Date.now() };
+      try {
+        const bgTimer = setTimeout(() => {
+          startBackgroundDiscovery('startup-bg');
+        }, 1200);
+        if (bgTimer.unref) bgTimer.unref();
+      } catch { /* 定时器失败不影响首屏 */ }
+    }
     // B-4fdd（需求⑤）：离线时把「已尝试的源」拼进消息，界面直接可见（不只有日志）。
     if (!finalStatus.online) {
       const attempted = [];
@@ -22202,6 +22217,9 @@ async function runDshDiscovery(reason = 'status', budgets = {}) {
         ...(budgets.fast ? {
           skipProcessDiscovery: true,
           includeRange: false,
+          // 首轮只探权威源（env/端口文件/dsh.json/默认端口）；全段扫描挪到首屏后的后台重试，
+          // 避免「扫 16k 端口」把首轮发现耗时抖到 1-3s（PM 012728 离群值就是这里）。
+          includeScan: false,
           scanBudgetMs: Number(budgets.scanBudgetMs) > 0 ? Number(budgets.scanBudgetMs) : 500,
           scanConnectTimeoutMs: Number(budgets.scanConnectTimeoutMs) > 0 ? Number(budgets.scanConnectTimeoutMs) : 80,
           scanConcurrency: Number(budgets.scanConcurrency) > 0 ? Number(budgets.scanConcurrency) : 128,
@@ -22318,6 +22336,35 @@ async function maybeAutoDiscoverDsh(reason = 'status', budgets = {}) {
   }
   if (!manual) dshDiscovery.at = now;
   return runDshDiscovery(reason, budgets);
+}
+
+/**
+ * B-4fdd：首屏后的后台重发现（完整预算，含进程发现与扫描）。成功则 adopt（会 reload webview），
+ * 失败只记录审计；不阻塞首屏、不影响启动四段。
+ */
+async function startBackgroundDiscovery(reason = 'startup-bg') {
+  if (typeof startupMarks === 'object' && startupMarks) {
+    startupMarks.backgroundDiscovery = { ...(startupMarks.backgroundDiscovery || {}), startedAt: Date.now() };
+  }
+  try {
+    const result = await maybeAutoDiscoverDsh(reason, {});
+    if (startupMarks && startupMarks.backgroundDiscovery) {
+      startupMarks.backgroundDiscovery.doneAt = Date.now();
+      startupMarks.backgroundDiscovery.ok = Boolean(result && result.ok);
+      startupMarks.backgroundDiscovery.code = String((result && result.code) || '');
+      startupMarks.backgroundDiscovery.durationMs = Number(result && result.durationMs) || 0;
+    }
+    try { console.log('[startup] backgroundDiscovery code=' + String((result && result.code) || '') + ' ok=' + Boolean(result && result.ok) + ' ' + (Number(result && result.durationMs) || 0) + 'ms'); } catch { /* ignore */ }
+    return result;
+  } catch (error) {
+    if (startupMarks && startupMarks.backgroundDiscovery) {
+      startupMarks.backgroundDiscovery.doneAt = Date.now();
+      startupMarks.backgroundDiscovery.ok = false;
+      startupMarks.backgroundDiscovery.code = 'STARTUP_BG_DISCOVERY_FAILED';
+      startupMarks.backgroundDiscovery.message = String((error && error.message) || error).slice(0, 200);
+    }
+    return { ok: false, code: 'STARTUP_BG_DISCOVERY_FAILED' };
+  }
 }
 
 async function installDshCookie() {
@@ -23762,18 +23809,27 @@ function applyDeletionTombstonesOnStartup() {
 
 app.whenReady().then(async () => {
   markStartup('appReady');
-  try { applyDeletionTombstonesOnStartup(); } catch { /* 墓碑补扫失败不阻断启动 */ }
+  // B-4fdd：把 whenReady 里的同步前置段逐段计时——PM 012728 的冷启离群（2.4-4.8s 页面加载之外）
+  // 需要证据判断是 registerIpc 还是 tombstones/采样器吃掉了那 1-2 秒。
+  const __phase = (name, fn) => {
+    const t0 = Date.now();
+    try { return fn(); } finally {
+      const dt = Date.now() - t0;
+      if (dt > 20) { try { console.log('[startup] main.' + name + ' ' + dt + 'ms'); } catch { /* ignore */ } }
+    }
+  };
+  __phase('tombstones', () => { try { applyDeletionTombstonesOnStartup(); } catch { /* 墓碑补扫失败不阻断启动 */ } });
   if (!singleInstanceLock) return;
   app.setName(APP_NAME);
-  registerIpc();
+  __phase('registerIpc', () => registerIpc());
   // T-5d98：启动对齐 + 60 秒巡检（幂等；失败可见，写失败内部 60 秒重试一次）。
-  schedulePmIdentityReconcile('startup');
+  __phase('reconcileSchedule', () => schedulePmIdentityReconcile('startup'));
   try { const t = setInterval(() => { try { runPmIdentityReconcile('interval60'); } catch { /* ignore */ } }, 60000); if (t.unref) t.unref(); } catch { /* ignore */ }
-  await installDshCookie();
+  // B-4fdd：cookie 安装不阻塞（先建窗，装完再继续）。
+  const dshCookieTask = installDshCookie().catch(() => false);
   // R-c1ed F-1 接线：采样定时器 + 启动/24h 清理（自检/布局检查模式不采，避免污染证据目录与拖慢断言）。
   if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_EFFECT_CHECK && !IS_THEME_SHOTS) {
-    startRenderMemorySampler();
-    scheduleRenderMemoryMaintenance();
+    __phase('memSampler', () => { startRenderMemorySampler(); scheduleRenderMemoryMaintenance(); });
   }
   // B-2dd3 自检：内存阈值告警去抖 + 崩溃归因（隔离数据根；采样器必须真跑，所以放在上面启动之后）。
   if (IS_B2DD3_CHECK) {
@@ -24014,7 +24070,10 @@ app.whenReady().then(async () => {
     }
     return;
   }
+  const __winT0 = Date.now();
   createWindow();
+  try { console.log('[startup] main.createWindow ' + (Date.now() - __winT0) + 'ms'); } catch { /* ignore */ }
+  await dshCookieTask;
   // B-a577：全队空闲时队列也要自己跑 —— 60 秒定时兜底泵（失败留痕、队列项保留）。
   startDispatchQueuePump();
   // T-b417：启动后自动拉起路由守护（15 秒后，避开首帧）；退出时由 before-quit 收尾。
