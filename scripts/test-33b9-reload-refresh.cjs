@@ -192,6 +192,9 @@ function readStore() {
     ...process.env,
     AWB_DATA_DIR: DATA,
     AWB_STORE: STORE,
+    // ★壳层 resolveTeamRoot() 优先读 AWB_TEAM_ROOT（不是 TEAM_ROOT）——漏了它会改真实名册（本轮踩过）。
+    AWB_TEAM_ROOT: TEAM,
+    AWB_TEAM_PROJECTS_ROOT: path.join(SB, '项目区'),
     TEAM_ROOT: TEAM,
     TEAM_PROJECTS_ROOT: path.join(SB, '项目区'),
     TEAM_WORKBENCH_JSON: STORE,
