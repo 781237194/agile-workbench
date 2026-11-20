@@ -121,6 +121,8 @@ function versionSection() {
   fs.writeFileSync(path.join(box, '发布', '版本历史.jsonl'), JSON.stringify({ version: '2.1.15', sha256: sha256(zip) }) + '\n');
   const bad = source.checkVersionConsistency({ root: box });
   const codes = bad.rows.filter((r) => !r.ok).map((r) => r.code);
+  check('E2b 同 minor 内 patch 递增允许（PM 02:23 放宽）：app 2.1.14 / plugin 2.2.15 → 绿；app 2.1.15 / plugin 2.2.14 → 不许可',
+    source.pluginVersionAllowed('2.2.15', '2.1.14') === true && source.pluginVersionAllowed('2.2.14', '2.1.15') === false, {});
   check('E3 沙盘版本映射错位（app 2.1.15 / plugin 2.2.14）→ PLUGIN_VERSION_MISMATCH 红',
     bad.ok === false && codes.includes('PLUGIN_VERSION_MISMATCH'), { codes });
   check('E4 同一沙盘 payload.appVersion 旧值 → APP_PAYLOAD_VERSION_MISMATCH 红', codes.includes('APP_PAYLOAD_VERSION_MISMATCH'), { codes });

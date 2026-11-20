@@ -1,5 +1,5 @@
 {
-  "at": "2026-11-20T16:03:44.560Z",
+  "at": "2026-11-20T16:24:18.538Z",
   "root": "D:\\deepseek\\agile-workbench",
   "roots": [
     "install.ps1",
@@ -55,13 +55,13 @@
     }
   ],
   "counts": {
-    "byLine": 96,
+    "byLine": 105,
     "byFile": 14,
-    "byDedup": 95,
+    "byDedup": 103,
     "perPattern": {
-      "plugin-literal": 39,
-      "mapping-formula": 4,
-      "plugin-version-read": 23,
+      "plugin-literal": 42,
+      "mapping-formula": 6,
+      "plugin-version-read": 27,
       "relatives-copy": 11,
       "manifest-definition": 19
     }
@@ -389,6 +389,24 @@
       "file": "scripts/test-5099-four-channel.cjs",
       "line": 124,
       "pattern": "plugin-literal",
+      "text": "check('E2b 同 minor 内 patch 递增允许（PM 02:23 放宽）：app 2.1.14 / plugin 2.2.15 → 绿；app 2.1.15 / plugin 2.2.14 → 不许可',"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 125,
+      "pattern": "plugin-literal",
+      "text": "source.pluginVersionAllowed('2.2.15', '2.1.14') === true && source.pluginVersionAllowed('2.2.14', '2.1.15') === false, {});"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 125,
+      "pattern": "plugin-version-read",
+      "text": "source.pluginVersionAllowed('2.2.15', '2.1.14') === true && source.pluginVersionAllowed('2.2.14', '2.1.15') === false, {});"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 126,
+      "pattern": "plugin-literal",
       "text": "check('E3 沙盘版本映射错位（app 2.1.15 / plugin 2.2.14）→ PLUGIN_VERSION_MISMATCH 红',"
     },
     {
@@ -573,69 +591,105 @@
     },
     {
       "file": "scripts/version-single-source.cjs",
-      "line": 65,
+      "line": 55,
+      "pattern": "mapping-formula",
+      "text": "* 插件版本是否允许（含 PM 2026-11-21 02:23 的放宽）：同一 minor（app.minor+1）内允许 patch 递增，"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 57,
+      "pattern": "plugin-literal",
+      "text": "* 例：app 2.1.14 ↔ plugin 2.2.14（基准）或 2.2.15（修正重发）都允许。"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 59,
+      "pattern": "plugin-version-read",
+      "text": "function pluginVersionAllowed(pluginVersion, appVersion) {"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 60,
+      "pattern": "plugin-version-read",
+      "text": "const pv = parseVersion(pluginVersion);"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 63,
+      "pattern": "mapping-formula",
+      "text": "return pv.major === av.major && pv.minor === av.minor + 1 && pv.patch >= av.patch;"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 76,
       "pattern": "plugin-version-read",
       "text": "* 本地一致性检查（不联网）。返回 { ok, appVersion, pluginVersion, rows[] }。"
     },
     {
       "file": "scripts/version-single-source.cjs",
-      "line": 86,
+      "line": 96,
       "pattern": "plugin-version-read",
-      "text": "{ appVersion, expectedPlugin, pluginVersion: pluginPkg && pluginPkg.version }, 'PLUGIN_VERSION_MISMATCH');"
+      "text": "Boolean(expectedPlugin) && Boolean(pluginPkg) && pluginVersionAllowed(pluginPkg.version, appVersion),"
     },
     {
       "file": "scripts/version-single-source.cjs",
-      "line": 127,
+      "line": 97,
+      "pattern": "plugin-version-read",
+      "text": "{ appVersion, expectedPlugin, pluginVersion: pluginPkg && pluginPkg.version, rule: '同 minor 内 plugin.patch >= app.patch' }, 'PLUGIN_VERSION_MISMATCH');"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 138,
       "pattern": "plugin-version-read",
       "text": "pluginVersion: (pluginPkg && pluginPkg.version) || '',"
     },
     {
       "file": "scripts/version-single-source.cjs",
-      "line": 175,
+      "line": 186,
       "pattern": "plugin-version-read",
       "text": "console.log(`app=${result.appVersion} plugin=${result.pluginVersion}（应为 ${result.expectedPlugin}）tag=${result.mapping.tag}`);"
     },
     {
       "file": "scripts/version-single-source.cjs",
-      "line": 181,
+      "line": 192,
       "pattern": "plugin-version-read",
       "text": "const pluginVersion = result.pluginVersion;"
     },
     {
       "file": "scripts/version-single-source.cjs",
-      "line": 182,
+      "line": 193,
       "pattern": "plugin-version-read",
       "text": "const reg = await checkRegistryVersion({ version: pluginVersion });"
     },
     {
       "file": "scripts/version-single-source.cjs",
-      "line": 183,
+      "line": 194,
       "pattern": "plugin-version-read",
       "text": "result.rows.push({ id: 'G6', name: `registry 回查 dsh-agile-workbench@${pluginVersion} 真实存在`, ok: reg.ok, code: reg.code, detail: reg.detail });"
     },
     {
       "file": "scripts/version-single-source.cjs",
-      "line": 187,
+      "line": 198,
       "pattern": "plugin-version-read",
-      "text": "result.rows.push({ id: 'G6', name: 'npm 包名/版本映射（未加 --registry，只查本地声明）', ok: Boolean(result.expectedPlugin) && result.pluginVersion === result.expectedPlugin, code: result.pluginVersion === result.expe"
+      "text": "const localOk = pluginVersionAllowed(result.pluginVersion, result.appVersion);"
     },
     {
       "file": "scripts/version-single-source.cjs",
-      "line": 188,
-      "pattern": "plugin-version-read",
-      "text": "result.ok = result.ok && result.pluginVersion === result.expectedPlugin;"
-    },
-    {
-      "file": "scripts/version-single-source.cjs",
-      "line": 194,
+      "line": 206,
       "pattern": "plugin-version-read",
       "text": "console.log(`\\n${pass}/${result.rows.length} PASS  app=${result.appVersion} plugin=${result.pluginVersion}`);"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 213,
+      "pattern": "plugin-version-read",
+      "text": "pluginVersionAllowed,"
     },
     {
       "file": "dsh-plugin/package.json",
       "line": 3,
       "pattern": "plugin-literal",
-      "text": "\"version\": \"2.2.14\","
+      "text": "\"version\": \"2.2.15\","
     },
     {
       "file": "dsh-plugin/README.md",

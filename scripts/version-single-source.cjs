@@ -51,6 +51,17 @@ function pluginToApp(pluginVersion) {
   if (!parts || parts.minor < 1) return '';
   return formatVersion({ ...parts, minor: parts.minor - 1 });
 }
+/**
+ * 插件版本是否允许（含 PM 2026-11-21 02:23 的放宽）：同一 minor（app.minor+1）内允许 patch 递增，
+ * 用于「载荷声明修正」这类不改变 app 版本的重发；patch 低于 app.patch 视为错位。
+ * 例：app 2.1.14 ↔ plugin 2.2.14（基准）或 2.2.15（修正重发）都允许。
+ */
+function pluginVersionAllowed(pluginVersion, appVersion) {
+  const pv = parseVersion(pluginVersion);
+  const av = parseVersion(appVersion);
+  if (!pv || !av) return false;
+  return pv.major === av.major && pv.minor === av.minor + 1 && pv.patch >= av.patch;
+}
 function tagForApp(appVersion) {
   return parseVersion(appVersion) ? 'v' + appVersion : '';
 }
@@ -81,9 +92,9 @@ function checkVersionConsistency({ root = REPO_ROOT } = {}) {
   push('G1', 'package.json 版本可解析', Boolean(parseVersion(appVersion)), { appVersion }, 'APP_VERSION_SOURCE_MISSING');
   push('G2a', `dsh-plugin/package.json name=dsh-agile-workbench`,
     Boolean(pluginPkg && pluginPkg.name === 'dsh-agile-workbench'), { name: pluginPkg && pluginPkg.name }, 'NPM_NAME_MISMATCH');
-  push('G2b', `plugin 版本 == 映射值 ${expectedPlugin || '（算不出）'}（插件实际 ${(pluginPkg && pluginPkg.version) || '缺失'}）`,
-    Boolean(expectedPlugin) && Boolean(pluginPkg) && pluginPkg.version === expectedPlugin,
-    { appVersion, expectedPlugin, pluginVersion: pluginPkg && pluginPkg.version }, 'PLUGIN_VERSION_MISMATCH');
+  push('G2b', `plugin 版本在允许区间（基准 ${expectedPlugin || '（算不出）'}，同 minor 内 patch 可递增；插件实际 ${(pluginPkg && pluginPkg.version) || '缺失'}）`,
+    Boolean(expectedPlugin) && Boolean(pluginPkg) && pluginVersionAllowed(pluginPkg.version, appVersion),
+    { appVersion, expectedPlugin, pluginVersion: pluginPkg && pluginPkg.version, rule: '同 minor 内 plugin.patch >= app.patch' }, 'PLUGIN_VERSION_MISMATCH');
   const declaredPayload = pluginPkg && pluginPkg.pmWorkbenchPayload && String(pluginPkg.pmWorkbenchPayload.sha256 || '');
   push('G2c', 'npm 包声明 payload sha == 版本信息 sha（APP_PAYLOAD_SHA_MISMATCH）',
     Boolean(declaredPayload) && Boolean(feed) && declaredPayload === String(feed.sha256 || ''),
@@ -184,8 +195,9 @@ async function main() {
     result.registry = reg;
     result.ok = result.ok && reg.ok;
   } else {
-    result.rows.push({ id: 'G6', name: 'npm 包名/版本映射（未加 --registry，只查本地声明）', ok: Boolean(result.expectedPlugin) && result.pluginVersion === result.expectedPlugin, code: result.pluginVersion === result.expectedPlugin ? '' : 'NPM_VERSION_MISMATCH', detail: {} });
-    result.ok = result.ok && result.pluginVersion === result.expectedPlugin;
+    const localOk = pluginVersionAllowed(result.pluginVersion, result.appVersion);
+    result.rows.push({ id: 'G6', name: 'npm 包名/版本映射（未加 --registry，只查本地声明）', ok: Boolean(result.expectedPlugin) && localOk, code: localOk ? '' : 'NPM_VERSION_MISMATCH', detail: {} });
+    result.ok = result.ok && localOk;
   }
   if (asJson) console.log(JSON.stringify(result, null, 2));
   else {
@@ -198,6 +210,7 @@ async function main() {
 
 module.exports = {
   parseVersion,
+  pluginVersionAllowed,
   formatVersion,
   appToPlugin,
   pluginToApp,
