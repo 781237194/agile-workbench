@@ -56,11 +56,19 @@ function seedSandbox({ mapped = false } = {}) {
   fs.writeFileSync(teamFile, JSON.stringify(team, null, 1), 'utf8');
   // 关键构造：DSH 在线、名册 6 人。mapped=false → 本地 project.sessions 为空（Owner 截图里的 0/6）；
   // mapped=true → 名册 id 与 DSH mock 全匹配（AC④a：6 行、6/6）。
+  // 注意：store 里 project.path 必须改指沙盘目录——persistSessionMapping 会写 <project.path>/团队会话.json，
+  // 沿用真实路径会污染真实项目的会话清单（本轮首跑踩过：真实 manifest 的 pm 被写成 session-sbx-pm）。
+  const sandboxProjectDir = path.join(SB, '项目区', '工作台改造修复');
+  fs.mkdirSync(sandboxProjectDir, { recursive: true });
+  copy(path.join(projState, '项目.json'), path.join(sandboxProjectDir, '项目.json'));
   for (const n of fs.readdirSync(path.join(DATA, 'userdata'))) {
     if (!n.startsWith('workbench.json')) continue;
     const f = path.join(DATA, 'userdata', n);
     const store = JSON.parse(fs.readFileSync(f, 'utf8'));
     for (const p of (store.projects || [])) {
+      p.path = sandboxProjectDir;
+      p.workspace = p.workspace && typeof p.workspace === 'object' ? p.workspace : {};
+      p.workspace.path = sandboxProjectDir;
       if (mapped) {
         p.sessions = {};
         p.sessionMeta = {};
