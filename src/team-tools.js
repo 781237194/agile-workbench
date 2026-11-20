@@ -787,7 +787,7 @@ function loadOpsModule(layout) {
 // 约定：命中返回数组副本、其中任务对象是共享引用，调用方只读、不得原地改。
 const TASK_CACHE_TTL_MS = (() => {
   const raw = Number(process.env.AWB_TASK_CACHE_TTL_MS);
-  return Number.isFinite(raw) && raw >= 0 ? raw : 2000;
+  return Number.isFinite(raw) && raw >= 0 ? raw : 5000;
 })();
 const TASK_CACHE_FREEZE = String(process.env.AWB_TASK_CACHE_FREEZE || '') === '1';
 const taskScanCache = new Map(); // dir -> { signature, at, rows }

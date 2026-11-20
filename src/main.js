@@ -2161,18 +2161,46 @@ function mirrorWorkflowToStore(projectId, teamName, projectPath) {
   }
 }
 
+/** a514：工作流副作用（镜像 store 2.7MB 回写）后台化：合并 250ms、重试 2 次、失败审计+事件可见可重试。 */
+function workflowSideEffectsAudit(row) {
+  try {
+    const dir = path.join(ledgerTeamRoot(), '状态');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, '工作流副作用.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...row }) + String.fromCharCode(10), 'utf8');
+  } catch { /* 审计失败不阻断 */ }
+}
+function emitWorkflowSideEffects(payload) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workflow:side-effects', payload);
+  } catch { /* ignore */ }
+}
+const workflowSideEffects = createWorkflowSideEffects({
+  run: async (ctx) => {
+    const mirrored = mirrorWorkflowToStore(ctx.projectId, ctx.teamName, ctx.projectPath);
+    if (!mirrored) throw new Error('mirrorWorkflowToStore 返回空（store 或快照不可用）');
+    return { requirements: (mirrored.requirements || []).length, stage: mirrored.workflowMirror ? mirrored.workflowMirror.stage : null };
+  },
+  audit: workflowSideEffectsAudit,
+  emit: emitWorkflowSideEffects,
+  debounceMs: 250,
+  retries: 2,
+});
+function scheduleWorkflowMirror(projectId, teamName, projectPath, reason) {
+  if (!projectId || !teamName) return { queued: false, message: '缺少 projectId/teamName，未排队' };
+  return workflowSideEffects.schedule({ projectId, teamName, projectPath, reason: String(reason || 'workflow') });
+}
+
 /** 统一工作流返回：失败也镜像一次，界面/测试能看到旧状态是否已部分落盘。 */
 function workflowResponse(projectId, teamName, projectPath, result) {
-  const mirrored = mirrorWorkflowToStore(projectId, teamName, projectPath);
+  // a514：同步只保留需求行写盘；镜像回写进后台队列（失败可见 + 可重试）。
+  const mirrorScheduled = scheduleWorkflowMirror(projectId, teamName, projectPath, 'workflow-response');
   const payload = {
     ...(result || {}),
     projectId,
     teamName,
-    mirrored: mirrored ? {
-      requirements: (mirrored.requirements || []).length,
-      tasks: (mirrored.tasks || []).filter((task) => task.source === 'legacy-workflow').length,
-      stage: mirrored.workflowMirror ? mirrored.workflowMirror.stage : null
-    } : null,
+    mirrored: null,
+    mirrorQueued: Boolean(mirrorScheduled && mirrorScheduled.queued),
+    sideEffects: mirrorScheduled,
     state: statePayload()
   };
   // R-f9b1 补单（T-cb02②）：池行挂增补卷路径——**不改 工作流.json、不改正文哈希**，
@@ -2498,6 +2526,7 @@ let dshDiscovery = { at: 0, last: null, running: null };
 const sessionCreateLocks = new Map();
 const provisionLocks = new Map();
 
+const { createWorkflowSideEffects } = require('./workflow-side-effects');
 async function createSessionOnce(projectId, roleId, options) {
   const key = String(projectId) + ':' + String(roleId);
   if (sessionCreateLocks.has(key)) return sessionCreateLocks.get(key);
@@ -9067,6 +9096,14 @@ ipcMain.handle('theme:metrics', async () => {
     },
   });
   const scheduleBoardRebuild = (project, reason) => boardRebuild.schedule(project, reason);
+  ipcMain.handle('workflow:side-effects-status', async () => workflowSideEffects.status());
+  ipcMain.handle('workflow:side-effects-retry', async (_e, payload) => {
+    const p = payload || {};
+    const project = requireProject(readStore(), p.projectId);
+    const teamName = String(project.teamName || project.name || '');
+    const scheduled = scheduleWorkflowMirror(project.id, teamName, project.path, 'manual-retry');
+    return { ok: true, scheduled };
+  });
   ipcMain.handle('owner:accept', runWorkflowIpc(async (ctx, p, meta) => {
     // B-20261118-211237-9ded：验收打点（门预检 / 落账 / 总耗时）+ 快照复用给镜像回写。
     const acceptT0 = Date.now();
@@ -24091,6 +24128,24 @@ app.whenReady().then(async () => {
     }
     return;
   }
+  // a514：首屏后预热工作流缓存（冷扫 1000+ 任务文件/需求正文），把首次点击的全量扫描挪到空闲时段。
+  try {
+    const warmTimer = setTimeout(() => {
+      try {
+        const st = readStore();
+        const proj = (st.projects || []).find((p) => p.id === st.activeProjectId) || (st.projects || [])[0];
+        if (proj) {
+          const teamName = String(proj.teamName || proj.name || '');
+          if (teamName && typeof teamTools.readWorkflowSnapshot === 'function') {
+            const t0 = Date.now();
+            const snap = teamTools.readWorkflowSnapshot(teamName, proj.path);
+            try { console.log('[workflow-prewarm] ' + (snap && snap.ok ? 'ok' : 'fail') + ' ' + (Date.now() - t0) + 'ms team=' + teamName); } catch { /* ignore */ }
+          }
+        }
+      } catch { /* 预热失败不影响启动 */ }
+    }, 1200);
+    if (warmTimer && typeof warmTimer.unref === 'function') warmTimer.unref();
+  } catch { /* ignore */ }
   const __winT0 = Date.now();
   createWindow();
   try { console.log('[startup] main.createWindow ' + (Date.now() - __winT0) + 'ms'); } catch { /* ignore */ }

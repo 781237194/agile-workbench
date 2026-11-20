@@ -2536,6 +2536,45 @@ function scheduleLazyRendererScripts() {
   } catch { setTimeout(run, 120); }
 }
 
+// a514：后台副作用失败必须可见可重试（不允许乐观成功后无声失败）。
+function bindWorkflowSideEffects() {
+  const api = window.workbench || {};
+  if (typeof api.onWorkflowSideEffects !== 'function') return;
+  let banner = null;
+  let text = null;
+  let retry = null;
+  const ensure = () => {
+    if (banner) return banner;
+    banner = document.createElement('div');
+    banner.id = 'awb-side-effect-banner';
+    banner.hidden = true;
+    banner.style.cssText = 'position:fixed;right:16px;bottom:48px;max-width:440px;z-index:9999;background:#3a1b1b;color:#ffd7d7;border:1px solid #b34242;border-radius:8px;padding:10px 12px;font-size:12px;display:flex;gap:8px;align-items:center;';
+    text = document.createElement('span');
+    retry = document.createElement('button');
+    retry.type = 'button';
+    retry.textContent = '重试';
+    retry.style.cssText = 'flex:0 0 auto;padding:2px 10px;border-radius:6px;border:1px solid #b34242;background:#5a2323;color:#ffd7d7;cursor:pointer;';
+    banner.appendChild(text);
+    banner.appendChild(retry);
+    document.body.appendChild(banner);
+    return banner;
+  };
+  api.onWorkflowSideEffects((p) => {
+    const payload = p || {};
+    if (payload.ok) { if (banner) banner.hidden = true; try { void refresh(); } catch { /* ignore */ } return; }
+    ensure();
+    text.textContent = '后台同步失败：' + String(payload.message || '未知原因') + '；本次状态可能尚未反映到本地，可重试。';
+    banner.hidden = false;
+    retry.onclick = () => {
+      banner.hidden = true;
+      try {
+        const projectId = (state && (state.activeProjectId || (state.activeProject && state.activeProject.id))) || '';
+        void api.workflowSideEffectsRetry({ projectId });
+      } catch { /* ignore */ }
+    };
+  });
+}
+
 async function refresh() {
   // B-231006-b81a 回归基线诊断：刷新是否真的执行（Owner 报「刷新按钮也失效」）。
   // 只读计数，不参与业务；夹具点击 #btn-refresh 后断言它递增。
@@ -15854,6 +15893,7 @@ function startRosterWatch() {
   rosterUi.lastAt = Date.now();
   // 推送优先（换人后立刻刷新、且只刷一次）；5 秒轮询保留为兜底（通道不可用时行为与旧实现一致）。
   bindRosterPush();
+  try { bindWorkflowSideEffects(); } catch { /* 后台失败提示不阻塞首屏 */ }
   rosterUi.timer = setInterval(r4Gate(rosterWatchTick), ROSTER_WATCH_MS);
   // 自测/排查用只读钩子：当前映射签名与侧栏计数。
   window.__teamRoster = {

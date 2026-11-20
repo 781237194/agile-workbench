@@ -144,6 +144,15 @@ if (IS_BOARD_WINDOW) {
       ipcRenderer.on('team:decision-box-changed', handler);
       return () => { try { ipcRenderer.off('team:decision-box-changed', handler); } catch { /* ignore */ } };
     },
+    // a514：工作流后台副作用（镜像 store 回写）完成/失败推送——失败要能看见并可重试。
+    onWorkflowSideEffects: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      const handler = (_event, payload) => { try { cb(payload || {}); } catch { /* 回调自身异常忽略 */ } };
+      ipcRenderer.on('workflow:side-effects', handler);
+      return () => { try { ipcRenderer.off('workflow:side-effects', handler); } catch { /* ignore */ } };
+    },
+    workflowSideEffectsStatus: () => ipcRenderer.invoke('workflow:side-effects-status'),
+    workflowSideEffectsRetry: (payload) => ipcRenderer.invoke('workflow:side-effects-retry', payload),
     // B-20261117-133419-6543：看板后台重建完成推送（验收落账后不再同步等重建，完成后界面自刷新）。
     onBoardRebuilt: (cb) => {
       if (typeof cb !== 'function') return () => {};
