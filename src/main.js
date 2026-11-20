@@ -12390,11 +12390,14 @@ installShellAuditSensors();
       // 旧实现把 label 直接铺在卡片里（含「累计含缓存读…仅作参考」），把角色区挤没了。
       shortLabel: (() => {
         if (!focusRow) return '会话用量未知' + (maxRow ? '' : ' / 阈值未知');
+        // PM 04:02：shortLabel 用**角色显示名**（高级程序员 A，不是 programmer1），数值去空格更紧凑；
+        // 全量 label 仍保留给 tooltip/展开，两边不再猜字符串。
+        const roleName = String((ROLES.find((r) => r.id === focusRow.role) || {}).name || focusRow.role || '');
+        const compact = (n) => fmtTokens(n).replace(/\s+/g, '');
         const used = Number(focusRow.input) || 0;
         const warn = Number(focusRow.warn) || 0;
         const state = focusRow.level === 'force' ? '超阈值' : (focusRow.level === 'warn' ? '接近阈值' : '未超阈值');
-        return '本会话(' + (focusRow.role || '') + ') ' + fmtTokens(used) + ' / 阈值 ' + (warn ? fmtTokens(warn) : '未知')
-          + ' · ' + state;
+        return '本会话(' + roleName + ') ' + compact(used) + ' / 阈值 ' + (warn ? compact(warn) : '未知') + ' · ' + state;
       })(),
       detailLines: focusRow ? [
         '未缓存输入 ' + fmtTokens(focusRow.input || 0) + '（判定口径）',

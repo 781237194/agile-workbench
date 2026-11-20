@@ -252,11 +252,11 @@ async function shot(cdp, file) {
   let after = null;
   for (let i = 0; i < 20; i += 1) {
     after = await cdp.evaluate(`(() => { const host = document.querySelector('#session-usage'); return { role: host ? host.getAttribute('data-usage-role') : '', label: (document.querySelector('#session-usage [data-usage-label]') || {}).textContent || '' }; })()`);
-    if (after && after.role === 'product' && /本会话\(product\)/.test(String(after.label))) break;
+    if (after && after.role === 'product' && /本会话\(产品设计师\)/.test(String(after.label))) break;
     await sleep(100);
   }
   const elapsed = Date.now() - clickAt;
-  check('U5', '点「产品设计师」chip → ≤2s 标签/数值切到该角色', click === 'CLICKED' && after && after.role === 'product' && /本会话\(product\)/.test(String(after.label)) && elapsed <= 2000, { click, elapsed, after });
+  check('U5', '点「产品设计师」chip → ≤2s 标签/数值切到该角色', click === 'CLICKED' && after && after.role === 'product' && /本会话\(产品设计师\)/.test(String(after.label)) && elapsed <= 2000, { click, elapsed, after });
   const shotAfter = await shot(cdp, path.join(OUT, 'usage-after.png'));
   check('U6', '真窗口截图 2（切角色后）', shotAfter > 10000, { bytes: shotAfter });
   const report = { at: new Date().toISOString(), before, after, elapsedMs: elapsed, mockPort: mock.port, screenshots: { before: shotBefore, after: shotAfter } };
