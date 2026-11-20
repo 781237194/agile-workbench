@@ -37,10 +37,10 @@ const byteLen = (v) => {
 const kb = (n) => (n / 1024).toFixed(1) + 'KB';
 const pct = (n, total) => (total > 0 ? ((n / total) * 100).toFixed(2) + '%' : '-');
 
-function runBoot(role) {
+function runBoot(role, extra = []) {
   const env = { ...process.env };
   delete env.DSH_SESSION_ID;   // 避免把宿主会话写进 boot 记录
-  const r = spawnSync(process.execPath, [TOOL, 'boot', '--role', role, '--project', PROJECT, '--json'], {
+  const r = spawnSync(process.execPath, [TOOL, 'boot', '--role', role, '--project', PROJECT, '--json', ...extra], {
     encoding: 'utf8', env, cwd: ROOT, timeout: 300000, maxBuffer: 64 * 1024 * 1024,
   });
   const text = String(r.stdout || '');
@@ -70,8 +70,16 @@ function estimateCountsSwap(payload) {
 function main() {
   const result = { generatedAt: new Date().toISOString(), project: PROJECT, targetBytes: TARGET, roles: [] };
   for (const role of ROLES) {
-    const boot = runBoot(role);
-    const row = { role, status: boot.status, rawBytes: boot.rawBytes, parseError: boot.parseError, topKeys: [], briefingChars: null, countsSwap: null };
+    const boot = runBoot(role, ['--full']);   // 改造前全量（字段级体量/砍项估算）
+    const slim = runBoot(role);               // 默认 slim（AC1 判据：stdout 字节）
+    const row = { role, status: boot.status, rawBytes: boot.rawBytes, fullBytes: boot.rawBytes, slimBytes: slim.rawBytes, slimOk: Boolean(slim.json && slim.json.ok), parseError: boot.parseError, topKeys: [], briefingChars: null, countsSwap: null };
+    if (slim.json && typeof slim.json === 'object') {
+      row.slimBootMeta = slim.json.bootMeta || null;
+      row.slimCounts = slim.json.counts || null;
+      row.slimUnreadLen = Array.isArray(slim.json.unread) ? slim.json.unread.length : null;
+      row.slimTasksLen = Array.isArray(slim.json.tasks) ? slim.json.tasks.length : null;
+    }
+    row.withinTarget = Number(row.slimBytes) <= TARGET;
     if (boot.json && typeof boot.json === 'object') {
       const body = { ...boot.json };
       const total = byteLen(body);
@@ -115,7 +123,7 @@ function main() {
     console.log(JSON.stringify(result, null, 2));
   }
   // 只读 spike：任何角色 boot 失败都算失败（否则数据不可信）
-  const bad = result.roles.filter((r) => r.status !== 0 || !r.jsonBytes);
+  const bad = result.roles.filter((r) => r.status !== 0 || !r.jsonBytes || !r.slimOk);
   process.exit(bad.length ? 1 : 0);
 }
 main();

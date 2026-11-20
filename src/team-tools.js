@@ -2012,13 +2012,31 @@ function createTeamTools(options = {}) {
       // 另给 briefingExcerpt 兼容旧调用方；截断成 400 会让 boot 审计看不到待办/提案。
       briefing: String(value.briefing || '').slice(0, Math.max(400, Number(teamConfig().bootBriefMaxChars || 2000))),
       briefingExcerpt: String(value.briefing || '').slice(0, 400),
-      unread: Array.isArray(value.unread) ? value.unread.length : 0,
-      tasks: Array.isArray(value.tasks) ? value.tasks.length : 0,
-      proposals: Array.isArray(value.proposals) ? value.proposals.length : 0,
+      unread: bootCountOf(value, 'unread', Array.isArray(value.unread) ? value.unread.length : 0),
+      tasks: bootCountOf(value, 'tasks', Array.isArray(value.tasks) ? value.tasks.length : 0),
+      proposals: bootCountOf(value, 'proposals', Array.isArray(value.proposals) ? value.proposals.length : 0),
       expiresAt: Date.now() + Math.max(30000, ttlMs - BOOT_EXPIRY_MARGIN_MS)
     };
     bootCache.set(key, record);
     return { ok: true, code: 'OK', cached: false, ...record };
+  }
+
+  /**
+   * R-e438 §六：boot --json 默认输出把 unread/tasks/proposals 截成预览数组，真值在 counts.*。
+   * 这里统一「counts 优先、数组 length 回退」，保证面板不出现 0/3/NaN（`--full` 仍走回退）。
+   */
+  function bootCountOf(value, key, legacy) {
+    const c = value && value.counts;
+    if (c) {
+      if (key === 'tasks') {
+        const t = c.tasks && typeof c.tasks === "object" ? c.tasks : {};
+        const sum = Number(t.open || 0) + Number(t.working || 0) + Number(t.done || 0);
+        if (Number.isFinite(sum)) return sum;
+      }
+      const direct = key === 'proposals' ? c.pendingProposals : c[key];
+      if (Number.isFinite(Number(direct))) return Number(direct);
+    }
+    return legacy;
   }
 
   function dropBootToken(projectName, role) {
@@ -2049,9 +2067,9 @@ function createTeamTools(options = {}) {
       rulesHash: String(value.rulesHash || ''),
       briefing,
       briefingExcerpt: briefing.slice(0, 400),
-      unread: Number(value.unread || 0),
-      tasks: Number(value.tasks || 0),
-      proposals: Number(value.proposals || 0),
+      unread: bootCountOf(value, 'unread', Number(value.unread || 0)),
+      tasks: bootCountOf(value, 'tasks', Number(value.tasks || 0)),
+      proposals: bootCountOf(value, 'proposals', Number(value.proposals || 0)),
       expiresAt: Date.now() + Math.max(30000, ttlMs - BOOT_EXPIRY_MARGIN_MS)
     };
     bootCache.set(name + '|' + roleId + '|' + sid, record);

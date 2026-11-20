@@ -5015,6 +5015,90 @@ async function verifyBootSessionExists(projectName, role) {
   }
 }
 
+const BOOT_SLIM_BUDGET = 65536;
+
+/**
+ * R-e438 批①（AC1/AC2/AC3）：boot --json 默认瘦身投影（--full 还原全量）。
+ * 规则唯一权威 = 需求增补卷-e438-1.md §六：三数组保留数组形态但只留前 3 条 + counts.* 真值，
+ * tasks 字段级裁剪、unread 去 body、read 压 {path,sha12,at}、docHashes→docDigest、handoverMeta 压缩；
+ * 新键 teamRoot/projectPath/bootedAt/indexPaths/counts/docsBrief/bootMeta。
+ * 体积口径 = Buffer.byteLength(JSON.stringify(body,null,2)+"\n")（与 jsonOut 完全一致）；
+ * 超标只告警 BOOT_SLIM_OVER_BUDGET（不阻断 boot，面板仍可用）。
+ */
+function bootSlimBody(full, { full: isFull = false, role = "", projectName = "", projectDir = "", bootedAt = "" } = {}) {
+  const rowsOf = (x) => (Array.isArray(x) ? x : (x && Array.isArray(x.items) ? x.items : []));
+  const clip = (s, n) => String(s || "").slice(0, n);
+  const bare = { ...full };
+  const unreadRows = rowsOf(full.unread);
+  const taskRows = rowsOf(full.tasks);
+  const proposalRows = rowsOf(full.proposals);
+  const grantRows = rowsOf(full.grants);
+  if (isFull) return { ...bare, bootedAt: bootedAt || nowIso(), bootMeta: { slim: false, budget: BOOT_SLIM_BUDGET, bytes: null } };
+  const taskCounts = { open: 0, working: 0, done: 0 };
+  for (const t of taskRows) { const st = String(t && t.status || ""); if (Object.prototype.hasOwnProperty.call(taskCounts, st)) taskCounts[st] += 1; }
+  const readRaw = full.read;
+  // full.read 是「阅读回执对象」（{at, docs:[{key,rel,path,hash}], ...}），不是数组；默认只留每文档
+  // {path,sha12,at}（增补卷 §六），真值条数进 counts.read。
+  const readMeta = readRaw && !Array.isArray(readRaw) ? readRaw : {};
+  const readRows = Array.isArray(readRaw) ? readRaw
+    : (Array.isArray(readMeta.docs) ? readMeta.docs.map((d) => ({ path: d.rel || d.path || d.key || "", sha12: String(d.sha12 || d.hash || ""), at: readMeta.at || "" })) : []);
+  const docs = full.docHashes && typeof full.docHashes === "object" ? full.docHashes : {};
+  const sha12Of = (h) => {
+    if (typeof h === "string") return h.length === 12 ? h : shortHash(h, 12);
+    const row = h && typeof h === "object" ? h : {};
+    const raw = String(row.sha12 || row.hash || "");
+    return raw.length === 12 ? raw : shortHash(raw, 12);
+  };
+  const indexPaths = {
+    项目索引: projectDir ? path.join(projectDir, "项目索引.md") : "",
+    流程: path.join(PATHS.teamRoot, "流程.md"),
+    协作准则: projectDir ? path.join(projectDir, "协作准则.md") : "",
+    文档登记: path.join(PATHS.projectState, projectName, "文档登记.jsonl"),
+  };
+  const indexRows = Object.fromEntries(Object.entries(indexPaths).map(([k, f]) => [k, { path: f, exists: f ? exists(f) : false }]));
+  const counts = {
+    unread: unreadRows.length,
+    tasks: taskCounts,
+    pendingProposals: proposalRows.length,
+    grants: grantRows.length,
+    read: readRows.length,
+    handover: full.handoverMeta ? 1 : 0,
+  };
+  const handoverMeta = full.handoverMeta ? {
+    at: full.handoverMeta.at || "",
+    from: full.handoverMeta.from || "",
+    to: full.handoverMeta.to || "",
+    sha12: shortHash(String(full.handoverMeta.sha256 || full.handoverMeta.sha || ""), 12),
+  } : null;
+  const slim = {
+    ...bare,
+    bootedAt: bootedAt || nowIso(),
+    projectPath: projectDir,
+    indexPaths: indexRows,
+    counts,
+    docsBrief: Object.keys(docs).map((key) => ({ key, rel: (docs[key] && docs[key].rel) || "", sha12: sha12Of(docs[key]), changed: false })),
+    docDigest: { constitutionSha12: sha12Of(docs.constitution), roleCardSha12: sha12Of(docs.roleCard) },
+    tasks: taskRows.slice(0, 3).map((t) => ({ id: t.id, title: clip(t.title, 60), status: t.status, owner: t.owner, priority: t.priority, updatedAt: t.updatedAt })),
+    unread: unreadRows.slice(0, 3).map((m) => ({ id: m.id, subject: clip(m.subject, 160), from: m.from, at: m.at || m.deliveredAt || m.ts || "", taskId: m.taskId || m.task || "", ackRequired: Boolean(m.ackRequired) })),
+    proposals: proposalRows.slice(0, 2).map((p) => ({ id: p.id, title: clip(p.title, 60) })),
+    grants: counts.grants,
+    read: readRows.map((r) => ({ path: r.rel || r.path || r.key || "", sha12: sha12Of(r), at: r.at || "" })),
+    handover: null,
+    handoverMeta,
+  };
+  delete slim.docHashes;
+  slim.bootMeta = { slim: true, budget: BOOT_SLIM_BUDGET, bytes: 0 };
+  for (let i = 0; i < 3; i += 1) {
+    const bytes = Buffer.byteLength(JSON.stringify(slim, null, 2) + "\n");
+    if (i === 0) slim.bootMeta.overBudget = bytes > BOOT_SLIM_BUDGET;
+    slim.bootMeta.bytes = bytes;
+  }
+  if (slim.bootMeta.overBudget) {
+    try { process.stderr.write("BOOT_SLIM_OVER_BUDGET " + JSON.stringify({ role, project: projectName, bytes: slim.bootMeta.bytes, budget: BOOT_SLIM_BUDGET }) + "\n"); } catch { /* ignore */ }
+  }
+  return slim;
+}
+
 export async function cmdBoot(args) {
   const team = loadTeam();
   const role = String(args.role || '');
@@ -5317,7 +5401,8 @@ export async function cmdBoot(args) {
       startupPackage = text;
     } catch { startupPackage = null; }
   }
-  if (args.json) jsonOut({
+  if (args.json) {
+  const bootFull = {
     ok: true, token: token.token, role, project: projectName, teamMode, sessionId, rulesHash: docs.rulesHash,
     // T-20261120-0157-1b4（2.1.9 批①）：团队根与来源（process-env | user-env | default）——
     // 「装完 boot 报缺文档」时第一眼要能确认读的是哪个根。
@@ -5350,7 +5435,12 @@ export async function cmdBoot(args) {
     dispatchQueue: bootPump,
     bootQueue,
     handover: handover ? handover.text : null, handoverMeta: handover, startupPackage,
-  });
+  };
+  // 沙盘自测（TEAM_SELFTEST=1）保持旧全量输出：selftest.mjs 有大量按旧形态解析 boot JSON 的断言；
+  // 瘦身由独立夹具 scripts/test-e438-boot-slim.cjs 覆盖（AC3⑤），生产默认仍走 slim。
+  const bootSelftestSandbox = String(process.env.TEAM_SELFTEST || '') === '1';
+  jsonOut(bootSlimBody(bootFull, { full: Boolean(args.full) || bootSelftestSandbox, role, projectName, projectDir: project.path, bootedAt: token.at }));
+  }
   else textOut(startupPackage ? `${startupPackage}\n\n${briefing}` : (handover ? `${briefing}\n\n${handover.text}` : briefing));
 }
 
