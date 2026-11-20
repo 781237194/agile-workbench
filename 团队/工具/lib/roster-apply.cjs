@@ -84,7 +84,10 @@ function syncRosterSessions(team, sessions, { roleIds = [], roleNames = {}, acti
     const wanted = map[member.role] ? String(map[member.role]).trim() : '';
     const current = String(member.sessionId || '');
     if (!wanted) {
-      if (current) { applyMemberSession(member, ''); out.changed += 1; out.cleared.push(String(member.role)); }
+      // B-d751（P0）：**读不到不清**。壳层在 DSH 不可达/会话列表为空时会把空 map 传进来，
+      // 旧实现 `applyMemberSession(member, '')` 直接把名册写空 → 全队 send 被
+      // SESSION_MAP_INCONSISTENT 拒死（2026-11-21 03:03 事故）。清理名册只允许走
+      // clearRosterSessions（删项目/归档等显式路径），sync 只负责填空与更新。
       continue;
     }
     const v = validateSessionId(wanted);

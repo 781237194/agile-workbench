@@ -1030,6 +1030,26 @@ function createTeamTools(options = {}) {
     if (!name || !sessions || typeof sessions !== 'object') return { ok: false, code: 'BAD_ROSTER' };
     const team = readJsonSafe(layout.teamFile);
     if (!team || !Array.isArray(team.members)) return { ok: false, code: 'NO_TEAM' };
+    // B-d751（P0）：只有「拿到的值全非空且数量够」才允许写名册。DSH 不可达/会话列表为空/只回一部分时，
+    // 旧实现会把 sessionId 写成空（2026-11-21 03:03 六角色全空、全队 SESSION_MAP_INCONSISTENT）。
+    // 这里按「读不到就什么都不写」处理：skip 并审计原因，名册文件一个字节都不动。
+    const activeMembers = team.members.filter((m) => m && m.role && !m.archived);
+    const expected = activeMembers.length;
+    const provided = Object.entries(sessions)
+      .filter(([, v]) => String(v || '').trim())
+      .map(([role, v]) => [String(role), String(v).trim()]);
+    const got = provided.length;
+    const before = activeMembers.filter((m) => String(m.sessionId || '').trim()).length;
+    const skip = (reason) => {
+      const row = { source: 'team-tools/syncRoster_skipped', reason, expected, got, before, ratio: expected ? Math.round((got / expected) * 100) / 100 : null };
+      try { appendRosterAudit(name, row); } catch { /* 审计失败不影响跳过 */ }
+      try { console.log('[syncRoster] before=' + before + ' after=' + before + ' skipped=' + reason + ' expected=' + expected + ' got=' + got); } catch { /* ignore */ }
+      return { ok: true, code: 'ROSTER_SYNC_SKIPPED', skipped: true, reason, expected, got, changed: 0, cleared: 0, ratio: row.ratio };
+    };
+    if (!got) return skip('dsh_empty_or_unreachable');
+    if (got < expected) return skip('insufficient_sessions');
+    const invalid = provided.filter(([, v]) => !/^session-[A-Za-z0-9._-]+$/.test(v));
+    if (invalid.length) return skip('invalid_session_ids');
     // P0 97db 持久性（T-20261119-044009-7ded）：删除墓碑命中时拒写名册（防 6s 延迟回写），并写名册守卫审计。
     // R1（T-20261119-050705-8a78）：重建豁免读真实 store（不依赖单一 env）；墓碑过期即失效。
     const tombGuardSync = rosterDeletionGuard.deletionTombstoneBlocksRoster({ projectName: name, stateDir: projectStatePaths(name).dir, teamRoot: layout.root, workbenchFile: process.env.AWB_STORE || process.env.TEAM_WORKBENCH_JSON || '' });
@@ -1042,14 +1062,17 @@ function createTeamTools(options = {}) {
       activeProject: name,
     });
     const changed = result.changed + (team.activeProject !== name ? 1 : 0);
+    const after = team.members.filter((m) => m && m.role && !m.archived && String(m.sessionId || '').trim()).length;
+    const ratio = expected ? Math.round((after / expected) * 100) / 100 : null;
+    try { console.log('[syncRoster] before=' + before + ' after=' + after + ' skipped=0 changed=' + changed + ' cleared=' + result.cleared.length + ' ratio=' + ratio); } catch { /* ignore */ }
     if (result.rejected.length) appendRosterAudit(name, { source: 'team-tools/syncRoster', rejected: result.rejected });
     if (changed) {
       try { writeJsonAtomic(layout.teamFile, team); } catch (error) {
         return { ok: false, code: 'ROSTER_WRITE_FAILED', message: String(error && error.message || error).slice(0, 200) };
       }
-      appendRosterAudit(name, { source: 'team-tools/syncRoster', added: result.added, cleared: result.cleared, changed: result.changed });
+      appendRosterAudit(name, { source: 'team-tools/syncRoster', added: result.added, cleared: result.cleared, changed: result.changed, ratio });
     }
-    return { ok: true, code: changed ? 'ROSTER_SYNCED' : 'ROSTER_UNCHANGED', changed, rejected: result.rejected };
+    return { ok: true, code: changed ? 'ROSTER_SYNCED' : 'ROSTER_UNCHANGED', changed, cleared: result.cleared.length, skipped: 0, ratio, rejected: result.rejected };
   }
 
   function registrationFor(projectName) {
