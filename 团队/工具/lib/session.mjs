@@ -1917,6 +1917,8 @@ export async function cmdSession(args) {
     const idleGateJson = idleGate ? {
       ok: idleGate.ok, minutes: idleGate.minutes, actorRole: idleGate.actorRole, actorSessionId: idleGate.actorSessionId,
       skippedSelf: Object.entries(idleGate.roles).filter(([, r]) => r.skippedSelf).map(([roleName]) => roleName),
+      // PM 2026-11-20 13:40 口径：放行体 idleGate 也带秒级剩余（取双方最大值；纯 idle 时为 0）。
+      remainingSec: Math.max(0, ...Object.values(idleGate.roles).map((r) => Number(r.remainingSec) || 0)),
     } : null;
     // R-20261118-143558-eba2：换人前必须有人落交接回执，且回执 sha 与磁盘一致。
     // 沙盘默认豁免（既有 selftest 的 4 处 rotate 无回执），门禁本体用 TEAM_HANDOVER_ENFORCE=1 强制。

@@ -193,6 +193,10 @@ try {
     const src = fs.readFileSync(SESSION_SRC, 'utf8');
     check('X1', 'session.mjs 无「Owner 通道不设此门」「或由 Owner 直接指令换人」', !src.includes('Owner 通道不设此门') && !src.includes('或由 Owner 直接指令换人'), {});
     check('X2', '未新增 actorRole===owner 跳过分支（rotateAllowed 不变）', !/actorRole\s*===\s*'owner'/.test(src) && /export function rotateAllowed\(tokenRole, targetRole\)/.test(src), {});
+    // PM 2026-11-20 13:40 补充口径：--json 放行体 idleGate 也要带 actorRole/actorSessionId/skippedSelf/remainingSec。
+    check('X3', 'idleGate(JSON) 含 actorRole/actorSessionId/skippedSelf/remainingSec',
+      /idleGateJson/.test(src) && /remainingSec:\s*Math\.max\(0,\s*\.\.\.Object\.values\(idleGate\.roles\)/.test(src)
+      && /skippedSelf:\s*Object\.entries\(idleGate\.roles\)/.test(src), {});
   }
 } catch (e) {
   check('E0', '夹具未抛异常', false, { error: String((e && e.stack) || e) });
