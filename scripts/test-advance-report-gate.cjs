@@ -88,9 +88,14 @@ writeJson(WF, {
 // 测试任务（owner=tester → 完成即触发 advance），evidence 指向报告文件但不写「不通过」
 const testTask = runJson(['task', 'create', '--boot', pmToken, '--title', '测试：报告不通过夹具', '--priority', 'P1', '--type', 'task', '--owner', 'tester', '--requirement', reqId]);
 const testTaskId = testTask.json && testTask.json.task ? testTask.json.task.id : '';
-ok('建测试任务后未被误标完成（K2 后建单=open；不得 working/claimedAt 误认领）',
-  Boolean(testTaskId) && String(testTask.json.task.status) !== 'done' && !testTask.json.task.claimedAt,
-  JSON.stringify({ status: testTask.json && testTask.json.task && testTask.json.task.status, claimedAt: testTask.json && testTask.json.task && testTask.json.task.claimedAt }));
+// K2（B-e328）后：task create 只建单，status=open、claimedAt=null、--owner 仅是建议承接人；
+// 「已认领」的唯一入口是 PM send --ack --task 或本人 task claim。旧断言要求 status==='working' 属 K2 前口径（已过期）。
+// 实质判据：不得被误标 done（误标完成）、不得被误认领（status 变 working / 出现 claimedAt）。
+const newTask = (testTask.json && testTask.json.task) || {};
+ok('建测试任务后未误认领/误标完成（K2 后建单 status=open，且无 claimedAt）',
+  Boolean(testTaskId) && String(newTask.status) === 'open' && !newTask.claimedAt
+    && String(newTask.status) !== 'working' && String(newTask.status) !== 'done',
+  JSON.stringify({ status: newTask.status, claimedAt: newTask.claimedAt }));
 
 // ---------- ① 报告说不通过 → 不推进 ----------
 writeReport('测试报告-v190.md', 'status=不通过：AC6/AC7 验收入口未实现', '', reqId);
