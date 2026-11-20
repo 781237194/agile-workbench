@@ -2161,7 +2161,14 @@ function mirrorWorkflowToStore(projectId, teamName, projectPath) {
   }
 }
 
-/** a514：工作流副作用（镜像 store 2.7MB 回写）后台化：合并 250ms、重试 2 次、失败审计+事件可见可重试。 */
+// B-33b9 附带修复（P0 启动崩溃）：本 require 原在 :2532，却在 :2180 就被使用 →
+// `Cannot access 'createWorkflowSideEffects' before initialization`，新起工作台直接白屏。
+const { createWorkflowSideEffects } = require('./workflow-side-effects');
+
+/**
+ * a514：工作流写回后的「重量级副作用」（镜像 store 2.7MB 回写）不再占用点击响应。
+ * 合并：同项目 250ms 内的多次请求只跑一次；重试 2 次；失败写审计并发事件让界面可见/可重试。
+ */
 function workflowSideEffectsAudit(row) {
   try {
     const dir = path.join(ledgerTeamRoot(), '状态');
@@ -2526,7 +2533,6 @@ let dshDiscovery = { at: 0, last: null, running: null };
 const sessionCreateLocks = new Map();
 const provisionLocks = new Map();
 
-const { createWorkflowSideEffects } = require('./workflow-side-effects');
 async function createSessionOnce(projectId, roleId, options) {
   const key = String(projectId) + ':' + String(roleId);
   if (sessionCreateLocks.has(key)) return sessionCreateLocks.get(key);
@@ -11778,7 +11784,7 @@ installShellAuditSensors();
     // B-4fdd：启动首个检查限时 1200ms（否则离线冷启动要等 8s）；之后恢复原超时。
     const firstStartupCheck = isFirstStartupDshCheck();
     if (firstStartupCheck) markStartup('dshCheckStart');
-    const status = await dsh.check({ timeoutMs: firstStartupCheck ? 1200 : (canDiscover ? DSH_DISCOVERY_CHECK_TIMEOUT_MS : 8000) });
+    const status = await dsh.check({ timeoutMs: firstStartupCheck ? 700 : (canDiscover ? DSH_DISCOVERY_CHECK_TIMEOUT_MS : 8000) });
     if (firstStartupCheck) {
       startupMarks.dshOnline = Boolean(status.online);
       markStartup('dshCheckEnd', { online: Boolean(status.online), code: String(status.code || '') });
@@ -11801,10 +11807,14 @@ installShellAuditSensors();
       if (discovery && discovery.ok) {
         finalStatus = discovery.status || await dsh.check({ timeoutMs: 6000 });
       } else if (discovery && !discovery.skipped) {
+        // B-33b9 AC⑥：默认视图只给人话三段式；旧的完整技术原因放 technicalDetail（展开区/--json）。
+        const threeLines = Array.isArray(discovery.diagnosticLines) && discovery.diagnosticLines.length === 3
+          ? discovery.diagnosticLines.join('；')
+          : '';
         finalStatus = {
           ...status,
-          // B-0cbc：发现失败文案含「已探测端口全集 + 各源读数 + 下一步」，400 会砍掉关键信息。
-          message: String((status.message || 'DSH 离线') + '；' + discovery.message).slice(0, 1200),
+          message: String(threeLines || (status.message || 'DSH 离线') + '；' + discovery.message).slice(0, 1200),
+          technicalDetail: String((status.message || '') + '；' + (discovery.message || '')).slice(0, 2000),
           discovery: dshDiscoverySummary(discovery)
         };
       } else if (discovery && discovery.code === 'DSH_DISCOVERY_COOLDOWN'
@@ -11812,7 +11822,12 @@ installShellAuditSensors();
         // 冷却期内重复检测也把上一次失败原因带出来，避免只显示 “fetch failed”。
         finalStatus = {
           ...status,
-          message: String((status.message || 'DSH 离线') + '；' + dshDiscovery.last.message).slice(0, 1200),
+          message: String(
+            (Array.isArray(dshDiscovery.last.diagnosticLines) && dshDiscovery.last.diagnosticLines.length === 3
+              ? dshDiscovery.last.diagnosticLines.join('；')
+              : (status.message || 'DSH 离线') + '；' + dshDiscovery.last.message)
+          ).slice(0, 1200),
+          technicalDetail: String((status.message || '') + '；' + (dshDiscovery.last.message || '')).slice(0, 2000),
           discovery: dshDiscoverySummary(dshDiscovery.last)
         };
       }
@@ -21517,6 +21532,12 @@ function dshDiscoverySummary(result) {
     code: result.code || '',
     // B-0cbc（PM ②⑤）：摘要要带上完整端口清单与端口文件读数，界面/测试与文案同源对账。
     message: String(result.message || '').slice(0, 1200),
+    // B-33b9 AC⑥：失败人话三段式（默认视图 ≤3 行），技术明细留在 details/--json。
+    diagnosticLines: Array.isArray(result.diagnosticLines) ? result.diagnosticLines.slice(0, 3).map((line) => String(line)) : [],
+    details: Array.isArray(result.details) ? result.details.slice(0, 12).map((line) => String(line).slice(0, 300)) : [],
+    listeners: Array.isArray(result.listeners) ? result.listeners.slice(0, 40).map((row) => ({ port: Number(row.port) || 0, pid: Number(row.pid) || 0 })) : [],
+    processDiscovery: result.processDiscovery || null,
+    pinUnreachable: Boolean(result.pinUnreachable),
     source: result.source || '',
     shouldPersist: Boolean(result.shouldPersist),
     probedPorts: Array.isArray(result.probedPorts) ? result.probedPorts.slice(0, 64) : [],
@@ -22166,6 +22187,16 @@ async function adoptDiscoveredDsh(discovery) {
   const baseUrl = normalizeDshBaseUrl(discovery && discovery.baseUrl);
   const previousBaseUrl = dsh.baseUrl;
   const warnings = [];
+  // B-33b9 AC③：用户显式 pin（source=user/pinned）优先，自动发现不得覆盖；
+  // pin 不可达时只临时改用命中地址并在界面标注，dsh.json 保持 pin 原样。
+  const pinActive = Boolean(DSH_EXPLICIT.baseUrl);
+  const pinUnreachable = pinActive && String(discovery && discovery.code || '') === 'DSH_FOUND_PIN_UNREACHABLE';
+  if (pinUnreachable) {
+    warnings.push({
+      code: 'DSH_PIN_UNREACHABLE_TEMP_FALLBACK',
+      message: '显式 pin 地址 ' + DSH_EXPLICIT.baseUrl + ' 不可达，本次临时使用自动发现的 ' + baseUrl + '（未覆盖 dsh.json 里的 pin）'
+    });
+  }
   if (baseUrl === previousBaseUrl) {
     const status = await dsh.check({ timeoutMs: 5000 });
     return {
@@ -22173,6 +22204,8 @@ async function adoptDiscoveredDsh(discovery) {
       baseUrl,
       previousBaseUrl,
       persisted: false,
+      pinUnreachable,
+      pinActive,
       cookieOk: true,
       webview: { ok: true, via: 'none' },
       status,
@@ -22182,15 +22215,18 @@ async function adoptDiscoveredDsh(discovery) {
   dsh = new DshAdapter(baseUrl);
   let persisted = false;
   let persistError = null;
-  try {
-    persistDshConfig(baseUrl, { source: 'auto' });
-    persisted = true;
-  } catch (error) {
-    persistError = {
-      code: 'DSH_CONFIG_WRITE_FAILED',
-      message: String(error && error.message || error).slice(0, 200)
-    };
-    warnings.push(persistError);
+  const mayPersist = !pinActive && discovery.shouldPersist !== false;
+  if (mayPersist) {
+    try {
+      persistDshConfig(baseUrl, { source: 'auto' });
+      persisted = true;
+    } catch (error) {
+      persistError = {
+        code: 'DSH_CONFIG_WRITE_FAILED',
+        message: String(error && error.message || error).slice(0, 200)
+      };
+      warnings.push(persistError);
+    }
   }
   const cookieOk = await installDshCookie();
   if (!cookieOk) {
@@ -22205,6 +22241,8 @@ async function adoptDiscoveredDsh(discovery) {
     previousBaseUrl,
     persisted,
     persistError,
+    pinActive,
+    pinUnreachable,
     cookieOk,
     webview,
     status,
@@ -22259,12 +22297,10 @@ async function runDshDiscovery(reason = 'status', budgets = {}) {
         ...(budgets.fast ? {
           skipProcessDiscovery: true,
           includeRange: false,
-          // 首轮只探权威源（env/端口文件/dsh.json/默认端口）；全段扫描挪到首屏后的后台重试，
-          // 避免「扫 16k 端口」把首轮发现耗时抖到 1-3s（PM 012728 离群值就是这里）。
+          // B-33b9 AC④：首屏只做「netstat 监听端口枚举 + 特征校验」，不扫段；
+          // 总预算 1.2s（AC 要求发现链 ≤1.5s，冷启墙钟 ≤2s 给 check 留 700ms）。
+          totalBudgetMs: 1200,
           includeScan: false,
-          scanBudgetMs: Number(budgets.scanBudgetMs) > 0 ? Number(budgets.scanBudgetMs) : 500,
-          scanConnectTimeoutMs: Number(budgets.scanConnectTimeoutMs) > 0 ? Number(budgets.scanConnectTimeoutMs) : 80,
-          scanConcurrency: Number(budgets.scanConcurrency) > 0 ? Number(budgets.scanConcurrency) : 128,
           maxCandidates: 8,
         } : {}),
       });
@@ -22321,8 +22357,11 @@ async function runDshDiscovery(reason = 'status', budgets = {}) {
       return result;
     }
     const changed = Boolean(adopted.changed);
+    const persistNote = adopted.persisted
+      ? '（已写入 dsh.json）'
+      : (adopted.pinActive ? '（用户 pin 优先，未覆盖 dsh.json）' : '（未能写入 dsh.json）');
     const message = changed
-      ? label + ' DSH：' + previousBaseUrl + ' → ' + adopted.baseUrl + (adopted.persisted ? '（已写入 dsh.json）' : '（未能写入 dsh.json）')
+      ? label + ' DSH：' + previousBaseUrl + ' → ' + adopted.baseUrl + persistNote
       : 'DSH 地址已是最新：' + adopted.baseUrl;
     const result = {
       ...discovery,

@@ -295,9 +295,13 @@ const DSH_DISCOVERY_MAX_LISTENERS = 40; // P1-4：netstat 监听端口候选上�
 // 不再扫 49152–65535 全段（Owner 现场：真正端口 55263 从未被探测过）。
 const DSH_NETSTAT_BUDGET_MS = 300;
 const DSH_LISTENER_PROBE_CONCURRENCY = 8;
-const DSH_LISTENER_PROBE_TIMEOUT_MS = 400;
+const DSH_LISTENER_PROBE_TIMEOUT_MS = 250;
 const DSH_LISTENER_BUDGET_MS = 1500;
 const DSH_LISTENER_MAX_CANDIDATES = 40;
+// 只探「最像 DSH」的前 N 个监听端口（按端口大小排序，DSH 随机端口通常在 10000+）。
+// 16 个 = 8 并发 × 2 波，单候选用例硬上限 620ms → 最坏 ~1.24s，满足发现链 ≤1.5s，
+// 同时避免在启动事件循环抖动时把全部 40+ 个系统端口都等一遍（实测会拖到 4–5s）。
+const DSH_LISTENER_MAX_PROBE = 16;
 
 function normalizeLocalBaseUrl(raw) {
   let text = String(raw == null ? '' : raw).trim();
@@ -463,14 +467,16 @@ async function probeDshVersion(baseUrl, options = {}) {
 function probeTcpPort(host, port, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (open) => {
+    const timer = setTimeout(() => finish(false), Math.max(50, Number(timeoutMs) || 250));
+    function finish(open) {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       try { socket.destroy(); } catch { /* 忽略 */ }
       resolve(open);
-    };
+    }
     const socket = net.connect({ host, port });
-    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.setTimeout(Math.max(50, Number(timeoutMs) || 250), () => finish(false));
     socket.once('connect', () => finish(true));
     socket.once('error', () => finish(false));
   });
@@ -926,31 +932,60 @@ function candidateSourceLabel(source) {
   return labels[source] || source;
 }
 
-function addCandidate(candidates, seen, rawUrl, source, priority, evidence) {
+function addCandidate(candidates, seen, rawUrl, source, priority, evidence, extra) {
   const baseUrl = normalizeLocalBaseUrl(rawUrl);
   if (!baseUrl || seen.has(baseUrl)) return false;
   seen.add(baseUrl);
   let port = 0;
   try { port = Number(new URL(baseUrl).port) || 0; } catch { /* 已校验 */ }
-  candidates.push({ baseUrl, port, source, priority, evidence: String(evidence || '') });
+  candidates.push({ baseUrl, port, source, priority, evidence: String(evidence || ''), ...(extra && typeof extra === 'object' ? extra : {}) });
   return true;
 }
 
-async function probeCandidates(candidates, timeoutMs, concurrency) {
+async function probeCandidates(candidates, timeoutMs, concurrency, deadline) {
   const results = new Array(candidates.length);
   const limit = Number(concurrency) > 0 ? Number(concurrency) : DSH_DISCOVERY_PROBE_CONCURRENCY;
+  const hardDeadline = Number(deadline) > 0 ? Number(deadline) : 0;
   let cursor = 0;
+  let skipped = 0;
   const worker = async () => {
     while (cursor < candidates.length) {
+      // B-33b9：发现链总预算硬闸——到点后未探的候选直接跳过，不能把首屏拖到 2s+。
+      if (hardDeadline && Date.now() >= hardDeadline) { skipped += 1; cursor += 1; continue; }
       const index = cursor++;
       const candidate = candidates[index];
-      const probe = await probeDshWeb(candidate.baseUrl, { timeoutMs });
+      const timeout = hardDeadline ? Math.max(120, Math.min(timeoutMs, hardDeadline - Date.now())) : timeoutMs;
+      // B-33b9：先做 TCP 判活（250ms 级、可中断），死端口不再发 HTTP——
+      // Windows 上对「被防火墙丢弃」的端口发 fetch 会卡 5s，AbortSignal 也救不回首屏。
+      let host = '127.0.0.1';
+      try { host = String(new URL(candidate.baseUrl).hostname || '127.0.0.1').replace(/^\[|\]$/g, ''); } catch { /* 用默认 */ }
+      const tcpOpen = candidate.port > 0 ? await probeTcpPort(host, candidate.port, Math.min(250, timeout)) : true;
+      if (!tcpOpen) {
+        results[index] = { ...candidate, ok: false, code: 'DSH_PROBE_TCP_CLOSED', elapsedMs: 0, message: '端口未监听' };
+        continue;
+      }
+      // HTTP 特征校验也加硬闸：某些系统服务 TCP 能连但永不回 HTTP，fetch 的超时在 Windows 上
+      // 偶尔要 5s 才生效——这里用 Promise.race 保证单候选 ≤2×timeout+120ms 一定返回。
+      const hardProbeMs = Math.max(200, timeout * 2 + 120);
+      const probe = await Promise.race([
+        probeDshWeb(candidate.baseUrl, { timeoutMs: timeout }),
+        new Promise((resolve) => setTimeout(() => resolve({
+          ok: false,
+          code: 'DSH_PROBE_HARD_TIMEOUT',
+          baseUrl: candidate.baseUrl,
+          elapsedMs: hardProbeMs,
+          message: '特征校验超过 ' + hardProbeMs + 'ms（已跳过）'
+        }), hardProbeMs))
+      ]);
       results[index] = { ...candidate, ...probe };
     }
   };
   const workers = Array.from({ length: Math.min(limit, candidates.length) }, worker);
-  await Promise.all(workers);
-  return results.filter(Boolean);
+  // B-33b9：调用方可能用 Promise.race 到点取快照——把「已完成结果」实时挂在 promise 上，
+  // 这样即使个别候选的 fetch 卡住，也能拿到先探到的命中（真 DSH 通常在第一批里）。
+  const done = Promise.all(workers).then(() => results.filter(Boolean));
+  done.liveResults = results;
+  return done;
 }
 
 /**
@@ -1043,6 +1078,7 @@ async function discoverDshWeb(options = {}) {
     listenerMs: 0,
     listenerCount: 0,
     listenerProbes: 0,
+    listenerSkipped: 0,
     listenerHit: false,
     listenerBudgetHit: false,
     totalBudgetMs,
@@ -1089,52 +1125,89 @@ async function discoverDshWeb(options = {}) {
   let best = pickBestProbe(probes, savedBaseUrl);
   stats.quickHit = Boolean(best);
   let processInfo = { ok: false, code: 'DSH_PROCESS_SKIPPED', processes: [], ports: [], argPorts: [], error: best ? '权威源已命中，跳过进程发现' : '已跳过进程发现' };
+  let listenerInfo = { ok: false, code: best ? 'DSH_LISTENER_SKIPPED' : 'DSH_LISTENER_PENDING', listeners: [], error: '' };
   if (best) {
     stats.processSkipped = true;
-  } else if (!options.skipProcessDiscovery) {
-    const processStarted = Date.now();
-    try {
-      processInfo = await collectDshProcessInfo({
-        timeoutMs: Number(options.processTimeoutMs) > 0 ? Number(options.processTimeoutMs) : undefined
-      });
-    } catch (error) {
-      processInfo = {
-        ok: false,
-        code: 'DSH_PROCESS_QUERY_FAILED',
-        processes: [],
-        ports: [],
-        argPorts: [],
-        error: String(error && error.message || error).slice(0, 240)
-      };
-    }
-    stats.processMs = Date.now() - processStarted;
   } else {
-    stats.processSkipped = true;
-    // 快通道（skipProcessDiscovery）：仍用 netstat 拿监听端口（约 100ms，不做 WMI/进程反查）。
-    // Owner 0321 现场：DSH 55263 在首轮被跳过、后台又被冷却吃掉 → 应用永久离线；这条兜底让 55263 直接命中。
+    // B-33b9 AC①：先做「本机监听端口枚举」（netstat ≤300ms），这是主路径；
+    // 它比 wmic/PowerShell 进程查询便宜得多，Electron 形态也能拿到 pid→端口。
     if (options.skipListenerProbe !== true) {
       const listenerStarted = Date.now();
+      const remain = Math.max(0, deadline - Date.now());
       try {
-        const listeners = await listWindowsListeners({
-          timeoutMs: Number(options.listenerTimeoutMs) > 0 ? Number(options.listenerTimeoutMs) : 2500
+        const waitMs = Math.max(200, Math.min(DSH_NETSTAT_BUDGET_MS + 400, remain || DSH_NETSTAT_BUDGET_MS));
+        listenerInfo = await Promise.race([
+          listWindowsListeners({ timeoutMs: Math.max(120, Math.min(DSH_NETSTAT_BUDGET_MS, remain || DSH_NETSTAT_BUDGET_MS)) }),
+          new Promise((resolve) => setTimeout(() => resolve({
+            ok: false,
+            code: 'DSH_NETSTAT_TIMEOUT',
+            listeners: [],
+            error: 'netstat 超过 ' + waitMs + 'ms 未返回（已跳过，后台重试）'
+          }), waitMs))
+        ]);
+      } catch (error) {
+        listenerInfo = { ok: false, code: 'DSH_NETSTAT_FAILED', listeners: [], error: String(error && error.message || error).slice(0, 200) };
+      }
+      stats.listenerMs = Date.now() - listenerStarted;
+      stats.listenerCount = Array.isArray(listenerInfo.listeners) ? listenerInfo.listeners.length : 0;
+      if (!listenerInfo.ok) stats.listenerError = String(listenerInfo.error || 'netstat 不可用').slice(0, 200);
+    }
+    // B-33b9：监听端口按「像 DSH 的程度」排序——DSH 的随机端口通常在 10000+，
+    // 135/445/5040 这类系统端口排后面，避免 1.5s 预算被系统端口吃掉、真端口没探到。
+    const listenerRank = (listener) => (Number(listener.port) >= 10000 ? 2 : (Number(listener.port) >= 1024 ? 1 : 0));
+    const orderedListeners = (listenerInfo.listeners || [])
+      .sort((a, b) => listenerRank(b) - listenerRank(a) || Number(b.port) - Number(a.port))
+      .slice(0, DSH_LISTENER_MAX_PROBE);
+    for (const listener of orderedListeners) {
+      addCandidate(candidates, seen, listener.baseUrl, 'netstat-port', 4, 'netstat 监听 ' + listener.port + '（pid ' + listener.pid + '）', { pid: listener.pid });
+    }
+    // B-33b9 AC②：对候选并发 ≤8 探测（单探 400ms），发现链总预算 ≤1.5s。
+    const listenerWave = candidates.filter((candidate) => candidate.source === 'netstat-port');
+    if (listenerWave.length && Date.now() < deadline) {
+      const listenerWaveStarted = Date.now();
+      const remain = Math.max(200, deadline - Date.now());
+      const listenerProbePromise = probeCandidates(
+        listenerWave,
+        Math.min(DSH_LISTENER_PROBE_TIMEOUT_MS, remain),
+        DSH_LISTENER_PROBE_CONCURRENCY,
+        deadline
+      );
+      // 单候选已有 TCP/HTTP 硬上限（≤620ms），这里不再用墙钟 race 抢快照——
+      // 启动期事件循环抖动时 race 会先于 IO 回调触发，反而丢掉已命中的真端口。
+      const listenerProbeResult = await listenerProbePromise;
+      probes = probes.concat(listenerProbeResult);
+      stats.listenerProbes = listenerWave.length;
+      stats.listenerSkipped = Math.max(0, listenerWave.length - listenerProbeResult.length);
+      stats.listenerWaveMs = Date.now() - listenerWaveStarted;
+      best = pickBestProbe(probes, savedBaseUrl);
+      stats.listenerHit = Boolean(best && best.source === 'netstat-port');
+      stats.listenerBudgetHit = Date.now() >= deadline;
+    }
+    if (best) {
+      // 命中即用 netstat 的 pid→端口 作为进程证据（AC⑤：不再报「dsh 进程=0 个」）。
+      processInfo = processInfoFromListeners(listenerInfo, best);
+      stats.processSkipped = true;
+    } else if (!options.skipProcessDiscovery) {
+      const processStarted = Date.now();
+      try {
+        processInfo = await collectDshProcessInfo({
+          timeoutMs: Number(options.processTimeoutMs) > 0
+            ? Number(options.processTimeoutMs)
+            : Math.max(400, Math.min(1200, deadline - Date.now()))
         });
-        const listenerPorts = (listeners && listeners.ok ? listeners.listeners : [])
-          .filter((l) => l && Number(l.port) >= 1024)
-          .slice(0, DSH_DISCOVERY_MAX_LISTENERS)
-          .map((l) => ({ port: l.port, pid: l.pid, baseUrl: l.baseUrl }));
+      } catch (error) {
         processInfo = {
           ok: false,
-          code: 'DSH_PROCESS_SKIPPED',
-          method: 'netstat-only',
+          code: 'DSH_PROCESS_QUERY_FAILED',
           processes: [],
           ports: [],
           argPorts: [],
-          listenerPorts,
-          error: ''
+          error: String(error && error.message || error).slice(0, 240)
         };
-        stats.listenerPorts = listenerPorts.length;
-      } catch { /* 兜底失败不影响主流程 */ }
-      stats.listenerProbeMs = Date.now() - listenerStarted;
+      }
+      stats.processMs = Date.now() - processStarted;
+    } else {
+      stats.processSkipped = true;
     }
   }
   // 进程/netstat/默认端口候选只在权威源落空时才加（命中就完全不查进程）。
@@ -1145,8 +1218,7 @@ async function discoverDshWeb(options = {}) {
     for (const listener of processInfo.ports || []) {
       addCandidate(candidates, seen, listener.baseUrl, 'process-port', 4, 'pid ' + listener.pid + ' 监听 ' + listener.port);
     }
-    const listenerCandidates = (processInfo.listenerPorts || []).slice(0, DSH_DISCOVERY_MAX_LISTENERS);
-    for (const listener of listenerCandidates) {
+    for (const listener of (processInfo.listenerPorts || []).slice(0, DSH_DISCOVERY_MAX_LISTENERS)) {
       addCandidate(candidates, seen, listener.baseUrl, 'netstat-port', 5, 'netstat 监听 ' + listener.port + '（pid ' + listener.pid + '）');
     }
     addCandidate(candidates, seen, 'http://127.0.0.1:' + DSH_WEB_DEFAULT_PORT, 'default', 5, '默认端口');
@@ -1154,21 +1226,10 @@ async function discoverDshWeb(options = {}) {
   let rangeProbed = false;
   let scan = null;
   const canProbeBeyond = !explicitBaseUrl && options.includeRange !== false;
-  // 快通道 netstat 候选：本机监听端口几十个，DSH 可能排在后面——必须全量并发探，不能按 maxCandidates 截断。
-  if (!best && processInfo.method === 'netstat-only') {
-    const listenerWave = candidates.filter((c) => c && c.source === 'netstat-port');
-    if (listenerWave.length) {
-      const listenerWaveStarted = Date.now();
-      probes = probes.concat(await probeCandidates(
-        listenerWave,
-        Math.min(probeTimeoutMs, 600)
-      ));
-      stats.listenerWaveMs = Date.now() - listenerWaveStarted;
-      best = pickBestProbe(probes, savedBaseUrl);
-    }
-  }
   if (!best) {
-    const wave1 = candidates.slice(0, Math.min(DSH_DISCOVERY_MAX_WAVE1, maxCandidates));
+    // 已探过的监听端口不重复探；只探进程参数/默认端口等新增候选。
+    const wave1 = candidates.filter((candidate) => candidate.source !== 'netstat-port')
+      .slice(0, Math.min(DSH_DISCOVERY_MAX_WAVE1, maxCandidates));
     if (wave1.length) {
       const waveStarted = Date.now();
       probes = probes.concat(await probeCandidates(wave1, probeTimeoutMs));
@@ -1190,8 +1251,9 @@ async function discoverDshWeb(options = {}) {
       best = pickBestProbe(probes, savedBaseUrl);
     }
   }
-  // F-4-7：其它来源全落空，才在 127.0.0.1 的 6000–7000 里做有界扫描（先 TCP 判活，再验 DSH 特征）。
-  if (!best && canProbeBeyond && options.includeScan !== false) {
+  // B-33b9 AC①④：全段扫描（49152–65535）**默认关闭**，只保留显式 legacy 开关；
+  // 生产路径改为「监听端口枚举 + 特征校验」，端口来源是 netstat 列表而非 1.6 万个端口。
+  if (!best && canProbeBeyond && options.includeScan === true) {
     // d637：优先扫「历史端口 ±16」（上次保存/env/端口文件/默认端口），再退全段（倒序）。
     const priorityPorts = [];
     const pushAround = (basePort) => {
@@ -1243,10 +1305,21 @@ async function discoverDshWeb(options = {}) {
     ok: Boolean(processInfo.ok),
     method: processInfo.method || '',
     dshProcesses: (processInfo.processes || []).length,
+    identified: Boolean(processInfo.identified),
+    form: String(processInfo.form || ''),
+    message: String(processInfo.message || ''),
     ports: (processInfo.ports || []).map((listener) => listener.port),
     argPorts: (processInfo.argPorts || []).slice(),
     listenerPorts: (processInfo.listenerPorts || []).map((listener) => listener.port),
     error: 'error' in processInfo ? String(processInfo.error || '').slice(0, 240) : ''
+  };
+  // B-33b9 AC⑤：监听端口是 pid→端口的权威证据（Electron 形态也能命中）。
+  const listenerSummary = (listenerInfo.listeners || []).map((listener) => ({ port: listener.port, pid: listener.pid, baseUrl: listener.baseUrl })).slice(0, DSH_DISCOVERY_MAX_LISTENERS);
+  const processDiscovery = {
+    ...processSummary,
+    listenerCount: listenerSummary.length,
+    netstatOk: Boolean(listenerInfo.ok),
+    netstatError: String(listenerInfo.error || '').slice(0, 200)
   };
   const portFileSummary = portFiles.map((entry) => ({ file: entry.file, port: entry.port }));
   const valid = probes.filter((probe) => probe.ok).sort((a, b) => a.priority - b.priority);
@@ -1272,7 +1345,8 @@ async function discoverDshWeb(options = {}) {
       explicitIgnored: true,
       explicitBaseUrl, explicitSource, savedBaseUrl,
       candidates, probes, valid: validDistinct,
-      process: processSummary, portFiles: portFileSummary, portFileReadout,
+      process: processSummary, processDiscovery, listeners: listenerSummary,
+      portFiles: portFileSummary, portFileReadout,
       probedPorts: probes.map((p) => p.port).filter((p) => Number.isInteger(p) && p > 0),
       shouldPersist: true,
       rangeProbed, scan,
@@ -1295,6 +1369,8 @@ async function discoverDshWeb(options = {}) {
       probes,
       valid: validDistinct,
       process: processSummary,
+      processDiscovery,
+      listeners: listenerSummary,
       portFiles: portFileSummary,
       rangeProbed,
       scan,
@@ -1324,6 +1400,8 @@ async function discoverDshWeb(options = {}) {
       probes,
       valid: validDistinct,
       process: processSummary,
+      processDiscovery,
+      listeners: listenerSummary,
       portFiles: portFileSummary,
       rangeProbed,
       scan,
@@ -1350,6 +1428,8 @@ async function discoverDshWeb(options = {}) {
       probes,
       valid: validDistinct,
       process: processSummary,
+      processDiscovery,
+      listeners: listenerSummary,
       portFiles: portFileSummary,
       rangeProbed,
       scan,
@@ -1361,51 +1441,64 @@ async function discoverDshWeb(options = {}) {
   // B-0cbc（PM ②）：已探测端口必须**如实全列**（旧实现 slice(0,8) 导致「说 18 个只列 6 个」）。
   const probedSorted = Array.from(new Set(probedPorts)).sort((a, b) => a - b);
   const listedPorts = probedSorted.map((port) => '127.0.0.1:' + port).join('、');
-  const reasons = [];
-  if (probedSorted.length) reasons.push('已探测 ' + probedSorted.length + ' 个本机端口（' + listedPorts + '），均未返回 DSH 特征');
-  else reasons.push(processSummary.error || '没有可探测的本机端口');
-  // 各权威源读数：env / 端口文件 / dsh.json / 进程 / 扫描段（PM ②）。
-  const envReadout = [
-    'DSH_WEB_URL=' + (env && env.DSH_WEB_URL ? String(env.DSH_WEB_URL) : '（未设）'),
-    'DSH_WEB_PORT=' + (env && env.DSH_WEB_PORT ? String(env.DSH_WEB_PORT) : '（未设）'),
-    'DSH_PORT=' + (env && env.DSH_PORT ? String(env.DSH_PORT) : '（未设）'),
-  ].join('；');
+  const listenerCount = listenerSummary.length;
   const checkedCount = portFileReadout.length;
   const existedCount = portFileReadout.filter((row) => row.exists).length;
   const portFileReadoutText = checkedCount
     ? '端口文件 查了 ' + checkedCount + ' 个（存在 ' + existedCount + ' 个）'
       + (existedCount ? '：' + portFileReadout.filter((row) => row.exists).map((row) => row.file + '=' + (row.port || row.note)).join('；') : '；全部缺失')
     : '端口文件（已跳过）';
-  reasons.push('来源读数：' + envReadout + '；' + portFileReadoutText
-    + '；dsh.json 上次地址=' + (savedBaseUrl || '（无）')
-    + '；dsh 进程=' + (processSummary.dshProcesses || 0) + ' 个'
+  // B-33b9 AC⑤⑥：不再出现「dsh 进程=0 个」；进程形态由 netstat 的 pid→端口 证据给出。
+  const processReadout = processSummary.identified
+    ? '进程识别：已从 netstat 定位 DSH（pid ' + (processSummary.ports || []).join('/') + '，形态 ' + (processSummary.form || 'Electron') + '）'
+    : '进程识别：未能识别 DSH 进程（形态：' + (processSummary.form || '未知') + '），netstat 监听端口 ' + listenerCount + ' 个';
+  const details = [];
+  if (probedSorted.length) details.push('已探测 ' + probedSorted.length + ' 个本机端口（' + listedPorts + '），均未返回 DSH 特征');
+  if (listenerInfo.ok) details.push('监听端口枚举：' + listenerCount + ' 个（耗时 ' + stats.listenerMs + 'ms，探测 ' + stats.listenerProbes + ' 个）');
+  else details.push('监听端口枚举失败：' + String(listenerInfo.error || 'netstat 不可用').slice(0, 160));
+  details.push('来源读数：' + [
+    'DSH_WEB_URL=' + (env && env.DSH_WEB_URL ? String(env.DSH_WEB_URL) : '（未设）'),
+    'DSH_WEB_PORT=' + (env && env.DSH_WEB_PORT ? String(env.DSH_WEB_PORT) : '（未设）'),
+    'DSH_PORT=' + (env && env.DSH_PORT ? String(env.DSH_PORT) : '（未设）'),
+  ].join('；') + '；' + portFileReadoutText + '；dsh.json 上次地址=' + (savedBaseUrl || '（无）') + '；' + processReadout
     + (processSummary.argPorts && processSummary.argPorts.length ? '（--port ' + processSummary.argPorts.join('/') + '）' : ''));
   if (scan && Array.isArray(scan.ports)) {
-    reasons.push(scan.ports.length
+    details.push(scan.ports.length
       ? '扫描 ' + scanStart + '–' + scanEnd + ' 有 ' + scan.ports.length + ' 个端口在监听但都不是 DSH'
       : '扫描 ' + scanStart + '–' + scanEnd + ' 没有发现监听端口');
   }
-  if (portFiles.length) reasons.push('端口文件写了 ' + portFiles.map((entry) => entry.port).join('/') + '，均不可用');
-  // B-0cbc（PM ⑤）：失败态给可执行下一步（预填候选 + 如何取端口）。
+  if (portFiles.length) details.push('端口文件写了 ' + portFiles.map((entry) => entry.port).join('/') + '，均不可用');
+  // AC⑥：失败时人话三段式（默认视图 ≤3 行），技术明细留在 details/--json。
+  const lastKnownBaseUrl = savedBaseUrl || explicitBaseUrl || '';
+  const line1 = listenerInfo.ok
+    ? '已检查 ' + listenerCount + ' 个监听端口，命中 0'
+    : '已检查 0 个监听端口（netstat 不可用：' + String(listenerInfo.error || '未知错误').slice(0, 60) + '）';
+  const line2 = lastKnownBaseUrl
+    ? '最近一次地址 ' + lastKnownBaseUrl + ' 现在不通'
+    : '没有可用的上次地址';
   const nextHints = [];
   if (portFiles.length) nextHints.push('先试端口文件里写过的 ' + portFiles.map((entry) => 'http://127.0.0.1:' + entry.port).join('、'));
-  if (probedSorted.length) nextHints.push('已知本机在用的候选：' + probedSorted.slice(0, 6).map((port) => 'http://127.0.0.1:' + port).join('、'));
-  nextHints.push('在 DSH 里查看 设置 → Web/HTTP 端口，或看 DSH 启动命令行里的 --port；把地址填到 工作台 → 设置 → DSH 外部地址 后点「保存并探测」');
-  const suffix = (savedBaseUrl ? '；保留原地址 ' + savedBaseUrl : '') + '。下一步：' + nextHints.join('；');
+  if (listenerCount) nextHints.push('在「设置 → 诊断」里从本机 ' + listenerCount + ' 个监听端口中选 DSH 的真实端口');
+  nextHints.push('重启 DSH 后点「手动重新发现」，或把 DSH 地址填到 工作台 → 设置 → DSH 外部地址 后保存');
+  const line3 = '下一步：' + nextHints.slice(0, 2).join('；');
+  const diagnosticLines = [line1, line2, line3];
+  const message = line1 + '；' + line2 + '；' + line3 + '。技术明细见 --json / 诊断展开区';
   // P0-2：发现失败时把命令候选路径+存在性写进可读原因（ENOENT 可诊断）。
   const diag = processInfo.diagnostics || {};
   try {
     const att = Array.isArray(diag.commandAttempts) ? diag.commandAttempts : [];
     const parts = [];
     for (const row of att.slice(-6)) parts.push(String(row.file) + "（存在=" + String(row.exists) + "）");
-    if (parts.length) reasons.push('诊断：' + parts.join('；'));
-    else if (diag.processes && diag.processes.error) reasons.push('诊断：' + String(diag.processes.error));
+    if (parts.length) details.push('诊断：' + parts.join('；'));
+    else if (diag.processes && diag.processes.error) details.push('诊断：' + String(diag.processes.error));
   } catch { /* 诊断失败不阻断 */ }
   return {
     ok: false,
     state: 'failed',
     code: 'DSH_NOT_FOUND',
-    message: '未发现 DSH Web：' + reasons.join('；') + suffix,
+    message,
+    diagnosticLines,
+    details,
     baseUrl: '',
     source: '',
     explicitBaseUrl: '',
@@ -1414,6 +1507,8 @@ async function discoverDshWeb(options = {}) {
     probes,
     valid: validDistinct,
     process: processSummary,
+    processDiscovery,
+    listeners: listenerSummary,
     portFiles: portFileSummary,
     portFileReadout,
     // B-0cbc（PM ②⑤）：失败结果也带完整端口清单，界面/夹具与文案同源对账。
@@ -1437,6 +1532,12 @@ module.exports = {
   parsePortFileText,
   readDshPortFiles,
   scanLocalPortRange,
+  listWindowsListeners,
+  collectDshProcessInfo,
+  processInfoFromListeners,
+  DSH_LISTENER_PROBE_CONCURRENCY,
+  DSH_LISTENER_PROBE_TIMEOUT_MS,
+  DSH_LISTENER_BUDGET_MS,
   DSH_WEB_DEFAULT_PORT,
   DSH_SCAN_DEFAULT_START,
   DSH_SCAN_DEFAULT_END,
