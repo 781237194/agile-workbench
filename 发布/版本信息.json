@@ -1,7 +1,7 @@
 {
-  "version": "2.1.10",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.10/发布/pm-workbench-2.1.10.zip",
-  "sha256": "217b70cd3bad52a2f2d55b8206c8941192e2a39d433baa66924e44eee365d239",
-  "size": 4954676,
-  "notes": "2.1.9 遗留修复（Owner 2026-11-20 02:0x 报的 P0 残留两处）：①名册缺省视为已归档——dsh:team-status 的 items 不再把「已从名册移除的角色」当可用会话（d4d295d）；②rosterSessionIds 进 app:state 的 projects（publicProject），抽 rosterSessionIdsOf() 单函数与 publicMapping 共用——此前该字段只在 mapping 里，渲染层 verifiedCount 拿不到 → 侧栏文本恒 6/6（db27fc4）。真窗口复验（tester 断面 3007627）：名册 2 活跃+残留 6 → 侧栏 2/6、团队台 2/6、2 行；名册全归档 → 0、0/6、0 行。夹具：test-190a-sidebar 17/17（新增 A8）、team-members 8/8、0823 17/17、1749 17/17、1b4 10/10、selftest 176/176。"
+  "version": "2.1.11",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.11/发布/pm-workbench-2.1.11.zip",
+  "sha256": "045e1684320c8dcd87590914fefc0d6cc61e68ff0bd583ecfb32752b530d1883",
+  "size": 4959304,
+  "notes": "Owner 2026-11-20 10:48 报的「六角色会话用量红字：pm 123136.5 万（阈值 30 万）已超 4104.6 倍」修复：会话用量判定改用 DSH 的未缓存输入（uncachedInputTokens），累计（含 cacheRead）只作参考并在文案标注——pm 由「4104.6 倍」纠正为「14.9 倍（446.3 万 / 30 万）」，tester 11.9 倍、programmer1 10.1 倍；无累计导入时行为不变。含 190a items 源头加固（已归档角色不进 dsh:team-status.items，与 inspector 同口径）。夹具：test-0823-usage-thresholds 17/17、test-190a-sidebar 18/18、selftest 176/176。"
 }
