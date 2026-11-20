@@ -1065,7 +1065,30 @@ function bootFor(args, action) {
   // 写命令在 requireBoot 里做「我是不是名册当前会话」硬校验（零写入）；读命令不做（§6.2）。
   const b = tokenOf(args, { write: !bootCommandIsRead(args, action) });
   if (args.role && args.role !== b.role) fail('BOOT_ROLE_MISMATCH', `令牌角色 ${b.role} ≠ --role ${args.role}`);
-  if (args.project && args.project !== b.project) fail('BOOT_PROJECT_MISMATCH', `令牌项目 ${b.project} ≠ --project ${args.project}`);
+  // R-d19e §6.2/§6.3：令牌项目 ≠ 命令项目时的四类错误码；唯一例外=PM/Owner 只读 + --cross-project --reason。
+  if (args.project && args.project !== b.project) {
+    const readOnly = bootCommandIsRead(args, action);
+    const actorRole = String(b.role || '');
+    const reason = String(args.reason || '').trim();
+    if (!readOnly) {
+      fail('PROJECT_WRITE_DENIED', `跨项目写被拒：令牌项目 ${b.project} ≠ 目标项目 ${args.project}（零写入）`, {
+        tokenProject: String(b.project || ''), target: String(args.project || ''), action, code: 'PROJECT_WRITE_DENIED',
+      }, 3);
+    }
+    if (!['pm', 'owner'].includes(actorRole) || !args['cross-project'] || reason.length < 4) {
+      fail('TOKEN_PROJECT_MISMATCH', `令牌项目 ${b.project} 与命令项目 ${args.project} 不一致；只读跨项目需 PM/Owner + --cross-project --reason "≥4字"`, {
+        tokenProject: String(b.project || ''), target: String(args.project || ''), action, role: actorRole,
+      }, 3);
+    }
+    try {
+      const dir = projectStatePaths(String(args.project)).dir;
+      ensureDir(dir);
+      appendLine(path.join(dir, '跨项目访问.jsonl'), JSON.stringify({
+        at: nowIso(), role: actorRole, tokenProject: String(b.project || ''), target: String(args.project || ''),
+        command: String(action || ''), reason,
+      }));
+    } catch { /* 审计失败不阻断只读放行 */ }
+  }
   // R-703f F-4 / AC3②：旧会话再发言要丢弃，不能让它继续以角色身份落账。
   // R-a1eb §6.3 之后**唯一硬校验在 requireBoot(write)**（任何「我 ≠ 名册 current」都拒）；
   // 这里只保留「轮换记录里被明确记为 from」的**补充**判定，且**不再写审计**——

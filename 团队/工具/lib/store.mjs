@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as mailStore from './mail-store.mjs';
+import { findBootTokenFile } from './project-paths.mjs';
 import {
   PATHS, TEAM_ROOT_SOURCE, TeamError, fail, nowIso, sha256, hashFile, exists, ensureDir, readText, readJson,
   writeText, writeJson, appendLine, readJsonl, readJsonlTolerant, slug, safeName, isInside,
@@ -947,6 +948,11 @@ export function bootTokenPath(token) {
   return path.join(PATHS.boots, `${token}.json`);
 }
 
+/** R-d19e：读令牌文件（团队级 + 项目级启动目录；找不到返回空串）。 */
+export function resolveBootTokenPath(token) {
+  return findBootTokenFile(String(token || ''));
+}
+
 export function createBootToken({ role, project, sessionId, docs }) {
   const team = loadTeam();
   const token = randomHex(12);
@@ -994,7 +1000,7 @@ export function noteActionAfterWrite({ token, actionType, commitId, sendNotice }
     const tk = String(token || '');
     if (!tk || tk === 'true') return { ok: false, skipped: true, reason: 'no_token' };
     if (!lessons.isCountedAction(actionType)) return { ok: true, skipped: true, reason: 'not_counted', actionType };
-    const data = readJson(bootTokenPath(tk), null);
+    const data = readJson(resolveBootTokenPath(tk), null);
     if (!data || !data.role || !data.project) return { ok: false, skipped: true, reason: 'no_boot' };
     const st = projectStatePaths(data.project);
     const team = loadTeam();
@@ -1032,7 +1038,7 @@ import * as lessons from './lessons.mjs';
  */
 export function requireBoot(token, { role, project, write = false } = {}) {
   if (!token || token === true) fail('BOOT_REQUIRED', '需要 --boot <启动令牌>；先运行 boot');
-  const data = readJson(bootTokenPath(String(token)), null);
+  const data = readJson(resolveBootTokenPath(String(token)), null);
   if (!data) fail('BOOT_INVALID', `启动令牌不存在：${token}`);
   // B-b8d0（Owner 05:26 更正）：启动令牌不再按时间过期——BOOT_EXPIRED 不再出现。
   // expiresAt 仍写入作审计/prompt 展示，但**不再作为拒绝依据**；缺令牌仍 BOOT_REQUIRED，规则变更仍 RULES_CHANGED。

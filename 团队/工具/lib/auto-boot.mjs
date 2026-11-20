@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { PATHS, nowIso, ensureDir, readJson, appendLine, exists, hashFile } from './core.mjs';
+import { projectSubdir } from './project-paths.mjs';
 import { projectStatePaths, loadProject, sendMessage, loadTeam } from './store.mjs';
 
 const LOCK_TTL_SEC = 30;
@@ -51,7 +52,7 @@ export function inferBootTrigger(project, role, sessionId = '') {
   } catch { /* 名册读不到继续往下判 */ }
   let tokens = [];
   try {
-    tokens = tokenFiles().map((file) => ({ file, row: readJson(file, null) }))
+    tokens = tokenFiles(project).map((file) => ({ file, row: readJson(file, null) }))
       .filter((item) => item.row && String(item.row.project || '') === String(project || '') && String(item.row.role || '') === String(role || ''));
   } catch { tokens = []; }
   if (!tokens.length) return 'create';
@@ -86,17 +87,25 @@ function failDedupeFile(project) {
   return path.join(projectStatePaths(project).dir, 'boot失败去重.json');
 }
 
-function tokenFiles() {
-  try {
-    return fs.readdirSync(PATHS.boots).filter((name) => name.endsWith('.json')).map((name) => path.join(PATHS.boots, name));
-  } catch { return []; }
+function tokenFiles(project = '') {
+  // R-d19e：项目级 启动/ 优先、团队级兜底（两处都扫，读侧不区分新旧）。
+  const dirs = [];
+  if (project) dirs.push(projectSubdir(project, '启动'));
+  dirs.push(PATHS.boots);
+  const out = [];
+  for (const dir of dirs) {
+    try {
+      for (const name of fs.readdirSync(dir)) if (name.endsWith('.json')) out.push(path.join(dir, name));
+    } catch { /* 目录不存在 */ }
+  }
+  return out;
 }
 
 /** 找该角色在该项目下仍然有效的 boot 令牌（未过期、会话匹配优先）。 */
 export function findValidBootToken(project, role, sessionId = '') {
   const now = Date.now();
   let best = null;
-  for (const file of tokenFiles()) {
+  for (const file of tokenFiles(project)) {
     let row = null;
     try { row = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { continue; }
     if (!row || String(row.role) !== String(role)) continue;

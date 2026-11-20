@@ -967,18 +967,23 @@ export function clearArchivedRoleState(projectName, role, sessionId, archiveId =
     }
     const removedTokens = [];
     try {
-      for (const name of fs.readdirSync(PATHS.boots)) {
-        if (!name.endsWith('.json')) continue;
-        const file = path.join(PATHS.boots, name);
-        try {
-          const tok = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
-          const sameRole = String(tok.role || '') === String(role || '');
-          const sameProject = String(tok.project || '') === String(projectName || '');
-          // 旧会话归档：只删「令牌会话 == 被归档会话」的那把，绝不删在岗会话的令牌
-          const sameSession = !sid || String(tok.sessionId || '') === sid;
-          // pm 令牌保留：自归档待 Owner 确认路径仍需同一令牌二次调用（selftest 契约）。
-          if (sameRole && sameProject && sameSession && String(role) !== 'pm') { fs.rmSync(file, { force: true }); removedTokens.push(name); }
-        } catch { /* 坏令牌跳过 */ }
+      const tokenDirs = [path.join(projectStatePaths(projectName).dir, '启动'), PATHS.boots];
+      for (const dir of tokenDirs) {
+        let names = [];
+        try { names = fs.readdirSync(dir); } catch { continue; }
+        for (const name of names) {
+          if (!name.endsWith('.json')) continue;
+          const file = path.join(dir, name);
+          try {
+            const tok = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+            const sameRole = String(tok.role || '') === String(role || '');
+            const sameProject = String(tok.project || '') === String(projectName || '');
+            // 旧会话归档：只删「令牌会话 == 被归档会话」的那把，绝不删在岗会话的令牌
+            const sameSession = !sid || String(tok.sessionId || '') === sid;
+            // pm 令牌保留：自归档待 Owner 确认路径仍需同一令牌二次调用（selftest 契约）。
+            if (sameRole && sameProject && sameSession && String(role) !== 'pm') { fs.rmSync(file, { force: true }); removedTokens.push(name); }
+          } catch { /* 坏令牌跳过 */ }
+        }
       }
     } catch { /* 启动目录不存在 */ }
     return { wfChanged, removedTokens, scope: archivedIsCurrent ? 'role' : 'session' };

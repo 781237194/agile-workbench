@@ -15,6 +15,7 @@ import path from 'node:path';
 import {
   PATHS, fail, nowIso, randomHex, sha256, ensureDir, readJson, writeJson, withLock,
 } from './core.mjs';
+import { projectStateSlugs } from './project-paths.mjs';
 
 export const OWNER_CONFIRM_TTL_MS = 10 * 60 * 1000;
 const MIN_TTL_MS = 30 * 1000;
@@ -26,7 +27,13 @@ export function ownerConfirmDir() {
 }
 
 function confirmationFile(nonce) {
-  return path.join(ownerConfirmDir(), `${nonce}.json`);
+  // R-d19e：项目级 owner-confirm 优先（迁移后），团队级兜底；写回同一定位到的文件。
+  const name = `${nonce}.json`;
+  for (const s of projectStateSlugs()) {
+    const f = path.join(PATHS.projectState, s, 'owner-confirm', name);
+    if (fs.existsSync(f)) return f;
+  }
+  return path.join(ownerConfirmDir(), name);
 }
 
 function safeNonce(value) {

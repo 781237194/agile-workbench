@@ -74,6 +74,7 @@ import { cmdRolecard } from './lib/rolecard-cli.mjs';
 import { cmdRoute, cmdQueues } from './lib/route-cli.mjs';
 // R-20261116-191906-7aa8：证据导出包（export/verify，唯一实现 lib/evidence-pack.mjs）。
 import { cmdEvidence } from './lib/evidence-pack.mjs';
+import { cmdMigrate } from './lib/project-isolation.mjs';
 
 const HELP = `团队工作台 v2 · 多会话敏捷团队
 
@@ -330,6 +331,7 @@ async function main() {
     case 'pm': await cmdPmDispatch(args); break; // c65a AC2：pm dispatch 原子派单
     case 'inbox': cmdInbox(args); break;
     case 'mail': cmdMail(args); break; // R-e438 批②：邮箱 JSONL 迁移/归档/统计
+  case 'migrate': cmdMigrate(args); break; // R-d19e 批①：项目级隔离迁移（tokens/mail/locks/owner-confirm）
     case 'read': cmdRead(args); break;
     // B-7e49：系统通知通道（发件人固定 system）——壳层 Owner 决定落账后通知 PM，绕开 send 的 SELF_SEND
   case 'notify': await cmdNotify(args); break;

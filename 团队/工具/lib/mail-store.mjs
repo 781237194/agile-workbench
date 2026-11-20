@@ -15,6 +15,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { projectSubdir } from './project-paths.mjs';
 
 const MAX_GAP = 64 * 1024;            // 尾读块大小
 const HOT_DAYS = 7;                   // 热文件保留天数
@@ -55,10 +56,10 @@ function writeIndex(p, idx) {
 /** 读文件末条消息的 seq（index 丢失/落后时兜底，防止 seq 从 1 重开）。 */
 function lastMessageSeq(p) {
   try {
-    const st = fs.statSync(p.jsonl);
+    const st = fs.statSync(jsonl);
     const len = Math.min(st.size, 64 * 1024);
     const buf = Buffer.alloc(len);
-    const fd = fs.openSync(p.jsonl, 'r');
+    const fd = fs.openSync(jsonl, 'r');
     try { fs.readSync(fd, buf, 0, len, st.size - len); } finally { fs.closeSync(fd); }
     for (const line of buf.toString('utf8').split(/\r?\n/).reverse()) {
       if (!line.trim()) continue;
@@ -131,8 +132,11 @@ function collectEvents(mailRoot, role) {
 }
 function readTail(mailRoot, role, { limit = 50, afterSeq = 0, project = '' } = {}) {
   const p = pathsFor(mailRoot, role);
-  if (!fs.existsSync(p.jsonl)) return { rows: [], badLines: 0, hitLegacyFallback: true };
-  const st = fs.statSync(p.jsonl);
+  // R-d19e：项目级邮箱优先（项目/<slug>/邮箱/<role>/messages.jsonl），团队级兜底。
+  const projectJsonl = project ? path.join(projectSubdir(project, '邮箱'), String(role || ''), 'messages.jsonl') : '';
+  const jsonl = projectJsonl && fs.existsSync(projectJsonl) ? projectJsonl : p.jsonl;
+  if (!fs.existsSync(jsonl)) return { rows: [], badLines: 0, hitLegacyFallback: true };
+  const st = fs.statSync(jsonl);
   const limNum = Number(limit);
   const want = Number.isFinite(limNum) ? Math.max(1, Math.min(2000, limNum)) : 50;
   const bad = { count: 0 };
@@ -144,7 +148,7 @@ function readTail(mailRoot, role, { limit = 50, afterSeq = 0, project = '' } = {
     const start = Math.max(0, end - MAX_GAP);
     const len = end - start;
     const buf = Buffer.alloc(len);
-    const fd = fs.openSync(p.jsonl, 'r');
+    const fd = fs.openSync(jsonl, 'r');
     try { fs.readSync(fd, buf, 0, len, start); } finally { fs.closeSync(fd); }
     raw = buf.toString('utf8') + raw;
     end = start;
@@ -174,6 +178,8 @@ function readTail(mailRoot, role, { limit = 50, afterSeq = 0, project = '' } = {
 /** 读该角色全部消息（热文件 + 归档分片），按 seq 升序；供迁移/归档/统计与全量 inbox。 */
 function readAll(mailRoot, role, { project = '' } = {}) {
   const p = pathsFor(mailRoot, role);
+  // R-d19e：项目级邮箱与本角色团队级邮箱合并读（按 id 去重），项目级在前。
+  const projectJsonl = project ? path.join(projectSubdir(project, '邮箱'), String(role || ''), 'messages.jsonl') : '';
   const rows = [];
   const seen = new Set();
   const push = (line, bad) => {
@@ -185,6 +191,7 @@ function readAll(mailRoot, role, { project = '' } = {}) {
     rows.push(row);
   };
   const bad = { count: 0 };
+  if (projectJsonl && fs.existsSync(projectJsonl)) for (const line of fs.readFileSync(projectJsonl, 'utf8').split(/\r?\n/)) push(line, bad);
   if (fs.existsSync(p.jsonl)) for (const line of fs.readFileSync(p.jsonl, 'utf8').split(/\r?\n/)) push(line, bad);
   try {
     for (const month of fs.readdirSync(p.archiveDir)) {

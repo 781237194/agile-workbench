@@ -6020,22 +6020,29 @@ ipcMain.handle('theme:metrics', async () => {
    */
   function latestProjectBootToken(projectName, role) {
     const want = String(role || 'pm');
-    const dir = path.join(ledgerTeamRoot(), '状态', '启动');
-    let names = [];
-    try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return null; }
+    // R-d19e：项目级 启动/ 优先，团队级兜底（迁移后仍能取到 pm 令牌，不得报 PM_TOKEN_REQUIRED）。
+    const dirs = [];
+    if (projectName) dirs.push(path.join(ledgerTeamRoot(), '状态', '项目', teamTools.teamSlug(String(projectName)), '启动'));
+    dirs.push(path.join(ledgerTeamRoot(), '状态', '启动'));
     let best = null;
-    for (const file of names) {
-      try {
-        const row = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8').replace(/^\uFEFF/, ''));
-        if (String(row.role || '') !== want) continue;
-        if (projectName && String(row.project || '') !== String(projectName)) continue;
-        const token = String(row.token || file.replace(/\.json$/, ''));
-        if (!token) continue;
-        const issuedAt = String(row.issuedAt || row.createdAt || '');
-        if (!best || issuedAt > best.issuedAt) {
-          best = { token, file, issuedAt, expiresAt: String(row.expiresAt || ''), role: want, sessionId: String(row.sessionId || '') };
-        }
-      } catch { /* 跳过损坏令牌文件，不中断查找 */ }
+    for (const dir of dirs) {
+      let names = [];
+      try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { continue; }
+      if (!names.length && dir !== dirs[dirs.length - 1]) continue;
+      for (const file of names) {
+        try {
+          const row = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8').replace(/^\uFEFF/, ''));
+          if (String(row.role || '') !== want) continue;
+          if (projectName && String(row.project || '') !== String(projectName)) continue;
+          const token = String(row.token || file.replace(/\.json$/, ''));
+          if (!token) continue;
+          const issuedAt = String(row.issuedAt || row.createdAt || '');
+          if (!best || issuedAt > best.issuedAt) {
+            best = { token, file, issuedAt, expiresAt: String(row.expiresAt || ''), role: want, sessionId: String(row.sessionId || '') };
+          }
+        } catch { /* 跳过损坏令牌文件，不中断查找 */ }
+      }
+      if (best) return best; // 项目目录命中即优先；否则下一轮团队级兜底
     }
     return best;
   }
