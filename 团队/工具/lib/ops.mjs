@@ -1,5 +1,6 @@
 // 团队工作台 v2 · 业务命令（boot / 消息 / 任务 / 提案 / 评审 / 签字 / 应用 / 索引 / 对账）
 import fs from 'node:fs';
+import * as mailStore from './mail-store.mjs';
 import { runPmDispatchAtomic } from './pm-dispatch-atomic.mjs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -5099,6 +5100,54 @@ function bootSlimBody(full, { full: isFull = false, role = "", projectName = "",
   return slim;
 }
 
+
+/**
+ * R-e438 批②：邮箱 JSONL 运维入口（migrate / archive / stats / list）。
+ *  - 落点 团队/状态/邮箱/<role>/messages.jsonl；迁移把旧 new/cur 整体移入 邮箱/_legacy/<role>/（不删，可回滚）。
+ *  - 写操作（migrate/archive）默认 dry-run，必须 --yes 才落地；非沙盘须 pm/owner 启动令牌。
+ *  - 沙盘（TEAM_SELFTEST=1）默认豁免启动令牌；TEAM_MAIL_ENFORCE=1 可强制（越权夹具用）。
+ */
+export function cmdMail(args) {
+  const sub = String((args._ && args._[1]) || '').toLowerCase();
+  const sandbox = String(process.env.TEAM_SELFTEST || '') === '1';
+  const enforce = String(process.env.TEAM_MAIL_ENFORCE || '') === '1';
+  const writeAction = sub === 'migrate' || sub === 'archive';
+  if (writeAction && (!sandbox || enforce)) {
+    const bootToken = String(args.boot || '').trim();
+    if (!bootToken) fail('BOOT_REQUIRED', 'mail ' + sub + ' 必须带 --boot 启动令牌（pm/owner）', { action: sub });
+    const bootInfo = requireBoot(bootToken, { write: true });
+    const actor = String(bootInfo.role || '');
+    if (actor !== 'pm' && actor !== 'owner') fail('PERMISSION_DENIED', '只有 pm/owner 能执行 mail ' + sub + '（当前令牌角色 ' + (actor || '-') + '）', { action: sub, actorRole: actor });
+  }
+  const one = String(args.role || '').trim();
+  const mailRoot = PATHS.mail;
+  const rolesOf = () => (one ? [one] : (args.all ? activeMembers(loadTeam()).map((m) => String(m.role)) : []));
+  if (sub === 'stats' || sub === 'list' || sub === 'migrate' || sub === 'archive') {
+    const roles = rolesOf();
+    if (!roles.length) fail('BAD_ARGS', 'mail ' + sub + ' 需要 --role <角色> 或 --all', { action: sub });
+    if (sub === 'stats') {
+      const rows = roles.map((r) => mailStore.statsRole(mailRoot, r));
+      out(args, rows.map((r) => `${r.role}: jsonl=${r.jsonl} seq=${r.seqMin || '-'}..${r.seqMax || '-'} messages=${r.messages} bad=${r.badLines} legacyFiles=${r.legacyFiles} archived=[${(r.archivedMonths || []).join(',')}]`).join('\n'), { ok: true, project: projectNameOf(args), roles: rows });
+      return;
+    }
+    if (sub === 'list') {
+      const rows = roles.flatMap((r) => mailStore.readTail(mailRoot, r, { limit: Number(args.limit || 50), afterSeq: Number(args.after || 0) }).rows.map((m) => ({ ...m, role: r })));
+      out(args, JSON.stringify(rows.map((m) => ({ role: m.role, id: m.id, seq: m.seq, at: m.at, from: m.from, subject: m.subject }))), { ok: true, rows });
+      return;
+    }
+    const dryRun = !args.yes || Boolean(args['dry-run']);
+    const days = Number(args.days || 7);
+    const results = roles.map((r) => (sub === 'migrate'
+      ? mailStore.migrateRole(mailRoot, r, { dryRun })
+      : mailStore.archiveCold(mailRoot, r, { dryRun, days })));
+    const lines = results.map((r) => sub === 'migrate'
+      ? `${r.role}: 扫描 ${r.scanned} 条，导入 ${r.imported}，跳过 ${r.skipped}${r.moved ? '，旧目录已移入 _legacy' : ''}${dryRun ? '（dry-run 未写）' : ''}${r.errors && r.errors.length ? ' errors=' + r.errors.length : ''}`
+      : `${r.role}: 归档 ${r.archived}，保留 ${r.kept}，月份=[${(r.months || []).join(',')}]${dryRun ? '（dry-run 未写）' : ''}${r.audit ? '，审计=' + r.audit : ''}`);
+    out(args, lines.join('\n'), { ok: true, action: sub, dryRun, results });
+    return;
+  }
+  fail('BAD_ARGS', 'mail 子命令：migrate | archive | stats | list', { action: sub });
+}
 export async function cmdBoot(args) {
   const team = loadTeam();
   const role = String(args.role || '');

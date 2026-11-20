@@ -1,6 +1,7 @@
 // 团队工作台 v2 · 持久化层（团队 / 项目 / 令牌 / 消息 / 任务 / 提案 / 授权）
 import fs from 'node:fs';
 import path from 'node:path';
+import * as mailStore from './mail-store.mjs';
 import {
   PATHS, TEAM_ROOT_SOURCE, TeamError, fail, nowIso, sha256, hashFile, exists, ensureDir, readText, readJson,
   writeText, writeJson, appendLine, readJsonl, readJsonlTolerant, slug, safeName, isInside,
@@ -1137,6 +1138,14 @@ export function normalizeMessageMaxChars(raw, fallback = 600) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
+
+/** R-e438 批②：该角色是否已完成 JSONL 切换（messages.jsonl 在、旧 new/cur 目录都不在）。 */
+function roleUsesJsonlMail(role) {
+  const dir = path.join(PATHS.mail, role);
+  if (!fs.existsSync(path.join(dir, 'messages.jsonl'))) return false;
+  for (const box of ['new', 'cur']) if (fs.existsSync(path.join(dir, box))) return false;
+  return true;
+}
 export function sendMessage(msg) {
   // R-9db6 F-9db6-10②：断消息通道注入（只在测试里设），用于造 RECEIPT_FAILED；生产默认不设。
   if (process.env.TEAM_MESSAGE_SEND_FAIL === '1') {
@@ -1178,6 +1187,8 @@ export function sendMessage(msg) {
   const box = mailBoxDir(msg.to, 'new');
   ensureDir(box);
   writeJson(path.join(box, `${record.ts.replace(/[:.]/g, '-')}-${id}.json`), record);
+  // R-e438 批②：同一条消息同时追加到 邮箱/<role>/messages.jsonl（JSONL 为迁移后的主存储）。
+  try { mailStore.appendMessage(PATHS.mail, msg.to, record); } catch { /* JSONL 追加失败不阻断旧通道 */ }
   // T-20261117-203046-9ff2：给 PM 的关键消息（升级/唤醒失败/评审打回/决策回执…）**发完立即**通知钩子，
   // 让 ops 侧当场唤醒 PM，而不是等队列泵的兜底摘要（兜底仍保留作保险）。
   if (record.to === 'pm') {
@@ -1230,6 +1241,10 @@ function readMailboxJson(file) {
 }
 
 export function listInbox(role, { includeCur = false, project = '' } = {}) {
+  if (roleUsesJsonlMail(role)) {
+    const { rows } = mailStore.readAll(PATHS.mail, role, { project });
+    return rows.filter((m) => includeCur || !String(m.readAt || '').trim()).map((m) => ({ ...m, box: 'jsonl' }));
+  }
   const out = [];
   for (const box of includeCur ? ['new', 'cur'] : ['new']) {
     const dir = mailBoxDir(role, box);
@@ -1250,6 +1265,10 @@ export function unreadCount(role, project = '') {
 }
 
 export function findMessage(role, id) {
+  if (roleUsesJsonlMail(role)) {
+    const hit = mailStore.readAll(PATHS.mail, role).rows.find((m) => String(m.id) === String(id));
+    return hit ? { msg: hit, file: null, box: 'jsonl' } : null;
+  }
   for (const box of ['new', 'cur']) {
     const dir = mailBoxDir(role, box);
     if (!exists(dir)) continue;

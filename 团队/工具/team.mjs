@@ -5,7 +5,7 @@ import path from 'node:path';
 import { parseArgs, TeamError, jsonOut, textOut } from './lib/core.mjs';
 import { cmdAnchor } from './lib/anchor.mjs';
 import {
-  cmdInit, cmdProject, cmdBoot, cmdSend, cmdNotify, cmdOwnerNotify, cmdPmDispatch, cmdInbox, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
+  cmdInit, cmdProject, cmdBoot, cmdSend, cmdNotify, cmdOwnerNotify, cmdPmDispatch, cmdInbox, cmdMail, cmdRead, cmdAck, cmdTask, cmdMemory, cmdPropose,
   cmdShow, cmdReview, cmdSign, cmdApply, cmdGrant, cmdIndex, cmdStatus, cmdClaim, cmdReconcile,
   cmdVerify, cmdLog, cmdLock, cmdOwnerApprove, cmdOwner, cmdRoster, cmdPilot, cmdDoctor,
   cmdReq, cmdFind, cmdBoard, cmdVote, cmdWorkflow, cmdOwnerProxyDecide, cmdQueue, cmdSkill, cmdSched,
@@ -329,6 +329,7 @@ async function main() {
     case 'send': await cmdSend(args); break;
     case 'pm': await cmdPmDispatch(args); break; // c65a AC2：pm dispatch 原子派单
     case 'inbox': cmdInbox(args); break;
+    case 'mail': cmdMail(args); break; // R-e438 批②：邮箱 JSONL 迁移/归档/统计
     case 'read': cmdRead(args); break;
     // B-7e49：系统通知通道（发件人固定 system）——壳层 Owner 决定落账后通知 PM，绕开 send 的 SELF_SEND
   case 'notify': await cmdNotify(args); break;
