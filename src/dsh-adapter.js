@@ -1158,31 +1158,39 @@ async function discoverDshWeb(options = {}) {
     const orderedListeners = (listenerInfo.listeners || [])
       .sort((a, b) => listenerRank(b) - listenerRank(a) || Number(b.port) - Number(a.port))
       .slice(0, DSH_LISTENER_MAX_PROBE);
-    for (const listener of orderedListeners) {
-      addCandidate(candidates, seen, listener.baseUrl, 'netstat-port', 4, 'netstat 监听 ' + listener.port + '（pid ' + listener.pid + '）', { pid: listener.pid });
+    // B-33b9（PM 04:04 优化）：先探 3–5 个「最可疑」候选（≥10000 端口降序，DSH 55263 通常在前 3），
+    // 命中即停；未命中再探其余监听端口。把冷启动命中从 ~1.7s 压到 ≤1.2s。
+    let listenerProbeCount = 0;
+    let probedListenerPorts = 0;
+    let bestListener = null;
+    const addListenerWave = async (list, concurrency, label) => {
+      const wave = [];
+      for (const listener of list) {
+        const before = candidates.length;
+        addCandidate(candidates, seen, listener.baseUrl, 'netstat-port', 4, 'netstat 监听 ' + listener.port + '（pid ' + listener.pid + '）', { pid: listener.pid });
+        if (candidates.length > before) wave.push(candidates[candidates.length - 1]);
+      }
+      if (!wave.length || Date.now() >= deadline) return;
+      const started = Date.now();
+      const remain = Math.max(180, deadline - Date.now());
+      const result = await probeCandidates(wave, Math.min(DSH_LISTENER_PROBE_TIMEOUT_MS, remain), concurrency, deadline);
+      probes = probes.concat(result);
+      listenerProbeCount += wave.length;
+      probedListenerPorts += result.length;
+      stats[label + 'Ms'] = Date.now() - started;
+      stats[label + 'Count'] = wave.length;
+      const picked = pickBestProbe(probes, savedBaseUrl);
+      if (picked) bestListener = picked;
+    };
+    await addListenerWave(orderedListeners.slice(0, 4), 4, 'listenerTier1');
+    if (!bestListener) {
+      await addListenerWave(orderedListeners.slice(4), DSH_LISTENER_PROBE_CONCURRENCY, 'listenerTier2');
     }
-    // B-33b9 AC②：对候选并发 ≤8 探测（单探 400ms），发现链总预算 ≤1.5s。
-    const listenerWave = candidates.filter((candidate) => candidate.source === 'netstat-port');
-    if (listenerWave.length && Date.now() < deadline) {
-      const listenerWaveStarted = Date.now();
-      const remain = Math.max(200, deadline - Date.now());
-      const listenerProbePromise = probeCandidates(
-        listenerWave,
-        Math.min(DSH_LISTENER_PROBE_TIMEOUT_MS, remain),
-        DSH_LISTENER_PROBE_CONCURRENCY,
-        deadline
-      );
-      // 单候选已有 TCP/HTTP 硬上限（≤620ms），这里不再用墙钟 race 抢快照——
-      // 启动期事件循环抖动时 race 会先于 IO 回调触发，反而丢掉已命中的真端口。
-      const listenerProbeResult = await listenerProbePromise;
-      probes = probes.concat(listenerProbeResult);
-      stats.listenerProbes = listenerWave.length;
-      stats.listenerSkipped = Math.max(0, listenerWave.length - listenerProbeResult.length);
-      stats.listenerWaveMs = Date.now() - listenerWaveStarted;
-      best = pickBestProbe(probes, savedBaseUrl);
-      stats.listenerHit = Boolean(best && best.source === 'netstat-port');
-      stats.listenerBudgetHit = Date.now() >= deadline;
-    }
+    stats.listenerProbes = listenerProbeCount;
+    stats.listenerSkipped = Math.max(0, orderedListeners.length - probedListenerPorts);
+    best = bestListener;
+    stats.listenerHit = Boolean(best && best.source === 'netstat-port');
+    stats.listenerBudgetHit = Date.now() >= deadline;
     if (best) {
       // 命中即用 netstat 的 pid→端口 作为进程证据（AC⑤：不再报「dsh 进程=0 个」）。
       processInfo = processInfoFromListeners(listenerInfo, best);
