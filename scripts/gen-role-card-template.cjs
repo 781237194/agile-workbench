@@ -73,9 +73,21 @@ function stripSyncBlocks(text) {
   let cursor = 0;
   for (const b of blocks) {
     out += src.slice(cursor, b.index);
+    // B-7714：`~N` 是 parseCard 给「同 key 第二份」的临时后缀（sync 对已有手写场景节的卡多写了一份）。
+    // 这类块整块丢弃——解包会把重复场景正文搬进模板（product/analyst/programmer2 三张卡就是这样多出
+    // 一份「## H. 场景覆盖准则」，导致这三张卡 dry-run 永远多一个 add/conflict）。
+    if (/~\d+$/.test(String(b.key))) { cursor = b.index + b.full.length; continue; }
     const heading = (String(b.body).match(/^##\s+(.+?)\s*$/m) || [])[1] || '';
     const dup = Boolean(heading) && new RegExp('^##\\s+' + escapeRe(heading) + '\\s*$', 'm').test(restText);
-    out += dup ? '' : b.body;
+    if (dup) { cursor = b.index + b.full.length; continue; }
+    // 解包时若该 key 靠标题关键词/slug 推不出来（如 scene-coverage-h），在标题后补一个显式 key marker，
+    // 否则它又会按关键词落回 scene-coverage → 重新变成 ~2。
+    const KEYWORD_KEYS = new Set(['scene-coverage', 'workflow-align', 'subagent-boundary']);
+    let body = b.body;
+    if (!KEYWORD_KEYS.has(String(b.key))) {
+      body = body.replace(/^(\s*##\s+[^\n]*\n)/, `$1\n<!-- rolecard-section: ${b.key} -->\n`);
+    }
+    out += body;
     cursor = b.index + b.full.length;
   }
   out += src.slice(cursor);
@@ -209,8 +221,15 @@ const SCENE_COVERAGE_PER_ROLE = {
   programmer2: '- **开发交付自查三问**：入口点得动（真实按钮/IPC/CLI，不是只调函数）？失败看得见（人话 + 错误码 + 下一步）？重开还在（已落盘）？三缺一不得自评完成。',
   tester: '- **TR-Q 把场景矩阵转成可执行断言**，并标注哪些场景本期不测（写明理由）；只测正向的测试报告不算通过。',
 };
+// B-7714：注入的 §H 标准段用**独立节 key** `scene-coverage-h`（显式 marker 优先于标题关键词）。
+// 否则它与角色卡自带的「场景覆盖门/场景覆盖准则」节都命中关键词 → parseCard 把第二份命名成
+// `scene-coverage~2`，sync 就会在真实卡里写出 `scene-coverage~2` 标准块（PM 12:30 的污染即此）。
+const SCENE_COVERAGE_SECTION_MARK = '<!-- rolecard-section: scene-coverage-h -->';
 function sceneCoverageText(role) {
-  return [...SCENE_COVERAGE_SHARED, SCENE_COVERAGE_PER_ROLE[role] || ''].filter(Boolean).join('\n');
+  // 显式 key marker 必须落在**本节的正文里**（标题行之后）：parseCard 的 keyOfHeading 只看从标题
+  // 开始的那段文本，marker 放在标题之前不会被看到 → 仍按关键词落回 scene-coverage → 又变 ~2。
+  const [heading, ...rest] = SCENE_COVERAGE_SHARED;
+  return [heading, SCENE_COVERAGE_SECTION_MARK, ...rest, SCENE_COVERAGE_PER_ROLE[role] || ''].filter(Boolean).join('\n');
 }
 function ensureSceneCoverage(text, role) {
   // 判据用**实质要点**而不是「场景覆盖准则」五个字：项目卡可能只提到该词（如 analyst 卡里的一句引用），

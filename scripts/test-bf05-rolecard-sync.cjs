@@ -211,13 +211,15 @@ const writeCard = (role, text) => fs.writeFileSync(cardOf(role), text, 'utf8');
     check('AC4 boot×2 + project ensure 不改卡（只有 --apply 会写）', shaFile(cardOf('product')) === before4, { before: before4 });
 
     // ── AC5：同 key 不同内容 → conflict，ok=false/partial，该节不写、其余照写 ──
+    // B-7714 后模板把注入的 §H 标准段改为显式 key `scene-coverage-h`，卡里「## H. 场景覆盖准则」属于该
+    // 标准段、不再走关键词匹配；本断言改用卡自带的「场景覆盖门」节（key=scene-coverage，与模板同 key）来造冲突。
     let conflictCard = readCard('product');
-    const hStart5 = conflictCard.indexOf('## H. 场景覆盖准则');
-    if (hStart5 < 0) throw new Error('AC5 前置失败：卡内没有 §H 节');
+    const hStart5 = conflictCard.indexOf('## 场景覆盖门');
+    if (hStart5 < 0) throw new Error('AC5 前置失败：卡内没有「场景覆盖门」节');
     const hNext5 = conflictCard.slice(hStart5 + 3).search(/\n## /);
     const hEnd5 = hNext5 >= 0 ? hStart5 + 3 + hNext5 : conflictCard.length;
     conflictCard = conflictCard.slice(0, hStart5)
-      + '## H. 场景覆盖准则（Owner 2026-11-19 强制 · 详见 团队/流程.md §H）\n\n- 本人改写：与模板不同。\n'
+      + '## 场景覆盖门（§H 强制 · Owner 2026-11-19 · 是 RR 的第五件事）\n\n- 本人改写：与模板不同。\n'
       + (hEnd5 < conflictCard.length ? conflictCard.slice(hEnd5 + 1) : '');
     // 同时删掉一个标准节（workflow-align）以验证「其余节照写」
     const wStart5 = conflictCard.indexOf('## 现行工作流对齐');
@@ -249,14 +251,15 @@ const writeCard = (role, text) => fs.writeFileSync(cardOf(role), text, 'utf8');
     check('AC7② 删除 manifest → 仍按源文本 sha 检测（不崩）', noManifest.ok && noManifest.templateSha12 === tplProduct.sha12, noManifest && { ok: noManifest.ok, templateSha12: noManifest.templateSha12 });
 
     // ── AC9c：异名节只出 rename 建议，不自动改 ──────────────────────────────
+    // 同 AC5：改用卡自带的「场景覆盖门」节（关键词匹配 → 改标题后应只给 rename 建议）。
     let renameCard = readCard('product');
-    const rStart = renameCard.indexOf('## H. 场景覆盖准则');
-    if (rStart < 0) throw new Error('AC9c 前置失败：卡内没有 §H 节');
+    const rStart = renameCard.indexOf('## 场景覆盖门');
+    if (rStart < 0) throw new Error('AC9c 前置失败：卡内没有「场景覆盖门」节');
     const rNext = renameCard.slice(rStart + 3).search(/\n## /);
     const rEnd = rNext >= 0 ? rStart + 3 + rNext : renameCard.length;
     const rSeg = renameCard.slice(rStart, rEnd)
       .split(/\r?\n/).filter((l) => !/rolecard-standard:/.test(l)).join('\n')
-      .replace(/^## H\. 场景覆盖准则[^\n]*/, '## 场景覆盖门（§H 强制 · 本人写法）');
+      .replace(/^## 场景覆盖门[^\n]*/, '## 场景覆盖门（§H 强制 · 本人写法）');
     renameCard = renameCard.slice(0, rStart) + rSeg + renameCard.slice(rEnd);
     writeCard('product', renameCard);
     const beforeRename = shaFile(cardOf('product'));
