@@ -161,11 +161,14 @@ function readTail(mailRoot, role, { limit = 50, afterSeq = 0, project = '' } = {
     rows.push(row);
   }
   const events = collectEvents(mailRoot, role);
+  let atFallback = 0;
   const mapped = rows.reverse().map((row) => {
     const ev = events.get(String(row.id)) || (events.get(String(row.seq)) || {});
-    return { ...row, readAt: String(row.readAt || ev.readAt || ''), ackAt: String(row.ackAt || ev.ackAt || '') };
+    const derivedAt = String(row.at || '').trim() ? String(row.at) : atOf(row);
+    if (!String(row.at || '').trim() && derivedAt) atFallback += 1;
+    return { ...row, at: derivedAt, readAt: String(row.readAt || ev.readAt || ''), ackAt: String(row.ackAt || ev.ackAt || '') };
   });
-  return { rows: mapped, badLines: bad.count, hitLegacyFallback: false };
+  return { rows: mapped, badLines: bad.count, atFallback, hitLegacyFallback: false };
 }
 
 /** 读该角色全部消息（热文件 + 归档分片），按 seq 升序；供迁移/归档/统计与全量 inbox。 */
@@ -206,13 +209,20 @@ function readAll(mailRoot, role, { project = '' } = {}) {
   } catch { /* 无归档 */ }
   rows.sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0) || String(a.at || '').localeCompare(String(b.at || '')));
   const events = collectEvents(mailRoot, role);
+  let atFallback = 0;
   const mapped = rows.map((row) => {
     const ev = events.get(String(row.id)) || (events.get(String(row.seq)) || {});
-    return { ...row, readAt: String(row.readAt || ev.readAt || ''), ackAt: String(row.ackAt || ev.ackAt || '') };
+    const derivedAt = String(row.at || '').trim() ? String(row.at) : atOf(row);
+    if (!String(row.at || '').trim() && derivedAt) atFallback += 1;
+    return { ...row, at: derivedAt, readAt: String(row.readAt || ev.readAt || ''), ackAt: String(row.ackAt || ev.ackAt || '') };
   });
-  return { rows: mapped, badLines: bad.count };
+  return { rows: mapped, badLines: bad.count, atFallback };
 }
 
+/** ③ 兜底链：at ?? ts ?? deliveredAt（缺 at 的旧行排序/归档不静默）。 */
+function atOf(row) {
+  return String((row && (row.at || row.ts || row.deliveredAt)) || '');
+}
 function monthOf(at) {
   const s = String(at || '');
   const m = /^(\d{4})-(\d{2})/.exec(s);
@@ -233,7 +243,8 @@ function archiveCold(mailRoot, role, { now = Date.now(), days = HOT_DAYS, dryRun
     let row = null;
     try { row = JSON.parse(line); } catch { keep.push(line); continue; }
     if (!row || row.type === 'event' || !row.id) { keep.push(line); continue; }
-    const at = Date.parse(String(row.at || ''));
+    const at = Date.parse(atOf(row));
+    if (!String(row.at || '').trim() && atOf(row)) result.atFallback = (result.atFallback || 0) + 1;
     if (Number.isFinite(at) && at < cutoff) old.push(row); else keep.push(line);
   }
   result.kept = keep.length;
@@ -241,7 +252,7 @@ function archiveCold(mailRoot, role, { now = Date.now(), days = HOT_DAYS, dryRun
   if (!old.length) return result;
   const byMonth = new Map();
   for (const row of old) {
-    const m = monthOf(row.at) || 'unknown';
+    const m = monthOf(atOf(row)) || monthOf(new Date(now).toISOString()) || 'unknown';
     if (!byMonth.has(m)) byMonth.set(m, []);
     byMonth.get(m).push(row);
   }
@@ -361,7 +372,7 @@ function repairRole(mailRoot, role, { dryRun = false, now = Date.now() } = {}) {
   writeIndex(p, idx);
   try {
     fs.mkdirSync(mailRoot, { recursive: true });
-    fs.appendFileSync(path.join(mailRoot, '邮箱修复.jsonl'), JSON.stringify({ at: new Date(now).toISOString(), event: 'mail_seq_reindex', role, rows: out.rows, dupSeq: out.dupSeq, missingAt: out.missingAt, backup: out.backup }) + '\n', 'utf8');
+    fs.appendFileSync(path.join(mailRoot, '邮箱修复.jsonl'), JSON.stringify({ at: new Date(now).toISOString(), event: 'mail_seq_reindex', role, rows: out.rows, dupSeq: out.dupSeq, missingAt: out.missingAt, atFallback: out.missingAt, backup: out.backup }) + '\n', 'utf8');
     out.audit = true;
   } catch { /* 审计失败不阻断 */ }
   return out;
@@ -376,7 +387,7 @@ function statsRole(mailRoot, role) {
   }
   return {
     role, jsonl: fs.existsSync(p.jsonl), seqMin: idx.seqMin, seqMax: idx.seqMax, bytes: idx.bytes,
-    messages: all.rows.length, badLines: all.badLines, legacyFiles, archivedMonths: idx.archivedMonths,
+    messages: all.rows.length, badLines: all.badLines, atFallback: all.atFallback || 0, legacyFiles, archivedMonths: idx.archivedMonths,
   };
 }
 

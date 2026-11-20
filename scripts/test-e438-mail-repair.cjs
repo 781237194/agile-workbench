@@ -88,6 +88,19 @@ function check(id, title, ok, detail) {
   const backups = fs.existsSync(legacy) ? fs.readdirSync(legacy).filter((n) => n.startsWith('messages.jsonl.pre-repair-')) : [];
   const audit = (() => { try { return fs.readFileSync(path.join(MAIL, '邮箱修复.jsonl'), 'utf8').includes('mail_seq_reindex'); } catch { return false; } })();
   check('R5', '备份文件存在（pre-repair）且 邮箱修复.jsonl 有 mail_seq_reindex 审计', backups.length >= 1 && audit, { backups, audit });
+
+  // R6：缺 at 的存量行 → readAll 用 ts 兜底（atFallback 计数），排序按兜底时间
+  const jf = path.join(dir, 'messages.jsonl');
+  fs.appendFileSync(jf, JSON.stringify({ id: 'M-noat-1', from: 'pm', to: ROLE, subject: '无 at', body: 'z', project: 'p', type: 'note', ts: '2026-09-15T00:00:00Z', deliveredAt: '2026-09-15T00:00:00Z', seq: 22 }) + '\n', 'utf8');
+  const all6 = ms.readAll(MAIL, ROLE);
+  const noatRow = all6.rows.find((r) => r.id === 'M-noat-1');
+  check('R6', '缺 at 行 readAll 用 ts 兜底（at=ts、atFallback≥1、排序按时间）',
+    Boolean(noatRow) && noatRow.at === '2026-09-15T00:00:00Z' && all6.atFallback >= 1, { at: noatRow && noatRow.at, atFallback: all6.atFallback });
+
+  // R7：冷归档按兜底 at 选月（缺 at 的 2026-09 行归 2026-09，不落 unknown/最旧月）
+  const dryOld = ms.archiveCold(MAIL, ROLE, { dryRun: true });
+  check('R7', '冷归档按 at 兜底链选月（缺 at 的 2026-09 行计入 2026-09，不误归 unknown）',
+    (dryOld.months || []).includes('2026-09'), { months: dryOld.months });
 })().catch((e) => { check('E0', '夹具未抛异常', false, { error: String((e && e.stack) || e) }); }).finally(() => {
   try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
 });
