@@ -1314,8 +1314,28 @@ export async function wakeRoute(projectName, opts) {
   // **即使显式开启 TEAM_ROUTE_WAKE=on 也不发**；与既有 skip 机制同口径（记 skip 行，不误报 wake_failed）。
   if (String(taskId || '')) {
     let taskNow = null;
-    try { taskNow = readTaskFresh(projectName, String(taskId)); } catch { taskNow = null; }
+    let taskReadError = '';
+    try { taskNow = readTaskFresh(projectName, String(taskId)); } catch (e) { taskNow = null; taskReadError = String((e && e.message) || e); }
+    // PM 2026-11-20 16:41 口径（更保守）：**读不到任务状态就一律不发**——该开关默认关闭，只有 Owner 书面同意后
+    // 显式开启才会走；一旦开启，误叫已闭环任务的代价（打断 Owner/PM）远高于漏叫一次，且状态读不到本身就说明
+    // 状态面不可信。记 skip(why=task_unreadable) 并在路由守护.jsonl 留原因。
+    if (!taskNow) {
+      appendRouteLog(projectName, {
+        ...base, event: 'skip', ok: true, why: 'task_unreadable',
+        reason: `任务 ${taskId} 状态读不到（文件缺失/不可解析${taskReadError ? '：' + taskReadError.slice(0, 120) : ''}）：保守不唤醒（看板唤醒守卫）`,
+        upstreamUrl: String(engineUrl || ''),
+      });
+      return { skipped: 'task_unreadable', why: 'task_unreadable', key, taskStatus: '', taskReadError };
+    }
     const taskStatus = String((taskNow && taskNow.status) || '');
+    if (!taskStatus) {
+      appendRouteLog(projectName, {
+        ...base, event: 'skip', ok: true, why: 'task_unreadable',
+        reason: `任务 ${taskId} 缺少 status 字段：保守不唤醒（看板唤醒守卫）`,
+        upstreamUrl: String(engineUrl || ''),
+      });
+      return { skipped: 'task_unreadable', why: 'task_unreadable', key, taskStatus: '' };
+    }
     if (taskStatus && ROUTE_CLOSED_TASK_STATUSES.includes(taskStatus)) {
       appendRouteLog(projectName, {
         ...base, event: 'skip', ok: true, why: 'task_closed',

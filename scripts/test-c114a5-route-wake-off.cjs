@@ -123,8 +123,15 @@ async function main() {
 
     /* ── ② 显式开启（排障）行为恢复 ── */
     process.env.TEAM_ROUTE_WAKE = 'on';
+    // 唤醒前状态守卫（⑦/⑧）要求 taskId 指向真实在办任务，否则会按「读不到状态」保守跳过
+    const onTaskId = 'B-20261120-999994-c114';
+    writeJson(path.join(STATE, '任务', `${onTaskId}.json`), {
+      id: onTaskId, project: PROJECT, type: 'bug', title: '显式开启对照组（working）', priority: 'P1',
+      owner: 'programmer1', status: 'working', claimedAt: new Date().toISOString(), reopenCount: 0,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), history: [],
+    });
     const routeBefore2 = jsonl(ROUTE_LOG).length;
-    const r2 = await daemon.wakeRoute(PROJECT, optOf('c114a5-on-1'));
+    const r2 = await daemon.wakeRoute(PROJECT, { ...optOf('c114a5-on-1'), taskId: onTaskId });
     const routeRows2 = jsonl(ROUTE_LOG).slice(routeBefore2);
     check('②a TEAM_ROUTE_WAKE=on：不再短路（wake=true，沙盘下 deliverRouteWake 走 SELFTEST 分支）',
       Boolean(r2 && r2.wake === true), { r2 });
@@ -173,6 +180,28 @@ async function main() {
     const routeOpen = jsonl(ROUTE_LOG).slice(routeBeforeOpen);
     check('⑦d 对照：同一开关下在办任务仍照常唤醒（守卫按状态，不是把开关变空转）',
       rOpen && rOpen.wake === true && routeOpen.some((r) => String(r.event) === 'wake'), { r: rOpen, rows: routeOpen });
+
+    /* ── ⑧ 读不到任务状态 → 一律不发（PM 2026-11-20 16:41 更保守口径） ── */
+    const missingId = 'B-20261120-999996-c114';   // 任务文件不存在 → readTaskFresh 返回 null
+    const emptyStatusId = 'B-20261120-999995-c114'; // 任务存在但没有 status 字段
+    writeJson(path.join(STATE, '任务', `${emptyStatusId}.json`), {
+      id: emptyStatusId, project: PROJECT, type: 'bug', title: '缺 status 字段（夹具）', priority: 'P1',
+      owner: 'programmer1', claimedAt: null, reopenCount: 0, createdAt: new Date().toISOString(), history: [],
+    });
+    const wakeBeforeUnread = jsonl(WAKE_LOG).length;
+    const routeBeforeUnread = jsonl(ROUTE_LOG).length;
+    const rMissing = await daemon.wakeRoute(PROJECT, { ...optOf('c114a5-unreadable-1'), taskId: missingId });
+    const rNoStatus = await daemon.wakeRoute(PROJECT, { ...optOf('c114a5-unreadable-2'), taskId: emptyStatusId });
+    const routeUnread = jsonl(ROUTE_LOG).slice(routeBeforeUnread);
+    const wakeUnread = jsonl(WAKE_LOG).slice(wakeBeforeUnread);
+    check('⑧a 读不到任务状态（文件缺失/缺 status）→ skipped=task_unreadable，显式开启也不发',
+      rMissing && rMissing.skipped === 'task_unreadable' && rMissing.taskStatus === ''
+      && rNoStatus && rNoStatus.skipped === 'task_unreadable', { missing: rMissing, noStatus: rNoStatus });
+    check('⑧b 路由守护.jsonl 记 skip(why=task_unreadable) 且带原因，无 wake 行',
+      routeUnread.filter((r) => String(r.event) === 'skip' && String(r.why) === 'task_unreadable' && Boolean(String(r.reason || ''))).length === 2
+      && !routeUnread.some((r) => String(r.event) === 'wake'),
+      { rows: routeUnread.map((r) => `${r.event}/${r.why}`) });
+    check('⑧c 唤醒.jsonl 零新增（读不到状态就不叫人）', wakeUnread.length === 0, { wakeRows: wakeUnread });
     delete process.env.TEAM_ROUTE_WAKE;
     const created = runJson(['task', 'create', '--boot', pmTok, '--title', '派单唤醒夹具任务', '--priority', 'P2', '--type', 'task', '--owner', 'programmer1', '--json']);
     const taskId = String(((created.json || {}).task || {}).id || '');
