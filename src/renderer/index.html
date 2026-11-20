@@ -973,26 +973,38 @@
   <script src="gate.js"></script>
   <!-- B-230447-3d23：工作区卡片三档口径（齐备/指向不存在/读取失败）纯逻辑，必须在 app.js 之前。 -->
   <script src="workspace-card.js"></script>
+  <!-- a129：app.js（957KB）之前先跑 3KB 预取脚本：提前发 app:state、DOM 就绪即报可交互 -->
+  <script src="boot-prefetch.js"></script>
   <script src="app.js"></script>
   <!-- B-d100：打回后复审判定（owner-review.js 之前引入，Node 也可 require 做断言） -->
   <script src="ui-perf-core.js"></script>
-<script src="owner-review-state.js"></script>
+<!-- a129：首屏后按需加载，不从首屏解析 -->
+<script data-lazy-src="owner-review-state.js"></script>
   <!-- B-1358：验收前置状态判定（测试任务/测试报告/截图/Owner 决定） -->
-  <script src="accept-prereq.js"></script>
+  <!-- a129：首屏后按需加载，不从首屏解析 -->
+  <script data-lazy-src="accept-prereq.js"></script>
   <!-- R-5550：正文 AC 结构化解析（只在 AC 块内解析、缺项清单） -->
-  <script src="ac-parse.js"></script>
+  <!-- a129：首屏后按需加载，不从首屏解析 -->
+  <script data-lazy-src="ac-parse.js"></script>
   <!-- R-dba4（T-3957）：四组映射 / 组内排序 / AC 逐条 / 四块大白话的纯逻辑（owner-review.js 之前引入） -->
-  <script src="review-list-core.js"></script>
-  <script src="owner-review.js"></script>
+  <!-- a129：首屏后按需加载，不从首屏解析 -->
+  <script data-lazy-src="review-list-core.js"></script>
+  <!-- a129：首屏后按需加载，不从首屏解析 -->
+  <script data-lazy-src="owner-review.js"></script>
 <!-- R-51de（T-410c）：经验教训看板（侧栏入口、六页签、只读、md 实时解析） -->
-<script src="lessons-board.js"></script>
+<!-- a129：首屏后按需加载，不从首屏解析 -->
+<script data-lazy-src="lessons-board.js"></script>
 <!-- R-20261114-001014-e29f：工作区残留（额外会话）单一展示 + 清理 + 清理历史 -->
-<script src="workspace-clean.js"></script>
+<!-- a129：首屏后按需加载，不从首屏解析 -->
+<script data-lazy-src="workspace-clean.js"></script>
 <!-- R-c4c7：团队收件箱实时面板（零轮询；只订阅 mailbox:changed，只在首屏/重聚焦各读一次快照） -->
-<script src="mailbox-panel.js"></script>
+<!-- a129：首屏后按需加载，不从首屏解析 -->
+<script data-lazy-src="mailbox-panel.js"></script>
 <!-- R-6bc8（T-37f5）：会话排队面板（只读：排队数 + 四态 + 失败/跳过两列 + 背压提示） -->
-<script src="session-queue-panel.js"></script>
+<!-- a129：首屏后按需加载，不从首屏解析 -->
+<script data-lazy-src="session-queue-panel.js"></script>
 <!-- R-b34a AC8③（T-20261118-195239-0d3b）：慢 IPC 锚点 [data-perf-log] 填充（只读 perf:recent） -->
-<script src="perf-log-anchor.js"></script>
+<!-- a129：首屏后按需加载，不从首屏解析 -->
+<script data-lazy-src="perf-log-anchor.js"></script>
 </body>
 </html>

@@ -2498,6 +2498,44 @@ function startupMarkBridge(kind) {
   } catch { /* 打点失败不影响启动 */ }
 }
 
+// a129（P0 首屏代码分割）：首屏之后才加载评审/池/流程/团队台/用量等 10 个脚本（约 350KB），
+// 首屏只解析 boot-prefetch + flow/gate/app 等最小集。加载顺序 = index.html 中 data-lazy-src 出现顺序。
+let lazyRendererLoading = null;
+function loadLazyRendererScripts() {
+  if (lazyRendererLoading) return lazyRendererLoading;
+  lazyRendererLoading = (async () => {
+    const nodes = Array.from(document.querySelectorAll('script[data-lazy-src]'));
+    const loaded = [];
+    for (const node of nodes) {
+      const src = String(node.getAttribute('data-lazy-src') || '');
+      if (!src) continue;
+      await new Promise((resolve) => {
+        const el = document.createElement('script');
+        el.src = src;
+        el.async = false;
+        el.onload = () => { loaded.push(src); resolve(); };
+        el.onerror = () => { loaded.push(src + '?error'); resolve(); };
+        (document.body || document.head).appendChild(el);
+      });
+    }
+    // 这些脚本内部已处理「DOMContentLoaded 已过就直接 init」；不要补派 DCL，避免 app.js 的监听重复执行。
+    window.__awbLazyScripts = loaded;
+    window.__awbLazyLoaded = true;
+    try { console.log('[startup] lazy ' + loaded.length + ' scripts loaded'); } catch { /* ignore */ }
+    return loaded;
+  })();
+  return lazyRendererLoading;
+}
+window.__awbEnsureLazy = loadLazyRendererScripts;
+
+function scheduleLazyRendererScripts() {
+  const run = () => { void loadLazyRendererScripts().catch(() => {}); };
+  try {
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 1200 });
+    else setTimeout(run, 120);
+  } catch { setTimeout(run, 120); }
+}
+
 async function refresh() {
   // B-231006-b81a 回归基线诊断：刷新是否真的执行（Owner 报「刷新按钮也失效」）。
   // 只读计数，不参与业务；夹具点击 #btn-refresh 后断言它递增。
@@ -2509,7 +2547,10 @@ async function refresh() {
   }
   renderBridgeAlert();
   try {
-    state = await window.workbench.state();
+    // a129：boot-prefetch.js 在 app.js 解析前就发出了 app:state；这里复用同一个 Promise（省一次往返等待）。
+    const statePromise = window.__awbStatePromise || window.workbench.state();
+    window.__awbStatePromise = null;
+    state = await statePromise;
     startupMarkBridge('state');
     stateReadError = null;
     // B-4fdd：首屏不等 team:members（那是第二个 IPC，冷启动白等 100-500ms）；先用缓存/空值渲染，
@@ -2520,6 +2561,8 @@ async function refresh() {
     try { console.log('[startup] render ' + (performance.now() - __renderStart).toFixed(1) + 'ms'); } catch { /* ignore */ }
     // 首屏可用 = 首拉 render 完成并完成一帧（与 dsh:status 的 startup.marks.firstScreenMs 同源）。
     try { requestAnimationFrame(() => requestAnimationFrame(() => startupMarkBridge('screen'))); } catch { /* ignore */ }
+    // 首屏已提交渲染：下一拍再加载重脚本（评审/池/流程/团队台/用量），不抢首屏 CPU。
+    try { scheduleLazyRendererScripts(); } catch { /* 懒加载失败不影响首屏 */ }
     const current = activeProject();
     if (current) loadLegacyDocs(legacyUi.projectId === current.id);
     const memberProbe = loadMemberStates(current).then((rows) => {

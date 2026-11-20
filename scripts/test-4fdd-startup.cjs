@@ -210,6 +210,25 @@ async function launchOnce(box, { port, envExtra, waitMarksMs }) {
   }
   // dsh:status（离线/在线都取一次，拿 startup 摘要）
   status = await cdp.evaluate('window.workbench.dshStatus()');
+  // a129：懒加载完成 + 首屏交互冒烟（K3 初始化门）。
+  const smoke = await cdp.evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const t0 = Date.now();
+    while (!window.__awbLazyLoaded && Date.now() - t0 < 8000) await wait(100);
+    const out = { lazyLoaded: Boolean(window.__awbLazyLoaded), lazyCount: (window.__awbLazyScripts || []).length, clicks: {}, errors: (window.__awbBootErrors || []).slice(0, 8) };
+    const click = (sel) => { const el = document.querySelector(sel); if (!el) return false; try { el.click(); return true; } catch { return false; } };
+    out.clicks.refresh = click('#btn-refresh');
+    await wait(200);
+    for (const sel of ['#team-pill', '#session-pill', '#btn-pool', '#btn-session-queue']) {
+      const el = document.querySelector(sel);
+      if (!el) { out.clicks[sel] = 'missing'; continue; }
+      try { el.click(); await wait(150); el.click(); await wait(100); out.clicks[sel] = 'ok'; } catch (e) { out.clicks[sel] = 'throw'; }
+    }
+    out.workspaceSwitch = Boolean(document.getElementById('workspace-switch'));
+    out.ok = out.lazyLoaded && out.clicks.refresh === true && out.workspaceSwitch && out.errors.length === 0
+      && out.clicks['#team-pill'] === 'ok' && out.clicks['#session-pill'] === 'ok' && out.clicks['#btn-pool'] === 'ok' && out.clicks['#btn-session-queue'] === 'ok';
+    return out;
+  })()`, 30000);
   const pageInfo = await cdp.evaluate(`(() => ({
     readyState: document.readyState,
     hasRetry: Boolean(document.getElementById('dsh-retry')),
@@ -233,6 +252,7 @@ async function launchOnce(box, { port, envExtra, waitMarksMs }) {
     dsh: (status && status.status) || null,
     discovery: (status && status.discovery) || null,
     pageInfo,
+    smoke,
     marks: perfRows(box.team).filter((r) => r.kind === 'startup'),
     stdoutTail: stdout.slice(-2500),
   };
@@ -244,7 +264,33 @@ async function launchOnce(box, { port, envExtra, waitMarksMs }) {
   return result;
 }
 
+// PM 012728：竞争态要注明 CPU/进程数；--wait-idle <秒> 可等机器空闲再测（阈值 30%）。
+function sampleLoad() {
+  try {
+    const { execFileSync } = require('node:child_process');
+    const cpu = Number(String(execFileSync('powershell', ['-NoProfile', '-Command',
+      '(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average'],
+      { encoding: 'utf8', timeout: 20000 }) || '').trim());
+    const procs = Number(String(execFileSync('powershell', ['-NoProfile', '-Command',
+      '(Get-Process | Measure-Object).Count'], { encoding: 'utf8', timeout: 20000 }) || '').trim());
+    return { cpu: Number.isFinite(cpu) ? Math.round(cpu) : null, procs: Number.isFinite(procs) ? procs : null };
+  } catch { return { cpu: null, procs: null }; }
+}
+async function waitIdle(maxSec, threshold = 30) {
+  const end = Date.now() + Math.max(0, maxSec) * 1000;
+  let last = null;
+  while (Date.now() < end) {
+    last = sampleLoad();
+    if (last.cpu !== null && last.cpu <= threshold) return last;
+    await sleep(3000);
+  }
+  return last || { cpu: null, procs: null };
+}
+
 async function main() {
+  const waitIdleSec = Number(argOf('--wait-idle', '0')) || 0;
+  const loadBefore = waitIdleSec > 0 ? await waitIdle(waitIdleSec) : sampleLoad();
+  if (!JSON_OUT) console.log('环境负载（开始）：CPU ' + (loadBefore.cpu === null ? '未知' : loadBefore.cpu + '%') + ' / 进程 ' + (loadBefore.procs === null ? '未知' : loadBefore.procs));
   const port0 = await freePort();
   const box = seedSandbox('cold');
   // 冷启动：ROUNDS 轮 × 每轮 RUNS 次（各自新数据目录，模拟首次打开；不设 env、无 dsh.json）。
@@ -263,7 +309,9 @@ async function main() {
       else {
         const procFirst = Number(r.startup && r.startup.marks && r.startup.marks.firstScreenMs);
         const disc = Number(r.discoveryMs);
-        if (!JSON_OUT) console.log('  · ' + tag + '：首屏(进程起算)=' + procFirst + 'ms 发现链=' + disc + 'ms 墙钟=' + r.firstScreenWall + 'ms');
+        if (!JSON_OUT) console.log('  · ' + tag + '：首屏(进程起算)=' + procFirst + 'ms 发现链=' + disc + 'ms 墙钟=' + r.firstScreenWall
+        + 'ms lazy=' + (r.smoke && r.smoke.lazyCount) + ' smoke=' + Boolean(r.smoke && r.smoke.ok));
+      check(tag + ' 懒加载+首屏交互冒烟（lazy=10、刷新/三抽屉/切工作区入口、无脚本错误）', Boolean(r.smoke && r.smoke.ok), { smoke: r.smoke });
       }
       try { fs.rmSync(b.sb, { recursive: true, force: true }); } catch { /* ignore */ }
       if (!r.ok) break;
@@ -335,7 +383,7 @@ async function main() {
   try { fs.rmSync(box.sb, { recursive: true, force: true }); } catch { /* ignore */ }
   if (OUT) {
     fs.mkdirSync(OUT, { recursive: true });
-    fs.writeFileSync(path.join(OUT, 'startup-measure.json'), JSON.stringify({ root: ROOT, at: new Date().toISOString(), cold: coldOk.map((r) => ({
+    fs.writeFileSync(path.join(OUT, 'startup-measure.json'), JSON.stringify({ root: ROOT, at: new Date().toISOString(), load: { atStart: loadBefore, atEnd: sampleLoad() }, cold: coldOk.map((r) => ({
     round: r.round, index: r.index,
     firstScreenWall: r.firstScreenWall, discoveryMs: r.discoveryMs,
     startup: r.startup, marks: r.marks,
