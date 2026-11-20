@@ -1,7 +1,7 @@
 {
-  "version": "2.1.11",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.11/发布/pm-workbench-2.1.11.zip",
-  "sha256": "045e1684320c8dcd87590914fefc0d6cc61e68ff0bd583ecfb32752b530d1883",
-  "size": 4959304,
-  "notes": "Owner 2026-11-20 10:48 报的「六角色会话用量红字：pm 123136.5 万（阈值 30 万）已超 4104.6 倍」修复：会话用量判定改用 DSH 的未缓存输入（uncachedInputTokens），累计（含 cacheRead）只作参考并在文案标注——pm 由「4104.6 倍」纠正为「14.9 倍（446.3 万 / 30 万）」，tester 11.9 倍、programmer1 10.1 倍；无累计导入时行为不变。含 190a items 源头加固（已归档角色不进 dsh:team-status.items，与 inspector 同口径）。夹具：test-0823-usage-thresholds 17/17、test-190a-sidebar 18/18、selftest 176/176。"
+  "version": "2.1.12",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.12/发布/pm-workbench-2.1.12.zip",
+  "sha256": "073dd30c17fc33b016de0ece8aa9cada2d91385619f186c483fcd0d4ca6a6266",
+  "size": 4995850,
+  "notes": "本轮 8 个缺陷修复一次性交付（全部经 PM 独立复跑 + tester 净树两轮复验 + PM 逐一验收）：①换人静默门不再把「收到的系统通知」和「收到的角色消息」算成活跃（只看本人发出，01425f6+859c2be）；②running 判据兼容 会话排队.json schema:2（roles[] 数组），不再恒假（a85937e）；③task reap --ids 支持逗号/空白/全角分隔并对不存在 id 显式报 missing，不再静默处理 0（e749da3）；④会话用量阈值改为单会话累计预算 500 万/1000 万并说清「换人归零」（f8f6904+00dc62e，pm 455 万不再红线）；⑤auto-rotate 判档改用未缓存输入并对齐单源阈值（d5f79ad）；⑥§D2 子代理使用边界进六角色卡模板 + rolecard sync 标准节 subagent-boundary（含 begin/end 成对，918c559）；⑦配套夹具 8 个 seed 按新阈值同步、新增 6 个夹具（49dadba 等）。夹具：test-6c35 7/7、test-d2 24/24、test-8d91 14/14、test-reap-ids-parse 4/4、test-0823 17/17、test-usage-threshold-semantics 18/18、test-b48a 9/9、selftest 176/176。"
 }
