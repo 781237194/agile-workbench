@@ -6588,6 +6588,9 @@ ipcMain.handle('theme:metrics', async () => {
     // 名册行保留（对应 Owner「归档应移除 boot」），所以 memberCount 不随归档变化，readyCount 会减。
     const rosterCountsNow = rosterObservability.rosterCounts(teamTools.teamMembers() || []);
     if (rosterAllEmpty) {
+      // B-6bb5（P0）：名册行仍在、只是会话绑定全空（典型：DSH 离线/换端口后 mapping 0/N）≠「团队已归档/成员表清空」。
+      // 旧实现无条件 membersEmpty:true → 卡片写「本工作区无在册成员」，与徽标「完成 6 人」自相矛盾。
+      const noMembersAtAll = rosterCountsNow.memberCount === 0;
       return {
         ok: true, project: projectName, workspace: workspacePath, roles: [], roleIds: memberRoleIds,
         count: 0,
@@ -6595,7 +6598,10 @@ ipcMain.handle('theme:metrics', async () => {
         memberCount: rosterCountsNow.memberCount, activeCount: rosterCountsNow.activeCount,
         readyCount: rosterCountsNow.readyCount, archivedCount: rosterCountsNow.archivedCount,
         unboundActiveCount: rosterCountsNow.unboundActiveCount,
-        membersEmpty: true, rosterAllEmpty: true, teamMode: normalizeTeamMode(project && project.teamMode), error: ''
+        membersEmpty: noMembersAtAll, rosterAllEmpty: true,
+        filteredOut: !noMembersAtAll,
+        filteredReason: noMembersAtAll ? '' : 'unbound',
+        teamMode: normalizeTeamMode(project && project.teamMode), error: ''
       };
     }
     const workspaceSessionSet = new Set((project && project.workspace && Array.isArray(project.workspace.sessionIds) ? project.workspace.sessionIds : []).map(String));

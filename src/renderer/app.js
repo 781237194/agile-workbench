@@ -3013,6 +3013,8 @@ function renderSessions() {
   const rosterFailed = Boolean(cache && cache.rosterFailed && !(Array.isArray(rosterRows) && rosterRows.length));
   const rosterFiltered = Boolean(cache && cache.filteredOut);
   const rosterEmpty = Boolean(cache && !rosterFailed && !rosterFiltered && Array.isArray(rosterRows) && rosterRows.length === 0);
+  // B-6bb5：真无成员必须同时满足「名册行 0」与「memberCount 0」；仅行被过滤空时不算。
+  const trulyEmptyRoster = rosterEmpty && Number(cache && cache.memberCount || 0) === 0;
   const allEntries = sessionEntries(p);
   const entries = Array.isArray(rosterRows) && rosterRows.length
     ? allEntries.filter((item) => rosterRows.some((row) => String(row.role || '') === String(item.role.id)))
@@ -3038,21 +3040,51 @@ function renderSessions() {
     count.setAttribute('data-roster-failed', rosterFailed ? '1' : '0');
     count.setAttribute('data-roster-filtered', rosterFiltered ? '1' : '0');
   }
+  // B-6bb5：离线标记随状态清除，避免恢复后徽标仍挂着上一轮的 data-dsh-offline。
+  if (count) count.removeAttribute('data-dsh-offline');
   // AC1：用量展示与团队会话同一块刷新（异步，不阻塞主渲染）
   try { renderSessionUsage(p).catch(() => { /* 用量展示失败不阻断会话渲染 */ }); } catch { /* ignore */ }
   if (!p) {
     box.innerHTML = '<div class="empty-row">先选择工作区；当前团队模式的角色会话会显示在这里。</div>';
     return;
   }
+  // B-6bb5（P0）：DSH 离线是独立一档——本地名册可能完好（N 个在册角色），只是 DSH 连不上导致会话列表空。
+  // 旧实现把「行被过滤成 0」一律写成「无在册成员」，属于断言性假话，且与徽标「完成 N 人」自相矛盾。
+  const dsh = state && state.dsh ? state.dsh : null;
+  const dshOffline = Boolean(dsh && dsh.configured && !dsh.online);
+  const dshCode = String((dsh && dsh.code) || (dshOffline ? 'DSH_OFFLINE' : ''));
+  const dshAddress = String((dsh && dsh.baseUrl) || '');
   if (rosterFailed) {
     const code = (cache && (cache.rosterErrorCode || cache.rosterErrorMessage)) || 'UNKNOWN';
     box.innerHTML = '<div class="empty-row bad" data-roster-failed="1">名册读取失败（' + esc(String(code)).slice(0, 80) + '）：保留上一次成功读取的会话列表；请稍后重试或检查团队账本</div>';
     return;
   }
+  if (dshOffline) {
+    // 离线档：N 个在册角色 + 当前离线（错误码）+ 地址 + 重试；绝不出现「无在册成员」。
+    // N 取名册行数（rosterTotal），不用 teamRoleCount 兜底——真无成员时如实写 0，不能借项目角色数虚报。
+    const offlineN = rosterTotal || 0;
+    box.innerHTML = '<div class="empty-row bad" data-dsh-offline="1">' + offlineN + ' 个在册角色；DSH 当前离线（' + esc(dshCode || 'DSH_OFFLINE') + '）· 当前会话映射 ' + ready + '/' + Math.max(offlineN, ready)
+      + (dshAddress ? ' · 地址 ' + esc(dshAddress) : '') + '<button class="link-btn" type="button" data-dsh-retry="1">重试连接</button></div>';
+    if (count) {
+      count.textContent = ready + '/' + Math.max(offlineN, ready);
+      count.setAttribute('data-local', ready + '/' + Math.max(offlineN, ready));
+      count.setAttribute('data-verified', '0');
+      count.setAttribute('data-dsh-offline', '1');
+    }
+    return;
+  }
   if (rosterFiltered) {
-    const mc = cache && Number(cache.memberCount) > 0 ? Number(cache.memberCount) : 0;
-    const reason = String((cache && cache.filteredReason) || '') === 'archived' ? '成员已归档' : '项目映射缺失';
-    box.innerHTML = '<div class="empty-row" data-roster-filtered="1">名册有 ' + mc + ' 人，但本工作区当前可显示 0 人（' + esc(reason) + '）' + '<button class="link-btn" type="button" data-open-new-project>＋ 建团队</button></div>';
+    // DSH 在线但会话未映射：角色在册 ≠ 无成员，文案写清原因并给下一步。
+    const reason = String((cache && cache.filteredReason) || '') === 'archived' ? '成员已归档' : '会话尚未映射';
+    box.innerHTML = '<div class="empty-row" data-roster-filtered="1">' + total + ' 个在册角色；' + esc(reason) + '，当前显示 0/' + total
+      + '<button class="link-btn" type="button" data-dsh-retry="1">重试连接</button><button class="link-btn" type="button" data-open-new-project>＋ 建团队</button></div>';
+    if (count) count.setAttribute('data-roster-filtered', '1');
+    return;
+  }
+  if (rosterEmpty && !trulyEmptyRoster) {
+    // 名册还有 N 人、只是行被过滤空：按「会话未映射」处理，不写「无在册成员」。
+    box.innerHTML = '<div class="empty-row" data-roster-unmapped="1">' + total + ' 个在册角色；会话尚未映射，当前显示 0/' + total
+      + '<button class="link-btn" type="button" data-dsh-retry="1">重试连接</button></div>';
     return;
   }
   if (rosterEmpty) {
@@ -15551,6 +15583,28 @@ async function retryDsh() {
   }
 }
 
+/* B-6bb5（P0）：卡片里的「重试连接」——离线→在线一次恢复，不重启。
+ * 先 probeDsh（会更新 state.dsh 与 DSH 灯），成功后再 refresh() 重画卡片/会话行；失败把错误码带出来。 */
+async function retryDshFromCard(btn) {
+  try { window.__dshRetryCalls = Number(window.__dshRetryCalls || 0) + 1; } catch { /* ignore */ }
+  if (btn) btn.disabled = true;
+  try {
+    const status = await probeDsh(true, false);
+    if (!status || !status.online) {
+      toast('DSH 仍未连接：' + String((status && status.code) || 'DSH_OFFLINE') + ' · ' + ((status && status.message) || '检查地址或先启动 dsh web'), 'bad');
+      return;
+    }
+    toast('DSH 已连接，正在刷新会话…', 'ok');
+    await refresh();
+    const p = activeProject();
+    if (p) { try { await loadDshTeamStatus({ force: true }); } catch { /* 核验失败不阻断卡片恢复 */ } }
+  } catch (e) {
+    toast('重试失败：' + humanError(e.message), 'bad');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 /* ── 会话映射自动跟随（B-405f 补充）：轮换/换人后不用重启工作台 ─────────
  * 以前界面只在启动或手动刷新时读一次 workbench.json；team.mjs session rotate 在
  * 进程外改了映射，左侧就停在 4/6，必须重启。这里每 5 秒只读一次状态：
@@ -16585,6 +16639,18 @@ function bindCriticalControls() {
   }
 }
 
+/** B-6bb5：卡片「重试连接」事件委托（按钮由 renderSessions 动态生成，单次 document 委托即可）。 */
+function bindDshRetryDelegation() {
+  if (document.body && document.body.dataset.dshRetryBound === '1') return;
+  if (document.body) document.body.dataset.dshRetryBound = '1';
+  bindBlock('dsh-retry-delegation', () => document.addEventListener('click', (e) => {
+    const btn = e.target instanceof Element ? e.target.closest('[data-dsh-retry]') : null;
+    if (!btn) return;
+    e.preventDefault();
+    void retryDshFromCard(btn);
+  }));
+}
+
 function bind() {
   // B-fa80：系统占用点击立即刷新（平时 2 秒自动刷新）。
   $('#metrics')?.addEventListener('click', () => { tickMetrics(); });
@@ -17303,6 +17369,7 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
 
   // 抽屉关闭
   bindPanelControls();
+  bindDshRetryDelegation();
 
   // 六角色行支持键盘打开
   document.addEventListener('keydown', (e) => {
@@ -17751,6 +17818,7 @@ window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /*
   // 抽屉关闭/入口另走独立块兜底绑定，保证单个初始化失败时三个 × 仍可点。
   bindBlock('bind', bind);
   bindPanelControls();
+  bindDshRetryDelegation();
   bindPanelOpeners();
   bindCriticalControls();
   renderBridgeAlert();
