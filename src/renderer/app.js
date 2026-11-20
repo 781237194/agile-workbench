@@ -15954,6 +15954,74 @@ function startRosterWatch() {
   window.__rosterPushStats = window.__teamRoster.pushStats;
 }
 
+const dshRefreshUi = { busy: null, pending: false, lastAt: 0 };
+const autoRebindUi = { busy: false, lastKey: '', lastAt: 0 };
+
+/** B-33b9 追加：地址切换/重载成功后一次刷新全部（dsh 状态 + 名册 + 映射 + 六角色区）。 */
+async function refreshDshEverywhere(reason = 'push') {
+  if (dshRefreshUi.busy) { dshRefreshUi.pending = true; return dshRefreshUi.busy; }
+  dshRefreshUi.busy = (async () => {
+    try {
+      await refresh();
+      try { await probeDsh(true, true); } catch { /* 离线也继续重画 */ }
+      const p = activeProject();
+      if (p) {
+        try { await loadDshTeamStatus({ force: true }); } catch { /* 团队台失败不阻断 */ }
+      }
+      try { if (window.__teamRoster && typeof window.__teamRoster.sync === 'function') await window.__teamRoster.sync({ reason: String(reason || 'dsh') }); } catch { /* ignore */ }
+      try { renderSessions(); renderSidebar(); renderDsh(state?.dsh); } catch { /* ignore */ }
+      await maybeAutoRebindByTitle();
+      dshRefreshUi.lastAt = Date.now();
+    } finally {
+      dshRefreshUi.busy = null;
+      if (dshRefreshUi.pending) {
+        dshRefreshUi.pending = false;
+        void refreshDshEverywhere(String(reason || '') + '-followup');
+      }
+    }
+  })();
+  return dshRefreshUi.busy;
+}
+
+/**
+ * B-33b9 追加：连上后「映射 0/N」→ 自动按标题重绑，不等用户点按钮。
+ * 不依赖 liveFor 本地缓存（团队台 IPC 失败时也要能试）：主进程按 DSH 真实标题精确匹配，
+ * 无匹配会返回 DSH_TITLE_NO_MATCH，这里静默留手动入口；同一项目 15s 内只试一次避免刷屏。
+ */
+async function maybeAutoRebindByTitle() {
+  const p = activeProject();
+  const api = window.workbench;
+  if (!p || !api || typeof api.rebindSessions !== 'function' || !state?.dsh?.online) return;
+  const mapped = Object.keys(p.sessions || {}).filter((role) => p.sessions[role]).length;
+  const roles = teamRoles(p) || [];
+  if (mapped !== 0 || !roles.length) return;
+  const key = String(p.id);
+  if (autoRebindUi.busy || (autoRebindUi.lastKey === key && Date.now() - autoRebindUi.lastAt < 15000)) return;
+  autoRebindUi.busy = true;
+  autoRebindUi.lastKey = key;
+  autoRebindUi.lastAt = Date.now();
+  try {
+    const r = await api.rebindSessions({ projectId: p.id });
+    if (r && r.ok && Number(r.bound) > 0) {
+      try { showNotice('DSH 已连接，自动按标题重绑 ' + r.bound + '/' + r.total + ' 个角色会话', 'ok'); } catch { /* ignore */ }
+      await refresh();
+      renderSessions();
+    }
+  } catch { /* 自动重绑失败留手动按钮 */ } finally { autoRebindUi.busy = false; }
+}
+
+function bindDshStatusPush() {
+  const api = window.workbench;
+  if (!api || typeof api.onDshStatusChanged !== 'function') return false;
+  try {
+    api.onDshStatusChanged((payload) => {
+      const reason = String((payload && payload.reason) || 'push');
+      void refreshDshEverywhere(reason);
+    });
+    return true;
+  } catch { return false; }
+}
+
 function reloadDshView(opts = {}) {
   const view = $('#dsh-view');
   if (!view) return false;
@@ -15964,6 +16032,16 @@ function reloadDshView(opts = {}) {
   // B-405f 补充：重载聊天区的同时重读会话映射，成员列表/计数一起刷新（不用重启工作台）。
   if (window.__teamRoster && typeof window.__teamRoster.sync === 'function') {
     window.__teamRoster.sync({}).catch(() => {});
+  }
+  // B-33b9 追加：重载 = 主进程重新发现/校验地址 + reload webview + 广播；成功后全局刷新。
+  const api = window.workbench;
+  if (api && typeof api.reloadDshView === 'function') {
+    void api.reloadDshView().then((r) => {
+      if (r && r.status) { state.dsh = r.status; renderDsh(r.status); }
+      return refreshDshEverywhere('reload');
+    }).catch(() => refreshDshEverywhere('reload'));
+  } else {
+    void refreshDshEverywhere('reload');
   }
   if (!opts.quiet) toast('已重载 DSH 主画面', 'ok');
   return true;
@@ -18061,6 +18139,7 @@ window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /*
   bindBlock('bind', bind);
   bindPanelControls();
   bindDshRetryDelegation();
+  bindDshStatusPush();
   bindPanelOpeners();
   bindCriticalControls();
   if (!window.workbench) {

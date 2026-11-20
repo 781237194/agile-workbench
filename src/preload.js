@@ -99,6 +99,13 @@ if (IS_BOARD_WINDOW) {
       ipcRenderer.on('team:session-queue-changed', handler);
       return () => { try { ipcRenderer.off('team:session-queue-changed', handler); } catch { /* ignore */ } };
     },
+    // B-33b9 追加：DSH 地址切换/重载成功后的**一次**全局刷新推送（status+映射+六角色区同源重读）。
+    onDshStatusChanged: (cb) => {
+      if (typeof cb !== 'function') return () => {};
+      const handler = (_event, payload) => { try { cb(payload || {}); } catch { /* 回调自身异常忽略 */ } };
+      ipcRenderer.on('dsh:status-changed', handler);
+      return () => { try { ipcRenderer.off('dsh:status-changed', handler); } catch { /* ignore */ } };
+    },
     // R-1dfb（F7/AC5，卷 §六）：团队台活跃度三列只读通道——主进程统一算 + 5 分钟缓存，
     // 渲染层只显示不自算（最近提交 / 最近文件写入 / 最后成功唤醒）。
     teamRoleActivity: (payload) => ipcRenderer.invoke('team:role-activity', payload),

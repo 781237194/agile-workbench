@@ -11750,7 +11750,27 @@ ipcMain.handle('theme:metrics', async () => {
     const row = recordRenderCrash('selftest', { type: 'renderer', reason: 'crashed-selftest', exitCode: 0 });
     return { ok: true, row };
   });
-  ipcMain.handle('app:reload-dsh', async () => reloadDshGuest());
+  ipcMain.handle('app:reload-dsh', async () => {
+    // B-33b9 追加：重载 DSH 不能只 reload webview——地址可能已变（旧 58497 → 新 55263）。
+    // 先按可信候选（data/dsh.json + netstat 监听端口）重新发现/校验，再 reload，最后广播一次全局刷新。
+    const reload = reloadDshGuest();
+    let discovery = null;
+    let status = null;
+    try {
+      discovery = await maybeAutoDiscoverDsh('reload', { probeTimeoutMs: 500 }, { force: true });
+      status = (discovery && discovery.status) || await dsh.check({ timeoutMs: 3000 });
+    } catch (error) {
+      status = { ...(dsh.statusSync ? dsh.statusSync() : {}), message: '重载后检测失败：' + String(error && error.message || error).slice(0, 160) };
+    }
+    broadcastDshStatusChanged('reload', { status, discovery: dshDiscoverySummary(discovery) });
+    return {
+      ...reload,
+      ok: Boolean(reload && reload.ok),
+      status,
+      discovery: dshDiscoverySummary(discovery),
+      at: new Date().toISOString()
+    };
+  });
   // R-c1ed F-1 自检/验收通道：读窗口（§3.1 唯一取数）、采样开销统计、手动清理（= --clean 等价入口）。
   ipcMain.handle('app:render-memory-window', async (_e, payload) => {
     const p = payload || {};
@@ -22134,6 +22154,24 @@ function scheduleRenderMemoryMaintenance() {
 }
 
 
+function broadcastDshStatusChanged(reason, payload = {}) {
+  // B-33b9：地址切换/重载成功后**一次**广播全局刷新（dsh 状态 + 名册 + 映射 + 六角色区一起重读）。
+  const message = {
+    reason: String(reason || 'status'),
+    at: new Date().toISOString(),
+    baseUrl: String((payload.status && payload.status.baseUrl) || dsh.baseUrl || ''),
+    online: Boolean(payload.status && payload.status.online),
+    status: payload.status || null,
+    discovery: payload.discovery || null
+  };
+  for (const win of [mainWindow, teamBoardWindow]) {
+    try {
+      if (win && !win.isDestroyed() && win.webContents) win.webContents.send('dsh:status-changed', message);
+    } catch { /* 窗口销毁中 */ }
+  }
+  return message;
+}
+
 function reloadDshGuest() {
   try {
     const guests = typeof webContents.getAllWebContents === 'function' ? webContents.getAllWebContents() : [];
@@ -22207,16 +22245,32 @@ async function adoptDiscoveredDsh(discovery) {
     });
   }
   if (baseUrl === previousBaseUrl) {
-    const status = await dsh.check({ timeoutMs: 5000 });
+    let status = await dsh.check({ timeoutMs: 5000 });
+    let webview = { ok: true, via: 'none' };
+    let reconnected = false;
+    // B-33b9 追加（Owner：重启后还是连不上、手点重载才连上）：
+    // 地址已经正确时旧实现直接返回「无需处理」——但 DSH 重启后 cookie/内嵌页仍指向旧连接，
+    // 这里补一步：重装 cookie + 重载 webview + 复检；成功即视为「已恢复」，界面据此广播刷新。
+    if (!status.online) {
+      try {
+        await installDshCookie();
+        webview = await reloadDshWebview(baseUrl);
+        status = await dsh.check({ timeoutMs: 5000 });
+        reconnected = Boolean(status.online);
+      } catch (error) {
+        warnings.push({ code: 'DSH_RECONNECT_FAILED', message: String(error && error.message || error).slice(0, 200) });
+      }
+    }
     return {
       changed: false,
+      reconnected,
       baseUrl,
       previousBaseUrl,
       persisted: false,
       pinUnreachable,
       pinActive,
       cookieOk: true,
-      webview: { ok: true, via: 'none' },
+      webview,
       status,
       warnings
     };
@@ -22341,6 +22395,7 @@ async function runDshDiscovery(reason = 'status', budgets = {}) {
       };
       result.event = recordDshEndpointEvent(result);
       dshDiscovery.last = result;
+      broadcastDshStatusChanged('discovery-failed', { status: (dsh.statusSync ? dsh.statusSync() : null), discovery: dshDiscoverySummary(result) });
       console.warn('[dsh] ' + message);
       return result;
     }
@@ -22371,7 +22426,9 @@ async function runDshDiscovery(reason = 'status', budgets = {}) {
       : (adopted.pinActive ? '（用户 pin 优先，未覆盖 dsh.json）' : '（未能写入 dsh.json）');
     const message = changed
       ? label + ' DSH：' + previousBaseUrl + ' → ' + adopted.baseUrl + persistNote
-      : 'DSH 地址已是最新：' + adopted.baseUrl;
+      : (adopted.reconnected
+        ? 'DSH 地址未变已恢复连接：' + adopted.baseUrl + '（' + label + '）'
+        : 'DSH 地址已是最新：' + adopted.baseUrl);
     const result = {
       ...discovery,
       ...adopted,
@@ -22383,6 +22440,10 @@ async function runDshDiscovery(reason = 'status', budgets = {}) {
     };
     result.event = recordDshEndpointEvent(result);
     dshDiscovery.last = result;
+    broadcastDshStatusChanged('discovery', {
+      status: result.status || (dsh.statusSync ? dsh.statusSync() : null),
+      discovery: dshDiscoverySummary(result)
+    });
     console.log('[dsh] ' + message + (adopted.webview && adopted.webview.ok ? '；WebView=' + adopted.webview.via : '；WebView 未重载'));
     return result;
   })();
