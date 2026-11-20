@@ -2561,11 +2561,14 @@ function bindWorkflowSideEffects() {
   };
   api.onWorkflowSideEffects((p) => {
     const payload = p || {};
+    if (retry) retry.disabled = false;
     if (payload.ok) { if (banner) banner.hidden = true; try { void refresh(); } catch { /* ignore */ } return; }
     ensure();
     text.textContent = '后台同步失败：' + String(payload.message || '未知原因') + '；本次状态可能尚未反映到本地，可重试。';
     banner.hidden = false;
     retry.onclick = () => {
+      if (retry.disabled) return; // a514：重试在途时禁止二次触发（写操作幂等，但不重复排队）
+      retry.disabled = true;
       banner.hidden = true;
       try {
         const projectId = (state && (state.activeProjectId || (state.activeProject && state.activeProject.id))) || '';

@@ -111,6 +111,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('B5 任务扫描缓存 TTL=5000 且首屏后预热 [workflow-prewarm]',
     teamSrc.includes('raw : 5000') && mainSrc.includes('[workflow-prewarm]'), {});
 
+  // ===== a514 第二批（PM 043047）：快照去重 / 非破坏性 supplements / 重试防重 =====
+  const teamSrc2 = fs.readFileSync(path.join(ROOT, 'src', 'team-tools.js'), 'utf8');
+  const appSrc2 = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const mainSrc2 = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  check('B6 快照去重：readWorkflowSnapshotRaw + snapshotMemo + 指纹 1.2s',
+    teamSrc2.includes('function readWorkflowSnapshotRaw(') && teamSrc2.includes('const snapshotMemo = new Map()')
+    && teamSrc2.includes('function workflowSnapshotFingerprint(') && teamSrc2.includes('memo.at) < 1200'), {});
+  check('B7 workflowResponse 不原地改快照行（enrichedRows 复制，无 row.supplements =）',
+    mainSrc2.includes('const enrichedRows = []') && !mainSrc2.includes('row.supplements = rows.map('), {});
+  check('B8 失败条重试在途禁用（不二次触发）', appSrc2.includes('if (retry.disabled) return;') && appSrc2.includes('retry.disabled = true'), {});
+
   const failed = ROWS.filter((r) => !r.ok).length;
   if (JSON_OUT) console.log(JSON.stringify({ total: ROWS.length, passed: ROWS.length - failed, failed: ROWS.filter((r) => !r.ok).map((r) => r.name), rows: ROWS }, null, 2));
   else console.log(`\n${ROWS.length - failed}/${ROWS.length} PASS${failed ? ' · ' + failed + ' FAIL' : ''}`);

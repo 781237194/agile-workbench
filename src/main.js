@@ -2220,18 +2220,23 @@ function workflowResponse(projectId, teamName, projectPath, result) {
     if (projectPath && Array.isArray(payload.requirements) && payload.requirements.length) {
       const view = { path: projectPath };
       const index = buildSupplementIndex(view);
+      // a514：快照可能被同动作内复用（memo），这里不能原地改行——按需复制后再挂 supplements。
+      const enrichedRows = [];
       for (const row of payload.requirements) {
-        if (!row || typeof row !== 'object') continue;
-        if (Array.isArray(row.supplements) && row.supplements.length) continue;
+        if (!row || typeof row !== 'object') { enrichedRows.push(row); continue; }
+        if (Array.isArray(row.supplements) && row.supplements.length) { enrichedRows.push(row); continue; }
+        let supplements = null;
         try {
           const rows = requirementSupplements(view, row, index);
           if (rows.length) {
-            row.supplements = rows.map((item) => ({
+            supplements = rows.map((item) => ({
               name: item.name, rel: item.rel, bytes: item.bytes, sha256: item.sha256, missing: Boolean(item.missing), source: item.source || 'disk-scan'
             }));
           }
         } catch { /* 单行失败不影响快照 */ }
+        enrichedRows.push(supplements ? { ...row, supplements } : row);
       }
+      payload.requirements = enrichedRows;
     }
   } catch { /* 卷索引失败不影响 workflow:state 主流程 */ }
   return payload;

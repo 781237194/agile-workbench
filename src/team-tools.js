@@ -792,6 +792,8 @@ const TASK_CACHE_TTL_MS = (() => {
 const TASK_CACHE_FREEZE = String(process.env.AWB_TASK_CACHE_FREEZE || '') === '1';
 const taskScanCache = new Map(); // dir -> { signature, at, rows }
 const taskCacheStats = { hits: 0, misses: 0, invalidations: 0, lastScanMs: 0, lastHitAt: '', size: 0 };
+// a514：同一动作内快照去重（门预检 + ownerAccept 内部读只构造一遍视图）。
+const snapshotMemoStats = { hits: 0, misses: 0 };
 // 需求正文扫描缓存（readWorkflowSnapshot 每次都会读 94 份正文算 hash，实测 120ms）
 const requirementDocsCache = new Map(); // dir -> { signature, at, value }
 const requirementDocsStats = { hits: 0, misses: 0, lastScanMs: 0 };
@@ -6290,7 +6292,7 @@ function createTeamTools(options = {}) {
    *   ②工作流行本身已 terminated 的照常显示（真工作流不隐瞒），但强制 status=terminated 并打 voided 标记；
    *   ③未登记（只有任务文件、工作流无行）的需求行打 registered=false / unregistered=true，供面板标「未登记」。
    */
-  function readWorkflowSnapshot(projectName, projectPath) {
+  function readWorkflowSnapshotRaw(projectName, projectPath) {
     const name = String(projectName || '').trim();
     if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
     // 先吸收团队工具现场：DSH 角色直接写 TR/V 文件时，工作台读快照也要看到。
@@ -6525,6 +6527,41 @@ function createTeamTools(options = {}) {
       }
     };
   }
+
+  // a514：快照去重——指纹（工作流.json / 任务目录 / 项目.json / 团队.json / 需求目录 的 mtime+size）不变且 1.2s 内直接复用；
+  // 写盘会改 工作流.json mtime → 指纹变 → 下一次自动重读，不会把旧状态当新状态。
+  function workflowSnapshotFingerprint(projectName, projectPath) {
+    const parts = [];
+    const add = (p) => { try { const st = fs.statSync(p); parts.push(Math.round(st.mtimeMs) + ':' + (st.size || 0)); } catch { parts.push('-'); } };
+    try {
+      const stateDir = projectStateDir(projectName);
+      add(path.join(stateDir, '工作流.json'));
+      add(path.join(stateDir, '项目.json'));
+      add(path.join(stateDir, '任务'));
+      add(path.join(layout.root, '状态', '团队.json'));
+      if (projectPath) add(path.join(path.resolve(String(projectPath)), '需求'));
+      return parts.join('|');
+    } catch { return ''; }
+  }
+  function readWorkflowSnapshot(projectName, projectPath) {
+    const name = String(projectName || '').trim();
+    if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
+    const fp = workflowSnapshotFingerprint(name, projectPath);
+    const memo = snapshotMemo.get(name);
+    if (memo && fp && memo.fp === fp && (Date.now() - memo.at) < 1200) {
+      snapshotMemoStats.hits += 1;
+      taskCacheStats.lastHitAt = new Date().toISOString();
+      return memo.value;
+    }
+    const value = readWorkflowSnapshotRaw(name, projectPath);
+    if (value && value.ok && fp) {
+      snapshotMemoStats.misses += 1;
+      snapshotMemo.set(name, { fp, at: Date.now(), value });
+      if (snapshotMemo.size > 8) snapshotMemo.delete(snapshotMemo.keys().next().value);
+    }
+    return value;
+  }
+  const snapshotMemo = new Map();
 
   /** 工作流动作前置：项目必须已在旧团队登记，六角色目录/文档/索引必须齐。 */
   /**
