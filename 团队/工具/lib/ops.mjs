@@ -5127,7 +5127,7 @@ export function cmdMail(args) {
     if (!roles.length) fail('BAD_ARGS', 'mail ' + sub + ' 需要 --role <角色> 或 --all', { action: sub });
     if (sub === 'stats') {
       const rows = roles.map((r) => mailStore.statsRole(mailRoot, r));
-      out(args, rows.map((r) => `${r.role}: jsonl=${r.jsonl} seq=${r.seqMin || '-'}..${r.seqMax || '-'} messages=${r.messages} bad=${r.badLines} legacyFiles=${r.legacyFiles} archived=[${(r.archivedMonths || []).join(',')}]`).join('\n'), { ok: true, project: projectNameOf(args), roles: rows });
+      out(args, rows.map((r) => `${r.role}: jsonl=${r.jsonl} seq=${r.seqMin || '-'}..${r.seqMax || '-'} messages=${r.messages} bad=${r.badLines} legacyFiles=${r.legacyFiles} archived=[${(r.archivedMonths || []).join(',')}]`).join('\n'), { ok: true, project: String(args.project || ''), roles: rows });
       return;
     }
     if (sub === 'list') {
