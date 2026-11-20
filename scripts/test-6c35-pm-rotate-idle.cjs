@@ -133,6 +133,23 @@ function clearMail() {
   fs.rmSync(path.join(TEAM, '状态', '邮箱'), { recursive: true, force: true });
 }
 
+/** B-f174：会话排队.json schema:2（roles 为数组）——真实形态；旧代码按对象取 → running 判据恒假。 */
+function putQueue(roleState) {
+  const file = path.join(TEAM, '状态', '会话排队.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const at = new Date().toISOString();
+  const roles = Object.entries(roleState).map(([role, st]) => ({
+    role, sessionId: `session-6c35-${role}`, known: true, queued: 0, state: 'ok', stale: false, active: true,
+    running: Boolean(st && st.running), runningSince: st && st.running ? at : null, pendingInput: [], lastEventAt: at,
+  }));
+  fs.writeFileSync(file, JSON.stringify({ schema: 2, at, project: PROJECT, staleMs: 120000, degraded: null, roles }, null, 2) + '\n', 'utf8');
+  return file;
+}
+
+function clearQueue() {
+  fs.rmSync(path.join(TEAM, '状态', '会话排队.json'), { force: true });
+}
+
 function putWorkingTask() {
   fs.mkdirSync(TASK_DIR, { recursive: true });
   const task = {
@@ -190,6 +207,25 @@ function main() {
     check('A5', '给 pm 派 status=working 任务 → pm idle === false（tasks 硬判据未被削弱）',
       Boolean(p5.data) && !p5.data.error && p5.data.idle === false && /working 任务/.test(reasons5),
       { ...detailOf(p5), task: taskFile, reasons: reasons5 });
+
+    /* ── A6/A7：running 会话判据（B-f174，schema:2 roles[] 数组形态） ── */
+    clearMail();
+    fs.rmSync(TASK_DIR, { recursive: true, force: true });
+    clearQueue();
+    const qFile = putQueue({ pm: { running: true } });
+    const p6 = probe();
+    const reasons6 = (p6.data && Array.isArray(p6.data.reasons)) ? p6.data.reasons.join(' | ') : '';
+    check('A6', '会话排队.json 为 schema:2（roles 数组）且 pm running=true → pm idle === false 且 reason 含「有正在跑的会话」',
+      Boolean(p6.data) && !p6.data.error && p6.data.idle === false && /有正在跑的会话/.test(reasons6),
+      { ...detailOf(p6), queue: qFile, reasons: reasons6 });
+
+    putQueue({ pm: { running: false } });
+    const p7 = probe();
+    const reasons7 = (p7.data && Array.isArray(p7.data.reasons)) ? p7.data.reasons.join(' | ') : '';
+    check('A7', '同一 schema:2 但 pm running=false → 不受该判据影响（pm idle === true、reasons 不含「有正在跑的会话」）',
+      Boolean(p7.data) && !p7.data.error && p7.data.idle === true && !/有正在跑的会话/.test(reasons7),
+      { ...detailOf(p7), reasons: reasons7 });
+    clearQueue();
   } catch (e) {
     check('E0', '夹具未抛异常', false, { error: String((e && e.stack) || e) });
   } finally {

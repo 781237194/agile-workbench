@@ -1576,8 +1576,13 @@ export function pmRotateIdleState(projectName, { minutes = null, roles = ['pm', 
       }
     }
     if (lastMs && now - lastMs < windowMs) reasons.push(`近 ${mins} 分钟本人发出过消息（最近 ${new Date(lastMs).toISOString()}；收到的消息与系统自动通知不计）`);
-    // ② running 会话
-    const qRow = (queue && (queue[role] || (queue.roles && queue.roles[role]))) || null;
+    // ② running 会话（B-20261120-123332-f174：会话排队.json 已是 schema:2、roles 是**数组**；
+    // 旧代码 `queue.roles[role]` 按对象取 → 恒 undefined，这条硬判据形同虚设。数组/对象两种形态都兼容。）
+    const qRoles = queue ? queue.roles : null;
+    const qRow = (() => {
+      if (Array.isArray(qRoles)) return qRoles.find((r) => r && String(r.role || '') === String(role)) || null;
+      return (queue && (queue[role] || (qRoles && qRoles[role]))) || null;
+    })();
     if (qRow && (qRow.running === true || qRow.thinking === true || Number(qRow.thinkSec || 0) > 0)) reasons.push(`有正在跑的会话（running=${qRow.running === true} / thinkSec=${Number(qRow.thinkSec || 0)}）`);
     // ③ working 任务
     const mine = tasks.filter((t) => String(t.owner || '') === String(role) && String(t.status || '') === 'working');
