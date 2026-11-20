@@ -8933,7 +8933,8 @@ ipcMain.handle('theme:metrics', async () => {
     });
   }));
   ipcMain.handle('requirement:review', runWorkflowIpc(async (ctx, p, meta) => {
-    return teamTools.reviewRequirement({
+    const __rvT0 = Date.now();
+    const __rvResult = await teamTools.reviewRequirement({
       ...p,
       // 需求评审只允许产品角色；不能因为调用方没传 role 就默认成 product（PM 自审漏洞）。
       role: String(p.role || ''),
@@ -8941,8 +8942,11 @@ ipcMain.handle('theme:metrics', async () => {
       projectPath: ctx.projectPath,
       sessionId: meta.sessionId
     });
+    try { console.log('[review-profile] ' + JSON.stringify({ action: 'requirement:review', ms: Date.now() - __rvT0, ok: Boolean(__rvResult && __rvResult.ok), code: String((__rvResult && __rvResult.code) || '') })); } catch { /* ignore */ }
+    return __rvResult;
   }));
   ipcMain.handle('requirement:owner', runWorkflowIpc(async (ctx, p) => {
+    const __owT0 = Date.now();
     const result = await teamTools.ownerRequirementDecision({
       ...p,
       projectName: ctx.teamName,
@@ -8953,6 +8957,7 @@ ipcMain.handle('theme:metrics', async () => {
       // Owner 确认码已废弃：不再要求 challenge/nonce；旧工具内部换码由 team-tools 静默完成。
       ownerConfirmed: true
     });
+    try { console.log('[review-profile] ' + JSON.stringify({ action: 'requirement:owner', ms: Date.now() - __owT0, ok: Boolean(result && result.ok), code: String((result && result.code) || '') })); } catch { /* ignore */ }
     return result;
   }));
   ipcMain.handle('owner:demand', runWorkflowIpc(async (ctx, p) => {
