@@ -25,8 +25,12 @@ if /i "%~1"=="--check" goto :check
 if not exist "%ELECTRON_EXE%" goto :missing
 
 rem T-ece6: detect leftover main processes for THIS app dir. Never kill by default.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%GUARD_PS1%" -AppDir "%APP_DIR%"
+rem B-4fdd：改用 node 实例探针（connect + AWB 握手，~150ms）。PowerShell 版实测 3.5-4.3s，
+rem 冷启动预算只有 2s，这一段必须去掉；探针端口见 data/userdata/instance.port。
+set "ELECTRON_RUN_AS_NODE=1"
+"%ELECTRON_EXE%" "%APP_DIR%/scripts/start-guard.cjs" --app-dir "%APP_DIR%"
 set "GUARD_RC=%ERRORLEVEL%"
+set "ELECTRON_RUN_AS_NODE="
 
 if /i "%~1"=="--kill-orphans" goto :kill_orphans
 if "%START_KILL_ORPHANS%"=="1" goto :kill_orphans
@@ -62,15 +66,21 @@ exit /b %RC%
 
 :kill_orphans
 echo [清理] 结束本工作台残留 electron 主进程...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%GUARD_PS1%" -AppDir "%APP_DIR%" -Kill
+set "ELECTRON_RUN_AS_NODE=1"
+"%ELECTRON_EXE%" "%APP_DIR%/scripts/start-guard.cjs" --app-dir "%APP_DIR%" --kill
+set "ELECTRON_RUN_AS_NODE="
 goto :launch
 
 :check
 echo [检查] APP_DIR=%APP_DIR%
 echo [检查] electron=%ELECTRON_EXE%
 if exist "%ELECTRON_EXE%" (echo [检查] electron 存在) else (echo [检查] electron 缺失，请先 npm install)
-powershell -NoProfile -ExecutionPolicy Bypass -File "%GUARD_PS1%" -AppDir "%APP_DIR%"
-if errorlevel 3 (echo [检查] 结论：有默认实例（会挡启动），要重启请先 start.cmd --kill-orphans) else (echo [检查] 结论：没有默认实例，启动不受阻（沙箱实例另行列出）)
+rem B-4fdd：检查也用 node 实例探针（快、不再枚举进程）。
+set "ELECTRON_RUN_AS_NODE=1"
+"%ELECTRON_EXE%" "%APP_DIR%/scripts/start-guard.cjs" --app-dir "%APP_DIR%"
+set "GUARD_RC=%ERRORLEVEL%"
+set "ELECTRON_RUN_AS_NODE="
+if "%GUARD_RC%"=="3" (echo [检查] 结论：有默认实例（会挡启动），要重启请先 start.cmd --kill-orphans) else (echo [检查] 结论：没有默认实例，启动不受阻)
 exit /b 0
 
 :missing

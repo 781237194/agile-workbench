@@ -19,6 +19,8 @@ if (IS_BOARD_WINDOW) {
 } else {
   contextBridge.exposeInMainWorld('workbench', {
     state: () => ipcRenderer.invoke('app:state'),
+    // B-4fdd：启动分段标记（渲染层 → 主进程写 性能-*.jsonl 并汇总进 dsh:status）
+    startupMark: (payload) => ipcRenderer.invoke('app:startup-mark', payload),
     version: () => ipcRenderer.invoke('app:version'),
     metrics: () => ipcRenderer.invoke('system:metrics'),
     // R-b34a AC8③：最近慢 IPC（只读，供 [data-perf-log] 展示）

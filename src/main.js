@@ -664,6 +664,33 @@ const DSH_EXPLICIT = (() => {
 app.setPath('userData', USER_DATA);
 app.setPath('sessionData', USER_DATA);
 app.setPath('temp', TEMP_ROOT);
+// B-4fdd：给 start.cmd 的启动前检查留一个 O(1) 标记（否则每次冷启动都要 Get-CimInstance 3-4s）。
+// 只写自己 userData 目录（沙箱实例写沙箱目录，不会被默认实例的 guard 当成「已有实例」）。
+try {
+  fs.mkdirSync(USER_DATA, { recursive: true });
+  fs.writeFileSync(path.join(USER_DATA, 'main.pid'), JSON.stringify({ pid: process.pid, at: Date.now(), appDir: ROOT }), 'utf8');
+} catch { /* 标记写失败只影响启动检查速度 */ }
+// B-4fdd：实例存活探针——监听本机端口并回 AWB 握手行；start.cmd 的 guard 用 connect 判断
+// 「是否已有默认实例」，不再枚举进程（tasklist/Get-CimInstance 实测 1.5-4.3s）。
+const instanceProbe = { server: null, port: 0, file: path.join(USER_DATA, 'instance.port') };
+try {
+  const net = require('node:net');
+  const basePort = 47000 + (Number(process.env.AWB_INSTANCE_PORT) || 0 || (((() => { let h = 0; for (const ch of ROOT) h = (h * 31 + ch.charCodeAt(0)) % 2500; return h; })())));
+  const listenAt = (port, left) => {
+    const server = net.createServer((sock) => { try { sock.end('AWB\n'); } catch { /* ignore */ } });
+    server.once('error', () => { try { server.close(); } catch { /* ignore */ } if (left > 0) listenAt(port + 1, left - 1); });
+    server.listen(port, '127.0.0.1', () => {
+      instanceProbe.server = server;
+      instanceProbe.port = port;
+      try { fs.writeFileSync(instanceProbe.file, String(port), 'utf8'); } catch { /* ignore */ }
+    });
+  };
+  listenAt(basePort, 8);
+  app.on('before-quit', () => {
+    try { instanceProbe.server && instanceProbe.server.close(); } catch { /* ignore */ }
+    try { fs.rmSync(instanceProbe.file, { force: true }); } catch { /* ignore */ }
+  });
+} catch { /* 探针失败只影响启动前检查 */ }
 // 自测隔离：store 和团队状态都落在沙盘根，不碰真实团队状态与用户项目。
 if (IS_SELFTEST) {
   // P0（2026-11-20 14:18 事故 + PM 14:39 追加「继承污染」）：宿主用户级 env 里的
@@ -5652,9 +5679,92 @@ function readGateAudit(project, limit = 20) {
 }
 
 
+// ── B-4fdd（P0「自动连接仍 >10 秒」）：真实启动路径四段打点 ─────────────────────────
+// 口径（需求 AC1）：进程启动→窗口可交互 / 发现链（复用 d637 stats）/ DSH 握手（首个 dsh:status 检查）/
+// 首屏数据渲染（渲染层 refresh 完成并完成一帧）。每条都写 性能-YYYYMMDD.jsonl（<TEAM_ROOT>/状态/），
+// console 固定前缀 [startup]；摘要随 dsh:status 返回（startup 字段）。
+const AWB_BOOT_MS = Date.now();
+const startupMarks = {
+  boot: AWB_BOOT_MS, appReady: 0, windowCreated: 0, loadStart: 0, loadEnd: 0, webviewLoaded: 0,
+  dshCheckStart: 0, dshCheckEnd: 0, dshOnline: null, discoveryStart: 0, discoveryEnd: 0, discovery: null,
+  rendererInteractive: 0, stateLoaded: 0, firstScreen: 0,
+};
+function startupPerfFile(atMs) {
+  const d = new Date(Number(atMs) || Date.now());
+  const day = d.toISOString().slice(0, 10).replace(/-/g, '');
+  let root = '';
+  try { root = resolveTeamRoot(); } catch { root = ''; }
+  return path.join(root || path.join(process.cwd(), '团队'), '状态', '性能-' + day + '.jsonl');
+}
+function appendStartupRow(row) {
+  try {
+    const target = startupPerfFile(row && row.atMs);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.appendFileSync(target, JSON.stringify(row) + '\n', 'utf8');
+    return target;
+  } catch { return ''; }
+}
+function markStartup(phase, extra = {}) {
+  const at = Date.now();
+  if (Object.prototype.hasOwnProperty.call(startupMarks, phase)) startupMarks[phase] = at;
+  const sinceBoot = at - AWB_BOOT_MS;
+  const row = { at: new Date(at).toISOString(), atMs: at, kind: 'startup', phase, sinceBootMs: sinceBoot, ...extra };
+  appendStartupRow(row);
+  try { console.log('[startup] ' + phase + ' +' + sinceBoot + 'ms' + (extra && extra.code ? ' code=' + extra.code : '')); } catch { /* ignore */ }
+  return sinceBoot;
+}
+function startupSummary() {
+  const rel = (ms) => (Number(ms) > 0 ? Number(ms) - AWB_BOOT_MS : null);
+  const discoveryMs = startupMarks.discovery && Number(startupMarks.discovery.durationMs) > 0
+    ? Number(startupMarks.discovery.durationMs)
+    : null;
+  // B-4fdd：DSH 握手 = 这一次 dsh.check 的耗时（不是从进程启动算的偏移）。
+  const handshakeMs = (Number(startupMarks.dshCheckEnd) > 0 && Number(startupMarks.dshCheckStart) > 0)
+    ? Number(startupMarks.dshCheckEnd) - Number(startupMarks.dshCheckStart)
+    : null;
+  return {
+    bootAt: new Date(AWB_BOOT_MS).toISOString(),
+    marks: {
+      appReadyMs: rel(startupMarks.appReady),
+      windowCreatedMs: rel(startupMarks.windowCreated),
+      windowLoadedMs: rel(startupMarks.loadEnd),
+      webviewLoadedMs: rel(startupMarks.webviewLoaded),
+      rendererInteractiveMs: rel(startupMarks.rendererInteractive),
+      stateLoadedMs: rel(startupMarks.stateLoaded),
+      firstScreenMs: rel(startupMarks.firstScreen),
+      dshCheckStartMs: rel(startupMarks.dshCheckStart),
+      dshCheckEndMs: rel(startupMarks.dshCheckEnd),
+    },
+    discoveryMs,
+    discoveryStats: startupMarks.discovery && startupMarks.discovery.stats ? startupMarks.discovery.stats : null,
+    discoveryCode: startupMarks.discovery ? String(startupMarks.discovery.code || '') : '',
+    handshakeMs,
+    dshOnline: startupMarks.dshOnline,
+    meets: {
+      discovery1500: discoveryMs !== null ? discoveryMs <= 1500 : null,
+      firstScreen2000: rel(startupMarks.firstScreen) !== null ? rel(startupMarks.firstScreen) <= 2000 : null,
+      warm1000: rel(startupMarks.firstScreen) !== null ? rel(startupMarks.firstScreen) <= 1000 : null,
+    },
+  };
+}
+function isFirstStartupDshCheck() { return !startupMarks.dshCheckEnd; }
+
 function registerIpc() {
   // T-0d3b（IPC 二轮）：app:state 原每次 ~0.4-1.8s（statePayload 里对账/收件箱尾部/会话映射）。
   // 改为 mtime 指纹缓存：store 文件未变 → 直接复用上次结果；但有 2s 下限，保证对账/收件箱状态最多滞后 2s。
+  // B-4fdd：渲染层三处标记（交互就绪 / 首拉完成 / 首屏渲染一帧）。
+  ipcMain.handle('app:startup-mark', (_e, payload) => {
+    const p = payload || {};
+    const phase = String(p.phase || '');
+    const allowed = ['rendererInteractive', 'stateLoaded', 'firstScreen'];
+    if (!allowed.includes(phase)) return { ok: false, code: 'BAD_PHASE', allowed };
+    const at = Number(p.at) > 0 ? Number(p.at) : Date.now();
+    startupMarks[phase] = at;
+    const sinceBoot = at - AWB_BOOT_MS;
+    appendStartupRow({ at: new Date(at).toISOString(), atMs: at, kind: 'startup', phase, sinceBootMs: sinceBoot, from: 'renderer', extra: p.extra || null });
+    try { console.log('[startup] ' + phase + ' +' + sinceBoot + 'ms'); } catch { /* ignore */ }
+    return { ok: true, phase, sinceBootMs: sinceBoot, startup: startupSummary() };
+  });
   ipcMain.handle('app:state', () => {
     const fp = storeFileFingerprint();
     const nowMs = Date.now();
@@ -11622,13 +11732,26 @@ installShellAuditSensors();
   ipcMain.handle('dsh:status', async () => {    // DSH 更新后端口会变：检测失败时先尝试从 DSH 进程/监听端口自动发现，
     // 发现成功则持久化并重载 WebView；失败保留原地址，把原因写进 status.message。
     const canDiscover = dshAutoDiscoveryAllowed();
-    const status = await dsh.check({ timeoutMs: canDiscover ? DSH_DISCOVERY_CHECK_TIMEOUT_MS : 8000 });
+    // B-4fdd：启动首个检查限时 1200ms（否则离线冷启动要等 8s）；之后恢复原超时。
+    const firstStartupCheck = isFirstStartupDshCheck();
+    if (firstStartupCheck) markStartup('dshCheckStart');
+    const status = await dsh.check({ timeoutMs: firstStartupCheck ? 1200 : (canDiscover ? DSH_DISCOVERY_CHECK_TIMEOUT_MS : 8000) });
+    if (firstStartupCheck) {
+      startupMarks.dshOnline = Boolean(status.online);
+      markStartup('dshCheckEnd', { online: Boolean(status.online), code: String(status.code || '') });
+    }
     let finalStatus = status;
     let discovery = null;
     // 凭据问题不是端口问题：换端口解决不了，还会白扫进程；手动 IPC 仍可强制重发现。
     const authFailure = status.code === 'DSH_AUTH_MISSING' || status.code === 'DSH_AUTH_REJECTED';
     if (!status.online && canDiscover && !authFailure) {
-      discovery = await maybeAutoDiscoverDsh('status');
+      if (firstStartupCheck) markStartup('discoveryStart');
+      // B-4fdd：启动首轮用 fast 预算（跳过昂贵的进程发现，靠端口文件/env/扫描），离线也要 ≤3s 给结果。
+      discovery = await maybeAutoDiscoverDsh('status', firstStartupCheck ? { fast: true, probeTimeoutMs: 250 } : {});
+      startupMarks.discovery = discovery && discovery.durationMs !== undefined
+        ? { durationMs: Number(discovery.durationMs) || 0, code: String(discovery.code || ''), stats: discovery.stats || null }
+        : { durationMs: 0, code: String((discovery && discovery.code) || ''), stats: (discovery && discovery.stats) || null };
+      if (firstStartupCheck) markStartup('discoveryEnd', { code: startupMarks.discovery.code, durationMs: startupMarks.discovery.durationMs });
       if (discovery && discovery.ok) {
         finalStatus = discovery.status || await dsh.check({ timeoutMs: 6000 });
       } else if (discovery && !discovery.skipped) {
@@ -11651,7 +11774,25 @@ installShellAuditSensors();
     void runDshCapabilityProbe('status');
     // e379 AC6：首次状态检查顺带做一次 MCP 自检（每进程一次，失败只记 warning，不阻断）。
     if (!mcpSelfCheckState.record && !mcpSelfCheckState.running) void runMcpSelfCheckRuntime('status');
-    return { ok: true, status: finalStatus, discovery: discovery ? dshDiscoverySummary(discovery) : null };
+    // B-4fdd（需求⑤）：离线时把「已尝试的源」拼进消息，界面直接可见（不只有日志）。
+    if (!finalStatus.online) {
+      const attempted = [];
+      attempted.push('地址 ' + String(finalStatus.baseUrl || dsh.baseUrl || '（未配置）'));
+      const disc = finalStatus.discovery || (discovery ? dshDiscoverySummary(discovery) : null);
+      if (disc) {
+        if (Array.isArray(disc.probedPorts) && disc.probedPorts.length) attempted.push('已探测端口 ' + disc.probedPorts.slice(0, 8).join('/'));
+        if (Array.isArray(disc.portFileReadout) && disc.portFileReadout.length) {
+          const files = disc.portFileReadout.filter((row) => row.exists).map((row) => row.file);
+          attempted.push(files.length ? '端口文件 ' + files.slice(0, 4).join('、') : '端口文件（均缺失）');
+        }
+        if (disc.source) attempted.push('来源 ' + disc.source);
+        if (disc.code) attempted.push('code ' + disc.code);
+      }
+      if (!/已尝试/.test(String(finalStatus.message || ''))) {
+        finalStatus = { ...finalStatus, message: String(finalStatus.message || 'DSH 离线') + '；已尝试源：' + attempted.join('；') };
+      }
+    }
+    return { ok: true, status: finalStatus, discovery: discovery ? dshDiscoverySummary(discovery) : null, startup: startupSummary() };
   });
   // 手动“重新发现”：供设置页/诊断按钮调用；不新增假 UI，返回结构化结果。
   ipcMain.handle('dsh:rediscover', async () => {
@@ -13027,13 +13168,18 @@ function createWindow() {
       webviewTag: true
     }
   });
+  markStartup('windowCreated');
+  mainWindow.webContents.on('did-start-loading', () => { if (!startupMarks.loadStart) markStartup('loadStart'); });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // PM 2026-11-18 20:42：app ready 后**后台低优先级预生成** 看板.html，让用户首次打开看板也命中磁盘缓存
   // （tester 净机：命中时冷开 T3 1370ms；首开无缓存 5735-7441ms）。延迟执行、失败静默，不影响启动。
   // AWB_BOARD_PREGEN_MS 可注入延迟（自检用 2000，默认 8000；=0 关闭）。
   scheduleBoardPregeneration();
   // 重启恢复上次字号：等页面加载完再设置，避免 zoom 被导航重置。
-  mainWindow.webContents.on('did-finish-load', () => applyZoomToWindow(mainWindow, readZoomPref()));
+  mainWindow.webContents.on('did-finish-load', () => {
+    markStartup('loadEnd');
+    applyZoomToWindow(mainWindow, readZoomPref());
+  });
   startMemSampler();
   mainWindow.once('ready-to-show', () => { if (!AWB_START_HIDDEN) mainWindow.show(); });
   // 拖动/缩放后防抖记住尺寸；关闭前补一次，避免最后一秒的变化丢掉。
@@ -22008,7 +22154,7 @@ function recordDshEndpointEvent(result) {
   return record;
 }
 
-async function runDshDiscovery(reason = 'status') {
+async function runDshDiscovery(reason = 'status', budgets = {}) {
   if (dshDiscovery.running) return dshDiscovery.running;
   const task = (async () => {
     const previousBaseUrl = dsh.baseUrl;
@@ -22016,11 +22162,20 @@ async function runDshDiscovery(reason = 'status') {
     try {
       discovery = await discoverDshWeb({
         savedBaseUrl: previousBaseUrl,
-        timeoutMs: 1200,
+        timeoutMs: Number(budgets.probeTimeoutMs) > 0 ? Number(budgets.probeTimeoutMs) : 1200,
         env: process.env,
         // F-4：显式配置优先；有它就不再报 ambiguous。
         explicitBaseUrl: DSH_EXPLICIT.baseUrl,
-        explicitSource: DSH_EXPLICIT.source
+        explicitSource: DSH_EXPLICIT.source,
+        // B-4fdd：启动首轮 fast 预算——跳过进程发现（netstat/powershell 最贵），扫描预算收紧。
+        ...(budgets.fast ? {
+          skipProcessDiscovery: true,
+          includeRange: false,
+          scanBudgetMs: Number(budgets.scanBudgetMs) > 0 ? Number(budgets.scanBudgetMs) : 500,
+          scanConnectTimeoutMs: Number(budgets.scanConnectTimeoutMs) > 0 ? Number(budgets.scanConnectTimeoutMs) : 80,
+          scanConcurrency: Number(budgets.scanConcurrency) > 0 ? Number(budgets.scanConcurrency) : 128,
+          maxCandidates: 8,
+        } : {}),
       });
     } catch (error) {
       discovery = {
@@ -22100,7 +22255,7 @@ async function runDshDiscovery(reason = 'status') {
   }
 }
 
-async function maybeAutoDiscoverDsh(reason = 'status') {
+async function maybeAutoDiscoverDsh(reason = 'status', budgets = {}) {
   const manual = reason === 'manual';
   // 自测沙盘绝不访问真实 DSH；手动 IPC 在自测里也只返回跳过，不碰本机端口。
   if (IS_SELFTEST) {
@@ -22131,7 +22286,7 @@ async function maybeAutoDiscoverDsh(reason = 'status') {
     return { ...dshDiscovery.last, skipped: true, code: 'DSH_DISCOVERY_COOLDOWN' };
   }
   if (!manual) dshDiscovery.at = now;
-  return runDshDiscovery(reason);
+  return runDshDiscovery(reason, budgets);
 }
 
 async function installDshCookie() {
@@ -23575,6 +23730,7 @@ function applyDeletionTombstonesOnStartup() {
 }
 
 app.whenReady().then(async () => {
+  markStartup('appReady');
   try { applyDeletionTombstonesOnStartup(); } catch { /* 墓碑补扫失败不阻断启动 */ }
   if (!singleInstanceLock) return;
   app.setName(APP_NAME);
@@ -23881,4 +24037,9 @@ app.on('window-all-closed', () => {
 });
 
 // T-b417：退出时先请守护子进程停，不让它变成孤儿进程继续抢锁。
-app.on('before-quit', () => { explicitQuit = true; boardQuitting = true; stopRouteSupervisor(); });
+app.on('before-quit', () => {
+  explicitQuit = true;
+  boardQuitting = true;
+  stopRouteSupervisor();
+  try { fs.unlinkSync(path.join(USER_DATA, 'main.pid')); } catch { /* 已删/不存在 */ }
+});

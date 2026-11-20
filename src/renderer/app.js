@@ -2485,6 +2485,19 @@ function memberStateView(stateStr, fallback) {
   return { ...fallback, boot: true };
 }
 
+// B-4fdd：启动分段标记（每次启动只报一次；失败静默，不影响业务）。
+const startupMarkState = { interactive: false, state: false, screen: false };
+function startupMarkBridge(kind) {
+  if (startupMarkState[kind]) return;
+  startupMarkState[kind] = true;
+  const phase = kind === 'interactive' ? 'rendererInteractive' : (kind === 'state' ? 'stateLoaded' : 'firstScreen');
+  try {
+    if (window.workbench && typeof window.workbench.startupMark === 'function') {
+      void window.workbench.startupMark({ phase, at: Date.now() });
+    }
+  } catch { /* 打点失败不影响启动 */ }
+}
+
 async function refresh() {
   // B-231006-b81a 回归基线诊断：刷新是否真的执行（Owner 报「刷新按钮也失效」）。
   // 只读计数，不参与业务；夹具点击 #btn-refresh 后断言它递增。
@@ -2497,12 +2510,23 @@ async function refresh() {
   renderBridgeAlert();
   try {
     state = await window.workbench.state();
+    startupMarkBridge('state');
     stateReadError = null;
-    try { memberStatesCache = await loadMemberStates(activeProject()); } catch { memberStatesCache = null; }
+    // B-4fdd：首屏不等 team:members（那是第二个 IPC，冷启动白等 100-500ms）；先用缓存/空值渲染，
+    // 成员状态到了再补一次重绘（会话行本来就有「本地/已核验」两种态，不会显示错）。
     hydrateTeamModes();
+    const __renderStart = performance.now();
     render();
+    try { console.log('[startup] render ' + (performance.now() - __renderStart).toFixed(1) + 'ms'); } catch { /* ignore */ }
+    // 首屏可用 = 首拉 render 完成并完成一帧（与 dsh:status 的 startup.marks.firstScreenMs 同源）。
+    try { requestAnimationFrame(() => requestAnimationFrame(() => startupMarkBridge('screen'))); } catch { /* ignore */ }
     const current = activeProject();
     if (current) loadLegacyDocs(legacyUi.projectId === current.id);
+    const memberProbe = loadMemberStates(current).then((rows) => {
+      memberStatesCache = rows;
+      try { renderSessions(); renderSidebar(); } catch { /* 补齐失败不影响首屏 */ }
+    }).catch(() => { memberStatesCache = null; });
+    void memberProbe;
   } catch (e) {
     // B-230447-3d23：读失败不能再只弹 toast 把页面留在「未选择」占位——记错误码并重绘卡片（保留上次值）。
     stateReadError = { code: 'APP_STATE_READ_FAILED', message: String((e && e.message) || e) };
@@ -2646,28 +2670,39 @@ function render() {
     versionLine.dataset.commit = commit;
     versionLine.title = commit ? `当前版本 ${state.version}（commit ${commit}）` : `当前版本 ${state.version}`;
   }
-  renderSidebar();
-  renderSessions();
-  renderHeader();
-  renderTruthStrip();
-  renderOverview();
-  renderFlow();
-  renderRoles();
-  renderTeam();
-  renderDsh(state.dsh);
-  renderStoreFlag();
-  renderWorkspacePopover();
-  renderBoardPanel();
-  renderLaunchers();
-  syncThemeUi();
-  // 旧流程面板：换项目已在上方清空缓存，这里只发一次文件读取；同一项目只重绘。
-  if (current) {
-    if (switchedProjects) loadLegacyDocs();
-    else renderLegacyPanels();
-  }
-  showTab(activeTab, { fromRender: true });
-  renderModeCopyAnchors();
-  applyTeamModeCopy(document.body);
+  // B-4fdd：render 总耗时实测 ~700ms（冷启动首屏最大项）。拆两段：
+  //   首屏必需（侧栏/顶栏/会话/DSH 状态）同步画完；下方折叠面板/旧流程/看板入口下一拍补绘。
+  const __t = (name, fn) => {
+    const t0 = performance.now();
+    try { return fn(); } catch (e) { return null; } finally {
+      const dt = performance.now() - t0;
+      if (dt > 40) { try { console.log('[startup] render.' + name + ' ' + dt.toFixed(0) + 'ms'); } catch { /* ignore */ } }
+    }
+  };
+  __t('sidebar', renderSidebar);
+  __t('sessions', renderSessions);
+  __t('header', renderHeader);
+  __t('dsh', () => renderDsh(state.dsh));
+  __t('storeFlag', renderStoreFlag);
+  __t('theme', syncThemeUi);
+  const __deferred = () => {
+    __t('truthStrip', renderTruthStrip);
+    __t('overview', renderOverview);
+    __t('flow', renderFlow);
+    __t('roles', renderRoles);
+    __t('team', renderTeam);
+    __t('workspacePopover', renderWorkspacePopover);
+    __t('boardPanel', renderBoardPanel);
+    __t('launchers', renderLaunchers);
+    if (current) {
+      if (switchedProjects) loadLegacyDocs();
+      else __t('legacyPanels', renderLegacyPanels);
+    }
+    __t('tab', () => showTab(activeTab, { fromRender: true }));
+    __t('modeCopy', () => { renderModeCopyAnchors(); applyTeamModeCopy(document.body); });
+  };
+  // 下一拍补绘；首屏在此之前已经可见（rAF 打点早于这里）。
+  try { setTimeout(__deferred, 0); } catch { __deferred(); }
   // Owner 不自动弹窗：顶栏「Owner 待决定」与项目面板的 Owner 卡片就是继续入口。
 }
 
@@ -17820,6 +17855,16 @@ window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /*
     });
   } catch { /* ignore */ }
   loadInboxSeen();
+  renderBridgeAlert();
+  // B-4fdd：先把 DSH 状态检查（握手）发出去，与首屏渲染并行——它原来排在 bind+refresh 之后，
+  // 冷启动白等 2-4s 才发第一个握手请求。
+  const dshInitPromise = (window.workbench && typeof window.workbench.dshStatus === 'function')
+    ? initDsh().catch(() => null)
+    : Promise.resolve(null);
+  try { requestAnimationFrame(() => requestAnimationFrame(() => startupMarkBridge('interactive'))); } catch { /* ignore */ }
+  // B-4fdd：首屏只依赖「state 拉到 + render 一帧」，不等 DOM 绑定；绑定随后补上（静态 DOM，不依赖 state）。
+  await refresh();
+  warnStore();
   // B-231006-b81a：bind() 任何一块抛错都不许掐断 refresh（否则整页按钮静默失效、卡片停在占位）；
   // 抽屉关闭/入口另走独立块兜底绑定，保证单个初始化失败时三个 × 仍可点。
   bindBlock('bind', bind);
@@ -17827,14 +17872,11 @@ window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /*
   bindDshRetryDelegation();
   bindPanelOpeners();
   bindCriticalControls();
-  renderBridgeAlert();
-  await refresh();
-  warnStore();
   if (!window.workbench) {
     renderBridgeAlert();
     return;
   }
-  await initDsh();
+  await dshInitPromise;
   await tickMetrics();
   // R4 结论：保留 + 降级门 + 重合入下一帧——指标 2s 只读 IPC；隐藏/后台暂停（gate.js），同 key 300ms 合并。
   setInterval(r4Coalesce(r4Gate(tickMetrics), 300, 'metrics'), 2000);
