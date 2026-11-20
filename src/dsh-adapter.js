@@ -359,9 +359,10 @@ function dshHomeDirs(env) {
 }
 
 /** 读端口文件候选：只读已知文件名，不遍历目录，失败一律返回空数组（不抛）。 */
-function readDshPortFiles(env) {
+function readDshPortFiles(env, sink) {
   const files = ['gui.port', 'web.port', 'port', 'dsh.port'];
   const found = [];
+  const report = (row) => { try { if (Array.isArray(sink)) sink.push(row); } catch { /* 读数不影响发现 */ } };
   const seenPorts = new Set();
   for (const dir of dshHomeDirs(env)) {
     for (const name of files) {
@@ -369,12 +370,14 @@ function readDshPortFiles(env) {
       let text;
       try {
         const stat = fs.statSync(file);
-        if (!stat.isFile() || stat.size > 4096) continue;
+        if (!stat.isFile() || stat.size > 4096) { report({ file, exists: true, raw: '', port: 0, note: '不是普通文件或超 4KB' }); continue; }
         text = fs.readFileSync(file, 'utf8');
-      } catch { continue; }
+      } catch { report({ file, exists: false, raw: '', port: 0, note: '缺失' }); continue; }
       const port = parsePortFileText(text);
-      if (!port || seenPorts.has(port)) continue;
+      if (!port) { report({ file, exists: true, raw: String(text).trim().slice(0, 64), port: 0, note: '无有效端口' }); continue; }
+      if (seenPorts.has(port)) { report({ file, exists: true, raw: String(text).trim().slice(0, 64), port, note: '重复端口' }); continue; }
       seenPorts.add(port);
+      report({ file, exists: true, raw: String(text).trim().slice(0, 64), port, note: 'ok' });
       found.push({ file, port, baseUrl: 'http://127.0.0.1:' + port, raw: String(text).trim().slice(0, 64) });
     }
   }
@@ -982,13 +985,16 @@ async function discoverDshWeb(options = {}) {
     }
   }
 
+  // B-0cbc：端口文件读数同时收「缺失/无端口」明细，失败文案要逐条列（PM ②）。
+  const portFileReadout = [];
   const portFiles = options.skipPortFiles
     ? []
-    : readDshPortFiles(env);
+    : readDshPortFiles(env, portFileReadout);
   const candidates = [];
   const seen = new Set();
+  // B-0cbc（PM ①③）：顺序改为 显式配置 → DSH_WEB_URL/PORT → ~/.dsh/*.port → 上次保存(dsh.json)
+  //   → 进程命令行 → 监听端口 → 端口段扫描。上次保存的地址只是**候选**，失效时仍走完整条链。
   if (explicitBaseUrl) addCandidate(candidates, seen, explicitBaseUrl, 'explicit', -1, explicitSource || '显式配置');
-  if (savedBaseUrl) addCandidate(candidates, seen, savedBaseUrl, 'saved', 0, '当前 dsh.json');
   if (env && env.DSH_WEB_URL) addCandidate(candidates, seen, env.DSH_WEB_URL, 'env-url', 1, 'DSH_WEB_URL');
   if (env) {
     for (const key of ['DSH_WEB_PORT', 'DSH_PORT']) {
@@ -999,6 +1005,7 @@ async function discoverDshWeb(options = {}) {
   for (const entry of portFiles) {
     addCandidate(candidates, seen, entry.baseUrl, 'port-file', 2, entry.file + ' → ' + entry.raw);
   }
+  if (savedBaseUrl) addCandidate(candidates, seen, savedBaseUrl, 'saved', 3, '上次保存（dsh.json）');
   for (const port of processInfo.argPorts || []) {
     addCandidate(candidates, seen, 'http://127.0.0.1:' + port, 'process-arg', 3, 'DSH 进程 --port');
   }
@@ -1078,7 +1085,27 @@ async function discoverDshWeb(options = {}) {
     validDistinct.push(probe);
   }
 
-  // 有显式配置但显式地址不可达：如实报「配置不可达」，不偷偷改成别的本机端口。
+  // B-0cbc（PM ④）：显式 pin 不可达、但环境变量/端口文件等源探活成功时，**用命中的并提示 pin 已失效**
+  // （旧实现直接判失败 → DSH 换端口后工作台永久失联）。没有任何命中才报 DSH_EXPLICIT_UNREACHABLE。
+  const pinProbe = explicitBaseUrl ? probes.find((probe) => probe.baseUrl === explicitBaseUrl) : null;
+  if (explicitBaseUrl && !validDistinct.some((probe) => probe.baseUrl === explicitBaseUrl) && validDistinct.length) {
+    const picked = validDistinct.slice().sort((a, b) => a.priority - b.priority)[0];
+    return {
+      ok: true, state: 'resolved', code: 'DSH_FOUND_PIN_UNREACHABLE',
+      message: '显式配置的地址不可达：' + explicitBaseUrl + '（来源：' + explicitSource + '），已改用探活命中的 '
+        + picked.baseUrl + '（来源：' + candidateSourceLabel(picked.source) + '）；建议在设置里重新保存地址',
+      baseUrl: picked.baseUrl,
+      source: picked.source,
+      explicitIgnored: true,
+      explicitBaseUrl, explicitSource, savedBaseUrl,
+      candidates, probes, valid: validDistinct,
+      process: processSummary, portFiles: portFileSummary, portFileReadout,
+      probedPorts: probes.map((p) => p.port).filter((p) => Number.isInteger(p) && p > 0),
+      shouldPersist: true,
+      rangeProbed, scan,
+      durationMs: Date.now() - started,
+    };
+  }
   if (explicitBaseUrl && !validDistinct.some((probe) => probe.baseUrl === explicitBaseUrl)) {
     return {
       ok: false,
@@ -1134,6 +1161,10 @@ async function discoverDshWeb(options = {}) {
       ok: true,
       state: 'resolved',
       code: 'DSH_FOUND',
+      // PM ④：非「上次保存」的源命中（env/端口文件/进程/扫描）由 main 回写 dsh.json。
+      shouldPersist: String(best.source || '') !== 'saved',
+      probedPorts: Array.from(new Set(probes.map((p) => p.port).filter((p) => Number.isInteger(p) && p > 0))).sort((a, b) => a - b),
+      portFileReadout,
       message: '已发现 DSH Web：' + best.baseUrl + '（来源：' + candidateSourceLabel(best.source) + '）',
       baseUrl: best.baseUrl,
       source: best.source,
@@ -1150,17 +1181,40 @@ async function discoverDshWeb(options = {}) {
     };
   }
 
-  const list = probedPorts.slice(0, 8).join('/');
+  // B-0cbc（PM ②）：已探测端口必须**如实全列**（旧实现 slice(0,8) 导致「说 18 个只列 6 个」）。
+  const probedSorted = Array.from(new Set(probedPorts)).sort((a, b) => a - b);
+  const listedPorts = probedSorted.map((port) => '127.0.0.1:' + port).join('、');
   const reasons = [];
-  if (probedPorts.length) reasons.push('已探测 ' + probedPorts.length + ' 个本机端口（' + list + '），均未返回 DSH 特征');
+  if (probedSorted.length) reasons.push('已探测 ' + probedSorted.length + ' 个本机端口（' + listedPorts + '），均未返回 DSH 特征');
   else reasons.push(processSummary.error || '没有可探测的本机端口');
+  // 各权威源读数：env / 端口文件 / dsh.json / 进程 / 扫描段（PM ②）。
+  const envReadout = [
+    'DSH_WEB_URL=' + (env && env.DSH_WEB_URL ? String(env.DSH_WEB_URL) : '（未设）'),
+    'DSH_WEB_PORT=' + (env && env.DSH_WEB_PORT ? String(env.DSH_WEB_PORT) : '（未设）'),
+    'DSH_PORT=' + (env && env.DSH_PORT ? String(env.DSH_PORT) : '（未设）'),
+  ].join('；');
+  const checkedCount = portFileReadout.length;
+  const existedCount = portFileReadout.filter((row) => row.exists).length;
+  const portFileReadoutText = checkedCount
+    ? '端口文件 查了 ' + checkedCount + ' 个（存在 ' + existedCount + ' 个）'
+      + (existedCount ? '：' + portFileReadout.filter((row) => row.exists).map((row) => row.file + '=' + (row.port || row.note)).join('；') : '；全部缺失')
+    : '端口文件（已跳过）';
+  reasons.push('来源读数：' + envReadout + '；' + portFileReadoutText
+    + '；dsh.json 上次地址=' + (savedBaseUrl || '（无）')
+    + '；dsh 进程=' + (processSummary.dshProcesses || 0) + ' 个'
+    + (processSummary.argPorts && processSummary.argPorts.length ? '（--port ' + processSummary.argPorts.join('/') + '）' : ''));
   if (scan && Array.isArray(scan.ports)) {
     reasons.push(scan.ports.length
       ? '扫描 ' + scanStart + '–' + scanEnd + ' 有 ' + scan.ports.length + ' 个端口在监听但都不是 DSH'
       : '扫描 ' + scanStart + '–' + scanEnd + ' 没有发现监听端口');
   }
   if (portFiles.length) reasons.push('端口文件写了 ' + portFiles.map((entry) => entry.port).join('/') + '，均不可用');
-  const suffix = savedBaseUrl ? '；保留原地址 ' + savedBaseUrl : '';
+  // B-0cbc（PM ⑤）：失败态给可执行下一步（预填候选 + 如何取端口）。
+  const nextHints = [];
+  if (portFiles.length) nextHints.push('先试端口文件里写过的 ' + portFiles.map((entry) => 'http://127.0.0.1:' + entry.port).join('、'));
+  if (probedSorted.length) nextHints.push('已知本机在用的候选：' + probedSorted.slice(0, 6).map((port) => 'http://127.0.0.1:' + port).join('、'));
+  nextHints.push('在 DSH 里查看 设置 → Web/HTTP 端口，或看 DSH 启动命令行里的 --port；把地址填到 工作台 → 设置 → DSH 外部地址 后点「保存并探测」');
+  const suffix = (savedBaseUrl ? '；保留原地址 ' + savedBaseUrl : '') + '。下一步：' + nextHints.join('；');
   // P0-2：发现失败时把命令候选路径+存在性写进可读原因（ENOENT 可诊断）。
   const diag = processInfo.diagnostics || {};
   try {
@@ -1184,6 +1238,9 @@ async function discoverDshWeb(options = {}) {
     valid: validDistinct,
     process: processSummary,
     portFiles: portFileSummary,
+    portFileReadout,
+    // B-0cbc（PM ②⑤）：失败结果也带完整端口清单，界面/夹具与文案同源对账。
+    probedPorts: probedSorted,
     rangeProbed,
     scan,
     durationMs: Date.now() - started

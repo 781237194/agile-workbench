@@ -11605,7 +11605,8 @@ installShellAuditSensors();
       } else if (discovery && !discovery.skipped) {
         finalStatus = {
           ...status,
-          message: String((status.message || 'DSH 离线') + '；' + discovery.message).slice(0, 400),
+          // B-0cbc：发现失败文案含「已探测端口全集 + 各源读数 + 下一步」，400 会砍掉关键信息。
+          message: String((status.message || 'DSH 离线') + '；' + discovery.message).slice(0, 1200),
           discovery: dshDiscoverySummary(discovery)
         };
       } else if (discovery && discovery.code === 'DSH_DISCOVERY_COOLDOWN'
@@ -11613,7 +11614,7 @@ installShellAuditSensors();
         // 冷却期内重复检测也把上一次失败原因带出来，避免只显示 “fetch failed”。
         finalStatus = {
           ...status,
-          message: String((status.message || 'DSH 离线') + '；' + dshDiscovery.last.message).slice(0, 400),
+          message: String((status.message || 'DSH 离线') + '；' + dshDiscovery.last.message).slice(0, 1200),
           discovery: dshDiscoverySummary(dshDiscovery.last)
         };
       }
@@ -21220,8 +21221,14 @@ function dshDiscoverySummary(result) {
   return {
     at: result.at || null,
     code: result.code || '',
-    message: String(result.message || '').slice(0, 400),
+    // B-0cbc（PM ②⑤）：摘要要带上完整端口清单与端口文件读数，界面/测试与文案同源对账。
+    message: String(result.message || '').slice(0, 1200),
     source: result.source || '',
+    shouldPersist: Boolean(result.shouldPersist),
+    probedPorts: Array.isArray(result.probedPorts) ? result.probedPorts.slice(0, 64) : [],
+    portFileReadout: Array.isArray(result.portFileReadout)
+      ? result.portFileReadout.map((row) => ({ file: String(row.file || ''), exists: Boolean(row.exists), port: Number(row.port) || 0, note: String(row.note || '') })).slice(0, 12)
+      : [],
     changed: Boolean(result.changed),
     persisted: Boolean(result.persisted),
     baseUrl: result.baseUrl || dsh.baseUrl,
@@ -21927,7 +21934,7 @@ function recordDshEndpointEvent(result) {
     valid: Array.isArray(result && result.valid) ? result.valid.map((probe) => probe.baseUrl) : [],
     portFiles: Array.isArray(result && result.portFiles) ? result.portFiles.map((entry) => entry.port) : [],
     durationMs: Number(result && result.durationMs) || 0,
-    message: String((result && result.message) || '').slice(0, 400)
+    message: String((result && result.message) || '').slice(0, 1200) // B-0cbc：保留端口清单/读数/下一步
   };
   try {
     fs.mkdirSync(DATA_ROOT, { recursive: true });
