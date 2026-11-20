@@ -87,6 +87,26 @@ function parseLine(line, bad) {
 }
 
 /** 从文件尾回读最多 limit 条消息（可 afterSeq 只看水位之后），返回按 seq 升序。 */
+
+/** 从 jsonl 读事件行（read/ack），返回 Map: id → {readAt,ackAt}。 */
+function collectEvents(mailRoot, role) {
+  const p = pathsFor(mailRoot, role);
+  const out = new Map();
+  if (!fs.existsSync(p.jsonl)) return out;
+  for (const line of fs.readFileSync(p.jsonl, 'utf8').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let row = null;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (!row || row.type !== 'event') continue;
+    const key = String(row.refId || row.id || row.refSeq || '');
+    if (!key) continue;
+    const cur = out.get(key) || {};
+    if (row.event === 'read') cur.readAt = row.at || cur.readAt || '';
+    if (row.event === 'ack') cur.ackAt = row.at || cur.ackAt || '';
+    out.set(key, cur);
+  }
+  return out;
+}
 function readTail(mailRoot, role, { limit = 50, afterSeq = 0, project = '' } = {}) {
   const p = pathsFor(mailRoot, role);
   if (!fs.existsSync(p.jsonl)) return { rows: [], badLines: 0, hitLegacyFallback: true };
@@ -118,7 +138,12 @@ function readTail(mailRoot, role, { limit = 50, afterSeq = 0, project = '' } = {
     seen.add(row.id);
     rows.push(row);
   }
-  return { rows: rows.reverse(), badLines: bad.count, hitLegacyFallback: false };
+  const events = collectEvents(mailRoot, role);
+  const mapped = rows.reverse().map((row) => {
+    const ev = events.get(String(row.id)) || (events.get(String(row.seq)) || {});
+    return { ...row, readAt: String(row.readAt || ev.readAt || ''), ackAt: String(row.ackAt || ev.ackAt || '') };
+  });
+  return { rows: mapped, badLines: bad.count, hitLegacyFallback: false };
 }
 
 /** 读该角色全部消息（热文件 + 归档分片），按 seq 升序；供迁移/归档/统计与全量 inbox。 */
@@ -144,7 +169,12 @@ function readAll(mailRoot, role, { project = '' } = {}) {
     }
   } catch { /* 无归档 */ }
   rows.sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0) || String(a.at || '').localeCompare(String(b.at || '')));
-  return { rows, badLines: bad.count };
+  const events = collectEvents(mailRoot, role);
+  const mapped = rows.map((row) => {
+    const ev = events.get(String(row.id)) || (events.get(String(row.seq)) || {});
+    return { ...row, readAt: String(row.readAt || ev.readAt || ''), ackAt: String(row.ackAt || ev.ackAt || '') };
+  });
+  return { rows: mapped, badLines: bad.count };
 }
 
 function monthOf(at) {

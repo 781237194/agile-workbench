@@ -7,7 +7,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { readWorkflowState } from './lifecycle.mjs';
-import { loadProject, projectStatePaths, listTasks, requireBoot, loadReceipts } from './store.mjs';
+import { loadProject, projectStatePaths, listTasks, requireBoot, loadReceipts, listInbox, mailUsesJsonl } from './store.mjs';
 import { detectOptionalPlugins } from './plugins.mjs';
 import { PATHS, nowIso, stamp, ensureDir, jsonOut, textOut, fail } from './core.mjs';
 // B-20261117-123207-ed72：未闭环任务判定改走 gates.statusIsClosed 单源。
@@ -77,6 +77,23 @@ export function finalizePrecheck(projectName) {
   let roles = [];
   try { roles = fs.readdirSync(mailDir); } catch { roles = []; }
   for (const role of roles) {
+    if (String(role).startsWith('_') || String(role) === '归档') continue;
+    // 批②-2：该角色已切 JSONL 时以 JSONL 为准（new/cur 目录已移入 _legacy）。
+    let msgRows = null;
+    try {
+      if (mailUsesJsonl(role)) msgRows = listInbox(role, { includeCur: true });
+    } catch { msgRows = null; }
+    if (msgRows) {
+      for (const msg of msgRows) {
+        const subject = String(msg.subject || '');
+        const kind = String(msg.type || msg.kind || '');
+        const from = String(msg.from || '');
+        if (kind !== 'dispatch' || from !== 'pm') continue;
+        if (ackedIds.has(String(msg.id || ''))) continue;
+        dispatches.push({ id: msg.id || '', to: role, recipientSessionId: String(msg.recipientSessionId || '') });
+      }
+      continue;
+    }
     const newDir = path.join(mailDir, role, 'new');
     let names = [];
     try { names = fs.readdirSync(newDir); } catch { continue; }

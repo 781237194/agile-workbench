@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import * as mailStore from './mail-store.mjs';
 import { runPmDispatchAtomic } from './pm-dispatch-atomic.mjs';
+import { mailUsesJsonl } from './store.mjs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -2069,6 +2070,20 @@ function messageReadState(msg, box) {
   };
 }
 function readProjectMail(role, project) {
+  if (typeof mailUsesJsonl === 'function' && mailUsesJsonl(role)) {
+    // 批②-2：该角色已切 JSONL——消息 + 事件派生状态（unread/readEvidence 与旧目录语义等价）。
+    return listInbox(role, { includeCur: true, project }).map((msg) => ({
+      msg,
+      file: null,
+      box: String(msg.migratedFrom || 'new'),
+      state: {
+        legacy: false,
+        unread: !String(msg.readAt || '').trim(),
+        readEvidence: Boolean(String(msg.readAt || '').trim()) || String(msg.migratedFrom || '') === 'cur',
+        deliveredAt: String(msg.deliveredAt || msg.at || msg.ts || ''),
+      },
+    }));
+  }
   const rows = [];
   for (const box of ['new', 'cur']) {
     const dir = path.join(PATHS.mail, role, box);
@@ -5112,7 +5127,9 @@ export function cmdMail(args) {
   const sandbox = String(process.env.TEAM_SELFTEST || '') === '1';
   const enforce = String(process.env.TEAM_MAIL_ENFORCE || '') === '1';
   const writeAction = sub === 'migrate' || sub === 'archive';
-  if (writeAction && (!sandbox || enforce)) {
+  // dry-run 只读：不要求 pm/owner 令牌（PM 先看报数）；真正落地（--yes 且非 --dry-run）才校验。
+  const dryRunRequested = !args.yes || Boolean(args['dry-run']);
+  if (writeAction && !dryRunRequested && (!sandbox || enforce)) {
     const bootToken = String(args.boot || '').trim();
     if (!bootToken) fail('BOOT_REQUIRED', 'mail ' + sub + ' 必须带 --boot 启动令牌（pm/owner）', { action: sub });
     const bootInfo = requireBoot(bootToken, { write: true });

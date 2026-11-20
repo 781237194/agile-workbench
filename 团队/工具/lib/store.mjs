@@ -1146,6 +1146,11 @@ function roleUsesJsonlMail(role) {
   for (const box of ['new', 'cur']) if (fs.existsSync(path.join(dir, box))) return false;
   return true;
 }
+
+/** R-e438 批②-2：消费方切换判定（与 roleUsesJsonlMail 同源）。 */
+export function mailUsesJsonl(role) {
+  return roleUsesJsonlMail(role);
+}
 export function sendMessage(msg) {
   // R-9db6 F-9db6-10②：断消息通道注入（只在测试里设），用于造 RECEIPT_FAILED；生产默认不设。
   if (process.env.TEAM_MESSAGE_SEND_FAIL === '1') {
@@ -1243,7 +1248,13 @@ function readMailboxJson(file) {
 export function listInbox(role, { includeCur = false, project = '' } = {}) {
   if (roleUsesJsonlMail(role)) {
     const { rows } = mailStore.readAll(PATHS.mail, role, { project });
-    return rows.filter((m) => includeCur || !String(m.readAt || '').trim()).map((m) => ({ ...m, box: 'jsonl' }));
+    // 批②-2：JSONL 没有 new/cur 目录，box 由事件派生（已读→cur），保持 cmdInbox「默认只列未读」口径。
+    return rows
+      .filter((m) => includeCur || !String(m.readAt || '').trim())
+      .map((m) => ({
+        ...m,
+        box: (String(m.readAt || '').trim() || String(m.migratedFrom || '') === 'cur') ? 'cur' : 'new',
+      }));
   }
   const out = [];
   for (const box of includeCur ? ['new', 'cur'] : ['new']) {
@@ -1320,6 +1331,11 @@ export function readMessage(role, id) {
   }
   // R-c651 F-c651-4：读取即写 readAt；旧消息没有 readAt 的按 deliveredAt||ts 派生并标 legacyRead（只读兼容，不另建未读表）。
   let msg = found.msg;
+  if (found.box === 'jsonl') {
+    // 批②-2：追加 read 事件（append-only），读取侧用事件派生 readAt。
+    try { if (!msg.readAt) mailStore.appendEvent(PATHS.mail, role, { event: 'read', refId: String(msg.id), refSeq: Number(msg.seq) || 0, at: nowIso(), by: role }); } catch { /* 事件写失败不阻断读 */ }
+    return { msg: { ...msg, readAt: String(msg.readAt || nowIso()) }, alreadyRead: Boolean(msg.readAt) };
+  }
   if (!msg.readAt) {
     msg = found.box === 'cur'
       ? { ...msg, readAt: String(msg.deliveredAt || msg.ts || nowIso()), legacyRead: true }
@@ -1358,6 +1374,10 @@ export function ackMessage(role, id, note) {
     const afterRead = findMessage(role, id);
     if (afterRead && afterRead.msg) {
       const stampNow = nowIso();
+      if (!afterRead.file) {
+        // 批②-2：JSONL 模式只追加事件（回执本体已落 回执.jsonl）。
+        try { mailStore.appendEvent(PATHS.mail, role, { event: 'ack', refId: String(id), refSeq: Number(afterRead.msg.seq) || 0, at: stampNow, by: role }); } catch { /* 事件写失败不影响回执 */ }
+      } else
       writeJson(afterRead.file, {
         ...afterRead.msg,
         deliveredAt: String(afterRead.msg.deliveredAt || afterRead.msg.ts || stampNow),
