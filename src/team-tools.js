@@ -1034,11 +1034,14 @@ function createTeamTools(options = {}) {
     // 旧实现会把 sessionId 写成空（2026-11-21 03:03 六角色全空、全队 SESSION_MAP_INCONSISTENT）。
     // 这里按「读不到就什么都不写」处理：skip 并审计原因，名册文件一个字节都不动。
     const activeMembers = team.members.filter((m) => m && m.role && !m.archived);
-    const expected = activeMembers.length;
+    // 目标角色集取「项目 roleIds」：项目切到四人模式时若仍按当前在册 6 人判不足，会永远 skip（复核漏洞）。
+    const targetRoles = projectRoleIdsOf(name);
+    const expected = targetRoles.length || activeMembers.length;
     const provided = Object.entries(sessions)
       .filter(([, v]) => String(v || '').trim())
       .map(([role, v]) => [String(role), String(v).trim()]);
     const got = provided.length;
+    const providedRoleSet = new Set(provided.map(([role]) => role));
     const before = activeMembers.filter((m) => String(m.sessionId || '').trim()).length;
     const skip = (reason) => {
       const row = { source: 'team-tools/syncRoster_skipped', reason, expected, got, before, ratio: expected ? Math.round((got / expected) * 100) / 100 : null };
@@ -1047,7 +1050,8 @@ function createTeamTools(options = {}) {
       return { ok: true, code: 'ROSTER_SYNC_SKIPPED', skipped: true, reason, expected, got, changed: 0, cleared: 0, ratio: row.ratio };
     };
     if (!got) return skip('dsh_empty_or_unreachable');
-    if (got < expected) return skip('insufficient_sessions');
+    const missingTargetRoles = targetRoles.filter((role) => !providedRoleSet.has(role));
+    if (got < expected || missingTargetRoles.length) return skip('insufficient_sessions');
     const invalid = provided.filter(([, v]) => !/^session-[A-Za-z0-9._-]+$/.test(v));
     if (invalid.length) return skip('invalid_session_ids');
     // P0 97db 持久性（T-20261119-044009-7ded）：删除墓碑命中时拒写名册（防 6s 延迟回写），并写名册守卫审计。
@@ -1056,23 +1060,33 @@ function createTeamTools(options = {}) {
     if (tombGuardSync.blocked) return { ok: true, code: 'ROSTER_SYNC_BLOCKED_TOMBSTONE', blocked: true, reason: tombGuardSync.reason };
     // B-2a44：赋值/校验全部走 roster-apply.cjs 单源（与 roster-writer.mjs 同一实现），
     // 不再自己 `member.sessionId =`；非法/旧副本 id 保持名册原值并审计，不静默写坏名册。
+    // 项目切换 / 角色集收缩：目标项目没有的角色，其旧 sessionId 必须显式清理（走 clearRosterSessions，
+    // 不在 syncRosterSessions 里顺手清空）；这样「读不到不清」与「换项目要跟着变」两条都成立。
+    let clearedRoles = [];
+    const strayRoles = activeMembers
+      .filter((m) => String(m.sessionId || '').trim() && !targetRoles.includes(String(m.role)))
+      .map((m) => ({ role: String(m.role), sessionId: String(m.sessionId) }));
+    if (strayRoles.length) {
+      const cleared = rosterApplyCore.clearRosterSessions(team, new Set(strayRoles.map((r) => r.sessionId)), { activeProject: name });
+      clearedRoles = cleared.roles;
+    }
     const result = rosterApplyCore.syncRosterSessions(team, sessions, {
       roleIds: ROLE_IDS,
       roleNames: ROLE_NAMES,
       activeProject: name,
     });
-    const changed = result.changed + (team.activeProject !== name ? 1 : 0);
+    const changed = result.changed + clearedRoles.length + (team.activeProject !== name ? 1 : 0);
     const after = team.members.filter((m) => m && m.role && !m.archived && String(m.sessionId || '').trim()).length;
     const ratio = expected ? Math.round((after / expected) * 100) / 100 : null;
-    try { console.log('[syncRoster] before=' + before + ' after=' + after + ' skipped=0 changed=' + changed + ' cleared=' + result.cleared.length + ' ratio=' + ratio); } catch { /* ignore */ }
+    try { console.log('[syncRoster] before=' + before + ' after=' + after + ' skipped=0 changed=' + changed + ' cleared=' + (result.cleared.length + clearedRoles.length) + ' ratio=' + ratio + (clearedRoles.length ? ' clearedRoles=' + clearedRoles.join(',') : '')); } catch { /* ignore */ }
     if (result.rejected.length) appendRosterAudit(name, { source: 'team-tools/syncRoster', rejected: result.rejected });
     if (changed) {
       try { writeJsonAtomic(layout.teamFile, team); } catch (error) {
         return { ok: false, code: 'ROSTER_WRITE_FAILED', message: String(error && error.message || error).slice(0, 200) };
       }
-      appendRosterAudit(name, { source: 'team-tools/syncRoster', added: result.added, cleared: result.cleared, changed: result.changed, ratio });
+      appendRosterAudit(name, { source: 'team-tools/syncRoster', added: result.added, cleared: result.cleared, clearedRoles, changed: result.changed, ratio });
     }
-    return { ok: true, code: changed ? 'ROSTER_SYNCED' : 'ROSTER_UNCHANGED', changed, cleared: result.cleared.length, skipped: 0, ratio, rejected: result.rejected };
+    return { ok: true, code: changed ? 'ROSTER_SYNCED' : 'ROSTER_UNCHANGED', changed, cleared: result.cleared.length + clearedRoles.length, clearedRoles, skipped: 0, ratio, rejected: result.rejected };
   }
 
   function registrationFor(projectName) {
