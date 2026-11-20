@@ -5,6 +5,7 @@ import path from 'node:path';
 import { normalizeTaskId } from './store.mjs';
 // T-20261117-204902-ca6b：通知类唤醒正文的唯一来源（CJS，壳层 src/team-tools.js 也 require 同一份）。
 import wakeText from './wake-text.cjs';
+import { extractRefs, auditRefs } from './ref-anchor.mjs';
 
 const buildNoticeText = wakeText.buildNoticePrompt;
 
@@ -109,7 +110,7 @@ export function buildDispatchPrompt({
   const reading = Array.isArray(readingList) && readingList.length
     ? `\n本轮必读（程序指定，缺一不可）：${readingList.map((rel) => path.join(projectPath, rel)).join('；')}\n`
     : '';
-  return `这是派单，不是通知：${messageId}（${subject}）。\n`
+  const prompt = `这是派单，不是通知：${messageId}（${subject}）。\n`
     + `${taskLine}\n`
     + `AC 引用：见需求正文 §验收标准（写清路径 + sha256）；version/change 指回需求正文当前版本，不在任务/模板里复制 AC。\n`
     + `中文思考、中文回复、中文写文档；**每轮先读《团队宪法》（唯一最高优先级）**，项目铁律为按需避坑清单（不必每轮读），再按需读 项目信息.md / 项目索引.md / 你的 文件索引.md 与 角色卡.md。\n`
@@ -117,6 +118,12 @@ export function buildDispatchPrompt({
     + `按顺序做完，不要只回“收到”：\n${numbered}\n`
     + `完成标准：有产出 + 完成回执 + ${taskIdText ? 'task done 证据' : '结果说明'}；已回执 ≠ 已完成，只 ack 不算完成。\n`
     + `最后只回一行：已完成/未完成 + 任务 id + 产出路径；不要输出方案，不要巡检全队。`;
+  // RC-2：派单正文里的补丁式引用（路径#sha12:行）做非阻断校验，失败写 锚点校验.jsonl 并在正文附提示。
+  const refs = extractRefs(prompt);
+  const anchorAudit = auditRefs({ project, projectPath, source: 'dispatch', refs, taskId: taskIdText, messageId });
+  if (!anchorAudit.warnings.length) return prompt;
+  const warnText = anchorAudit.warnings.map((w) => `${w.code}:${w.ref}`).join('、');
+  return prompt + `\n【锚点校验】${anchorAudit.warnings.length} 处补丁式引用待修：${warnText}（不阻断，已记 锚点校验.jsonl；请按 路径#sha12:行号 重写）\n`;
 }
 
 /**

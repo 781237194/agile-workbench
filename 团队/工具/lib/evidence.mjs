@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fail, nowIso, hashFile, sha256, isInside, relPath, WORKSPACE } from './core.mjs';
+import { extractRefs, dropRefs, checkRef, auditRefs } from './ref-anchor.mjs';
 
 const CODE_PREFIXES = ['src/', '团队/'];
 const START_TOLERANCE_MS = 2000; // 文件系统 mtime 精度容差（同秒写入不算陈旧）
@@ -188,7 +189,12 @@ export function checkEvidenceGate({ projectPath, task, evidence, commits = [] })
   const startAt = String((task && (task.claimedAt || task.createdAt)) || '');
   const startMs = Date.parse(startAt) || 0;
   const text = String(evidence || '').trim();
-  const refs = scanRefs(text);
+  // RC-2：补丁式引用（路径#sha12:行）单独解析/校验，非阻断；文件存在性/新鲜度仍按纯路径校验。
+  const anchorRefs = extractRefs(text);
+  const anchorChecks = anchorRefs.map((r) => ({ ref: r, ...checkRef(r) }));
+  const anchorWarnings = anchorChecks.filter((r) => !r.ok);
+  const textForFiles = dropRefs(text);
+  const refs = scanRefs(textForFiles);
   const baseDetails = { taskId, evidence: text.slice(0, 200), refs: refs.map((r) => r.ref) };
 
   if (!refs.length) {
@@ -248,5 +254,6 @@ export function checkEvidenceGate({ projectPath, task, evidence, commits = [] })
     files.push(entry);
   }
 
-  return { ok: true, skipped: false, code: 'EVIDENCE_OK', checkedAt, files, taskStart: startAt };
+  const anchorAudit = auditRefs({ project: path.basename(path.resolve(projectPath)), source: 'evidence', refs: anchorRefs, taskId });
+  return { ok: true, skipped: false, code: 'EVIDENCE_OK', checkedAt, files, taskStart: startAt, anchorRefs: anchorChecks.map((a) => ({ ref: a.ref, ok: a.ok, code: a.code })), anchorWarnings: anchorAudit.warnings.length };
 }
