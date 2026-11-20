@@ -4663,6 +4663,8 @@ html[data-theme="light"] #titlebar .titlebar-center .owner-review-proxy { color:
 .session-usage-note { font-size: 8.5px; opacity: .75; }
 .session-usage { margin: 2px 0 4px; max-height: 54px; overflow: auto; font-size: 9px; color: var(--dim); line-height: 1.4; }
 .session-row + .session-reason, .session-reason { margin-top: 4px; font-size: 9px; color: var(--dim); line-height: 1.45; }
+.session-unmatched-list { margin: 2px 0; display: flex; flex-direction: column; gap: 1px; }
+.session-unmatched { font-size: 8.5px; opacity: .85; }
 .session-reason .link-btn { margin-left: 4px; }
 .session-usage[hidden] { display: none; }
 .session-usage.warn { color: var(--gold-3); }

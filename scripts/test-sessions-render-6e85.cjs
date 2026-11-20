@@ -38,7 +38,7 @@ function freePort() {
   });
 }
 let dshPort = 0;
-function seedSandbox() {
+function seedSandbox({ mapped = false } = {}) {
   const SB = fs.mkdtempSync(path.join(os.tmpdir(), 'awb-6e85-'));
   const DATA = path.join(SB, 'data');
   const TEAM = path.join(SB, '团队');
@@ -52,19 +52,29 @@ function seedSandbox() {
   try { cp.execFileSync('cmd', ['/c', 'mklink', '/J', path.join(TEAM, '工具'), path.join(ROOT, '团队', '工具')], { stdio: 'ignore' }); } catch { /* ignore */ }
   const teamFile = path.join(TEAM, '状态', '团队.json');
   const team = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
-  for (const m of (team.members || [])) m.sessionId = '';
+  for (const m of (team.members || [])) m.sessionId = mapped ? 'session-sbx-' + m.role : '';
   fs.writeFileSync(teamFile, JSON.stringify(team, null, 1), 'utf8');
-  // 关键构造：DSH 在线、名册 6 人，但本地 project.sessions 为空（Owner 截图里的 0/6）。
+  // 关键构造：DSH 在线、名册 6 人。mapped=false → 本地 project.sessions 为空（Owner 截图里的 0/6）；
+  // mapped=true → 名册 id 与 DSH mock 全匹配（AC④a：6 行、6/6）。
   for (const n of fs.readdirSync(path.join(DATA, 'userdata'))) {
     if (!n.startsWith('workbench.json')) continue;
     const f = path.join(DATA, 'userdata', n);
     const store = JSON.parse(fs.readFileSync(f, 'utf8'));
     for (const p of (store.projects || [])) {
-      p.sessions = {};
-      p.sessionMeta = {};
+      if (mapped) {
+        p.sessions = {};
+        p.sessionMeta = {};
+        for (const [role] of TITLES) {
+          p.sessions[role] = 'session-sbx-' + role;
+          p.sessionMeta[role] = { title: '团队·' + (TITLES.find(([r]) => r === role) || [])[1], updatedAt: new Date().toISOString() };
+        }
+      } else {
+        p.sessions = {};
+        p.sessionMeta = {};
+      }
       p.workspace = p.workspace && typeof p.workspace === 'object' ? p.workspace : {};
-      p.workspace.sessionIds = [];
-      p.workspace.bound = false;
+      p.workspace.sessionIds = mapped ? TITLES.map(([role]) => 'session-sbx-' + role) : [];
+      p.workspace.bound = mapped;
     }
     fs.writeFileSync(f, JSON.stringify(store, null, 1), 'utf8');
   }
@@ -112,6 +122,17 @@ async function launch(port, sb) {
   return { child, ws, send, evalJs, log: () => log };
 }
 function kill(h) { try { cp.execFileSync('taskkill', ['/PID', String(h.child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* ignore */ } try { h.ws.close(); } catch { /* ignore */ } }
+const EVID = path.join(ROOT, '项目', '工作台改造修复', '程序员A', '产出', '证据-6e85-20261121');
+async function shot(h, selector, file) {
+  const rect = await h.evalJs(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.left + scrollX, y: r.top + scrollY, width: Math.max(1, Math.round(r.width)), height: Math.max(1, Math.round(r.height)) }; })()`);
+  if (!rect) return 0;
+  const r = await h.send('Page.captureScreenshot', { format: 'png', clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 } });
+  const b64 = r && r.result && r.result.data;
+  if (!b64) return 0;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, Buffer.from(b64, 'base64'));
+  return fs.statSync(file).size;
+}
 async function view(h) {
   return h.evalJs(`(() => {
     const box = document.querySelector('#role-sessions');
@@ -126,6 +147,7 @@ async function view(h) {
       mapped: Array.from(document.querySelectorAll('#role-sessions .session-row[data-session-id]')).filter((r) => (r.getAttribute('data-session-id') || '') !== '').length,
       reason: reasonEl ? (reasonEl.textContent || '').trim() : '',
       reasonCode: reasonEl ? reasonEl.getAttribute('data-session-reason-code') : null,
+      unmatched: Array.from(document.querySelectorAll('#role-sessions [data-unmatched-role]')).map((el) => ({ role: el.getAttribute('data-unmatched-role'), text: (el.textContent || '').trim() })),
       hasRebind: Boolean(document.querySelector('#role-sessions [data-rebind-by-title]')),
       usageAfterRoles: usageBefore,
       usageText: usage ? (usage.textContent || '') : '',
@@ -134,25 +156,47 @@ async function view(h) {
     };
   })()`);
 }
+function cleanup(sb) {
+  try { cp.execFileSync('cmd', ['/c', 'rmdir', path.join(sb.TEAM, '工具')], { stdio: 'ignore' }); } catch { /* ignore */ }
+  try { fs.rmSync(sb.SB, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+async function waitRows(h) {
+  let v = await view(h);
+  if (v && v.rowCount === 6) return v;
+  // DSH 状态探测偶发首轮未落定：点一次重试再读（不改变被测逻辑）。
+  await h.evalJs(`document.querySelector('#role-sessions [data-dsh-retry]')?.click(); 'ok'`);
+  for (let i = 0; i < 20; i += 1) { await sleep(500); v = await view(h); if (v.rowCount === 6) break; }
+  return v;
+}
 (async () => {
   dshPort = await freePort();
   const server = await startMock();
-  const sb = seedSandbox();
-  const h = await launch(10231 + Math.floor(Math.random() * 80), sb);
+  // S0（AC④a）：名册 id 与 DSH 全匹配 → 6 行、6/6、无「需重绑」原因行。
+  let sb = seedSandbox({ mapped: true });
+  let h = await launch(10331 + Math.floor(Math.random() * 80), sb);
   try {
     await sleep(5000);
-    let v = await view(h);
-    // DSH 状态探测偶发首轮未落定：点一次重试再读（不改变被测逻辑）。
-    if (v && v.rowCount !== 6) {
-      await h.evalJs(`document.querySelector('#role-sessions [data-dsh-retry]')?.click(); 'ok'`);
-      for (let i = 0; i < 20; i += 1) { await sleep(500); v = await view(h); if (v.rowCount === 6) break; }
-    }
+    const v0 = await waitRows(h);
+    check('S0', '名册 id 全匹配：角色区 6 行、徽标 6/6、无原因行', v0.rowCount === 6 && v0.badge === '6/6' && !v0.reasonCode, v0);
+  } finally { kill(h); cleanup(sb); }
+
+  // S1–S5（AC④b/④c）：名册 id 全空但标题匹配 → 6 行灰行 + 需重绑 + 重绑可点；用量不得进角色区。
+  sb = seedSandbox({ mapped: false });
+  h = await launch(10231 + Math.floor(Math.random() * 80), sb);
+  try {
+    await sleep(5000);
+    let v = await waitRows(h);
     check('S1', 'DSH 在线但映射 0：角色区仍按名册渲染 6 行（不被空态文案替换）', v.rowCount === 6, v);
     check('S2', '用量文案不得进角色区：role-sessions.textContent 不含 累计输入/缓存读/阈值',
       !/累计输入|缓存读|阈值/.test(v.text || ''), { text: (v.text || '').slice(0, 500) });
     check('S3', '用量是独立区块且在角色行之后（DOM 顺序 role-sessions → session-usage-wrap）', v.usageAfterRoles === true, v);
     check('S4', '0/6 给真实原因（MAPPING_EMPTY）+ 按标题重绑入口', v.reasonCode === 'MAPPING_EMPTY' && /映射/.test(v.reason) && v.hasRebind, v);
     check('S4b', '计数与角色行同源：0/6', v.badge === '0/6', v);
+    check('S4c', '逐角色列出未匹配原因（名册 id + DSH 标题/会话 id），6 条',
+      v.unmatched.length === 6 && v.unmatched.every((row) => /名册/.test(row.text) && /DSH「团队·/.test(row.text)), v.unmatched);
+    const roleShot = await shot(h, '#role-sessions', path.join(EVID, 'role-area-0of6.png'));
+    const usageShot = await shot(h, '#session-usage-wrap', path.join(EVID, 'usage-card.png'));
+    check('S4d', '真窗口截图：角色区 + 用量卡各一张（角色区 >10KB，用量卡 >2KB）', roleShot > 10000 && usageShot > 2000, { roleShot, usageShot });
     // 点「按标题重绑」：DSH mock 标题 = 团队·<角色名>，应写回 6 条映射。
     await h.evalJs(`document.querySelector('#role-sessions [data-rebind-by-title]')?.click(); 'ok'`);
     for (let i = 0; i < 40; i += 1) { await sleep(500); v = await view(h); if (v.mapped >= 6) break; }
@@ -166,10 +210,7 @@ async function view(h) {
     } catch { /* ignore */ }
     check('S5', '按标题重绑：6 个角色会话写回 project.sessions，角色区显示已映射', v.mapped >= 6 && storeMapped >= 6, { view: v, storeMapped });
   } finally { kill(h); server.close(); }
-  if (KEEP) console.log('KEEP_SANDBOX=' + sb.SB); else {
-    try { cp.execFileSync('cmd', ['/c', 'rmdir', path.join(sb.TEAM, '工具')], { stdio: 'ignore' }); } catch { /* ignore */ }
-    try { fs.rmSync(sb.SB, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
+  if (KEEP) console.log('KEEP_SANDBOX=' + sb.SB); else cleanup(sb);
 })().catch((e) => check('EX', '断面未抛异常', false, { error: String((e && e.stack) || e) })).finally(() => {
   console.log(`\n${R.filter((x) => x.ok).length}/${R.length} PASS`);
 });

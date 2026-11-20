@@ -3167,8 +3167,17 @@ function renderSessions() {
     const reasonText = mappedN === 0
       ? `DSH 已连接，但在册 ${total} 个角色在本地会话映射里是 0 个（project.sessions 缺失或标题未匹配），所以显示 0/${total}`
       : `本工作区在册 ${total} 个角色，本地只映射 ${mappedN} 个；未映射的行显示「DSH 会话未创建」`;
+    // B-6e85 AC③：逐一列出未匹配角色（名册 id 前 8 位 + DSH 侧标题/会话 id 前 8 位），供 Owner 判断是「名册过期」还是「标题变了」。
+    const unmatchedHtml = entries.filter((item) => !item.sessionId).map((item) => {
+      const rosterId = String((p.sessions && p.sessions[item.role.id]) || '');
+      const live = liveItemFor(p, item.role.id);
+      const dshId = String((live && live.sessionId) || '');
+      const title = String((live && live.currentTitle) || roleSessionTitle(p, item.role.id));
+      return `<span class="session-unmatched" data-unmatched-role="${esc(item.role.id)}">${esc(item.role.name)}：名册 ${rosterId ? esc(rosterId.slice(0, 8)) : '（空）'} · DSH「${esc(title)}」${dshId ? '（' + esc(dshId.slice(0, 8)) + '）' : ''}</span>`;
+    }).join('');
     box.insertAdjacentHTML('beforeend', '<div class="session-reason" data-session-reason="1" data-session-reason-code="' + (mappedN === 0 ? 'MAPPING_EMPTY' : 'MAPPING_PARTIAL') + '">'
-      + esc(reasonText) + '<button class="link-btn" type="button" data-rebind-by-title="1">按标题重绑</button></div>');
+      + esc(reasonText) + (unmatchedHtml ? '<div class="session-unmatched-list" data-unmatched-list="1">' + unmatchedHtml + '</div>' : '')
+      + '<button class="link-btn" type="button" data-rebind-by-title="1">按标题重绑</button></div>');
   }
   // T-5d98：行重绘后补一次绑定状态（推送早于渲染时不会丢）。
   try { if (typeof applyPmIdentityState === 'function') applyPmIdentityState(PM_IDENTITY_LAST || {}); } catch { /* ignore */ }
