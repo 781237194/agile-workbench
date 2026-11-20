@@ -3158,12 +3158,18 @@ async function renderSessionUsage(p) {
   host.setAttribute('data-usage-tokens', data.topTokens === null ? '' : String(data.topTokens));
   host.setAttribute('data-usage-threshold', String(data.warnThreshold || 5000000));
   host.setAttribute('data-usage-level', String(data.level || 'unknown'));
-  const label = String(data.label || ('会话用量未知 / 阈值 ' + Math.round((data.warnThreshold || 5000000) / 10000) + ' 万'));
+  const label = String(data.shortLabel || data.label || ('会话用量未知 / 阈值 ' + Math.round((data.warnThreshold || 5000000) / 10000) + ' 万'));
+  const fullLabel = String(data.label || label);
+  const detailLines = Array.isArray(data.detailLines) ? data.detailLines : [];
   const chips = (data.roles || []).map((row) => '<button type="button" class="usage-chip' + (String((data.focus && data.focus.role) || '') === String(row.role) ? ' active' : '')
     + '" data-usage-role-pick="' + esc(row.role) + '" title="切到 ' + esc(USAGE_ROLE_LABEL[row.role] || row.role) + ' 看它的原生用量">' + esc(USAGE_ROLE_LABEL[row.role] || row.role) + '</button>').join('');
-  const compare = usageCompareMarkup(data.focus && data.focus.view);
-  host.innerHTML = '<span class="usage-label" data-usage-label="1">' + esc(label) + '</span>'
-    + '<span class="usage-chips" data-usage-chips="1">' + chips + '</span>' + compare;
+  const detailHtml = detailLines.length
+    ? '<div class="usage-detail" data-usage-detail="1" hidden>' + detailLines.map((line) => '<span class="usage-detail-line">' + esc(line) + '</span>').join('') + '</div>'
+    : '';
+  // P0（Owner 0407）：默认只显示一行紧凑摘要 + 角色 chip；长文案进 tooltip，明细点「明细」才展开。
+  host.innerHTML = '<span class="usage-label" data-usage-label="1" title="' + esc(fullLabel) + '">' + esc(label) + '</span>'
+    + '<button type="button" class="link-btn usage-detail-toggle" data-usage-detail-toggle="1"' + (detailHtml ? '' : ' hidden') + '>明细</button>'
+    + '<span class="usage-chips" data-usage-chips="1">' + chips + '</span>' + detailHtml;
   host.classList.toggle('warn', data.level === 'warn');
   host.classList.toggle('bad', data.level === 'force');
   host.title = '数据来自 团队/状态/项目/' + (data.project || '') + '/会话用量.json（原生 DSH tokenUsage：未缓存输入/缓存读/输出）；'
@@ -3189,6 +3195,11 @@ function renderSessions() {
   // 现在：名册有行就按名册逐角色出行，缺映射的行用 roleById 合成，保证 6 个在册角色始终可见。
   const roleById = new Map();
   for (const item of allEntries) if (item && item.role) roleById.set(String(item.role.id), item.role);
+  // P0（Owner 0407 真窗口截图 + 测试 I1 未达标）：角色行的事实来源是**在册名册/本模式角色**，
+  // 不是 DSH 会话映射。旧实现在 memberStatesCache 不可用（离线/读失败）时退回 allEntries（映射派生），
+  // 映射只有 1/6 时就只画出 1 行、映射 0 时整块变空态 —— Owner 看到「6 个在册角色却一行都没有」。
+  // 现在：有名册行 → 按名册；无名人册行 → 按本模式角色（teamRoles）兜底，仍然逐角色出行。
+  const localRoleRows = (teamRoles(p) || []).map((role) => ({ role: String(role.id || ''), name: role.name }));
   const rosterEntries = Array.isArray(rosterRows) && rosterRows.length
     ? rosterRows.map((row) => {
       const roleId = String(row.role || '');
@@ -3196,7 +3207,9 @@ function renderSessions() {
       const mapped = p && p.sessions && p.sessions[roleId] ? String(p.sessions[roleId]) : '';
       return { role, sessionId: mapped };
     })
-    : allEntries;
+    : (localRoleRows.length
+      ? localRoleRows.map((row) => ({ role: roleById.get(row.role) || { id: row.role, name: row.name, color: '#888' }, sessionId: (p && p.sessions && p.sessions[row.role]) ? String(p.sessions[row.role]) : '' }))
+      : allEntries);
   const entries = rosterEntries;
   const ready = entries.filter((item) => item.sessionId).length;
   const rosterTotal = cache && Number(cache.memberCount) > 0 ? Number(cache.memberCount) : (Array.isArray(rosterRows) ? rosterRows.length : 0);
@@ -3233,6 +3246,26 @@ function renderSessions() {
   const dshOffline = Boolean(dsh && dsh.configured && !dsh.online);
   const dshCode = String((dsh && dsh.code) || (dshOffline ? 'DSH_OFFLINE' : ''));
   const dshAddress = String((dsh && dsh.baseUrl) || '');
+  // P0（Owner 0407 / 测试 I1）：角色行的渲染抽成函数，离线档也要用它把 6 行画出来，
+  // 不许因为「DSH 连不上」就把整块换成一句状态文案。
+  const buildRowsHtml = () => entries.map(({ role, sessionId }) => {
+    const st = p ? memberStateView(memberStateOfCache(p, role.id), sessionState(p, role)) : { cls: 'missing', text: '未启动', title: '', boot: true };
+    const live = p ? liveItemFor(p, role.id) : null;
+    const titleMismatch = Boolean(live && live.currentTitle && live.currentTitle !== roleSessionTitle(p, role.id));
+    const sub = sessionId
+      ? esc(sessionShort(sessionId)) + (titleMismatch ? ' · 标题不一致' : '')
+      : 'DSH 会话未创建';
+    // AC2b：会话行要有可断言的选中态 data 属性（当前角色会话行标 aria-selected/data-selected=true，
+    // 其余 false；会话 id 也落到 data-session-id 上，便于 tester 按 id 断言而不是看样式）。
+    const isCurrent = Boolean(sessionId) && Boolean(p) && String((p.sessions && p.sessions[role.id]) || '') === String(sessionId);
+    return `<div class="session-row ${sessionId ? '' : 'missing'}" role="button" tabindex="0" data-role-session="${esc(role.id)}"
+      data-session-id="${esc(sessionId || '')}" data-selected="${isCurrent ? 'true' : 'false'}" aria-selected="${isCurrent ? 'true' : 'false'}"
+      title="${esc(titleMismatch ? `DSH 标题是「${live.currentTitle}」，应为「${roleSessionTitle(p, role.id)}」` : (sessionId ? '打开 ' + role.name + ' 的 DSH 会话操作' : '先建团队'))}">
+      <span class="session-dot" style="--role-color:${esc(role.color)}" aria-hidden="true"></span>
+      <span class="session-main"><b data-role-name>${esc(role.name)}</b><small>${sub}</small></span>
+      <span class="session-state ${st.cls}" title="${esc(st.title)}">${esc(st.text)}</span>
+    </div>`;
+  }).join('');
   if (rosterFailed) {
     const code = (cache && (cache.rosterErrorCode || cache.rosterErrorMessage)) || 'UNKNOWN';
     box.innerHTML = '<div class="empty-row bad" data-roster-failed="1">名册读取失败（' + esc(String(code)).slice(0, 80) + '）：保留上一次成功读取的会话列表；请稍后重试或检查团队账本</div>';
@@ -3241,8 +3274,9 @@ function renderSessions() {
   if (dshOffline) {
     // 离线档：N 个在册角色 + 当前离线（错误码）+ 地址 + 重试；绝不出现「无在册成员」。
     // N 取名册行数（rosterTotal），不用 teamRoleCount 兜底——真无成员时如实写 0，不能借项目角色数虚报。
-    const offlineN = rosterTotal || 0;
-    box.innerHTML = '<div class="empty-row bad" data-dsh-offline="1">' + offlineN + ' 个在册角色；DSH 当前离线（' + esc(dshCode || 'DSH_OFFLINE') + '）· 当前会话映射 ' + ready + '/' + Math.max(offlineN, ready)
+    const offlineN = rosterTotal || entries.length || 0;
+    // 先画角色行（按名册/本模式角色），再画离线横幅——两件同时出现，绝不用横幅替换角色区。
+    box.innerHTML = buildRowsHtml() + '<div class="empty-row bad" data-dsh-offline="1">' + offlineN + ' 个在册角色；DSH 当前离线（' + esc(dshCode || 'DSH_OFFLINE') + '）· 当前会话映射 ' + ready + '/' + Math.max(offlineN, ready)
       + (dshAddress ? ' · 地址 ' + esc(dshAddress) : '') + '<button class="link-btn" type="button" data-dsh-retry="1">重试连接</button></div>';
     if (count) {
       count.textContent = ready + '/' + Math.max(offlineN, ready);
@@ -3250,6 +3284,7 @@ function renderSessions() {
       count.setAttribute('data-verified', '0');
       count.setAttribute('data-dsh-offline', '1');
     }
+    if (!entries.length) return;
     return;
   }
   if (rosterFiltered) {
@@ -3273,24 +3308,7 @@ function renderSessions() {
     if (count) { count.textContent = '0'; count.setAttribute('data-verified', '0'); }
     return;
   }
-  box.innerHTML = entries.map(({ role, sessionId }) => {
-    const st = p ? memberStateView(memberStateOfCache(p, role.id), sessionState(p, role)) : { cls: 'missing', text: '未启动', title: '', boot: true };
-    const live = p ? liveItemFor(p, role.id) : null;
-    const titleMismatch = Boolean(live && live.currentTitle && live.currentTitle !== roleSessionTitle(p, role.id));
-    const sub = sessionId
-      ? esc(sessionShort(sessionId)) + (titleMismatch ? ' · 标题不一致' : '')
-      : 'DSH 会话未创建';
-    // AC2b：会话行要有可断言的选中态 data 属性（当前角色会话行标 aria-selected/data-selected=true，
-    // 其余 false；会话 id 也落到 data-session-id 上，便于 tester 按 id 断言而不是看样式）。
-    const isCurrent = Boolean(sessionId) && Boolean(p) && String((p.sessions && p.sessions[role.id]) || '') === String(sessionId);
-    return `<div class="session-row ${sessionId ? '' : 'missing'}" role="button" tabindex="0" data-role-session="${esc(role.id)}"
-      data-session-id="${esc(sessionId || '')}" data-selected="${isCurrent ? 'true' : 'false'}" aria-selected="${isCurrent ? 'true' : 'false'}"
-      title="${esc(titleMismatch ? `DSH 标题是「${live.currentTitle}」，应为「${roleSessionTitle(p, role.id)}」` : (sessionId ? '打开 ' + role.name + ' 的 DSH 会话操作' : '先建团队'))}">
-      <span class="session-dot" style="--role-color:${esc(role.color)}" aria-hidden="true"></span>
-      <span class="session-main"><b data-role-name>${esc(role.name)}</b><small>${sub}</small></span>
-      <span class="session-state ${st.cls}" title="${esc(st.title)}">${esc(st.text)}</span>
-    </div>`;
-  }).join('');
+  box.innerHTML = buildRowsHtml();
   // B-6e85：0/N 必须说清真实原因（DSH 在线但会话映射缺失/标题不匹配），并给「按标题重绑」入口。
   if (entries.length && (verified === 0 || ready < total)) {
     const mappedN = entries.filter((item) => item.sessionId).length;
@@ -17675,6 +17693,21 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
     const role = String(chip.getAttribute('data-usage-role-pick') || '');
     usageUi = { projectId: usageUi.projectId, role, at: 0, data: null };
     try { renderSessionUsage(activeProject()).catch(() => { /* 切角色失败不阻断 */ }); } catch { /* ignore */ }
+  });
+
+  // P0（Owner 0407）：用量「明细」展开/收起（默认折叠，避免长文把角色区挤没）
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    const btn = t.closest('[data-usage-detail-toggle]');
+    if (!btn) return;
+    e.preventDefault();
+    const detail = document.querySelector('#session-usage [data-usage-detail]');
+    const wrap = document.getElementById('session-usage-wrap');
+    if (!detail) return;
+    detail.hidden = !detail.hidden;
+    if (wrap) wrap.classList.toggle('detail-open', !detail.hidden);
+    btn.textContent = detail.hidden ? '明细' : '收起';
   });
 
   // 抽屉关闭

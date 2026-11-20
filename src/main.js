@@ -12385,7 +12385,23 @@ installShellAuditSensors();
       topTokens: focusRow ? focusRow.tokens : null,
       topRole: focusRow ? focusRow.role : null,
       level: focusRow ? focusRow.level : severity,
-      label
+      label,
+      // P0（Owner 0407 界面）：默认只显示一行紧凑摘要，明细折叠。
+      // 旧实现把 label 直接铺在卡片里（含「累计含缓存读…仅作参考」），把角色区挤没了。
+      shortLabel: (() => {
+        if (!focusRow) return '会话用量未知' + (maxRow ? '' : ' / 阈值未知');
+        const used = Number(focusRow.input) || 0;
+        const warn = Number(focusRow.warn) || 0;
+        const state = focusRow.level === 'force' ? '超阈值' : (focusRow.level === 'warn' ? '接近阈值' : '未超阈值');
+        return '本会话(' + (focusRow.role || '') + ') ' + fmtTokens(used) + ' / 阈值 ' + (warn ? fmtTokens(warn) : '未知')
+          + ' · ' + state;
+      })(),
+      detailLines: focusRow ? [
+        '未缓存输入 ' + fmtTokens(focusRow.input || 0) + '（判定口径）',
+        '缓存读 ' + fmtTokens(focusRow.cacheRead || 0) + '（仅参考）',
+        '输出 ' + fmtTokens(focusRow.output || 0),
+        '总 token ' + fmtTokens(focusRow.tokens || 0) + '（未缓存输入+缓存读+输出）',
+      ] : [],
     };
   });
 
