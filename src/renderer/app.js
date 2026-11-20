@@ -3200,16 +3200,23 @@ function renderSessions() {
   // 映射只有 1/6 时就只画出 1 行、映射 0 时整块变空态 —— Owner 看到「6 个在册角色却一行都没有」。
   // 现在：有名册行 → 按名册；无名人册行 → 按本模式角色（teamRoles）兜底，仍然逐角色出行。
   const localRoleRows = (teamRoles(p) || []).map((role) => ({ role: String(role.id || ''), name: role.name }));
-  const rosterEntries = Array.isArray(rosterRows) && rosterRows.length
-    ? rosterRows.map((row) => {
-      const roleId = String(row.role || '');
-      const role = roleById.get(roleId) || (teamRoles(p) || []).find((r) => String(r.id) === roleId) || { id: roleId, name: String((row && row.name) || roleId), color: '#888' };
-      const mapped = p && p.sessions && p.sessions[roleId] ? String(p.sessions[roleId]) : '';
-      return { role, sessionId: mapped };
-    })
+  // P0（Owner 0509：rosterRows 只有 1 行时仍只画 1 行）：**行数只由本模式角色决定**，
+  // rosterRows 仅作为「状态来源」（stateRow），不再决定画几行。纯逻辑抽在 session-rows.js，假 DOM 可测。
+  const rosterEntries = (window.AWBSessionRows && typeof window.AWBSessionRows.buildRosterEntries === 'function')
+    ? window.AWBSessionRows.buildRosterEntries({ rosterRows, localRoles: localRoleRows, sessions: p && p.sessions, allEntries, roleById })
     : (localRoleRows.length
-      ? localRoleRows.map((row) => ({ role: roleById.get(row.role) || { id: row.role, name: row.name, color: '#888' }, sessionId: (p && p.sessions && p.sessions[row.role]) ? String(p.sessions[row.role]) : '' }))
-      : allEntries);
+      ? localRoleRows.map((row) => {
+        const roleId = String(row.role || '');
+        const role = roleById.get(roleId) || { id: roleId, name: row.name, color: '#888' };
+        const mapped = p && p.sessions && p.sessions[roleId] ? String(p.sessions[roleId]) : '';
+        return { role, sessionId: mapped, stateRow: null };
+      })
+      : (Array.isArray(rosterRows) && rosterRows.length ? rosterRows.map((row) => {
+        const roleId = String((row && row.role) || '');
+        const role = roleById.get(roleId) || { id: roleId, name: String((row && row.name) || roleId), color: '#888' };
+        const mapped = p && p.sessions && p.sessions[roleId] ? String(p.sessions[roleId]) : '';
+        return { role, sessionId: mapped, stateRow: row };
+      }) : allEntries));
   const entries = rosterEntries;
   const ready = entries.filter((item) => item.sessionId).length;
   const rosterTotal = cache && Number(cache.memberCount) > 0 ? Number(cache.memberCount) : (Array.isArray(rosterRows) ? rosterRows.length : 0);
@@ -3252,9 +3259,10 @@ function renderSessions() {
     const st = p ? memberStateView(memberStateOfCache(p, role.id), sessionState(p, role)) : { cls: 'missing', text: '未启动', title: '', boot: true };
     const live = p ? liveItemFor(p, role.id) : null;
     const titleMismatch = Boolean(live && live.currentTitle && live.currentTitle !== roleSessionTitle(p, role.id));
-    const sub = sessionId
-      ? esc(sessionShort(sessionId)) + (titleMismatch ? ' · 标题不一致' : '')
-      : 'DSH 会话未创建';
+    const rowModel = (window.AWBSessionRows && typeof window.AWBSessionRows.rowModel === 'function')
+      ? window.AWBSessionRows.rowModel({ role, sessionId })
+      : { sub: sessionId ? sessionShort(sessionId) : 'DSH 会话未创建' };
+    const sub = rowModel.sub + (titleMismatch ? ' · 标题不一致' : '');
     // AC2b：会话行要有可断言的选中态 data 属性（当前角色会话行标 aria-selected/data-selected=true，
     // 其余 false；会话 id 也落到 data-session-id 上，便于 tester 按 id 断言而不是看样式）。
     const isCurrent = Boolean(sessionId) && Boolean(p) && String((p.sessions && p.sessions[role.id]) || '') === String(sessionId);
