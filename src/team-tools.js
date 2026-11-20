@@ -5627,28 +5627,38 @@ function createTeamTools(options = {}) {
 
   function readLegacyTasks(projectName) {
     const dir = projectStatePaths(projectName).tasks;
-    const signature = taskCacheSignatureOf(dir);
     const cached = taskScanCache.get(dir);
-    if (TASK_CACHE_TTL_MS > 0 && cached && signature && cached.signature === signature
-      && (Date.now() - cached.at) < TASK_CACHE_TTL_MS) {
+    // TTL 内：连 stat 都不做，直接复用（点击高峰/轮询重复读）。
+    if (TASK_CACHE_TTL_MS > 0 && cached && Array.isArray(cached.rows) && (Date.now() - cached.at) < TASK_CACHE_TTL_MS) {
       taskCacheStats.hits += 1;
       taskCacheStats.lastHitAt = new Date().toISOString();
       return cached.rows.slice();
     }
-    const out = [];
     let names = [];
-    try { names = fs.readdirSync(dir); } catch { return out; }
+    try { names = fs.readdirSync(dir); } catch { return []; }
     const scanStarted = Date.now();
+    const prevFiles = cached && cached.files instanceof Map ? cached.files : null;
+    const files = new Map();
+    let parsed = 0;
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
+      let sig = '';
+      try { const st = fs.statSync(path.join(dir, name)); sig = Math.round(st.mtimeMs) + ':' + st.size; } catch { sig = ''; }
+      const prev = prevFiles ? prevFiles.get(name) : null;
+      if (prev && sig && prev.sig === sig) { files.set(name, prev); continue; }
       const task = readJsonSafe(path.join(dir, name));
-      if (task && task.id) out.push(task);
+      parsed += 1;
+      if (task && task.id) files.set(name, { sig, row: task });
     }
-    const rows = out.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+    const rows = Array.from(files.values())
+      .map((entry) => entry.row)
+      .filter((task) => task && task.id)
+      .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
     if (TASK_CACHE_FREEZE) for (const row of rows) { try { Object.freeze(row); } catch { /* 忽略 */ } }
     taskCacheStats.misses += 1;
+    taskCacheStats.parsedFiles = parsed;
     taskCacheStats.lastScanMs = Date.now() - scanStarted;
-    if (signature) taskScanCache.set(dir, { signature, at: Date.now(), rows });
+    taskScanCache.set(dir, { signature: taskCacheSignatureOf(dir) || '', at: Date.now(), rows, files });
     taskCacheStats.size = taskScanCache.size;
     return rows.slice();
   }

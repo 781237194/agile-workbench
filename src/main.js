@@ -2178,6 +2178,9 @@ function workflowSideEffectsAudit(row) {
 }
 function emitWorkflowSideEffects(payload) {
   try {
+    console.log('[side-effects-profile] ' + JSON.stringify({ ok: Boolean(payload && payload.ok), mirrorMs: Number(payload && payload.ms) || 0, projectId: String((payload && payload.projectId) || ''), reason: String((payload && payload.reason) || '') }));
+  } catch { /* ignore */ }
+  try {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workflow:side-effects', payload);
   } catch { /* ignore */ }
 }
@@ -9100,6 +9103,7 @@ ipcMain.handle('theme:metrics', async () => {
     debounceMs: Number(process.env.AWB_BOARD_REBUILD_DEBOUNCE_MS) > 0 ? Number(process.env.AWB_BOARD_REBUILD_DEBOUNCE_MS) : 600,
     generateBoard: (project) => teamTools.generateBoard(project),
     onDone: (payload) => {
+      try { console.log('[board-profile] ' + JSON.stringify({ ok: Boolean(payload && payload.ok), boardMs: Number(payload && payload.ms) || 0, projectId: String((payload && payload.projectId) || '') })); } catch { /* ignore */ }
       try { recordShellAudit('board-rebuild', payload); } catch { /* 审计失败不阻断 */ }
       for (const win of BrowserWindow.getAllWindows()) {
         try { win.webContents.send('board:rebuilt', payload); } catch { /* 窗口在销毁中 */ }
