@@ -258,7 +258,9 @@ button:focus-visible, [tabindex]:focus-visible {
 .tb-chip:hover { border-color: var(--gold-line); background: var(--gold-soft); color: var(--text); }
 .chip-k { color: var(--dim); font-size: 8.5px; letter-spacing: .02em; }
 .tb-chip b { color: var(--gold-2); font-size: 10px; font-weight: 650; }
-.top-tools { display: flex; align-items: center; gap: 0; min-width: 0; margin-left: auto; }
+.top-tools { display: flex; align-items: center; gap: 0; min-width: 0; margin-left: auto; flex: 0 1 auto; overflow: hidden; }
+/* B-6429：工具按钮自身不压缩（压缩会裁图标），空间不够时按上面的降级顺序收文字/间距/工作区宽度。 */
+.top-tools .tb-btn { flex: 0 0 auto; }
 .ghost, .primary {
   /* P2：hover/active 手感（原型 .16s cubic-bezier(.2,.7,.2,1)） */
   transition: transform .16s cubic-bezier(.2, .7, .2, 1), box-shadow .16s cubic-bezier(.2, .7, .2, 1), filter .16s cubic-bezier(.2, .7, .2, 1), background-color .16s cubic-bezier(.2, .7, .2, 1);
@@ -317,12 +319,25 @@ button:focus-visible, [tabindex]:focus-visible {
   stroke-linejoin: round;
 }
 .tb-btn:hover .tb-ico { color: var(--gold); }
+/* B-6429（P3）：文件夹按钮恒为 14×14 纯图标（28×28 点击区），任意宽度都不显示文字。
+   空间不足时的降级顺序（写死，改动请同步夹具 test-6429-folder-icon.cjs）：
+     ① 先收文字（≤1500 收 chip 文字、≤1440 收 top-tools 文字）
+     ② 再收间距（≤1320/1280 收 padding/gap）
+     ③ 最后收工作区宽度（.workspace-switch flex-basis 330→260→220，min-width 150 兜底） */
 .tb-folder {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+  justify-content: center;
+  gap: 0;
+  flex: 0 0 auto;
   margin-left: 1px;
+  margin-right: 4px;   /* 与 .titlebar-right 的硬间距（右组另有 margin-left:4px） */
   color: var(--gold-2);
   border-color: var(--gold-line);
   background: linear-gradient(180deg, rgba(201, 163, 101, .13), rgba(201, 163, 101, .045));
 }
+.tb-folder .tb-text { display: none !important; }
 .tb-folder:hover { border-color: rgba(201, 163, 101, .52); background: rgba(201, 163, 101, .13); }
 .tb-folder .tb-ico { color: var(--gold); }
 .titlebar-right {
@@ -332,6 +347,7 @@ button:focus-visible, [tabindex]:focus-visible {
   align-items: center;
   gap: 2px;
   padding-right: 0;
+  margin-left: 4px;   /* B-6429：与左侧工具条恒留 ≥4px，防被压住 */
   -webkit-app-region: no-drag;
 }
 .tb-icon {
@@ -1726,12 +1742,19 @@ html[data-theme="light"] .modal-mask { background: rgba(40, 32, 22, .46); }
   #titlebar .workspace-switch { max-width: 260px; }
   #titlebar .tb-chip { padding: 0 6px; }
 }
-@media (max-width: 1320px) {
+/* B-6429 降级①：先收文字（工具按钮只留图标） */
+@media (max-width: 1440px) {
   .top-tools .tb-text { display: none; }
   .tb-btn { padding: 0 6px; }
   .titlebar-center { gap: 7px; }
-  .workspace-switch { max-width: 300px; }
+  .workspace-switch { flex-basis: 260px; max-width: 300px; }
   .stage-path { max-width: 30%; }
+}
+/* B-6429 降级②：再收间距；③ 最后收工作区宽度（220/150 兜底） */
+@media (max-width: 1320px) {
+  .tb-btn { padding: 0 5px; }
+  .titlebar-center { gap: 6px; }
+  .workspace-switch { flex-basis: 220px; }
 }
 @media (max-width: 1160px) {
   .brand-sub, .version { display: none; }

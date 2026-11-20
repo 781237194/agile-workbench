@@ -98,9 +98,9 @@
           <span class="tb-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M13 6.2A5.2 5.2 0 1 0 13.2 9"/><path d="M13 2.9v3.4h-3.4"/></svg></span>
           <span class="tb-text">刷新</span>
         </button>
-        <button id="btn-folder-top" class="ghost tb-btn tb-folder" title="打开当前工作区文件夹" type="button">
+        <!-- B-6429（P3）：纯图标按钮（14×14 folder），不显示「文件夹」文字；title/aria-label 保留。 -->
+        <button id="btn-folder-top" class="ghost tb-btn tb-folder" title="打开当前工作区文件夹" aria-label="打开当前工作区文件夹" type="button">
           <span class="tb-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M1.9 4.2c0-.6.4-1 1-1h3l1.2 1.4h5.9c.6 0 1 .4 1 1v6.2c0 .6-.4 1-1 1H2.9c-.6 0-1-.4-1-1V4.2Z"/></svg></span>
-          <span class="tb-text">文件夹</span>
         </button>
       </nav>
     </div>
