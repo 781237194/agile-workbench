@@ -11812,7 +11812,8 @@ installShellAuditSensors();
   }
 
   // R-703f F-1 / AC1：会话用量界面（只读）。数据源 团队/状态/项目/<项目>/会话用量.json，
-  // schema：{ "<role>": {sessionId, tokens, input, at, source} }；阈值默认 30 万（--warn 可配，落在数据里）。
+  // schema：{ "<role>": {sessionId, tokens, input, at, source} }；阈值取自 session.mjs 单源
+  // （B-usage-semantics 起默认＝本会话累计未缓存输入 500 万/1000 万，项目 项目.json → sessionLimits 可覆盖）。
   // 文件缺失 / at 超 24h → 返回 unknown（界面显示"用量未知"），不凭空估算。
   ipcMain.handle('session:usage', async (_e, payload) => {
     const p = payload || {};
@@ -11822,8 +11823,9 @@ installShellAuditSensors();
     const slug = teamTools.teamSlug(name);
     const file = path.join(teamRoot, '状态', '项目', slug, '会话用量.json');
     // B-20261120-020530-0823（PM 2026-11-20 02:50）：阈值**不再写死** 300000/500000。
-    // 唯一来源 = 团队/工具/lib/session.mjs → sessionLimitsOf(project).of(role)：pm 60/100 万、其余 30/50 万，
-    // 项目 项目.json → sessionLimits 可覆盖。壳层若再写第二套，就会出现「pm 50 万被按 30 万判 force」这类误判。
+    // 唯一来源 = 团队/工具/lib/session.mjs → sessionLimitsOf(project).of(role)：
+    // B-usage-semantics 起六个角色统一 500 万/1000 万（本会话累计未缓存输入口径），项目 项目.json → sessionLimits 可覆盖。
+    // 壳层若再写第二套，就会出现「pm 50 万被按 30 万判 force」这类误判。
     // 通过动态 import 读 ESM（main.js 里已有先例：lessons.mjs / sched-advice.mjs）。
     // 失败时**降级为 unknown** 并在 label 说明原因，绝不静默回落到写死值。
     const explicitWarn = Number(p.warn) > 0 ? Number(p.warn) : 0;
@@ -11858,7 +11860,9 @@ installShellAuditSensors();
       const tokens = Number(row && row.tokens) || 0;
       // B-20261120-1010（Owner 2026-11-20 10:48 报）：`tokens` 是**累计**（input+cacheRead+output），
       // 长会话的 cacheRead 累计会把 pm 推到 12 亿量级 → 显示「超 4104.6 倍」纯噪声。
-      // 阈值（30/50 万）语义是「进上下文的量」，所以判定口径改为 DSH 的 **uncachedInputTokens**（row.input）；
+      // B-usage-semantics（Owner 2026-11-20 11:2x）：判定口径＝DSH 的 **uncachedInputTokens**（row.input），
+      // 语义＝「本会话从开工到现在的累计未缓存输入」，**换人（rotate）归零**；阈值也按这个量级定
+      // （sessionLimitsOf 默认 500 万/1000 万，不是单次上下文预算的 30/50 万）。
       // 累计仍展示（标注「累计含缓存读」），但**不参与**超限倍数计算。
       const inputTokens = Number(row && row.input) || 0;
       const compareTokens = inputTokens > 0 ? inputTokens : tokens;
@@ -11885,7 +11889,7 @@ installShellAuditSensors();
     }).sort((a, b) => b.compareTokens - a.compareTokens);
     const tracked = roles.filter((row) => row.level !== 'unknown');
     const maxRow = tracked[0] || null;
-    // 0823 AC③：一句话文案必须说清「最高是谁 + 它的阈值 + 超几倍」，禁止拿 A 的用量比 B 的阈值。
+    // 0823 AC③ + B-usage-semantics：一句话必须说清「口径 + 是谁 + 它的阈值 + 超几倍」，禁止拿 A 的用量比 B 的阈值。
     const ratio = maxRow && maxRow.warn ? (maxRow.compareTokens / maxRow.warn) : 0;
     const label = (() => {
       if (!limitsReady && explicitWarn <= 0) {
@@ -11895,12 +11899,18 @@ installShellAuditSensors();
         const firstWarn = tracked[0] && tracked[0].warn ? tracked[0].warn : (explicitWarn || 0);
         return '会话用量未知 / 阈值 ' + (firstWarn ? fmtTokens(firstWarn) : '未知');
       }
-      // 判定值用未缓存输入；累计（含缓存读）另标注，避免 Owner 看到 12 亿这种噪声数当唯一读数。
-      const base = UsageThreshold.usageLabel({ ...maxRow, tokens: maxRow.compareTokens }, fmtTokens);
+      // 判定值用本会话累计未缓存输入；累计（含缓存读）另标注，避免 Owner 看到 12 亿这种噪声数当唯一读数。
+      // B-usage-semantics：在 usage-threshold.js 的通用模板上只改两处固定措辞（模板片段由夹具锁定）——
+      //   首句「会话用量最高：<角色> X（其阈值 Y）」→「本会话累计输入 X（换人归零，其阈值 Y）」
+      //   去向「需换人」→「建议换人」
+      const base = UsageThreshold.usageLabel({ ...maxRow, tokens: maxRow.compareTokens }, fmtTokens)
+        .replace(/^会话用量最高：\S+\s+/, '本会话累计输入 ')
+        .replace('（其阈值 ', '（换人归零，其阈值 ')
+        .replace('需换人', '建议换人');
       const total = Number(maxRow.tokens) || 0;
       const cmp = Number(maxRow.compareTokens) || 0;
       return total > cmp * 1.5
-        ? base + '（判定口径＝未缓存输入；累计含缓存读 ' + fmtTokens(total) + '，仅作参考）'
+        ? base + '（判定口径＝本会话累计未缓存输入；累计含缓存读 ' + fmtTokens(total) + '，仅作参考）'
         : base;
     })();
     const severity = UsageThreshold.severityOf(roles.map((row) => row.level));
