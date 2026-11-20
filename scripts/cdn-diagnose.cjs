@@ -6,8 +6,8 @@ const https = require('node:https');
 const http = require('node:http');
 
 const CDN_HINTS = {
-  CDN_DNS_FAILED: 'DNS 解析失败：检查本机 DNS/代理；企业网常见于 raw.githubusercontent.com 被拦。可改用镜像或设置 HTTPS_PROXY，或先 --skip-cdn 并记录原因。',
-  CDN_REDIRECT_BLOCKED: 'CDN 301 跳转到 raw.githubusercontent.com 后不可达（跳转链见 redirects）：多为网络/代理限制；设置 HTTPS_PROXY 或在能访问 GitHub raw 的网络重试，或 --skip-cdn 并记录原因。',
+  CDN_DNS_FAIL: 'DNS 解析失败：检查本机 DNS/代理；企业网常见于 raw.githubusercontent.com 被拦。可改用镜像或设置 HTTPS_PROXY，或先 --skip-cdn 并记录原因。',
+  CDN_REDIRECT_UNREACHABLE: 'CDN 301 跳转到 raw.githubusercontent.com 后不可达（跳转链见 redirects）：多为网络/代理限制；设置 HTTPS_PROXY 或在能访问 GitHub raw 的网络重试，或 --skip-cdn 并记录原因。',
   CDN_NETWORK_BLOCKED: '连接被重置/拒绝（ECONNRESET/ECONNREFUSED）：多为网络策略或本地代理未生效；检查代理与防火墙后重试。',
   CDN_TLS_FAILED: 'TLS 证书校验失败：检查系统时间、根证书或企业代理的中间人证书；不要用 --insecure 绕过发版校验。',
   CDN_TIMEOUT: 'CDN 下载超时：网络慢或被限速；可稍后重试或改用镜像（jsDelivr 回源 raw.githubusercontent 可能很慢）。',
@@ -22,11 +22,11 @@ function classifyNetworkError(error, { stage = '', redirects = [] } = {}) {
   const code = String((error && error.code) || '') || (/HTTP_TIMEOUT/.test(message) ? 'HTTP_TIMEOUT' : '');
   let category = 'CDN_NETWORK_BLOCKED';
   if (/HTTP_TIMEOUT|ETIMEDOUT|timed? ?out/i.test(message) || code === 'ETIMEDOUT') category = 'CDN_TIMEOUT';
-  else if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(message + ' ' + code)) category = 'CDN_DNS_FAILED';
+  else if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(message + ' ' + code)) category = 'CDN_DNS_FAIL';
   else if (/CERT|SSL|TLS|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(message + ' ' + code)) category = 'CDN_TLS_FAILED';
   else if (/ECONNRESET|ECONNREFUSED|EPIPE|EHOSTUNREACH|ENETUNREACH|socket hang up/i.test(message + ' ' + code)) category = 'CDN_NETWORK_BLOCKED';
-  if (stage === 'redirect' && (category === 'CDN_NETWORK_BLOCKED' || category === 'CDN_TIMEOUT' || category === 'CDN_DNS_FAILED')) {
-    category = 'CDN_REDIRECT_BLOCKED';
+  if (stage === 'redirect' && (category === 'CDN_NETWORK_BLOCKED' || category === 'CDN_TIMEOUT' || category === 'CDN_DNS_FAIL')) {
+    category = 'CDN_REDIRECT_UNREACHABLE';
   }
   return { category, code: code || category, hint: CDN_HINTS[category] || '', detail: { stage, redirects: redirects.slice(0, 8), message: message.slice(0, 300) } };
 }
@@ -82,4 +82,27 @@ function httpGetWithRedirects(url, { headers = {}, timeout = 45000, follow = 5 }
   return once(url, follow);
 }
 
-module.exports = { CDN_HINTS, classifyNetworkError, cdnVerdict, httpGetWithRedirects };
+/**
+ * --cdn-fallback github（PM 015009）：CDN 不可达时用 GitHub Release asset 的 sha 作替代校验。
+ * 绝不「静默当 PASS」：返回 category=CDN_FALLBACK_GITHUB + 明确 hint，调用方必须把 fallback 打进 C4/C7 detail。
+ */
+function cdnFallbackVerdict({ cdn = null, fallback = '', githubSha = '', localSha = '' } = {}) {
+  if (String(fallback) !== 'github') {
+    return { ok: false, category: 'CDN_NO_FALLBACK', code: 'CDN_FALLBACK_UNSUPPORTED', hint: 'CDN 失败且未指定 --cdn-fallback github（不会静默当 PASS）。', detail: { cdnCategory: cdn && cdn.category } };
+  }
+  if (!githubSha) {
+    return { ok: false, category: 'CDN_NO_FALLBACK', code: 'CDN_FALLBACK_UNAVAILABLE', hint: 'CDN 失败，GitHub asset 也没有可用 sha（先确认 C3 通过）。', detail: { cdnCategory: cdn && cdn.category } };
+  }
+  if (!localSha || githubSha !== localSha) {
+    return { ok: false, category: 'CDN_SHA_MISMATCH', code: 'CDN_FALLBACK_SHA_MISMATCH', hint: '回退 GitHub asset 后 sha 仍与本地不一致：内容问题，不要重试掩盖。', detail: { githubSha, localSha } };
+  }
+  return {
+    ok: true,
+    category: 'CDN_FALLBACK_GITHUB',
+    code: 'CDN_FALLBACK_OK',
+    hint: 'CDN 不可达，已按 --cdn-fallback github 改用 Release asset 校验（CDN 渠道本身未验证，必须在发布记录里写明原因）。',
+    detail: { cdnCategory: cdn && cdn.category, cdnCode: cdn && cdn.code, githubSha, localSha },
+  };
+}
+
+module.exports = { CDN_HINTS, classifyNetworkError, cdnVerdict, cdnFallbackVerdict, httpGetWithRedirects };

@@ -25,12 +25,15 @@ const zlib = require('node:zlib');
 const { execFileSync } = require('node:child_process');
 // R-5099：GitHub asset / 四渠道同源的纯判定放在 lib 里（夹具可直测「同 size 不同内容必红」）。
 const { assetVerdict, fourWayVerdict, payloadVerdict, sha256 } = require('./release-verify-lib.cjs');
-const { cdnVerdict, httpGetWithRedirects } = require('./cdn-diagnose.cjs');
+const { cdnVerdict, cdnFallbackVerdict, httpGetWithRedirects } = require('./cdn-diagnose.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
 const version = String(args.find((a) => !a.startsWith('--')) || '').trim();
 const skipCdn = args.includes('--skip-cdn');
+// 98ea（PM 015009）：CDN 不可达时可显式 --cdn-fallback github（默认不启用；启用也必须打标，不静默 PASS）。
+const cdnFallback = (() => { const i = args.indexOf('--cdn-fallback'); return i >= 0 && args[i + 1] ? String(args[i + 1]) : ''; })();
+let cdnFallbackUsed = false;
 const skipNpm = args.includes('--skip-npm');
 if (!version) {
   console.error('用法：node scripts/release-verify.cjs <version> [--skip-cdn] [--skip-npm]');
@@ -150,10 +153,29 @@ function githubToken() {
       });
     } catch (e) {
       cdnDiag = cdnVerdict({ error: e, redirects: (e && e.redirects) || [] });
-      check('C4', 'CDN 下载包 sha256 与本地一致（诊断：' + cdnDiag.category + '）', false, {
-        category: cdnDiag.category, code: cdnDiag.code, hint: cdnDiag.hint,
-        error: String((e && e.message) || e).slice(0, 200), redirects: cdnDiag.detail && cdnDiag.detail.redirects,
-      });
+      // --cdn-fallback github：用 C3 已下载的 GitHub asset sha 兜底（不重新下载）；必须显式打标。
+      if (cdnFallback === 'github') {
+        const fb = cdnFallbackVerdict({ cdn: cdnDiag, fallback: cdnFallback, githubSha: githubAssetSha, localSha });
+        if (fb.ok) {
+          cdnFallbackUsed = true;
+          cdnSha = githubAssetSha;
+          check('C4', 'CDN 下载包 sha256 与本地一致（回退 GitHub：' + cdnDiag.category + '）', true, {
+            category: fb.category, code: fb.code, hint: fb.hint, fallback: 'github', cdnCategory: cdnDiag.category,
+            cdnCode: cdnDiag.code, githubSha: githubAssetSha, localSha,
+          });
+        } else {
+          check('C4', 'CDN 下载包 sha256 与本地一致（回退也失败：' + fb.category + '）', false, {
+            category: fb.category, code: fb.code, hint: fb.hint, fallback: 'github', cdnCategory: cdnDiag.category,
+            error: String((e && e.message) || e).slice(0, 200),
+          });
+        }
+      } else {
+        check('C4', 'CDN 下载包 sha256 与本地一致（诊断：' + cdnDiag.category + '）', false, {
+          category: cdnDiag.category, code: cdnDiag.code, hint: cdnDiag.hint,
+          error: String((e && e.message) || e).slice(0, 200), redirects: cdnDiag.detail && cdnDiag.detail.redirects,
+          fallbackHint: '如需在网络受限时用 GitHub asset 兜底，可加 --cdn-fallback github（会显式标注，不静默 PASS）',
+        });
+      }
     }
     if (cdnDiag && !cdnDiag.ok) {
       rows[rows.length - 1].category = cdnDiag.category;
@@ -193,11 +215,12 @@ function githubToken() {
   const four = fourWayVerdict({
     localSha,
     feedSha: feed && feed.sha256,
-    githubSha: skipCdn ? githubAssetSha : githubAssetSha,
-    cdnSha: skipCdn ? 'skipped' : cdnSha,
+    githubSha: githubAssetSha,
+    cdnSha: (skipCdn || cdnFallbackUsed) ? 'skipped' : cdnSha,
   });
-  check('C7', '四渠道同源：本地 zip == 版本信息.json == GitHub asset == CDN（每方下载后重算 sha256）',
-    four.ok, { code: four.code, ...four.detail });
+  check('C7', '四渠道同源：本地 zip == 版本信息.json == GitHub asset == CDN（每方下载后重算 sha256）'
+    + (cdnFallbackUsed ? '【CDN 走 --cdn-fallback github，CDN 渠道未验证】' : ''),
+    four.ok, { code: four.code, cdnFallbackUsed, ...four.detail });
 
   // C8（R-5099 新增）：npm 包真实存在且其声明的 payload sha 与升级包一致（APP_PAYLOAD_SHA_MISMATCH）。
   if (skipNpm) {

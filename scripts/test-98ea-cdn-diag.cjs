@@ -6,7 +6,7 @@
  * A. 纯分类：ENOTFOUND/ECONNRESET/ETIMEDOUT/CERT/带跳转链的失败 → 各自 category + hint
  * B. 只比内容：HTTP 404 → CDN_HTTP_ERROR；空 body → CDN_BAD_RESPONSE；sha 不同 → CDN_SHA_MISMATCH；一致 → ok
  * C. 真断面：本地 mock CDN 301 → 不可达 port（模拟 jsDelivr→raw.githubusercontent 被拦）
- *    → httpGetWithRedirects 抛错且带 redirects；分类必须是 CDN_REDIRECT_BLOCKED + 提示里能看到 raw/代理
+ *    → httpGetWithRedirects 抛错且带 redirects；分类必须是 CDN_REDIRECT_UNREACHABLE + 提示里能看到 raw/代理
  * D. 真断面：mock 200 + 正确字节 → cdnVerdict ok；mock 200 + 同长度不同字节 → CDN_SHA_MISMATCH（同 size 换内容）
  *
  * 用法：node scripts/test-98ea-cdn-diag.cjs [--json]
@@ -18,7 +18,7 @@ const net = require('node:net');
 const crypto = require('node:crypto');
 const ROOT = path.resolve(__dirname, '..');
 const JSON_OUT = process.argv.includes('--json');
-const { cdnVerdict, classifyNetworkError, httpGetWithRedirects } = require(path.join(ROOT, 'scripts', 'cdn-diagnose.cjs'));
+const { cdnVerdict, cdnFallbackVerdict, classifyNetworkError, httpGetWithRedirects } = require(path.join(ROOT, 'scripts', 'cdn-diagnose.cjs'));
 const ROWS = [];
 function check(name, ok, detail) {
   ROWS.push({ name, ok: Boolean(ok), detail: ok ? undefined : detail });
@@ -43,11 +43,11 @@ function serve(handler) {
 
 function unitSection() {
   const cases = [
-    ['ENOTFOUND 原生 DNS 失败', err('getaddrinfo ENOTFOUND cdn.jsdelivr.net', 'ENOTFOUND'), {}, 'CDN_DNS_FAILED'],
+    ['ENOTFOUND 原生 DNS 失败', err('getaddrinfo ENOTFOUND cdn.jsdelivr.net', 'ENOTFOUND'), {}, 'CDN_DNS_FAIL'],
     ['ECONNRESET 直连失败', err('read ECONNRESET', 'ECONNRESET'), {}, 'CDN_NETWORK_BLOCKED'],
     ['HTTP_TIMEOUT', err('HTTP_TIMEOUT'), {}, 'CDN_TIMEOUT'],
     ['CERT 失败', err('unable to verify the first certificate', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'), {}, 'CDN_TLS_FAILED'],
-    ['跳转后 ECONNRESET → REDIRECT_BLOCKED', err('read ECONNRESET', 'ECONNRESET'), { stage: 'redirect', redirects: [{ from: 'https://cdn.jsdelivr.net/x', status: 301, to: 'https://raw.githubusercontent.com/y' }] }, 'CDN_REDIRECT_BLOCKED'],
+    ['跳转后 ECONNRESET → REDIRECT_BLOCKED', err('read ECONNRESET', 'ECONNRESET'), { stage: 'redirect', redirects: [{ from: 'https://cdn.jsdelivr.net/x', status: 301, to: 'https://raw.githubusercontent.com/y' }] }, 'CDN_REDIRECT_UNREACHABLE'],
   ];
   for (const [name, e, opts, want] of cases) {
     const got = classifyNetworkError(e, opts);
@@ -58,6 +58,18 @@ function unitSection() {
   check('A7 404 → CDN_HTTP_ERROR', cdnVerdict({ status: 404, bodyLength: 120, localSha: 'x', downloadedSha: 'y' }).category === 'CDN_HTTP_ERROR', {});
   check('A8 空 body → CDN_BAD_RESPONSE', cdnVerdict({ status: 200, bodyLength: 0, localSha: 'x', downloadedSha: '' }).category === 'CDN_BAD_RESPONSE', {});
   check('A9 成功 → CDN_OK', cdnVerdict({ status: 200, bodyLength: 10, localSha: 'x', downloadedSha: 'x' }).ok === true, {});
+
+  // B. --cdn-fallback github（PM 015009）：不能静默 PASS
+  const cdnFail = cdnVerdict({ error: err('read ECONNRESET', 'ECONNRESET') });
+  const shaLocal = sha(Buffer.from('LOCAL-ZIP'));
+  const fbOk = cdnFallbackVerdict({ cdn: cdnFail, fallback: 'github', githubSha: shaLocal, localSha: shaLocal });
+  check('B1 CDN 失败 + --cdn-fallback github + GitHub sha 一致 → 通过但标记 CDN_FALLBACK_GITHUB（不静默）',
+    fbOk.ok === true && fbOk.category === 'CDN_FALLBACK_GITHUB' && /未验证/.test(fbOk.hint), fbOk);
+  const fbNone = cdnFallbackVerdict({ cdn: cdnFail, fallback: '', githubSha: shaLocal, localSha: shaLocal });
+  check('B2 CDN 失败且未给 fallback → 仍失败（CDN_NO_FALLBACK，不静默当 PASS）',
+    fbNone.ok === false && fbNone.code === 'CDN_FALLBACK_UNSUPPORTED', fbNone);
+  const fbBad = cdnFallbackVerdict({ cdn: cdnFail, fallback: 'github', githubSha: sha(Buffer.from('OTHER')), localSha: shaLocal });
+  check('B3 回退后 sha 仍不一致 → CDN_SHA_MISMATCH（内容问题）', fbBad.ok === false && fbBad.category === 'CDN_SHA_MISMATCH', fbBad);
 }
 
 async function liveSection() {
@@ -77,7 +89,7 @@ async function liveSection() {
     } catch (e) { caught = e; }
     check('C1 301→不可达：抛错且带 redirects 链', Boolean(caught) && Array.isArray(caught.redirects) && caught.redirects.length === 1, { error: caught && String(caught.message), redirects: caught && caught.redirects });
     const diag = cdnVerdict({ error: caught || new Error('missing'), redirects: (caught && caught.redirects) || [] });
-    check('C2 分类必须是 CDN_REDIRECT_BLOCKED（不是裸 ECONNRESET）', diag.category === 'CDN_REDIRECT_BLOCKED', diag);
+    check('C2 分类必须是 CDN_REDIRECT_UNREACHABLE（不是裸 ECONNRESET）', diag.category === 'CDN_REDIRECT_UNREACHABLE', diag);
     check('C3 提示含 raw.githubusercontent 与代理/网络说明', /raw\.githubusercontent/.test(diag.hint) && /代理|网络/.test(diag.hint), { hint: diag.hint });
     await new Promise((r) => redirectServer.close(r));
   } else {
