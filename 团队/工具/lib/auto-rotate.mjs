@@ -141,17 +141,24 @@ export function collectCandidates({ now, usage, rounds, memberRoles, warnThresho
   for (const [role, raw] of Object.entries(usage || {})) {
     if (!roles.has(role)) continue;
     const row = raw && typeof raw === 'object' ? raw : {};
-    const tokens = Number(row.tokens);
-    if (!Number.isFinite(tokens) || tokens <= 0) continue;
+    // B-20261120-121307-b48a：判档值＝**本会话累计未缓存输入**（row.input，换人归零），与
+    // session.mjs → checkSessionRotateWarn / 壳层 session:usage 同口径；row.tokens 是累计含缓存读
+    // （pm 现盘 12.6 亿），拿它比 500 万/1000 万阈值会恒判 force。无 input 时回落 tokens（兼容旧数据）。
+    const rawTokens = Number(row.tokens);
+    const inputTokens = Number(row.input);
+    const judged = Number.isFinite(inputTokens) && inputTokens > 0
+      ? inputTokens
+      : (Number.isFinite(rawTokens) && rawTokens > 0 ? rawTokens : NaN);
+    if (!Number.isFinite(judged) || judged <= 0) continue;
     const atMs = Date.parse(String(row.at || ''));
     if (Number.isFinite(atMs) && now - atMs > 24 * 3600 * 1000) continue;   // 超 24h 视为用量过期
-    // B-20261118-080102-2c05：按角色覆盖优先（pm 2 倍）；没有覆盖就沿用传入/全局默认。
+    // 阈值单源：按角色覆盖优先，缺项回落到调用方传入（默认 30/50 万刻度，仅作纯函数缺省）。
     const lim = typeof limitsOf === 'function' ? limitsOf(role) : null;
     const roleWarn = lim && Number(lim.warn) > 0 ? Number(lim.warn) : warnThreshold;
     const roleForce = lim && Number(lim.force) > 0 ? Number(lim.force) : forceThreshold;
-    const level = usageLevelOf(tokens, roleWarn, roleForce);   // 单源：与 session usage / 水位提醒同一函数
+    const level = usageLevelOf(judged, roleWarn, roleForce);   // 单源：与 session usage / 水位提醒同一函数
     if (level !== 'force' && level !== 'warn') continue;
-    put({ role, kind: 'usage', level, tokens, atMs: Number.isFinite(atMs) ? atMs : now, usageAt: String(row.at || ''), sessionId: String(row.sessionId || '') });
+    put({ role, kind: 'usage', level, tokens: judged, rawTokens: Number.isFinite(rawTokens) ? rawTokens : null, warn: roleWarn, force: roleForce, atMs: Number.isFinite(atMs) ? atMs : now, usageAt: String(row.at || ''), sessionId: String(row.sessionId || '') });
   }
   for (const [role, raw] of Object.entries(rounds || {})) {
     if (!roles.has(role)) continue;
@@ -466,10 +473,13 @@ async function liveUsageOf({ projectName, roles, warn = DEFAULT_TOKEN_WARN, forc
 }
 
 /* ── AC7：交接请求正文六段行序（触发原因 / 目标文件 / 需写内容 / 死线 / 回执要求 / 模板） ── */
-export function handoverRequestBody({ role, level, kind, tokens, rounds, deadlineIso, projectName }) {
+export function handoverRequestBody({ role, level, kind, tokens, rounds, deadlineIso, projectName, warn = null, force = null }) {
+  // B-b48a：阈值取调用方传入的**该角色实际阈值**（sessionLimitsOf().of(role)），不再写死 30/50 万。
+  const warnText = Number(warn) > 0 ? Number(warn) : DEFAULT_TOKEN_WARN;
+  const forceText = Number(force) > 0 ? Number(force) : DEFAULT_TOKEN_FORCE;
   const reason = kind === 'rounds'
     ? `轮数已达 ${rounds} 轮（阈值 ${DEFAULT_ROUNDS_LIMIT} 轮），需要换新会话`
-    : `上下文用量 ${tokens}（${level === 'force' ? '强制档' : '预警档'}：force ${DEFAULT_TOKEN_FORCE} / warn ${DEFAULT_TOKEN_WARN}），需要换新会话`;
+    : `上下文用量 ${tokens}（${level === 'force' ? '强制档' : '预警档'}：force ${forceText} / warn ${warnText}），需要换新会话`;
   return [
     '一、触发原因：' + reason,
     `二、目标文件：${ROLE_DIRS[role] || role}/产出/交接-最新.md（整份覆盖写，写最新的在办状态）`,
@@ -810,7 +820,7 @@ export async function runAutoRotateCycle(projectName, options = {}) {
         note: '夜间 22:00–08:00 一律不换人（含 force），已入队次日 08:00 执行',
         reason: '夜间静默（22–08）未换人：只记账，次日 08:00 起按队列入队执行',
         evidence: {
-          threshold: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, warn: DEFAULT_TOKEN_WARN, force: DEFAULT_TOKEN_FORCE, roundsLimit: cfg.rotateRounds },
+          threshold: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, warn: Number(item.warn) > 0 ? Number(item.warn) : DEFAULT_TOKEN_WARN, force: Number(item.force) > 0 ? Number(item.force) : DEFAULT_TOKEN_FORCE, roundsLimit: cfg.rotateRounds },
           forced: item.level === 'force',
           deferredUntil, nightKey, source,
         },
@@ -931,9 +941,9 @@ export async function runAutoRotateCycle(projectName, options = {}) {
       const recentWarn = rows.some((r) => String(r.code) === 'WARN_ONLY' && String(r.role) === item.role
         && Math.abs(now - Date.parse(String(r.at || ''))) < TRIGGER_DEDUPE_MS);
       if (!dryRun && !recentWarn) {
-        appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'WARN_ONLY', result: 'ok', role: item.role, project: name, note: `${item.role} 到预警档（${item.tokens} / warn ${DEFAULT_TOKEN_WARN}）：只提醒不换人`, evidence: { level: 'warn', tokens: item.tokens, warn: DEFAULT_TOKEN_WARN, usageSource: item.kind === 'usage' ? (usageSourceByRole[item.role] || 'file') : 'rounds' } });
+        appendAudit(auditFile, { at: nowIso, stage: 'skipped', code: 'WARN_ONLY', result: 'ok', role: item.role, project: name, note: `${item.role} 到预警档（${item.tokens} / warn ${item.warn || DEFAULT_TOKEN_WARN}）：只提醒不换人`, evidence: { level: 'warn', tokens: item.tokens, warn: item.warn || DEFAULT_TOKEN_WARN, usageSource: item.kind === 'usage' ? (usageSourceByRole[item.role] || 'file') : 'rounds' } });
         try {
-          sendMessage({ from: 'system', to: item.role, project: name, type: 'session_rotate_warn', subject: `用量预警（只提醒不换人）：${item.tokens} ≥ ${DEFAULT_TOKEN_WARN}`, body: `${item.role} 本次会话用量 ${item.tokens}（预警档 ${DEFAULT_TOKEN_WARN} / 强制档 ${DEFAULT_TOKEN_FORCE}）。\n按口径：预警档只提醒、不自动换人；到强制档才会走交接流程。建议先把在办状态写进 <角色目录>/产出/交接-最新.md 备着。` });
+          sendMessage({ from: 'system', to: item.role, project: name, type: 'session_rotate_warn', subject: `用量预警（只提醒不换人）：${item.tokens} ≥ ${item.warn || DEFAULT_TOKEN_WARN}`, body: `${item.role} 本次会话用量 ${item.tokens}（预警档 ${item.warn || DEFAULT_TOKEN_WARN} / 强制档 ${item.force || DEFAULT_TOKEN_FORCE}）。\n按口径：预警档只提醒、不自动换人；到强制档才会走交接流程。建议先把在办状态写进 <角色目录>/产出/交接-最新.md 备着。` });
         } catch { /* 审计已留痕 */ }
       }
       actions.push({ stage: 'skipped', code: 'WARN_ONLY', role: item.role });
@@ -1029,8 +1039,8 @@ export async function runAutoRotateCycle(projectName, options = {}) {
       note: item.kind === 'rounds'
         ? `阈值命中（${item.level}）：轮次 ${item.rounds}/${ROUNDS_MAX}（归零即归档）——已发 1 条交接请求，等回执（触发码 rotate_rounds）`
         : `阈值命中（${item.level}）：已发 1 条交接请求，等回执（触发码 rotate_tokens）`,
-      trigger: { kind: item.kind, level: item.level, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens' },
-      evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: DEFAULT_TOKEN_FORCE, warn: DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens',
+      trigger: { kind: item.kind, level: item.level, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: item.force || DEFAULT_TOKEN_FORCE, warn: item.warn || DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens' },
+      evidence: { level: item.level, kind: item.kind, tokens: item.tokens === undefined ? null : item.tokens, rounds: item.rounds === undefined ? null : item.rounds, force: item.force || DEFAULT_TOKEN_FORCE, warn: item.warn || DEFAULT_TOKEN_WARN, forced: item.level === 'force', code: item.kind === 'rounds' ? 'rotate_rounds' : 'rotate_tokens',
         // B-61f5：token 触发的来源（file=会话用量.json / live=实时回退；轮次触发为 file 以外的 rounds 时写 'rounds'）
         usageSource: item.kind === 'usage' ? (usageSourceByRole[item.role] || 'file') : 'rounds' },
     };
@@ -1041,7 +1051,7 @@ export async function runAutoRotateCycle(projectName, options = {}) {
         sendMessage({
           from: 'system', to: item.role, project: name, type: 'session_rotate_warn',
           subject: `请先交接（${item.kind === 'rounds' ? `轮数 ${item.rounds}` : `${item.level === 'force' ? '强制档' : '预警档'} ${item.tokens}`}）`,
-          body: handoverRequestBody({ role: item.role, level: item.level, kind: item.kind, tokens: item.tokens, rounds: item.rounds, deadlineIso: iso(now + HANDOVER_TIMEOUT_MS), projectName: name }),
+          body: handoverRequestBody({ role: item.role, level: item.level, kind: item.kind, tokens: item.tokens, rounds: item.rounds, deadlineIso: iso(now + HANDOVER_TIMEOUT_MS), projectName: name, warn: item.warn, force: item.force }),
         });
       } catch { /* 审计已留痕 */ }
       // B-3594：阈值命中 → 角色 + PM **各一条**提醒（PM 那条给可复制的手动换人命令）
