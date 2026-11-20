@@ -41,6 +41,18 @@ function check(id, title, ok, detail) {
   const mig = ms.migrateRole(MAIL, ROLE, { dryRun: false });
   check('R0', `迁移 20 条（导入 ${mig.imported}）`, mig.imported === 20, { mig });
 
+  // R8：迁移时 at 兜底链最后一环——文件名时间（消息体无 at/ts/deliveredAt）
+  {
+    const dir8 = path.join(MAIL, 'tester', 'new');
+    fs.mkdirSync(dir8, { recursive: true });
+    const name8 = '2026-09-30T01-02-03-456Z-M-filetime.json';
+    fs.writeFileSync(path.join(dir8, name8), JSON.stringify({ id: 'M-filetime-1', from: 'pm', to: 'tester', subject: '文件名时间', body: 'x', project: 'p', type: 'note' }), 'utf8');
+    const m8 = ms.migrateRole(MAIL, 'tester', { dryRun: false });
+    const row8 = ms.readAll(MAIL, 'tester').rows.find((r) => r.id === 'M-filetime-1');
+    check('R8', '迁移时无 at/ts/deliveredAt → 用文件名时间兜底（2026-09-30T01:02:03.456Z）',
+      m8.imported === 1 && Boolean(row8) && row8.at === '2026-09-30T01:02:03.456Z', { imported: m8.imported, at: row8 && row8.at });
+  }
+
   // 新写入 1 条：不带 at（sendMessage 记录形态）
   const seqNew = ms.appendMessage(MAIL, ROLE, { id: 'M-new-1', from: 'pm', to: ROLE, subject: '新消息', body: 'y', project: 'p', task: '', ackRequired: false, type: 'note', ts: new Date().toISOString(), deliveredAt: new Date().toISOString() });
   const lines = fs.readFileSync(path.join(dir, 'messages.jsonl'), 'utf8').split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));

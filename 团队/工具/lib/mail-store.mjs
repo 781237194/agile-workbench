@@ -220,6 +220,13 @@ function readAll(mailRoot, role, { project = '' } = {}) {
 }
 
 /** ③ 兜底链：at ?? ts ?? deliveredAt（缺 at 的旧行排序/归档不静默）。 */
+/** ③ 兜底链最后一环：从旧邮箱文件名解析时间（<ts替换>-<id>.json，ts 内用 - 代替 : 与 .）。 */
+function atFromFileName(name) {
+  const s = String(name || '');
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z/.exec(s);
+  return m ? `${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z` : '';
+}
+
 function atOf(row) {
   return String((row && (row.at || row.ts || row.deliveredAt)) || '');
 }
@@ -303,7 +310,7 @@ function migrateRole(mailRoot, role, { dryRun = false } = {}) {
       const msg = JSON.parse(fs.readFileSync(f.file, 'utf8'));
       if (!msg || !msg.id) { result.skipped += 1; continue; }
       if (existing.has(String(msg.id))) { result.skipped += 1; continue; }
-      rows.push({ msg, box: f.box, at: String(msg.at || msg.ts || msg.deliveredAt || '') });
+      rows.push({ msg, box: f.box, at: String(msg.at || msg.ts || msg.deliveredAt || atFromFileName(f.name) || '') });
     } catch (e) { result.errors.push(String((e && e.message) || e).slice(0, 120)); }
   }
   rows.sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.msg.id).localeCompare(String(b.msg.id)));
@@ -311,7 +318,7 @@ function migrateRole(mailRoot, role, { dryRun = false } = {}) {
   if (dryRun) return result;
   for (const r of rows) {
     // 迁移保留原字段；readAt 已读消息照原样（cur 里的按已读处理）
-    appendMessage(mailRoot, role, { ...r.msg, at: String(r.msg.at || r.msg.ts || r.msg.deliveredAt || r.msg.readAt || ''), migratedFrom: r.box === 'cur' ? 'cur' : 'new', deliveredAt: r.msg.deliveredAt || r.msg.at || r.msg.ts || '' });
+    appendMessage(mailRoot, role, { ...r.msg, at: String(r.msg.at || r.msg.ts || r.msg.deliveredAt || r.msg.readAt || r.at || ''), migratedFrom: r.box === 'cur' ? 'cur' : 'new', deliveredAt: r.msg.deliveredAt || r.msg.at || r.msg.ts || r.at || '' });
   }
   try {
     fs.mkdirSync(p.legacyDir, { recursive: true });
