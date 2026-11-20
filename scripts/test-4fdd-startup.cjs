@@ -158,6 +158,50 @@ function perfRows(team) {
   }
   return rows;
 }
+// ── 单实例纪律（Owner 2026-11-21 03:4x）──────────────────────────────────────
+// 冷启样本必须「一个进程测完、确认彻底退出，再起下一个」；之前 fire-and-forget taskkill
+// 会与下一次启动重叠 → 同时 2-3 个 Electron、内存暴涨。以下函数只清自己沙盘路径下的进程，
+// 绝不按名字/路径批量杀（Owner 生产实例的 user-data-dir 是 data\userdata，不含临时沙盘路径）。
+function killTreeSync(pid) {
+  if (!pid) return;
+  try { spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 15000 }); } catch { /* ignore */ }
+}
+function electronPidsOfSandbox(sbPath) {
+  if (!sbPath) return [];
+  try {
+    const out = String(spawnSync('powershell', ['-NoProfile', '-Command',
+      "Get-CimInstance Win32_Process -Filter \"Name='electron.exe'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"],
+      { encoding: 'utf8', timeout: 20000 }).stdout || '').trim();
+    if (!out) return [];
+    const parsed = JSON.parse(out);
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    return rows
+      .filter((r) => r && String(r.CommandLine || '').includes(sbPath))
+      .map((r) => Number(r.ProcessId))
+      .filter((n) => Number.isFinite(n) && n > 0);
+  } catch { return []; }
+}
+async function killTreeAndWait(pid, sbPath) {
+  killTreeSync(pid);
+  let scanned = 0;
+  for (let i = 0; i < 12; i += 1) {
+    const left = electronPidsOfSandbox(sbPath);
+    if (!left.length) return { ok: true, scanned };
+    scanned = Math.max(scanned, left.length);
+    for (const p of left) killTreeSync(p);
+    await sleep(500);
+  }
+  return { ok: false, scanned };
+}
+async function assertNoSandboxInstances(sbPath, label) {
+  const left = electronPidsOfSandbox(sbPath);
+  if (!left.length) return { ok: true };
+  for (const p of left) killTreeSync(p);
+  await sleep(800);
+  const again = electronPidsOfSandbox(sbPath);
+  return { ok: again.length === 0, label, killed: left, left: again };
+}
+
 async function launchOnce(box, { port, envExtra, waitMarksMs }) {
   const t0 = Date.now();
   const env = {
@@ -262,7 +306,9 @@ async function launchOnce(box, { port, envExtra, waitMarksMs }) {
   await sleep(500);
   try { ws.close(); } catch { /* ignore */ }
   try { child.kill(); } catch { /* ignore */ }
-  try { spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* ignore */ }
+  // 必须等进程树真正退出，否则下一次实例会与本次重叠（内存/CPU 翻倍）。
+  const teardown = await killTreeAndWait(child.pid, box.sb);
+  result.teardown = teardown;
   return result;
 }
 
@@ -333,11 +379,13 @@ async function main() {
     const roundRows = [];
     for (let i = 0; i < RUNS; i += 1) {
       const b = seedSandbox('cold-r' + round + '-' + i);
+      const tag = '冷启 第' + (round + 1) + '轮/第' + (i + 1) + '次';
       await new Promise((res) => setTimeout(res, 700)); // 运行间冷却，避免自造并发抖动
+      const precheck = await assertNoSandboxInstances(b.sb, tag);
       const r = await launchOnce(b, { port: port0 + (round * RUNS + i), envExtra: {}, waitMarksMs: 12000 });
+      if (precheck.ok === false) r.precheckLeftover = precheck;
       cold.push({ ...r, round, index: i });
       roundRows.push(r);
-      const tag = '冷启 第' + (round + 1) + '轮/第' + (i + 1) + '次';
       if (!r.ok) { check(tag + ' 能起来', false, r); }
       else {
         const procFirst = Number(r.startup && r.startup.marks && r.startup.marks.firstScreenMs);
