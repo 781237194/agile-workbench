@@ -64,7 +64,11 @@ async function freePort() {
   return 56151;
 }
 function loadBefore() {
-  const text = execFileSync('git', ['show', 'HEAD:src/dsh-adapter.js'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  // before = 本文件最近一次改动它的提交的**父提交**里的 dsh-adapter.js（即提速前实现）。
+  // 不能直接用 HEAD：本单提交后 HEAD 已是修复版，会得到「before≈after」的假基线。
+  const lastChange = execFileSync('git', ['log', '-n1', '--format=%H', '--', 'src/dsh-adapter.js'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  const baseline = execFileSync('git', ['rev-parse', '--verify', lastChange + '^'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  const text = execFileSync('git', ['show', baseline + ':src/dsh-adapter.js'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'd637-before-'));
   const file = path.join(dir, 'dsh-adapter-before.cjs');
   fs.writeFileSync(file, text, 'utf8');

@@ -1,0 +1,647 @@
+{
+  "at": "2026-11-20T16:03:44.560Z",
+  "root": "D:\\deepseek\\agile-workbench",
+  "roots": [
+    "install.ps1",
+    "scripts",
+    "src",
+    "dsh-plugin",
+    "团队/工具/lib"
+  ],
+  "include": [
+    ".cjs",
+    ".mjs",
+    ".js",
+    ".ps1",
+    ".json",
+    ".yml",
+    ".md"
+  ],
+  "exclude": [
+    "_tmp",
+    "证据-",
+    "代码快照-",
+    "sandbox",
+    "node_modules",
+    "测试人员/产出",
+    "团队/skill/归档",
+    "项目/"
+  ],
+  "patterns": [
+    {
+      "id": "plugin-literal",
+      "re": "/2\\.2\\.\\d+/",
+      "why": "抓 app↔plugin 版本字面量（2.2.13 这类）：版本双轨与安装链接文案漂移都在这里"
+    },
+    {
+      "id": "mapping-formula",
+      "re": "/MINOR\\+1|minor\\s*\\+\\s*1/",
+      "why": "抓版本映射算式（app.PATCH+1 → plugin.MINOR+1）：出现第二份即映射实现散落"
+    },
+    {
+      "id": "plugin-version-read",
+      "re": "/pluginVersion/",
+      "why": "抓 pluginVersion 读取点：只允许读取，不允许据此重算映射"
+    },
+    {
+      "id": "relatives-copy",
+      "re": "/\\$relatives/",
+      "why": "抓 install.ps1 白名单复制块与其消费/夹具读取：必须与清单逐项相等"
+    },
+    {
+      "id": "manifest-definition",
+      "re": "/(UPGRADE_TREE|UPGRADE_FILES|NEVER_PACKAGE)/",
+      "why": "抓清单定义（UPGRADE_TREE/UPGRADE_FILES/NEVER_PACKAGE）：新增定义来源即漂移"
+    }
+  ],
+  "counts": {
+    "byLine": 96,
+    "byFile": 14,
+    "byDedup": 95,
+    "perPattern": {
+      "plugin-literal": 39,
+      "mapping-formula": 4,
+      "plugin-version-read": 23,
+      "relatives-copy": 11,
+      "manifest-definition": 19
+    }
+  },
+  "hits": [
+    {
+      "file": "install.ps1",
+      "line": 1478,
+      "pattern": "relatives-copy",
+      "text": "$relatives = @("
+    },
+    {
+      "file": "install.ps1",
+      "line": 1497,
+      "pattern": "relatives-copy",
+      "text": "foreach ($rel in $relatives) {"
+    },
+    {
+      "file": "scripts/build-upgrade-zip.cjs",
+      "line": 17,
+      "pattern": "manifest-definition",
+      "text": "* （团队/状态、团队/项目、项目/、data/ 等）由清单里的 NEVER_PACKAGE 排除，根本不进 staging。"
+    },
+    {
+      "file": "scripts/build-upgrade-zip.cjs",
+      "line": 171,
+      "pattern": "manifest-definition",
+      "text": "for (const rel of [...manifest.UPGRADE_TREE, ...manifest.UPGRADE_FILES]) copyEntry(sourceRoot, rel, stageRoot, stats);"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 6,
+      "pattern": "relatives-copy",
+      "text": "* 为什么要有它：版本号、插件版本映射、install.ps1 的 $relatives 白名单、升级包清单原先分散在多处手写，"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 14,
+      "pattern": "mapping-formula",
+      "text": "*   mapping-formula       抓 MINOR+1 这类映射算式；出现第二份 = 映射实现散落（单源违规）"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 15,
+      "pattern": "plugin-version-read",
+      "text": "*   plugin-version-read   抓 pluginVersion 读取点；只允许读取，不允许据此重算映射"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 16,
+      "pattern": "relatives-copy",
+      "text": "*   relatives-copy        抓 install.ps1 的 $relatives 复制块与夹具读取；必须与清单逐项相等"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 17,
+      "pattern": "relatives-copy",
+      "text": "*   manifest-definition   抓 UPGRADE_TREE/UPGRADE_FILES/NEVER_PACKAGE 定义与 $relatives；新增定义来源即漂移"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 17,
+      "pattern": "manifest-definition",
+      "text": "*   manifest-definition   抓 UPGRADE_TREE/UPGRADE_FILES/NEVER_PACKAGE 定义与 $relatives；新增定义来源即漂移"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 34,
+      "pattern": "plugin-literal",
+      "text": "{ id: 'plugin-literal', re: /2\\.2\\.\\d+/, why: '抓 app↔plugin 版本字面量（2.2.13 这类）：版本双轨与安装链接文案漂移都在这里' },"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 35,
+      "pattern": "mapping-formula",
+      "text": "{ id: 'mapping-formula', re: /MINOR\\+1|minor\\s*\\+\\s*1/, why: '抓版本映射算式（app.PATCH+1 → plugin.MINOR+1）：出现第二份即映射实现散落' },"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 36,
+      "pattern": "plugin-version-read",
+      "text": "{ id: 'plugin-version-read', re: /pluginVersion/, why: '抓 pluginVersion 读取点：只允许读取，不允许据此重算映射' },"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 37,
+      "pattern": "relatives-copy",
+      "text": "{ id: 'relatives-copy', re: /\\$relatives/, why: '抓 install.ps1 白名单复制块与其消费/夹具读取：必须与清单逐项相等' },"
+    },
+    {
+      "file": "scripts/release-manifest-drift-scan.cjs",
+      "line": 38,
+      "pattern": "manifest-definition",
+      "text": "{ id: 'manifest-definition', re: /(UPGRADE_TREE|UPGRADE_FILES|NEVER_PACKAGE)/, why: '抓清单定义（UPGRADE_TREE/UPGRADE_FILES/NEVER_PACKAGE）：新增定义来源即漂移' },"
+    },
+    {
+      "file": "scripts/release-verify.cjs",
+      "line": 152,
+      "pattern": "plugin-version-read",
+      "text": "let pluginVersion = '';"
+    },
+    {
+      "file": "scripts/release-verify.cjs",
+      "line": 153,
+      "pattern": "plugin-version-read",
+      "text": "try { pluginVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'dsh-plugin', 'package.json'), 'utf8')).version; } catch { pluginVersion = ''; }"
+    },
+    {
+      "file": "scripts/release-verify.cjs",
+      "line": 157,
+      "pattern": "plugin-version-read",
+      "text": "const exists = Boolean(json.versions && json.versions[pluginVersion]);"
+    },
+    {
+      "file": "scripts/release-verify.cjs",
+      "line": 158,
+      "pattern": "plugin-version-read",
+      "text": "check('C5', `npm 含 dsh-agile-workbench@${pluginVersion}`, res.status === 200 && exists, {"
+    },
+    {
+      "file": "scripts/release-verify.cjs",
+      "line": 159,
+      "pattern": "plugin-version-read",
+      "text": "pluginVersion, latest: json['dist-tags'] && json['dist-tags'].latest, exists,"
+    },
+    {
+      "file": "scripts/release-verify.cjs",
+      "line": 193,
+      "pattern": "plugin-version-read",
+      "text": "const pluginVersion = String(pluginPkgLocal.version || '');"
+    },
+    {
+      "file": "scripts/release-verify.cjs",
+      "line": 197,
+      "pattern": "plugin-version-read",
+      "text": "const meta = json && json.versions && json.versions[pluginVersion];"
+    },
+    {
+      "file": "scripts/release-verify.cjs",
+      "line": 199,
+      "pattern": "plugin-version-read",
+      "text": "check('C8', `npm 无 dsh-agile-workbench@${pluginVersion}（NPM_NOT_PUBLISHED）`, false, { pluginVersion, latest: json && json['dist-tags'] && json['dist-tags'].latest });"
+    },
+    {
+      "file": "scripts/release-verify.cjs",
+      "line": 220,
+      "pattern": "plugin-version-read",
+      "text": "pluginVersion, ...payload.detail, code: payload.code,"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 8,
+      "pattern": "relatives-copy",
+      "text": "*   T1 清单同源：install.ps1 的 $relatives 与 scripts/upgrade-package-manifest.cjs 逐项一致；"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 113,
+      "pattern": "relatives-copy",
+      "text": "const relativesMatch = installText.match(/\\$relatives\\s*=\\s*@\\(([\\s\\S]*?)\\)/);"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 117,
+      "pattern": "manifest-definition",
+      "text": "const manifestAll = [...manifest.UPGRADE_TREE, ...manifest.UPGRADE_FILES].sort();"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 119,
+      "pattern": "relatives-copy",
+      "text": "check('T1 install.ps1 $relatives 与 upgrade-package-manifest.cjs 逐项一致（含 团队/ 五目录 + 三份根规则）',"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 148,
+      "pattern": "plugin-literal",
+      "text": "const pkgDir = path.join(sb, 'newpkg', 'agile-workbench-v2.2.0');"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 149,
+      "pattern": "plugin-literal",
+      "text": "seedNewPackage(pkgDir, '2.2.0');"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 153,
+      "pattern": "plugin-literal",
+      "text": "'-UpgradeVersion', '2.2.0', '-UpgradeSha256', sha(zipBuf), '-UpgradeUrl', `http://127.0.0.1:${port}/team.zip`,"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 162,
+      "pattern": "plugin-literal",
+      "text": "gatesNew !== gatesOld && gatesNew === sha('// new gates 2.2.0\\n'), { gatesOld, gatesNew });"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 174,
+      "pattern": "plugin-literal",
+      "text": "const legacyDir = path.join(sb, 'legacy', 'agile-workbench-v2.2.1');"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 175,
+      "pattern": "plugin-literal",
+      "text": "seedLegacyPackage(legacyDir, '2.2.1');"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 179,
+      "pattern": "plugin-literal",
+      "text": "'-UpgradeVersion', '2.2.1', '-UpgradeSha256', sha(legacyZip), '-UpgradeUrl', `http://127.0.0.1:${port}/legacy.zip`,"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 193,
+      "pattern": "plugin-literal",
+      "text": "'-UpgradeVersion', '2.2.0', '-UpgradeSha256', sha(zipBuf), '-UpgradeUrl', `http://127.0.0.1:${port}/team.zip`,"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 205,
+      "pattern": "plugin-literal",
+      "text": "const pkgDir4 = path.join(sb, 'pkg-missing-constitution', 'agile-workbench-v2.2.0');"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 206,
+      "pattern": "plugin-literal",
+      "text": "seedNewPackage(pkgDir4, '2.2.0');"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 212,
+      "pattern": "plugin-literal",
+      "text": "'-UpgradeVersion', '2.2.0', '-UpgradeSha256', sha(zip4), '-UpgradeUrl', `http://127.0.0.1:${port}/missing-constitution.zip`,"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 221,
+      "pattern": "plugin-literal",
+      "text": "const pkgDir7 = path.join(sb, 'pkg-full', 'agile-workbench-v2.2.0');"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 222,
+      "pattern": "plugin-literal",
+      "text": "seedNewPackage(pkgDir7, '2.2.0');"
+    },
+    {
+      "file": "scripts/test-2e6d-team-upgrade.cjs",
+      "line": 228,
+      "pattern": "plugin-literal",
+      "text": "'-UpgradeVersion', '2.2.0', '-UpgradeSha256', sha(zip7), '-UpgradeUrl', `http://127.0.0.1:${port}/full.zip`,"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 12,
+      "pattern": "plugin-literal",
+      "text": "* E. 版本单源：真实仓库 13/13 全绿；沙盘「app 2.1.15 / plugin 2.2.14」→ PLUGIN_VERSION_MISMATCH。"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 39,
+      "pattern": "relatives-copy",
+      "text": "fs.writeFileSync(path.join(dir, 'install.ps1'), \"$relatives = @('src')\\n\", 'utf8');"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 41,
+      "pattern": "manifest-definition",
+      "text": "\"const UPGRADE_TREE = ['src'];\\nconst UPGRADE_FILES = ['package.json'];\\nconst NEVER_PACKAGE = ['项目'];\\nmodule.exports = { UPGRADE_TREE, UPGRADE_FILES, NEVER_PACKAGE };\\n\", 'utf8');"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 43,
+      "pattern": "plugin-literal",
+      "text": "\"const INSTALLER_SCRIPT_URL = 'https://example.invalid/@v2.2.14/install.ps1'\\n\", 'utf8');"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 59,
+      "pattern": "plugin-literal",
+      "text": "fs.writeFileSync(path.join(box, 'scripts', 'injected.cjs'), \"// 新增字面量：2.2.9 必须被抓\\n\", 'utf8');"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 63,
+      "pattern": "plugin-literal",
+      "text": "check('A3 注入 2.2.9 字面量 → extra=1、exit 1、给出 file:line',"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 72,
+      "pattern": "manifest-definition",
+      "text": "fs.writeFileSync(manifestPath, original.replace(\"const NEVER_PACKAGE = ['项目'];\\n\", ''), 'utf8');"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 111,
+      "pattern": "plugin-literal",
+      "text": "check('E2 映射：app 2.1.14 → plugin 2.2.14、逆向一致、tag v2.1.14',"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 112,
+      "pattern": "plugin-literal",
+      "text": "source.appToPlugin('2.1.14') === '2.2.14' && source.pluginToApp('2.2.14') === '2.1.14' && source.tagForApp('2.1.14') === 'v2.1.14', {});"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 114,
+      "pattern": "plugin-literal",
+      "text": "// 沙盘：app 2.1.15 / plugin 2.2.14（映射错位）+ payload 声明仍指旧 sha → 必须红"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 119,
+      "pattern": "plugin-literal",
+      "text": "fs.writeFileSync(path.join(box, 'dsh-plugin', 'package.json'), JSON.stringify({ name: 'dsh-agile-workbench', version: '2.2.14', pmWorkbenchPayload: { appVersion: '2.1.14', sha256: sha256(zip) } }, nul"
+    },
+    {
+      "file": "scripts/test-5099-four-channel.cjs",
+      "line": 124,
+      "pattern": "plugin-literal",
+      "text": "check('E3 沙盘版本映射错位（app 2.1.15 / plugin 2.2.14）→ PLUGIN_VERSION_MISMATCH 红',"
+    },
+    {
+      "file": "scripts/test-d2-subagent-boundary.cjs",
+      "line": 10,
+      "pattern": "manifest-definition",
+      "text": "*   C 升级包覆盖（§D2 传播要求③）：`团队/工具`（含 scaffold.mjs / rolecard-sync.mjs）在 UPGRADE_TREE、"
+    },
+    {
+      "file": "scripts/test-d2-subagent-boundary.cjs",
+      "line": 11,
+      "pattern": "manifest-definition",
+      "text": "*     `团队/流程.md` 在 UPGRADE_FILES 与 PACKAGE_ASSERT_ENTRIES，且不被 NEVER_PACKAGE 排除。"
+    },
+    {
+      "file": "scripts/test-d2-subagent-boundary.cjs",
+      "line": 202,
+      "pattern": "manifest-definition",
+      "text": "const covered = (rel) => manifest.UPGRADE_FILES.includes(rel)"
+    },
+    {
+      "file": "scripts/test-d2-subagent-boundary.cjs",
+      "line": 203,
+      "pattern": "manifest-definition",
+      "text": "|| manifest.UPGRADE_TREE.some((t) => rel === t || rel.startsWith(t + '/'));"
+    },
+    {
+      "file": "scripts/test-d2-subagent-boundary.cjs",
+      "line": 207,
+      "pattern": "manifest-definition",
+      "text": "{ upTree: manifest.UPGRADE_TREE.includes('团队/工具'), upFile: manifest.UPGRADE_FILES.includes('团队/流程.md') });"
+    },
+    {
+      "file": "scripts/test-d83d-upgrade-apply.cjs",
+      "line": 54,
+      "pattern": "plugin-literal",
+      "text": "if (req.url === '/feed-available') { res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ version: '2.2.0', sha256: SHA, url: 'https://example.invalid/up"
+    },
+    {
+      "file": "scripts/test-e610-installer-upgrade.cjs",
+      "line": 110,
+      "pattern": "plugin-literal",
+      "text": "seedNewPackage(newPkg, '2.2.0');"
+    },
+    {
+      "file": "scripts/test-e610-installer-upgrade.cjs",
+      "line": 114,
+      "pattern": "plugin-literal",
+      "text": "writeFile(path.join(badPkg, 'package.json'), JSON.stringify({ name: 'pm-workbench', version: '2.2.0' }, null, 2));"
+    },
+    {
+      "file": "scripts/test-e610-installer-upgrade.cjs",
+      "line": 124,
+      "pattern": "plugin-literal",
+      "text": "if (req.url === '/feed-ok') return sendJson({ version: '2.2.0', sha256: goodSha, url: `http://127.0.0.1:${srv.address().port}/good.zip`, notes: 'fixture' });"
+    },
+    {
+      "file": "scripts/test-e610-installer-upgrade.cjs",
+      "line": 125,
+      "pattern": "plugin-literal",
+      "text": "if (req.url === '/feed-nosha') return sendJson({ version: '2.2.0', url: `http://127.0.0.1:${srv.address().port}/good.zip` });"
+    },
+    {
+      "file": "scripts/test-e610-installer-upgrade.cjs",
+      "line": 126,
+      "pattern": "plugin-literal",
+      "text": "if (req.url === '/feed-badsha') return sendJson({ version: '2.2.0', sha256: 'f'.repeat(64), url: `http://127.0.0.1:${srv.address().port}/good.zip` });"
+    },
+    {
+      "file": "scripts/test-e610-installer-upgrade.cjs",
+      "line": 127,
+      "pattern": "plugin-literal",
+      "text": "if (req.url === '/feed-badpkg') return sendJson({ version: '2.2.0', sha256: badSha, url: `http://127.0.0.1:${srv.address().port}/bad.zip` });"
+    },
+    {
+      "file": "scripts/test-e610-installer-upgrade.cjs",
+      "line": 162,
+      "pattern": "plugin-literal",
+      "text": "ok(readJson(path.join(r2, 'package.json')).version === '2.2.0' && fs.readFileSync(path.join(r2, 'src', 'main.js'), 'utf8').includes('new build'), 'U2b 程序文件已更新（version 2.2.0 + 新 main.js）', {});"
+    },
+    {
+      "file": "scripts/test-e610-installer-upgrade.cjs",
+      "line": 170,
+      "pattern": "plugin-literal",
+      "text": "ok(String(row2.sha256 || '') === goodSha && String(row2.from) === '2.1.0' && String(row2.to) === '2.2.0', 'U2g 记录 from/to/sha256 正确（与壳层同字段）', { row: row2 });"
+    },
+    {
+      "file": "scripts/test-e610-upgrade.cjs",
+      "line": 58,
+      "pattern": "plugin-literal",
+      "text": "if (req.url === '/feed-available') return sendJson(200, { version: '2.2.0', sha256: SHA, url: 'https://example.invalid/upgrade-2.2.0.zip', notes: '夹具版本' });"
+    },
+    {
+      "file": "scripts/test-e610-upgrade.cjs",
+      "line": 104,
+      "pattern": "plugin-literal",
+      "text": "check('AC1-1 有新版 → 菜单「可升级：2.2.0」', available && /可升级/.test(available.label), available);"
+    },
+    {
+      "file": "scripts/test-e610-upgrade.cjs",
+      "line": 123,
+      "pattern": "plugin-literal",
+      "text": "const noReason = await inst.cdp.evaluate('(async () => { try { const r = await window.workbench.upgradeStart({ latest: \"2.2.0\", sha256: \"' + SHA + '\", url: \"https://example.invalid/x.zip\", force: true"
+    },
+    {
+      "file": "scripts/upgrade-package-manifest.cjs",
+      "line": 14,
+      "pattern": "relatives-copy",
+      "text": "* install.ps1 → Invoke-UpgradeApplyTree 的 $relatives 必须与本清单一致；"
+    },
+    {
+      "file": "scripts/upgrade-package-manifest.cjs",
+      "line": 22,
+      "pattern": "manifest-definition",
+      "text": "const UPGRADE_TREE = Object.freeze(["
+    },
+    {
+      "file": "scripts/upgrade-package-manifest.cjs",
+      "line": 36,
+      "pattern": "manifest-definition",
+      "text": "const UPGRADE_FILES = Object.freeze(["
+    },
+    {
+      "file": "scripts/upgrade-package-manifest.cjs",
+      "line": 59,
+      "pattern": "manifest-definition",
+      "text": "const NEVER_PACKAGE = Object.freeze(["
+    },
+    {
+      "file": "scripts/upgrade-package-manifest.cjs",
+      "line": 78,
+      "pattern": "manifest-definition",
+      "text": "return NEVER_PACKAGE.some((prefix) => p === prefix || p.startsWith(prefix + '/'));"
+    },
+    {
+      "file": "scripts/upgrade-package-manifest.cjs",
+      "line": 145,
+      "pattern": "manifest-definition",
+      "text": "UPGRADE_TREE,"
+    },
+    {
+      "file": "scripts/upgrade-package-manifest.cjs",
+      "line": 146,
+      "pattern": "manifest-definition",
+      "text": "UPGRADE_FILES,"
+    },
+    {
+      "file": "scripts/upgrade-package-manifest.cjs",
+      "line": 147,
+      "pattern": "manifest-definition",
+      "text": "NEVER_PACKAGE,"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 7,
+      "pattern": "plugin-literal",
+      "text": "*   app  A.B.C  →  plugin A.(B+1).C        （app 2.1.14 ↔ plugin 2.2.14）"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 42,
+      "pattern": "mapping-formula",
+      "text": "/** app → plugin：MINOR+1（唯一映射实现）。 */"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 46,
+      "pattern": "mapping-formula",
+      "text": "return formatVersion({ ...parts, minor: parts.minor + 1 });"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 49,
+      "pattern": "plugin-version-read",
+      "text": "function pluginToApp(pluginVersion) {"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 50,
+      "pattern": "plugin-version-read",
+      "text": "const parts = parseVersion(pluginVersion);"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 65,
+      "pattern": "plugin-version-read",
+      "text": "* 本地一致性检查（不联网）。返回 { ok, appVersion, pluginVersion, rows[] }。"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 86,
+      "pattern": "plugin-version-read",
+      "text": "{ appVersion, expectedPlugin, pluginVersion: pluginPkg && pluginPkg.version }, 'PLUGIN_VERSION_MISMATCH');"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 127,
+      "pattern": "plugin-version-read",
+      "text": "pluginVersion: (pluginPkg && pluginPkg.version) || '',"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 175,
+      "pattern": "plugin-version-read",
+      "text": "console.log(`app=${result.appVersion} plugin=${result.pluginVersion}（应为 ${result.expectedPlugin}）tag=${result.mapping.tag}`);"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 181,
+      "pattern": "plugin-version-read",
+      "text": "const pluginVersion = result.pluginVersion;"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 182,
+      "pattern": "plugin-version-read",
+      "text": "const reg = await checkRegistryVersion({ version: pluginVersion });"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 183,
+      "pattern": "plugin-version-read",
+      "text": "result.rows.push({ id: 'G6', name: `registry 回查 dsh-agile-workbench@${pluginVersion} 真实存在`, ok: reg.ok, code: reg.code, detail: reg.detail });"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 187,
+      "pattern": "plugin-version-read",
+      "text": "result.rows.push({ id: 'G6', name: 'npm 包名/版本映射（未加 --registry，只查本地声明）', ok: Boolean(result.expectedPlugin) && result.pluginVersion === result.expectedPlugin, code: result.pluginVersion === result.expe"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 188,
+      "pattern": "plugin-version-read",
+      "text": "result.ok = result.ok && result.pluginVersion === result.expectedPlugin;"
+    },
+    {
+      "file": "scripts/version-single-source.cjs",
+      "line": 194,
+      "pattern": "plugin-version-read",
+      "text": "console.log(`\\n${pass}/${result.rows.length} PASS  app=${result.appVersion} plugin=${result.pluginVersion}`);"
+    },
+    {
+      "file": "dsh-plugin/package.json",
+      "line": 3,
+      "pattern": "plugin-literal",
+      "text": "\"version\": \"2.2.14\","
+    },
+    {
+      "file": "dsh-plugin/README.md",
+      "line": 39,
+      "pattern": "plugin-literal",
+      "text": "**一句话之后会自动发生（套装 `dsh-agile-workbench` 2.2.4 · 应用本体 v2.1.4）**："
+    }
+  ]
+}

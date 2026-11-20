@@ -21,7 +21,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const https = require('node:https');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const { execFileSync } = require('node:child_process');
+// R-5099：GitHub asset / 四渠道同源的纯判定放在 lib 里（夹具可直测「同 size 不同内容必红」）。
+const { assetVerdict, fourWayVerdict, payloadVerdict, sha256 } = require('./release-verify-lib.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
@@ -93,6 +96,8 @@ function githubToken() {
   } catch (e) { tagSha = ''; }
   check('C2', `tag v${version} 内 zip 与本地同 sha`, Boolean(tagSha) && tagSha === localSha, { tagSha, localSha });
 
+  let githubAssetSha = '';
+  let cdnSha = '';
   // C3 GitHub Release asset
   const token = githubToken();
   if (token) {
@@ -102,9 +107,23 @@ function githubToken() {
       });
       const json = JSON.parse(rel.body.toString('utf8'));
       const asset = (json.assets || []).find((a) => a.name === `pm-workbench-${version}.zip`);
-      check('C3', `Release v${version} 存在且 asset 大小与本地一致`,
-        rel.status === 200 && Boolean(asset) && Number(asset.size) === (localBuf ? localBuf.length : -1),
-        { status: rel.status, asset: asset && { name: asset.name, size: asset.size, state: asset.state } });
+      // R-5099 修复已知洞：旧 C3 只比 size，同大小换内容能蒙过 → 现在下载 asset 字节并重算 sha256。
+      let githubSha = '';
+      let assetBuf = null;
+      if (rel.status === 200 && asset && asset.id) {
+        try {
+          const dl = await httpGet(`https://api.github.com/repos/781237194/agile-workbench/releases/assets/${asset.id}`, {
+            headers: { Authorization: `token ${token}`, 'User-Agent': 'awb-release-verify', Accept: 'application/octet-stream' },
+            timeout: 90000,
+          });
+          if (dl.status === 200) { assetBuf = dl.body; githubSha = sha256(assetBuf); }
+        } catch (e) { githubSha = ''; }
+      }
+      const verdict = assetVerdict({ localBuf, assetBuf });
+      githubAssetSha = githubSha;
+      check('C3', `Release v${version} 的 asset 下载后重算 sha256 与本地一致（${assetBuf ? assetBuf.length : 0}B）`,
+        rel.status === 200 && verdict.ok,
+        { status: rel.status, code: verdict.code, asset: asset && { name: asset.name, size: asset.size, state: asset.state }, ...verdict.detail });
     } catch (e) {
       check('C3', `Release v${version} 可查`, false, { error: String(e && e.message) });
     }
@@ -119,7 +138,7 @@ function githubToken() {
     const url = `https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v${version}/%E5%8F%91%E5%B8%83/pm-workbench-${version}.zip`;
     try {
       const res = await httpGet(url, { timeout: 90000 });
-      const cdnSha = sha256Buf(res.body);
+      cdnSha = sha256Buf(res.body);
       check('C4', 'CDN 下载包 sha256 与本地一致', res.status === 200 && cdnSha === localSha, { status: res.status, cdnSha, localSha, bytes: res.body.length });
     } catch (e) {
       check('C4', 'CDN 下载包 sha256 与本地一致', false, { error: String(e && e.message) });
@@ -153,6 +172,58 @@ function githubToken() {
   check('C6', `版本历史.jsonl 有 ${version} 行且 sha 匹配`, Boolean(histRow) && histRow.sha256 === localSha, {
     found: Boolean(histRow), histSha: histRow && histRow.sha256,
   });
+
+  // C7（R-5099 新增）：四渠道同源——本地 zip / 版本信息.json / GitHub asset（下载重算）/ CDN（下载重算）。
+  const four = fourWayVerdict({
+    localSha,
+    feedSha: feed && feed.sha256,
+    githubSha: skipCdn ? githubAssetSha : githubAssetSha,
+    cdnSha: skipCdn ? 'skipped' : cdnSha,
+  });
+  check('C7', '四渠道同源：本地 zip == 版本信息.json == GitHub asset == CDN（每方下载后重算 sha256）',
+    four.ok, { code: four.code, ...four.detail });
+
+  // C8（R-5099 新增）：npm 包真实存在且其声明的 payload sha 与升级包一致（APP_PAYLOAD_SHA_MISMATCH）。
+  if (skipNpm) {
+    check('C8', 'npm payload 声明 sha（--skip-npm）', true, { skipped: true });
+  } else {
+    try {
+      let pluginPkgLocal = {};
+      try { pluginPkgLocal = JSON.parse(fs.readFileSync(path.join(ROOT, 'dsh-plugin', 'package.json'), 'utf8')); } catch { pluginPkgLocal = {}; }
+      const pluginVersion = String(pluginPkgLocal.version || '');
+      const localDeclared = String((pluginPkgLocal.pmWorkbenchPayload && pluginPkgLocal.pmWorkbenchPayload.sha256) || '');
+      const res = await httpGet('https://registry.npmjs.org/dsh-agile-workbench', { headers: { 'Cache-Control': 'no-cache' } });
+      const json = JSON.parse(res.body.toString('utf8'));
+      const meta = json && json.versions && json.versions[pluginVersion];
+      if (!meta) {
+        check('C8', `npm 无 dsh-agile-workbench@${pluginVersion}（NPM_NOT_PUBLISHED）`, false, { pluginVersion, latest: json && json['dist-tags'] && json['dist-tags'].latest });
+      } else {
+        const tarball = meta.dist && meta.dist.tarball;
+        const tar = await httpGet(tarball, { timeout: 90000 });
+        const tgz = zlib.gunzipSync(tar.body);
+        // 从 tar 里取出 package/package.json（tar 头 512B，name 在前 100B，size 八进制在 124..135）。
+        let publishedPkg = null;
+        let off = 0;
+        while (off + 512 <= tgz.length) {
+          const name = tgz.slice(off, off + 100).toString('utf8').replace(/\0.*$/, '');
+          const sizeText = tgz.slice(off + 124, off + 136).toString('utf8').replace(/\0.*$/, '').trim();
+          const size = parseInt(sizeText, 8) || 0;
+          if (name === 'package/package.json') {
+            try { publishedPkg = JSON.parse(tgz.slice(off + 512, off + 512 + size).toString('utf8')); } catch { publishedPkg = null; }
+            break;
+          }
+          off += 512 + Math.ceil(size / 512) * 512;
+        }
+        const publishedDeclared = String((publishedPkg && publishedPkg.pmWorkbenchPayload && publishedPkg.pmWorkbenchPayload.sha256) || '');
+        const payload = payloadVerdict({ localDeclared, publishedDeclared, localSha });
+        check('C8', 'npm 包声明的 payload sha == 升级包 sha（APP_PAYLOAD_SHA_MISMATCH）', payload.ok, {
+          pluginVersion, ...payload.detail, code: payload.code,
+        });
+      }
+    } catch (e) {
+      check('C8', 'npm payload 声明 sha', false, { error: String((e && e.message) || e) });
+    }
+  }
 
   const pass = rows.filter((r) => r.ok).length;
   console.log(`\n${pass}/${rows.length} PASS  版本 ${version}`);

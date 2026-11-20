@@ -45,5 +45,9 @@
     "dsh-ego-browser": "^0.9.7",
     "@liustack/modsearch": "^5.10.12",
     "@liustack/modlens": "^3.27.3"
+  },
+  "pmWorkbenchPayload": {
+    "appVersion": "2.1.14",
+    "sha256": "522ea6f1b18af649e582ed14acf891d522808fb33db49d073531743c240551b6"
   }
 }

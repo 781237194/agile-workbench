@@ -21,6 +21,7 @@
  * 不抛异常、不阻塞会话。
  * ============================================================================
  */
+import { readFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import fs, { existsSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -82,8 +83,20 @@ function defaultDirs() {
 export function getDefaultWorkbenchDirs() {
   return defaultDirs()
 }
+// R-5099：安装器地址不得写死旧 tag。唯一映射 app = plugin 的 MINOR-1（见 scripts/version-single-source.cjs）；
+// 运行期读本插件 package.json 的版本推导 tag；读不到时用下面这个兜底常量（六处一致性门会校验它是否最新）。
+const APP_VERSION_FALLBACK = '2.1.14'
+function appVersionForInstaller() {
+  try {
+    // 唯一声明：发布流程写进本包 package.json 的 pmWorkbenchPayload.appVersion。
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+    const declared = pkg && pkg.pmWorkbenchPayload && pkg.pmWorkbenchPayload.appVersion
+    if (declared) return String(declared)
+  } catch { /* 打包/精简安装时读不到，走兜底 */ }
+  return APP_VERSION_FALLBACK
+}
 const INSTALLER_SCRIPT_URL =
-  'https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.4/install.ps1'
+  `https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v${appVersionForInstaller()}/install.ps1`
 const INSTALL_COMMAND =
   '$f="$env:TEMP\\pm-workbench-install.ps1"; iwr "' + INSTALLER_SCRIPT_URL + '" -OutFile $f; & $f'
 const MANUAL_INSTALL_COMMAND =
