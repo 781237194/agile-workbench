@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PATHS, nowIso, stamp, ensureDir, fail, textOut, appendLine } from './core.mjs';
 import { projectStateDirOf, projectSubdir } from './project-paths.mjs';
-import { projectStatePaths } from './store.mjs';
+import { projectStatePaths, requireBoot } from './store.mjs';
 
 const ONLY_ALLOWED = new Set(['tokens', 'mail', 'locks', 'owner-confirm']);
 
@@ -188,6 +188,14 @@ export function cmdMigrate(args) {
   const sub = String((args._ && args._[1]) || '').toLowerCase();
   if (sub !== 'project-isolation') fail('BAD_SUBCOMMAND', `migrate 只支持 project-isolation（收到 ${sub || '(空)'}）`, { usage: 'team.mjs migrate project-isolation [--dry-run] [--yes] [--json] [--only tokens,mail,locks,owner-confirm]' });
   const dryRun = Boolean(args['dry-run']) || !args.yes;
+  // 落地（--yes）需 pm/owner 令牌；沙盘豁免（与 mail migrate 同口径）。
+  if (!dryRun && String(process.env.TEAM_SELFTEST || '') !== '1') {
+    const token = String(args.boot || '').trim();
+    if (!token) fail('BOOT_REQUIRED', 'migrate project-isolation --yes 必须带 --boot（pm/owner 令牌）', { action: 'project-isolation' });
+    const info = requireBoot(token, { write: true });
+    const actor = String(info.role || '');
+    if (actor !== 'pm' && actor !== 'owner') fail('PERMISSION_DENIED', `只有 pm/owner 能执行项目隔离迁移（当前令牌角色 ${actor || '-'}）`, { action: 'project-isolation', tokenRole: actor });
+  }
   const only = String(args.only || '').split(',').map((s) => s.trim()).filter(Boolean);
   const consumer = consumerCheck();
   const r = migrateProjectIsolation({ only, dryRun });
