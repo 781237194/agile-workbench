@@ -167,6 +167,8 @@ async function launchOnce(box, { port, envExtra, waitMarksMs }) {
     AWB_TEAM_ROOT: box.team,
     TEAM_ROOT: box.team,
     TEAM_PROJECTS_ROOT: path.join(box.sb, '项目区'),
+    // ⛔ 不许抢焦点：Owner 在打游戏/用机时，所有测量窗口必须隐藏启动（ready-to-show 不 show）。
+    AWB_START_HIDDEN: '1',
     ...envExtra,
   };
   delete env.DSH_WEB_URL;
@@ -268,13 +270,28 @@ async function launchOnce(box, { port, envExtra, waitMarksMs }) {
 function sampleLoad() {
   try {
     const { execFileSync } = require('node:child_process');
-    const cpu = Number(String(execFileSync('powershell', ['-NoProfile', '-Command',
-      '(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average'],
-      { encoding: 'utf8', timeout: 20000 }) || '').trim());
-    const procs = Number(String(execFileSync('powershell', ['-NoProfile', '-Command',
-      '(Get-Process | Measure-Object).Count'], { encoding: 'utf8', timeout: 20000 }) || '').trim());
-    return { cpu: Number.isFinite(cpu) ? Math.round(cpu) : null, procs: Number.isFinite(procs) ? procs : null };
-  } catch { return { cpu: null, procs: null }; }
+    const ps = (cmd) => String(execFileSync('powershell', ['-NoProfile', '-Command', cmd], { encoding: 'utf8', timeout: 25000 }) || '').trim();
+    const cpu = Number(ps('(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average'));
+    const procs = Number(ps('(Get-Process | Measure-Object).Count'));
+    // PM 032004 放行门：可用物理内存（KB）与其它 Electron 实例数（只读，不杀进程）。
+    const freeKb = Number(ps('(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory'));
+    const electronCount = Number(ps('@(Get-Process -Name electron -ErrorAction SilentlyContinue).Count'));
+    return {
+      cpu: Number.isFinite(cpu) ? Math.round(cpu) : null,
+      procs: Number.isFinite(procs) ? procs : null,
+      freeMemGB: Number.isFinite(freeKb) ? Math.round((freeKb / 1024 / 1024) * 10) / 10 : null,
+      electronCount: Number.isFinite(electronCount) ? electronCount : null,
+      at: new Date().toISOString(),
+    };
+  } catch { return { cpu: null, procs: null, freeMemGB: null, electronCount: null, at: new Date().toISOString() }; }
+}
+// PM 032004 放行门：CPU≤20% + 可用物理内存≥8GB + 无其它 Electron 实例；不满足不许起跑。
+function releaseGate(load) {
+  const reasons = [];
+  if (!(load.cpu !== null && load.cpu <= 20)) reasons.push('CPU>20% 或未知（' + load.cpu + '）');
+  if (!(load.freeMemGB !== null && load.freeMemGB >= 8)) reasons.push('可用物理内存<8GB 或未知（' + load.freeMemGB + 'GB）');
+  if (!(load.electronCount === 0)) reasons.push('仍有其它 Electron 实例（' + load.electronCount + '）');
+  return { ok: reasons.length === 0, reasons };
 }
 async function waitIdle(maxSec, threshold = 30) {
   const end = Date.now() + Math.max(0, maxSec) * 1000;
@@ -288,9 +305,25 @@ async function waitIdle(maxSec, threshold = 30) {
 }
 
 async function main() {
+  const requireClean = process.argv.includes('--require-clean');
   const waitIdleSec = Number(argOf('--wait-idle', '0')) || 0;
   const loadBefore = waitIdleSec > 0 ? await waitIdle(waitIdleSec) : sampleLoad();
-  if (!JSON_OUT) console.log('环境负载（开始）：CPU ' + (loadBefore.cpu === null ? '未知' : loadBefore.cpu + '%') + ' / 进程 ' + (loadBefore.procs === null ? '未知' : loadBefore.procs));
+  const gate = releaseGate(loadBefore);
+  const loadLine = '环境：CPU ' + (loadBefore.cpu === null ? '未知' : loadBefore.cpu + '%')
+    + ' / 进程 ' + (loadBefore.procs === null ? '未知' : loadBefore.procs)
+    + ' / 可用内存 ' + (loadBefore.freeMemGB === null ? '未知' : loadBefore.freeMemGB + 'GB')
+    + ' / Electron 实例 ' + (loadBefore.electronCount === null ? '未知' : loadBefore.electronCount);
+  if (!JSON_OUT) console.log(loadLine + (gate.ok ? ' ｜ 放行门：PASS' : ' ｜ 放行门：BLOCKED（' + gate.reasons.join('；') + '）'));
+  if (requireClean && !gate.ok) {
+    const block = { ok: false, code: 'RELEASE_GATE_BLOCKED', reasons: gate.reasons, load: loadBefore };
+    if (JSON_OUT) console.log(JSON.stringify(block, null, 2));
+    else console.log('BLOCKED：不满足放行条件，未启动任何窗口/未做任何测量。');
+    if (OUT) {
+      fs.mkdirSync(OUT, { recursive: true });
+      fs.writeFileSync(path.join(OUT, 'release-gate.json'), JSON.stringify(block, null, 2) + '\n', 'utf8');
+    }
+    process.exit(2);
+  }
   const port0 = await freePort();
   const box = seedSandbox('cold');
   // 冷启动：ROUNDS 轮 × 每轮 RUNS 次（各自新数据目录，模拟首次打开；不设 env、无 dsh.json）。
@@ -383,7 +416,7 @@ async function main() {
   try { fs.rmSync(box.sb, { recursive: true, force: true }); } catch { /* ignore */ }
   if (OUT) {
     fs.mkdirSync(OUT, { recursive: true });
-    fs.writeFileSync(path.join(OUT, 'startup-measure.json'), JSON.stringify({ root: ROOT, at: new Date().toISOString(), load: { atStart: loadBefore, atEnd: sampleLoad() }, cold: coldOk.map((r) => ({
+    fs.writeFileSync(path.join(OUT, 'startup-measure.json'), JSON.stringify({ root: ROOT, at: new Date().toISOString(), load: { atStart: loadBefore, atEnd: sampleLoad(), gate }, cold: coldOk.map((r) => ({
     round: r.round, index: r.index,
     firstScreenWall: r.firstScreenWall, discoveryMs: r.discoveryMs,
     startup: r.startup, marks: r.marks,
