@@ -16526,6 +16526,48 @@ async function openTeamBoardOld(projectId) {
   } catch (e) { toast('旧版看板失败：' + humanError(e.message), 'bad'); }
 }
 
+// B-231006-b81a：绑定失败隔离——任何单个绑定块抛错都不得连带其它按钮失效。
+// 失败同时记控制台与「通知审计」（主进程 notify:audit → 团队/状态/项目/<项目>/通知审计.jsonl），
+// 供 Owner 真机排障时定位是哪一块初始化失败（而不是整页按钮静默失效）。
+const bindFailures = [];
+try { window.__bindFailures = bindFailures; } catch { /* ignore */ }
+function auditBindFailure(name, e) {
+  const text = `[bind] ${name} 初始化失败：${String((e && e.message) || e)}`;
+  bindFailures.push({ at: new Date().toISOString(), block: String(name), message: String((e && e.message) || e) });
+  try { console.error(text); } catch { /* ignore */ }
+  try {
+    if (window.workbench && typeof window.workbench.notifyAudit === 'function') {
+      window.workbench.notifyAudit({ level: 'error', text, source: 'bind-failure' });
+    }
+  } catch { /* 审计失败不阻断绑定 */ }
+}
+function bindBlock(name, fn) {
+  try { fn(); } catch (e) { auditBindFailure(name, e); }
+}
+/** 抽屉关闭：× 与蒙层。独立块 + 幂等标记，bind() 中途抛错时由 boot 的兜底再调一次仍能关闭。 */
+function bindPanelControls() {
+  $$('[data-close-drawer]').forEach((b) => {
+    if (b.dataset.drawerCloseBound === '1') return;
+    b.dataset.drawerCloseBound = '1';
+    bindBlock('drawer-close:' + String(b.getAttribute('data-close-drawer') || ''), () => b.addEventListener('click', () => setDrawer(null)));
+  });
+  const mask = $('#drawer-mask');
+  if (mask && mask.dataset.drawerMaskBound !== '1') {
+    mask.dataset.drawerMaskBound = '1';
+    bindBlock('drawer-mask', () => mask.addEventListener('click', () => setDrawer(null)));
+  }
+}
+/** 三个抽屉的入口按钮：各自独立块，单个失败不影响其它入口。 */
+function bindPanelOpeners() {
+  const pairs = [['#team-pill', 'team'], ['#session-pill', 'team'], ['#btn-board', 'project'], ['#btn-members', 'team'], ['#btn-session-queue', 'session-queue']];
+  for (const [sel, name] of pairs) {
+    const el = $(sel);
+    if (!el || el.dataset.drawerOpenerBound === '1') continue;
+    el.dataset.drawerOpenerBound = '1';
+    bindBlock('drawer-open:' + sel, () => el.addEventListener('click', () => setDrawer(name)));
+  }
+}
+
 function bind() {
   // B-fa80：系统占用点击立即刷新（平时 2 秒自动刷新）。
   $('#metrics')?.addEventListener('click', () => { tickMetrics(); });
@@ -16556,14 +16598,7 @@ function bind() {
     const item = e.target.closest('[data-project]');
     if (item) selectWorkspace(item.dataset.project);
   });
-  $('#team-pill')?.addEventListener('click', () => setDrawer('team'));
-  $('#session-pill')?.addEventListener('click', () => setDrawer('team'));
-
-  // 顶栏操作
-  $('#btn-board')?.addEventListener('click', () => setDrawer('project'));
-  $('#btn-members')?.addEventListener('click', () => setDrawer('team'));
-  // R-6bc8（T-20261117-152156-85c9）：会话排队独立抽屉入口（紧挨「项目面板」）
-  $('#btn-session-queue')?.addEventListener('click', () => setDrawer('session-queue'));
+  bindPanelOpeners();
   $('#legacy-owner-quick-removed')?.addEventListener('click', openOwnerGate);
   $('#legacyReviewStage')?.addEventListener('click', () => {
     if (activeProject()) openOwnerGate();
@@ -17258,8 +17293,7 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
   });
 
   // 抽屉关闭
-  $$('[data-close-drawer]').forEach((b) => b.addEventListener('click', () => setDrawer(null)));
-  $('#drawer-mask')?.addEventListener('click', () => setDrawer(null));
+  bindPanelControls();
 
   // 六角色行支持键盘打开
   document.addEventListener('keydown', (e) => {
@@ -17704,7 +17738,11 @@ window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /*
     });
   } catch { /* ignore */ }
   loadInboxSeen();
-  bind();
+  // B-231006-b81a：bind() 任何一块抛错都不许掐断 refresh（否则整页按钮静默失效、卡片停在占位）；
+  // 抽屉关闭/入口另走独立块兜底绑定，保证单个初始化失败时三个 × 仍可点。
+  bindBlock('bind', bind);
+  bindPanelControls();
+  bindPanelOpeners();
   renderBridgeAlert();
   await refresh();
   warnStore();
