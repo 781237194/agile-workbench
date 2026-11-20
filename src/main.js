@@ -22304,8 +22304,9 @@ async function runDshDiscovery(reason = 'status', budgets = {}) {
   }
 }
 
-async function maybeAutoDiscoverDsh(reason = 'status', budgets = {}) {
+async function maybeAutoDiscoverDsh(reason = 'status', budgets = {}, options = {}) {
   const manual = reason === 'manual';
+  const force = Boolean(options && options.force);
   // 自测沙盘绝不访问真实 DSH；手动 IPC 在自测里也只返回跳过，不碰本机端口。
   if (IS_SELFTEST) {
     return {
@@ -22331,7 +22332,7 @@ async function maybeAutoDiscoverDsh(reason = 'status', budgets = {}) {
   }
   if (dshDiscovery.running) return dshDiscovery.running;
   const now = Date.now();
-  if (!manual && dshDiscovery.last && now - dshDiscovery.at < DSH_DISCOVERY_COOLDOWN_MS) {
+  if (!manual && !force && dshDiscovery.last && now - dshDiscovery.at < DSH_DISCOVERY_COOLDOWN_MS) {
     return { ...dshDiscovery.last, skipped: true, code: 'DSH_DISCOVERY_COOLDOWN' };
   }
   if (!manual) dshDiscovery.at = now;
@@ -22347,7 +22348,8 @@ async function startBackgroundDiscovery(reason = 'startup-bg') {
     startupMarks.backgroundDiscovery = { ...(startupMarks.backgroundDiscovery || {}), startedAt: Date.now() };
   }
   try {
-    const result = await maybeAutoDiscoverDsh(reason, {});
+    // force：首轮刚跑过 discovery，若走冷却这里会直接返回 COOLDOWN，应用就再也不会重发现（Owner 0321 现场）。
+    const result = await maybeAutoDiscoverDsh(reason, {}, { force: true });
     if (startupMarks && startupMarks.backgroundDiscovery) {
       startupMarks.backgroundDiscovery.doneAt = Date.now();
       startupMarks.backgroundDiscovery.ok = Boolean(result && result.ok);
@@ -22355,6 +22357,25 @@ async function startBackgroundDiscovery(reason = 'startup-bg') {
       startupMarks.backgroundDiscovery.durationMs = Number(result && result.durationMs) || 0;
     }
     try { console.log('[startup] backgroundDiscovery code=' + String((result && result.code) || '') + ' ok=' + Boolean(result && result.ok) + ' ' + (Number(result && result.durationMs) || 0) + 'ms'); } catch { /* ignore */ }
+    // 离线兜底：15s / 45s / 120s 各再试一次（force），成功即停；定时器 unref 不拖住退出。
+    if (!(result && result.ok)) {
+      const delays = [15000, 45000, 120000];
+      let attempt = 0;
+      const retry = async () => {
+        if (attempt >= delays.length) return;
+        const delay = delays[attempt];
+        attempt += 1;
+        const timer = setTimeout(async () => {
+          try {
+            const again = await maybeAutoDiscoverDsh('startup-bg-retry' + attempt, {}, { force: true });
+            try { console.log('[startup] backgroundDiscovery retry' + attempt + ' code=' + String((again && again.code) || '') + ' ok=' + Boolean(again && again.ok)); } catch { /* ignore */ }
+            if (!(again && again.ok)) void retry();
+          } catch { /* ignore */ }
+        }, delay);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+      };
+      void retry();
+    }
     return result;
   } catch (error) {
     if (startupMarks && startupMarks.backgroundDiscovery) {
