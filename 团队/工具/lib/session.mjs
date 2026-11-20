@@ -1546,26 +1546,36 @@ export function pmRotateIdleState(projectName, { minutes = null, roles = ['pm', 
   for (const role of roles) {
     const reasons = [];
     let lastMs = 0;
-    // ① 邮箱最新消息（new + cur）
-    for (const box of ['new', 'cur']) {
-      const dir = path.join(PATHS.mail, String(role), box);
-      let names = [];
-      try { names = fs.readdirSync(dir); } catch { names = []; }
-      for (const n of names.slice(-80)) {
-        if (!n.endsWith('.json')) continue;
-        let row = null; try { row = readJson(path.join(dir, n), null); } catch { row = null; } // 破损文件不许让门崩（降级）
-        if (!row) continue;
-        // B-20261120-110351-6c35（Owner 2026-11-20 11:01 指令）：旧实现把**系统自动通知**也算活跃——
-        // 路由泵 wake 摘要、名册变更广播、认领停滞提醒每条都是 from=system，投一条就把 15 分钟倒计时重置，
-        // PM 结构上永远等不到静默窗（实测 10:51–10:56 换完 5 个角色后，产品给 PM 换人反复被
-        // WAIT_BOTH_IDLE 拒）。口径改为：**排除 from=system 的自动通知**，人与角色之间的往来照旧算活跃；
-        // running 会话 / working 任务 / 在途派单锁三条硬判据不变。
-        if (String(row.from || '') === 'system') continue;
-        const ms = Date.parse(String(row.ts || row.at || row.deliveredAt || ''));
-        if (Number.isFinite(ms) && ms > lastMs) lastMs = ms;
+    // ① 本角色**发出**的消息（扫全队邮箱，只看 from===role；收到的一律不算活跃）
+    // B-20261120-121345-f25d（PM 2026-11-20 12:13 实测）：旧口径把「收到的消息」也算活跃——PM 收到
+    // 别人的 ack/回执就重置 15 分钟倒计时，而 ack 只是「收到」不是 PM 在干活；叠加 from=system 噪声
+    // （B-6c35）后 pm 结构上几乎换不掉。口径定为：**只有本人发出的消息算活跃**；
+    // running 会话 / working 任务 / 在途派单锁三条硬判据不变。
+    const tsOfMailName = (name) => {
+      const m = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z/.exec(String(name || ''));
+      return m ? Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`) : NaN;
+    };
+    const lookbackMs = windowMs + 10 * 60 * 1000;   // 文件名预筛：窗口 + 10 分钟缓冲，其余历史不解析
+    let boxOwners = [];
+    try { boxOwners = fs.readdirSync(PATHS.mail, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); } catch { boxOwners = []; }
+    for (const boxOwner of boxOwners) {
+      for (const box of ['new', 'cur']) {
+        const dir = path.join(PATHS.mail, boxOwner, box);
+        let names = [];
+        try { names = fs.readdirSync(dir); } catch { names = []; }
+        for (const n of names) {
+          if (!n.endsWith('.json')) continue;
+          const nameMs = tsOfMailName(n);
+          if (Number.isFinite(nameMs) && now - nameMs > lookbackMs) continue;   // 历史消息按文件名预筛掉
+          let row = null; try { row = readJson(path.join(dir, n), null); } catch { row = null; } // 破损文件不许让门崩（降级）
+          if (!row) continue;
+          if (String(row.from || '') !== String(role)) continue;   // 只认本人发出；收到的与他人消息都不算
+          const ms = Date.parse(String(row.ts || row.at || row.deliveredAt || ''));
+          if (Number.isFinite(ms) && ms > lastMs) lastMs = ms;
+        }
       }
     }
-    if (lastMs && now - lastMs < windowMs) reasons.push(`近 ${mins} 分钟有真人/角色往来消息（最近 ${new Date(lastMs).toISOString()}；系统自动通知不计）`);
+    if (lastMs && now - lastMs < windowMs) reasons.push(`近 ${mins} 分钟本人发出过消息（最近 ${new Date(lastMs).toISOString()}；收到的消息与系统自动通知不计）`);
     // ② running 会话
     const qRow = (queue && (queue[role] || (queue.roles && queue.roles[role]))) || null;
     if (qRow && (qRow.running === true || qRow.thinking === true || Number(qRow.thinkSec || 0) > 0)) reasons.push(`有正在跑的会话（running=${qRow.running === true} / thinkSec=${Number(qRow.thinkSec || 0)}）`);
