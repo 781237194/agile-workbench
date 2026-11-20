@@ -14,6 +14,9 @@ let guideStep = 0;
 let dshReady = false;
 let pendingDshFocus = null;
 let lastWorkspaceProjectId = null;
+// B-230447-3d23：工作区卡片三档——读失败要显码并保留上次成功值；指向不存在的项目不得静默清空。
+let stateReadError = null;
+let lastWorkspaceCard = null;
 let openDrawerName = null;
 // boot 过期后要自动重绘，把“已读全/可推进”降级；只用一个定时器，换项目/重新 boot 时重置。
 let bootExpiryTimer = null;
@@ -2491,12 +2494,16 @@ async function refresh() {
   renderBridgeAlert();
   try {
     state = await window.workbench.state();
+    stateReadError = null;
     try { memberStatesCache = await loadMemberStates(activeProject()); } catch { memberStatesCache = null; }
     hydrateTeamModes();
     render();
     const current = activeProject();
     if (current) loadLegacyDocs(legacyUi.projectId === current.id);
   } catch (e) {
+    // B-230447-3d23：读失败不能再只弹 toast 把页面留在「未选择」占位——记错误码并重绘卡片（保留上次值）。
+    stateReadError = { code: 'APP_STATE_READ_FAILED', message: String((e && e.message) || e) };
+    try { renderSidebar(); } catch { /* 卡片重绘失败不阻断提示 */ }
     toast('读取失败：' + e.message, 'bad');
   }
 }
@@ -2738,7 +2745,9 @@ function renderSidebar() {
   const folderBtn = $('#btn-wc-folder');
   const teamBtn = $('#btn-wc-team');
   const buildBtn = $('#btn-wc-build');
-  if (name) name.textContent = p ? p.name : '未选择工作区';
+  const WorkspaceCardApi = (typeof AWBWorkspaceCard !== 'undefined' && AWBWorkspaceCard) ? AWBWorkspaceCard : null;
+  const card = WorkspaceCardApi ? WorkspaceCardApi.view({ state, project: p, lastGood: lastWorkspaceCard, stateError: stateReadError }) : null;
+  if (name) name.textContent = card ? card.nameText : (p ? p.name : '未选择工作区');
   if (pathEl) {
     pathEl.textContent = p ? (p.exists === false ? `${p.path} · 目录不存在` : p.path) : '先新建或恢复一个项目';
     pathEl.title = p ? p.path : '';
@@ -2761,7 +2770,8 @@ function renderSidebar() {
       parts.push((verified === null ? ready : verified) + '/' + roleTotal + ' 会话' + (verified === null ? '（本地）' : '（DSH 已核验）'));
       parts.push(teamModeLabel(p));
     }
-    meta.textContent = p ? parts.join(' · ') : 'DSH workspace · 待建团队';
+    meta.textContent = card && card.metaText ? card.metaText : (p ? parts.join(' · ') : '');
+    if (card && !card.code && p) lastWorkspaceCard = { nameText: card.nameText, metaText: meta.textContent };
     meta.title = p && ws.boundAt ? `工作区绑定于 ${fmtTime(ws.boundAt)}` : '';
   }
   if (warnEl) {
@@ -2769,6 +2779,11 @@ function renderSidebar() {
     const live = p ? liveFor(p) : null;
     const notes = [];
     let bad = false;
+    // B-230447-3d23：卡片口径的读取错误必须可见（含错误码），不允许用「未选择」冒充「没有项目」。
+    if (card && card.code) {
+      notes.push(`工作区读取：${card.code}${card.stale ? '（已保留上次数据）' : ''}`);
+      bad = true;
+    }
     if (p && p.exists === false) { notes.push('项目目录不存在或被移动，DSH 工作区无法绑定。'); bad = true; }
     if (p && ws.lastError && ws.lastError.code) {
       notes.push(`DSH 工作区绑定失败：${ws.lastError.code}${ws.lastError.message ? ' · ' + ws.lastError.message : ''}（切项目或建团队会自动重试）`);
@@ -2777,7 +2792,7 @@ function renderSidebar() {
     // e29f F-4：额外会话（含同一角色多会话）只由侧栏统计那一处统一计数显示，
     // 这里不再重复报数字，避免同一时刻两处数字不同。
     if (live && live.error) { notes.push('DSH 核验失败：' + live.error); bad = true; }
-    if (!p) notes.length = 0;
+    if (!p && !(card && card.code)) notes.length = 0;
     warnEl.hidden = !notes.length;
     warnEl.textContent = notes.join(' ');
     warnEl.classList.toggle('warn-soft', !bad);
@@ -17243,7 +17258,7 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
   });
 
   // 抽屉关闭
-  $('[data-close-drawer]').forEach((b) => b.addEventListener('click', () => setDrawer(null)));
+  $$('[data-close-drawer]').forEach((b) => b.addEventListener('click', () => setDrawer(null)));
   $('#drawer-mask')?.addEventListener('click', () => setDrawer(null));
 
   // 六角色行支持键盘打开
