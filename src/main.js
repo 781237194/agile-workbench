@@ -9,6 +9,8 @@ const { execFileSync, spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 // B-20261120-020530-0823：会话用量阈值判定的纯逻辑（阈值单源来自 团队/工具/lib/session.mjs）。
 const UsageThreshold = require('./usage-threshold.js');
+// B-7009（P1）：会话用量展示口径（点名角色 + 原生三项对照表 + 缓存键含角色）的纯逻辑。
+const UsageView = require('./usage-view.js');
 // R-dba4 / T-3999：评审界面「大白话」持久化的纯逻辑（本文件只做 IPC 与落盘，不碰 工作流.json）。
 const ReviewCopy = require('./review-copy.js');
 // R-c1ed F-1：渲染内存采样分片 / 保留 / 取数通道（纯逻辑，Node 可测）
@@ -11988,6 +11990,9 @@ installShellAuditSensors();
       // （sessionLimitsOf 默认 500 万/1000 万，不是单次上下文预算的 30/50 万）。
       // 累计仍展示（标注「累计含缓存读」），但**不参与**超限倍数计算。
       const inputTokens = Number(row && row.input) || 0;
+      // B-7009：原生分项（老文件没有 cacheRead/output 时由 usage-view 按「tokens−input」合并展示，不猜）。
+      const cacheRead = Number(row && row.cacheRead) || 0;
+      const output = Number(row && row.output) || 0;
       const compareTokens = inputTokens > 0 ? inputTokens : tokens;
       const at = String((row && row.at) || '');
       const atMs = Date.parse(at);
@@ -12007,11 +12012,22 @@ installShellAuditSensors();
         warn: lim.warn,
         force: lim.force,
         thresholdSource: lim.source,
+        cacheRead,
+        output,
+        // ②对照表：界面值 / 原生值 / 公式 / 误差（原生三项直取，误差应为 0）
+        view: UsageView.usageViewOf(role, { tokens, input: inputTokens, cacheRead, output }),
         level
       };
     }).sort((a, b) => b.compareTokens - a.compareTokens);
     const tracked = roles.filter((row) => row.level !== 'unknown');
     const maxRow = tracked[0] || null;
+    // B-7009（PM ③①）：界面可指定角色（切角色 → 缓存键变化 → 立即刷新）；
+    // 未指定时退化为「用量最高」，但文案必须写明是谁、哪些项。
+    const requestedRole = String(p.role || '').trim();
+    const selectedRow = requestedRole
+      ? (roles.find((row) => String(row.role) === requestedRole) || null)
+      : null;
+    const focusRow = selectedRow || maxRow;
     // 0823 AC③ + B-usage-semantics：一句话必须说清「口径 + 是谁 + 它的阈值 + 超几倍」，禁止拿 A 的用量比 B 的阈值。
     const ratio = maxRow && maxRow.warn ? (maxRow.compareTokens / maxRow.warn) : 0;
     const label = (() => {
@@ -12032,9 +12048,16 @@ installShellAuditSensors();
         .replace('需换人', '建议换人');
       const total = Number(maxRow.tokens) || 0;
       const cmp = Number(maxRow.compareTokens) || 0;
-      return total > cmp * 1.5
+      const plain = total > cmp * 1.5
         ? base + '（判定口径＝本会话累计未缓存输入；累计含缓存读 ' + fmtTokens(total) + '，仅作参考）'
         : base;
+      // B-7009①：「本会话」必须点名角色与三项口径（未缓存输入/缓存读/输出）。
+      const focusView = UsageView.usageViewOf(focusRow.role, {
+        tokens: focusRow.tokens, input: focusRow.input, cacheRead: focusRow.cacheRead, output: focusRow.output,
+      });
+      return focusView.label + '；阈值 ' + fmtTokens(focusRow.warn || 0) + '（判定口径＝未缓存输入）'
+        + (focusRow.level === 'force' ? '，建议换人' : (focusRow.level === 'warn' ? '，接近阈值' : ''))
+        + (total > cmp * 1.5 ? '；注：' + plain : '');
     })();
     const severity = UsageThreshold.severityOf(roles.map((row) => row.level));
     return {
@@ -12048,10 +12071,20 @@ installShellAuditSensors();
       warnThreshold: maxRow ? maxRow.warn : (tracked[0] ? tracked[0].warn : (explicitWarn || null)),
       forceThreshold: maxRow ? maxRow.force : (tracked[0] ? tracked[0].force : (explicitWarn ? explicitWarn * 2 : null)),
       roles,
+      requestedRole,
+      // B-7009：当前展示对象（指定角色优先，否则用量最高）+ 它的对照表
+      focus: focusRow ? {
+        role: focusRow.role, sessionId: focusRow.sessionId, at: focusRow.at, stale: focusRow.stale,
+        input: focusRow.input, cacheRead: focusRow.cacheRead, output: focusRow.output, tokens: focusRow.tokens,
+        warn: focusRow.warn, force: focusRow.force, level: focusRow.level,
+        view: focusRow.view,
+        cacheKey: UsageView.usageCacheKey(p.projectId || name, focusRow.role),
+      } : null,
+      formula: 'input=uncachedInputTokens；tokens=uncachedInputTokens+cacheReadTokens+outputTokens',
       // 界面一行文案用它：X = 角色里最大 tokens（没有就 null → 显示"用量未知"）
-      topTokens: maxRow ? maxRow.tokens : null,
-      topRole: maxRow ? maxRow.role : null,
-      level: maxRow ? maxRow.level : severity,
+      topTokens: focusRow ? focusRow.tokens : null,
+      topRole: focusRow ? focusRow.role : null,
+      level: focusRow ? focusRow.level : severity,
       label
     };
   });

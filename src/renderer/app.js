@@ -2927,32 +2927,61 @@ async function loadWorkspaces(force = false) {
 
 // R-703f AC1：会话用量（只读展示，数据源 团队/状态/项目/<项目>/会话用量.json 经 session:usage）。
 // 现状：文件缺失/超 24h → 「会话用量未知 / 阈值 30 万」；有数据 → 「会话用量 X / 阈值 30 万」+ 角色明细。
-let sessionUsageCache = { projectId: '', at: 0, data: null };
+// B-7009（P1）：缓存键必须含角色（切角色立即刷新，≤2s）；展示对象可切换（默认用量最高）。
+let usageUi = { projectId: '', role: '', at: 0, data: null };
+const USAGE_ROLE_LABEL = { pm: '项目经理', product: '产品设计师', analyst: '需求分析师', programmer1: '高级程序员 A', programmer2: '高级程序员 B', tester: '测试人员' };
+function usageNeedsRefresh(p, role) {
+  if (!usageUi || usageUi.projectId !== String(p && p.id || '')) return true;
+  if (String(usageUi.role || '') !== String(role || '')) return true;   // 切角色不等 TTL，立即刷新
+  return (Date.now() - Number(usageUi.at || 0)) > 15000;
+}
+function usageCompareMarkup(view) {
+  const rows = (view && Array.isArray(view.rows)) ? view.rows : [];
+  if (!rows.length) return '';
+  const cell = (n) => (Number.isFinite(Number(n)) ? Math.round(Number(n)).toLocaleString('en-US') : '未知');
+  return '<span class="usage-compare" data-usage-compare="1">'
+    + rows.map((row) => '<span class="usage-compare-row" data-usage-metric="' + esc(row.key) + '">'
+      + '<i>' + esc(row.name) + '</i>'
+      + '<b data-usage-ui="' + esc(row.ui) + '">' + cell(row.ui) + '</b>'
+      + '<s data-usage-native="' + esc(row.native) + '">' + cell(row.native) + '</s>'
+      + '<em data-usage-error="' + esc(row.errorPct) + '">' + (row.within5 ? '≤5%' : '>5%') + '</em>'
+      + '<u title="' + esc(row.formula) + '">' + esc(row.formula) + '</u>'
+      + '</span>').join('')
+    + '</span>';
+}
 async function renderSessionUsage(p) {
   const host = document.getElementById('session-usage');
   if (!host) return;
   if (!p) { host.hidden = true; host.textContent = ''; return; }
   const api = window.workbench;
   if (!api || typeof api.sessionUsage !== 'function') { host.hidden = true; return; }
-  let data = sessionUsageCache.data;
-  if (sessionUsageCache.projectId !== p.id || (Date.now() - sessionUsageCache.at) > 15000) {
+  const projectId = String(p.id || '');
+  const role = String(usageUi.projectId === projectId ? (usageUi.role || '') : (usageUi.role || ''));
+  let data = usageUi.data;
+  if (usageNeedsRefresh(p, role)) {
     try {
-      data = await api.sessionUsage({ projectId: p.id });
-      sessionUsageCache = { projectId: p.id, at: Date.now(), data };
+      data = await api.sessionUsage({ projectId: p.id, role: role || undefined });
+      usageUi = { projectId, role, at: Date.now(), data };
     } catch { data = null; }
   }
   if (!data || data.ok === false) { host.hidden = true; return; }
   host.hidden = false;
   host.setAttribute('data-session-usage', '1');
+  host.setAttribute('data-usage-role', String((data.focus && data.focus.role) || ''));
+  host.setAttribute('data-usage-cache-key', String((data.focus && data.focus.cacheKey) || (projectId + '::' + (role || '*'))));
   host.setAttribute('data-usage-tokens', data.topTokens === null ? '' : String(data.topTokens));
-  host.setAttribute('data-usage-threshold', String(data.warnThreshold || 300000));
+  host.setAttribute('data-usage-threshold', String(data.warnThreshold || 5000000));
   host.setAttribute('data-usage-level', String(data.level || 'unknown'));
-  const label = String(data.label || ('会话用量未知 / 阈值 ' + Math.round((data.warnThreshold || 300000) / 10000) + ' 万'));
-  const detail = (data.roles || []).slice(0, 3).map((row) => row.role + ':' + (row.stale ? '未知' : Math.round(row.tokens / 1000) + 'k')).join(' · ');
-  host.textContent = label + (detail ? ('（' + detail + '）') : '');
+  const label = String(data.label || ('会话用量未知 / 阈值 ' + Math.round((data.warnThreshold || 5000000) / 10000) + ' 万'));
+  const chips = (data.roles || []).map((row) => '<button type="button" class="usage-chip' + (String((data.focus && data.focus.role) || '') === String(row.role) ? ' active' : '')
+    + '" data-usage-role-pick="' + esc(row.role) + '" title="切到 ' + esc(USAGE_ROLE_LABEL[row.role] || row.role) + ' 看它的原生用量">' + esc(USAGE_ROLE_LABEL[row.role] || row.role) + '</button>').join('');
+  const compare = usageCompareMarkup(data.focus && data.focus.view);
+  host.innerHTML = '<span class="usage-label" data-usage-label="1">' + esc(label) + '</span>'
+    + '<span class="usage-chips" data-usage-chips="1">' + chips + '</span>' + compare;
   host.classList.toggle('warn', data.level === 'warn');
   host.classList.toggle('bad', data.level === 'force');
-  host.title = '会话用量来自 团队/状态/项目/' + (data.project || '') + '/会话用量.json；阈值 ' + Math.round((data.warnThreshold || 300000) / 10000) + ' 万（session usage --set 可造数）';
+  host.title = '数据来自 团队/状态/项目/' + (data.project || '') + '/会话用量.json（原生 DSH tokenUsage：未缓存输入/缓存读/输出）；'
+    + '切角色立即刷新，阈值取 session.mjs 单源';
 }
 
 function renderSessions() {
@@ -17201,8 +17230,20 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
     }
   });
 
+  // B-7009（P1）：点角色 chip 切换用量展示（清缓存 → 立即重取，≤2s 生效）
+  document.addEventListener('click', (e) => {
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+    const chip = target.closest('[data-usage-role-pick]');
+    if (!chip) return;
+    e.preventDefault();
+    const role = String(chip.getAttribute('data-usage-role-pick') || '');
+    usageUi = { projectId: usageUi.projectId, role, at: 0, data: null };
+    try { renderSessionUsage(activeProject()).catch(() => { /* 切角色失败不阻断 */ }); } catch { /* ignore */ }
+  });
+
   // 抽屉关闭
-  $$('[data-close-drawer]').forEach((b) => b.addEventListener('click', () => setDrawer(null)));
+  $('[data-close-drawer]').forEach((b) => b.addEventListener('click', () => setDrawer(null)));
   $('#drawer-mask')?.addEventListener('click', () => setDrawer(null));
 
   // 六角色行支持键盘打开

@@ -131,7 +131,12 @@ function usageEntriesOfSessions(input = {}) {
     const session = byId.get(sid);
     const usage = usageOfSessionInfo(session);
     if (!usage) continue;
-    out[role] = { sessionId: sid, tokens: usage.tokens, input: usage.input, at, source: USAGE_SOURCE };
+    // B-7009：原生三项都落盘（input=uncachedInputTokens / cacheRead / output），界面才能给「界面值 vs 原生值」对照表。
+    out[role] = {
+      sessionId: sid, tokens: usage.tokens, input: usage.input,
+      cacheRead: usage.cacheRead, output: usage.output,
+      at, source: USAGE_SOURCE,
+    };
   }
   return out;
 }
