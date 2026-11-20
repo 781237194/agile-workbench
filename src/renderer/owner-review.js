@@ -1469,7 +1469,9 @@
     const code = (err && err.code) ? String(err.code) : (codeMatch ? codeMatch[1] : '');
     const hint = ERROR_HINTS[code] || '';
     const detail = raw.replace(/^\[[A-Z0-9_]+\]\s*/, '').trim();
-    const title = hint || detail || '现在还不能提交这个决定';
+    // B-82e2（P1）：未知错误可能是「已落账、后续步骤失败」（历史 7e49 就是这样）。
+    // 不能替 Owner 断言「不能提交」——改成提示先刷新核对，避免误以为没生效去重复点击。
+    const title = hint || detail || '提交结果未确认：决定可能已落账，请先刷新列表核对，不要重复点';
     return { code, title, detail: hint ? detail : '' };
   }
   function showBanner(err) {
@@ -3375,7 +3377,27 @@
       // 这条已不在待评估里：选中下一条，避免正文停在旧条目上（否则看起来“列表没动”）。
       const next = pendingRows()[0];
       state.selected = next ? String(next.id) : '';
-      showNotice(`${label}${title ? '：' + title : ''}；列表已更新`);
+      // B-82e2（P1）：落账成功、但后续「通知 PM」失败时，不能说整体失败——文案写成
+      // 「已通过（附：通知 PM 失败 code=X）」，并明确「决定已生效」。
+      const notifyFail = (r && r.ownerDecisionNotify && r.ownerDecisionNotify.ok === false) ? r.ownerDecisionNotify : null;
+      const notifyOkButWarn = !notifyFail && r && r.notifyFailed === true ? { code: 'OWNER_DECISION_NOTIFY_FAILED', message: '' } : null;
+      const notify = notifyFail || notifyOkButWarn;
+      const notifySuffix = notify ? `（已生效；附：通知 PM 失败 code=${String(notify.code || 'OWNER_DECISION_NOTIFY_FAILED')}）` : '';
+      showNotice(`${label}${title ? '：' + title : ''}${notifySuffix}；列表已更新`, notify ? 'warn' : 'ok');
+      if (notify) {
+        // 横幅同样写清「已生效」：避免 Owner 看到红字就以为决定没落账。
+        try {
+          const dialogNow = dialogEl();
+          const box = dialogNow && (dialogNow.querySelector('[data-or-banner]') || dialogNow.querySelector('[data-or-error]'));
+          if (box) {
+            box.innerHTML = '';
+            box.appendChild(el('div', 'or-banner-title', `✓ ${label}（决定已生效）`));
+            box.appendChild(el('div', 'or-banner-reason', `后续「通知 PM」失败：${String(notify.message || '').slice(0, 200) || '见错误码'}`));
+            box.appendChild(el('div', 'or-banner-code', `（错误码 ${String(notify.code || 'OWNER_DECISION_NOTIFY_FAILED')}）`));
+            box.hidden = false;
+          }
+        } catch { /* 提示失败不阻断 */ }
+      }
       if (!next) closeDialog(); else renderDialog();
     } catch (e) {
       showBanner(e);

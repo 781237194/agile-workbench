@@ -3545,6 +3545,10 @@ function statePayload(options = {}) {
     reconcileProjectCommStatesCached(store);
   }
   const active = store.projects.find((p) => p.id === store.activeProjectId) || store.projects[0] || null;
+  // B-230447-3d23：保留 raw 指针与「指向不存在」标记——渲染层要显 PROJECT_NOT_FOUND，
+  // 不能因为这里静默回退到 projects[0] 就永远看不到错误（activeProjectId 仍给已解析值供既有消费方）。
+  const activeIdRaw = String(store.activeProjectId || '');
+  const activeMissing = Boolean(activeIdRaw) && !store.projects.some((p) => String(p && p.id) === activeIdRaw);
   return {
     version: APP_VERSION,
     commit: APP_COMMIT,
@@ -3554,6 +3558,9 @@ function statePayload(options = {}) {
     stages: STAGES,
     projects: store.projects.map(publicProject),
     activeProjectId: active ? active.id : null,
+    activeProjectIdRaw: activeIdRaw || null,
+    activeProjectMissing: activeMissing,
+    activeProjectMissingId: activeMissing ? activeIdRaw : null,
     defaultRoot: path.join(ROOT, '项目'),
     // c9ac（T-20261118-083424-8e33）：把 ui 投影出来，面板据此**每帧热读** ui.sessionQueue.stallMs
     // （此前 statePayload 不带 ui，渲染层拿不到阈值 → 停滞判定恒 600000，属 AC4② 的接线缺口）。
@@ -11480,6 +11487,7 @@ ipcMain.handle('theme:metrics', async () => {
       }
       requirementWrite = requirementResult;
     }
+    // B-82e2：requirementWrite 上面只留了 ok/code/channel，通知结果要单独带出去（见下方 return）。
     ownerDecide(project, status, p.opinion, { roundKey });
     if (p.requirementId) {
       project.ownerReview.requirementId = decideRequirementId;
@@ -11544,6 +11552,12 @@ ipcMain.handle('theme:metrics', async () => {
       requirementWrite: requirementWrite
         ? { ok: requirementWrite.ok, code: requirementWrite.code, channel: requirementWrite.channel }
         : null,
+      // B-82e2（P1）：决定是否已生效 + 通知 PM 结果必须透传——旧实现把这两个字段丢了，
+      // 界面既不知道「已落账」，也拼不出「已通过（附：通知 PM 失败 code=X）」。
+      decided: Boolean(requirementWrite && requirementWrite.ok === true),
+      decidedAt: requirementWrite && requirementWrite.decided ? new Date().toISOString() : null,
+      notifyFailed: Boolean(requirementWrite && requirementWrite.notifyFailed === true),
+      ownerDecisionNotify: (requirementWrite && requirementWrite.ownerDecisionNotify) || null,
       roundKey,
       stage: deriveStage(current),
       workflowFile: outcome.workflowFile,

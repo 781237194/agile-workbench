@@ -8074,12 +8074,48 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
       });
     });
     if (!written.ok) return written;
+    // B-82e2（P1，同型 B-7e49）——**落账已成功**。旧实现这里 return 里引用了从未定义的
+    // `ownerDecisionNotify` → ReferenceError，被 IPC 当整单失败（界面弹「现在还不能提交这个决定」），
+    // 而 decisions/ownerReview 已经落盘、通知 PM 也从没跑过。现在：
+    //   ① 真正补上通知（唯一实现＝team.mjs owner-notify，与 legacy 分支同一执行体/文案/去重/审计）；
+    //   ② 通知/索引/快照等所有后续步骤一律**软失败**，失败码进 ownerDecisionNotify.code / warnings；
+    //   ③ 打点 [owner-decide] 给出每一步的 code，便于定位「哪一步抛错」。
+    let ownerDecisionNotify = null;
+    try {
+      const roundNow = Number(((existingTarget && existingTarget.row && existingTarget.row.round) || 1)) || 1;
+      const notifyRun = await withBootToken(name, 'pm', async (token) => runNode(layout.teamTool, [
+        'owner-notify', '--boot', token, '--project', name,
+        '--requirement', requirementId, '--status', status, '--round', String(roundNow),
+        '--opinion', String(opinion || '').slice(0, 1000), '--channel', String(channel || 'ui'), '--json',
+      ], { timeoutMs: TIMEOUTS.send }));
+      ownerDecisionNotify = (notifyRun && notifyRun.value && notifyRun.value.notify)
+        || { ok: false, code: 'OWNER_DECISION_NOTIFY_FAILED', message: String((notifyRun && (notifyRun.message || notifyRun.errorCode)) || 'owner-notify 无返回').slice(0, 300) };
+    } catch (error) {
+      ownerDecisionNotify = { ok: false, code: 'OWNER_DECISION_NOTIFY_FAILED', message: String((error && error.message) || error).slice(0, 300) };
+    }
+    console.log('[owner-decide] decision=' + status + ' requirement=' + requirementId
+      + ' notify=' + (ownerDecisionNotify && ownerDecisionNotify.ok ? 'ok' : ('fail:' + String((ownerDecisionNotify && ownerDecisionNotify.code) || 'UNKNOWN'))));
     const projectPath = String((input.project && input.project.path) || (registrationFor(name) || {}).path || '');
-    const projectIndex = await refreshProjectIndex(name, projectPath);
-    const indexWarning = projectIndexWarning(projectIndex);
+    let projectIndex = null;
+    let indexWarning = null;
+    try {
+      projectIndex = await refreshProjectIndex(name, projectPath);
+      indexWarning = projectIndexWarning(projectIndex);
+    } catch (error) {
+      indexWarning = { code: 'PROJECT_INDEX_REFRESH_FAILED', message: String((error && error.message) || error).slice(0, 300) };
+      console.log('[owner-decide] index=fail:' + indexWarning.code);
+    }
+    const warnings = [];
+    if (indexWarning) warnings.push(indexWarning);
+    if (ownerDecisionNotify && ownerDecisionNotify.ok === false) {
+      warnings.push({ code: String(ownerDecisionNotify.code || 'OWNER_DECISION_NOTIFY_FAILED'), message: '决定已生效，但通知 PM 失败：' + String(ownerDecisionNotify.message || '').slice(0, 200) });
+    }
     return {
       ok: true,
       code: 'OK',
+      // 明确告诉界面：决定已生效（通知失败只附在 ownerDecisionNotify 里，不是整体失败）。
+      decided: true,
+      notifyFailed: Boolean(ownerDecisionNotify && ownerDecisionNotify.ok === false),
       name,
       requirementId,
       status,
@@ -8088,7 +8124,7 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
       workflow: written.state || null,
       projectIndex,
       ownerDecisionNotify,
-      warnings: indexWarning ? [indexWarning] : [],
+      warnings,
     };
   }
 
