@@ -7088,6 +7088,14 @@ export async function cmdTask(args) {
     const taskId = String(args.id || args._[2] || '').trim();
     if (!taskId) fail('BAD_ID', 'task show 需要 --id <任务id>（例：task show --project P --boot T --id T-2026...）', { usage: 'task show --id <任务id>' });
     const task = loadTask(b.project, taskId);
+    // RC-1 AC③：--slim 给骨架（≤2KB，保留 id/title/status/owner/claimedAt/acceptance 摘要）；
+    // 默认与 --full 保持旧输出逐字节不变（4,376B 类大对象仍可用 --full 取全文）。
+    if (args.slim && !args.full) {
+      const slim = slimTaskOf(task);
+      if (args.json) process.stdout.write(JSON.stringify({ ok: true, slim: true, task: slim }) + '\n');
+      else textOut(JSON.stringify(slim, null, 2));
+      return;
+    }
     // AC1：--json 时 stdout 恰好一行 JSON（不夹日志、不 pretty），与 req audit 同口径；非 json 走格式化文本。
     if (args.json) process.stdout.write(JSON.stringify({ ok: true, task }) + '\n');
     else textOut(JSON.stringify(task, null, 2));
@@ -8522,6 +8530,98 @@ export function cmdReqOpinionAckBackfill(args) {
     { ok: true, ...res });
 }
 
+/** RC-1：显示视图判定（--full 保持旧输出；--slim 强制骨架）。 */
+function showViewIsFull(args) {
+  if (args.slim) return false;
+  return Boolean(args.full);
+}
+
+/** 顶层键计数（数组=长度，对象=键数，字符串=字节长）。 */
+function topKeyCountsOf(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (Array.isArray(v)) out[k] = v.length;
+    else if (v && typeof v === 'object') out[k] = Object.keys(v).length;
+    else if (typeof v === 'string') out[k] = Buffer.byteLength(v, 'utf8');
+    else out[k] = 1;
+  }
+  return out;
+}
+
+/** 需求正文 sha12（按 需求/<id>*.md 取第一个；找不到 → null）。 */
+function requirementDocSha12(projectPath, id) {
+  try {
+    const dir = path.join(String(projectPath || ''), '需求');
+    const names = fs.readdirSync(dir).filter((n) => n.endsWith('.md') && n.startsWith(String(id))).sort();
+    if (!names.length) return null;
+    return crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, names[0]))).digest('hex').slice(0, 12);
+  } catch { return null; }
+}
+
+/** 子任务骨架：只留消费方需要的轻字段 + 验收摘要（≤160 字）。 */
+function slimTaskOf(t) {
+  if (!t) return null;
+  const acceptance = String(t.acceptance || '');
+  return {
+    id: t.id || null,
+    title: t.title || null,
+    status: t.status || null,
+    owner: t.owner === undefined ? null : (t.owner || null),
+    priority: t.priority || null,
+    claimedAt: t.claimedAt === undefined ? null : (t.claimedAt || null),
+    updatedAt: t.updatedAt || null,
+    requirementId: t.requirementId === undefined ? null : (t.requirementId || null),
+    acceptance: acceptance ? (acceptance.length > 160 ? acceptance.slice(0, 160) + '…' : acceptance) : (t.acceptance === undefined ? null : ''),
+    acceptanceBytes: Buffer.byteLength(acceptance, 'utf8'),
+    rev: Number.isFinite(Number(t.rev)) ? Number(t.rev) : null,
+    topKeys: topKeyCountsOf(t),
+  };
+}
+
+/** 需求骨架（RC-1 AC①：六项必留 + 顶层键计数；重字段只给计数/摘要）。 */
+function slimRequirementShow(payload, project) {
+  const r = (payload && payload.requirement) || {};
+  const kids = Array.isArray(payload && payload.tasks) ? payload.tasks : [];
+  const workflow = (r.workflow && typeof r.workflow === 'object') ? r.workflow : {};
+  const phase = String(workflow.stage || workflow.phase || workflow.currentStage || workflow.status || r.status || '') || null;
+  return {
+    ok: true,
+    slim: true,
+    requirement: {
+      id: r.id || null,
+      title: r.title || null,
+      status: r.status || null,
+      phase,
+      sha12: requirementDocSha12(project && project.path, r.id || ''),
+      subtaskCount: kids.length,
+      // 轻字段（保留消费方需要，不消失；缺失显式 null）
+      project: r.project === undefined ? null : (r.project || null),
+      type: r.type || null,
+      requirementId: r.requirementId === undefined ? null : (r.requirementId || null),
+      priority: r.priority || null,
+      owner: r.owner === undefined ? null : (r.owner || null),
+      statusNote: r.statusNote === undefined ? null : (r.statusNote || null),
+      createdAt: r.createdAt || null,
+      updatedAt: r.updatedAt || null,
+      claimedAt: r.claimedAt === undefined ? null : (r.claimedAt || null),
+      doneAt: r.doneAt === undefined ? null : (r.doneAt || null),
+      rev: Number.isFinite(Number(r.rev)) ? Number(r.rev) : null,
+      // 重字段：只给字节/条数，不给全文
+      detailBytes: Buffer.byteLength(String(r.detail || ''), 'utf8'),
+      acceptanceBytes: Buffer.byteLength(String(r.acceptance || ''), 'utf8'),
+      storyBytes: Buffer.byteLength(String(r.story || ''), 'utf8'),
+      historyCount: Array.isArray(r.history) ? r.history.length : 0,
+      reviewsCount: Array.isArray(r.reviews) ? r.reviews.length : 0,
+      reviewKeys: topKeyCountsOf(r.review),
+      workflowKeys: topKeyCountsOf(workflow),
+      topKeys: topKeyCountsOf(r),
+    },
+    tasks: kids.map((t) => slimTaskOf(t)),
+    supplements: (payload.supplements || []).map((s) => ({ name: s.name || null, bytes: s.bytes || 0, sha12: s.sha12 || null, sections: s.sections || [], content: null })),
+    links: payload.links || null,
+  };
+}
+
 export function cmdReq(args) {
   const sub = args._[1] || 'list';
   // R-dba4（工具侧，T-20261115-142650-acfe）：需求行「大白话 copy」写入口（与壳层 requirement:copy-save 同判据）
@@ -8671,6 +8771,19 @@ export function cmdReq(args) {
       ...(links.problems.length ? [`\n链接自检：${links.problems.map((p) => p.code + ' ' + p.detail).join('；')}`] : []),
       ...(Boolean(args['with-supplement']) ? supplements.filter((s) => s.content).map((s) => `\n===== ${s.name} =====\n${s.content}`) : []),
     ].join('\n');
+    // RC-1：默认骨架视图（--full 保持旧输出逐字节不变；--slim 显式骨架）。
+    if (!showViewIsFull(args)) {
+      const slim = slimRequirementShow(payload, project);
+      const slimHuman = [
+        JSON.stringify(slim, null, 2),
+        supplements.length
+          ? `\n增补卷（${supplements.length}）：\n${slim.supplements.map((s) => `- ${s.name}（${s.bytes}B/sha256 ${s.sha12}）小节：${(s.sections || []).join('、')}`).join('\n')}`
+          : '\n增补卷：无',
+        ...(links.problems.length ? [`\n链接自检：${links.problems.map((p) => p.code + ' ' + p.detail).join('；')}`] : []),
+      ].join('\n');
+      out(args, slimHuman, slim);
+      return;
+    }
     out(args, human, payload);
     return;
   }
