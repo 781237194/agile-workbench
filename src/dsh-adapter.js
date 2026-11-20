@@ -290,6 +290,14 @@ const DSH_SCAN_DEFAULT_START = 49152; // P1-4：DSH 随机端口落在 ephemeral
 const DSH_SCAN_DEFAULT_END = 65535;
 const DSH_SCAN_MAX_PROBE_PORTS = 12;
 const DSH_DISCOVERY_MAX_LISTENERS = 40; // P1-4：netstat 监听端口候选上限（进程反向匹配失败时兜底）
+// B-33b9（P0 DSH 地址自愈）：监听端口枚举 + 特征校验的总预算。
+// 口径来源=任务卡 AC①②：netstat ≤300ms、探活并发 ≤8/超时 400ms、发现链总预算 ≤1.5s。
+// 不再扫 49152–65535 全段（Owner 现场：真正端口 55263 从未被探测过）。
+const DSH_NETSTAT_BUDGET_MS = 300;
+const DSH_LISTENER_PROBE_CONCURRENCY = 8;
+const DSH_LISTENER_PROBE_TIMEOUT_MS = 400;
+const DSH_LISTENER_BUDGET_MS = 1500;
+const DSH_LISTENER_MAX_CANDIDATES = 40;
 
 function normalizeLocalBaseUrl(raw) {
   let text = String(raw == null ? '' : raw).trim();
@@ -928,8 +936,9 @@ function addCandidate(candidates, seen, rawUrl, source, priority, evidence) {
   return true;
 }
 
-async function probeCandidates(candidates, timeoutMs) {
+async function probeCandidates(candidates, timeoutMs, concurrency) {
   const results = new Array(candidates.length);
+  const limit = Number(concurrency) > 0 ? Number(concurrency) : DSH_DISCOVERY_PROBE_CONCURRENCY;
   let cursor = 0;
   const worker = async () => {
     while (cursor < candidates.length) {
@@ -939,9 +948,39 @@ async function probeCandidates(candidates, timeoutMs) {
       results[index] = { ...candidate, ...probe };
     }
   };
-  const workers = Array.from({ length: Math.min(DSH_DISCOVERY_PROBE_CONCURRENCY, candidates.length) }, worker);
+  const workers = Array.from({ length: Math.min(limit, candidates.length) }, worker);
   await Promise.all(workers);
   return results.filter(Boolean);
+}
+
+/**
+ * B-33b9 AC⑤：进程发现以 netstat 的 PID 列为主证据。
+ * - 命中监听端口时：pid→端口 明确（Electron 形态也能定位），不再出现「dsh 进程=0 个」；
+ * - 未命中时：如实写「未能识别 DSH 进程（形态：Electron/未知）」，并给出监听端口数量。
+ */
+function processInfoFromListeners(listenerInfo, hitProbe) {
+  const listeners = (listenerInfo && Array.isArray(listenerInfo.listeners)) ? listenerInfo.listeners : [];
+  const hit = hitProbe || null;
+  const hitPid = hit && hit.pid ? Number(hit.pid) : 0;
+  const ports = hit ? [{ port: Number(hit.port) || 0, pid: hitPid, baseUrl: hit.baseUrl }] : [];
+  const identified = Boolean(hit);
+  const form = identified ? 'Electron/netstat' : (listeners.length ? 'Electron/监听端口' : '未知');
+  return {
+    ok: Boolean(listenerInfo && listenerInfo.ok),
+    code: identified ? 'OK' : (listenerInfo && listenerInfo.ok ? 'DSH_PROCESS_NOT_IDENTIFIED' : 'DSH_NETSTAT_FAILED'),
+    method: 'netstat',
+    processes: [],
+    dshProcesses: 0,
+    identified,
+    form,
+    ports,
+    argPorts: [],
+    listenerPorts: listeners,
+    error: listenerInfo && listenerInfo.error ? String(listenerInfo.error).slice(0, 240) : '',
+    message: identified
+      ? '已从 netstat 监听端口识别 DSH：pid ' + hitPid + ' 监听 ' + hit.port
+      : '未能识别 DSH 进程（形态：' + form + '），已取到 ' + listeners.length + ' 个本机监听端口'
+  };
 }
 
 function pickBestProbe(probes, savedBaseUrl) {
@@ -988,6 +1027,9 @@ async function discoverDshWeb(options = {}) {
   const maxCandidates = Number(options.maxCandidates) > 0 ? Number(options.maxCandidates) : DSH_DISCOVERY_MAX_CANDIDATES;
   const explicitBaseUrl = normalizeLocalBaseUrl(options.explicitBaseUrl || '');
   const explicitSource = String(options.explicitSource || 'explicit');
+  // B-33b9：发现链总预算（默认 1.5s）——首屏前只做「监听端口枚举 + 特征校验」。
+  const totalBudgetMs = Number(options.totalBudgetMs) > 0 ? Number(options.totalBudgetMs) : DSH_LISTENER_BUDGET_MS;
+  const deadline = started + totalBudgetMs;
   const scanStart = Number(options.scanRange && options.scanRange.start) > 0 ? Number(options.scanRange.start) : DSH_SCAN_DEFAULT_START;
   const scanEnd = Number(options.scanRange && options.scanRange.end) > 0 ? Number(options.scanRange.end) : DSH_SCAN_DEFAULT_END;
 
@@ -998,10 +1040,18 @@ async function discoverDshWeb(options = {}) {
     quickCandidates: 0,
     quickProbeMs: 0,
     quickHit: false,
+    listenerMs: 0,
+    listenerCount: 0,
+    listenerProbes: 0,
+    listenerHit: false,
+    listenerBudgetHit: false,
+    totalBudgetMs,
     processMs: 0,
     processSkipped: false,
     waveProbeMs: 0,
     rangeProbeMs: 0,
+    listenerProbeMs: 0,
+    listenerWaveMs: 0,
     scanAttempts: 0,
     scanPorts: 0,
     scanElapsedMs: 0,
@@ -1060,6 +1110,32 @@ async function discoverDshWeb(options = {}) {
     stats.processMs = Date.now() - processStarted;
   } else {
     stats.processSkipped = true;
+    // 快通道（skipProcessDiscovery）：仍用 netstat 拿监听端口（约 100ms，不做 WMI/进程反查）。
+    // Owner 0321 现场：DSH 55263 在首轮被跳过、后台又被冷却吃掉 → 应用永久离线；这条兜底让 55263 直接命中。
+    if (options.skipListenerProbe !== true) {
+      const listenerStarted = Date.now();
+      try {
+        const listeners = await listWindowsListeners({
+          timeoutMs: Number(options.listenerTimeoutMs) > 0 ? Number(options.listenerTimeoutMs) : 2500
+        });
+        const listenerPorts = (listeners && listeners.ok ? listeners.listeners : [])
+          .filter((l) => l && Number(l.port) >= 1024)
+          .slice(0, DSH_DISCOVERY_MAX_LISTENERS)
+          .map((l) => ({ port: l.port, pid: l.pid, baseUrl: l.baseUrl }));
+        processInfo = {
+          ok: false,
+          code: 'DSH_PROCESS_SKIPPED',
+          method: 'netstat-only',
+          processes: [],
+          ports: [],
+          argPorts: [],
+          listenerPorts,
+          error: ''
+        };
+        stats.listenerPorts = listenerPorts.length;
+      } catch { /* 兜底失败不影响主流程 */ }
+      stats.listenerProbeMs = Date.now() - listenerStarted;
+    }
   }
   // 进程/netstat/默认端口候选只在权威源落空时才加（命中就完全不查进程）。
   if (!best) {
@@ -1078,6 +1154,19 @@ async function discoverDshWeb(options = {}) {
   let rangeProbed = false;
   let scan = null;
   const canProbeBeyond = !explicitBaseUrl && options.includeRange !== false;
+  // 快通道 netstat 候选：本机监听端口几十个，DSH 可能排在后面——必须全量并发探，不能按 maxCandidates 截断。
+  if (!best && processInfo.method === 'netstat-only') {
+    const listenerWave = candidates.filter((c) => c && c.source === 'netstat-port');
+    if (listenerWave.length) {
+      const listenerWaveStarted = Date.now();
+      probes = probes.concat(await probeCandidates(
+        listenerWave,
+        Math.min(probeTimeoutMs, 600)
+      ));
+      stats.listenerWaveMs = Date.now() - listenerWaveStarted;
+      best = pickBestProbe(probes, savedBaseUrl);
+    }
+  }
   if (!best) {
     const wave1 = candidates.slice(0, Math.min(DSH_DISCOVERY_MAX_WAVE1, maxCandidates));
     if (wave1.length) {
