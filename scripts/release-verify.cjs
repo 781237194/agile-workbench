@@ -25,6 +25,7 @@ const zlib = require('node:zlib');
 const { execFileSync } = require('node:child_process');
 // R-5099：GitHub asset / 四渠道同源的纯判定放在 lib 里（夹具可直测「同 size 不同内容必红」）。
 const { assetVerdict, fourWayVerdict, payloadVerdict, sha256 } = require('./release-verify-lib.cjs');
+const { cdnVerdict, httpGetWithRedirects } = require('./cdn-diagnose.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
@@ -136,12 +137,27 @@ function githubToken() {
     check('C4', 'CDN 校验（--skip-cdn）', true, { skipped: true });
   } else {
     const url = `https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v${version}/%E5%8F%91%E5%B8%83/pm-workbench-${version}.zip`;
+    // 98ea：CDN 失败必须可分类——jsDelivr 常 301 到 raw.githubusercontent.com；若该域名不可达，
+    // 旧实现只报 ECONNRESET/HTTP_TIMEOUT，无法区分「网络受限」与「包内容不一致」。
+    let cdnDiag = null;
     try {
-      const res = await httpGet(url, { timeout: 90000 });
+      const res = await httpGetWithRedirects(url, { timeout: 90000 });
       cdnSha = sha256Buf(res.body);
-      check('C4', 'CDN 下载包 sha256 与本地一致', res.status === 200 && cdnSha === localSha, { status: res.status, cdnSha, localSha, bytes: res.body.length });
+      cdnDiag = cdnVerdict({ status: res.status, bodyLength: res.body.length, localSha, downloadedSha: cdnSha, redirects: res.redirects || [] });
+      check('C4', 'CDN 下载包 sha256 与本地一致（诊断：' + cdnDiag.category + '）', cdnDiag.ok, {
+        category: cdnDiag.category, code: cdnDiag.code, hint: cdnDiag.hint,
+        status: res.status, cdnSha, localSha, bytes: res.body.length, redirects: (res.redirects || []).slice(0, 6),
+      });
     } catch (e) {
-      check('C4', 'CDN 下载包 sha256 与本地一致', false, { error: String(e && e.message) });
+      cdnDiag = cdnVerdict({ error: e, redirects: (e && e.redirects) || [] });
+      check('C4', 'CDN 下载包 sha256 与本地一致（诊断：' + cdnDiag.category + '）', false, {
+        category: cdnDiag.category, code: cdnDiag.code, hint: cdnDiag.hint,
+        error: String((e && e.message) || e).slice(0, 200), redirects: cdnDiag.detail && cdnDiag.detail.redirects,
+      });
+    }
+    if (cdnDiag && !cdnDiag.ok) {
+      rows[rows.length - 1].category = cdnDiag.category;
+      rows[rows.length - 1].hint = cdnDiag.hint;
     }
   }
 
@@ -226,6 +242,8 @@ function githubToken() {
   }
 
   const pass = rows.filter((r) => r.ok).length;
+  const failedRow = rows.find((r) => !r.ok && r.category);
+  if (failedRow) console.log('\n[诊断] ' + failedRow.id + ' ' + failedRow.category + (failedRow.hint ? ' · ' + failedRow.hint : ''));
   console.log(`\n${pass}/${rows.length} PASS  版本 ${version}`);
   const outFile = path.join(ROOT, '_tmp', `release-verify-${version}.json`);
   try {
