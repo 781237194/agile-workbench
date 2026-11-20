@@ -1450,7 +1450,7 @@ function bindMaintPanel() {
   const resultEl = panel.querySelector('[data-maint-result]');
   let state = { mode: 'reset', json: null };
   const say = (msg, bad) => { if (!resultEl) return; resultEl.hidden = false; resultEl.textContent = String(msg || ''); resultEl.style.color = bad ? 'var(--bad, #d9534f)' : ''; };
-  const renderDryRun = (json) => {
+  const renderDryRun = (json, meta = {}) => {
     if (!json) { say('干跑失败：没有拿到清单（看主进程日志）', true); return; }
     state.json = json;
     const items = Array.isArray(json.items) ? json.items : [];
@@ -1460,14 +1460,20 @@ function bindMaintPanel() {
     if (applyEl) applyEl.hidden = false;
     if (verifyEl) verifyEl.hidden = false;
     if (confirmEl) confirmEl.placeholder = json.mode === 'reset' ? '重置' : '彻底卸载';
-    say(`干跑完成（未删除任何文件）。确认短语：${json.confirmExpected || (json.mode === 'reset' ? '重置' : '彻底卸载')}`);
+    const verdict = String(json.verdict || json.result || 'DRY_RUN');
+    const logHint = meta && meta.logFile ? ` ｜ 日志：${meta.logFile}（${meta.logBytes}B）` : (meta && meta.logError ? ' ｜ 日志写入失败：' + meta.logError : '');
+    say(`干跑完成（未删除任何文件）：判定 ${verdict} · 待处理 ${lines.length} 项 · 确认短语：${json.confirmExpected || (json.mode === 'reset' ? '重置' : '彻底卸载')}${logHint}`);
   };
   const dryRun = async (mode) => {
     state.mode = mode;
     try {
       const r = await window.workbench.maintRun({ mode, dryRun: true });
-      if (!r || !r.json) { say(`干跑失败（code=${(r && r.code) || '?'}）：${(r && r.stdoutTail) || ''}`, true); return; }
-      renderDryRun(r.json);
+      if (!r || r.ok === false || !r.json) {
+        const why = (r && (r.message || r.stdoutTail || r.stderrTail)) || '';
+        say(`干跑失败（code=${(r && r.code) || '?'}）：${why}` + (r && r.logFile ? ` ｜ 日志：${r.logFile}（${r.logBytes}B）` : ''), true);
+        return;
+      }
+      renderDryRun(r.json, r);
     } catch (e) { say('干跑异常：' + String((e && e.message) || e), true); }
   };
   if (panel) panel.addEventListener('click', async (event) => {

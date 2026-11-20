@@ -29,6 +29,8 @@ const perfCache = require('./perf-cache.js');
 const CrashGuard = require('./crash-guard.js');
 // R-b34a 批5：目录扫描结果缓存（files:list 等递归扫描用；键=目录 mtime+size，3s TTL 兜底）
 const dirScanCache = require('./dir-scan-cache.js');
+// B-20261120-163528-ebbb（P0）：维护调用「取最后一个完整 JSON」+ install-logs 调用日志（纯逻辑，Node 可测）
+const maintLog = require('./maint-log.js');
 const FILES_LIST_MAX_DEPTH = 4;
 const FILES_LIST_MAX_FILES = 600;
 const FILES_LIST_TTL_MS = 3000;
@@ -415,14 +417,47 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
   });
   // ── R-2de7 一键重置 / 彻底卸载（GUI 维护区；默认干跑，执行必须逐字短语）────
   const maintSandbox = () => String(process.env.TEAM_SELFTEST || '') === '1' || String(process.env.AWB_MAINT_SANDBOX || '') === '1';
-  const runMaintScript = (scriptFile, args, timeoutMs) => new Promise((resolve) => {
+  /**
+   * 跑维护脚本（install.ps1 / awb-diag.ps1）并落调用日志。
+   * B-ebbb（P0）：①JSON 用「取最后一个完整对象」解析（容忍 AWB_MAINT_JSON 前缀、尾随日志行、截断自动闭合）；
+   *              ②每次调用（**含 --dry-run**）写 <logDir>/install-<ts>.log：时间/命令/工作目录/退出码/stdout 全文/stderr/耗时，
+   *                保证非 0 字节；日志写失败只回传 logError，不影响维护本身。
+   */
+  const runMaintScript = (scriptFile, args, timeoutMs, logDir) => new Promise((resolve) => {
     const { execFile } = require('node:child_process');
-    execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile, ...args], { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
+    const startedAt = Date.now();
+    const startedIso = new Date(startedAt).toISOString();
+    const cwd = (() => { try { return process.cwd(); } catch { return ''; } })();
+    const fullArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile, ...args];
+    execFile('powershell.exe', fullArgs, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
       const out = String(stdout || '');
-      let json = null;
-      const at = out.indexOf('AWB_MAINT_JSON:');
-      if (at >= 0) { try { json = JSON.parse(out.slice(at + 15).trim()); } catch { json = null; } }
-      resolve({ code: error ? (typeof error.code === 'number' ? error.code : (error.killed ? 124 : 1)) : 0, stdout: out, stderr: String(stderr || ''), json });
+      const errText = String(stderr || '');
+      const code = error ? (typeof error.code === 'number' ? error.code : (error.killed ? 124 : 1)) : 0;
+      const parsed = maintLog.extractLastJson(out);
+      let logFile = '';
+      let logBytes = 0;
+      let logError = '';
+      try {
+        const w = maintLog.writeMaintLog(logDir, {
+          at: startedIso,
+          command: ['powershell.exe', ...fullArgs].join(' '),
+          cwd,
+          exitCode: code,
+          durationMs: Date.now() - startedAt,
+          stdout: out,
+          stderr: errText,
+        });
+        logFile = w.file;
+        logBytes = w.bytes;
+      } catch (e) { logError = String((e && e.message) || e); }
+      try {
+        appendEvent({
+          role: 'system', sessionId: 'shell', action: 'maint_run', project: '', target: String(args[0] || ''),
+          note: `code=${code} json=${parsed.json ? 'ok' : 'none'}(${parsed.source}) log=${logFile ? path.basename(logFile) + ':' + logBytes + 'B' : 'FAILED'}`,
+          data: { exitCode: code, durationMs: Date.now() - startedAt, jsonSource: parsed.source, logFile, logBytes, logError },
+        });
+      } catch { /* 审计失败不影响维护 */ }
+      resolve({ code, stdout: out, stderr: errText, json: parsed.json, jsonSource: parsed.source, logFile, logBytes, logError });
     });
   });
   rawIpcHandle('maint:run', async (_e, payload) => {
@@ -430,22 +465,41 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
     const mode = String(p.mode || 'reset').toLowerCase() === 'uninstall' ? 'uninstall' : 'reset';
     const dryRun = p.dryRun !== false;
     // 沙盘/自检下允许 payload.root 覆盖目标目录（仅供 tester/CDP 用假安装树判 GUI）
-    const rootOverride = p.root && maintSandbox() ? String(p.root) : '';
+    // 夹具便利：AWB_MAINT_SANDBOX=1 时可用 AWB_MAINT_ROOT 指定默认安装根（避免测试把日志写进真实仓库根）
+    const sandboxRootDefault = maintSandbox() ? String(process.env.AWB_MAINT_ROOT || '') : '';
+    const rootOverride = (p.root && maintSandbox() ? String(p.root) : '') || sandboxRootDefault;
     const args = [mode === 'reset' ? '-Reset' : '-Uninstall', '-InstallDir', rootOverride || ROOT, '-Json'];
     if (dryRun) args.push('-DryRun'); else args.push('-Yes');
     if (!dryRun && p.confirm) args.push('-Confirm', String(p.confirm));
     if (p.purge) args.push('-Purge');
     if (p.keepData) args.push('-KeepData');
     if (maintSandbox()) args.push('-Sandbox');
-    const r = await runMaintScript(path.join(ROOT, 'install.ps1'), args, 10 * 60 * 1000);
-    return { ok: Boolean(r.json && r.json.verdict), code: r.code, json: r.json, stdoutTail: r.stdout.slice(-500), stderrTail: r.stderr.slice(-500) };
+    const maintLogDir = path.join(rootOverride || ROOT, 'install-logs');
+    const r = await runMaintScript(path.join(ROOT, 'install.ps1'), args, 10 * 60 * 1000, maintLogDir);
+    // B-ebbb（P0）：ok 必须反映「真的成功」。
+    //  · 干跑（dryRun）：install.ps1 在「有需人工项/SKIPPED_SANDBOX」时按设计 exit 2，但清单是成功的计划 →
+    //    只要解析出 JSON 且有清单就 ok（旧实现把「有没有 verdict」当成功，另一头又把 code 当失败，两处都误报）。
+    //  · 真执行：必须退出码 0 且判定 CLEAN/OK；code=2 + RESIDUE/LOCK_HELD 一律 ok:false（界面走「未完全干净」）。
+    const maintVerdict = String((r.json && (r.json.verdict || r.json.result)) || '');
+    const maintOk = dryRun
+      ? Boolean(r.json && (Array.isArray(r.json.items) || maintVerdict))
+      : (r.code === 0 && ['CLEAN', 'OK'].includes(maintVerdict));
+    return {
+      ok: maintOk, code: r.code, json: r.json, jsonSource: r.jsonSource,
+      logFile: r.logFile, logBytes: r.logBytes, logError: r.logError,
+      stdoutTail: r.stdout.slice(-500), stderrTail: r.stderr.slice(-500),
+    };
   });
   rawIpcHandle('maint:verify', async (_e, payload) => {
     const p = payload && typeof payload === 'object' ? payload : {};
     const verifyRoot = p.root && maintSandbox() ? String(p.root) : ROOT;
     const args = ['-VerifyClean', '-Mode', String(p.mode || 'reset'), '-Root', verifyRoot, '-Json'];
-    const r = await runMaintScript(path.join(ROOT, '发布', 'tools', 'awb-diag.ps1'), args, 120000);
-    return { ok: r.code === 0 || r.code === 2, code: r.code, json: r.json, stdoutTail: r.stdout.slice(-500) };
+    const r = await runMaintScript(path.join(ROOT, '发布', 'tools', 'awb-diag.ps1'), args, 120000, path.join(verifyRoot, 'install-logs'));
+    return {
+      ok: r.code === 0 || r.code === 2, code: r.code, json: r.json, jsonSource: r.jsonSource,
+      logFile: r.logFile, logBytes: r.logBytes, logError: r.logError,
+      stdoutTail: r.stdout.slice(-500),
+    };
   });
   // ── e610 AC6：自动检查（只检查/只提示小圆点，绝不自动下载或安装）────────────────
   // 开关存 workbench.json 的 ui.autoUpgradeCheck（与 ui.zoom 同一写入口）；渲染层按 intervalMs 定时只调 upgrade-check。
