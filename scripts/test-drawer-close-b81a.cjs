@@ -74,6 +74,19 @@ async function open(h, opener, drawer) {
   }
   return h.evalJs(`({hidden:(document.querySelector(${JSON.stringify(drawer)})||{}).hidden===true, mask:(document.querySelector('#drawer-mask')||{}).hidden===true})`);
 }
+async function probeRefresh(h) {
+  const before = await h.evalJs('Number(window.__refreshCount||0)');
+  await h.evalJs(`document.querySelector('#btn-refresh')?.click(); 'ok'`);
+  await sleep(1500);
+  const after = await h.evalJs('Number(window.__refreshCount||0)');
+  let disabled = true;
+  for (let i = 0; i < 25; i += 1) {
+    disabled = await h.evalJs(`Boolean((document.querySelector('#btn-refresh')||{}).disabled)`);
+    if (!disabled) break;
+    await sleep(400);
+  }
+  return { before, after, disabled };
+}
 async function probeClose(h, opener, drawer, btnSel) {
   return h.evalJs(`(function(){
     const d = document.querySelector(${JSON.stringify(drawer)});
@@ -94,6 +107,8 @@ async function probeClose(h, opener, drawer, btnSel) {
     await sleep(4000);
     const initial = await h.evalJs(`({name:(document.querySelector('#workspace-name')||{}).textContent, failures:(window.__bindFailures||[]).length})`);
     check('D0', `首屏卡片显示项目名（app:state 有数据）+ 无绑定失败`, initial && initial.name && !/未选择/.test(initial.name) && initial.failures === 0, initial);
+    const rf0 = await probeRefresh(h);
+    check('D0-refresh', '刷新按钮有效（点击 → refresh 计数 +1；DSH 离线时可能长时间占按钮，属 B-6bb5 范围）', rf0.after > rf0.before, rf0);
     // D1 三个抽屉逐个：打开 → 量 rect/命中 → 点 × → 断言关闭
     const cases = [
       ['#btn-board', 'project', '#project-drawer', '#project-drawer [data-close-drawer="project"]'],

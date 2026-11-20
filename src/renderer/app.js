@@ -2486,6 +2486,9 @@ function memberStateView(stateStr, fallback) {
 }
 
 async function refresh() {
+  // B-231006-b81a 回归基线诊断：刷新是否真的执行（Owner 报「刷新按钮也失效」）。
+  // 只读计数，不参与业务；夹具点击 #btn-refresh 后断言它递增。
+  try { window.__refreshCount = Number(window.__refreshCount || 0) + 1; } catch { /* ignore */ }
   if (!window.workbench) {
     renderBridgeAlert();
     toast('preload 没有加载，工作台 API 不可用', 'bad');
@@ -16533,8 +16536,8 @@ const bindFailures = [];
 try { window.__bindFailures = bindFailures; } catch { /* ignore */ }
 function auditBindFailure(name, e) {
   const text = `[bind] ${name} 初始化失败：${String((e && e.message) || e)}`;
-  bindFailures.push({ at: new Date().toISOString(), block: String(name), message: String((e && e.message) || e) });
-  try { console.error(text); } catch { /* ignore */ }
+  bindFailures.push({ at: new Date().toISOString(), block: String(name), message: String((e && e.message) || e), stack: String((e && e.stack) || '').slice(0, 900) });
+  try { console.error(text + '\n' + String((e && e.stack) || '')); } catch { /* ignore */ }
   try {
     if (window.workbench && typeof window.workbench.notifyAudit === 'function') {
       window.workbench.notifyAudit({ level: 'error', text, source: 'bind-failure' });
@@ -16565,6 +16568,20 @@ function bindPanelOpeners() {
     if (!el || el.dataset.drawerOpenerBound === '1') continue;
     el.dataset.drawerOpenerBound = '1';
     bindBlock('drawer-open:' + sel, () => el.addEventListener('click', () => setDrawer(name)));
+  }
+}
+
+/** 关键按钮兜底：刷新。Owner 回归基线要求「刷新 / 三个 × / 项目面板」同时可用，
+ *  bind() 任意位置抛错时由 boot 的兜底再绑一次（幂等标记，成功路径不会重复绑）。 */
+function bindCriticalControls() {
+  const btn = $('#btn-refresh');
+  if (btn && btn.dataset.refreshBound !== '1') {
+    btn.dataset.refreshBound = '1';
+    bindBlock('refresh', () => btn.addEventListener('click', async (e) => {
+      const target = e.currentTarget;
+      if (target) target.disabled = true;
+      try { await refreshAll({ toast: true }); } catch (err) { toast('刷新失败：' + humanError(err.message), 'bad'); } finally { if (target) target.disabled = false; }
+    }));
   }
 }
 
@@ -16618,15 +16635,7 @@ function bind() {
   $('#btn-clean-missing')?.addEventListener('click', () => cleanMissingProjects());
   $('#btn-empty-new')?.addEventListener('click', openNewProject);
   $('#btn-side-restore')?.addEventListener('click', () => openRestoreModal());
-  $('#btn-refresh')?.addEventListener('click', async (e) => {
-    const btn = e.currentTarget;
-    if (btn) btn.disabled = true;
-    try {
-      await refreshAll({ toast: true });
-    } catch (err) {
-      toast('刷新失败：' + humanError(err.message), 'bad');
-    } finally { if (btn) btn.disabled = false; }
-  });
+  bindCriticalControls();
   $('#btn-folder-top')?.addEventListener('click', openProjectFolder);
   $('#metrics')?.addEventListener('click', () => { tickMetrics(); });
   $('#btn-dsh-mode')?.addEventListener('click', () => reloadDshView());
@@ -17743,6 +17752,7 @@ window.__themeState = themeState; window.__themeProbe = themeProbe; } catch { /*
   bindBlock('bind', bind);
   bindPanelControls();
   bindPanelOpeners();
+  bindCriticalControls();
   renderBridgeAlert();
   await refresh();
   warnStore();
