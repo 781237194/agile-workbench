@@ -52,12 +52,34 @@ function writeIndex(p, idx) {
 }
 
 /** 追加一条消息；返回 seq。同一角色并发时 seq 可能重复——调用方应容错（读取按 id 去重）。 */
+/** 读文件末条消息的 seq（index 丢失/落后时兜底，防止 seq 从 1 重开）。 */
+function lastMessageSeq(p) {
+  try {
+    const st = fs.statSync(p.jsonl);
+    const len = Math.min(st.size, 64 * 1024);
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(p.jsonl, 'r');
+    try { fs.readSync(fd, buf, 0, len, st.size - len); } finally { fs.closeSync(fd); }
+    for (const line of buf.toString('utf8').split(/\r?\n/).reverse()) {
+      if (!line.trim()) continue;
+      try {
+        const r = JSON.parse(line);
+        if (r && r.type !== 'event' && Number.isFinite(Number(r.seq))) return Number(r.seq);
+      } catch { /* skip */ }
+    }
+  } catch { /* missing */ }
+  return 0;
+}
+
 function appendMessage(mailRoot, role, row) {
   const p = pathsFor(mailRoot, role);
   fs.mkdirSync(p.dir, { recursive: true });
   const idx = readIndex(p);
-  const seq = Math.min(SEQ_LIMIT, (idx.seqMax || 0) + 1);
-  const line = JSON.stringify({ ...row, seq }) + '\n';
+  // ③ seq 接续：index.seqMax 与文件末行取最大值（防止 index 丢失/迁移后重开导致 1..N 重号）。
+  const seq = Math.min(SEQ_LIMIT, Math.max(idx.seqMax || 0, lastMessageSeq(p)) + 1);
+  // ② 新追加必须写 at（与迁移行同形；旧消息只有 ts/deliveredAt）。
+  const at = String(row.at || row.ts || row.deliveredAt || new Date().toISOString());
+  const line = JSON.stringify({ ...row, at, seq }) + '\n';
   fs.appendFileSync(p.jsonl, line, 'utf8');
   idx.seqMin = idx.seqMin || seq;
   idx.seqMax = seq;
@@ -291,6 +313,59 @@ function migrateRole(mailRoot, role, { dryRun = false } = {}) {
   return result;
 }
 
+
+/**
+ * 修复历史邮箱：补齐 at、按 (seq, at, id) 重排 seq 1..N、事件 refSeq 同步映射；
+ * 写前备份到 邮箱/_legacy/<role>/messages.jsonl.pre-repair-<ts>，写后更新 index 并记 邮箱修复.jsonl。
+ */
+function repairRole(mailRoot, role, { dryRun = false, now = Date.now() } = {}) {
+  const p = pathsFor(mailRoot, role);
+  const out = { role, rows: 0, dupSeq: 0, missingAt: 0, events: 0, dryRun: Boolean(dryRun), backup: '', audit: false };
+  if (!fs.existsSync(p.jsonl)) return out;
+  const messages = [];
+  const events = [];
+  for (const line of fs.readFileSync(p.jsonl, 'utf8').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let row = null;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (!row) continue;
+    if (row.type === 'event') events.push(row); else if (row.id) messages.push(row);
+  }
+  out.rows = messages.length;
+  out.events = events.length;
+  out.missingAt = messages.filter((r) => !String(r.at || '').trim()).length;
+  out.dupSeq = messages.length - new Set(messages.map((r) => Number(r.seq) || 0)).size;
+  messages.sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0) || String(a.at || a.ts || '').localeCompare(String(b.at || b.ts || '')) || String(a.id).localeCompare(String(b.id)));
+  const seqOf = new Map();
+  messages.forEach((r, i) => {
+    r.seq = i + 1;
+    if (!String(r.at || '').trim()) r.at = String(r.ts || r.deliveredAt || new Date(now).toISOString());
+    seqOf.set(String(r.id), r.seq);
+  });
+  for (const e of events) {
+    const ref = String(e.refId || '');
+    if (ref && seqOf.has(ref)) e.refSeq = seqOf.get(ref);
+  }
+  if (dryRun) return out;
+  const ts = new Date(now).toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  fs.mkdirSync(p.legacyDir, { recursive: true });
+  out.backup = path.join(p.legacyDir, `messages.jsonl.pre-repair-${ts}`);
+  fs.copyFileSync(p.jsonl, out.backup);
+  const tmp = p.jsonl + '.tmp';
+  fs.writeFileSync(tmp, [...messages, ...events].map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+  fs.renameSync(tmp, p.jsonl);
+  const idx = readIndex(p);
+  idx.seqMin = messages.length ? 1 : 0;
+  idx.seqMax = messages.length;
+  idx.bytes = Buffer.byteLength(fs.readFileSync(p.jsonl, 'utf8'));
+  writeIndex(p, idx);
+  try {
+    fs.mkdirSync(mailRoot, { recursive: true });
+    fs.appendFileSync(path.join(mailRoot, '邮箱修复.jsonl'), JSON.stringify({ at: new Date(now).toISOString(), event: 'mail_seq_reindex', role, rows: out.rows, dupSeq: out.dupSeq, missingAt: out.missingAt, backup: out.backup }) + '\n', 'utf8');
+    out.audit = true;
+  } catch { /* 审计失败不阻断 */ }
+  return out;
+}
 function statsRole(mailRoot, role) {
   const p = pathsFor(mailRoot, role);
   const idx = readIndex(p);
@@ -307,5 +382,5 @@ function statsRole(mailRoot, role) {
 
 export {
   pathsFor, readIndex, writeIndex, appendMessage, appendEvent, readTail, readAll,
-  archiveCold, migrateRole, statsRole, monthOf, HOT_DAYS,
+  archiveCold, migrateRole, statsRole, repairRole, monthOf, HOT_DAYS,
 };

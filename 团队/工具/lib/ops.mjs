@@ -2180,6 +2180,11 @@ export function markReadAll(project, role, { actor = 'owner', source = 'ui-mark-
   const ids = [];
   for (const row of readProjectMail(role, name)) {
     if (!row.state.unread) continue; // 旧消息按 M7 视为已读：不补字段、不动旧协议箱
+    // 批②-2：JSONL 角色没有单文件句柄——走 readMessage（追加 read 事件）保持与 read/ack 同源。
+    if (!row.file) {
+      try { readMessage(role, row.msg.id); ids.push(row.msg.id); } catch { /* 单条失败不阻断其余 */ }
+      continue;
+    }
     writeJson(row.file, { ...row.msg, readAt: now });
     ids.push(row.msg.id);
   }
@@ -5126,7 +5131,7 @@ export function cmdMail(args) {
   const sub = String((args._ && args._[1]) || '').toLowerCase();
   const sandbox = String(process.env.TEAM_SELFTEST || '') === '1';
   const enforce = String(process.env.TEAM_MAIL_ENFORCE || '') === '1';
-  const writeAction = sub === 'migrate' || sub === 'archive';
+  const writeAction = sub === 'migrate' || sub === 'archive' || sub === 'repair';
   // dry-run 只读：不要求 pm/owner 令牌（PM 先看报数）；真正落地（--yes 且非 --dry-run）才校验。
   const dryRunRequested = !args.yes || Boolean(args['dry-run']);
   if (writeAction && !dryRunRequested && (!sandbox || enforce)) {
@@ -5139,7 +5144,7 @@ export function cmdMail(args) {
   const one = String(args.role || '').trim();
   const mailRoot = PATHS.mail;
   const rolesOf = () => (one ? [one] : (args.all ? activeMembers(loadTeam()).map((m) => String(m.role)) : []));
-  if (sub === 'stats' || sub === 'list' || sub === 'migrate' || sub === 'archive') {
+  if (sub === 'stats' || sub === 'list' || sub === 'migrate' || sub === 'archive' || sub === 'repair') {
     const roles = rolesOf();
     if (!roles.length) fail('BAD_ARGS', 'mail ' + sub + ' 需要 --role <角色> 或 --all', { action: sub });
     if (sub === 'stats') {
@@ -5154,6 +5159,12 @@ export function cmdMail(args) {
     }
     const dryRun = !args.yes || Boolean(args['dry-run']);
     const days = Number(args.days || 7);
+    if (sub === 'repair') {
+      const results = roles.map((r) => mailStore.repairRole(mailRoot, r, { dryRun }));
+      const lines = results.map((r) => `${r.role}: 行=${r.rows} 事件=${r.events} 重复seq=${r.dupSeq} 缺at=${r.missingAt}${dryRun ? '（dry-run 未写）' : `，已备份=${r.backup ? '是' : '否'}，审计=${r.audit ? '是' : '否'}`}`);
+      out(args, lines.join('\n'), { ok: true, action: 'repair', dryRun, results });
+      return;
+    }
     const results = roles.map((r) => (sub === 'migrate'
       ? mailStore.migrateRole(mailRoot, r, { dryRun })
       : mailStore.archiveCold(mailRoot, r, { dryRun, days })));
@@ -5163,7 +5174,7 @@ export function cmdMail(args) {
     out(args, lines.join('\n'), { ok: true, action: sub, dryRun, results });
     return;
   }
-  fail('BAD_ARGS', 'mail 子命令：migrate | archive | stats | list', { action: sub });
+  fail('BAD_ARGS', 'mail 子命令：migrate | archive | repair | stats | list', { action: sub });
 }
 export async function cmdBoot(args) {
   const team = loadTeam();

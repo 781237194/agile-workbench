@@ -87,13 +87,6 @@ function hotRows(role) {
 }
 function shaArchives() {
   const parts = [];
-  for (const role of listRoleDirs()) {
-    const dir = path.join(MAIL, role);
-    for (const n of (fs.existsSync(dir) ? fs.readdirSync(dir) : [])) {
-      const f = path.join(dir, n);
-      if (fs.statSync(f).isFile()) parts.push(role + '/' + n + ':' + shaFile(f));
-    }
-  }
   const arch = path.join(MAIL, '归档');
   const walk = (d) => {
     let entries = [];
@@ -137,13 +130,14 @@ async function main() {
       return Number.isFinite(at) && at < now - HOT_DAYS * 86400000;
     });
     const touchFiles = fs.existsSync(path.join(MAIL, role)) ? fs.readdirSync(path.join(MAIL, role)) : [];
-    const seqs = rows.map((r) => Number(r.seq)).filter(Number.isFinite);
-    const seqMono = seqs.every((v, i) => i === 0 || v >= seqs[i - 1]);
+    const hotSeqs = hot.map((r) => Number(r.seq)).filter(Number.isFinite);
+    // A3 口径（2026-11-20 16:5x 修复后）：seq 连续性以**热文件**为准（归档分片保留历史 seq，按 id 阅读，不参与跨文件单调）。
+    const seqMono = hotSeqs.length === hot.length && hotSeqs.every((v, i) => v === i + 1);
     report.push({ role, legacyIds: legacy.size, rows: rows.length, statsMessages: stats.messages, badLines: all.badLines, hot: hot.length, hotOld: hotOld.length, touchFiles: touchFiles.length, crossRole: cross.length, missing: missing.length, extra: extra.length, extraNew: extraNew.length, seqMono });
     check(`A1-${role}`, `迁移完整性：jsonl ⊇ _legacy 全部 id（legacy=${legacy.size}, jsonl=${rows.length}；迁移后新增 ${extraNew.length} 条）`,
       legacy.size > 0 && missing.length === 0 && extraNew.length === extra.length, { missing: missing.slice(0, 5), extra: extra.filter((id) => !extraNew.includes(id)).slice(0, 5) });
     check(`A2-${role}`, '无跨角色串读（readAll 每条 to === role；混合归档按 to 过滤）', cross.length === 0, { cross: cross.slice(0, 3) });
-    check(`A3-${role}`, 'seq 单调递增（按 seq 排序后无回退）', seqMono, { first: seqs.slice(0, 5), last: seqs.slice(-5) });
+    check(`A3-${role}`, '热文件 seq 连续 1..N（归档保留历史 seq，不参与跨文件判断）', seqMono, { first: hotSeqs.slice(0, 5), last: hotSeqs.slice(-5) });
     check(`A4-${role}`, `热文件只近 ${HOT_DAYS} 天（旧行 ${hotOld.length} 条应为 0）`, hotOld.length === 0, { hotOld: hotOld.slice(0, 3).map((r) => r.at) });
     check(`A5-${role}`, `触达文件 ≤2（${touchFiles.join(',')}）`, touchFiles.filter((n) => n === 'messages.jsonl' || n === 'index.json').length === 2, { touchFiles });
     check(`A6-${role}`, `badLines=0 且 stats.messages == readAll 行数（${stats.messages} / ${rows.length}）`,
