@@ -41,6 +41,8 @@ import { addDecision } from './decision-box.mjs';
 import { ROLE_QUEUE_FILE, buildRoleQueues, writeRoleQueues } from './route-queues.mjs';
 import { scenarioConfirmState } from './scenario-confirm.mjs';
 import { DshClient } from './dsh-session.mjs';
+// B-20261120-144358-b5ac：engineUrl 不再只认「当前工作区.json」——统一走 dsh-url 的解析链（含 ~/.dsh/gui.port 实时源）。
+import { resolveDshBaseUrl, resolveDshBaseUrlLive } from './dsh-url.mjs';
 
 // ---------- 文件名与常量（三个新文件在此处集中声明，便于产品登记字段表） ----------
 export const ROUTE_LOG_FILE = '路由守护.jsonl';
@@ -607,7 +609,9 @@ function withinWindow(lastAtIso, windowMs, nowMs) {
 
 // ---------- 日志 / 状态文件 ----------
 
-const LOG_FIELDS = ['at', 'event', 'source', 'requirementId', 'fromStatus', 'toStatus', 'role', 'action', 'taskId', 'gate', 'ok', 'why', 'wakeRef', 'triggerChange', 'reason'];
+// B-20261120-144358-b5ac（P2）：唤醒失败必须能定位「打到哪个地址、什么错误码」——为此把
+// upstreamUrl / upstreamSource / errorCode / attempts 四个可排障字段并入白名单（其余字段仍不允许自由加）。
+const LOG_FIELDS = ['at', 'event', 'source', 'requirementId', 'fromStatus', 'toStatus', 'role', 'action', 'taskId', 'gate', 'ok', 'why', 'wakeRef', 'triggerChange', 'reason', 'upstreamUrl', 'upstreamSource', 'errorCode', 'attempts'];
 
 /** 写一行路由日志（只允许 F-6 字段 + 幂等键 key，不自由加字段）。 */
 export function appendRouteLog(projectName, row) {
@@ -706,12 +710,38 @@ export function buildRouteWakeText({ role = '', action = '', requirementId = '',
   ].filter(Boolean).join('\n');
 }
 
+export function resolveWakeEngine(override = '') {
+  return resolveDshBaseUrl({ override: String(override || '') });
+}
+
 function engineUrlOf(override) {
-  let engine = String(override || '') || String(process.env.DSH_WEB_URL || '');
-  if (!engine) {
-    try { engine = String(readJson(path.join(PATHS.state, '当前工作区.json'), {}).engineUrl || ''); } catch { /* 没有工作区文件 */ }
-  }
-  return engine;
+  return String(resolveWakeEngine(override).baseUrl || '');
+}
+
+/** 网络类失败（端口死了/连不上）——这类才值得换端口重试；业务错误（NOT_FOUND 等）不重试。 */
+function isNetworkFailure(e) {
+  const code = String((e && e.code) || (e && e.cause && e.cause.code) || '');
+  const msg = String((e && e.message) || e || '');
+  return /ECONNREFUSED|ECONNRESET|ENOTFOUND|EHOSTUNREACH|ETIMEDOUT|EAI_AGAIN|EPIPE|fetch failed|network|socket hang up/i.test(code + ' ' + msg);
+}
+
+/** 唤醒候选地址：主解析 → 实时端口 → 工作区文件；去重保序。 */
+function wakeEngineCandidates(override = '') {
+  const out = [];
+  const push = (baseUrl, source) => {
+    const url = String(baseUrl || '');
+    if (!url) return;
+    if (out.some((x) => x.baseUrl === url)) return;
+    out.push({ baseUrl: url, source: String(source || '') });
+  };
+  const primary = resolveDshBaseUrl({ override: String(override || '') });
+  push(primary.baseUrl, primary.source);
+  const live = resolveDshBaseUrlLive({ override: '' });
+  push(live.baseUrl, live.source);
+  // 第三候选：只看「当前工作区.json」（关掉端口文件，否则会与第一/第二候选重复而被去重掉）。
+  const ws = resolveDshBaseUrl({ override: '', includeWorkspaceFile: true, includePortFile: false });
+  push(ws.baseUrl, ws.source);
+  return out;
 }
 
 /**
@@ -726,14 +756,34 @@ export async function deliverRouteWake(projectName, { role, text, engineUrl = ''
   try { member = getMember(loadTeam(), role); } catch (e) { return { ok: false, why: String((e && e.message) || e) }; }
   const sessionId = String((member && member.sessionId) || '');
   if (!sessionId) return { ok: false, why: `角色 ${role} 还没有 DSH 会话` };
-  const engine = engineUrlOf(engineUrl);
-  if (!engine) return { ok: false, why: '没有 engineUrl；无法唤醒目标会话' };
-  try {
-    await new DshClient(engine).prompt({ sessionId, text, mode: 'queue' });
-    return { ok: true, role, sessionId };
-  } catch (e) {
-    return { ok: false, why: String((e && e.message) || e), code: String((e && e.code) || '') };
+  const candidates = wakeEngineCandidates(engineUrl);
+  if (!candidates.length) return { ok: false, why: '没有 engineUrl；无法唤醒目标会话', code: 'NO_ENGINE_URL' };
+  const attempts = [];
+  let lastError = null;
+  for (let i = 0; i < candidates.length; i += 1) {
+    const cand = candidates[i];
+    try {
+      await new DshClient(cand.baseUrl).prompt({ sessionId, text, mode: 'queue' });
+      attempts.push({ engineUrl: cand.baseUrl, engineSource: cand.source, ok: true });
+      return { ok: true, role, sessionId, engineUrl: cand.baseUrl, engineSource: cand.source, attempts };
+    } catch (e) {
+      const code = String((e && e.code) || (e && e.cause && e.cause.code) || '');
+      const why = String((e && e.message) || e);
+      attempts.push({ engineUrl: cand.baseUrl, engineSource: cand.source, ok: false, code, why: why.slice(0, 200) });
+      lastError = { code, why, engineUrl: cand.baseUrl, engineSource: cand.source };
+      // 只有网络类失败才换下一个端口；业务错误（如 session/not-found）原样返回，避免误导重试。
+      if (!isNetworkFailure(e)) break;
+    }
   }
+  const last = attempts[attempts.length - 1] || {};
+  return {
+    ok: false,
+    why: String((lastError && lastError.why) || 'wake_failed'),
+    code: String((lastError && lastError.code) || ''),
+    engineUrl: String((lastError && lastError.engineUrl) || ''),
+    engineSource: String((lastError && lastError.engineSource) || ''),
+    attempts,
+  };
 }
 
 function alertPm(projectName, { type = 'wake_failed', subject = '', body = '', key = '' } = {}) {
@@ -1192,6 +1242,34 @@ function recordWake(out, result, base, action, role) {
   }
 }
 
+/**
+ * B-20261120-144358-b5ac：唤醒失败的「回执 + 一次性 PM 告警」唯一实现（wakeRoute 与夹具共用）。
+ * 回执必须能定位「打到哪个地址、什么错误码」，否则现场只能看到一句 fetch failed。
+ */
+export function reportWakeFailure(projectName, { role = '', action = '', requirementId = '', taskId = '', key = '', result = {}, base = {} } = {}) {
+  const why = String((result && result.why) || 'wake_failed');
+  const upstream = String((result && result.engineUrl) || '');
+  const upstreamSource = String((result && result.engineSource) || '');
+  const errCode = String((result && result.code) || '');
+  const tried = ((result && Array.isArray(result.attempts)) ? result.attempts : [])
+    .map((a) => `${a.engineUrl || '-'}${a.engineSource ? `(${a.engineSource})` : ''}:${a.ok ? 'ok' : (a.code || 'error')}`)
+    .slice(0, 4).join(' → ');
+  let log = null;
+  try {
+    log = appendRouteLog(projectName, {
+      ...base, event: 'wake_failed', ok: false, why: why.slice(0, 240), wakeRef: 'no_retry_timer',
+      upstreamUrl: upstream, upstreamSource, errorCode: errCode, attempts: tried,
+    });
+  } catch { /* 日志失败不掩盖告警 */ }
+  const alert = alertPm(projectName, {
+    type: 'wake_failed',
+    subject: `路由唤醒失败：${role}（${requirementId || taskId || '-'}）`,
+    body: `role=${role} action=${action} 失败原因：${why}\nupstream url=${upstream || '-'}${upstreamSource ? `（来源 ${upstreamSource}）` : ''}｜error code=${errCode || '-'}\n已尝试：${tried || '-'}\n按 R-d1bf 不再定时重试；下一次事件（新消息/回执/状态变化）会重新唤醒。`,
+    key: `route_wake_failed|${key}`,
+  });
+  return { logged: Boolean(log), alert, why, upstreamUrl: upstream, upstreamSource, errorCode: errCode, attempts: tried };
+}
+
 /** 单次路由唤醒：幂等 → 发 → 记日志 → 排 followUp / 重试。 */
 async function wakeRoute(projectName, opts) {
   const {
@@ -1215,18 +1293,11 @@ async function wakeRoute(projectName, opts) {
     appendRouteLog(projectName, {
       ...base, event: 'wake', ok: true, why: '',
       wakeRef: String(result.sessionId || result.skipped || ''),
+      upstreamUrl: String(result.engineUrl || ''), upstreamSource: String(result.engineSource || ''),
     });
     return { wake: true, key, wakeRef: result.sessionId || result.skipped || '' };
   }
-  const why = String(result.why || 'wake_failed');
-  // R-d1bf：失败只留一条事件记录 + 一次性告警 PM，不再排定时重试。
-  appendRouteLog(projectName, { ...base, event: 'wake_failed', ok: false, why: why.slice(0, 240), wakeRef: 'no_retry_timer' });
-  alertPm(projectName, {
-    type: 'wake_failed',
-    subject: `路由唤醒失败：${role}（${requirementId || taskId || '-'}）`,
-    body: `role=${role} action=${action} 失败原因：${why}\n按 R-d1bf 不再定时重试；下一次事件（新消息/回执/状态变化）会重新唤醒。`,
-    key: `route_wake_failed|${key}`,
-  });
+  reportWakeFailure(projectName, { role, action, requirementId, taskId, key, result, base });
   return { scheduled: false, key, why, noRetry: true };
 }
 
