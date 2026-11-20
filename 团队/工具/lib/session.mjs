@@ -4,6 +4,7 @@
 //   session usage    [--project P] [--role R] [--warn 5000000] [--force 10000000] [--json]
 //   session check    [--project P] [--json]
 //   session rotate   --role R [--session S] [--reason "..."] [--force] [--offline] [--json]
+//                    [--owner-authorized --reason "原因（≤200 字）"（仅 pm/owner，显式跳过闲时门并留审计）]
 //   session handover --role R [--project P] [--json]
 //
 // 四处映射（壳层唤醒以 workbench.json 为准，CLI 唤醒以 团队.json 为准，轮换必须四处同改）：
@@ -32,6 +33,25 @@ import { resolveDshBaseUrl, dshUrlMissingHint } from './dsh-url.mjs';
 // B-20261118-083150-4b2f（fa0e 补丁 A）：名册写入（四处映射 / 轮换记录 / BQ / 广播 / 事件）收归唯一入口，
 // session rotate 与 auto-rotate 都只调它；本文件不再直接写 members[].sessionId。
 import { rotateRoster, rotateRosterBatch, checkRotateHandover } from './roster-writer.mjs';
+// B-20261120-143331-d475（Owner 2026-11-20 14:3x）：换人闲时门的「Owner 授权绕过」通道。
+// 绕行缺口不堵（保留后门），但必须走正式参数 + 三处审计；默认门（不带参数）完全不变。
+import { readNowMs } from './clock.mjs';
+
+export const OWNER_BYPASS_CODE = 'OWNER_AUTHORIZED_SKIP_IDLE_GATE';
+export const OWNER_BYPASS_REASON_MAX = 200;
+export const OWNER_BYPASS_AUDIT_NAME = 'owner授权换人.jsonl';
+
+/** 专用审计落点：项目状态/owner授权换人.jsonl（append-only，一行一次绕过）。 */
+export function ownerBypassAuditPath(projectName) {
+  return path.join(projectStatePaths(String(projectName || '')).dir, OWNER_BYPASS_AUDIT_NAME);
+}
+
+function appendOwnerBypassAudit(projectName, row) {
+  const file = ownerBypassAuditPath(projectName);
+  ensureDir(path.dirname(file));
+  fs.appendFileSync(file, JSON.stringify(row) + '\n', 'utf8');
+  return file;
+}
 
 // ─── B-usage-semantics（Owner 2026-11-20 11:2x）：阈值口径＝**本会话累计未缓存输入**，不是单次上下文预算 ───
 // 判定值取自 DSH 的 uncachedInputTokens（会话用量.json 的 input 字段）：本会话从开工到现在的**累计**，换人
@@ -771,7 +791,7 @@ function archiveGate(projectName, role, oldId) {
 export async function rotateSession({
   projectName, role, sessionId = '', force = false, offline = false, reason = '', by = 'owner',
   failAt = '', sessionTitle = '', windowMinutes = 30, dryRun = false, createSession = null, engineUrl = '',
-  audit = null,
+  audit = null, ownerBypass = null,
 }) {
   const name = String(projectName || '');
   if (!name) fail('NO_PROJECT', '需要 --project');
@@ -880,9 +900,29 @@ export async function rotateSession({
         force: Boolean(force),
         archiveGate: { archived: gate.archived, archiveId: gate.archive ? gate.archive.id : null },
         archiveDeferred,
+        // B-20261120-143331-d475：Owner 授权绕过闲时门 → 轮换记录落账（三处之一）
+        ...(ownerBypass ? {
+          bypass: String(ownerBypass.code || OWNER_BYPASS_CODE),
+          bypassReason: String(ownerBypass.reason || ''),
+          bypassBy: String(ownerBypass.by || ''),
+          bypassAt: String(ownerBypass.at || ''),
+        } : {}),
         // R-20261118-143558-eba2：审计——谁换的（令牌角色）、交接回执与交接文件 sha。
         ...(audit && typeof audit === 'object' ? audit : {}),
       },
+      // B-20261120-143331-d475：会话轮换.jsonl（三处之二）与 名册变更.jsonl（三处之三）同带绕过字段
+      jsonlExtra: ownerBypass ? {
+        bypass: String(ownerBypass.code || OWNER_BYPASS_CODE),
+        bypassReason: String(ownerBypass.reason || ''),
+        bypassBy: String(ownerBypass.by || ''),
+        bypassAt: String(ownerBypass.at || ''),
+      } : {},
+      auditExtra: ownerBypass ? {
+        bypass: String(ownerBypass.code || OWNER_BYPASS_CODE),
+        bypassReason: String(ownerBypass.reason || ''),
+        bypassBy: String(ownerBypass.by || ''),
+        bypassAt: String(ownerBypass.at || ''),
+      } : {},
       // 其余事务步骤（邮件归档 / 任务会话指向 / 派单锁 / 旧会话归档 / 一致性闸门）在映射写完之后、
       // 记账之前执行；抛错即由 roster-writer 回滚映射，本文件的 catch 再恢复邮件/任务/锁。
       beforeFinalize: async ({ oldId: actualOld, newId: nextId, mapResult }) => {
@@ -944,6 +984,37 @@ export async function rotateSession({
         };
       },
     });
+    // B-20261120-143331-d475：专用审计（第三处）——绕过换人闲时门必须独立可查（append-only，
+    // 与轮换记录/名册变更分开，避免被「一次换人一行」淹掉）。失败不回滚换人，只记在返回值里。
+    let ownerBypassAudit = null;
+    let ownerBypassAuditError = '';
+    if (ownerBypass) {
+      try {
+        const file = appendOwnerBypassAudit(name, {
+          at: nowIso(),
+          event: 'owner_authorized_rotate',
+          bypass: String(ownerBypass.code || OWNER_BYPASS_CODE),
+          reason: String(ownerBypass.reason || ''),
+          by: String(ownerBypass.by || by || ''),
+          bypassAt: String(ownerBypass.at || ''),
+          project: name,
+          role,
+          from: String((result.record && result.record.from) || result.oldId || ''),
+          to: String((result.record && result.record.to) || result.newId || ''),
+          recordId: String(result.recordId || ''),
+          source: 'session-rotate',
+          mode: String((result.record && result.record.mode) || ''),
+          created: Boolean(result.record && result.record.created),
+          actorSessionId: String(ownerBypass.actorSessionId || ''),
+          idleGateSkipped: true,
+          idleGateMinutes: Number(ownerBypass.minutes) || null,
+        });
+        ownerBypassAudit = { ok: true, file, bypass: String(ownerBypass.code || OWNER_BYPASS_CODE) };
+      } catch (e) {
+        ownerBypassAuditError = String((e && e.message) || e);
+        ownerBypassAudit = { ok: false, error: ownerBypassAuditError };
+      }
+    }
     // 记录（含 bootPending / broadcastTo / 会话轮换两份文件）由 roster-writer 落盘；对外返回结构保持不变。
     // R-20261118-131107-28b8：换人**成功后**用「被替换下来的旧 sessionId」自动归档——只记结果，失败不回滚换人。
     const archiveOutcome = (() => {
@@ -973,6 +1044,7 @@ export async function rotateSession({
       };
       result.record.archiveOutcome = archiveOutcome;
     }
+    if (result.record && ownerBypassAudit) result.record.ownerBypassAudit = ownerBypassAudit;
     return result.record;
   } catch (e) {
     // 回滚：邮件 + 任务 + 派单锁恢复到轮换前（映射已由 roster-writer 回滚），再归档本次创建的新会话。
@@ -1890,17 +1962,52 @@ export async function cmdSession(args) {
       const bootInfo = requireBoot(bootToken, { write: true });
       actorRole = String(bootInfo.role || '');
       actorSessionId = String(bootInfo.sessionId || '');
-      if (!rotateAllowed(actorRole, role)) {
-        fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话；产品只能给 PM 换人、PM 不能给自己换人（当前令牌角色 ${actorRole || '-'} → 目标 ${role}）`, { role, project: projectName, tokenRole: actorRole });
+      // B-20261120-143331-d475：Owner 授权的正式后门要能覆盖「PM 自换」这一结构性死锁——
+      // 旧口径只允许产品换 PM，而产品无权用后门（Owner 口径：仅 pm/owner），于是唯一的实际执行者
+      // 是拿着 Owner 授权的 PM 自己。仅当显式 --owner-authorized 时才放宽这一格（默认门完全不变）。
+      const pmSelfAuthorized = Boolean(args['owner-authorized']) && String(actorRole) === 'pm' && String(role) === 'pm';
+      if (!rotateAllowed(actorRole, role) && !pmSelfAuthorized) {
+        fail('PERMISSION_DENIED', `只有 PM/Owner 能轮换会话；产品只能给 PM 换人、PM 不能给自己换人（当前令牌角色 ${actorRole || '-'} → 目标 ${role}）${Boolean(args['owner-authorized']) ? '；--owner-authorized 也只放宽 PM 自换这一格' : ''}`, { role, project: projectName, tokenRole: actorRole, ownerAuthorized: Boolean(args['owner-authorized']) });
       }
     }
     // B-20261119-204845-8d91（Owner 直接指令）：**PM 换人必须先满足「双方闲时」**——
     // 产品不能在 PM 忙碌、或自己正跑任务时直接换人。四项：近 N 分钟无新消息 / 无 running 会话 /
     // 无名下 working 任务 / 无在途派单锁；N 取 团队.json → config.pmRotateIdleMin（默认 15）。
     // 不满足 → WAIT_BOTH_IDLE 拒绝（在任何写盘之前 → 零副作用），并输出缺哪一方、还差多少分钟。
+    // B-20261120-143331-d475（Owner 2026-11-20 14:3x 口径）：换人闲时门结构性不可达（交接确认本身让双方窗口归零），
+    // 绕行缺口不堵、保留后门，但必须走正式通道：`--owner-authorized --reason <≤200 字>`，仅 pm/owner；
+    // 缺 reason / 超长 / 无权限 → 拒绝且零写入；不带该参数 → **完全走默认门**（行为不变）。
+    const ownerAuthorized = Boolean(args['owner-authorized']);
+    let ownerBypass = null;
+    if (ownerAuthorized) {
+      const bypassReason = String(args.reason || '').trim();
+      if (!bypassReason) {
+        fail('BYPASS_REASON_REQUIRED', `--owner-authorized 必须同时带 --reason "原因"（≤${OWNER_BYPASS_REASON_MAX} 字）；本次零写入`, {
+          role, project: projectName, bypass: OWNER_BYPASS_CODE, maxChars: OWNER_BYPASS_REASON_MAX,
+          usage: 'session rotate --role <角色> --owner-authorized --reason "Owner 授权：原因（≤200 字）" --boot <令牌>',
+        });
+      }
+      if (Array.from(bypassReason).length > OWNER_BYPASS_REASON_MAX) {
+        fail('BYPASS_REASON_TOO_LONG', `--reason 超过 ${OWNER_BYPASS_REASON_MAX} 字（当前 ${Array.from(bypassReason).length} 字）；本次零写入`, {
+          role, project: projectName, bypass: OWNER_BYPASS_CODE, maxChars: OWNER_BYPASS_REASON_MAX, length: Array.from(bypassReason).length,
+        });
+      }
+      if (!['pm', 'owner'].includes(String(actorRole || ''))) {
+        fail('PERMISSION_DENIED', `--owner-authorized 仅 PM/Owner 可用（当前令牌角色 ${actorRole || '-'}）；普通换人请去掉该参数走默认门`, {
+          role, project: projectName, tokenRole: actorRole || '', allow: ['pm', 'owner'], bypass: OWNER_BYPASS_CODE,
+        });
+      }
+      ownerBypass = {
+        code: OWNER_BYPASS_CODE, reason: bypassReason, by: String(actorRole || ''),
+        at: nowIso(), actorSessionId: String(actorSessionId || ''),
+        minutes: null,
+      };
+    }
     let idleGate = null;
-    if (role === 'pm') {
-      idleGate = pmRotateIdleState(projectName, { now: Date.now(), actorRole, actorSessionId });
+    if (role === 'pm' && !ownerBypass) {
+      // 注入时钟（R-d1bf 口径）：判定走 clock.readNowMs（AWB_NOW_MS），14 分 59 秒边界因此可测；
+      // 逻辑时钟只影响判定，不改任何落盘时间戳。
+      idleGate = pmRotateIdleState(projectName, { now: readNowMs(), actorRole, actorSessionId });
       if (!idleGate.ok) {
         const busy = Object.entries(idleGate.roles).filter(([, r]) => !r.idle);
         const secText = (s) => { const n = Math.max(0, Number(s) || 0); return `${Math.floor(n / 60)} 分 ${n % 60} 秒`; };
@@ -1914,12 +2021,17 @@ export async function cmdSession(args) {
         });
       }
     }
-    const idleGateJson = idleGate ? {
+    const idleGateJson = ownerBypass ? {
+      // B-20261120-143331-d475：绕过以显式形状暴露（不是「门放行了」），JSON/人类输出同源可判。
+      ok: true, skipped: true, bypass: ownerBypass.code, reason: ownerBypass.reason,
+      by: ownerBypass.by, at: ownerBypass.at, actorSessionId: ownerBypass.actorSessionId,
+      minutes: null, remainingSec: null,
+    } : (idleGate ? {
       ok: idleGate.ok, minutes: idleGate.minutes, actorRole: idleGate.actorRole, actorSessionId: idleGate.actorSessionId,
       skippedSelf: Object.entries(idleGate.roles).filter(([, r]) => r.skippedSelf).map(([roleName]) => roleName),
       // PM 2026-11-20 13:40 口径：放行体 idleGate 也带秒级剩余（取双方最大值；纯 idle 时为 0）。
       remainingSec: Math.max(0, ...Object.values(idleGate.roles).map((r) => Number(r.remainingSec) || 0)),
-    } : null;
+    } : null);
     // R-20261118-143558-eba2：换人前必须有人落交接回执，且回执 sha 与磁盘一致。
     // 沙盘默认豁免（既有 selftest 的 4 处 rotate 无回执），门禁本体用 TEAM_HANDOVER_ENFORCE=1 强制。
     const handoverEnforce = String(process.env.TEAM_HANDOVER_ENFORCE || '') === '1';
@@ -1958,6 +2070,7 @@ export async function cmdSession(args) {
       reason: String(args.reason || ''),
       by: actorRole,
       audit: handoverAudit,
+      ownerBypass,
       failAt: String(args['fail-at'] || ''),
       sessionTitle: String(args.title || ''),
       windowMinutes: Number(args.window || 30),
@@ -1973,6 +2086,7 @@ export async function cmdSession(args) {
         `将改任务：${record.tasks.length ? record.tasks.join('、') : '无'}`,
         `将清派单锁：${record.dispatchLock.cleared ? '是（' + (record.dispatchLock.messageId || '无单号') + '）' : '无'}`,
         `归档门：${record.archiveGate.archived ? '已归档（可 rotate）' : (record.archiveGate.inFlight ? '未归档，有在途任务/锁 → 将按 ARCHIVE_DEFERRED 放行' : '未归档且无在途任务 → 将拒绝 ARCHIVE_REQUIRED')}`,
+        ...(ownerBypass ? [`闲时门：将按 Owner 授权跳过（${ownerBypass.code}）｜原因：${ownerBypass.reason}｜授权人：${ownerBypass.by}`] : []),
         '未写入任何文件；确认后去掉 --dry-run 执行。',
       ];
       out(args, lines.join('\n'), { ok: true, ...record, ...(idleGateJson ? { idleGate: idleGateJson } : {}) });
@@ -1998,6 +2112,9 @@ export async function cmdSession(args) {
         return `旧会话自动归档：${a.result}${tail}`;
       })(),
       `收件箱归档消息：${record.mailArchived} 条；任务会话指向：${record.tasks.length} 个`,
+      // B-20261120-143331-d475：绕过必须显式可见（人话里也点名「跳过了哪道门」+ 原因 + 授权人 + 专用审计落点）
+      ...(ownerBypass ? [`闲时门：已按 Owner 授权跳过（${ownerBypass.code}）｜原因：${ownerBypass.reason}｜授权人：${ownerBypass.by}`] : []),
+      ...(ownerBypass && record.ownerBypassAudit ? [`绕过审计：${record.ownerBypassAudit.file || '(写入失败：' + (record.ownerBypassAudit.error || '-') + ')'}`] : []),
       record.bootPending && record.bootPending.queued
         ? `待启动队列：已登记 ${record.bootPending.entry.id}（${record.bootPending.wake && record.bootPending.wake.ok
           ? (record.bootPending.wake.skipped === 'SELFTEST' ? '沙盘跳过推送' : '已推送启动提示')

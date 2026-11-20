@@ -207,8 +207,11 @@ Owner 决策箱（R-9db6 · 工具侧）
        30 万预警（提示准备 archive/rotate）、50 万强制归档/换人；阈值可配（--threshold 兼容旧语义=预警）；
        无 DSH 元数据标“未知”不按 0；只告警不自动换
   session rotate --role <角色> [--session S] [--reason "..."] [--force] [--offline] [--dry-run] [--json]
+       [--owner-authorized --reason "原因（≤200 字）"]
        新建/指定会话 → 四处映射同改（团队.json、项目/团队会话.json、workbench.json 的
        projects[].sessions 与 projects[].workspace.sessionIds）→ 归档旧会话 → 写轮换记录与事件；
+       --owner-authorized 仅 pm/owner：显式跳过 PM 换人的「双方闲时」门（OWNER_AUTHORIZED_SKIP_IDLE_GATE），
+       并在轮换记录 / 会话轮换.jsonl / 名册变更.jsonl / owner授权换人.jsonl 四处留审计；不带该参数完全走默认门；
        邮件归档只动本项目消息（按 project 限定，跨项目不归档）；失败回滚覆盖映射/邮件/任务/派单锁；
        --dry-run 只读预演（打印将写四处、将归档邮件、将改任务/锁，零写入）；
        同角色已有活跃会话时拒绝（SESSION_ALREADY_ACTIVE），--force 留痕

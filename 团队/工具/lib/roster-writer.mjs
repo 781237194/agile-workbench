@@ -506,7 +506,7 @@ export function broadcastRosterBatch({ projectName, entries, reason = '', source
  */
 export async function finalizeRoster({
   projectName, role, from = '', to, mode = 'auto', created = false, reason = '', by = 'system', source = 'session-rotate',
-  recordExtra = {}, jsonlExtra = {}, eventExtra = {}, bootQueue = true, offline = false, broadcast = true, now = null,
+  recordExtra = {}, jsonlExtra = {}, eventExtra = {}, auditExtra = {}, bootQueue = true, offline = false, broadcast = true, now = null,
   activeProject = true,
 }) {
   const name = String(projectName || '');
@@ -573,6 +573,7 @@ export async function finalizeRoster({
       // 非活跃项目不写团队.json → 名册其实没变，不能记 ROSTER_UPDATED（P2-5 复核）
       code: activeProject ? 'ROSTER_UPDATED' : 'ROSTER_SKIPPED_INACTIVE_PROJECT',
       project: name, role, from, to, by, source, mode, created, reason: String(reason || '').slice(0, 200),
+      ...(auditExtra || {}),
       recordId, rosterSha256: shaOfFile(PATHS.team),
       rosterWritten: Boolean(activeProject),
       bootQueued: Boolean(bootPending && bootPending.queued), broadcastTo: bcast && bcast.others,
@@ -698,6 +699,7 @@ export async function checkRotateHandover({ projectName, role, sessionId = '', t
 export async function rotateRoster({
   projectName, role, newSessionId, mode = 'auto', created = false, reason = '', by = 'system', source = 'session-rotate',
   expectedOldId = '', memberExtra = {}, recordExtra = {}, jsonlExtra = {}, eventExtra = {}, manifestExtra = {},
+  auditExtra = {},
   dshList = null, engineUrl = '', offline = false, checkDsh = true, createdSessionId = '',
   bootQueue = true, broadcast = true, failAt = '', now = null, dryRun = false, beforeFinalize = null,
 }) {
@@ -784,6 +786,7 @@ export async function rotateRoster({
       },
       jsonlExtra: { ...(jsonlExtra || {}), ...(hookExtra.jsonlExtra || {}) },
       eventExtra: { ...(eventExtra || {}), ...(hookExtra.eventExtra || {}) },
+      auditExtra: auditExtra || {},
       bootQueue, offline, broadcast, now,
       activeProject: snap.activeProject !== false,
     });
