@@ -2428,12 +2428,39 @@ function renderBridgeAlert() {
 let memberStatesCache = null;
 async function loadMemberStates(project) {
   if (!project || !window.workbench || typeof window.workbench.teamMembers !== 'function') return null;
+  // B-8056（AC②）：读失败**不等于**「无在册成员」——失败时保留上一次成功的行，并把失败码带回渲染层；
+  // 空名册只有在后端明确 membersEmpty 且没有被过滤标记时才认。
+  const prev = memberStatesCache && memberStatesCache.projectId === project.id ? memberStatesCache : null;
+  let res = null;
   try {
-    const res = await window.workbench.teamMembers({ projectId: project.id });
-    if (!res || res.ok === false) return { projectId: project.id, at: Date.now(), rows: [], empty: true };
-    const rows = Array.isArray(res.roles) ? res.roles : [];
-    return { projectId: project.id, at: Date.now(), rows, empty: Boolean(res.membersEmpty) || rows.length === 0 };
-  } catch { return null; }
+    res = await window.workbench.teamMembers({ projectId: project.id });
+  } catch (e) {
+    return {
+      projectId: project.id, at: Date.now(), rows: prev ? prev.rows : null,
+      empty: false, rosterFailed: true, rosterErrorCode: 'TEAM_MEMBERS_IPC_FAILED',
+      rosterErrorMessage: String((e && e.message) || e), staleAt: prev ? prev.at : 0,
+    };
+  }
+  if (!res || res.ok === false) {
+    return {
+      projectId: project.id, at: Date.now(), rows: prev ? prev.rows : null,
+      empty: false, rosterFailed: true,
+      rosterErrorCode: String((res && (res.code || res.errorCode)) || 'TEAM_MEMBERS_FAILED'),
+      rosterErrorMessage: String((res && (res.message || res.error)) || ''),
+      staleAt: prev ? prev.at : 0,
+    };
+  }
+  const rows = Array.isArray(res.roles) ? res.roles : [];
+  return {
+    projectId: project.id, at: Date.now(), rows,
+    empty: Boolean(res.membersEmpty) && rows.length === 0 && !res.filteredOut,
+    filteredOut: Boolean(res.filteredOut),
+    filteredReason: String(res.filteredReason || ''),
+    memberCount: Number(res.memberCount) || rows.length,
+    projectMissing: Boolean(res.projectMissing),
+    diagnostics: res.diagnostics || null,
+    staleAt: 0,
+  };
 }
 function memberStateOfCache(project, roleId) {
   if (!memberStatesCache || !project || memberStatesCache.projectId !== project.id) return null;
@@ -2927,27 +2954,52 @@ function renderSessions() {
   const count = $('#session-count');
   const p = activeProject();
   if (!box) return;
-  const rosterRows = memberStatesCache && p && memberStatesCache.projectId === p.id ? memberStatesCache.rows : null;
-  const rosterEmpty = Boolean(rosterRows && rosterRows.length === 0);
+  // B-8056：缓存三态（正常 / 被过滤 / 读取失败）+ 空态分档；顶部计数与列表**同源**（都以 memberStatesCache.rows 为准）。
+  const cache = memberStatesCache && p && memberStatesCache.projectId === p.id ? memberStatesCache : null;
+  const rosterRows = cache ? cache.rows : null;
+  const rosterFailed = Boolean(cache && cache.rosterFailed && !(Array.isArray(rosterRows) && rosterRows.length));
+  const rosterFiltered = Boolean(cache && cache.filteredOut);
+  const rosterEmpty = Boolean(cache && !rosterFailed && !rosterFiltered && Array.isArray(rosterRows) && rosterRows.length === 0);
   const allEntries = sessionEntries(p);
-  const entries = rosterRows ? allEntries.filter((item) => rosterRows.some((row) => String(row.role || '') === String(item.role.id))) : allEntries;
+  const entries = Array.isArray(rosterRows) && rosterRows.length
+    ? allEntries.filter((item) => rosterRows.some((row) => String(row.role || '') === String(item.role.id)))
+    : allEntries;
   const ready = entries.filter((item) => item.sessionId).length;
-  const verified = p ? verifiedCount(p) : null;
-  const total = p ? teamRoleCount(p) : entries.length || 6;
+  const rosterTotal = cache && Number(cache.memberCount) > 0 ? Number(cache.memberCount) : (Array.isArray(rosterRows) ? rosterRows.length : 0);
+  const verifiedFromRows = Array.isArray(rosterRows) && rosterRows.length
+    ? rosterRows.filter((row) => String(row.state || '') === 'ok').length
+    : null;
+  const verified = verifiedFromRows !== null ? verifiedFromRows : (p ? verifiedCount(p) : null);
+  const total = rosterTotal || (p ? teamRoleCount(p) : entries.length || 6);
   if (count) {
     // e29f F-3：展示数字只认 DSH 核验（sessionId 全等 + 属于本工作区）；未核验/过期显示「待核验」。
-    // 本地映射不再冒充展示数字，但保留在 data-local 上（5 秒跟随外部轮换的用例靠它核对）。
-    count.textContent = rosterEmpty ? '0' : (verified === null ? '待核验' : `${verified}/${total}`);
-    count.title = verified === null
-      ? `DSH 未核验：本地映射 ${ready}/${total} 只作参考`
-      : `DSH 核验 ${verified}/${total}（本地映射 ${ready}/${total}）`;
+    // B-8056：分母改成「名册行数/列表行来源」同一个数，不再用 teamRoleCount 另算（两处不同源）。
+    count.textContent = rosterFailed ? '读取失败' : (verified === null ? '待核验' : `${verified}/${total}`);
+    count.title = rosterFailed
+      ? `名册读取失败（${(cache && (cache.rosterErrorCode || cache.rosterErrorMessage)) || 'UNKNOWN'}）：显示的是上一次成功读取的结果`
+      : (verified === null
+        ? `DSH 未核验：本地映射 ${ready}/${total} 只作参考`
+        : `DSH 核验 ${verified}/${total}（本地映射 ${ready}/${total}）`);
     count.setAttribute('data-local', `${ready}/${total}`);
     count.setAttribute('data-verified', verified === null ? '0' : '1');
+    count.setAttribute('data-roster-failed', rosterFailed ? '1' : '0');
+    count.setAttribute('data-roster-filtered', rosterFiltered ? '1' : '0');
   }
   // AC1：用量展示与团队会话同一块刷新（异步，不阻塞主渲染）
   try { renderSessionUsage(p).catch(() => { /* 用量展示失败不阻断会话渲染 */ }); } catch { /* ignore */ }
   if (!p) {
     box.innerHTML = '<div class="empty-row">先选择工作区；当前团队模式的角色会话会显示在这里。</div>';
+    return;
+  }
+  if (rosterFailed) {
+    const code = (cache && (cache.rosterErrorCode || cache.rosterErrorMessage)) || 'UNKNOWN';
+    box.innerHTML = '<div class="empty-row bad" data-roster-failed="1">名册读取失败（' + esc(String(code)).slice(0, 80) + '）：保留上一次成功读取的会话列表；请稍后重试或检查团队账本</div>';
+    return;
+  }
+  if (rosterFiltered) {
+    const mc = cache && Number(cache.memberCount) > 0 ? Number(cache.memberCount) : 0;
+    const reason = String((cache && cache.filteredReason) || '') === 'archived' ? '成员已归档' : '项目映射缺失';
+    box.innerHTML = '<div class="empty-row" data-roster-filtered="1">名册有 ' + mc + ' 人，但本工作区当前可显示 0 人（' + esc(reason) + '）' + '<button class="link-btn" type="button" data-open-new-project>＋ 建团队</button></div>';
     return;
   }
   if (rosterEmpty) {

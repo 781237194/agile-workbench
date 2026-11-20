@@ -6437,6 +6437,19 @@ ipcMain.handle('theme:metrics', async () => {
     }
   });
   ipcMain.handle('team:members', (_e, payload) => {
+    // B-8056（P0/AC②）：名册文件坏/不可读时 teamTools.teamMembers() 会静默返回 []，旧实现据此判
+    // 「无在册成员」→ 界面把「读取失败」显示成「团队没了」。这里先单独探一次可读性，失败就显式返回 ok:false，
+    // 让渲染层走「读取失败」分支并保留上一次成功的行。
+    try {
+      const rosterFile = path.join(ledgerTeamRoot(), '状态', '团队.json');
+      JSON.parse(fs.readFileSync(rosterFile, 'utf8').replace(/^\uFEFF/, ''));
+    } catch (e) {
+      return {
+        ok: false, code: 'TEAM_ROSTER_UNREADABLE',
+        message: '团队名册读取失败（团队/状态/团队.json）：' + String((e && e.message) || e).slice(0, 200),
+        roles: [], roleIds: [], count: 0, membersEmpty: false, filteredOut: false, projectMissing: false, error: 'TEAM_ROSTER_UNREADABLE'
+      };
+    }
     const store = readStore();
     let project = null;
     if (payload && payload.projectId) project = store.projects.find((item) => item.id === payload.projectId) || null;
@@ -6444,9 +6457,12 @@ ipcMain.handle('theme:metrics', async () => {
     // 97db 复验修正（T-20261119-030838-a67258）：显式按 projectId 查询但项目已删除时，必须返回空名册，
     // 不得回退到 store 里其它项目（否则删后 team:members 仍返回 6 行、membersEmpty 永远 false）。
     if (payload && String(payload.projectId || '').trim() && !project && !wantedName) {
+      // B-8056：项目已不在 store（id 失配/被删）与「无在册成员」是两回事——必须让界面能区分并保留上次值。
       return {
         ok: true, project: '', workspace: '', roles: [], roleIds: [], count: 0,
-        membersEmpty: true, projectMissing: true, error: ''
+        membersEmpty: false, projectMissing: true, filteredOut: true, filteredReason: 'project-missing',
+        diagnostics: { hasProject: false, requestedProjectId: String(payload.projectId || ''), storeProjects: (store.projects || []).length },
+        error: ''
       };
     }
     if (!project && wantedName) {
@@ -6539,12 +6555,31 @@ ipcMain.handle('theme:metrics', async () => {
     // （rosterCountsNow 在上面 rosterAllEmpty 判定前已算好，两条早退路径都要带同样的计数口径。）
     if (!roles.length) {
       // 97db 返工：名册/映射都为空时必须显式告诉渲染层「无在册成员」，不得只返回 ok:false 让界面猜。
+      // B-8056（P0）：但「行被过滤成 0」≠「无在册成员」——名册还有成员时必须标 filteredOut + 原因，
+      // 否则界面显示「本工作区无在册成员」，而顶部计数按项目六角色算 → 两处自相矛盾（PM 现场即此）。
+      const diagnostics = {
+        hasProject: Boolean(project),
+        projectId: project ? String(project.id || '') : '',
+        manifestTrusted,
+        manifestRoles: Array.isArray(manifestRoles) ? manifestRoles.length : 0,
+        memberRoleIds: memberRoleIds.length,
+        mappedCount: Object.keys(mapped || {}).length,
+        rosterCount: rosterCountsNow.memberCount,
+        rosterAllEmpty,
+        rosterArchivedFiltered: rosterArchivedRoles.size,
+        baseRoles: baseRoles.length,
+      };
+      const trulyEmpty = rosterCountsNow.memberCount === 0 && !baseRolesRaw.length;
       return {
         ok: true, project: projectName, workspace: workspacePath, roles: [], roleIds: memberRoleIds,
         count: 0, memberCount: rosterCountsNow.memberCount, activeCount: rosterCountsNow.activeCount,
         readyCount: rosterCountsNow.readyCount, archivedCount: rosterCountsNow.archivedCount,
         unboundActiveCount: rosterCountsNow.unboundActiveCount,
-        membersEmpty: true, teamMode: normalizeTeamMode(project && project.teamMode), error: ''
+        membersEmpty: trulyEmpty,
+        filteredOut: !trulyEmpty,
+        filteredReason: !trulyEmpty ? (rosterArchivedRoles.size ? 'archived' : 'no-mapping') : '',
+        diagnostics,
+        teamMode: normalizeTeamMode(project && project.teamMode), error: ''
       };
     }
     return {
