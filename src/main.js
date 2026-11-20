@@ -11856,17 +11856,24 @@ installShellAuditSensors();
     const nowMs = Date.now();
     const roles = Object.entries(raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}).map(([role, row]) => {
       const tokens = Number(row && row.tokens) || 0;
+      // B-20261120-1010（Owner 2026-11-20 10:48 报）：`tokens` 是**累计**（input+cacheRead+output），
+      // 长会话的 cacheRead 累计会把 pm 推到 12 亿量级 → 显示「超 4104.6 倍」纯噪声。
+      // 阈值（30/50 万）语义是「进上下文的量」，所以判定口径改为 DSH 的 **uncachedInputTokens**（row.input）；
+      // 累计仍展示（标注「累计含缓存读」），但**不参与**超限倍数计算。
+      const inputTokens = Number(row && row.input) || 0;
+      const compareTokens = inputTokens > 0 ? inputTokens : tokens;
       const at = String((row && row.at) || '');
       const atMs = Date.parse(at);
       const stale = !Number.isFinite(atMs) || (nowMs - atMs) > 24 * 3600000;
       const lim = limitsFor(role);
-      const verdict = UsageThreshold.classifyUsage({ tokens, missing, stale, limits: lim });
+      const verdict = UsageThreshold.classifyUsage({ tokens: compareTokens, missing, stale, limits: lim });
       const level = verdict.level;
       return {
         role,
         sessionId: String((row && row.sessionId) || ''),
         tokens,
-        input: Number((row && row.input) || 0),
+        compareTokens,
+        input: inputTokens,
         at,
         source: String((row && row.source) || ''),
         stale,
@@ -11875,11 +11882,11 @@ installShellAuditSensors();
         thresholdSource: lim.source,
         level
       };
-    }).sort((a, b) => b.tokens - a.tokens);
+    }).sort((a, b) => b.compareTokens - a.compareTokens);
     const tracked = roles.filter((row) => row.level !== 'unknown');
     const maxRow = tracked[0] || null;
     // 0823 AC③：一句话文案必须说清「最高是谁 + 它的阈值 + 超几倍」，禁止拿 A 的用量比 B 的阈值。
-    const ratio = maxRow && maxRow.warn ? (maxRow.tokens / maxRow.warn) : 0;
+    const ratio = maxRow && maxRow.warn ? (maxRow.compareTokens / maxRow.warn) : 0;
     const label = (() => {
       if (!limitsReady && explicitWarn <= 0) {
         return '会话用量不可判定（读不到 session.mjs 单源阈值' + (limitsError ? '：' + String(limitsError).slice(0, 40) : '') + '）';
@@ -11888,7 +11895,13 @@ installShellAuditSensors();
         const firstWarn = tracked[0] && tracked[0].warn ? tracked[0].warn : (explicitWarn || 0);
         return '会话用量未知 / 阈值 ' + (firstWarn ? fmtTokens(firstWarn) : '未知');
       }
-      return UsageThreshold.usageLabel(maxRow, fmtTokens);
+      // 判定值用未缓存输入；累计（含缓存读）另标注，避免 Owner 看到 12 亿这种噪声数当唯一读数。
+      const base = UsageThreshold.usageLabel({ ...maxRow, tokens: maxRow.compareTokens }, fmtTokens);
+      const total = Number(maxRow.tokens) || 0;
+      const cmp = Number(maxRow.compareTokens) || 0;
+      return total > cmp * 1.5
+        ? base + '（判定口径＝未缓存输入；累计含缓存读 ' + fmtTokens(total) + '，仅作参考）'
+        : base;
     })();
     const severity = UsageThreshold.severityOf(roles.map((row) => row.level));
     return {
