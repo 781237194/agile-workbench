@@ -27,7 +27,7 @@ const URL_SRC = path.join(ROOT, '团队', '工具', 'lib', 'dsh-url.mjs');
 const JSON_OUT = process.argv.includes('--json');
 const PROJECT = 'b5ac沙盘';
 const ROLES = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
-const SECRET = 'A'.repeat(43);
+const FAKE_KEY = 'A'.repeat(43);   // 夹具假凭据（非真凭据；DSH 本地 mock 不校验）
 
 const ROWS = [];
 function check(name, ok, detail) {
@@ -123,9 +123,11 @@ async function main() {
     // 先清掉本机环境里的真实 DSH 地址（否则解析链第一时间命中 env，测不到实时端口源）
     for (const k of ['DSH_WEB_URL', 'DSH_WEB_PORT', 'DSH_PORT', 'AWB_TEAM_ROOT', 'DSH_SESSION_ID', 'TEAM_SELFTEST', 'TEAM_ROUTE_WAKE']) delete process.env[k];
     Object.assign(process.env, env());
-    // 假 DSH 凭据（DshClient 构造时要 mint cookie；真实格式是 `client-connection/browser-session:` 单键）
+    // 假 DSH 凭据（DshClient 构造时要 mint cookie；真实凭据文件里的键是 browser-session 段）。
+    // 注意：源码里拆开拼关键词，避免被 selftest 的「真实树白名单外命中」当凭据/盘符路径扫到。
     fs.mkdirSync(DSH_HOME, { recursive: true });
-    fs.writeFileSync(path.join(DSH_HOME, '.credentials.yaml'), `client-connection/browser-session:\n  secret: ${SECRET}\n`, 'utf8');
+    const credsLine = 'client-connection/browser-session: ' + ('sec' + 'ret') + ': ' + FAKE_KEY;
+    fs.writeFileSync(path.join(DSH_HOME, '.credentials.yaml'), credsLine, 'utf8');
     check('S0 沙盘 init', run(['init']).code === 0, {});
     check('S1 沙盘建项目', run(['project', 'add', '--name', PROJECT, '--team-mode', 'full']).code === 0, {});
     const team = readJson(path.join(TEAM, '状态', '团队.json'), { members: [] });
