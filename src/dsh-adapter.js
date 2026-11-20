@@ -277,7 +277,14 @@ class DshAdapter {
 const DSH_WEB_DEFAULT_PORT = 52711;
 const DSH_DISCOVERY_MAX_CANDIDATES = 20;
 const DSH_DISCOVERY_MAX_WAVE1 = 16;
-const DSH_DISCOVERY_PROBE_CONCURRENCY = 6;
+// d637（P1）：权威源先探，命中即短路；探测并发从 6 提到 32（本机 loopback 探测，QPS 不是瓶颈）。
+const DSH_DISCOVERY_PROBE_CONCURRENCY = 32;
+const DSH_QUICK_PROBE_TIMEOUT_MS = 700;   // 权威源（显式/env/端口文件/上次保存）单探上限
+const DSH_SCAN_CONCURRENCY = 96;         // 扫描并发（≥32）
+const DSH_SCAN_CONNECT_TIMEOUT_MS = 180;  // 扫描单探 TCP 超时（≤250ms）
+const DSH_SCAN_BUDGET_MS = 1800;          // 扫描总预算（冷启动 ≤2s 的前提）
+const DSH_SCAN_PRIORITY_SPAN = 16;        // 历史端口 ±16 先扫
+const DSH_SCAN_MAX_OPEN = 6;
 // F-4：其它来源全落空时，才在 127.0.0.1 的这个区间做有界扫描（需求写死 6000–7000）。
 const DSH_SCAN_DEFAULT_START = 49152; // P1-4：DSH 随机端口落在 ephemeral 区间，不再写死 6000–7000
 const DSH_SCAN_DEFAULT_END = 65535;
@@ -469,31 +476,50 @@ async function scanLocalPortRange(options = {}) {
   const started = Date.now();
   const start = Number(options.start) > 0 ? Number(options.start) : 6000;
   const end = Number(options.end) > 0 ? Number(options.end) : 7000;
-  const concurrency = Number(options.concurrency) > 0 ? Number(options.concurrency) : 64;
-  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 220;
-  const budgetMs = Number(options.budgetMs) > 0 ? Number(options.budgetMs) : 4000;
-  const maxOpen = Number(options.maxOpen) > 0 ? Number(options.maxOpen) : 24;
+  const concurrency = Number(options.concurrency) > 0 ? Number(options.concurrency) : DSH_SCAN_CONCURRENCY;
+  const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : DSH_SCAN_CONNECT_TIMEOUT_MS;
+  const budgetMs = Number(options.budgetMs) > 0 ? Number(options.budgetMs) : DSH_SCAN_BUDGET_MS;
+  const maxOpen = Number(options.maxOpen) > 0 ? Number(options.maxOpen) : DSH_SCAN_MAX_OPEN;
+  // d637：①历史端口 ±span 先扫（上次保存 / env / 默认端口周围）；②其余从 end 往下扫（ephemeral 端口就近分配，
+  // 51234 这种靠上的端口第一批就命中，换端口后不用等整段扫完）。
+  const priority = Array.isArray(options.priorityPorts) ? options.priorityPorts : [];
   if (!(end >= start)) return { ok: false, code: 'DSH_SCAN_BAD_RANGE', ports: [], elapsedMs: 0 };
+  const visited = new Set();
+  const queue = [];
+  const push = (port) => {
+    if (!Number.isInteger(port) || port < start || port > end || visited.has(port)) return;
+    visited.add(port);
+    queue.push(port);
+  };
+  for (const port of priority) push(Number(port));
+  for (let port = end; port >= start; port -= 1) push(port);
   const ports = [];
-  let cursor = start;
+  let cursor = 0;
   let budgetHit = false;
+  let openLimitHit = false;
   const worker = async () => {
-    while (cursor <= end) {
+    while (cursor < queue.length) {
       if (Date.now() - started > budgetMs) { budgetHit = true; return; }
-      const port = cursor++;
+      const port = queue[cursor++];
       if (await probeTcpPort('127.0.0.1', port, timeoutMs)) {
         ports.push(port);
-        if (ports.length >= maxOpen) { budgetHit = true; return; }
+        if (ports.length >= maxOpen) { openLimitHit = true; return; }
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency * 4, Math.max(1, end - start + 1)) }, worker));
+  const workers = Math.max(1, Math.min(concurrency, queue.length || 1));
+  await Promise.all(Array.from({ length: workers }, worker));
   ports.sort((a, b) => a - b);
   return {
     ok: true,
     code: budgetHit ? 'DSH_SCAN_PARTIAL' : 'DSH_SCAN_OK',
     ports,
     budgetHit,
+    openLimitHit,
+    scannedPorts: Math.min(cursor, queue.length),
+    concurrency: workers,
+    connectTimeoutMs: timeoutMs,
+    priorityPorts: priority.slice(0, 64),
     elapsedMs: Date.now() - started
   };
 }
@@ -965,10 +991,58 @@ async function discoverDshWeb(options = {}) {
   const scanStart = Number(options.scanRange && options.scanRange.start) > 0 ? Number(options.scanRange.start) : DSH_SCAN_DEFAULT_START;
   const scanEnd = Number(options.scanRange && options.scanRange.end) > 0 ? Number(options.scanRange.end) : DSH_SCAN_DEFAULT_END;
 
-  let processInfo;
-  if (options.skipProcessDiscovery) {
-    processInfo = { ok: false, code: 'DSH_PROCESS_SKIPPED', processes: [], ports: [], argPorts: [], error: '已跳过进程发现' };
-  } else {
+  // d637（P1）：先把「权威源」（显式/env/端口文件/上次保存）建出来并**单独先探一轮**：
+  //   任一命中 → 直接短路，不跑进程发现（netstat/powershell 很贵）也不扫描（scanAttempts=0）。
+  const stats = {
+    startedAt: started,
+    quickCandidates: 0,
+    quickProbeMs: 0,
+    quickHit: false,
+    processMs: 0,
+    processSkipped: false,
+    waveProbeMs: 0,
+    rangeProbeMs: 0,
+    scanAttempts: 0,
+    scanPorts: 0,
+    scanElapsedMs: 0,
+    scanConcurrency: 0,
+    scanConnectTimeoutMs: 0,
+    probeTimeoutMs
+  };
+  // B-0cbc：端口文件读数同时收「缺失/无端口」明细，失败文案要逐条列（PM ②）。
+  const portFileReadout = [];
+  const portFiles = options.skipPortFiles
+    ? []
+    : readDshPortFiles(env, portFileReadout);
+  const candidates = [];
+  const seen = new Set();
+  // B-0cbc（PM ①③）：权威源顺序 显式配置 → DSH_WEB_URL/PORT → ~/.dsh/*.port → 上次保存(dsh.json)。
+  if (explicitBaseUrl) addCandidate(candidates, seen, explicitBaseUrl, 'explicit', -1, explicitSource || '显式配置');
+  if (env && env.DSH_WEB_URL) addCandidate(candidates, seen, env.DSH_WEB_URL, 'env-url', 1, 'DSH_WEB_URL');
+  if (env) {
+    for (const key of ['DSH_WEB_PORT', 'DSH_PORT']) {
+      if (!env[key]) continue;
+      addCandidate(candidates, seen, 'http://127.0.0.1:' + String(env[key]).trim(), 'env-port', 2, key);
+    }
+  }
+  for (const entry of portFiles) {
+    addCandidate(candidates, seen, entry.baseUrl, 'port-file', 2, entry.file + ' → ' + entry.raw);
+  }
+  if (savedBaseUrl) addCandidate(candidates, seen, savedBaseUrl, 'saved', 3, '上次保存（dsh.json）');
+  const quickCandidates = candidates.slice();
+  stats.quickCandidates = quickCandidates.length;
+  const quickStarted = Date.now();
+  let probes = quickCandidates.length
+    ? await probeCandidates(quickCandidates, Math.min(probeTimeoutMs, DSH_QUICK_PROBE_TIMEOUT_MS))
+    : [];
+  stats.quickProbeMs = Date.now() - quickStarted;
+  let best = pickBestProbe(probes, savedBaseUrl);
+  stats.quickHit = Boolean(best);
+  let processInfo = { ok: false, code: 'DSH_PROCESS_SKIPPED', processes: [], ports: [], argPorts: [], error: best ? '权威源已命中，跳过进程发现' : '已跳过进程发现' };
+  if (best) {
+    stats.processSkipped = true;
+  } else if (!options.skipProcessDiscovery) {
+    const processStarted = Date.now();
     try {
       processInfo = await collectDshProcessInfo({
         timeoutMs: Number(options.processTimeoutMs) > 0 ? Number(options.processTimeoutMs) : undefined
@@ -983,49 +1057,36 @@ async function discoverDshWeb(options = {}) {
         error: String(error && error.message || error).slice(0, 240)
       };
     }
+    stats.processMs = Date.now() - processStarted;
+  } else {
+    stats.processSkipped = true;
   }
-
-  // B-0cbc：端口文件读数同时收「缺失/无端口」明细，失败文案要逐条列（PM ②）。
-  const portFileReadout = [];
-  const portFiles = options.skipPortFiles
-    ? []
-    : readDshPortFiles(env, portFileReadout);
-  const candidates = [];
-  const seen = new Set();
-  // B-0cbc（PM ①③）：顺序改为 显式配置 → DSH_WEB_URL/PORT → ~/.dsh/*.port → 上次保存(dsh.json)
-  //   → 进程命令行 → 监听端口 → 端口段扫描。上次保存的地址只是**候选**，失效时仍走完整条链。
-  if (explicitBaseUrl) addCandidate(candidates, seen, explicitBaseUrl, 'explicit', -1, explicitSource || '显式配置');
-  if (env && env.DSH_WEB_URL) addCandidate(candidates, seen, env.DSH_WEB_URL, 'env-url', 1, 'DSH_WEB_URL');
-  if (env) {
-    for (const key of ['DSH_WEB_PORT', 'DSH_PORT']) {
-      if (!env[key]) continue;
-      addCandidate(candidates, seen, 'http://127.0.0.1:' + String(env[key]).trim(), 'env-port', 2, key);
+  // 进程/netstat/默认端口候选只在权威源落空时才加（命中就完全不查进程）。
+  if (!best) {
+    for (const port of processInfo.argPorts || []) {
+      addCandidate(candidates, seen, 'http://127.0.0.1:' + port, 'process-arg', 3, 'DSH 进程 --port');
     }
+    for (const listener of processInfo.ports || []) {
+      addCandidate(candidates, seen, listener.baseUrl, 'process-port', 4, 'pid ' + listener.pid + ' 监听 ' + listener.port);
+    }
+    const listenerCandidates = (processInfo.listenerPorts || []).slice(0, DSH_DISCOVERY_MAX_LISTENERS);
+    for (const listener of listenerCandidates) {
+      addCandidate(candidates, seen, listener.baseUrl, 'netstat-port', 5, 'netstat 监听 ' + listener.port + '（pid ' + listener.pid + '）');
+    }
+    addCandidate(candidates, seen, 'http://127.0.0.1:' + DSH_WEB_DEFAULT_PORT, 'default', 5, '默认端口');
   }
-  for (const entry of portFiles) {
-    addCandidate(candidates, seen, entry.baseUrl, 'port-file', 2, entry.file + ' → ' + entry.raw);
-  }
-  if (savedBaseUrl) addCandidate(candidates, seen, savedBaseUrl, 'saved', 3, '上次保存（dsh.json）');
-  for (const port of processInfo.argPorts || []) {
-    addCandidate(candidates, seen, 'http://127.0.0.1:' + port, 'process-arg', 3, 'DSH 进程 --port');
-  }
-  for (const listener of processInfo.ports || []) {
-    addCandidate(candidates, seen, listener.baseUrl, 'process-port', 4, 'pid ' + listener.pid + ' 监听 ' + listener.port);
-  }
-  // P1-4：进程反向匹配失败/为空时，用 netstat 监听端口兜底（比全端口扫描便宜）。
-  const listenerCandidates = (processInfo.listenerPorts || []).slice(0, DSH_DISCOVERY_MAX_LISTENERS);
-  for (const listener of listenerCandidates) {
-    addCandidate(candidates, seen, listener.baseUrl, "netstat-port", 5, "netstat 监听 " + listener.port + "（pid " + listener.pid + "）");
-  }
-
-  addCandidate(candidates, seen, 'http://127.0.0.1:' + DSH_WEB_DEFAULT_PORT, 'default', 5, '默认端口');
-
-  const wave1 = candidates.slice(0, Math.min(DSH_DISCOVERY_MAX_WAVE1, maxCandidates));
-  let probes = wave1.length ? await probeCandidates(wave1, probeTimeoutMs) : [];
-  let best = pickBestProbe(probes, savedBaseUrl);
   let rangeProbed = false;
   let scan = null;
   const canProbeBeyond = !explicitBaseUrl && options.includeRange !== false;
+  if (!best) {
+    const wave1 = candidates.slice(0, Math.min(DSH_DISCOVERY_MAX_WAVE1, maxCandidates));
+    if (wave1.length) {
+      const waveStarted = Date.now();
+      probes = probes.concat(await probeCandidates(wave1, probeTimeoutMs));
+      stats.waveProbeMs = Date.now() - waveStarted;
+      best = pickBestProbe(probes, savedBaseUrl);
+    }
+  }
   if (!best && canProbeBeyond) {
     rangeProbed = true;
     const before = candidates.length;
@@ -1033,17 +1094,36 @@ async function discoverDshWeb(options = {}) {
     addRangeCandidates(candidates, seen, 'http://127.0.0.1:' + DSH_WEB_DEFAULT_PORT, 3, maxCandidates);
     const range = candidates.slice(before);
     if (range.length) {
+      const rangeStarted = Date.now();
       const rangeProbes = await probeCandidates(range, probeTimeoutMs);
       probes = probes.concat(rangeProbes);
+      stats.rangeProbeMs = Date.now() - rangeStarted;
       best = pickBestProbe(probes, savedBaseUrl);
     }
   }
   // F-4-7：其它来源全落空，才在 127.0.0.1 的 6000–7000 里做有界扫描（先 TCP 判活，再验 DSH 特征）。
   if (!best && canProbeBeyond && options.includeScan !== false) {
+    // d637：优先扫「历史端口 ±16」（上次保存/env/端口文件/默认端口），再退全段（倒序）。
+    const priorityPorts = [];
+    const pushAround = (basePort) => {
+      const port = Number(basePort) || 0;
+      if (!(port > 0)) return;
+      for (let delta = -DSH_SCAN_PRIORITY_SPAN; delta <= DSH_SCAN_PRIORITY_SPAN; delta += 1) {
+        const p = port + delta;
+        if (p >= scanStart && p <= scanEnd && !priorityPorts.includes(p)) priorityPorts.push(p);
+      }
+    };
+    const portOfBaseUrl = (baseUrl) => { try { return Number(new URL(normalizeLocalBaseUrl(baseUrl)).port) || 0; } catch { return 0; } };
+    pushAround(portOfBaseUrl(savedBaseUrl));
+    if (env && env.DSH_WEB_URL) pushAround(portOfBaseUrl(env.DSH_WEB_URL));
+    for (const entry of portFiles) pushAround(entry.port);
+    pushAround(DSH_WEB_DEFAULT_PORT);
+    stats.scanAttempts += 1;
     try {
       scan = await scanLocalPortRange({
         start: scanStart,
         end: scanEnd,
+        priorityPorts,
         concurrency: Number(options.scanConcurrency) > 0 ? Number(options.scanConcurrency) : undefined,
         timeoutMs: Number(options.scanConnectTimeoutMs) > 0 ? Number(options.scanConnectTimeoutMs) : undefined,
         budgetMs: Number(options.scanBudgetMs) > 0 ? Number(options.scanBudgetMs) : undefined
@@ -1051,6 +1131,10 @@ async function discoverDshWeb(options = {}) {
     } catch (error) {
       scan = { ok: false, code: 'DSH_SCAN_FAILED', ports: [], error: String(error && error.message || error).slice(0, 160) };
     }
+    stats.scanPorts = Number(scan && scan.scannedPorts) || 0;
+    stats.scanElapsedMs = Number(scan && scan.elapsedMs) || 0;
+    stats.scanConcurrency = Number(scan && scan.concurrency) || 0;
+    stats.scanConnectTimeoutMs = Number(scan && scan.connectTimeoutMs) || 0;
     const openPorts = (scan && Array.isArray(scan.ports) ? scan.ports : [])
       .slice(0, DSH_SCAN_MAX_PROBE_PORTS);
     const before = candidates.length;
@@ -1103,6 +1187,7 @@ async function discoverDshWeb(options = {}) {
       probedPorts: probes.map((p) => p.port).filter((p) => Number.isInteger(p) && p > 0),
       shouldPersist: true,
       rangeProbed, scan,
+      stats,
       durationMs: Date.now() - started,
     };
   }
@@ -1124,6 +1209,7 @@ async function discoverDshWeb(options = {}) {
       portFiles: portFileSummary,
       rangeProbed,
       scan,
+      stats,
       durationMs: Date.now() - started
     };
   }
@@ -1152,6 +1238,7 @@ async function discoverDshWeb(options = {}) {
       portFiles: portFileSummary,
       rangeProbed,
       scan,
+      stats,
       durationMs: Date.now() - started
     };
   }
@@ -1177,6 +1264,7 @@ async function discoverDshWeb(options = {}) {
       portFiles: portFileSummary,
       rangeProbed,
       scan,
+      stats,
       durationMs: Date.now() - started
     };
   }
@@ -1243,6 +1331,7 @@ async function discoverDshWeb(options = {}) {
     probedPorts: probedSorted,
     rangeProbed,
     scan,
+    stats,
     durationMs: Date.now() - started
   };
 }

@@ -130,10 +130,15 @@ function kill(h) { try { cp.execFileSync('taskkill', ['/PID', String(h.child.pid
     fs.writeFileSync(STORE, JSON.stringify(st, null, 2), 'utf8');
     await h.send('Page.enable', {});
     await h.send('Page.reload', { ignoreCache: true });
-    await sleep(5000);
-    const d4 = await domNow(h);
+    let d4 = null; let rawState = null;
+    for (let i = 0; i < 40; i += 1) {
+      await sleep(500);
+      d4 = await domNow(h);
+      rawState = await h.evalJs(`(async()=>{try{const s=await window.workbench.state();return {raw:s.activeProjectIdRaw,missing:s.activeProjectMissing,id:s.activeProjectId};}catch(e){return {error:String(e&&e.message||e)}}})()`);
+      if (/PROJECT_NOT_FOUND/.test(String(d4.name || ''))) break;
+    }
     const stored2 = JSON.parse(fs.readFileSync(STORE, 'utf8'));
-    check('E4', 'activeProjectId 指向不存在 → 卡片显示 PROJECT_NOT_FOUND（不清空、不静默切走）', /PROJECT_NOT_FOUND/.test(d4.name) && /P-dead-3d23/.test(d4.meta) && stored2.activeProjectId === 'P-dead-3d23', { d4, active: stored2.activeProjectId, warn: d4.warn });
+    check('E4', 'activeProjectId 指向不存在 → 卡片显示 PROJECT_NOT_FOUND（不清空、不静默切走）', /PROJECT_NOT_FOUND/.test(d4.name) && /P-dead-3d23/.test(d4.meta) && stored2.activeProjectId === 'P-dead-3d23', { d4, rawState, active: stored2.activeProjectId, warn: d4.warn });
   } finally { kill(h); }
 })().catch((e) => check('EX', '断面未抛异常', false, { error: String((e && e.stack) || e) })).finally(() => {
   if (!KEEP) { try { cp.execFileSync('cmd', ['/c', 'rmdir', path.join(TEAM, '工具')], { stdio: 'ignore' }); } catch { /* ignore */ } try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ } } else { console.log('KEEP_SANDBOX=' + SB); }

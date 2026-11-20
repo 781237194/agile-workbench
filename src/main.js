@@ -21289,6 +21289,8 @@ function dshDiscoverySummary(result) {
     previousBaseUrl: result.previousBaseUrl || null,
     candidates: Array.isArray(result.candidates) ? result.candidates.length : 0,
     probes: Array.isArray(result.probes) ? result.probes.length : 0,
+    // d637：发现耗时拆解（权威源短路与否、是否扫描、扫描端口数与并发），界面/夹具/排障同源。
+    stats: result.stats || null,
     durationMs: result.durationMs || 0
   };
 }
