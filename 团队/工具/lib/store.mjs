@@ -1189,11 +1189,17 @@ export function sendMessage(msg) {
     // B-2736：静默通知标记——被 ack 时不再回任何消息，防回执/通知互相扩散。
     ...(msg.noEcho ? { noEcho: true } : {}),
   };
-  const box = mailBoxDir(msg.to, 'new');
-  ensureDir(box);
-  writeJson(path.join(box, `${record.ts.replace(/[:.]/g, '-')}-${id}.json`), record);
-  // R-e438 批②：同一条消息同时追加到 邮箱/<role>/messages.jsonl（JSONL 为迁移后的主存储）。
-  try { mailStore.appendMessage(PATHS.mail, msg.to, record); } catch { /* JSONL 追加失败不阻断旧通道 */ }
+  // R-e438 批②-2：已迁移到 JSONL 的角色**只写 JSONL**——否则新消息会重建 new/cur 目录，
+  // 让 roleUsesJsonlMail 翻回旧口径（归档历史消息瞬间从 inbox 消失）。
+  if (roleUsesJsonlMail(msg.to)) {
+    mailStore.appendMessage(PATHS.mail, msg.to, record);
+  } else {
+    const box = mailBoxDir(msg.to, 'new');
+    ensureDir(box);
+    writeJson(path.join(box, `${record.ts.replace(/[:.]/g, '-')}-${id}.json`), record);
+    // R-e438 批②：兼容期同一条消息双写 JSONL（迁移后仍是主存储）。
+    try { mailStore.appendMessage(PATHS.mail, msg.to, record); } catch { /* JSONL 追加失败不阻断旧通道 */ }
+  }
   // T-20261117-203046-9ff2：给 PM 的关键消息（升级/唤醒失败/评审打回/决策回执…）**发完立即**通知钩子，
   // 让 ops 侧当场唤醒 PM，而不是等队列泵的兜底摘要（兜底仍保留作保险）。
   if (record.to === 'pm') {

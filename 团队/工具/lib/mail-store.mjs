@@ -163,9 +163,23 @@ function readAll(mailRoot, role, { project = '' } = {}) {
   if (fs.existsSync(p.jsonl)) for (const line of fs.readFileSync(p.jsonl, 'utf8').split(/\r?\n/)) push(line, bad);
   try {
     for (const month of fs.readdirSync(p.archiveDir)) {
-      const f = path.join(p.archiveDir, month, 'messages.jsonl');
-      if (!fs.existsSync(f)) continue;
-      for (const line of fs.readFileSync(f, 'utf8').split(/\r?\n/)) push(line, bad);
+      const monthDir = path.join(p.archiveDir, month);
+      // 新形态：按月分角色 归档/<YYYY-MM>/<role>/messages.jsonl；
+      // 兼容旧形态：团队级混合 归档/<YYYY-MM>/messages.jsonl（必须按 to 过滤，否则 A 角色会读到 B 的归档消息）。
+      const perRole = path.join(monthDir, role, 'messages.jsonl');
+      if (fs.existsSync(perRole)) for (const line of fs.readFileSync(perRole, 'utf8').split(/\r?\n/)) push(line, bad);
+      const mixed = path.join(monthDir, 'messages.jsonl');
+      if (fs.existsSync(mixed)) {
+        for (const line of fs.readFileSync(mixed, 'utf8').split(/\r?\n/)) {
+          const row = parseLine(line, bad);
+          if (!row || row.type === 'event' || !row.id) continue;
+          if (String(row.to || '') !== String(role)) continue;   // 混合归档必须属于本角色收件箱
+          if (project && row.project && String(row.project) !== String(project)) continue;
+          if (seen.has(row.id)) continue;
+          seen.add(row.id);
+          rows.push(row);
+        }
+      }
     }
   } catch { /* 无归档 */ }
   rows.sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0) || String(a.at || '').localeCompare(String(b.at || '')));
@@ -213,7 +227,8 @@ function archiveCold(mailRoot, role, { now = Date.now(), days = HOT_DAYS, dryRun
   if (dryRun) return result;
   fs.mkdirSync(p.dir, { recursive: true });
   for (const [m, rows] of byMonth) {
-    const dir = path.join(p.archiveDir, m);
+    // 新归档一律按月分角色落盘：归档/<YYYY-MM>/<role>/messages.jsonl（避免团队级混合文件跨角色串读）。
+    const dir = path.join(p.archiveDir, m, role);
     fs.mkdirSync(dir, { recursive: true });
     const f = path.join(dir, 'messages.jsonl');
     fs.appendFileSync(f, rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');

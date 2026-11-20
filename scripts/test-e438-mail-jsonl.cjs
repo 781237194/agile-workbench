@@ -164,8 +164,8 @@ function finalPart() {
     const real = ms.archiveCold(MAIL, 'programmer1', { dryRun: false });
     const p = ms.pathsFor(MAIL, 'programmer1');
     const hot = ms.readTail(MAIL, 'programmer1', { limit: 1000 }).rows;
-    check('Z1', '冷归档：dry-run 只报数；--yes 后 >7 天消息落 归档/2026-09/，热文件不含老消息，index.archivedMonths 更新并留审计',
-      dry.archived >= 1 && fs.existsSync(path.join(MAIL, '归档', '2026-09', 'messages.jsonl'))
+    check('Z1', '冷归档：dry-run 只报数；--yes 后 >7 天消息落 归档/<月>/<role>/，热文件不含老消息，index.archivedMonths 更新并留审计',
+      dry.archived >= 1 && fs.existsSync(path.join(MAIL, '归档', '2026-09', 'programmer1', 'messages.jsonl'))
       && !hot.some((r) => r.id === 'M-old-202609')
       && ms.readIndex(p).archivedMonths.includes('2026-09')
       && fs.existsSync(path.join(MAIL, '邮箱归档.jsonl')), { dry: dry.archived, real: real.archived, hot: hot.length, months: ms.readIndex(p).archivedMonths });
