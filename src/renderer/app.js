@@ -2865,24 +2865,32 @@ function render() {
   __t('dsh', () => renderDsh(state.dsh));
   __t('storeFlag', renderStoreFlag);
   __t('theme', syncThemeUi);
-  const __deferred = () => {
-    __t('truthStrip', renderTruthStrip);
-    __t('overview', renderOverview);
-    __t('flow', renderFlow);
-    __t('roles', renderRoles);
-    __t('team', renderTeam);
-    __t('workspacePopover', renderWorkspacePopover);
-    __t('boardPanel', renderBoardPanel);
-    __t('launchers', renderLaunchers);
-    if (current) {
-      if (switchedProjects) loadLegacyDocs();
-      else __t('legacyPanels', renderLegacyPanels);
-    }
-    __t('tab', () => showTab(activeTab, { fromRender: true }));
-    __t('modeCopy', () => { renderModeCopyAnchors(); applyTeamModeCopy(document.body); });
-  };
   // 下一拍补绘；首屏在此之前已经可见（rAF 打点早于这里）。
-  try { setTimeout(__deferred, 0); } catch { __deferred(); }
+  // AC2 归因（T-32a3）：__deferred 单次实测 106–1499ms（trace timer 任务），改为 gate.chunked 分片（每片 ≤8ms），
+  // 把整块补绘摊到多帧，避免一次 >100ms 长任务；无 gate.chunked 时退回原行为。
+  const deferredTasks = [
+    () => __t('truthStrip', renderTruthStrip),
+    () => __t('overview', renderOverview),
+    () => __t('flow', renderFlow),
+    () => __t('roles', renderRoles),
+    () => __t('team', renderTeam),
+    () => __t('workspacePopover', renderWorkspacePopover),
+    () => __t('boardPanel', renderBoardPanel),
+    () => __t('launchers', renderLaunchers),
+    ...(current ? [switchedProjects ? () => { loadLegacyDocs(); } : () => __t('legacyPanels', renderLegacyPanels)] : []),
+    () => __t('tab', () => showTab(activeTab, { fromRender: true })),
+    () => __t('modeCopy', () => { renderModeCopyAnchors(); applyTeamModeCopy(document.body); }),
+  ];
+  const runDeferred = () => {
+    try {
+      if (window.AWBGate && typeof AWBGate.chunked === 'function') {
+        void AWBGate.chunked(deferredTasks, { budgetMs: 8 }).catch(() => { /* 分片失败降级 */ });
+        return;
+      }
+    } catch { /* ignore */ }
+    for (const fn of deferredTasks) fn();
+  };
+  try { setTimeout(runDeferred, 0); } catch { runDeferred(); }
   // Owner 不自动弹窗：顶栏「Owner 待决定」与项目面板的 Owner 卡片就是继续入口。
 }
 

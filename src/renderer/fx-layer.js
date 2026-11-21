@@ -552,6 +552,7 @@
   function stopLoop() {
     if (S.raf) {
       try { W.cancelAnimationFrame(S.raf); } catch (e) { /* ignore */ }
+      try { W.clearTimeout(S.raf); } catch (e) { /* ignore */ }
     }
     S.raf = 0;
     S.running = false;
@@ -584,7 +585,19 @@
       S.lastDraw = ts;
       drawParticles();
     }
-    if (S.running) S.raf = W.requestAnimationFrame(loop);
+    if (S.running) {
+      // AC2 归因（T-32a3）：空闲且无粒子时不跟高刷 rAF 空转（实测 ~155 次/秒、造成 GC/长任务），
+      // 降为 30fps 的 setTimeout；有粒子或非空闲仍走 rAF 保动画质量。
+      if (S.idle && !S.parts.length) {
+        S.raf = W.setTimeout(function () {
+          S.raf = 0;
+          if (!S.running) return;
+          loop(W.performance && W.performance.now ? W.performance.now() : Date.now());
+        }, 33);
+      } else {
+        S.raf = W.requestAnimationFrame(loop);
+      }
+    }
   }
 
   /* ── 点击涟漪（AC13）────────────────────────────────────────────────── */
