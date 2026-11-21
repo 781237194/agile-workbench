@@ -177,7 +177,10 @@ const REVIEW_ONE = `(async () => {
   const n0 = document.querySelector('[data-or-notice]'); if (n0) { n0.textContent = ''; }
   const t0 = performance.now();
   approve.click();
-  const seen = await until(() => { const n = document.querySelector('[data-or-notice]'); return n && n.getBoundingClientRect().height > 0 && /已通过/.test(n.textContent || ''); }, 20000);
+  const seen = await until(() => {
+    const list = [document.querySelector('[data-or-notice]'), document.querySelector('[data-or-notice-global]')];
+    return list.find((n) => n && n.getBoundingClientRect().height > 0 && /已通过/.test(n.textContent || '')) || null;
+  }, 20000);
   if (!seen) return { ok: false, error: 'notice timeout' };
   return { ok: true, ms: Math.round(seen.at - t0), notice: String((document.querySelector('[data-or-notice]') || {}).textContent || '').slice(0, 80) };
 })()`;

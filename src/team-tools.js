@@ -10515,8 +10515,20 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     } catch (error) {
       warning = { code: 'OWNER_NOTE_FAILED', message: String(error && error.message || error).slice(0, 300) };
     }
-    const projectIndex = await refreshProjectIndex(ctx.name, ctx.projectPath);
-    const indexWarning = projectIndexWarning(projectIndex);
+    // a514：验收里的索引刷新（扫 1360+ 任务，1–2.5s）移后台，点击响应只等落账 + 一次快照。
+    const __idxT0 = Date.now();
+    setImmediate(() => {
+      void (async () => {
+        try {
+          await refreshProjectIndex(ctx.name, ctx.projectPath);
+          try { console.log('[index-profile] ' + JSON.stringify({ action: 'owner-accept', indexMs: Date.now() - __idxT0, ok: true })); } catch { /* ignore */ }
+        } catch (error) {
+          try { console.log('[index-profile] ' + JSON.stringify({ action: 'owner-accept', indexMs: Date.now() - __idxT0, ok: false })); } catch { /* ignore */ }
+        }
+      })();
+    });
+    const projectIndex = null;
+    const indexWarning = { code: 'PROJECT_INDEX_REFRESH_QUEUED', message: '索引在后台刷新（不阻塞本次落账）' };
     let snapshot = readWorkflowSnapshot(ctx.name, ctx.projectPath);
     if (snapshot.ok) {
       const fresh = readWorkflowState(ctx.name);

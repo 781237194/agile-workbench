@@ -1549,6 +1549,7 @@
     } catch { /* 提示失败不影响落账 */ }
   }
 
+  let globalNoticeTimer = null;
   function showNotice(text) {
     const dialog = dialogEl();
     if (!dialog) return;
@@ -1564,6 +1565,22 @@
       }
       box.textContent = text;
       box.hidden = false;
+      // a514：容器可能在随后的 loadData/renderDialog 里被重绘，再挂一条全局固定条，保证用户立刻可见且不被删。
+      try {
+        let g = document.getElementById('awb-or-notice-global');
+        if (!g) {
+          g = el('div', 'or-notice-global');
+          g.id = 'awb-or-notice-global';
+          g.setAttribute('data-or-notice-global', '1');
+          g.setAttribute('role', 'status');
+          g.style.cssText = 'position:fixed;left:50%;top:64px;transform:translateX(-50%);z-index:9999;background:#143a22;color:#c9f7d6;border:1px solid #2f7d4b;border-radius:8px;padding:8px 16px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+          document.body.appendChild(g);
+        }
+        g.textContent = text;
+        g.hidden = false;
+        if (globalNoticeTimer) clearTimeout(globalNoticeTimer);
+        globalNoticeTimer = setTimeout(() => { g.hidden = true; }, 6000);
+      } catch { /* 全局条失败不影响主提示 */ }
       if (noticeTimer) clearTimeout(noticeTimer);
       noticeTimer = setTimeout(() => { box.hidden = true; }, 6000);
     } catch { /* 提示条只是反馈，失败不影响已经成功的操作 */ }
