@@ -15906,9 +15906,10 @@ function renderDsh(dsh) {
     // PM 16:05（Owner 拍板，最高优先级）：**连上就直接显示原生 DSH 界面，不做任何遮挡**。
     // 覆盖层只在「DSH 本身没连上（online=false）」时出现；不再依据 bodyLen/probe/did-finish 状态判定，
     // 也不允许因为"探针读到 0"把已经加载出来的原生界面盖住（今天多次因此把好页面挡了）。
-    // Owner 16:05 拍板（最高优先级，覆盖此前 loadedOk 判定）：连上就直接显示原生 DSH 界面。
-    // 覆盖层只在 online=false 时出现；探针/正文判定一律不得遮挡主区。
-    const showOff = !online;
+    // Owner 16:05/16:06 最高优先：连上就直接显示原生 DSH 界面，不做任何判断、不遮挡。
+    // 覆盖层只在 online=false **且 webview 还没有成功加载过页面** 时出现；
+    // 页面一旦 did-finish，后续探测抖动（DSH 忙时 fetch 偶发失败）绝不能再把主区盖住。
+    const showOff = !online && !dshReady;
     off.hidden = !showOff;
     const url = $('#dsh-off-url');
     if (url) {
