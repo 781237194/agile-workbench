@@ -1,7 +1,7 @@
 {
   "version": "2.1.16",
   "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.16/发布/pm-workbench-2.1.16.zip",
-  "sha256": "97652f46b852894d7cbec797c7035c49bd2074148a86bcc47b4f81ae2eacddd6",
-  "size": 4772143,
+  "sha256": "e2bf30c41345e522936353a7c6c277faa6556df6db72bcd06459100618cae22d",
+  "size": 4772812,
   "notes": "本版为 2026-11-22 凌晨现场修复：①名册清零根治——启动期「删除墓碑补扫」遇旧项目墓碑会清掉当前全局名册（每次重启 16–21 秒后六成员 sessionId 全空），新增 roster-startup-guard（墓碑团队≠activeProject / store 未就绪 / 同名项目仍在→不清）+ 团队.json 整文件写守卫（写后全空且写前>0→拒写并写 case/stack 审计）；②DSH 端口自愈——pin 只作提示，旧端口不可达 3 秒内自动回退发现（env→端口文件→进程端口→全监听端口探测），cookie 按新 authority 重签，离线每 30 秒重试；用户端口非默认（如 12341）也无需手改配置；③连接 DSH 后粒子可见——DSH 为 webview 独立合成层会盖住 DOM 粒子，新增透明覆盖 BrowserWindow（点击穿透、跟随 bounds、离线回退壳内）；④主进程 CPU 治理——briefing 2097ms→0.1ms（stale-while-revalidate + 裁 requirements）、workflow:state 422ms→62ms、fx-force-get 10 万次/100s 收敛、owner:pending-counts 热读 1.5MB 加缓存，OS 口径 CPU 41.8%→20.9%；⑤壳渲染层内存 76.6MB 堆 / 167.5MB RSS（≤250MB），缓存条目上限收紧。"
 }
