@@ -42,12 +42,15 @@ async function waitTarget(ms) {
 }
 class Cdp {
   constructor(ws) {
-    this.ws = ws; this.seq = 0; this.pending = new Map();
+    this.ws = ws; this.seq = 0; this.pending = new Map(); this.events = [];
     ws.addEventListener('message', (ev) => {
       let m; try { m = JSON.parse(String(ev.data)); } catch { return; }
       if (m.id && this.pending.has(m.id)) {
         const { resolve, reject } = this.pending.get(m.id); this.pending.delete(m.id);
         if (m.error) reject(new Error(m.error.message)); else resolve(m.result);
+      } else if (!m.id) {
+        this.events.push(m);
+        if (this.events.length > 800) this.events.shift();
       }
     });
   }
@@ -98,9 +101,11 @@ function seed(mockPort) {
     projects: [{ id: 'p-f749', name: '工作台改造修复', teamName: '工作台改造修复', path: PROJECT_DIR, teamMode: 'full', sessions: {}, sessionMeta: {}, workspace: { id: 'w-f749', path: PROJECT_DIR, name: '工作台改造修复', bound: true, sessionIds: [] }, requirements: [], tasks: [], messages: [], proposals: [], docs: [] }], ui: {}
   };
   fs.writeFileSync(STORE, JSON.stringify(store, null, 2) + '\n', 'utf8');
-  const baseForSeed = (process.env.AWB_F749_RECOVERED === '1' || process.env.AWB_F749_CLICK === '1') ? ('http://127.0.0.1:' + mockPort) : 'http://127.0.0.1:65533';
+  const realMode = process.env.AWB_F749_TARGET === '1';
+  const baseForSeed = realMode ? 'http://127.0.0.1:55263' : ((process.env.AWB_F749_RECOVERED === '1' || process.env.AWB_F749_CLICK === '1') ? ('http://127.0.0.1:' + mockPort) : 'http://127.0.0.1:65533');
   fs.writeFileSync(path.join(DATA, 'dsh.json'), JSON.stringify({ version: 1, baseUrl: baseForSeed, source: 'auto', pinned: false }, null, 2) + '\n', 'utf8');
-  return { 'netstat.exe': { ok: true, stdout: ['活动连接', '', '  TCP    127.0.0.1:' + ((process.env.AWB_F749_RECOVERED === '1' || process.env.AWB_F749_CLICK === '1') ? mockPort : 65501) + '    0.0.0.0:0    LISTENING    4242'].join('\r\n') + '\r\n' } };
+  const stubPort = realMode ? 55263 : ((process.env.AWB_F749_RECOVERED === '1' || process.env.AWB_F749_CLICK === '1') ? mockPort : 65501);
+  return { 'netstat.exe': { ok: true, stdout: ['活动连接', '', '  TCP    127.0.0.1:' + stubPort + '    0.0.0.0:0    LISTENING    4242'].join('\r\n') + '\r\n' } };
 }
 async function close(inst, keep) {
   if (!inst) return;
@@ -170,6 +175,101 @@ async function shot(cdp, file) {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false }, 10000);
   for (let i = 0; i < 120; i += 1) { const ready = await cdp.evaluate('Boolean(document.querySelector("#dsh-view")) && Boolean(document.querySelector("#dsh-off"))'); if (ready === true) break; await sleep(250); }
   await sleep(3500); // 等 initDsh/启动发现落定，避免它晚到的 offline renderDsh 覆盖手动状态
+  if (process.env.AWB_F749_TARGET === '1') {
+    // PM 12:41：webview 在 CDP 里是独立 target——直接截 target 画面并打印四个字段。
+    let targetInfo = null;
+    let allTargets = [];
+    for (let i = 0; i < 120; i += 1) {
+      const list = await httpJson('http://127.0.0.1:' + PORT + '/json/list');
+      allTargets = Array.isArray(list) ? list : [];
+      const hit = allTargets.find((item) => item && String(item.url || '').includes('55263'));
+      if (hit && hit.webSocketDebuggerUrl) { targetInfo = hit; break; }
+      await sleep(500);
+    }
+    check('T1', '找到 DSH webview 独立 target（url 含 55263）', Boolean(targetInfo && targetInfo.webSocketDebuggerUrl), targetInfo && { url: targetInfo.url, title: targetInfo.title } || allTargets.map((x) => ({ type: x.type, url: x.url })));
+    if (targetInfo && targetInfo.webSocketDebuggerUrl) {
+      const tws = new WebSocket(targetInfo.webSocketDebuggerUrl);
+      await new Promise((resolve, reject) => { tws.addEventListener('open', resolve, { once: true }); tws.addEventListener('error', () => reject(new Error('target ws 失败')), { once: true }); });
+      const tcdp = new Cdp(tws);
+      await tcdp.send('Runtime.enable');
+      await tcdp.send('Log.enable');
+      await tcdp.send('Page.enable');
+      let fields = null;
+      for (let i = 0; i < 120; i += 1) {
+        fields = await tcdp.evaluate(`(() => ({
+          href: String(location.href || ''),
+          title: String(document.title || ''),
+          body: String((document.body && document.body.innerText) || '').slice(0, 200),
+          bodyLen: String((document.body && document.body.innerText) || '').trim().length,
+          responseStatus: (performance.getEntriesByType('navigation')[0] || {}).responseStatus || 0
+        }))()`);
+        if (fields && fields.bodyLen > 0 && fields.title) break;
+        await sleep(500);
+      }
+      check('T2', 'target 内 title 像 DSH 且 body 非空', Boolean(fields && /deepseek/i.test(String(fields.title)) && Number(fields.bodyLen) > 0), fields);
+      // DSH 首启有 boot 动画「正在启动… 点击画面跳过 / Loading plugins…」；隐藏实例不会自动跳过，
+      // 点一下画面后等真正的 DSH UI（body 变长且不再含 Loading plugins）。
+      if (fields && /正在启动|Loading plugins|正在进入/.test(String(fields.body || ''))) {
+        try { await tcdp.send('Page.bringToFront', {}, 5000).catch(() => null); } catch { /* ignore */ }
+        await sleep(400);
+        try {
+          const box = await tcdp.evaluate(`({ w: window.innerWidth || 1328, h: window.innerHeight || 920 })`).catch(() => ({ w: 1328, h: 920 }));
+          const x = Math.round(Number(box && box.w) / 2), y = Math.round(Number(box && box.h) / 2);
+          await tcdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }, 5000).catch(() => null);
+          await tcdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, 5000).catch(() => null);
+          // 部分环境 Input 命中不到 boot overlay 的 capture 监听：再向 body 派发 pointerdown/click（同 elementFromPoint）。
+          await tcdp.evaluate(`(() => {
+            const el = document.elementFromPoint(${x}, ${y}) || document.body;
+            for (const type of ['pointerdown', 'click']) {
+              try { el.dispatchEvent(new (type === 'pointerdown' ? PointerEvent : MouseEvent)(type, { bubbles: true, cancelable: true, clientX: ${x}, clientY: ${y}, button: 0 })); } catch { /* ignore */ }
+            }
+            return true;
+          })()`).catch(() => null);
+        } catch { /* ignore */ }
+        for (let i = 0; i < 60; i += 1) {
+          await sleep(500);
+          const next = await tcdp.evaluate(`(() => ({ title: String(document.title || ''), body: String((document.body && document.body.innerText) || '').slice(0, 300), bodyLen: String((document.body && document.body.innerText) || '').trim().length }))()`);
+          if (next && !/正在启动|Loading plugins|正在进入/.test(String(next.body || '')) && Number(next.bodyLen) > 100) { fields = { ...fields, ...next }; break; }
+          if (next && i === 59) fields = { ...fields, ...next };
+        }
+      }
+      check('T3', 'target navigation responseStatus=200（非 401/空白）', Boolean(fields && Number(fields.responseStatus) === 200), fields && { responseStatus: fields.responseStatus });
+      await sleep(2000);
+      const errEvents = tcdp.events.filter((ev) => /exceptionThrown|Log\.entryAdded|Runtime\.consoleAPICalled/.test(String(ev.method || ''))).slice(-12).map((ev) => ({ method: ev.method, text: JSON.stringify(ev.params || {}).slice(0, 500) }));
+      try { console.log('TARGET_EVENTS ' + JSON.stringify(errEvents).slice(0, 4000)); } catch { /* ignore */ }
+      const stats = await cdp.evaluate('window.__dshViewLoadStats ? window.__dshViewLoadStats() : null').catch(() => null);
+      try { console.log('DVIEW_STATS ' + JSON.stringify(stats)); } catch { /* ignore */ }
+      const resources = await tcdp.evaluate(`(() => performance.getEntriesByType('resource').slice(-30).map((e) => ({ name: String(e.name || ''), status: Number(e.responseStatus) || 0, dur: Math.round(Number(e.duration) || 0) })))()`).catch(() => []);
+      try { console.log('TARGET_RESOURCES ' + JSON.stringify(resources).slice(0, 3000)); } catch { /* ignore */ }
+      try { await tcdp.send('Page.bringToFront', {}, 5000); } catch { /* ignore */ }
+      await sleep(3000); // 等 boot 动画退场后的真实 UI 完成一帧绘制
+      let png = 0;
+      try {
+        const out = await tcdp.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }, 20000);
+        if (out && out.data) { const buf = Buffer.from(out.data, 'base64'); fs.writeFileSync(path.join(OUT, 'dsh-target-real.png'), buf); png = buf.length; }
+      } catch { /* ignore */ }
+      check('T4', 'target 真实截图 dsh-target-real.png', png > 1000, { bytes: png });
+      // 死端口对照：同一 target 导航到 65533，截错误页。
+      try {
+        await tcdp.send('Page.navigate', { url: 'http://127.0.0.1:65533' }, 15000).catch(() => null);
+        await sleep(1200);
+        const errFields = await tcdp.evaluate(`(() => ({ href: String(location.href||''), title: String(document.title||''), body: String((document.body&&document.body.innerText)||'').slice(0,200), bodyLen: String((document.body&&document.body.innerText)||'').trim().length }))()`);
+        const eout = await tcdp.send('Page.captureScreenshot', { format: 'png' }, 20000);
+        if (eout && eout.data) fs.writeFileSync(path.join(OUT, 'dsh-target-error.png'), Buffer.from(eout.data, 'base64'));
+        check('T5', '死端口对照 target 截图 + 页面字段', Boolean(errFields && Number(errFields.bodyLen) >= 0), errFields);
+      } catch { /* ignore */ }
+      fs.writeFileSync(path.join(OUT, 'dsh-target-evidence.json'), JSON.stringify({ at: new Date().toISOString(), target: { url: targetInfo.url, title: targetInfo.title }, fields, png }, null, 2) + '\n', 'utf8');
+      fs.writeFileSync(path.join(OUT, 'dsh-target.stdout.log'), stdout, 'utf8');
+      try { tws.close(); } catch { /* ignore */ }
+    }
+    const bad = R.some((x) => !x.ok);
+    if (bad) console.log('KEEP_SANDBOX=' + SB);
+    await close({ child, ws, cdp }, bad);
+    if (mock && mock.server) mock.server.close();
+    console.log('\n' + R.filter((x) => x.ok).length + '/' + R.length + ' PASS');
+    process.exitCode = bad ? 1 : 0;
+    return;
+  }
   if (process.env.AWB_F749_CLICK === '1') {
     // PM 04:47 复现：先把 webview 指到死端口 → 错误可见；再点「重载 WebView」（走 IPC app:reload-dsh）
     // → 主进程重新发现 mock 地址并广播，webview 自动显示 DSH 页面。两张截图一次跑完。

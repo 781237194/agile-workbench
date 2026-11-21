@@ -15759,7 +15759,18 @@ let dshViewError = null;
 let dshGuestBodyLen = 0;
 let dshBodyProbeSeq = 0;
 const dshCookieRetry = { at: 0, url: '' };
-
+// PM 13:45：导航在途禁止自动重载；同一 baseUrl 的自动重试全局只允许 1 次，之后只能用户手动点。
+const dshViewLoad = { starts: 0, stops: 0, loading: false, loadingSince: 0, autoReloads: {} };
+try { window.__dshViewLoadStats = () => ({ starts: dshViewLoad.starts, stops: dshViewLoad.stops, loading: dshViewLoad.loading, autoReloads: dshViewLoad.autoReloads, bodyLen: dshGuestBodyLen, error: dshViewError }); } catch { /* ignore */ }
+function dshAutoReloadAllowed(base) {
+  if (!base) return false;
+  if (dshViewLoad.loading) return false;
+  return !(dshViewLoad.autoReloads[base] > 0);
+}
+function dshMarkAutoReload(base) {
+  if (!base) return;
+  dshViewLoad.autoReloads[base] = (dshViewLoad.autoReloads[base] || 0) + 1;
+}
 /** DSH 重启后 browser-session 密钥可能变化 → 401/空白。重新安装 cookie 并只重试一次。 */
 async function retryDshCookieOnce(reason = 'blank') {
   const api = window.workbench;
@@ -15767,13 +15778,18 @@ async function retryDshCookieOnce(reason = 'blank') {
   const base = String((state && state.dsh && state.dsh.baseUrl) || '');
   if (!base) return false;
   if (dshCookieRetry.url === base && Date.now() - dshCookieRetry.at < 8000) return false;
+  if (!dshAutoReloadAllowed(base)) {
+    try { console.log('[dsh-view] cookie-retry skipped loading=' + dshViewLoad.loading + ' autoUsed=' + Boolean(dshViewLoad.autoReloads[base])); } catch { /* ignore */ }
+    return false;
+  }
   dshCookieRetry.url = base;
   dshCookieRetry.at = Date.now();
   try {
     const result = await api.reinstallDshCookie();
     try { console.log('[dsh-view] cookie-retry reason=' + reason + ' ok=' + Boolean(result && result.ok)); } catch { /* ignore */ }
     if (result && result.ok) {
-      applyDshViewSrc(true, 'cookie-retry');
+      dshMarkAutoReload(base);
+      applyDshViewSrc(true, 'cookie-retry', { auto: true });
       return true;
     }
   } catch { /* ignore */ }
@@ -15784,9 +15800,10 @@ async function retryDshCookieOnce(reason = 'blank') {
  * B-f749：唯一 webview 地址/重载函数。
  * - 地址与 status.baseUrl 不同 → 改 src；
  * - force=true（同址离线→在线/点「重载 WebView」）→ reload。
- * 不再有第二份 src 赋值；按钮与 renderDsh 都走这里。
+ * - opts.auto=true（状态推送/重试触发的自动动作）受「加载中禁止 + 同 base 只 1 次」闸限制；
+ *   用户手动按钮传 auto=false，不受限。
  */
-function applyDshViewSrc(force = false, reason = 'src') {
+function applyDshViewSrc(force = false, reason = 'src', opts = {}) {
   const view = $('#dsh-view');
   if (!view) return false;
   const base = String((state && state.dsh && state.dsh.baseUrl) || '');
@@ -15794,6 +15811,10 @@ function applyDshViewSrc(force = false, reason = 'src') {
   const current = String(view.getAttribute('src') || '');
   const same = current === base;
   if (same && !force) return false;
+  if (opts.auto && !dshAutoReloadAllowed(base)) {
+    try { console.log('[dsh-view] auto-' + (same ? 'reload' : 'set-src') + ' skipped reason=' + reason + ' loading=' + dshViewLoad.loading + ' autoUsed=' + Boolean(dshViewLoad.autoReloads[base])); } catch { /* ignore */ }
+    return false;
+  }
   dshViewFailed = false;
   dshReady = false;
   dshViewError = null;
@@ -15803,12 +15824,13 @@ function applyDshViewSrc(force = false, reason = 'src') {
   } catch {
     try { view.setAttribute('src', base); } catch { /* ignore */ }
   }
-  try { console.log('[dsh-view] ' + (same ? 'reload' : 'set-src') + ' reason=' + String(reason || 'src') + ' url=' + base); } catch { /* ignore */ }
+  if (opts.auto) dshMarkAutoReload(base);
+  try { console.log('[dsh-view] ' + (same ? 'reload' : 'set-src') + ' reason=' + String(reason || 'src') + ' url=' + base + ' auto=' + Boolean(opts.auto)); } catch { /* ignore */ }
   return true;
 }
 
 function forceReloadDshView(reason = 'manual') {
-  const changed = applyDshViewSrc(true, reason);
+  const changed = applyDshViewSrc(true, reason, { auto: false });
   try { renderDsh(state?.dsh); } catch { /* ignore */ }
   return changed;
 }
@@ -15826,11 +15848,11 @@ function syncDshViewWithStatus(dsh) {
   if (!base || !online) return;
   const current = String(view.getAttribute('src') || '');
   if (current !== base || (prevBase && prevBase !== base)) {
-    applyDshViewSrc(false, 'status');
+    applyDshViewSrc(false, 'status', { auto: true });
     return;
   }
-  // 同址从离线恢复（启动时 webview 已指向旧/失败地址）：强制 reload，不能只等页面自己恢复。
-  if (prevOnline !== true) applyDshViewSrc(true, 'reconnect');
+  // 同址从离线恢复：只在加载不在途、且该 base 没自动重试过时 reload，避免状态抖动造成循环。
+  if (prevOnline !== true) applyDshViewSrc(true, 'reconnect', { auto: true });
 }
 
 function renderDsh(dsh) {
@@ -17939,6 +17961,21 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
   // DSH webview 事件
   const view = $('#dsh-view');
   if (view) {
+    // PM 13:45 诊断：导航计数/时间戳 + webview 控制台转发，用于判断是否我们自己 reload 风暴。
+    view.addEventListener('did-start-loading', () => {
+      dshViewLoad.starts += 1;
+      dshViewLoad.loading = true;
+      dshViewLoad.loadingSince = Date.now();
+      try { console.log('[dsh-view] did-start-loading #' + dshViewLoad.starts + ' src=' + String(view.getAttribute('src') || '')); } catch { /* ignore */ }
+    });
+    view.addEventListener('did-stop-loading', () => {
+      dshViewLoad.stops += 1;
+      dshViewLoad.loading = false;
+      try { console.log('[dsh-view] did-stop-loading #' + dshViewLoad.stops + ' starts=' + dshViewLoad.starts + ' elapsedMs=' + Math.max(0, Date.now() - dshViewLoad.loadingSince)); } catch { /* ignore */ }
+    });
+    view.addEventListener('console-message', (e) => {
+      try { console.log('[dsh-console] level=' + String(e.level) + ' msg=' + String(e.message || '').slice(0, 500)); } catch { /* ignore */ }
+    });
     view.addEventListener('did-finish-load', async () => {
       dshReady = true;
       dshViewFailed = false;
@@ -17982,7 +18019,8 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       }
     });
     view.addEventListener('did-fail-load', (e) => {
-      if (e.errorCode === -3) return;
+      try { console.warn('[dsh-view] did-fail-load code=' + String(e.errorCode) + ' desc=' + String(e.errorDescription || '') + ' mainFrame=' + String(e.isMainFrame) + ' url=' + String(e.validatedURL || view.getAttribute('src') || '')); } catch { /* ignore */ }
+      if (e.errorCode === -3) { try { console.log('[dsh-view] ERR_ABORTED(-3) 不触发重试（DSH 自己导航/中止）'); } catch { /* ignore */ } return; }
       if (e.isMainFrame === false) return;
       dshReady = false;
       dshViewFailed = true;
