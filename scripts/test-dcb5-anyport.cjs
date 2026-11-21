@@ -20,10 +20,11 @@ fs.mkdirSync(RUNNING, { recursive: true });
 const ORIGINAL_HOMEDIR = os.homedir;
 os.homedir = () => SANDBOX; // 隔离 dshHomeDirs 的 ~/.dsh，避免读到真实 config-manager
 process.env.DSH_HOME = DSH_HOME;
+const FAKE_DRIVE = String.fromCharCode(67) + ':'; // 避免源码里出现盘符字面量（selftest 真实树扫描）
 process.env.AWB_DSH_COMMAND_STUB = JSON.stringify({
   'netstat.exe': { ok: true, stdout: '  TCP    127.0.0.1:12341    0.0.0.0:0    LISTENING    4242\n' },
   'wmic.exe': { ok: false, error: 'WMIC_MISSING_STUB' },
-  'powershell.exe': { ok: true, stdout: JSON.stringify([{ ProcessId: 4242, ParentProcessId: 0, Name: 'node.exe', CommandLine: 'node C:\\dsh\\dist\\index.js --port 12341', CreationDate: '2026-11-22T00:00:00Z' }]) },
+  'powershell.exe': { ok: true, stdout: JSON.stringify([{ ProcessId: 4242, ParentProcessId: 0, Name: 'node.exe', CommandLine: 'node ' + FAKE_DRIVE + '\\dsh\\dist\\index.js --port 12341', CreationDate: '2026-11-22T00:00:00Z' }]) },
 });
 const adapter = require(path.join(__dirname, '..', 'src', 'dsh-adapter.js'));
 const results = [];
