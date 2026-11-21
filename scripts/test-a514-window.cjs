@@ -25,11 +25,39 @@ try {
   process.exit(2);
 }
 const SB = fs.mkdtempSync(path.join(SANDBOX_ROOT, 'a514win-'));
+INSTANCE_LOCK = path.join(SANDBOX_ROOT, 'a514-window.lock');
 const TEAM = path.join(SB, '团队');
 const PROJ = path.join(SB, '项目', '工作台改造修复');
 const STORE = path.join(SB, 'store', 'workbench.json');
 const WF = path.join(TEAM, '状态', '项目', '工作台改造修复', '工作流.json');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// PM 171732：单实例锁——锁文件存在且 pid 存活时拒绝启动，避免并发/循环起实例。
+let INSTANCE_LOCK = '';
+function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
+function acquireInstanceLock() {
+  if (!INSTANCE_LOCK) return;
+  try {
+    if (fs.existsSync(INSTANCE_LOCK)) {
+      const otherPid = Number.parseInt(String(fs.readFileSync(INSTANCE_LOCK, 'utf8') || ''), 10);
+      if (Number.isFinite(otherPid) && otherPid > 0 && pidAlive(otherPid)) {
+        console.error('SINGLE_INSTANCE_LOCKED pid=' + otherPid + '；同一时间只允许 1 个测试实例（PM 171732）');
+        process.exit(3);
+      }
+    }
+    fs.writeFileSync(INSTANCE_LOCK, String(process.pid), 'utf8');
+  } catch { /* 锁失败不阻断，但清理仍会做 */ }
+}
+function releaseInstanceLock() {
+  if (!INSTANCE_LOCK) return;
+  try {
+    if (!fs.existsSync(INSTANCE_LOCK)) return;
+    const pid = Number.parseInt(String(fs.readFileSync(INSTANCE_LOCK, 'utf8') || ''), 10);
+    if (!Number.isFinite(pid) || pid === process.pid) fs.rmSync(INSTANCE_LOCK, { force: true });
+  } catch { /* ignore */ }
+}
+process.on('exit', releaseInstanceLock);
+process.on('SIGINT', () => { releaseInstanceLock(); process.exit(130); });
+process.on('SIGTERM', () => { releaseInstanceLock(); process.exit(143); });
 const log = (...a) => console.log('[a514-window]', ...a);
 const PROJECT = '工作台改造修复';
 const REQ_ACCEPT = 'R-20261121-1401-a514'; // 必须匹配 REQ_FILE_RE：R-YYYYMMDD-数字-可选hex
@@ -248,6 +276,7 @@ function launch() {
     AWB_BACKGROUND_THROTTLING: '0',
   };
   delete env.ELECTRON_RUN_AS_NODE;
+  acquireInstanceLock();
   const child = spawn(electron, [ROOT, `--remote-debugging-port=${port}`], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
@@ -412,7 +441,10 @@ const TYPING = `(async () => {
     try { spawnSync('taskkill', ['/PID', String(inst.child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 20000 }); } catch { /* ignore */ }
     // PM 132753：跑完自清（AWB_KEEP_SANDBOX=1 才保留，便于事后归因）。
     if (String(process.env.AWB_KEEP_SANDBOX || '') !== '1') {
-      try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
+      // kill 后文件句柄可能还未释放：最多重试 3 次，避免沙盘残留。
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try { fs.rmSync(SB, { recursive: true, force: true }); break; } catch { if (attempt === 3) { try { console.warn('[sandbox] cleanup failed: ' + SB); } catch { /* ignore */ } } }
+      }
     } else {
       log('sandbox kept', SB);
     }
