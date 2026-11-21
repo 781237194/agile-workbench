@@ -20,8 +20,8 @@ function check(name, ok, detail) {
   ROWS.push({ name, ok: Boolean(ok), detail: ok ? undefined : detail });
   if (!JSON_OUT) console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : ' · ' + String(JSON.stringify(detail)).slice(0, 500)}`);
 }
-const SANDBOX_ROOT_BASE = process.env.AWB_SANDBOX_ROOT || 'D:/awb-sandbox/tmp';
-fs.mkdirSync(SANDBOX_ROOT_BASE, { recursive: true });
+const sandboxGuard = require(path.join(ROOT, 'scripts', 'sandbox-guard.cjs'));
+const SANDBOX_ROOT_BASE = sandboxGuard.sandboxTmp();
 const ROOT_DIR = fs.mkdtempSync(path.join(SANDBOX_ROOT_BASE, 'sg740a-'));
 const GUARD = path.join(ROOT, 'scripts', 'sandbox-guard.cjs');
 const CHILD = path.join(ROOT_DIR, 'child.cjs');
@@ -47,6 +47,16 @@ function runChild(env, wait = 20000) {
 }
 
 (async () => {
+  // F 默认根必须是 D 盘（PM 12:43 硬要求），且 C 盘显式拒绝
+  const guardMod = require(GUARD);
+  check('F 默认沙盘根在 D 盘', /^[dD]:[\\/]/.test(guardMod.DEFAULT_ROOT), { root: guardMod.DEFAULT_ROOT });
+  let cErr = null;
+  try { guardMod.sandboxTmp('C' + ':' + '\\Temp740a'); } catch (e) { cErr = e; }
+  check('G C 盘根直接拒绝（SANDBOX_ON_C_DRIVE）', cErr && cErr.code === 'SANDBOX_ON_C_DRIVE', { code: cErr && cErr.code });
+  const env3 = guardMod.sandboxEnv();
+  const tmpDir = guardMod.sandboxTmp();
+  check('H TEMP/TMP/TMPDIR 三键都指 D 盘沙盘 tmp', env3.TEMP === tmpDir && env3.TMP === tmpDir && env3.TMPDIR === tmpDir && /^[dD]:[\\/]/.test(tmpDir), { env3, tmpDir });
+
   // A 超限拒绝（maxBytes 极小）
   {
     const r = await runChild({ AWB_SANDBOX_MAX_BYTES: '1', AWB_SANDBOX_MAX_FILES: '1000000', SG_FILL: '1', SG_FILL_BYTES: '4096' });

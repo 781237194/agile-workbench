@@ -55,7 +55,8 @@ if (CHILD) {
 }
 
 function sandbox() {
-  const sb = fs.mkdtempSync(path.join(os.tmpdir(), 'd751nowipe-'));
+  const sandboxGuard = require(path.join(ROOT, 'scripts', 'sandbox-guard.cjs'));
+  const sb = fs.mkdtempSync(path.join(sandboxGuard.sandboxTmp(), 'd751nowipe-'));
   const root = path.join(sb, '团队');
   const projects = path.join(sb, '项目区');
   const store = path.join(sb, 'store');

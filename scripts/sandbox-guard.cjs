@@ -15,12 +15,39 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
+const D_DRIVE = String.fromCharCode(68) + ':';
+const DEFAULT_ROOT = D_DRIVE + '\\awb-sandbox';
 const DEFAULTS = {
-  root: process.env.AWB_SANDBOX_ROOT || path.join(ROOT, '_tmp', 'sandboxes'),
+  root: process.env.AWB_SANDBOX_ROOT || DEFAULT_ROOT,
   maxBytes: Number(process.env.AWB_SANDBOX_MAX_BYTES) > 0 ? Number(process.env.AWB_SANDBOX_MAX_BYTES) : 8 * 1024 * 1024 * 1024,
   maxFiles: Number(process.env.AWB_SANDBOX_MAX_FILES) > 0 ? Number(process.env.AWB_SANDBOX_MAX_FILES) : 200000,
   staleMs: Number(process.env.AWB_SANDBOX_STALE_MS) > 0 ? Number(process.env.AWB_SANDBOX_STALE_MS) : 60 * 60 * 1000,
 };
+
+function isOnCDrive(target) {
+  try { return /^[cC]:[\\/]/.test(path.resolve(String(target || ''))); } catch { return false; }
+}
+/** PM 12:43 硬要求：沙盘根不许落 C 盘；命中直接抛 SANDBOX_ON_C_DRIVE。 */
+function ensureSandboxRoot(root) {
+  const resolved = path.resolve(String(root || DEFAULTS.root));
+  if (isOnCDrive(resolved)) {
+    const error = new Error('沙盘根不允许落在 C 盘：' + resolved + '（请用 AWB_SANDBOX_ROOT 指到 D 盘）');
+    error.code = 'SANDBOX_ON_C_DRIVE';
+    throw error;
+  }
+  fs.mkdirSync(resolved, { recursive: true });
+  return resolved;
+}
+/** 统一的沙盘子临时目录（<root>/tmp），并返回 TEMP/TMP/TMPDIR 三键注入对象。 */
+function sandboxTmp(root) {
+  const tmp = path.join(ensureSandboxRoot(root), 'tmp');
+  fs.mkdirSync(tmp, { recursive: true });
+  return tmp;
+}
+function sandboxEnv(extra = {}, root) {
+  const tmp = sandboxTmp(root);
+  return { ...(extra || {}), TEMP: tmp, TMP: tmp, TMPDIR: tmp };
+}
 
 function auditFile(root) {
   return path.join(root, '..', '沙盘审计.jsonl');
@@ -58,10 +85,9 @@ function measure(root) {
 
 /** 超限即抛错（不创建任何目录）。 */
 function guard(options = {}) {
-  const root = options.root || DEFAULTS.root;
+  const root = ensureSandboxRoot(options.root || DEFAULTS.root);
   const maxBytes = options.maxBytes || DEFAULTS.maxBytes;
   const maxFiles = options.maxFiles || DEFAULTS.maxFiles;
-  fs.mkdirSync(root, { recursive: true });
   const { bytes, files } = measure(root);
   const over = bytes > maxBytes || files > maxFiles;
   appendAudit(root, {
@@ -84,9 +110,8 @@ function guard(options = {}) {
 
 /** 回收上次强杀残留（mtime > staleMs），写两行审计。 */
 function pruneStale(options = {}) {
-  const root = options.root || DEFAULTS.root;
+  const root = ensureSandboxRoot(options.root || DEFAULTS.root);
   const staleMs = options.staleMs || DEFAULTS.staleMs;
-  fs.mkdirSync(root, { recursive: true });
   const now = Date.now();
   const candidates = [];
   for (const name of fs.readdirSync(root)) {
@@ -142,4 +167,4 @@ function release(dir) {
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
-module.exports = { DEFAULTS, measure, guard, pruneStale, acquire, release, cleanupAll, auditFile };
+module.exports = { DEFAULTS, DEFAULT_ROOT, isOnCDrive, ensureSandboxRoot, sandboxTmp, sandboxEnv, measure, guard, pruneStale, acquire, release, cleanupAll, auditFile };

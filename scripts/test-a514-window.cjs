@@ -13,11 +13,12 @@ const { spawn, spawnSync } = require('node:child_process');
 const ROOT = path.resolve(__dirname, '..');
 const OUT = (() => { const i = process.argv.indexOf('--out'); return i > 0 && process.argv[i + 1] ? path.resolve(process.argv[i + 1]) : path.join(ROOT, '_tmp', 'a514-window'); })();
 fs.mkdirSync(OUT, { recursive: true });
-const SANDBOX_ROOT = process.env.AWB_SANDBOX_ROOT || 'D:/awb-sandbox/tmp';
-fs.mkdirSync(SANDBOX_ROOT, { recursive: true });
-// 740a：启动前过沙盘守卫（超 8GB/20 万文件直接拒绝，不创建新沙盘）。
+// 740a（PM 12:43）：沙盘根固定 D:\awb-sandbox（AWB_SANDBOX_ROOT 可覆盖但拒绝 C 盘），由 guard 统一校验/创建。
+const sandboxGuard = require(path.join(ROOT, 'scripts', 'sandbox-guard.cjs'));
+let SANDBOX_ROOT = '';
 try {
-  require(path.join(ROOT, 'scripts', 'sandbox-guard.cjs')).guard({ root: SANDBOX_ROOT });
+  SANDBOX_ROOT = sandboxGuard.sandboxTmp();
+  sandboxGuard.guard({ root: sandboxGuard.DEFAULTS.root });
 } catch (error) {
   console.error(String((error && error.code) || 'SANDBOX_GUARD_FAILED') + ': ' + String((error && error.message) || error));
   process.exit(2);
@@ -108,7 +109,7 @@ function launch() {
   const port = 9700 + Math.floor(Math.random() * 200);
   const env = {
     ...process.env,
-    TEMP: SANDBOX_ROOT, TMP: SANDBOX_ROOT, TMPDIR: SANDBOX_ROOT,
+    ...sandboxGuard.sandboxEnv(),
     AWB_DATA_DIR: path.join(SB, 'data'), AWB_STORE: STORE, AWB_TEAM_ROOT: TEAM,
     TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(SB, '项目'), TEAM_WORKBENCH_JSON: STORE,
     AWB_START_HIDDEN: '1', DSH_WEB_URL: 'http://127.0.0.1:1', AWB_SHOW_INACTIVE: '1',
