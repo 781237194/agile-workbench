@@ -133,6 +133,9 @@ async function shot(cdp, file) {
   check('V0d', '「重载 WebView」按钮走同一 reloadDshView（不再本地 forceReload）', /btn-dsh-off-reload[\s\S]{0,120}reloadDshView\(\{ quiet: true \}\)/.test(appSrc) && /reinstallDshCookie/.test(appSrc) && /retryDshCookieOnce/.test(appSrc));
   check('V0b', 'renderDsh 每次同步 webview（syncDshViewWithStatus）', /syncDshViewWithStatus\(dsh\)/.test(appSrc));
   check('V0c', 'did-fail-load 记录 URL/错误码（dshViewError）', /did-fail-load[\s\S]{0,800}dshViewError\s*=/.test(appSrc));
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const preloadSrc = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+  check('V0e', 'cookie 重装 IPC 三端接线（main handler/preload/renderer retry）', /ipcMain\.handle\('dsh:reinstall-cookie'/.test(mainSrc) && /reinstallDshCookie:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('dsh:reinstall-cookie'\)/.test(preloadSrc) && /api\.reinstallDshCookie\(\)/.test(appSrc));
   if (process.env.AWB_F749_STATIC === '1') {
     console.log('\n' + R.filter((x) => x.ok).length + '/' + R.length + ' PASS');
     process.exitCode = R.some((x) => !x.ok) ? 1 : 0;
