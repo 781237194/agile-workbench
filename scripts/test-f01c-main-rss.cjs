@@ -112,6 +112,29 @@ process.on('exit', cleanup);
   if (!shell) throw new Error('shell target not ready');
   await shell.send('Runtime.enable');
   await sleep(4000);
+  if (process.env.AWB_F01C_WORKFLOW_ONLY === '1') {
+    const before = await shell.eval('window.workbench.cacheStats()').catch(() => null);
+    const calls = Number(process.env.AWB_F01C_WORKFLOW_CALLS) > 0 ? Number(process.env.AWB_F01C_WORKFLOW_CALLS) : 30;
+    const t0 = Date.now();
+    await shell.eval(`(async () => { for (let i=0;i<${calls};i+=1){ try{ await window.workbench.workflowState({}); } catch{} } return true; })()`, 120000).catch(() => null);
+    const elapsedMs = Date.now() - t0;
+    const after = await shell.eval('window.workbench.cacheStats()').catch(() => null);
+    const cpuSamples = [];
+    if (process.env.AWB_F01C_CPU_ONLY === '1') {
+      for (let i = 0; i < 6; i += 1) {
+        await sleep(10000);
+        const r = await shell.eval('window.workbench.mainRss()').catch(() => null);
+        cpuSamples.push({ at: new Date().toISOString(), cpuPercent: r && r.cpuPercent, rssMB: r && r.rssMB });
+      }
+    }
+    const result = { ok: Boolean(after && after.workflowState && after.workflowState.hits > after.workflowState.misses) && (!cpuSamples.length || cpuSamples.every((s) => Number(s.cpuPercent) <= 30)), calls, elapsedMs, before, after, cpuSamples };
+    fs.writeFileSync(path.join(OUT, 'workflow-cache.json'), JSON.stringify(result, null, 2));
+    console.log(`workflow:state ×${calls}，${elapsedMs}ms，hits=${after && after.workflowState.hits} misses=${after && after.workflowState.misses} recent=${after && after.workflowState.recentHits}`);
+    if (cpuSamples.length) console.log('CPU 60s：' + cpuSamples.map((s) => String(s.cpuPercent)).join(' / '));
+    console.log('证据：' + path.join(OUT, 'workflow-cache.json'));
+    cleanup();
+    process.exit(result.ok ? 0 : 1);
+  }
   // 压一遍热点缓存（app:state / workflow:state），模拟日常刷新后的常驻对象。
   const stress = Number(process.env.AWB_F01C_STRESS) > 0 ? Number(process.env.AWB_F01C_STRESS) : 12;
   await shell.eval(`(async () => { for (let i=0;i<${stress};i+=1){ try{ await window.workbench.state(); } catch{} try{ await window.workbench.workflowState({}); } catch{} } return true; })()`, 120000).catch(() => null);

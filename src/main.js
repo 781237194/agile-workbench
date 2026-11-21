@@ -116,8 +116,18 @@ function storeFileFingerprint() {
   } catch { return ''; }
 }
 const workflowStateCache = new Map();
-const workflowStateStats = { hits: 0, misses: 0 };
-const METRICS_GPU_TTL_MS = 10000;
+// T-f18bf：启动令牌目录扫描（5k+ 文件）按目录 stamp 缓存 10s；ledgerActions 按团队 10s 缓存。
+const bootTokenDirCache = new Map();
+const ledgerActionsCache = new Map();
+const BOOT_TOKEN_CACHE_MS = 10000;
+const LEDGER_ACTIONS_CACHE_MS = 10000;
+// T-f18bf（PM 打回）：mtime 指纹命中仍常 miss 时，2 秒内的同一项目直接复用；优先保 CPU，
+// 允许工作流外部变化最多滞后 2 秒（写路径/显式刷新不受影响）。
+const workflowRecentCache = new Map();
+const WORKFLOW_RECENT_MS = 2000;
+const WORKFLOW_STATE_ENTRY_MAX_BYTES = 4 * 1024 * 1024;
+const workflowStateStats = { hits: 0, misses: 0, recentHits: 0, lastFp: '' };
+const METRICS_GPU_TTL_MS = 30000;
 const metricsGpuCache = { at: 0, value: null };
 let metricsGpuSampling = false;
 const HOT_IPC_TTL_MS = {
@@ -154,8 +164,8 @@ function workflowStateFingerprint(teamName) {
     const add = (p) => { try { const st = fs.statSync(p); parts.push(st.mtimeMs + ':' + (st.size || 0)); } catch { parts.push('-'); } };
     add(path.join(projDir, '工作流.json'));
     add(path.join(projDir, '任务'));
-    // 启动目录（PM 令牌）变化很频繁且只影响 ledgerActions，单独 10s 缓存；不放进快照指纹，避免快照反复失效。
-    add(path.join(resolveTeamRoot(), '状态', '团队.json'));
+    // 团队.json 由多名角色高频改写，放进指纹会让 workflow:state 每轮 miss；已移到 2s 最近缓存，
+    // 令牌/角色变化通过 ledgerActions 自身的 10s 缓存刷新（PM T-f18bf）。
     return parts.join('|');
   } catch { return ''; }
 }
@@ -6480,27 +6490,48 @@ ipcMain.handle('theme:metrics', async () => {
     const dirs = [];
     if (projectName) dirs.push(path.join(ledgerTeamRoot(), '状态', '项目', teamTools.teamSlug(String(projectName)), '启动'));
     dirs.push(path.join(ledgerTeamRoot(), '状态', '启动'));
-    let best = null;
     for (const dir of dirs) {
-      let names = [];
-      try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { continue; }
-      if (!names.length && dir !== dirs[dirs.length - 1]) continue;
-      for (const file of names) {
+      const rows = readBootTokenDirCached(dir);
+      if (!rows.length && dir !== dirs[dirs.length - 1]) continue;
+      let best = null;
+      for (const row of rows) {
+        if (String(row.role || '') !== want) continue;
+        if (projectName && String(row.project || '') !== String(projectName)) continue;
+        if (!row.token) continue;
+        if (!best || row.issuedAt > best.issuedAt) best = row;
+      }
+      if (best) return best; // 项目目录命中即优先；否则团队级兜底
+    }
+    return null;
+  }
+  /** T-f18bf：启动令牌目录（5k+ json）只解析一次，10s 内不再 readdir/readFile；目录变了最多滞后 10s。 */
+  function readBootTokenDirCached(dir) {
+    const key = String(dir || '');
+    const nowMs = Date.now();
+    const hit = bootTokenDirCache.get(key);
+    if (hit && nowMs - hit.at < BOOT_TOKEN_CACHE_MS) return hit.rows;
+    let signature = '';
+    try { const st = fs.statSync(dir); signature = `${st.mtimeMs}:${st.size}`; } catch { signature = 'missing'; }
+    if (hit && hit.signature === signature) { hit.at = nowMs; return hit.rows; }
+    const rows = [];
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        if (!name.endsWith('.json')) continue;
         try {
-          const row = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8').replace(/^\uFEFF/, ''));
-          if (String(row.role || '') !== want) continue;
-          if (projectName && String(row.project || '') !== String(projectName)) continue;
-          const token = String(row.token || file.replace(/\.json$/, ''));
+          const row = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, ''));
+          const token = String(row.token || name.replace(/\.json$/, ''));
           if (!token) continue;
-          const issuedAt = String(row.issuedAt || row.createdAt || '');
-          if (!best || issuedAt > best.issuedAt) {
-            best = { token, file, issuedAt, expiresAt: String(row.expiresAt || ''), role: want, sessionId: String(row.sessionId || '') };
-          }
+          rows.push({
+            token, file: name, role: String(row.role || ''), project: String(row.project || ''),
+            issuedAt: String(row.issuedAt || row.createdAt || ''), expiresAt: String(row.expiresAt || ''),
+            sessionId: String(row.sessionId || '')
+          });
         } catch { /* 跳过损坏令牌文件，不中断查找 */ }
       }
-      if (best) return best; // 项目目录命中即优先；否则下一轮团队级兜底
-    }
-    return best;
+    } catch { /* 目录不存在 */ }
+    bootTokenDirCache.set(key, { at: nowMs, signature, rows });
+    if (bootTokenDirCache.size > 16) bootTokenDirCache.delete(bootTokenDirCache.keys().next().value);
+    return rows;
   }
   function ledgerAuditFile(project) {
     const slug = teamTools.teamSlug(String(project.teamName || project.name || ''));
@@ -6543,8 +6574,12 @@ ipcMain.handle('theme:metrics', async () => {
   }
   /** 给界面只读的处置通道路由：有没有通道 + 有没有 PM 令牌（含禁用原因；不含令牌值）。 */
   function ledgerActionAvailability(teamName) {
+    const key = String(teamName || '');
+    const nowMs = Date.now();
+    const hit = ledgerActionsCache.get(key);
+    if (hit && nowMs - hit.at < LEDGER_ACTIONS_CACHE_MS) return hit.value;
     const pm = latestProjectBootToken(teamName, 'pm');
-    return {
+    const value = {
       supported: true,
       taskRelease: true,
       requirementReopen: true,
@@ -6560,6 +6595,9 @@ ipcMain.handle('theme:metrics', async () => {
         reason: pm ? '' : '需要 PM 令牌：团队里没有可用的 pm 启动令牌（请 PM 执行 team.mjs boot --role pm，或由 PM 在终端处置）'
       }
     };
+    ledgerActionsCache.set(key, { at: nowMs, value });
+    if (ledgerActionsCache.size > 16) ledgerActionsCache.delete(ledgerActionsCache.keys().next().value);
+    return value;
   }
   function ledgerRowState(row) {
     const fork = row && row.ledgerFork && typeof row.ledgerFork === 'object' ? row.ledgerFork : null;
@@ -9147,28 +9185,40 @@ ipcMain.handle('theme:metrics', async () => {
   });
 
   ipcMain.handle('workflow:state', runWorkflowIpc(async (ctx) => {
-    // T-0d3b（IPC 二轮）：mtime 指纹缓存（比 5s TTL 更准也更省）——
-    // 工作流.json / 任务目录 / 状态/启动 目录 / store 文件 任一变化即重算；未变直接复用上次结果。
+    // T-0d3b：mtime 指纹缓存；T-f18bf：指纹 miss 时还有 2s 最近缓存兜底（高频轮询命中）。
+    const nowMs = Date.now();
+    const recent = workflowRecentCache.get(String(ctx.project.id));
+    if (recent && nowMs - recent.at < WORKFLOW_RECENT_MS) {
+      workflowStateStats.recentHits += 1;
+      workflowStateStats.hits += 1;
+      return recent.value;
+    }
     const fp = workflowStateFingerprint(ctx.teamName);
+    workflowStateStats.lastFp = fp;
     const cacheKey = `${ctx.project.id}|${fp}`;
     if (fp) {
       const hit = workflowStateCache.get(cacheKey);
-      if (hit) { workflowStateStats.hits += 1; return hit; }
+      if (hit) {
+        workflowStateStats.hits += 1;
+        workflowRecentCache.set(String(ctx.project.id), { at: nowMs, value: hit });
+        return hit;
+      }
     }
     const snapshot = workflowSnapshot(ctx.project);
     // R-9fbe F-9fbe-5：把两个账本处置通道的可用性一起下发（只读、不含令牌值）——
     // 面板据此给按钮禁用原因；真点下去仍由 owner:ledger-* 复核（PM_TOKEN_REQUIRED 等）。
     // R-4657：附带缺陷自动验收开关与撤回窗口（池行只看这两项，不再自己猜）。
     const value = { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName), autoAccept: autoAcceptUiConfig() };
+    workflowStateStats.misses += 1;
     if (fp) {
-      workflowStateStats.misses += 1;
-      // 结构性上限：单条 >1MB 不进常驻缓存（任务/看板快照不再长期占主进程堆）。
+      // 结构性上限：单条 >4MB 不进常驻缓存（大对象不长期占堆；正常快照 ≤4MB 要能命中，否则每次全量重建）。
       const bytes = cacheValueBytes(value);
-      if (bytes <= 1024 * 1024) {
+      if (bytes <= WORKFLOW_STATE_ENTRY_MAX_BYTES) {
         workflowStateCache.set(cacheKey, value);
         if (workflowStateCache.size > 8) workflowStateCache.delete(workflowStateCache.keys().next().value);
       }
     }
+    workflowRecentCache.set(String(ctx.project.id), { at: nowMs, value });
     return value;
   }));
   ipcMain.handle('workflow:boot', runWorkflowIpc(async (ctx, p, meta) => {
@@ -13683,7 +13733,14 @@ ipcMain.handle('mem:stats-get', async () => ({
   mainRssMB: mainHeapMB().rssMB,
 }));
 // R-e31b/f01c：主进程 RSS 只读读数（验收取 3 次样本用；不触发任何清理/回收）。
-ipcMain.handle('mem:main-rss', () => ({ ok: true, ...mainHeapMB(), targetMB: 400 }));
+ipcMain.handle('mem:main-rss', () => {
+  let cpuPercent = null;
+  try {
+    const row = (app.getAppMetrics ? app.getAppMetrics() : []).find((r) => String(r.type || '').toLowerCase() === 'browser');
+    cpuPercent = row && row.cpu ? row.cpu.percentCPUUsage : null;
+  } catch { /* ignore */ }
+  return { ok: true, ...mainHeapMB(), cpuPercent, targetMB: 400 };
+});
 // R-e31b/f01c：常驻缓存规模只读读数（证明大对象已被上限挡住；不清理、不改缓存）。
 ipcMain.handle('mem:cache-stats', () => {
   let hotMax = 0;
@@ -13693,7 +13750,9 @@ ipcMain.handle('mem:cache-stats', () => {
   return {
     ok: true,
     hotIpc: { count: hotIpcCache.size, bytes: hotIpcCacheBytes, maxEntryBytes: hotMax, entryCapBytes: HOT_IPC_ENTRY_MAX_BYTES, totalCapBytes: HOT_IPC_TOTAL_MAX_BYTES },
-    workflowState: { count: workflowStateCache.size, rows: workflow },
+    workflowState: { count: workflowStateCache.size, rows: workflow, hits: workflowStateStats.hits, misses: workflowStateStats.misses, recentHits: workflowStateStats.recentHits, lastFp: workflowStateStats.lastFp, entryMaxBytes: WORKFLOW_STATE_ENTRY_MAX_BYTES },
+    ledgerActions: { cachedTeams: ledgerActionsCache.size, ttlMs: LEDGER_ACTIONS_CACHE_MS },
+    bootTokenDirs: { cachedDirs: bootTokenDirCache.size, ttlMs: BOOT_TOKEN_CACHE_MS },
     storeCacheBytes: storeCache && storeCache.value ? cacheValueBytes(storeCache.value) : 0,
     appStateCacheBytes: appStateCache && appStateCache.value ? cacheValueBytes(appStateCache.value) : 0,
     boardHtmlCacheBytes: teamBoardHtmlCache ? Number(teamBoardHtmlCache.bytes || (teamBoardHtmlCache.html ? Buffer.byteLength(teamBoardHtmlCache.html, 'utf8') : 0)) : 0,
