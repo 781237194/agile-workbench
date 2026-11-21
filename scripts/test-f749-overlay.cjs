@@ -32,7 +32,8 @@ const indexSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'
 check('O7', 'app.js 覆盖层只在 online=false 且未加载过时出现（Owner 16:05）', /const showOff = !online && !dshReady;/.test(appSrc));
 // O8：隐藏实例里 webview guest 默认会被 Chromium 节流 → DSH 的 boot 脚本停在「正在进入…」；
 // 只给 BrowserWindow 设 backgroundThrottling 不够，必须冻结 guest 的节流（PM 13:32 的 285 字进场页）。
-check('O8', 'webview 冻结后台节流（webpreferences=backgroundThrottling=no）', /<webview[^>]*backgroundThrottling=no/.test(indexSrc));
+// PM 20:35：背景节流属性已移除（它当初是 13:41 为隐藏实例测量加的；生产可见窗口不需要，且会让 guest 永不降载）。
+check('O8', 'webview 不再冻结后台节流（生产可见窗口不需要）', !/<webview[^>]*backgroundThrottling/.test(String(indexSrc || '')));
 // O9：PM 13:58 要求持续采样 500ms×10s，任一次 >0 即撤；10s 全 0 才报 DSH_BLANK。
 check('O9', '持续采样 500ms×20 且 10s 空页落 DSH_BLANK', /for \(let i = 0; i < 20; i \+= 1\)/.test(appSrc)
   && /setTimeout\(resolve, 500\)/.test(appSrc) && /DSH_BLANK/.test(appSrc) && /dshBodyProbeSeq/.test(appSrc));
