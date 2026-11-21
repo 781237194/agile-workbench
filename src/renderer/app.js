@@ -18001,6 +18001,23 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
             void retryDshCookieOnce('blank-401');
             continue;
           }
+          // 生产实测：DSH 进场 splash 会一直停在「正在启动…/Loading plugins…」（自动播放被拦时不走完片尾）。
+          // 只点一次「跳过」让 DSH 自己 enter()，随后继续采样真实 UI 的 bodyLen。
+          if (/正在启动|正在进入|Loading plugins|点击画面跳过/.test(text)) {
+            try {
+              const skipped = await view.executeJavaScript(`(() => {
+                const boot = document.querySelector('.dsvs-boot');
+                if (!boot) return false;
+                try { boot.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })); } catch { /* ignore */ }
+                try { boot.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); } catch { /* ignore */ }
+                try { boot.click(); } catch { /* ignore */ }
+                return true;
+              })()`);
+              try { console.log('[dsh-view] boot-skip attempted=' + Boolean(skipped)); } catch { /* ignore */ }
+            } catch { /* ignore */ }
+            await new Promise((resolve) => setTimeout(resolve, 700));
+            continue;
+          }
           dshGuestBodyLen = bodyLen;
           dshViewError = null;
           if (state) renderDsh(state.dsh);
