@@ -122,7 +122,15 @@
       hideMs: 120                // 离开/失焦后移除时限（AC14 ≤200ms）
     },
     idleAfterMs: IDLE_AFTER_MS,
-    degrade: { fpsMin: 55, dropRateMax: 2, windows: 2 }
+    degrade: {
+      fpsMin: 40,              // T-dd65：55→40，连续 3 个越线窗口才自动降级
+      dropRateMax: 2,
+      windows: 3,
+      recoverWindows: 2,       // T-dd65：连续 2 个健康窗口即恢复（原来 6）
+      healthyFpsMin: 55,       // 健康窗口判据：focused+visible 且 fps≥55、drop≤2（滞回，避免抖动）
+      healthyDropRateMax: 2,
+      degradeMove: false       // T-dd65：粒子的自动降级不再连带关移动光晕（move 独立）
+    }
   };
 
   // __themeState().fx.sample 必须是可调用属性，但 __themeState() 的返回值还要能被
@@ -155,7 +163,7 @@
     clicks: { count: 0, latencies: [], diameters: [], lastAt: 0, invisible: 0, sizePx: null, opacity: null },
     move: { count: 0, latencies: [], maxDistancePx: 0, el: null, hideTimer: 0, pending: null, sizePx: null, opacity: null },
     perf: { intervals: [], lastProbe: null, memMB: null, lastMemAt: 0 },
-    degraded: { healthyWindows: 0, particles: false, move: false, reason: '', at: 0, badWindows: 0 },
+    degraded: { healthyWindows: 0, particles: false, move: false, reason: '', at: 0, badWindows: 0, skippedHidden: 0, lastSkipAt: 0, lastRecoverAt: 0, lastRecoverReason: '' },
     // 诊断用：记录每次 pause/resume，方便自检看出「为什么粒子停了」（不参与渲染）
     pauseLog: []
   };
@@ -535,8 +543,54 @@
       reason: S.degraded.reason || '',
       at: S.degraded.at || null,
       lastRecoverAt: S.degraded.lastRecoverAt || null,
-      lastRecoverReason: S.degraded.lastRecoverReason || ''
+      lastRecoverReason: S.degraded.lastRecoverReason || '',
+      // T-dd65：自动采样的跳过统计与窗口计数（隐藏/未聚焦不参与降级判定）。
+      skippedHidden: S.degraded.skippedHidden || 0,
+      lastSkipAt: S.degraded.lastSkipAt || null,
+      badWindows: S.degraded.badWindows || 0,
+      healthyWindows: S.degraded.healthyWindows || 0,
+      windows: Number(FX_CONFIG.degrade.windows) || 3,
+      recoverWindows: Number(FX_CONFIG.degrade.recoverWindows) || 2
     };
+  }
+
+  /** T-dd65：自动采样门——隐藏/未聚焦/暂停时不采样，避免把 20–30fps 的后台 rAF 当性能问题降级。 */
+  function samplingAllowed() {
+    try {
+      if (S.paused) return false;
+      if (D.hidden || D.visibilityState === 'hidden') return false;
+      if (typeof D.hasFocus === 'function' && !D.hasFocus()) return false;
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function samplingState() {
+    var focused = null;
+    try { focused = (typeof D.hasFocus === 'function') ? Boolean(D.hasFocus()) : null; } catch (e) { focused = null; }
+    return {
+      allowed: samplingAllowed(),
+      focused: focused,
+      hidden: Boolean(D.hidden),
+      visibility: String(D.visibilityState || ''),
+      paused: Boolean(S.paused),
+      pausedReason: S.pausedReason || '',
+      skippedHidden: S.degraded.skippedHidden || 0
+    };
+  }
+
+  /**
+   * T-dd65：自动采样唯一入口（loop 自采样与 __themeProbe 都走这里）。
+   * 隐藏/未聚焦/暂停 → 跳过并计数，不喂 evaluateDegrade（否则后台 20–30fps 会被误判降级）。
+   * 显式 AWB_FX.evaluateDegrade 供自检/夹具使用，不受此门限制。
+   */
+  function autoSample(perf, source) {
+    if (!samplingAllowed()) {
+      S.degraded.skippedHidden = (S.degraded.skippedHidden || 0) + 1;
+      S.degraded.lastSkipAt = Date.now();
+      return { skipped: true, reason: 'hidden-or-unfocused', state: samplingState() };
+    }
+    evaluateDegrade(perf, source || 'auto');
+    return { skipped: false, state: samplingState() };
   }
 
   /* ── 循环 ───────────────────────────────────────────────────────────── */
@@ -571,11 +625,12 @@
     }
     S.lastFrame = ts;
     // 7a3b §6.2 / AC3：自采样接线（≥2s 且样本足够才参与统计；不调用 __themeProbe）。
+    // T-dd65：隐藏/未聚焦/暂停时 autoSample 直接跳过，不产生降级判定。
     try {
       var perfNow = Date.now();
       if (S.mode === 'full' && S.perf.intervals.length >= 60 && (!S.perf.selfAt || perfNow - S.perf.selfAt >= 2000)) {
         S.perf.selfAt = perfNow;
-        evaluateDegrade(rollingPerf(), 'rolling');
+        autoSample(rollingPerf(), 'rolling');
       }
     } catch (e) { /* 自采样异常不影响绘制 */ }
     S.idle = (Date.now() - S.lastInput) > FX_CONFIG.idleAfterMs;
@@ -1115,41 +1170,67 @@
     return out;
   }
 
-  /** 7a3b §6.2：降级判定单源——themeProbe（自检）与 loop 自采样都喂这里。 */
+  /**
+   * 7a3b §6.2 + T-dd65：降级判定单源。
+   * - 自动路径（loop 自采样 / __themeProbe）先过 autoSample 的可见性门，隐藏/未聚焦不参与判定；
+   * - 连续 3 个越线窗口才降级粒子（fpsMin 40）；粒子的降级不再连带关 move；
+   * - 连续 2 个健康窗口（focused+visible、fps≥55、drop≤2）→ 清降级、恢复粒子、写 lastRecoverAt。
+   * 显式调用本函数（自检/夹具）不受可见性门限制。
+   */
   function evaluateDegrade(perf, source) {
     if (!perf || typeof perf !== 'object') return;
     var fps = Number(perf.fps);
     var drop = Number(perf.dropRate);
-    var cfg = FX_CONFIG.degrade;
-    var bad = (isFinite(fps) && fps < Number(cfg.fpsMin)) || (isFinite(drop) && drop >= Number(cfg.dropRateMax));
-    var healthyWindows = Number(cfg.recoverWindows || 6);
+    var cfg = FX_CONFIG.degrade || {};
+    var fpsMin = Number(cfg.fpsMin);
+    var dropMax = Number(cfg.dropRateMax);
+    var windows = Math.max(1, Math.round(Number(cfg.windows) || 3));
+    var recoverWindows = Math.max(1, Math.round(Number(cfg.recoverWindows) || 2));
+    var healthyFpsMin = Number(cfg.healthyFpsMin);
+    var healthyDropMax = Number(cfg.healthyDropRateMax);
+    if (!isFinite(fpsMin)) fpsMin = 40;
+    if (!isFinite(dropMax)) dropMax = 2;
+    if (!isFinite(healthyFpsMin)) healthyFpsMin = 55;
+    if (!isFinite(healthyDropMax)) healthyDropMax = 2;
+    var hasFps = isFinite(fps);
+    var hasDrop = isFinite(drop);
+    var bad = (hasFps && fps < fpsMin) || (hasDrop && drop >= dropMax);
     if (bad) {
       S.degraded.healthyWindows = 0;
       S.degraded.badWindows = (S.degraded.badWindows || 0) + 1;
-      if (S.degraded.badWindows >= Number(cfg.windows || 2) && S.mode === 'full') {
-        if (!S.degraded.particles) S.degraded.particles = true;
-        else if (!S.degraded.move) S.degraded.move = true;
+      if (S.degraded.badWindows >= windows && S.mode === 'full') {
+        if (!S.degraded.particles) {
+          S.degraded.particles = true;
+        } else if (cfg.degradeMove === true && !S.degraded.move) {
+          // 仅当显式允许时才连带降 move（T-dd65 默认 false：move 不随 particles 降）。
+          S.degraded.move = true;
+        }
         S.degraded.at = Date.now();
-        S.degraded.reason = '连续 ' + Number(cfg.windows || 2) + ' 个' + (source === 'rolling' ? '自采样' : '__themeProbe') + '窗口越线（fps=' + fps + '、dropRate=' + drop + '）→ 按「粒子 → 移动光晕」顺序自动降级；点击反馈始终保留（卷-2 §六.5）';
+        S.degraded.reason = '连续 ' + windows + ' 个' + (source === 'rolling' ? '自采样' : '__themeProbe')
+          + '窗口越线（fps=' + fps + '、dropRate=' + drop + '）→ 按 T-dd65 仅自动降级粒子；'
+          + '移动光晕与点击反馈保留（卷-2 §六.5）';
         S.degraded.badWindows = 0;
         pushDiag({ at: Date.now(), action: 'degrade', source: source || 'rolling', steps: degradedInfo().steps, fps: fps, dropRate: drop });
         sync({ keepSeed: true });
       }
       return;
     }
-    // 健康窗口：连续 N 个后先恢复 move、再恢复 particles（7a3b §6.2 / AC4）
+    // 健康窗口：必须 focused+visible（自动路径已由 autoSample 保证）且 fps≥55、drop≤2；
+    // 连续 2 个后恢复（T-dd65：原 6 窗 + 只恢复 move 再恢复 particles 的串行逻辑改为一次恢复）。
+    var healthy = (!hasFps || fps >= healthyFpsMin) && (!hasDrop || drop <= healthyDropMax);
+    if (!healthy) { S.degraded.healthyWindows = 0; return; }
     if (!S.degraded.particles && !S.degraded.move) return;
     S.degraded.healthyWindows = (S.degraded.healthyWindows || 0) + 1;
-    if (S.degraded.healthyWindows < healthyWindows) return;
+    if (S.degraded.healthyWindows < recoverWindows) return;
     S.degraded.healthyWindows = 0;
-    var restored = null;
-    if (S.degraded.move) { S.degraded.move = false; restored = 'move'; }
-    else if (S.degraded.particles) { S.degraded.particles = false; restored = 'particles'; }
-    S.degraded.reason = '已恢复（连续 ' + healthyWindows + ' 个健康窗口；恢复 ' + restored + '）';
+    var restored = [];
+    if (S.degraded.move) { S.degraded.move = false; restored.push('move'); }
+    if (S.degraded.particles) { S.degraded.particles = false; restored.push('particles'); }
+    S.degraded.reason = '已恢复（连续 ' + recoverWindows + ' 个健康窗口；恢复 ' + restored.join('+') + '）';
     S.degraded.at = Date.now();
     S.degraded.lastRecoverAt = Date.now();
-    S.degraded.lastRecoverReason = '已恢复';
-    pushDiag({ at: Date.now(), action: 'recover', source: source || 'rolling', restored: restored, reason: '已恢复' });
+    S.degraded.lastRecoverReason = '已恢复（' + restored.join('+') + '）';
+    pushDiag({ at: Date.now(), action: 'recover', source: source || 'rolling', restored: restored.join('+'), reason: '已恢复', lastRecoverAt: S.degraded.lastRecoverAt });
     sync({ keepSeed: false });
   }
 
@@ -1169,7 +1250,8 @@
       at: Date.now()
     };
     if (mem != null && isFinite(mem)) { S.perf.memMB = mem; S.perf.lastMemAt = Date.now(); }
-    evaluateDegrade({ fps: isFinite(fps) ? fps : null, dropRate: isFinite(drop) ? drop : null }, 'themeProbe');
+    // T-dd65：自动路径统一走 autoSample（隐藏/未聚焦不参与降级判定）。
+    autoSample({ fps: isFinite(fps) ? fps : null, dropRate: isFinite(drop) ? drop : null }, 'themeProbe');
   }
 
   /* ── 对外：唯一取数口 + 状态 ────────────────────────────────────────── */
@@ -1239,7 +1321,8 @@
         running: S.running,
         pauseLog: S.pauseLog.slice(),
         effectLevelAttr: String(D.documentElement.getAttribute('data-effect-level') || ''),
-        fxModeAttr: S.layer ? String(S.layer.getAttribute('data-fx-mode') || '') : ''
+        fxModeAttr: S.layer ? String(S.layer.getAttribute('data-fx-mode') || '') : '',
+        sampling: samplingState()
       },
       perf: perf,
       fxDegraded: degradedInfo(),
@@ -1311,6 +1394,22 @@
     return { clicks: 0, move: 0 };
   }
 
+  /**
+   * T-dd65：手动清降级（自检/夹具用；生产恢复走 evaluateDegrade 的 2 健康窗）。
+   * 清 flags 后 sync 重新播种；返回清前状态，便于断言。
+   */
+  function resetDegraded() {
+    var before = degradedInfo();
+    S.degraded.particles = false;
+    S.degraded.move = false;
+    S.degraded.reason = '';
+    S.degraded.at = 0;
+    S.degraded.badWindows = 0;
+    S.degraded.healthyWindows = 0;
+    sync({ keepSeed: false });
+    return { before: before, after: degradedInfo() };
+  }
+
   /** 改配置：浅合并后重播种（Owner 微调用，不用改代码） */
   function setConfig(patch) {
     if (patch && typeof patch === 'object') {
@@ -1349,7 +1448,11 @@
     particleCount: particleCount,
     observeProbe: observeProbe,
     evaluateDegrade: evaluateDegrade,
-    diag: function () { return { rows: DIAG_LOG.slice(), degraded: degradedInfo(), perf: rollingPerf() }; },
+    autoSample: autoSample,
+    samplingAllowed: samplingAllowed,
+    samplingState: samplingState,
+    resetDegraded: resetDegraded,
+    diag: function () { return { rows: DIAG_LOG.slice(), degraded: degradedInfo(), perf: rollingPerf(), sampling: samplingState() }; },
     resetStats: resetStats,
     layerInfo: layerInfo,
     hitTest: hitTest,

@@ -97,11 +97,13 @@ async function close(inst) { if (!inst) return; try { inst.cdp.send('Browser.clo
       // ?motion=1 用源码静态断言（页面脚本已打包为 app.js，直接读磁盘更可靠）
       const fxSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'fx-layer.js'), 'utf8');
       check('AC2-2 源码支持 ?motion=1（第三入口）', /get\('motion'\) === '1'/.test(fxSrc));
-      // AC3：自采样降级（不调用 __themeProbe）
-      const degrade = await inst.cdp.evaluate('(() => { window.__probeCount = 0; const orig = window.__themeProbe; window.__themeProbe = function () { window.__probeCount += 1; return orig && orig.apply(null, arguments); }; window.AWB_FX.evaluateDegrade({ fps: 40, dropRate: 3, frames: 120, sampleMs: 2000 }, "rolling"); window.AWB_FX.evaluateDegrade({ fps: 40, dropRate: 3, frames: 120, sampleMs: 2000 }, "rolling"); const d = window.AWB_FX.degraded(); return { steps: d.steps, active: d.active, probeCount: window.__probeCount }; })()');
-      check('AC3-1 两坏窗口 → degraded.steps 含 particles', degrade && (degrade.steps || []).includes('particles'), degrade);
+      // AC3：自采样降级（不调用 __themeProbe；T-dd65：fpsMin 40、连续 3 窗才降、move 不随降）
+      const degrade = await inst.cdp.evaluate('(() => { window.__probeCount = 0; const orig = window.__themeProbe; window.__themeProbe = function () { window.__probeCount += 1; return orig && orig.apply(null, arguments); }; for (let i = 0; i < 3; i += 1) window.AWB_FX.evaluateDegrade({ fps: 25, dropRate: 5, frames: 120, sampleMs: 2000 }, "rolling"); const d = window.AWB_FX.degraded(); return { steps: d.steps, active: d.active, probeCount: window.__probeCount, cfg: window.AWB_FX.config.degrade }; })()');
+      check('AC3-1 三坏窗口（T-dd65：windows=3）→ degraded.steps 含 particles', degrade && (degrade.steps || []).includes('particles'), degrade);
+      check('AC3-1b T-dd65：move 不随 particles 自动降级', degrade && !(degrade.steps || []).includes('move'), degrade);
+      check('AC3-1c T-dd65 配置：fpsMin=40/windows=3/recoverWindows=2/degradeMove=false', degrade && degrade.cfg && degrade.cfg.fpsMin === 40 && degrade.cfg.windows === 3 && degrade.cfg.recoverWindows === 2 && degrade.cfg.degradeMove === false, degrade && degrade.cfg);
       check('AC3-2 全程未调用 __themeProbe', degrade && degrade.probeCount === 0, degrade);
-      // AC4：健康窗口恢复
+      // AC4：健康窗口恢复（2 个健康窗即恢复；旧夹具用 12 次仍成立）
       // 4) 恢复：先把降级阈值放宽，避免 loop 自采样在测试环境把刚恢复的粒子又降级（真实环境靠健康窗恢复）
       await inst.cdp.evaluate('window.AWB_FX.setConfig({ degrade: { fpsMin: 0, dropRateMax: 999, windows: 99999 } }); true');
       const recovered = await inst.cdp.evaluate('(async () => { for (let i = 0; i < 12; i += 1) window.AWB_FX.evaluateDegrade({ fps: 60, dropRate: 0, frames: 120, sampleMs: 2000 }, "rolling"); const d = window.AWB_FX.degraded(); let diag = []; try { diag = window.AWB_FX.diag().rows; } catch (e) {} const recoveredRows = diag.filter((r) => r && (r.reason === "已恢复" || r.action === "recover")); let pc = 0; for (let i = 0; i < 20; i += 1) { await new Promise((r) => setTimeout(r, 250)); const c = document.querySelector("#fx-layer canvas"); pc = c ? Number(c.getAttribute("data-fx-particles") || 0) : 0; if (pc > 0) break; } const d2 = window.AWB_FX.degraded(); return { steps: d2.steps, active: d2.active, recoveredRows: recoveredRows.length, lastRecoverAt: d.lastRecoverAt || null, particleCount: pc }; })()');
