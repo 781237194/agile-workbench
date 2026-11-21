@@ -34,6 +34,8 @@ if (IS_BOARD_WINDOW) {
   fxOverlayState: (state) => ipcRenderer.send('fx:overlay-state', state),
   fxOverlayStatus: () => ipcRenderer.invoke('fx:overlay-status'),
   fxOverlayBenchmark: () => ipcRenderer.invoke('fx:overlay-benchmark'),
+  // T-b30e 自检专用（生产实例 env 未开时主进程直接拒绝）：驱动窗口 resize/最大化/最小化/全屏。
+  fxOverlayTestWindow: (action) => ipcRenderer.invoke('fx:overlay-test-window', action),
   onFxOverlayReady: (handler) => {
     if (typeof handler !== 'function') return () => {};
     const listener = (_event, payload) => { try { handler(payload || {}); } catch { /* ignore */ } };

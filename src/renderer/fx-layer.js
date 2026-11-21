@@ -597,6 +597,8 @@
 
   function startLoop() {
     if (S.running) return;
+    // T-b30e：覆盖窗接管时壳内不再起绘制循环（resume/focus/visibility 等任何路径都要过这一关）。
+    if (overlayOwns()) { S.running = false; return; }
     S.running = true;
     S.lastFrame = 0;
     S.lastDraw = 0;
@@ -616,6 +618,12 @@
   function loop(ts) {
     S.raf = 0;
     if (!S.running) return;
+    // T-b30e：覆盖窗接管后壳内循环必须立刻停（覆盖窗失败/离线/降级时会重新 startLoop 回退）。
+    if (overlayOwns()) {
+      stopLoop();
+      try { notifyOverlay(); } catch (e) { /* ignore */ }
+      return;
+    }
     if (S.lastFrame) {
       var gap = ts - S.lastFrame;
       if (gap > 0 && gap < 500) {
@@ -824,6 +832,7 @@
     // 即使已经处于暂停态，也要把移动光晕收掉（AC14 要求失焦 200ms 内移除）
     hideMoveEl();
     stopLoop();
+    try { notifyOverlay(); } catch (e) { /* 覆盖窗暂停失败不影响主窗 */ }
     if (!wasPaused) logPause('pause', S.pausedReason);
   }
 
@@ -833,7 +842,8 @@
     S.pausedReason = '';
     S.lastInput = Date.now();
     logPause('resume', '');
-    if (S.mode !== 'off') startLoop();
+    if (S.mode !== 'off' && !overlayOwns()) startLoop();
+    try { notifyOverlay(); } catch (e) { /* 覆盖窗恢复失败不影响主窗 */ }
   }
 
   /* ── 输入绑定（只绑一次）────────────────────────────────────────────── */
@@ -867,6 +877,8 @@
     W.addEventListener('resize', function () {
       S.seedKey = '';
       if (S.mode === 'full' && !S.degraded.particles) { try { ensureParticles(); } catch (e) { /* ignore */ } }
+      // T-b30e：窗口尺寸变了要重算覆盖窗粒子数（壳内画不画由 overlayOwns 决定）。
+      try { notifyOverlay(); } catch (e) { /* ignore */ }
     }, { passive: true });
     try {
       var mq = W.matchMedia ? W.matchMedia('(prefers-reduced-motion: reduce)') : null;
@@ -895,6 +907,15 @@
     } catch (e) { /* 写盘失败不影响渲染 */ }
   }
 
+  /**
+   * T-b30e：覆盖窗接管判据——只有「覆盖窗已就绪 + DSH 在线 + 全效 + 粒子未降级 + 未暂停」时，
+   * 壳内 #awb-theme-particles 才停画；任一条件不满足都回退壳内绘制（离线/创建失败/降级/最小化）。
+   */
+  function overlayOwns() {
+    return Boolean(S.mode === 'full' && !S.degraded.particles && !S.paused
+      && W.__awbFxOverlayReady === true && W.__awbFxOverlayOnline === true);
+  }
+
   function sync(opts) {
     var options = opts && typeof opts === 'object' ? opts : {};
     var computed = computeMode();
@@ -920,14 +941,14 @@
     } else if (!options.keepSeed) {
       try { ensureParticles(); } catch (e) { /* 画布异常不影响主题 */ }
     }
-    // T-77e4：覆盖窗已就绪且 DSH 在线时，壳内画布被 webview 盖住只会白耗 CPU/GPU → 停画并清空；
-    // 覆盖窗创建失败/离线/降级时 overlayOwns=false，壳内照常绘制（降级兜底）。
-    var overlayOwns = Boolean(particlesOn && W.__awbFxOverlayReady === true && W.__awbFxOverlayOnline === true);
-    if (overlayOwns && S.canvas) {
+    // T-77e4/T-b30e：覆盖窗已就绪且 DSH 在线时，壳内画布被 webview 盖住只会白耗 CPU/GPU → 停画并清空；
+    // 覆盖窗创建失败/离线/降级/暂停时 overlayOwns=false，壳内照常绘制（降级兜底）。
+    var owns = overlayOwns();
+    if (owns && S.canvas) {
       clearCanvas();
       S.canvas.setAttribute('data-fx-particles', '0');
     }
-    if (S.mode === 'off' || overlayOwns) stopLoop();
+    if (S.mode === 'off' || owns) stopLoop();
     else if (!S.paused) startLoop();
     try {
       logFxDiag({
@@ -946,6 +967,7 @@
   /* ── T-77e4：透明覆盖窗状态 + 连接态层级证据（不改主画布） ─────────────── */
   function overlayState() {
     var cfg = S.cfg || {};
+    var owns = overlayOwns();
     return {
       mode: S.mode,
       count: S.parts.length,
@@ -953,7 +975,11 @@
       opacityRange: Array.isArray(cfg.opacityRange) ? cfg.opacityRange.slice(0, 2) : [0.15, 0.55],
       degraded: Boolean(S.degraded.particles),
       paused: Boolean(S.paused),
-      enabled: S.mode === 'full' && !S.degraded.particles && !S.paused && S.parts.length > 0 && W.__awbFxOverlayOnline === true
+      // T-b30e：enabled 与「壳内是否停画」同一判据，避免覆盖窗和壳内同时画。
+      enabled: Boolean(owns && S.parts.length > 0),
+      overlayOwns: owns,
+      shellRunning: Boolean(S.running),
+      shellParticles: S.canvas ? Number(S.canvas.getAttribute('data-fx-particles') || 0) : 0
     };
   }
   function notifyOverlay() {
@@ -1501,6 +1527,7 @@
     sample: sample,
     themeStateFx: themeStateFx,
     overlayState: overlayState,
+    overlayOwns: overlayOwns,
     layerEvidence: layerEvidence,
     notifyOverlay: notifyOverlay,
     describe: describe,

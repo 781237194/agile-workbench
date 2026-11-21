@@ -88,6 +88,30 @@
     if (!raf) raf = window.requestAnimationFrame(draw);
   }
 
+  /** T-b30e：测试/诊断取数口——覆盖窗实际画面抽样（alpha>0 比例）与粒子/循环状态。 */
+  function stats() {
+    return {
+      w: W, h: H, dpr: dpr,
+      canvas: canvas ? { w: canvas.width, h: canvas.height } : null,
+      parts: parts.length,
+      raf: Boolean(raf),
+      enabled: Boolean(state && state.enabled),
+      mode: state ? String(state.mode || '') : ''
+    };
+  }
+  function sampleAlpha() {
+    if (!ctx || !canvas) return { ok: false };
+    try {
+      var data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      var step = 4 * 8; // 每 8 像素抽样一次 alpha
+      var n = 0;
+      var nonEmpty = 0;
+      for (var i = 3; i < data.length; i += step) { n += 1; if (data[i] > 0) nonEmpty += 1; }
+      return { ok: true, sampled: n, nonEmpty: nonEmpty, ratioPct: n ? Math.round((nonEmpty / n) * 1000) / 10 : 0 };
+    } catch (e) { return { ok: false, error: String((e && e.message) || e).slice(0, 120) }; }
+  }
+  try { window.__fxOverlayStats = stats; window.__fxOverlaySample = sampleAlpha; } catch (e) { /* ignore */ }
+
   function ready() {
     try {
       if (window.fxOverlay && typeof window.fxOverlay.ready === 'function') window.fxOverlay.ready();

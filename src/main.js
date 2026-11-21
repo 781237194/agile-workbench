@@ -399,14 +399,50 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
       return { ok: false, code: 'FX_LOG_WRITE_FAILED' };
     }
   });
-  // T-77e4：透明覆盖窗状态（主窗 fx-layer 推送；覆盖窗只读渲染，不接触浏览器业务数据）。
-  rawIpcHandle('fx:overlay-status', () => ({
-    ok: true,
-    ready: Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayReady),
-    visible: Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayWindow.isVisible()),
-    state: fxOverlayState,
-    metrics: fxOverlayMetrics(),
-  }));
+  // T-77e4/T-b30e：透明覆盖窗状态（主窗 fx-layer 推送；覆盖窗只读渲染，不接触浏览器业务数据）。
+  // 额外给出 bounds 跟随/输入穿透/覆盖窗画面抽样，供自检与面板诊断（只读，不改行为）。
+  rawIpcHandle('fx:overlay-status', async () => {
+    const alive = Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed());
+    const mainBounds = fxOverlayBoundsOfMain();
+    let overlayBounds = null;
+    let overlayCanvas = null;
+    let overlaySample = null;
+    if (alive) {
+      try { overlayBounds = fxOverlayWindow.getBounds(); } catch { /* ignore */ }
+      try { overlayCanvas = await fxOverlayWindow.webContents.executeJavaScript('window.__fxOverlayStats ? window.__fxOverlayStats() : null'); } catch { /* ignore */ }
+      try { overlaySample = await fxOverlayWindow.webContents.executeJavaScript('window.__fxOverlaySample ? window.__fxOverlaySample() : null'); } catch { /* ignore */ }
+    }
+    const boundsMatch = Boolean(mainBounds && overlayBounds
+      && ['x', 'y', 'width', 'height'].every((k) => Number(mainBounds[k]) === Number(overlayBounds[k])));
+    return {
+      ok: true,
+      ready: Boolean(alive && fxOverlayReady),
+      visible: Boolean(alive && fxOverlayWindow.isVisible()),
+      state: fxOverlayState,
+      window: {
+        mainBounds,
+        overlayBounds,
+        boundsMatch,
+        boundsSyncCount: fxOverlayBoundsSyncCount,
+        lastBoundsAt: fxOverlayLastBoundsAt,
+        mainVisible: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()),
+        mainFocused: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()),
+        mainMinimized: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMinimized()),
+        mainFullScreen: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFullScreen()),
+      },
+      capabilities: {
+        clickThrough: Boolean(fxOverlayIgnoreMouse),
+        ignoreMouseEvents: Boolean(fxOverlayIgnoreMouse),
+        focusable: false,
+        parented: true,
+        transparent: true,
+        frame: false,
+      },
+      overlayCanvas,
+      overlaySample,
+      metrics: fxOverlayMetrics(),
+    };
+  });
   rawIpcHandle('fx:overlay-benchmark', async () => {
     const withOverlay = fxOverlayMetrics();
     const wasVisible = Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayWindow.isVisible());
@@ -430,8 +466,31 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
       },
     };
   });
-  ipcMain.on('fx:overlay-ready', () => {
-    fxOverlayReady = true;
+  // T-b30e 自检专用：窗口状态/尺寸驱动（仅在 AWB_FX_OVERLAY_TEST=1 的隔离实例里可用；生产返回拒绝）。
+  rawIpcHandle('fx:overlay-test-window', (_event, action) => {
+    if (String(process.env.AWB_FX_OVERLAY_TEST || '') !== '1') return { ok: false, code: 'TEST_WINDOW_DISABLED' };
+    const win = mainWindow;
+    if (!win || win.isDestroyed()) return { ok: false, code: 'NO_MAIN_WINDOW' };
+    const act = action && typeof action === 'object' ? action : {};
+    try {
+      if (act.type === 'resize') {
+        const width = Math.max(640, Math.round(Number(act.width) || 1200));
+        const height = Math.max(480, Math.round(Number(act.height) || 800));
+        const b = win.getBounds();
+        win.setBounds({ x: b.x, y: b.y, width, height });
+      } else if (act.type === 'maximize') win.maximize();
+      else if (act.type === 'unmaximize') win.unmaximize();
+      else if (act.type === 'minimize') win.minimize();
+      else if (act.type === 'restore') win.restore();
+      else if (act.type === 'fullscreen') win.setFullScreen(true);
+      else if (act.type === 'leave-fullscreen') win.setFullScreen(false);
+      else return { ok: false, code: 'BAD_ACTION' };
+    } catch (e) {
+      return { ok: false, code: 'WINDOW_ACTION_FAILED', message: String((e && e.message) || e).slice(0, 160) };
+    }
+    return { ok: true, at: Date.now(), bounds: fxOverlayBoundsOfMain(), overlayBounds: (fxOverlayWindow && !fxOverlayWindow.isDestroyed()) ? fxOverlayWindow.getBounds() : null };
+  });
+  ipcMain.on('fx:overlay-ready', () => {    fxOverlayReady = true;
     try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fx-overlay-ready', { ready: true }); } catch { /* ignore */ }
     try { pushFxOverlayState(); } catch { /* ignore */ }
   });
@@ -2918,6 +2977,10 @@ let fxOverlayWindow = null;
 let fxOverlayState = { enabled: false, count: 0, colors: [], opacityRange: [0.15, 0.55], mode: 'full' };
 let fxOverlayReady = false;
 let fxOverlayBoundsTimer = null;
+// T-b30e：覆盖窗 bounds 跟随/输入穿透的可观测计数（自检/状态取数口用，不影响行为）。
+let fxOverlayBoundsSyncCount = 0;
+let fxOverlayLastBoundsAt = 0;
+let fxOverlayIgnoreMouse = false;
 let teamBoardWindow = null;
 let teamBoardProjectId = null;
 let teamBoardProjectPath = null;
@@ -14305,12 +14368,18 @@ function syncFxOverlayBounds() {
   if (!fxOverlayWindow || fxOverlayWindow.isDestroyed()) return;
   const bounds = fxOverlayBoundsOfMain();
   if (!bounds) return;
-  try { fxOverlayWindow.setBounds(bounds); } catch { /* ignore */ }
+  try {
+    fxOverlayWindow.setBounds(bounds);
+    fxOverlayBoundsSyncCount += 1;
+    fxOverlayLastBoundsAt = Date.now();
+  } catch { /* ignore */ }
 }
 function pushFxOverlayState() {
   if (!fxOverlayWindow || fxOverlayWindow.isDestroyed()) return;
+  // 自检/受控断面可用 AWB_FX_OVERLAY_FORCE_VISIBLE=1 绕过焦点门（生产不设，行为不变）。
+  const forceVisible = String(process.env.AWB_FX_OVERLAY_FORCE_VISIBLE || '') === '1';
   const visible = Boolean(fxOverlayState.enabled && mainWindow && !mainWindow.isDestroyed()
-    && mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused());
+    && mainWindow.isVisible() && !mainWindow.isMinimized() && (mainWindow.isFocused() || forceVisible));
   try { fxOverlayWindow.webContents.send('fx:overlay-state', fxOverlayState); } catch { /* ignore */ }
   if (visible) {
     syncFxOverlayBounds();
@@ -14327,8 +14396,17 @@ function notifyFxOverlayReady(ready) {
 function ensureFxOverlayWindow() {
   if (fxOverlayWindow && !fxOverlayWindow.isDestroyed()) return fxOverlayWindow;
   if (!mainWindow || mainWindow.isDestroyed()) return null;
-  // 自测沙盘不建额外窗口，避免污染进程数/截图与自检报告。
-  if (IS_SELFTEST) return null;
+  // 自测沙盘默认不建额外窗口，避免污染进程数/截图与自检报告；
+  // T-b30e 覆盖窗自检用 AWB_FX_OVERLAY_TEST=1 显式启用。
+  if (IS_SELFTEST && String(process.env.AWB_FX_OVERLAY_TEST || '') !== '1') return null;
+  // T-b30e 回退开关：覆盖窗不可用/平台不支持时置 1 → 壳内 #fx-layer 继续绘制（AC① 回退路径）。
+  if (String(process.env.AWB_FX_OVERLAY_DISABLE || '') === '1') {
+    fxOverlayWindow = null;
+    fxOverlayReady = false;
+    fxOverlayIgnoreMouse = false;
+    notifyFxOverlayReady(false);
+    return null;
+  }
   try {
     fxOverlayWindow = new BrowserWindow({
       ...fxOverlayBoundsOfMain(),
@@ -14338,17 +14416,21 @@ function ensureFxOverlayWindow() {
       webPreferences: {
         preload: path.join(__dirname, 'preload-fx-overlay.js'),
         contextIsolation: true, nodeIntegration: false, sandbox: false,
+        // 自检实例（离屏/未聚焦）下不要节流 rAF，否则覆盖窗画面抽样恒为 0 无法取证。
+        backgroundThrottling: String(process.env.AWB_FX_OVERLAY_TEST || '') !== '1',
       },
     });
     fxOverlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    fxOverlayIgnoreMouse = true;
     fxOverlayWindow.loadFile(path.join(__dirname, 'renderer', 'fx-overlay.html'));
-    fxOverlayWindow.on('closed', () => { fxOverlayWindow = null; fxOverlayReady = false; notifyFxOverlayReady(false); });
+    fxOverlayWindow.on('closed', () => { fxOverlayWindow = null; fxOverlayReady = false; fxOverlayIgnoreMouse = false; notifyFxOverlayReady(false); });
     fxOverlayWindow.webContents.on('did-finish-load', () => { syncFxOverlayBounds(); pushFxOverlayState(); notifyFxOverlayReady(fxOverlayReady); });
     return fxOverlayWindow;
   } catch (error) {
     try { console.warn('[fx-overlay] create failed ' + String((error && error.message) || error).slice(0, 160)); } catch { /* ignore */ }
     fxOverlayWindow = null;
     fxOverlayReady = false;
+    fxOverlayIgnoreMouse = false;
     notifyFxOverlayReady(false);
     return null;
   }
@@ -14364,6 +14446,15 @@ function bindFxOverlayToMainWindow() {
   mainWindow.on('blur', () => { try { if (fxOverlayWindow && fxOverlayWindow.isVisible()) fxOverlayWindow.hide(); } catch { /* ignore */ } });
   mainWindow.on('minimize', () => { try { if (fxOverlayWindow) fxOverlayWindow.hide(); } catch { /* ignore */ } });
   mainWindow.on('restore', () => { ensure(); pushFxOverlayState(); });
+  // T-b30e：最大化/还原/全屏进出都必须重新贴住主窗（仅 resize 在部分 Windows 场景下不触发）。
+  const syncBoundsSoon = () => {
+    syncFxOverlayBounds();
+    if (fxOverlayBoundsTimer) clearTimeout(fxOverlayBoundsTimer);
+    fxOverlayBoundsTimer = setTimeout(syncFxOverlayBounds, 30);
+  };
+  for (const evt of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) {
+    mainWindow.on(evt, () => { syncBoundsSoon(); pushFxOverlayState(); });
+  }
   mainWindow.on('closed', () => { try { if (fxOverlayWindow && !fxOverlayWindow.isDestroyed()) fxOverlayWindow.close(); } catch { /* ignore */ } fxOverlayWindow = null; });
   mainWindow.webContents.on('did-finish-load', () => { ensure(); pushFxOverlayState(); notifyFxOverlayReady(fxOverlayReady); });
   ensure();
