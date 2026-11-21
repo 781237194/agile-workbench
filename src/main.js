@@ -11964,13 +11964,20 @@ ipcMain.handle('theme:metrics', async () => {
       const guests = typeof webContents.getAllWebContents === 'function' ? webContents.getAllWebContents() : [];
       const guest = guests.find((contents) => { try { return contents.getType() === 'webview' && !contents.isDestroyed(); } catch { return false; } });
       if (!guest) return { ok: false, code: 'DSH_WEBVIEW_MISSING' };
-      const value = await guest.executeJavaScript(`(() => ({
-        bodyLen: String((document.body && document.body.innerText) || '').trim().length,
-        title: String(document.title || ''),
-        href: String(location.href || ''),
-        boot: Boolean(document.querySelector('.dsvs-boot'))
-      }))()`, true);
-      return { ok: true, ...(value || {}), body: String((await guest.executeJavaScript('String((document.body && document.body.innerText) || "").slice(0, 300)', true)) || '') };
+      // PM 20:20（Owner：打字卡到没法用）：**探针禁止读 innerText**——innerText 会强制整页 reflow，
+      // DSH 页面 5600+ 节点 / 1MB CSS，每读一次几十毫秒，探针每 500ms 一次就是持续卡顿。
+      // 改为单次 textContent（不触发布局）+ 只取前 400 字用于 401 判定。
+      const value = await guest.executeJavaScript(`(() => {
+        const t = String((document.body && document.body.textContent) || '');
+        return {
+          bodyLen: t.trim().length,
+          body: t.slice(0, 400),
+          title: String(document.title || ''),
+          href: String(location.href || ''),
+          boot: Boolean(document.querySelector('.dsvs-boot'))
+        };
+      })()`, true);
+      return { ok: true, ...(value || {}) };
     } catch (error) {
       return { ok: false, code: 'DSH_GUEST_PROBE_FAILED', message: String((error && error.message) || error || '').slice(0, 200) };
     }
