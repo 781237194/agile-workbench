@@ -62,7 +62,16 @@ document.addEventListener('click', (ev) => {
 const r4Gate = (fn) => (R4GateApi && typeof R4GateApi.gate === 'function' ? R4GateApi.gate(fn) : fn);
 const r4Coalesce = (fn, ms, key) => (R4GateApi && typeof R4GateApi.coalesce === 'function' ? R4GateApi.coalesce(fn, ms, key) : fn);
 
-const fileUi = { projectId: null, expanded: new Set(), data: null };
+// R-e31b §5.3：文件面板按目录懒加载——只存当前已加载层的条目（不整树常驻）。
+const fileUi = {
+  projectId: null,
+  expanded: new Set(),
+  data: null,
+  children: new Map(),
+  loaded: new Set(),
+  truncated: new Set(),
+  byRel: new Map(),
+};
 // DSH 侧核验结果只对“当前项目”有效；换项目立即作废，避免把上一个项目的 6/6 贴到新项目上。
 const liveUi = {
   projectId: null, at: 0, loading: false, error: null,
@@ -15194,11 +15203,23 @@ function openFilePreview(project, item) {
 
 function toggleFileDir(rel) {
   if (!rel) return;
-  if (fileUi.expanded.has(rel)) fileUi.expanded.delete(rel);
-  else fileUi.expanded.add(rel);
-  renderFileTree();
-  const row = Array.from(document.querySelectorAll('[data-file-rel]')).find((el) => el.dataset.fileRel === rel);
-  try { row?.focus(); } catch { /* ignore */ }
+  const opening = !fileUi.expanded.has(rel);
+  if (!opening) { fileUi.expanded.delete(rel); renderFileTree(); return; }
+  fileUi.expanded.add(rel);
+  if (fileUi.loaded.has(rel)) { renderFileTree(); return; }
+  // R-e31b §5.3：展开时才取这一层（不整树扫描）。
+  void loadFileDir(rel).then(() => renderFileTree()).catch((e) => toast('目录读取失败：' + humanError(e.message), 'bad'));
+}
+
+async function loadFileDir(rel) {
+  const p = activeProject();
+  if (!p) return;
+  const r = await window.workbench.filesList({ projectId: p.id, dir: rel, limit: 500 });
+  if (!r || !r.ok) throw new Error((r && (r.message || r.code)) || '目录读取失败');
+  fileUi.loaded.add(rel);
+  fileUi.children.set(rel, Array.isArray(r.items) ? r.items : []);
+  for (const it of fileUi.children.get(rel)) fileUi.byRel.set(it.rel, it);
+  if (r.truncated) fileUi.truncated.add(rel); else fileUi.truncated.delete(rel);
 }
 
 async function loadFiles() {
@@ -15211,6 +15232,10 @@ async function loadFiles() {
   if (!p) {
     fileUi.projectId = null;
     fileUi.data = null;
+    fileUi.children = new Map();
+    fileUi.loaded = new Set();
+    fileUi.truncated = new Set();
+    fileUi.byRel = new Map();
     fileUi.expanded.clear();
     if (rootEl) rootEl.textContent = '—';
     if (summary) summary.textContent = '';
@@ -15226,12 +15251,21 @@ async function loadFiles() {
   if (fileUi.projectId !== p.id) {
     fileUi.projectId = p.id;
     fileUi.expanded.clear();
+    fileUi.children = new Map();
+    fileUi.loaded = new Set();
+    fileUi.truncated = new Set();
+    fileUi.byRel = new Map();
   }
   box.innerHTML = '<div class="empty-row">读取中…</div>';
   try {
-    const r = await window.workbench.filesList(p.id);
-    if (!r || !r.ok) throw new Error((r && r.error) || '读取失败');
-    fileUi.data = r;
+    const r = await window.workbench.filesList({ projectId: p.id, dir: '', limit: 500 });
+    if (!r || !r.ok) throw new Error((r && (r.message || r.code)) || '读取失败');
+    fileUi.data = { root: r.root };
+    fileUi.children = new Map([['', Array.isArray(r.items) ? r.items : []]]);
+    fileUi.loaded = new Set(['']);
+    fileUi.truncated = new Set(r.truncated ? [''] : []);
+    fileUi.byRel = new Map();
+    for (const it of fileUi.children.get('')) fileUi.byRel.set(it.rel, it);
     const root = r.root || p.path;
     if (rootEl) { rootEl.textContent = root; rootEl.title = root; }
     if (crumb) crumb.title = root;
@@ -15239,65 +15273,50 @@ async function loadFiles() {
   } catch (e) {
     fileUi.data = null;
     if (summary) summary.textContent = '';
-    box.innerHTML = `<div class="file-error"><b>项目目录读取失败</b><span>${esc(humanError(e.message))}</span><button class="ghost small" type="button" data-file-retry>重试</button></div>`;
+    box.innerHTML = '<div class="file-error"><b>项目目录读取失败</b><span>' + esc(humanError(e.message)) + '</span><button class="ghost small" type="button" data-file-retry>重试</button><button class="ghost small" type="button" data-open-project-folder>打开项目文件夹</button></div>';
   }
 }
 
 function renderFileTree() {
   const box = $('#files-list');
-  const data = fileUi.data;
-  if (!box || !data) return;
-  const items = data.files || [];
-  const dirs = items.filter((x) => x.kind === 'dir');
-  const files = items.filter((x) => x.kind !== 'dir');
+  if (!box || !fileUi.data) return;
+  const rootItems = fileUi.children.get('') || [];
   const summary = $('#files-summary');
-  if (summary) summary.textContent = `${dirs.length} 个文件夹 · ${files.length} 个文件`;
+  const loadedCount = Array.from(fileUi.children.values()).reduce((n, arr) => n + (arr ? arr.length : 0), 0);
+  if (summary) summary.textContent = '已加载 ' + loadedCount + ' 项';
 
-  const dirSet = new Set(dirs.map((x) => x.rel));
+  const dirSet = new Set();
+  for (const arr of fileUi.children.values()) for (const it of arr || []) if (it.isDir) dirSet.add(it.rel);
   for (const rel of Array.from(fileUi.expanded)) if (!dirSet.has(rel)) fileUi.expanded.delete(rel);
 
-  if (!items.length) {
-    box.innerHTML = `<div class="file-empty"><span class="file-empty-mark" aria-hidden="true">▱</span><b>项目目录为空</b><p>新建项目会自动生成角色目录、src/、_tmp/ 和项目信息.md。</p><button class="ghost small" type="button" data-open-project-folder>打开项目文件夹</button></div>`;
+  if (!rootItems.length) {
+    box.innerHTML = '<div class="file-empty"><span class="file-empty-mark" aria-hidden="true">▱</span><b>项目目录为空</b><p>新建项目会自动生成角色目录、src/、_tmp/ 和项目信息.md。</p><button class="ghost small" type="button" data-open-project-folder>打开项目文件夹</button></div>';
     return;
   }
 
-  const children = new Map();
-  for (const it of items) {
-    const rel = String(it.rel || '');
-    const parent = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
-    if (!children.has(parent)) children.set(parent, []);
-    children.get(parent).push(it);
-  }
-  for (const arr of children.values()) {
-    arr.sort((a, b) => {
-      const ad = a.kind === 'dir' ? 0 : 1;
-      const bd = b.kind === 'dir' ? 0 : 1;
-      if (ad !== bd) return ad - bd;
-      return String(a.name).localeCompare(String(b.name), 'zh-CN');
-    });
-  }
-
-  const build = (parent, depth) => (children.get(parent) || []).map((it) => {
-    const isDir = it.kind === 'dir';
+  const roleDirNames = ['项目经理', '产品', '需求分析师', '程序员A', '程序员B', '测试人员'];
+  const build = (parent, depth) => (fileUi.children.get(parent) || []).map((it) => {
+    const isDir = Boolean(it.isDir);
     const open = isDir && fileUi.expanded.has(it.rel);
-    const roleDirNames = ['项目经理', '产品', '需求分析师', '程序员A', '程序员B', '测试人员'];
     const dirKind = isDir ? (it.rel === '需求' ? '需求池' : (roleDirNames.includes(it.name) ? '角色目录' : '文件夹')) : '';
-    const meta = isDir ? dirKind : `${fmtSize(it.size || 0)} · ${fileKind(it.name)}`;
-    let html = `<div class="file-row${isDir ? ' is-dir' : ''}${open ? ' is-open' : ''}" style="--depth:${depth}" data-file-rel="${esc(it.rel)}" data-file-kind="${isDir ? 'dir' : 'file'}" tabindex="0" role="${isDir ? 'button' : 'link'}"${isDir ? ` aria-expanded="${open}"` : ''} title="${esc(it.rel)}">
-      <span class="file-caret" aria-hidden="true">${isDir ? (open ? '⌄' : '›') : ''}</span>
-      <span class="file-ico${isDir ? ' is-dir' : ''}" aria-hidden="true">${esc(fileIcon(it.name, isDir))}</span>
-      <span class="file-name">${esc(it.name)}</span>
-      <span class="file-meta">${esc(meta)}</span>
-    </div>`;
+    const meta = isDir ? dirKind : fmtSize(it.size || 0) + ' · ' + fileKind(it.name);
+    let html = '<div class="file-row' + (isDir ? ' is-dir' : '') + (open ? ' is-open' : '') + '" style="--depth:' + depth + '" data-file-rel="' + esc(it.rel) + '" data-file-kind="' + (isDir ? 'dir' : 'file') + '" tabindex="0" role="' + (isDir ? 'button' : 'link') + '"' + (isDir ? ' aria-expanded="' + open + '"' : '') + ' title="' + esc(it.rel) + '">'
+      + '<span class="file-caret" aria-hidden="true">' + (isDir ? (open ? '⌄' : '›') : '') + '</span>'
+      + '<span class="file-ico' + (isDir ? ' is-dir' : '') + '" aria-hidden="true">' + esc(fileIcon(it.name, isDir)) + '</span>'
+      + '<span class="file-name">' + esc(it.name) + '</span>'
+      + '<span class="file-meta">' + esc(meta) + '</span>'
+      + '</div>';
     if (isDir && open) {
-      const kids = children.get(it.rel) || [];
-      html += kids.length ? build(it.rel, depth + 1) : `<div class="file-empty-row" style="--depth:${depth + 1}">空文件夹</div>`;
+      const kids = fileUi.children.get(it.rel);
+      if (!kids) html += '<div class="file-empty-row" style="--depth:' + (depth + 1) + '">读取中…</div>';
+      else html += kids.length ? build(it.rel, depth + 1) : '<div class="file-empty-row" style="--depth:' + (depth + 1) + '">空文件夹</div>';
+      if (fileUi.truncated.has(it.rel)) html += '<div class="file-empty-row" style="--depth:' + (depth + 1) + '">该目录条目超过 500，已截断；更多内容请在系统文件夹中查看。</div>';
     }
     return html;
   }).join('');
 
   let html = build('', 0);
-  if (items.length >= 600) html += '<div class="file-empty-row">只显示前 600 项，更多内容请在系统文件夹中查看。</div>';
+  if (fileUi.truncated.has('')) html += '<div class="file-empty-row">该目录条目超过 500，已截断；更多内容请在系统文件夹中查看。</div>';
   box.innerHTML = html;
 }
 
@@ -17756,8 +17775,13 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
     if (tool === 'refresh') { loadFiles(); return; }
     const data = fileUi.data;
     if (!data) return;
-    if (tool === 'expand') fileUi.expanded = new Set((data.files || []).filter((x) => x.kind === 'dir').map((x) => x.rel));
-    else if (tool === 'collapse') fileUi.expanded.clear();
+    if (tool === 'expand') {
+      // R-e31b：展开只加载当前已加载层的直接子目录（懒加载，不整树）。
+      const topDirs = (fileUi.children.get('') || []).filter((x) => x.isDir).map((x) => x.rel);
+      fileUi.expanded = new Set(topDirs);
+      void Promise.all(topDirs.filter((rel) => !fileUi.loaded.has(rel)).map((rel) => loadFileDir(rel).catch(() => null)))
+        .then(() => renderFileTree());
+    } else if (tool === 'collapse') fileUi.expanded.clear();
     renderFileTree();
   });
   $('#files-list')?.addEventListener('click', async (e) => {
@@ -17768,9 +17792,15 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
     if (row.dataset.fileKind === 'dir') { toggleFileDir(rel); return; }
     const p = activeProject();
     if (!p) return;
-    const item = (fileUi.data?.files || []).find((x) => x.rel === rel);
-    if (!item) { toast('文件列表已变化，请刷新后重试', 'bad'); return; }
-    openFilePreview(p, item);
+    const item = fileUi.byRel.get(rel) || null;
+    if (!item) {
+      // 懒加载下条目可能来自未加载层：按目录再取一次
+      const dirRel = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+      try { if (!fileUi.loaded.has(dirRel)) await loadFileDir(dirRel); } catch { /* ignore */ }
+    }
+    const full = fileUi.byRel.get(rel) || item;
+    if (!full) { toast('文件列表已变化，请刷新后重试', 'bad'); return; }
+    openFilePreview(p, full);
   });
   $('#files-list')?.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
