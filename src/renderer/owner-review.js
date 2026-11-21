@@ -162,8 +162,18 @@
     };
   }
   function proxyExpiresText(value) {
-    const m = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
-    return m ? { clock: `${m[4]}:${m[5]}`, full: `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}` } : null;
+    // 390a：按本机时区显示（旧实现正则截 ISO 字符串，UTC 时间被当本地时钟，差 8 小时）。
+    try {
+      if (window.AWBProxyExpiry && typeof AWBProxyExpiry.formatProxyExpiry === 'function') {
+        return AWBProxyExpiry.formatProxyExpiry(value, Date.now());
+      }
+    } catch { /* 回退到 Date 本地格式化 */ }
+    const ms = Date.parse(String(value || ''));
+    if (!Number.isFinite(ms)) return null;
+    const d = new Date(ms);
+    const pad = (n) => String(n).padStart(2, '0');
+    const clock = pad(d.getHours()) + ':' + pad(d.getMinutes());
+    return { clock, full: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock}`, label: clock, active: ms > Date.now() };
   }
   /** missing=壳层没有代管接口；error=读取代管失败；active/idle=正常两态。 */
   function proxyRowState() {
@@ -196,7 +206,10 @@
     const modal = proxyModalEl();
     row.setAttribute('aria-expanded', modal && !modal.hidden ? 'true' : 'false');
     if (rowState === 'active') {
-      if (label) label.textContent = expires ? `代管中 · 到期 ${expires.clock}` : '代管中';
+      const expired = Boolean(expires && expires.active === false);
+      if (label) label.textContent = expired
+        ? `代管已结束（${expires.clock} 到期）`
+        : (expires ? `代管中 · 到期 ${expires.label || expires.clock}` : '代管中');
       row.setAttribute('aria-label', `代管中${expires ? `，到期 ${expires.full}` : ''}；点这里结束代管`);
       row.title = expires ? `一键代管生效中（到期 ${expires.full}）；点这里结束` : '一键代管生效中；点这里结束';
       return;
@@ -786,9 +799,14 @@
       state.proxyRecords = (r && Array.isArray(r.records)) ? r.records.filter((row) => !row.endedAt) : [];
       state.proxyIdSet = new Set(state.proxyRecords.map((row) => String(row.requirementId || '')).filter(Boolean));
       // 7849 AC1：scope=all 是一条全项目记录——只要「未结束 + 未过期」，所有非终态需求都算代管覆盖。
-      state.proxyAllActive = Boolean(r && r.allActive);
       state.proxyAllRecord = (r && r.allRecord) || null;
       state.proxyAllExpiresAt = state.proxyAllRecord ? String(state.proxyAllRecord.expiresAt || '') : '';
+      // 390a：allActive 与显示文案同源——都以 Date.parse(expiresAt) > now 为准，不各自判断。
+      const expiresMs = Date.parse(state.proxyAllExpiresAt || '');
+      state.proxyAllActive = Boolean(r && r.allActive) && Number.isFinite(expiresMs) && expiresMs > Date.now();
+      if (r && r.allActive && !state.proxyAllActive) {
+        state.proxyAllExpiredNote = true;
+      }
       let count = state.proxyIdSet.size;
       if (state.proxyAllActive) {
         const rows = (state.data && Array.isArray(state.data.requirements)) ? state.data.requirements : [];
