@@ -125,6 +125,10 @@ const bootTokenDirCache = new Map();
 const ledgerActionsCache = new Map();
 const BOOT_TOKEN_CACHE_MS = 10000;
 const LEDGER_ACTIONS_CACHE_MS = 10000;
+// T-f18bf：session-queue 面板每 5s 轮询会同步 spawn `team.mjs sched advice`（实测 181ms/次），
+// 按项目缓存 15s；同一项目 15s 内不再 spawn（PM 要求 ≥10s）。
+const schedAdviceCache = new Map();
+const SCHED_ADVICE_CACHE_MS = 15000;
 // T-f18bf（PM 打回）：mtime 指纹命中仍常 miss 时，2 秒内的同一项目直接复用；优先保 CPU，
 // 允许工作流外部变化最多滞后 2 秒（写路径/显式刷新不受影响）。
 const workflowRecentCache = new Map();
@@ -7774,24 +7778,44 @@ ipcMain.handle('theme:metrics', async () => {
       }
       // T-20261117-211833-7a30（R-a4c7）AC5②：调度建议（只读；与 CLI 同源纯函数，失败降级为空、不阻塞面板）
       let schedAdvice = null;
+      let schedAdviceFresh = false;
+      if (projectName) {
+        const cachedAdvice = schedAdviceCache.get(projectName);
+        if (cachedAdvice && Date.now() - cachedAdvice.at < SCHED_ADVICE_CACHE_MS) {
+          schedAdvice = cachedAdvice.value;
+          schedAdviceFresh = true;
+        }
+      }
       // R-20261118-131107-28b8：旧会话归档账本（只读；mtime+size 缓存）。失败行 → 面板黄点 + 摘要「有 N 个归档失败」。
       const archiveRows = projectName
         ? readArchiveLogCached(path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName), '会话归档.jsonl'))
         : [];
-      if (projectName) {
+      if (projectName && !schedAdviceFresh) {
+        const cachedAdvice = schedAdviceCache.get(projectName);
+        if (cachedAdvice && Date.now() - cachedAdvice.at < SCHED_ADVICE_CACHE_MS) {
+          schedAdvice = cachedAdvice.value;
+          schedAdviceFresh = true;
+        }
+      }
+      if (projectName && !schedAdviceFresh) {
         try {
           const schedOut = execFileSync(process.execPath, [path.join(teamRoot, '工具', 'team.mjs'), 'sched', 'advice', '--project', projectName, '--json'], {
             encoding: 'utf8', timeout: 20000, env: teamChildEnv(),
           });
           const schedLine = String(schedOut || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
           const parsed = JSON.parse(schedLine);
-          if (parsed && parsed.ok) schedAdvice = parsed;
+          if (parsed && parsed.ok) {
+            schedAdvice = parsed;
+            schedAdviceCache.set(projectName, { at: Date.now(), value: parsed });
+            schedAdviceFresh = true;
+            if (schedAdviceCache.size > 16) schedAdviceCache.delete(schedAdviceCache.keys().next().value);
+          }
         } catch (e) {
           console.warn('SCHED_ADVICE_FAILED ' + String((e && e.message) || e).slice(0, 200));
         }
       }
       // 兜底（同样只读）：CLI 不可用（沙盘/打包路径差异）时，进程内直接调纯函数，保证面板至少出 UNAVAILABLE 行。
-      if (!schedAdvice && projectName) {
+      if (!schedAdvice && projectName && !schedAdviceFresh) {
         try {
           const { pathToFileURL } = require('node:url');
           const schedMod = await import(pathToFileURL(path.join(ROOT, '团队', '工具', 'lib', 'sched-advice.mjs')).href);
@@ -7818,6 +7842,9 @@ ipcMain.handle('theme:metrics', async () => {
         } catch (e) {
           console.warn('SCHED_ADVICE_FALLBACK_FAILED ' + String((e && e.message) || e).slice(0, 200));
         }
+        // 成功/失败/空都进入 15s 缓存：避免每个面板轮询都重读 1,372 个任务文件（实测 CPU 大头）。
+        schedAdviceCache.set(projectName, { at: Date.now(), value: schedAdvice || null });
+        if (schedAdviceCache.size > 16) schedAdviceCache.delete(schedAdviceCache.keys().next().value);
       }
       // R-9674 §6.1③/§6.5：任务索引（后台建、watch 增量；这里只取内存快照，不读盘全扫）
       const taskDir = projectName ? path.join(teamRoot, '状态', '项目', teamTools.teamSlug(projectName), '任务') : '';
@@ -13756,6 +13783,7 @@ ipcMain.handle('mem:cache-stats', () => {
     hotIpc: { count: hotIpcCache.size, bytes: hotIpcCacheBytes, maxEntryBytes: hotMax, entryCapBytes: HOT_IPC_ENTRY_MAX_BYTES, totalCapBytes: HOT_IPC_TOTAL_MAX_BYTES },
     workflowState: { count: workflowStateCache.size, rows: workflow, hits: workflowStateStats.hits, misses: workflowStateStats.misses, recentHits: workflowStateStats.recentHits, lastFp: workflowStateStats.lastFp, entryMaxBytes: WORKFLOW_STATE_ENTRY_MAX_BYTES },
     ledgerActions: { cachedTeams: ledgerActionsCache.size, ttlMs: LEDGER_ACTIONS_CACHE_MS },
+    schedAdvice: { cachedProjects: schedAdviceCache.size, ttlMs: SCHED_ADVICE_CACHE_MS },
     bootTokenDirs: { cachedDirs: bootTokenDirCache.size, ttlMs: BOOT_TOKEN_CACHE_MS },
     heapCapMB: MAIN_HEAP_CAP_MB,
     storeCacheBytes: storeCache && storeCache.value ? cacheValueBytes(storeCache.value) : 0,
