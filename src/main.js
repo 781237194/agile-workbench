@@ -2169,7 +2169,16 @@ function mirrorWorkflowToStore(projectId, teamName, projectPath) {
       } catch { diffStoreBefore = null; }
     }
     current.teamName = teamName;
-    current.requirements = Array.isArray(snapshot.requirements) ? snapshot.requirements : [];
+    // PM 20:50（Owner：5MB store 每次 IPC 深拷贝 → 卡顿）：镜像只保留需求摘要字段。
+    // history/decisions/ownerAcceptance 等大字段（单条 11KB，其中 history 4.3KB）留在工作流真相源里，
+    // 界面需要详情时走 workflow:* IPC，不从 store 里搬。
+    const REQ_SUMMARY_KEYS = ['id', 'title', 'status', 'priority', 'owner', 'kind', 'updatedAt', 'createdAt', 'round', 'registered'];
+    current.requirements = (Array.isArray(snapshot.requirements) ? snapshot.requirements : []).map((row) => {
+      if (!row || typeof row !== 'object') return row;
+      const out = {};
+      for (const k of REQ_SUMMARY_KEYS) if (row[k] !== undefined) out[k] = row[k];
+      return out;
+    });
     current.votes = Array.isArray(snapshot.votes) ? snapshot.votes : [];
     const previousPhase = current.workflowMirror && current.workflowMirror.phase;
     current.workflowMirror = {
@@ -3720,7 +3729,8 @@ function reconcileExpiredLocks(store) {
  */
 function statePayload(options = {}) {
   const readOnly = options && options.readOnly === true;
-  const store = readStore();
+  // PM 20:50：只读路径用 readStoreCached()（零 structuredClone），5MB store 不再每次 IPC 深拷贝。
+  const store = readOnly ? readStoreCached() : readStore();
   if (!readOnly) {
     reconcileExpiredLocks(store);
     // 每次状态刷新顺带对账一次旧协议现场：角色自己 read/ack 后，界面无需手动点“刷新回执”。
@@ -8989,8 +8999,17 @@ ipcMain.handle('theme:metrics', async () => {
       teamMode: normalizeTeamMode(p.teamMode || ctx.project.teamMode)
     });
   }));
+  // PM 20:50（Owner：主进程 CPU 被打满）：briefingStatus 每次都要读工作流 + 算 6 个角色的文档哈希，
+  // 而界面每 5 秒轮询一次 → 加 4 秒 TTL 缓存（同一项目）。
+  const briefingCache = new Map();
   ipcMain.handle('workflow:briefing', runWorkflowIpc(async (ctx) => {
-    return teamTools.briefingStatus(ctx.teamName);
+    const key = String(ctx.teamName || '');
+    const nowMs = Date.now();
+    const hit = briefingCache.get(key);
+    if (hit && nowMs - hit.at < 4000) return hit.value;
+    const value = teamTools.briefingStatus(ctx.teamName);
+    briefingCache.set(key, { at: nowMs, value });
+    return value;
   }));
   // B-20261114-003257-0a46（R-d734）：项目信息/项目铁律的真实存在性。
   // 不走 files:list（600 项 / 4 层截断会把根目录文档截掉，旧版因此误报“缺失”）。
