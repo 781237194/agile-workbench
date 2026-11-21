@@ -3225,30 +3225,17 @@ function renderSessions() {
   // 不是 DSH 会话映射。旧实现在 memberStatesCache 不可用（离线/读失败）时退回 allEntries（映射派生），
   // 映射只有 1/6 时就只画出 1 行、映射 0 时整块变空态 —— Owner 看到「6 个在册角色却一行都没有」。
   // 现在：有名册行 → 按名册；无名人册行 → 按本模式角色（teamRoles）兜底，仍然逐角色出行。
-  const localRoleRows = (teamRoles(p) || []).map((role) => ({ role: String(role.id || ''), name: role.name }));
-  // P0（Owner 0509：rosterRows 只有 1 行时仍只画 1 行）：**行数只由本模式角色决定**，
-  // rosterRows 仅作为「状态来源」（stateRow），不再决定画几行。纯逻辑抽在 session-rows.js，假 DOM 可测。
-  // PM 05:02（M-20261121-050229-42361f）：行数只由本模式角色（teamRoles）决定，rosterRows 只作 state 来源；
-  // 并集/空态逻辑在 session-rows.js（rosterRows=1 也出 6 行，仅 trulyEmptyRoster 才空态）。
-  const rosterEntries = (window.AWBSessionRows && typeof window.AWBSessionRows.buildRosterEntries === 'function')
-    ? window.AWBSessionRows.buildRosterEntries({ rosterRows, localRoles: localRoleRows, sessions: p && p.sessions, allEntries, roleById })
-    : (() => {
-      // PM 05:03：即使 session-rows.js 未加载，也按「teamRoles 骨架 + rosterRows 只作 state」出行；
-      // 只有本模式角色为空时才退回名册行/映射，绝不因 rosterRows=1 只画 1 行。
-      const roles = teamRoles(p) || [];
-      const rows = Array.isArray(rosterRows) ? rosterRows : [];
-      const rowOf = new Map(rows.map((row) => [String((row && row.role) || ''), row]));
-      const skeleton = roles.length ? roles : rows.map((row) => ({ id: String((row && row.role) || ''), name: String((row && row.name) || '') }));
-      return skeleton.map((role) => {
-        const roleId = String((role && role.id) || '');
-        return {
-          role: roleById.get(roleId) || { id: roleId, name: String((role && role.name) || roleId), color: '#888' },
-          sessionId: p && p.sessions && p.sessions[roleId] ? String(p.sessions[roleId]) : '',
-          stateRow: rowOf.get(roleId) || null
-        };
-      });
-    })();
-  const entries = rosterEntries;
+  // PM 05:10（M-20261121-051026-0b56c7）：行数只由 teamRoles(p) 定，rosterRows 只取 state；
+  // rosterRows=1 也必须出 6 行，只有名册 0 人（allEntries 也为空）才空态。
+  const rowOf = new Map((Array.isArray(rosterRows) ? rosterRows : []).map((row) => [String((row && row.role) || ''), row]));
+  const roleSkeleton = teamRoles(p) || [];
+  const entries = roleSkeleton.length
+    ? roleSkeleton.map((role) => ({
+      role,
+      sessionId: (p && p.sessions && p.sessions[String(role.id || '')]) ? String(p.sessions[String(role.id || '')]) : '',
+      stateRow: rowOf.get(String(role.id || '')) || null
+    }))
+    : allEntries;
   const ready = entries.filter((item) => item.sessionId).length;
   const rosterTotal = cache && Number(cache.memberCount) > 0 ? Number(cache.memberCount) : (Array.isArray(rosterRows) ? rosterRows.length : 0);
   const verifiedFromRows = Array.isArray(rosterRows) && rosterRows.length

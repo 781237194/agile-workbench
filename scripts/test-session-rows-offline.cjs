@@ -70,7 +70,7 @@ check('F7', '名册真 0 人且无角色 → 空（只有这种情况允许空�
 const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
 const indexPath = path.join(ROOT, 'src', 'renderer', 'index.html');
 const indexSrc = fs.readFileSync(indexPath, 'utf8');
-const used = /AWBSessionRows\.buildRosterEntries/.test(appSrc) && /AWBSessionRows\.rowModel/.test(appSrc);
+const used = /const roleSkeleton = teamRoles\(p\)/.test(appSrc) && /AWBSessionRows\.rowModel/.test(appSrc) && !/rosterRows\.length\s*\?\s*rosterRows\.map/.test(appSrc);
 const order = /<script src="session-rows\.js"><\/script>[\s\S]*<script src="app\.js"><\/script>/.test(indexSrc);
 check('F8', 'app.js 用纯函数（buildRosterEntries/rowModel），index.html 在 app.js 之前加载', used && order, { used, order });
 
