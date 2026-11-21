@@ -1,6 +1,6 @@
 {
   "name": "dsh-agile-workbench",
-  "version": "2.2.17",
+  "version": "2.2.18",
   "description": "PM工作台（Agile Workbench）套装 bundle：一次安装装齐工作台启动器、记忆插件、浏览器插件、搜索插件、视觉插件与安全搜索 MCP。",
   "type": "module",
   "files": [
@@ -47,7 +47,7 @@
     "@liustack/modlens": "^3.27.3"
   },
   "pmWorkbenchPayload": {
-    "appVersion": "2.1.14",
-    "sha256": "522ea6f1b18af649e582ed14acf891d522808fb33db49d073531743c240551b6"
+    "appVersion": "2.1.16",
+    "sha256": "e2bf30c41345e522936353a7c6c277faa6556df6db72bcd06459100618cae22d"
   }
 }
