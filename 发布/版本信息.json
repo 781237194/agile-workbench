@@ -1,7 +1,7 @@
 {
-  "version": "2.1.15",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.15/发布/pm-workbench-2.1.15.zip",
-  "sha256": "0e92c013ce10ae6089f1566a1ed4df87e1a8a3a6d3d586e7b0af526a2ea05d00",
-  "size": 4685769,
-  "notes": "本版为 2026-11-21 全天现场修复：①DSH 主区黑屏/反复重载根治——删除重复的 applyDshViewSrc 声明（后声明覆盖前声明使重载闸失效）、地址比较去尾斜杠、删除 legacy 实现；②连上即直显原生 DSH 界面：覆盖层只在 DSH 未连上时出现，探针读到空白只记日志、不再遮挡；开机动画不再被重载打断；③冷启动自愈：启动/同址无条件重装 cookie + reload；运行期监听凭据变化自动重装（实测换密钥 3 秒级恢复），不再需要手点「重载 WebView」；④验收/评审提速：壳层收口不 spawn CLI、两段式落账（先落决定、后台写工作流，崩溃可回放）、点击瞬间同步渲染提示条——验收点击到看见提示 8–9ms，评审 0.4 秒级；⑤写入位置可配置：设置页「存储位置」可改应用数据/临时沙盘目录，显示占用与上限，一键清理过期沙盘，系统盘路径拒绝；⑥启动存储守卫非阻塞（不再弹模态框导致「打开几秒自己关」）。"
+  "version": "2.1.16",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.16/发布/pm-workbench-2.1.16.zip",
+  "sha256": "97652f46b852894d7cbec797c7035c49bd2074148a86bcc47b4f81ae2eacddd6",
+  "size": 4772143,
+  "notes": "本版为 2026-11-22 凌晨现场修复：①名册清零根治——启动期「删除墓碑补扫」遇旧项目墓碑会清掉当前全局名册（每次重启 16–21 秒后六成员 sessionId 全空），新增 roster-startup-guard（墓碑团队≠activeProject / store 未就绪 / 同名项目仍在→不清）+ 团队.json 整文件写守卫（写后全空且写前>0→拒写并写 case/stack 审计）；②DSH 端口自愈——pin 只作提示，旧端口不可达 3 秒内自动回退发现（env→端口文件→进程端口→全监听端口探测），cookie 按新 authority 重签，离线每 30 秒重试；用户端口非默认（如 12341）也无需手改配置；③连接 DSH 后粒子可见——DSH 为 webview 独立合成层会盖住 DOM 粒子，新增透明覆盖 BrowserWindow（点击穿透、跟随 bounds、离线回退壳内）；④主进程 CPU 治理——briefing 2097ms→0.1ms（stale-while-revalidate + 裁 requirements）、workflow:state 422ms→62ms、fx-force-get 10 万次/100s 收敛、owner:pending-counts 热读 1.5MB 加缓存，OS 口径 CPU 41.8%→20.9%；⑤壳渲染层内存 76.6MB 堆 / 167.5MB RSS（≤250MB），缓存条目上限收紧。"
 }

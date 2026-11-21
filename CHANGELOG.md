@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2.1.16（2026-11-22）
+
+### Owner 凌晨现场报障收口
+
+- **名册清零根治**：启动期删除墓碑补扫误清当前全局名册 → `roster-startup-guard`（墓碑团队≠activeProject / store 未就绪 / 同名项目仍在 → 不清）+ `团队.json` 整文件写守卫（写后全空且写前>0 → 拒写并写 `case`/`stack` 审计）。
+- **DSH 端口自愈**：pin 只作提示，旧地址 3 秒内自动回退发现（env → 端口文件 → 进程端口 → 全监听端口探测），cookie 按新 authority 重签，离线 30 秒重试；非默认端口（如 12341）无需手改配置。
+- **连接后粒子可见**：DSH `webview` 独立合成层会盖住 DOM 粒子 → 透明覆盖 BrowserWindow（点击穿透、跟随 bounds、离线回退壳内）。
+- **主进程 CPU**：briefing 2097ms→0.1ms、workflow:state 422ms→62ms、fx-force-get 收敛、owner:pending-counts 加缓存；OS 口径 41.8%→20.9%。
+- **壳内存**：76.6MB 堆 / 167.5MB RSS，缓存条目上限收紧。
+
 ## 2.1.4（2026-11-19）
 
 ### 按 Owner 干净机实测汇总修安装与连接（10 点中的我方项）
