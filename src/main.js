@@ -11767,6 +11767,40 @@ ipcMain.handle('theme:metrics', async () => {
     const row = recordRenderCrash('selftest', { type: 'renderer', reason: 'crashed-selftest', exitCode: 0 });
     return { ok: true, row };
   });
+  ipcMain.handle('dsh:guest-probe', async () => {
+    try {
+      const guests = typeof webContents.getAllWebContents === 'function' ? webContents.getAllWebContents() : [];
+      const guest = guests.find((contents) => { try { return contents.getType() === 'webview' && !contents.isDestroyed(); } catch { return false; } });
+      if (!guest) return { ok: false, code: 'DSH_WEBVIEW_MISSING' };
+      const value = await guest.executeJavaScript(`(() => ({
+        bodyLen: String((document.body && document.body.innerText) || '').trim().length,
+        title: String(document.title || ''),
+        href: String(location.href || ''),
+        boot: Boolean(document.querySelector('.dsvs-boot'))
+      }))()`, true);
+      return { ok: true, ...(value || {}), body: String((await guest.executeJavaScript('String((document.body && document.body.innerText) || "").slice(0, 300)', true)) || '') };
+    } catch (error) {
+      return { ok: false, code: 'DSH_GUEST_PROBE_FAILED', message: String((error && error.message) || error || '').slice(0, 200) };
+    }
+  });
+  ipcMain.handle('dsh:skip-boot', async () => {
+    try {
+      const guests = typeof webContents.getAllWebContents === 'function' ? webContents.getAllWebContents() : [];
+      const guest = guests.find((contents) => { try { return contents.getType() === 'webview' && !contents.isDestroyed(); } catch { return false; } });
+      if (!guest) return { ok: false, code: 'DSH_WEBVIEW_MISSING' };
+      const skipped = await guest.executeJavaScript(`(() => {
+        const boot = document.querySelector('.dsvs-boot');
+        if (!boot) return false;
+        try { boot.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })); } catch { /* ignore */ }
+        try { boot.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); } catch { /* ignore */ }
+        try { boot.click(); } catch { /* ignore */ }
+        return true;
+      })()`, true);
+      return { ok: true, skipped: Boolean(skipped) };
+    } catch (error) {
+      return { ok: false, code: 'DSH_SKIP_BOOT_FAILED', message: String((error && error.message) || error || '').slice(0, 200) };
+    }
+  });
   ipcMain.handle('dsh:reinstall-cookie', async () => {
     try {
       const ok = await installDshCookie();
@@ -13360,20 +13394,6 @@ function createWindow() {
   });
   startMemSampler();
   mainWindow.once('ready-to-show', () => {
-    // 收口指令 B-1：窗口显示后 1.5s 在后台预热任务索引与工作流快照（只读，失败仅日志），
-    // 让用户第一次点验收/评审命中热缓存（冷态首次验收 ≤1s）。
-    setTimeout(() => {
-      try {
-        const storeNow = readStore();
-        const projectNow = (storeNow.projects || []).find((row) => row && row.id === storeNow.activeProjectId)
-          || (storeNow.projects || [])[0];
-        if (projectNow && projectNow.teamName) {
-          setImmediate(() => {
-            try { teamTools.prewarmWorkflowCaches(projectNow.teamName, projectNow.path); } catch { /* ignore */ }
-          });
-        }
-      } catch { /* ignore */ }
-    }, 1500);
     // a514 测量：隐藏窗口不产帧（rAF 被挂起），打字「keydown→下一帧」测不出真实值。
     // 测试实例用屏幕外 + showInactive（可见但不抢焦点、不占桌面）拿真实帧；生产默认不变。
     if (String(process.env.AWB_SHOW_INACTIVE || '') === '1') {
@@ -24057,6 +24077,26 @@ function applyDeletionTombstonesOnStartup() {
 
 app.whenReady().then(async () => {
   markStartup('appReady');
+  // PM 14:37 口径：预热必须**窗口 show 之前**就开始（用户可能秒点验收），不再等 ready-to-show + 1.5s。
+  // 放在 whenReady 的同步段立即 setImmediate 执行，与 registerIpc 等并行；只读、失败仅日志。
+  setImmediate(() => {
+    const warmT0 = Date.now();
+    try {
+      const storeNow = readStore();
+      const projectNow = (storeNow.projects || []).find((row) => row && row.id === storeNow.activeProjectId)
+        || (storeNow.projects || [])[0];
+      if (projectNow && projectNow.teamName) {
+        const warm = teamTools.prewarmWorkflowCaches(projectNow.teamName, projectNow.path);
+        try {
+          console.log('[prewarm] done cold=' + (Date.now() - warmT0) + ' atAppReady=true tasks=' + JSON.stringify(warm && warm.parts && warm.parts.tasks) + ' snapshot=' + JSON.stringify(warm && warm.parts && warm.parts.snapshot));
+        } catch { /* ignore */ }
+      } else {
+        try { console.log('[prewarm] skip: no active team project'); } catch { /* ignore */ }
+      }
+    } catch (error) {
+      try { console.log('[prewarm] failed ' + String((error && error.message) || error).slice(0, 160)); } catch { /* ignore */ }
+    }
+  });
   // B-4fdd：把 whenReady 里的同步前置段逐段计时——PM 012728 的冷启离群（2.4-4.8s 页面加载之外）
   // 需要证据判断是 registerIpc 还是 tombstones/采样器吃掉了那 1-2 秒。
   // R-bcac：启动前存储容量守卫——超限先清过期沙盘，仍超用原生对话框三选一（清理并继续 / 改位置 / 退出）。

@@ -291,6 +291,9 @@ if (IS_BOARD_WINDOW) {
     },
     reloadDshView: () => ipcRenderer.invoke('app:reload-dsh'),
   // B-f749：DSH 重启后 cookie 密钥可能变化 → 401/空白时由渲染层请求重新安装 cookie 再 reload。
+  // B-f749：主进程直接读 guest webview 的正文/标题/进场状态，并触发一次 boot 跳过。
+  dshGuestProbe: () => ipcRenderer.invoke('dsh:guest-probe'),
+  dshSkipBoot: () => ipcRenderer.invoke('dsh:skip-boot'),
   reinstallDshCookie: () => ipcRenderer.invoke('dsh:reinstall-cookie'),
     crashSelfTest: () => ipcRenderer.invoke('app:crash-selftest'),
     crashAudit: (payload) => ipcRenderer.invoke('app:crash-audit', payload),

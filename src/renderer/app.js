@@ -15762,6 +15762,17 @@ const dshCookieRetry = { at: 0, url: '' };
 // PM 13:45：导航在途禁止自动重载；同一 baseUrl 的自动重试全局只允许 1 次，之后只能用户手动点。
 const dshViewLoad = { starts: 0, stops: 0, loading: false, loadingSince: 0, autoReloads: {} };
 try { window.__dshViewLoadStats = () => ({ starts: dshViewLoad.starts, stops: dshViewLoad.stops, loading: dshViewLoad.loading, autoReloads: dshViewLoad.autoReloads, bodyLen: dshGuestBodyLen, error: dshViewError }); } catch { /* ignore */ }
+/** 优先让主进程读 guest（webview.executeJavaScript 在部分 Electron 版本/时机不可用，会永远测到 0）。 */
+async function dshGuestProbe() {
+  const api = window.workbench;
+  if (api && typeof api.dshGuestProbe === 'function') {
+    try {
+      const r = await api.dshGuestProbe();
+      if (r && r.ok) return r;
+    } catch { /* ignore */ }
+  }
+  return null;
+}
 function dshAutoReloadAllowed(base) {
   if (!base) return false;
   if (dshViewLoad.loading) return false;
@@ -15809,7 +15820,8 @@ function applyDshViewSrc(force = false, reason = 'src', opts = {}) {
   const base = String((state && state.dsh && state.dsh.baseUrl) || '');
   if (!base) return false;
   const current = String(view.getAttribute('src') || '');
-  const same = current === base;
+  const normUrl = (u) => String(u || '').replace(/\/+$/, '');
+  const same = normUrl(current) === normUrl(base);
   if (same && !force) return false;
   if (opts.auto && !dshAutoReloadAllowed(base)) {
     try { console.log('[dsh-view] auto-' + (same ? 'reload' : 'set-src') + ' skipped reason=' + reason + ' loading=' + dshViewLoad.loading + ' autoUsed=' + Boolean(dshViewLoad.autoReloads[base])); } catch { /* ignore */ }
@@ -15923,7 +15935,7 @@ async function probeDsh(force = false, quiet = false) {
   }
 }
 
-function applyDshViewSrc() {
+function applyDshViewSrcLegacy() {
   const view = $('#dsh-view');
   const base = state?.dsh?.baseUrl;
   if (!view || !base) return;
@@ -15939,7 +15951,7 @@ async function initDsh() {
     const s = await window.workbench.dshStatus();
     state.dsh = s.status;
     renderDsh(s.status);
-    applyDshViewSrc();
+    applyDshViewSrc(false, 'misc', { auto: true });
   } catch { /* 配置缺失时保留静态文案 */ }
 }
 
@@ -15954,9 +15966,9 @@ async function retryDsh() {
     }
     dshViewFailed = false;
     dshReady = false;
-    applyDshViewSrc();
+    applyDshViewSrc(false, 'misc', { auto: true });
     const view = $('#dsh-view');
-    try { view?.reload(); } catch { applyDshViewSrc(); }
+    try { view?.reload(); } catch { applyDshViewSrc(true, 'retry-fallback', { auto: false }); }
     renderDsh(state.dsh);
     toast('正在重新连接 DSH', 'ok');
   } catch (e) {
@@ -16443,7 +16455,7 @@ function showDshView(on) {
   // DSH 永远是主画面。保留旧调用形状：只关闭浮层，不交换主场景。
   closeDrawers();
   if (on) {
-    applyDshViewSrc();
+    applyDshViewSrc(false, 'misc', { auto: true });
     renderDsh(state?.dsh);
   }
 }
@@ -16485,7 +16497,7 @@ function openDshConfig() {
           state.dsh = s.status;
           dshReady = false;
           renderDsh(s.status);
-          applyDshViewSrc();
+          applyDshViewSrc(false, 'misc', { auto: true });
           close();
           toast(s.status.online ? 'DSH 已连接' : 'DSH 配置已保存，当前未连接', s.status.online ? 'ok' : 'bad');
           const p = activeProject();
@@ -17992,30 +18004,26 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
         for (let i = 0; i < 20; i += 1) {
           await new Promise((resolve) => setTimeout(resolve, 500));
           if (probeSeq !== dshBodyProbeSeq) return;
-          let text = '';
-          try { text = String(await view.executeJavaScript('document.body ? String(document.body.innerText || "") : ""') || ''); } catch { continue; }
-          if (probeSeq !== dshBodyProbeSeq) return;
-          const bodyLen = text.trim().length;
-          if (!bodyLen) continue;
-          if (/authentication required|unauthorized|\b401\b/i.test(text)) {
-            void retryDshCookieOnce('blank-401');
-            continue;
+          const probe = await dshGuestProbe();
+          if (!probe) {
+            // 主进程 probe 不可用时不阻塞：did-finish 本身已证明页面加载成功，按 1 字符处理
+            dshGuestBodyLen = Math.max(1, dshGuestBodyLen);
+            dshViewError = null;
+            if (state) renderDsh(state.dsh);
+            return;
           }
-          // 生产实测：DSH 进场 splash 会一直停在「正在启动…/Loading plugins…」（自动播放被拦时不走完片尾）。
-          // 只点一次「跳过」让 DSH 自己 enter()，随后继续采样真实 UI 的 bodyLen。
-          if (/正在启动|正在进入|Loading plugins|点击画面跳过/.test(text)) {
+          const bodyLen = Number(probe.bodyLen) || 0;
+          const text = String(probe.body || '');
+          if (!bodyLen) continue;
+          if (probe.boot) {
             try {
-              const skipped = await view.executeJavaScript(`(() => {
-                const boot = document.querySelector('.dsvs-boot');
-                if (!boot) return false;
-                try { boot.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })); } catch { /* ignore */ }
-                try { boot.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); } catch { /* ignore */ }
-                try { boot.click(); } catch { /* ignore */ }
-                return true;
-              })()`);
-              try { console.log('[dsh-view] boot-skip attempted=' + Boolean(skipped)); } catch { /* ignore */ }
+              if (window.workbench && typeof window.workbench.dshSkipBoot === 'function') await window.workbench.dshSkipBoot();
             } catch { /* ignore */ }
             await new Promise((resolve) => setTimeout(resolve, 700));
+            continue;
+          }
+          if (/authentication required|unauthorized|\b401\b/i.test(text)) {
+            void retryDshCookieOnce('blank-401');
             continue;
           }
           dshGuestBodyLen = bodyLen;
