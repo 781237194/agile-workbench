@@ -12,7 +12,8 @@ const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 const PROJECTS = path.join(ROOT, '项目');
 const CURRENT_PROJECT = '工作台改造修复';
-const TEXT_EXT = new Set(['.md', '.json', '.jsonl', '.txt', '.log', '.csv']);
+// 只看说明/报告类文档：日志/JSON 证据里出现临时路径是审计内容，不是「证据放沙盘」。
+const TEXT_EXT = new Set(['.md']);
 const PATTERN = /(?:^|[\\/("'`\s])_tmp[\\/]|awb-sandbox[\\/]/;
 const hits = [];
 function walk(dir, projectName) {
