@@ -163,7 +163,7 @@ const HOT_IPC_TTL_MS = {
   'mem:stats-get': 5000,
   'render-memory:recent': 5000,
   'perf:recent': 5000,
-  'owner:pending-counts': 5000,
+  'owner:pending-counts': 15000,
   'team:inbox': 5000,
   'team:receipts': 5000,
   'team:comm': 5000,
@@ -1529,6 +1529,7 @@ function syncTeamRosterSessions(sessions, options = {}) {
     const team = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
     if (!Array.isArray(team.members)) return;
     const current = currentSessions;
+    const beforeSessions = new Map((team.members || []).filter((m) => m && m.role).map((m) => [String(m.role), String(m.sessionId || '')]));
     const projectName = String(options.projectName || options.teamName || '').trim();
     const roleIds = roleIdsForTeamMode(options.teamMode);
     // B-20261118-164055-2a44：赋值/写前校验走 team-tools → roster-apply.cjs 单源（与 roster-writer 同一实现），
@@ -1541,6 +1542,30 @@ function syncTeamRosterSessions(sessions, options = {}) {
       })
       : null;
     let changed = Boolean(applied && applied.changed);
+    // T-1205（P0）：任何把非空 sessionId 清成空的路径都必须留痕（含调用栈前 3 帧 + before/after），
+    // 用于定位“启动后 1–3 分钟名册被清零”的真正调用方；正常 sync 不应出现 cleared。
+    const clearedNow = [];
+    for (const member of (team.members || [])) {
+      if (!member || !member.role) continue;
+      const before = String(beforeSessions.get(String(member.role)) || '');
+      const after = String(member.sessionId || '');
+      if (before && !after) clearedNow.push({ role: String(member.role), before, after });
+    }
+    if (clearedNow.length) {
+      try {
+        if (teamTools && typeof teamTools.appendRosterAudit === 'function') {
+          teamTools.appendRosterAudit(projectName, {
+            event: 'roster_cleared',
+            source: 'shell/syncTeamRosterSessions',
+            stack: String(new Error().stack || '').split('\n').slice(1, 4),
+            before: Object.fromEntries(beforeSessions),
+            after: Object.fromEntries((team.members || []).filter((m) => m && m.role).map((m) => [String(m.role), String(m.sessionId || '')])),
+            cleared: clearedNow,
+            sessionsProvided: Object.keys(current),
+          });
+        }
+      } catch { /* 审计失败不阻断同步 */ }
+    }
     // 名册是"当前项目"的快照：本项目没有的角色必须清空 sessionId（旧实现只改有值角色，切项目时会残留 A 的会话）——
     // 上面 syncRosterSessions 已按「不在 sessions 里就清空」处理，这里只补 activeProject 的变化标记。
     if (projectName && team.activeProject !== projectName) {
@@ -24911,30 +24936,46 @@ function sweepRosterFromTombstone(teamName) {
     const file = deletionTombstoneFile(teamName);
     if (!fs.existsSync(file)) return { cleared: false, reason: "no-tombstone" };
     const tomb = JSON.parse(fs.readFileSync(file, "utf8"));
+    let storeProjects = [];
     try {
       const store = readStore();
-      const stillActive = (store.projects || []).some((proj) => proj && (String(proj.teamName || proj.name) === String(teamName)) && proj.path && fs.existsSync(String(proj.path)));
-      if (stillActive) {
-        // R1：同名重建成功 → 墓碑 consumed，立刻删掉，避免团队工具侧被永久拦截。
-        try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
-        try { teamTools.appendRosterAudit(String(teamName), { source: "shell/deletion-tombstone-consumed", gen: tomb.generation || 0 }); } catch { /* ignore */ }
-        return { cleared: false, reason: "project-exists", tombstoneCleared: true };
-      }
-    } catch { /* 读库失败时按墓碑继续清扫 */ }
+      storeProjects = Array.isArray(store.projects) ? store.projects : [];
+    } catch { /* 读库失败按未就绪处理，绝不清理 */ }
+    // T-1205（P0）：store 未加载/为空时不能证明项目已删除，保守不动名册；墓碑先保留等下次。
+    if (!storeProjects.length) {
+      try { teamTools.appendRosterAudit(String(teamName), { event: 'roster_clear_skipped', source: 'shell/deletion-tombstone', reason: 'store-not-ready', stack: String(new Error().stack || '').split('\n').slice(1, 4) }); } catch { /* ignore */ }
+      return { cleared: false, reason: "store-not-ready" };
+    }
+    // 只要 store 里还有同 teamName 的项目记录就视为“项目仍在”，消费墓碑而不是清名册；
+    // 不拿 path 是否存在当判据（路径暂时不可访问会把在岗团队误判为已删除）。
+    const stillActive = storeProjects.some((proj) => proj && (String(proj.teamName || proj.name) === String(teamName)));
+    if (stillActive) {
+      try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
+      try { teamTools.appendRosterAudit(String(teamName), { source: "shell/deletion-tombstone-consumed", gen: tomb.generation || 0 }); } catch { /* ignore */ }
+      return { cleared: false, reason: "project-exists", tombstoneCleared: true };
+    }
     const teamFile = path.join(resolveTeamRoot(), "状态", "团队.json");
     if (!fs.existsSync(teamFile)) return { cleared: false, reason: "no-team" };
     const team = JSON.parse(fs.readFileSync(teamFile, "utf8"));
     const roles = [];
+    const before = {};
     let teamChanged = false;
     if (team && Array.isArray(team.members)) {
       for (const member of team.members) {
+        if (member && member.role) before[String(member.role)] = String(member.sessionId || '');
         if (member && member.sessionId) { roles.push(String(member.role || "")); member.sessionId = ""; teamChanged = true; }
       }
     }
     if (team && team.activeProject && String(team.activeProject) === String(teamName)) { team.activeProject = null; teamChanged = true; }
     if (!teamChanged) return { cleared: false, reason: "already-empty" };
     jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: "panelTeamSync" });
-    try { teamTools.appendRosterAudit(String(teamName), { source: "shell/deletion-tombstone", cleared: roles, gen: tomb.generation || 0 }); } catch { /* 审计失败不阻断 */ }
+    try {
+      teamTools.appendRosterAudit(String(teamName), {
+        event: 'roster_cleared', source: 'shell/deletion-tombstone', cleared: roles,
+        before, after: Object.fromEntries(team.members.map((m) => [String(m.role || ''), String(m.sessionId || '')])),
+        stack: String(new Error().stack || '').split('\n').slice(1, 4), gen: tomb.generation || 0,
+      });
+    } catch { /* 审计失败不阻断 */ }
     return { cleared: true, roles, gen: tomb.generation || 0 };
   } catch (error) { return { cleared: false, reason: String((error && error.message) || error).slice(0, 120) }; }
 }

@@ -79,6 +79,12 @@ function syncRosterSessions(team, sessions, { roleIds = [], roleNames = {}, acti
   const out = { changed: 0, rejected: [], added: [], cleared: [] };
   if (!team || !Array.isArray(team.members)) return out;
   const map = sessions && typeof sessions === 'object' ? sessions : {};
+  // T-1205（P0）：来源为空/undefined/全空值时直接 no-op（绝不进入逐角色清理逻辑）；
+  // 名册清空只允许 clearRosterSessions 显式路径，且该路径要带审计。
+  if (!Object.values(map).some((value) => String(value || '').trim())) {
+    out.skipped = 'EMPTY_SESSIONS';
+    return out;
+  }
   for (const member of team.members) {
     if (!member || !member.role) continue;
     const wanted = map[member.role] ? String(map[member.role]).trim() : '';

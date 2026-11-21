@@ -34,6 +34,7 @@ check('空 sessions 不清名册', () => {
   const team = makeTeam();
   const out = core.syncRosterSessions(team, {}, { roleIds: ROLE_IDS, activeProject: '工作台改造修复' });
   assert.strictEqual(out.changed, 0);
+  assert.strictEqual(out.skipped, 'EMPTY_SESSIONS');
   assertNoClear(team, '空 sessions');
 });
 
