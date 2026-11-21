@@ -97,9 +97,9 @@ function seed(mockPort) {
     projects: [{ id: 'p-f749', name: '工作台改造修复', teamName: '工作台改造修复', path: PROJECT_DIR, teamMode: 'full', sessions: {}, sessionMeta: {}, workspace: { id: 'w-f749', path: PROJECT_DIR, name: '工作台改造修复', bound: true, sessionIds: [] }, requirements: [], tasks: [], messages: [], proposals: [], docs: [] }], ui: {}
   };
   fs.writeFileSync(STORE, JSON.stringify(store, null, 2) + '\n', 'utf8');
-  const baseForSeed = process.env.AWB_F749_RECOVERED === '1' ? ('http://127.0.0.1:' + mockPort) : 'http://127.0.0.1:65533';
+  const baseForSeed = (process.env.AWB_F749_RECOVERED === '1' || process.env.AWB_F749_CLICK === '1') ? ('http://127.0.0.1:' + mockPort) : 'http://127.0.0.1:65533';
   fs.writeFileSync(path.join(DATA, 'dsh.json'), JSON.stringify({ version: 1, baseUrl: baseForSeed, source: 'auto', pinned: false }, null, 2) + '\n', 'utf8');
-  return { 'netstat.exe': { ok: true, stdout: ['活动连接', '', '  TCP    127.0.0.1:' + (process.env.AWB_F749_RECOVERED === '1' ? mockPort : 65501) + '    0.0.0.0:0    LISTENING    4242'].join('\r\n') + '\r\n' } };
+  return { 'netstat.exe': { ok: true, stdout: ['活动连接', '', '  TCP    127.0.0.1:' + ((process.env.AWB_F749_RECOVERED === '1' || process.env.AWB_F749_CLICK === '1') ? mockPort : 65501) + '    0.0.0.0:0    LISTENING    4242'].join('\r\n') + '\r\n' } };
 }
 async function close(inst, keep) {
   if (!inst) return;
@@ -111,13 +111,26 @@ async function close(inst, keep) {
   if (!keep) { try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ } }
 }
 async function shot(cdp, file) {
-  try { const out = await cdp.send('Page.captureScreenshot', { format: 'png' }, 20000); if (!out || !out.data) return 0; const buf = Buffer.from(out.data, 'base64'); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, buf); return buf.length; } catch { return 0; }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const out = await cdp.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }, 20000);
+      if (out && out.data) {
+        const buf = Buffer.from(out.data, 'base64');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, buf);
+        return buf.length;
+      }
+    } catch { /* retry */ }
+    await sleep(300);
+  }
+  return 0;
 }
 
 (async () => {
   const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
   const reloadFn = (appSrc.match(/function reloadDshView\([\s\S]*?\n\}/) || [''])[0];
-  check('V0a', 'reloadDshView 先 applyDshViewSrc 再决定 reload（无裸 view.reload 第一句）', /applyDshViewSrc\(false, 'reload'\)/.test(reloadFn) && reloadFn.indexOf("applyDshViewSrc(false, 'reload')") < reloadFn.indexOf('if (!repointed)') && /if \(!repointed\)[\s\S]{0,120}view\.reload\(\)/.test(reloadFn), { hasApply: /applyDshViewSrc\(false, 'reload'\)/.test(reloadFn), hasReload: /if \(!repointed\)[\s\S]{0,120}view\.reload\(\)/.test(reloadFn) });
+  check('V0a', 'reloadDshView 先 await 主进程 reloadDshView，IPC 失败才 applyDshViewSrc 兜底', /await api\.reloadDshView\(\)/.test(reloadFn) && reloadFn.indexOf('await api.reloadDshView') < reloadFn.indexOf("applyDshViewSrc(false, 'reload-fallback')"), { ipcFirst: reloadFn.indexOf('await api.reloadDshView') < reloadFn.indexOf("applyDshViewSrc(false, 'reload-fallback')") });
+  check('V0d', '「重载 WebView」按钮走同一 reloadDshView（不再本地 forceReload）', /btn-dsh-off-reload[\s\S]{0,120}reloadDshView\(\{ quiet: true \}\)/.test(appSrc) && /reinstallDshCookie/.test(appSrc) && /retryDshCookieOnce/.test(appSrc));
   check('V0b', 'renderDsh 每次同步 webview（syncDshViewWithStatus）', /syncDshViewWithStatus\(dsh\)/.test(appSrc));
   check('V0c', 'did-fail-load 记录 URL/错误码（dshViewError）', /did-fail-load[\s\S]{0,800}dshViewError\s*=/.test(appSrc));
   if (process.env.AWB_F749_STATIC === '1') {
@@ -153,6 +166,43 @@ async function shot(cdp, file) {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false }, 10000);
   for (let i = 0; i < 120; i += 1) { const ready = await cdp.evaluate('Boolean(document.querySelector("#dsh-view")) && Boolean(document.querySelector("#dsh-off"))'); if (ready === true) break; await sleep(250); }
   await sleep(3500); // 等 initDsh/启动发现落定，避免它晚到的 offline renderDsh 覆盖手动状态
+  if (process.env.AWB_F749_CLICK === '1') {
+    // PM 04:47 复现：先把 webview 指到死端口 → 错误可见；再点「重载 WebView」（走 IPC app:reload-dsh）
+    // → 主进程重新发现 mock 地址并广播，webview 自动显示 DSH 页面。两张截图一次跑完。
+    await cdp.evaluate(`(async () => {
+      const view = document.querySelector('#dsh-view');
+      view.setAttribute('src', 'http://127.0.0.1:65533');
+      for (let i = 0; i < 50; i += 1) {
+        await new Promise((r) => setTimeout(r, 150));
+        const off = document.querySelector('#dsh-off');
+        const url = String((document.querySelector('#dsh-off-url') || {}).textContent || '');
+        if (off && off.hidden === false && /错误码/.test(url) && /65533/.test(url)) return true;
+      }
+      return false;
+    })()`, 30000);
+    const errPng = await shot(cdp, path.join(OUT, 'dsh-view-error.png'));
+    check('C1', '死端口后错误层显示 URL+错误码', errPng > 10000, { bytes: errPng });
+    const clicked = await cdp.evaluate(`(() => { const btn = document.querySelector('#btn-dsh-off-reload'); if (!btn) return false; btn.click(); return true; })()`);
+    let ok = false;
+    let title = '';
+    for (let i = 0; i < 80; i += 1) {
+      await sleep(150);
+      try { title = String(await cdp.evaluate(`document.querySelector('#dsh-view').executeJavaScript('document.title')`)); } catch { title = ''; }
+      const hidden = await cdp.evaluate(`Boolean(document.querySelector('#dsh-off').hidden)`);
+      if (clicked && hidden === true && /DeepSeek Harness mock/.test(title)) { ok = true; break; }
+    }
+    check('C2', '点「重载 WebView」→ 出现 DSH 页面（title 匹配）', ok, { clicked, title });
+    const okPng = await shot(cdp, path.join(OUT, 'dsh-view-recovered.png'));
+    check('C3', '重载后恢复态截图', okPng > 10000, { bytes: okPng });
+    fs.writeFileSync(path.join(OUT, 'dsh-view-sync.json'), JSON.stringify({ at: new Date().toISOString(), mode: 'click', title, errPng, okPng }, null, 2) + '\n', 'utf8');
+    const bad = R.some((x) => !x.ok);
+    if (bad) console.log('KEEP_SANDBOX=' + SB);
+    await close({ child, ws, cdp }, bad);
+    mock.server.close();
+    console.log('\n' + R.filter((x) => x.ok).length + '/' + R.length + ' PASS');
+    process.exitCode = bad ? 1 : 0;
+    return;
+  }
   if (process.env.AWB_F749_RECOVERED === '1') {
     // 正确地址冷启动（mock 在册）→ webview 必须真显示 mock 页面，供恢复态截图。
     let ok = false;

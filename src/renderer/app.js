@@ -15761,6 +15761,27 @@ function openOwnerModal() {
 // B-f749：webview 与状态同源。记录最后一次同步的地址/在线态 + 最近一次加载失败（URL/错误码）。
 const dshViewUi = { lastBaseUrl: '', lastOnline: null };
 let dshViewError = null;
+const dshCookieRetry = { at: 0, url: '' };
+
+/** DSH 重启后 browser-session secret 可能变化 → 401/空白。重新安装 cookie 并只重试一次。 */
+async function retryDshCookieOnce(reason = 'blank') {
+  const api = window.workbench;
+  if (!api || typeof api.reinstallDshCookie !== 'function') return false;
+  const base = String((state && state.dsh && state.dsh.baseUrl) || '');
+  if (!base) return false;
+  if (dshCookieRetry.url === base && Date.now() - dshCookieRetry.at < 8000) return false;
+  dshCookieRetry.url = base;
+  dshCookieRetry.at = Date.now();
+  try {
+    const result = await api.reinstallDshCookie();
+    try { console.log('[dsh-view] cookie-retry reason=' + reason + ' ok=' + Boolean(result && result.ok)); } catch { /* ignore */ }
+    if (result && result.ok) {
+      applyDshViewSrc(true, 'cookie-retry');
+      return true;
+    }
+  } catch { /* ignore */ }
+  return false;
+}
 
 /**
  * B-f749：唯一 webview 地址/重载函数。
@@ -16144,34 +16165,43 @@ function bindDshStatusPush() {
   } catch { return false; }
 }
 
-function reloadDshView(opts = {}) {
+async function reloadDshView(opts = {}) {
   const view = $('#dsh-view');
   if (!view) return false;
   dshViewFailed = false;
   dshReady = false;
-  // B-f749（PM 04:43）：旧实现直接 view.reload()，重载的是当前已失效的 src。
-  // 先 applyDshViewSrc() 把 webview 指回 state.dsh.baseUrl；src 已等于 baseUrl 才直接 reload。
-  const repointed = applyDshViewSrc(false, 'reload');
-  if (!repointed) {
-    try { view.reload(); } catch { /* ignore */ }
+  const api = window.workbench;
+  let result = null;
+  // B-f749（PM 04:47）：必须走主进程 app:reload-dsh（重新发现→cookie→reload→广播），
+  // 不能只 view.reload() 重载失效旧 src；IPC 失败才本地 applyDshViewSrc()+reload 兜底。
+  if (api && typeof api.reloadDshView === 'function') {
+    try {
+      result = await api.reloadDshView();
+    } catch (error) {
+      result = { ok: false, code: 'DSH_RELOAD_FAILED', message: String((error && error.message) || error || '') };
+    }
+    if (result && result.status) {
+      state.dsh = result.status;
+      renderDsh(result.status);
+    }
+  }
+  if (!(result && result.ok)) {
+    const repointed = applyDshViewSrc(false, 'reload-fallback');
+    if (!repointed) {
+      try { view.reload(); } catch { /* ignore */ }
+    }
   }
   renderDsh(state?.dsh);
   // B-405f 补充：重载聊天区的同时重读会话映射，成员列表/计数一起刷新（不用重启工作台）。
   if (window.__teamRoster && typeof window.__teamRoster.sync === 'function') {
     window.__teamRoster.sync({}).catch(() => {});
   }
-  // B-33b9 追加：重载 = 主进程重新发现/校验地址 + reload webview + 广播；成功后全局刷新。
-  const api = window.workbench;
-  if (api && typeof api.reloadDshView === 'function') {
-    void api.reloadDshView().then((r) => {
-      if (r && r.status) { state.dsh = r.status; renderDsh(r.status); }
-      return refreshDshEverywhere('reload');
-    }).catch(() => refreshDshEverywhere('reload'));
-  } else {
-    void refreshDshEverywhere('reload');
+  try { await refreshDshEverywhere('reload'); } catch { /* ignore */ }
+  if (!opts.quiet) {
+    if (result && result.ok) toast('已重载 DSH 主画面', 'ok');
+    else toast('重载失败：' + String((result && (result.message || result.code)) || '主进程未返回'), 'bad');
   }
-  if (!opts.quiet) toast('已重载 DSH 主画面', 'ok');
-  return true;
+  return Boolean(result && result.ok) || !opts.strict;
 }
 
 /**
@@ -17147,7 +17177,7 @@ function bind() {
   $('#btn-folder-top')?.addEventListener('click', openProjectFolder);
   $('#metrics')?.addEventListener('click', () => { tickMetrics(); });
   $('#btn-dsh-mode')?.addEventListener('click', () => reloadDshView());
-  $('#btn-dsh-off-reload')?.addEventListener('click', () => forceReloadDshView('button'));
+  $('#btn-dsh-off-reload')?.addEventListener('click', () => { void reloadDshView({ quiet: true }); });
   $('#btn-side')?.addEventListener('click', () => setSidebarHidden(!document.body.classList.contains('sidebar-hidden')));
   $('#btn-wc-folder')?.addEventListener('click', openProjectFolder);
   $('#btn-wc-team')?.addEventListener('click', () => setDrawer('team'));
@@ -17912,6 +17942,13 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       try { loadedUrl = String(view.getURL() || ''); } catch { loadedUrl = ''; }
       if (loadedUrl && loadedUrl !== 'about:blank' && loadedUrl === String((state && state.dsh && state.dsh.baseUrl) || '')) dshViewError = null;
       if (state) renderDsh(state.dsh);
+      // PM 04:47：加载后 401/空白也要重装 cookie 再 reload 一次（DSH 重启后 secret 可能变化）。
+      setTimeout(async () => {
+        try {
+          const text = String(await view.executeJavaScript('document.body ? String(document.body.innerText || "").slice(0, 400) : ""') || '');
+          if (!text.trim() || /authentication required|unauthorized|\b401\b/i.test(text)) void retryDshCookieOnce('blank-401');
+        } catch { /* ignore */ }
+      }, 700);
       if (pendingDshFocus) await flushPendingDshFocus();
       else {
         const p = activeProject();
@@ -17930,6 +17967,7 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       };
       try { console.warn('[dsh-view] did-fail-load url=' + dshViewError.url + ' code=' + dshViewError.code + ' ' + dshViewError.description); } catch { /* ignore */ }
       renderDsh(state?.dsh);
+      void retryDshCookieOnce('did-fail');
     });
   }
 

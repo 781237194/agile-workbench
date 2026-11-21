@@ -74,5 +74,15 @@ const used = /AWBSessionRows\.buildRosterEntries/.test(appSrc) && /AWBSessionRow
 const order = /<script src="session-rows\.js"><\/script>[\s\S]*<script src="app\.js"><\/script>/.test(indexSrc);
 check('F8', 'app.js 用纯函数（buildRosterEntries/rowModel），index.html 在 app.js 之前加载', used && order, { used, order });
 
+// F9/F10：PM 起草的用量卡三处（复核后已提交）静态接线必须齐全。
+const mainSrc = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+const styleSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'style.css'), 'utf8');
+check('F9', 'shortLabel+detailLines 同源返回，前端默认 shortLabel + 明细折叠 + 角色 chip 缓存键', /shortLabel:/.test(mainSrc) && /detailLines:/.test(mainSrc)
+  && /data\.shortLabel/.test(appSrc) && /data-usage-detail/.test(appSrc) && /data-usage-cache-key/.test(appSrc)
+  && /\.session-usage-wrap\s*\{[^}]*max-height/.test(styleSrc) && /\.session-usage-wrap\s*\{[^}]*overflow/.test(styleSrc)
+  && /usage-detail\[hidden\]/.test(styleSrc), { main: /shortLabel:/.test(mainSrc), style: /session-usage-wrap/.test(styleSrc) });
+const offlineBlock = (appSrc.match(/if \(dshOffline\)[\s\S]*?data-dsh-offline/) || [''])[0];
+check('F10', '离线分支先画角色行再画横幅（不因离线直接 return）', /buildRowsHtml\(\)/.test(offlineBlock) && /data-dsh-offline/.test(offlineBlock) && offlineBlock.indexOf('buildRowsHtml()') < offlineBlock.indexOf('data-dsh-offline'), { block: offlineBlock.slice(0, 120) });
+
 console.log('\n' + R.filter((x) => x.ok).length + '/' + R.length + ' PASS');
 process.exitCode = R.some((x) => !x.ok) ? 1 : 0;

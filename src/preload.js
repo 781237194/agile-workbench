@@ -286,6 +286,8 @@ if (IS_BOARD_WINDOW) {
       return () => { try { ipcRenderer.off('app:render-crash', handler); } catch { /* ignore */ } };
     },
     reloadDshView: () => ipcRenderer.invoke('app:reload-dsh'),
+  // B-f749：DSH 重启后 cookie secret 可能变化 → 401/空白时由渲染层请求重新安装 cookie 再 reload。
+  reinstallDshCookie: () => ipcRenderer.invoke('dsh:reinstall-cookie'),
     crashSelfTest: () => ipcRenderer.invoke('app:crash-selftest'),
     crashAudit: (payload) => ipcRenderer.invoke('app:crash-audit', payload),
     // R-c1ed F-1：窗口取数 / 采样开销统计 / 手动清理（与 --clean 等价）

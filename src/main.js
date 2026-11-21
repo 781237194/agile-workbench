@@ -11752,6 +11752,14 @@ ipcMain.handle('theme:metrics', async () => {
     const row = recordRenderCrash('selftest', { type: 'renderer', reason: 'crashed-selftest', exitCode: 0 });
     return { ok: true, row };
   });
+  ipcMain.handle('dsh:reinstall-cookie', async () => {
+    try {
+      const ok = await installDshCookie();
+      return { ok: Boolean(ok), code: ok ? 'OK' : 'DSH_COOKIE_FAILED', at: new Date().toISOString() };
+    } catch (error) {
+      return { ok: false, code: 'DSH_COOKIE_FAILED', message: String((error && error.message) || error || '').slice(0, 200) };
+    }
+  });
   ipcMain.handle('app:reload-dsh', async () => {
     // B-33b9 追加：重载 DSH 不能只 reload webview——地址可能已变（旧 58497 → 新 55263）。
     // 先按可信候选（data/dsh.json + netstat 监听端口）重新发现/校验，再 reload，最后广播一次全局刷新。
