@@ -9215,6 +9215,7 @@ ipcMain.handle('theme:metrics', async () => {
     }
     acceptProfile.gateMs = Date.now() - acceptT0;
     const acceptCallT0 = Date.now();
+    try { teamTools.beginSpawnProfiling(); } catch { /* ignore */ }
     const result = await teamTools.ownerAccept({
       ...p,
       ...proxyFields,
@@ -9228,6 +9229,12 @@ ipcMain.handle('theme:metrics', async () => {
       ownerConfirmed: true
     });
     acceptProfile.acceptMs = Date.now() - acceptCallT0;
+    try {
+      const spawnStats = teamTools.endSpawnProfiling();
+      acceptProfile.spawnMs = spawnStats.ms;
+      acceptProfile.spawnCalls = spawnStats.calls;
+      if (spawnStats.events.length) acceptProfile.spawnEvents = spawnStats.events;
+    } catch { /* ignore */ }
     acceptProfile.totalMs = Date.now() - acceptT0;
     try { console.log('[accept-profile] ' + JSON.stringify({ ...acceptProfile, role, requirementId: String(p.requirementId || '') })); } catch { /* ignore */ }
     // R-ea86 F-E5：验收成功后 看板.json 该需求行必须变 accepted。
@@ -11810,16 +11817,25 @@ ipcMain.handle('theme:metrics', async () => {
     }
   });
   ipcMain.handle('app:reload-dsh', async () => {
-    // B-33b9 追加：重载 DSH 不能只 reload webview——地址可能已变（旧 58497 → 新 55263）。
-    // 先按可信候选（data/dsh.json + netstat 监听端口）重新发现/校验，再 reload，最后广播一次全局刷新。
-    const reload = reloadDshGuest();
+    // A-02（P1）：顺序必须是「重新发现 → 装 cookie → reload 新地址 → 广播」。
+    // 旧实现先 reloadDshGuest()（重载当前旧 src）再发现，地址已变时用户重载先撞旧地址。
     let discovery = null;
     let status = null;
+    let reload = { ok: false, via: 'none' };
     try {
       discovery = await maybeAutoDiscoverDsh('reload', { probeTimeoutMs: 500 }, { force: true });
       status = (discovery && discovery.status) || await dsh.check({ timeoutMs: 3000 });
+      if (discovery && discovery.webview && discovery.webview.ok) {
+        reload = discovery.webview;
+      } else {
+        // discovery 没走到 adopt（例如命中但无 webview 变化）时，补「cookie → reload 当前 base」。
+        try { await installDshCookie(); } catch { /* ignore */ }
+        reload = await reloadDshWebview((status && status.baseUrl) || dsh.baseUrl);
+      }
     } catch (error) {
       status = { ...(dsh.statusSync ? dsh.statusSync() : {}), message: '重载后检测失败：' + String(error && error.message || error).slice(0, 160) };
+      try { await installDshCookie(); } catch { /* ignore */ }
+      reload = await reloadDshWebview(dsh.baseUrl);
     }
     broadcastDshStatusChanged('reload', { status, discovery: dshDiscoverySummary(discovery) });
     return {
@@ -11876,6 +11892,11 @@ installShellAuditSensors();
     if (firstStartupCheck) {
       startupMarks.dshOnline = Boolean(status.online);
       markStartup('dshCheckEnd', { online: Boolean(status.online), code: String(status.code || '') });
+      // A-01（P0）：启动时 DSH 已在线也要强制重装 cookie（DSH 重启同端口会换 secret），
+      // 且必须发生在 renderer 首次设置 webview src 之前——否则首次 load 必带旧 cookie。
+      if (status.online) {
+        try { await installDshCookie(); } catch { /* 失败由 did-fail/cookie 重试兜底 */ }
+      }
     }
     let finalStatus = status;
     let discovery = null;
@@ -22337,21 +22358,20 @@ async function adoptDiscoveredDsh(discovery) {
     });
   }
   if (baseUrl === previousBaseUrl) {
+    // A-01（P0）：地址没变 ≠ cookie 没问题。DSH 重启后同端口会换 browser-session secret，
+    // 这里无条件重装 cookie，并 reload 一次让 webview 带上新 cookie；不能只在 status.offline 时做。
+    let cookieOk = true;
+    try { cookieOk = await installDshCookie(); } catch { cookieOk = false; }
+    if (!cookieOk) warnings.push({ code: 'DSH_COOKIE_FAILED', message: 'DSH 登录 cookie 安装失败；页面可能需要重新登录' });
     let status = await dsh.check({ timeoutMs: 5000 });
     let webview = { ok: true, via: 'none' };
     let reconnected = false;
-    // B-33b9 追加（Owner：重启后还是连不上、手点重载才连上）：
-    // 地址已经正确时旧实现直接返回「无需处理」——但 DSH 重启后 cookie/内嵌页仍指向旧连接，
-    // 这里补一步：重装 cookie + 重载 webview + 复检；成功即视为「已恢复」，界面据此广播刷新。
-    if (!status.online) {
-      try {
-        await installDshCookie();
-        webview = await reloadDshWebview(baseUrl);
-        status = await dsh.check({ timeoutMs: 5000 });
-        reconnected = Boolean(status.online);
-      } catch (error) {
-        warnings.push({ code: 'DSH_RECONNECT_FAILED', message: String(error && error.message || error).slice(0, 200) });
-      }
+    try {
+      webview = await reloadDshWebview(baseUrl);
+      status = await dsh.check({ timeoutMs: 5000 });
+      reconnected = Boolean(status.online);
+    } catch (error) {
+      warnings.push({ code: 'DSH_RECONNECT_FAILED', message: String(error && error.message || error).slice(0, 200) });
     }
     return {
       changed: false,
@@ -22361,7 +22381,7 @@ async function adoptDiscoveredDsh(discovery) {
       persisted: false,
       pinUnreachable,
       pinActive,
-      cookieOk: true,
+      cookieOk,
       webview,
       status,
       adoptMs: Date.now() - adoptStartedAt,
@@ -24089,6 +24109,16 @@ app.whenReady().then(async () => {
         || (storeNow.projects || [])[0];
       if (projectNow && projectNow.teamName) {
         const warm = teamTools.prewarmWorkflowCaches(projectNow.teamName, projectNow.path);
+        // PM 14:48：再 spawn 一次 team.mjs --version，把 Node/模块/工作流文件读进 OS 缓存（只 1 次、失败忽略）。
+        try {
+          const tCli = Date.now();
+          const { execFile } = require('node:child_process');
+          execFile(process.execPath, [path.join(ROOT, '团队', '工具', 'team.mjs'), '--version'], { cwd: ROOT, timeout: 8000, windowsHide: true }, (error, stdout, stderr) => {
+            try {
+              console.log('[prewarm] cli-warm ms=' + (Date.now() - tCli) + ' ok=' + (!error) + ' out=' + String(stdout || stderr || '').trim().slice(0, 60));
+            } catch { /* ignore */ }
+          });
+        } catch { /* ignore */ }
         try {
           console.log('[prewarm] done cold=' + (Date.now() - warmT0) + ' atAppReady=true tasks=' + JSON.stringify(warm && warm.parts && warm.parts.tasks) + ' snapshot=' + JSON.stringify(warm && warm.parts && warm.parts.snapshot));
         } catch { /* ignore */ }
@@ -24101,40 +24131,19 @@ app.whenReady().then(async () => {
   });
   // B-4fdd：把 whenReady 里的同步前置段逐段计时——PM 012728 的冷启离群（2.4-4.8s 页面加载之外）
   // 需要证据判断是 registerIpc 还是 tombstones/采样器吃掉了那 1-2 秒。
-  // R-bcac：启动前存储容量守卫——超限先清过期沙盘，仍超用原生对话框三选一（清理并继续 / 改位置 / 退出）。
-  try {
-    const guard = StorageConfig.ensureStorageCapacity({ config: StorageConfig.resolveStorage({}) });
-    if (!guard.ok) {
-      const choice = dialog.showMessageBoxSync({
-        type: 'warning',
-        title: '临时沙盘超限',
-        message: guard.message,
-        detail: '临时沙盘目录：' + guard.tmpDir + '\n已用 ' + (guard.after.bytes / 1024 / 1024 / 1024).toFixed(2) + 'GB / ' + guard.after.files + ' 文件（上限 ' + (guard.limits.maxBytes / 1024 / 1024 / 1024).toFixed(0) + 'GB / ' + guard.limits.maxFiles + '）',
-        buttons: ['清理并继续', '改存储位置', '退出'],
-        defaultId: 0,
-        cancelId: 2,
-        noLink: true,
-      });
-      if (choice === 0) {
-        StorageConfig.cleanSandboxes({ tmpDir: guard.tmpDir, dataDir: guard.dataDir, all: true, reason: 'startup-clean-all' });
-        const retry = StorageConfig.ensureStorageCapacity({ config: StorageConfig.resolveStorage({}) });
-        if (!retry.ok) { dialog.showErrorBox('仍超限', retry.message); app.quit(); return; }
-      } else if (choice === 1) {
-        const picked = dialog.showOpenDialogSync({ title: '选择临时沙盘目录', properties: ['openDirectory', 'createDirectory'] });
-        if (!picked || !picked[0]) { app.quit(); return; }
-        const saved = StorageConfig.saveStorage({ tmpDir: picked[0] });
-        if (!saved.ok) { dialog.showErrorBox('保存失败', saved.message || saved.code); app.quit(); return; }
-        const retry = StorageConfig.ensureStorageCapacity({ config: StorageConfig.resolveStorage({}) });
-        if (!retry.ok) { dialog.showErrorBox('仍超限', retry.message); app.quit(); return; }
-      } else {
-        app.quit();
-        return;
-      }
-    }
-  } catch (error) {
-    try { console.warn('[storage-guard] ' + String((error && error.message) || error).slice(0, 200)); } catch { /* ignore */ }
+  // R-bcac：启动前存储容量守卫——**绝不阻塞启动、绝不在启动时弹模态框**（PM 16:10 热修）：
+// 旧实现超限会弹原生三选一对话框；对话框被 Esc/取消（cancelId=2）就走 app.quit()，
+// 用户看到的现象就是「打开几秒自己关了」。现在：超限先在后台清过期沙盘；仍超只写日志、照常启动。
+try {
+  const guard = StorageConfig.ensureStorageCapacity({ config: StorageConfig.resolveStorage({}) });
+  if (!guard.ok) {
+    try { console.warn('[storage-guard] 超限但照常启动：' + guard.message); } catch { /* ignore */ }
+    try { StorageConfig.cleanSandboxes({ tmpDir: guard.tmpDir, dataDir: guard.dataDir, all: true, reason: 'startup-clean-all' }); } catch { /* ignore */ }
   }
-  const __phase = (name, fn) => {
+} catch (error) {
+  try { console.warn('[storage-guard] ' + String((error && error.message) || error).slice(0, 200)); } catch { /* ignore */ }
+}
+const __phase = (name, fn) => {
     const t0 = Date.now();
     try { return fn(); } finally {
       const dt = Date.now() - t0;
