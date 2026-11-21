@@ -5,8 +5,35 @@
  * 纯 Node 夹具，不需要 Electron；真实状态零写入。
  */
 const assert = require('node:assert');
+const fs = require('node:fs');
+const os = require('node:os');
+const crypto = require('node:crypto');
 const path = require('node:path');
-const core = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'roster-apply.cjs'));
+const REAL_REPO = path.resolve(__dirname, '..');
+const REAL_TEAM = path.join(REAL_REPO, '团队', '状态', '团队.json');
+// PM 2026-11-22 04:08 铁律：夹具六键必须全指向本轮独立沙盘；跑前/跑后对真实团队.json 算 sha256 并断言不变。
+const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'awb-4e35-'));
+const SANDBOX_TEAM = path.join(SANDBOX, '团队');
+const SANDBOX_PROJECTS = path.join(SANDBOX, '项目');
+const SANDBOX_DATA = path.join(SANDBOX, 'data');
+const SANDBOX_STORE = path.join(SANDBOX, 'workbench.json');
+for (const dir of [SANDBOX_TEAM, SANDBOX_PROJECTS, SANDBOX_DATA]) fs.mkdirSync(dir, { recursive: true });
+Object.assign(process.env, {
+  AWB_TEAM_ROOT: SANDBOX_TEAM,
+  AWB_TEAM_PROJECTS_ROOT: SANDBOX_PROJECTS,
+  TEAM_ROOT: SANDBOX_TEAM,
+  TEAM_PROJECTS_ROOT: SANDBOX_PROJECTS,
+  AWB_STORE: SANDBOX_STORE,
+  TEAM_WORKBENCH_JSON: SANDBOX_STORE,
+  AWB_DATA_DIR: SANDBOX_DATA,
+  TEAM_SELFTEST: '1',
+});
+process.on('exit', () => { try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch { /* ignore */ } });
+function sha256Of(file) {
+  try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); } catch { return 'MISSING'; }
+}
+const REAL_TEAM_BEFORE = sha256Of(REAL_TEAM);
+const core = require(path.join(REAL_REPO, '团队', '工具', 'lib', 'roster-apply.cjs'));
 
 const ROLE_IDS = ['pm', 'product', 'analyst', 'programmer1', 'programmer2', 'tester'];
 function makeTeam() {
@@ -85,6 +112,21 @@ check('显式清空 applyMemberSession 触发审计（含 stack）', () => {
   assert.match(audit[0].before, /^session-pm-base$/);
   assert.strictEqual(audit[0].after, '');
   assert.ok(Array.isArray(audit[0].stack) && audit[0].stack.length >= 1);
+});
+
+check('六键全指向独立沙盘', () => {
+  const env = process.env;
+  for (const key of ['AWB_TEAM_ROOT', 'AWB_TEAM_PROJECTS_ROOT', 'TEAM_ROOT', 'TEAM_PROJECTS_ROOT', 'AWB_STORE', 'TEAM_WORKBENCH_JSON', 'AWB_DATA_DIR']) {
+    const value = String(env[key] || '');
+    assert.ok(value.startsWith(SANDBOX), `${key} 未指向沙盘：${value}`);
+    assert.ok(!value.startsWith(REAL_REPO), `${key} 指向真实仓库：${value}`);
+  }
+});
+
+check('真实团队.json 前后 sha256 不变', () => {
+  const after = sha256Of(REAL_TEAM);
+  console.log(`REAL_TEAM_SHA before=${REAL_TEAM_BEFORE} after=${after}`);
+  assert.strictEqual(after, REAL_TEAM_BEFORE);
 });
 
 const failed = results.filter((r) => !r.pass);
