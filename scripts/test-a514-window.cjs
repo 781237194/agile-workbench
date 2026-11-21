@@ -13,7 +13,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const ROOT = path.resolve(__dirname, '..');
 const OUT = (() => { const i = process.argv.indexOf('--out'); return i > 0 && process.argv[i + 1] ? path.resolve(process.argv[i + 1]) : path.join(ROOT, '_tmp', 'a514-window'); })();
 fs.mkdirSync(OUT, { recursive: true });
-// 740a（PM 12:43）：沙盘根固定 D:\awb-sandbox（AWB_SANDBOX_ROOT 可覆盖但拒绝 C 盘），由 guard 统一校验/创建。
+// 740a（PM 12:43）：沙盘根固定在安装盘上的 awb-sandbox（AWB_SANDBOX_ROOT 可覆盖但拒绝系统盘），由 guard 统一校验/创建。
 const sandboxGuard = require(path.join(ROOT, 'scripts', 'sandbox-guard.cjs'));
 let SANDBOX_ROOT = '';
 try {
