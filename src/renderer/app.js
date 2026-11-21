@@ -15758,7 +15758,8 @@ let dshViewError = null;
 // 否则 401/空白页会被误判成成功，变成黑屏且无任何提示。
 let dshGuestBodyLen = 0;
 let dshBodyProbeSeq = 0;
-const dshCookieRetry = { at: 0, url: '' };
+const dshCookieRetry = { at: 0, url: '', count: 0 };
+const DSH_COOKIE_RETRY_MAX = 3;
 // PM 13:45：导航在途禁止自动重载；同一 baseUrl 的自动重试全局只允许 1 次，之后只能用户手动点。
 const dshViewLoad = { starts: 0, stops: 0, loading: false, loadingSince: 0, autoReloads: {} };
 try { window.__dshViewLoadStats = () => ({ starts: dshViewLoad.starts, stops: dshViewLoad.stops, loading: dshViewLoad.loading, autoReloads: dshViewLoad.autoReloads, bodyLen: dshGuestBodyLen, error: dshViewError }); } catch { /* ignore */ }
@@ -15789,12 +15790,16 @@ async function retryDshCookieOnce(reason = 'blank') {
   const base = String((state && state.dsh && state.dsh.baseUrl) || '');
   if (!base) return false;
   if (dshCookieRetry.url === base && Date.now() - dshCookieRetry.at < 8000) return false;
-  if (!dshAutoReloadAllowed(base)) {
-    try { console.log('[dsh-view] cookie-retry skipped loading=' + dshViewLoad.loading + ' autoUsed=' + Boolean(dshViewLoad.autoReloads[base])); } catch { /* ignore */ }
+  // PM 15:45 热修：冷启动首次加载常还没装好 cookie（401/空白），cookie 重试不能被
+  // 「同 base 只自动重载 1 次」的闸挡死；改用独立预算（每 base 最多 3 次、间隔 ≥8s）。
+  if (dshCookieRetry.url !== base) dshCookieRetry.count = 0;
+  if ((dshCookieRetry.count || 0) >= DSH_COOKIE_RETRY_MAX) {
+    try { console.log('[dsh-view] cookie-retry exhausted count=' + dshCookieRetry.count); } catch { /* ignore */ }
     return false;
   }
   dshCookieRetry.url = base;
   dshCookieRetry.at = Date.now();
+  dshCookieRetry.count = (dshCookieRetry.count || 0) + 1;
   try {
     const result = await api.reinstallDshCookie();
     try { console.log('[dsh-view] cookie-retry reason=' + reason + ' ok=' + Boolean(result && result.ok)); } catch { /* ignore */ }
@@ -18005,9 +18010,8 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
           const text = String(probe.body || '');
           if (!bodyLen) continue;
           if (probe.boot) {
-            try {
-              if (window.workbench && typeof window.workbench.dshSkipBoot === 'function') await window.workbench.dshSkipBoot();
-            } catch { /* ignore */ }
+            // PM 15:48（Owner）：**不要自动跳过开机动画**——Owner 要保留 DSH 自己的启动动画，
+            // 让它自然播完进主界面即可。这里只等待，不做任何点击/跳过动作。
             await new Promise((resolve) => setTimeout(resolve, 700));
             continue;
           }
