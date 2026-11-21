@@ -1,4 +1,5 @@
 'use strict';
+require('./sandbox-tmp.cjs').useSandboxTmp();
 /**
  * B-33b9 追加（Owner 04:xx）：重载 DSH 后必须「地址跟上 + 全局刷新 + 自动按标题重绑」。
  *

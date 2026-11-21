@@ -1,4 +1,5 @@
 'use strict';
+require('./sandbox-tmp.cjs').useSandboxTmp();
 /**
  * B-20261121-043924-f749（P0）：状态「DSH 已连接」但内嵌 webview 黑屏。
  * 真窗口验证：①把状态指到死端口 → did-fail-load 必须显示 URL+错误码+「重载 WebView」；

@@ -1,4 +1,5 @@
 'use strict';
+require('./sandbox-tmp.cjs').useSandboxTmp();
 /**
  * PM 04:08 缺陷：DSH 离线时左侧角色区 0 行（状态行却写「6 个在册角色 / 映射 1/6」）。
  * 判定口径：角色行事实来源 = 在册名册（团队.json members），与 DSH 在线/离线无关；

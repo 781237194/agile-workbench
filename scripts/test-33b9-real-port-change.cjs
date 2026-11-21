@@ -1,4 +1,5 @@
 'use strict';
+require('./sandbox-tmp.cjs').useSandboxTmp();
 /**
  * B-20261121-033853-33b9 真窗口证据：DSH 换端口后工作台自动连上。
  *

@@ -1,4 +1,5 @@
 'use strict';
+require('./sandbox-tmp.cjs').useSandboxTmp();
 /**
  * B-33b9 真实环境证据（不依赖工作台 UI）：本机真实 DSH 换端口后，发现链从「旧地址失效」
  * 自动跟到当前真实端口并通过 DSH 身份校验（online）。

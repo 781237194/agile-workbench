@@ -1,4 +1,5 @@
 'use strict';
+require('./sandbox-tmp.cjs').useSandboxTmp();
 /**
  * Owner 2026-11-21 04:xx：用量卡瘦身 + 角色区优先 + 切角色立即刷新（真窗口截图验收，宽 ≥1600）。
  *

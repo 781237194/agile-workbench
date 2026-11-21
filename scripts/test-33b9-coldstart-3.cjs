@@ -1,4 +1,5 @@
 'use strict';
+require('./sandbox-tmp.cjs').useSandboxTmp();
 /**
  * B-33b9 冷启动 3 次样本（PM 04:04 要求）：每次**新起一个 Node 进程**，
  * 无 env（DSH_WEB_URL/PORT 全不设）、无 saved 地址，只靠「netstat 监听端口 → 特征校验」发现。
