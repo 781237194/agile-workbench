@@ -62,6 +62,13 @@ check('覆盖窗 focus/blur 与 metrics 已接线', () => {
   const preload = read('src/preload.js');
   assert.match(preload, /fxOverlayBenchmark/);
 });
+check('f9dc R2：blur→focus resume 不得重建壳内 loop', () => {
+  const fx = read('src/renderer/fx-layer.js');
+  assert.match(fx, /function overlayOwnsShell\(/);
+  assert.match(fx, /function startLoop\(\)[\s\S]{0,240}if \(overlayOwnsShell\(\)\) \{ stopLoop\(\); return; \}/);
+  assert.match(fx, /function loop\(ts\)[\s\S]{0,180}if \(overlayOwnsShell\(\)\) \{ stopLoop\(\); return; \}/);
+  assert.match(fx, /function resume\(\)[\s\S]{0,500}if \(overlayOwnsShell\(\)\) \{[\s\S]{0,500}stopLoop\(\);[\s\S]{0,240}else \{[\s\S]{0,80}startLoop\(\);/);
+});
 check('层级证据取数口已暴露', () => {
   const fx = read('src/renderer/fx-layer.js');
   assert.match(fx, /function layerEvidence\(/);
