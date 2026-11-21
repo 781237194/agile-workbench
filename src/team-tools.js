@@ -10131,7 +10131,174 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     };
   }
 
+  /**
+   * 两段式验收（PM M-20261121-155451 裁定）：UI 验收第一段只写 append-only 决定 + 待应用队列并立即返回，
+   * 提示文案「已验收（后台同步中）」；第二段（工作流全量写 / 镜像 / 索引 / 看板）后台执行，
+   * 失败写审计并自动重试 ≥3 次；重启时回放未完成的队列（不丢验收）。
+   * 幂等键 = 需求 id + 决定轮次（重试/回放不会产生第二次验收）。
+   */
+  const ACCEPT_QUEUE_DIR = '验收待应用';
+  function acceptQueueDir(name) { return path.join(projectStateDir(name), ACCEPT_QUEUE_DIR); }
+  function acceptQueueFile(name, id) { return path.join(acceptQueueDir(name), String(id).replace(/[^\w.-]+/g, '_') + '.json'); }
+  function appendAcceptJournal(name, row) {
+    try {
+      const file = path.join(projectStateDir(name), '验收决定.jsonl');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), ...row }) + String.fromCharCode(10), 'utf8');
+    } catch { /* 审计失败不阻断入队 */ }
+  }
+  function writePendingAcceptance(name, pending) {
+    const dir = acceptQueueDir(name);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = acceptQueueFile(name, pending.id);
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(pending, null, 2) + String.fromCharCode(10), 'utf8');
+    fs.renameSync(tmp, file);
+    appendAcceptJournal(name, { event: 'acceptance_queued', id: pending.id, requirementId: pending.requirementId, decision: pending.decision, round: pending.round, channel: pending.channel });
+    return { ok: true, file };
+  }
+  function listPendingAcceptances(name) {
+    const dir = acceptQueueDir(name);
+    let names = [];
+    try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return []; }
+    const rows = [];
+    for (const fileName of names) {
+      try {
+        const row = JSON.parse(fs.readFileSync(path.join(dir, fileName), 'utf8'));
+        if (row && row.state !== 'applied') rows.push(row);
+      } catch { /* ignore */ }
+    }
+    return rows;
+  }
+  function updatePendingAcceptance(name, id, patch) {
+    const file = acceptQueueFile(name, id);
+    try {
+      const row = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const next = { ...row, ...patch, updatedAt: new Date().toISOString() };
+      fs.writeFileSync(file, JSON.stringify(next, null, 2) + String.fromCharCode(10), 'utf8');
+      return next;
+    } catch { return null; }
+  }
+  function acceptReplayKey(row) { return `${String(row.requirementId || '')}|${String(row.round || '')}|${String(row.decision || '')}`; }
+  /**
+   * 应用待办验收（启动时回放 / 点击后后台执行共用）。
+   * @param {object} opts { retries=3, applyOverride?(pending)=>Promise<{ok:boolean,code?:string}> }
+   */
+  async function applyPendingAcceptances(projectName, projectPath, opts = {}) {
+    const name = String(projectName || '').trim();
+    if (!name) return { ok: false, code: 'PROJECT_REQUIRED' };
+    const retries = Number.isFinite(Number(opts.retries)) ? Math.max(1, Math.min(10, Number(opts.retries))) : 3;
+    const apply = typeof opts.applyOverride === 'function'
+      ? opts.applyOverride
+      : (pending) => ownerAcceptCommit({
+        projectName: name,
+        projectPath: projectPath || (registrationFor(name) || {}).path || '',
+        requirementId: pending.requirementId,
+        decision: pending.decision,
+        opinion: pending.opinion || '',
+        channel: 'ui',
+        role: pending.role || 'owner',
+        sessionId: pending.sessionId || '',
+        ownerConfirmed: pending.ownerConfirmed === true,
+        expectedStatus: pending.expectedStatus || '',
+        expectedUpdatedAt: pending.expectedUpdatedAt || ''
+      });
+    const results = [];
+    for (const pending of listPendingAcceptances(name)) {
+      const key = acceptReplayKey(pending);
+      let applied = null;
+      let lastError = '';
+      let tries = 0;
+      for (let attempt = 1; attempt <= retries; attempt += 1) {
+        tries = attempt;
+        try {
+          const res = await apply(pending);
+          if (res && res.ok) { applied = res; break; }
+          lastError = String((res && (res.code || res.message)) || 'APPLY_FAILED').slice(0, 200);
+          // 已落账（重复决定/已应用）也视为成功，避免重试把已完成的验收当失败。
+          if (res && /DUPLICATE_DECISION|ALREADY_/i.test(String(res.code || ''))) { applied = res; break; }
+        } catch (error) {
+          lastError = String((error && error.message) || error).slice(0, 200);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+      }
+      if (applied) {
+        updatePendingAcceptance(name, pending.id, { state: 'applied', appliedAt: new Date().toISOString() });
+        appendAcceptJournal(name, { event: 'acceptance_applied', id: pending.id, key });
+        results.push({ id: pending.id, ok: true });
+      } else {
+        const attempts = Number(pending.attempts || 0) + tries;
+        updatePendingAcceptance(name, pending.id, { state: 'failed', attempts, lastError });
+        appendAcceptJournal(name, { event: 'acceptance_apply_failed', id: pending.id, key, attempts, lastError });
+        results.push({ id: pending.id, ok: false, error: lastError });
+      }
+    }
+    return { ok: true, results };
+  }
+
   async function ownerAccept(input = {}) {
+    // 非 UI 通道（Owner 决定自己的 API/保险通道/代理）保持原同步路径。
+    if (String(input.channel || '') !== 'ui') return ownerAcceptCommit(input);
+    const name = String(input.projectName || (input.project && (input.project.teamName || input.project.name)) || '').trim();
+    const requirementId = String(input.requirementId || '').trim();
+    const decision = String(input.decision || input.status || '').trim();
+    if (!name || !requirementId) return ownerAcceptCommit(input);
+    // 同一需求+同一轮+同一决定已排队/已应用 → 直接返回排队结果（幂等，连点不重复验收）。
+    const roundNow = (() => {
+      try { const st = readWorkflowState(name); return (st && st.ok && st.state && Number(st.state.round)) || 1; } catch { return 1; }
+    })();
+    const existing = listPendingAcceptances(name).find((row) => String(row.requirementId) === requirementId
+      && String(row.decision) === decision
+      && Number(row.round) === Number(roundNow));
+    if (existing) {
+      return { ok: true, code: 'OWNER_ACCEPT_QUEUED', pending: true, queuedId: existing.id, decided: true, message: '已验收（后台同步中，重复提交已合并）', requirement: null };
+    }
+    const id = 'ACQ-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+    const pending = {
+      id,
+      at: new Date().toISOString(),
+      projectName: name,
+      requirementId,
+      decision,
+      round: roundNow,
+      requirementKey: String(input.requirementKey || ''),
+      opinion: String(input.opinion || '').slice(0, 1000),
+      channel: 'ui',
+      role: String(input.role || 'owner'),
+      sessionId: String(input.sessionId || ''),
+      ownerConfirmed: input.ownerConfirmed === true,
+      expectedStatus: String(input.expectedStatus || ''),
+      expectedUpdatedAt: String(input.expectedUpdatedAt || ''),
+      state: 'queued',
+      attempts: 0,
+    };
+    try {
+      writePendingAcceptance(name, pending);
+    } catch (error) {
+      return failure('ACCEPT_QUEUE_FAILED', '验收排队失败：' + String((error && error.message) || error).slice(0, 200), { requirementId });
+    }
+    const projectPath = String(input.project && input.project.path || (registrationFor(name) || {}).path || '');
+    setImmediate(() => {
+      void applyPendingAcceptances(name, projectPath, { retries: 3 }).catch((error) => {
+        try { console.warn('[accept-queue] apply failed ' + String((error && error.message) || error).slice(0, 160)); } catch { /* ignore */ }
+      });
+    });
+    return {
+      ok: true,
+      code: 'OWNER_ACCEPT_QUEUED',
+      pending: true,
+      queuedId: id,
+      decided: true,
+      decidedAt: pending.at,
+      requirement: null,
+      ownerReview: null,
+      message: '已验收（后台同步中）',
+      channel: 'ui',
+      driver: 'shell-queue',
+    };
+  }
+
+  async function ownerAcceptCommit(input = {}) {
     const ctx = await ensureWorkflowProject(input);
     if (!ctx.ok) return ctx;
     const role = String(input.role || 'owner').trim();
@@ -11178,6 +11345,11 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     devApply,
     dispatchTest,
     ownerAccept,
+    ownerAcceptCommit,
+    applyPendingAcceptances,
+    listPendingAcceptances,
+    beginSpawnProfiling,
+    endSpawnProfiling,
     // B-b55c：需求 id 精确匹配与状态来源（tester 复跑"同秒需求不串号"用同一份实现，不另写一套）
     requirementIdKey,
     requirementIdMatchPlan,

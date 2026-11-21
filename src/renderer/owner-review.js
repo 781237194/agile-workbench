@@ -2319,10 +2319,13 @@
         renderMissing([]);
         // B-20261118-211237-9ded：先给成功提示（响应即完成），列表刷新改成后台——
         // 之前 await loadData() 排在提示之前，主进程若正被看板重建占用，Owner 要再等数秒才看到结果。
-        showNotice(rejecting
+        // 两段式验收（PM 155451）：第一段返回 pending=true，提示必须写「后台同步中」，不能说已完成。
+        const pendingSync = Boolean(r && r.pending === true);
+        const successText = rejecting
           ? `已打回：${row.id}；需求回到可整改，PM 会收到打回原因`
-          : `已验收：${row.id}；流程图 ≤6 秒内更新`);
-        acceptListNotice(rejecting ? `已打回：${row.id}` : `已验收：${row.id}（流程图 ≤6 秒内更新）`, 'ok');
+          : (pendingSync ? `已验收：${row.id}（后台同步中，稍后自动完成；失败可在验收列表重试）` : `已验收：${row.id}；流程图 ≤6 秒内更新`);
+        showNotice(successText);
+        acceptListNotice(pendingSync ? `已验收：${row.id}（后台同步中）` : (rejecting ? `已打回：${row.id}` : `已验收：${row.id}（流程图 ≤6 秒内更新）`), 'ok');
         void Promise.resolve().then(() => loadData()).then(() => renderAcceptList()).catch(() => { /* 刷新失败不掩盖成功 */ });
       } catch (e) {
         submitting = false;

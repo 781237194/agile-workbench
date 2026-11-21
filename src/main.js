@@ -24109,6 +24109,12 @@ app.whenReady().then(async () => {
         || (storeNow.projects || [])[0];
       if (projectNow && projectNow.teamName) {
         const warm = teamTools.prewarmWorkflowCaches(projectNow.teamName, projectNow.path);
+        // 两段式验收（PM 155451）：启动时回放未完成的验收队列——杀进程中断也不丢验收。
+        try {
+          void teamTools.applyPendingAcceptances(projectNow.teamName, projectNow.path, { retries: 3 })
+            .then((replay) => { if (replay && Array.isArray(replay.results) && replay.results.length) console.log('[accept-replay] ' + JSON.stringify(replay.results)); })
+            .catch(() => { /* 回放失败仅日志 */ });
+        } catch { /* ignore */ }
         // PM 14:48：再 spawn 一次 team.mjs --version，把 Node/模块/工作流文件读进 OS 缓存（只 1 次、失败忽略）。
         try {
           const tCli = Date.now();
