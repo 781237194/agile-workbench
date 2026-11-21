@@ -1216,17 +1216,32 @@ function setEffectMenu(open) {
 
 // 7a3b：真实态一键强制 + 特效诊断（菜单内控件，不新增标题栏按钮）。
 // 7a3b 补口（AC1⑥）：启动时读取 workbench.json ui.fxForce → 恢复 data-fx-force（重启仍保持）。
-async function loadPersistedFxForce() {
-  try {
-    if (!window.workbench || typeof window.workbench.fxForceGet !== 'function') return;
-    const r = await window.workbench.fxForceGet();
-    if (!r || r.ok !== true) return;
-    if (r.force) {
-      document.documentElement.setAttribute('data-fx-force', '1');
-      try { if (window.AWB_FX && typeof window.AWB_FX.sync === 'function') window.AWB_FX.sync(); } catch { /* ignore */ }
-    } else document.documentElement.removeAttribute('data-fx-force');
-    try { if (typeof window.__awbPaintEffectMenu === 'function') window.__awbPaintEffectMenu(); } catch { /* ignore */ }
-  } catch { /* 读取失败不阻断界面 */ }
+// T-18bf：paintEffectMenu 可能每帧调用，原实现每次都发 fxForceGet（实测 1000 次/秒）；
+// 改为加载一次 + 在途复用 + 300ms 最小间隔（主进程侧另有 500ms 硬限流）。
+let fxForceLoaded = false;
+let fxForceLoading = null;
+let fxForceLastAt = 0;
+async function loadPersistedFxForce(force = false) {
+  if (fxForceLoaded && !force) return null;
+  if (fxForceLoading) return fxForceLoading;
+  const nowMs = Date.now();
+  if (!force && nowMs - fxForceLastAt < 300) return null;
+  fxForceLastAt = nowMs;
+  fxForceLoading = (async () => {
+    try {
+      if (!window.workbench || typeof window.workbench.fxForceGet !== 'function') return null;
+      const r = await window.workbench.fxForceGet();
+      if (!r || r.ok !== true) return null;
+      if (r.force) {
+        document.documentElement.setAttribute('data-fx-force', '1');
+        try { if (window.AWB_FX && typeof window.AWB_FX.sync === 'function') window.AWB_FX.sync(); } catch { /* ignore */ }
+      } else document.documentElement.removeAttribute('data-fx-force');
+      try { if (typeof window.__awbPaintEffectMenu === 'function') window.__awbPaintEffectMenu(); } catch { /* ignore */ }
+      fxForceLoaded = true;
+      return r;
+    } catch { /* 读取失败不阻断界面 */ return null; }
+  })().finally(() => { fxForceLoading = null; });
+  return fxForceLoading;
 }
 
 function bindFxRealState() {

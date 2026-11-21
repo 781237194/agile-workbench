@@ -129,10 +129,11 @@ const LEDGER_ACTIONS_CACHE_MS = 10000;
 // 按项目缓存 15s；同一项目 15s 内不再 spawn（PM 要求 ≥10s）。
 const schedAdviceCache = new Map();
 const SCHED_ADVICE_CACHE_MS = 15000;
-// T-f18bf（PM 打回）：mtime 指纹命中仍常 miss 时，2 秒内的同一项目直接复用；优先保 CPU，
-// 允许工作流外部变化最多滞后 2 秒（写路径/显式刷新不受影响）。
+// T-f18bf（PM 打回）：2s 最近缓存在 5–6s 轮询下必 miss；改为 10s 硬命中 + >3s 后台重算（stale-while-revalidate）。
 const workflowRecentCache = new Map();
-const WORKFLOW_RECENT_MS = 2000;
+const WORKFLOW_RECENT_MS = 10000;
+const WORKFLOW_REVALIDATE_MS = 3000;
+const workflowRevalidating = new Set();
 const WORKFLOW_STATE_ENTRY_MAX_BYTES = 4 * 1024 * 1024;
 const workflowStateStats = { hits: 0, misses: 0, recentHits: 0, lastFp: '' };
 const METRICS_GPU_TTL_MS = 30000;
@@ -148,6 +149,8 @@ const HOT_IPC_TTL_MS = {
   'workspace:plan': 8000, 'workspace:list': 8000,
   // app:state 依赖 store → 随 writeStore 失效；3s 内重复调用（面板刷新/多面板同屏）直接复用。
   'app:state': 3000,
+  // fx-force-get 被渲染层每帧级调用；主进程 500ms 硬限流，避免 handler 重复读缓存/序列化。
+  'theme:fx-force-get': 500,
   // T-18bf 二轮（PM：主进程 73% 大头是渲染层高频 IPC）：只读面板通道加 2–5s 结果复用；
   // 写路径不进来（HOT_IPC_TTL 只列只读 handler），同参并发由下方 inflight 合并。
   'team:session-queue': 2000,
@@ -9339,13 +9342,43 @@ ipcMain.handle('theme:metrics', async () => {
     };
   });
 
+  const buildWorkflowStateValue = (ctx) => {
+    const snapshot = workflowSnapshot(ctx.project);
+    const value = { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName), autoAccept: autoAcceptUiConfig() };
+    // T-18bf：默认只下发任务摘要（详情走 workflow:get {detail:'full'}），避免每次轮询序列化 1,372 条完整任务。
+    capWorkflowTasksForUi(value);
+    return value;
+  };
+  const rememberWorkflowState = (ctx, value) => {
+    const fp = workflowStateFingerprint(ctx.teamName);
+    workflowStateStats.lastFp = fp;
+    if (fp) {
+      const tasksLen = Array.isArray(value && value.tasks) ? value.tasks.length : 0;
+      if (tasksLen <= 5000) {
+        const cacheKey = `${ctx.project.id}|${fp}`;
+        workflowStateCache.set(cacheKey, value);
+        if (workflowStateCache.size > 8) workflowStateCache.delete(workflowStateCache.keys().next().value);
+      }
+    }
+    workflowRecentCache.set(String(ctx.project.id), { at: Date.now(), value });
+    if (workflowRecentCache.size > 8) workflowRecentCache.delete(workflowRecentCache.keys().next().value);
+  };
+  const revalidateWorkflowState = (ctx) => {
+    const id = String(ctx.project.id);
+    if (workflowRevalidating.has(id)) return;
+    workflowRevalidating.add(id);
+    setImmediate(() => {
+      try { rememberWorkflowState(ctx, buildWorkflowStateValue(ctx)); } catch { /* 后台刷新失败保留旧值 */ } finally { workflowRevalidating.delete(id); }
+    });
+  };
   ipcMain.handle('workflow:state', runWorkflowIpc(async (ctx) => {
-    // T-0d3b：mtime 指纹缓存；T-f18bf：指纹 miss 时还有 2s 最近缓存兜底（高频轮询命中）。
     const nowMs = Date.now();
     const recent = workflowRecentCache.get(String(ctx.project.id));
-    if (recent && nowMs - recent.at < WORKFLOW_RECENT_MS) {
+    if (recent) {
+      // 10s 内直接返回旧值；超过 3s 在返回后后台重算（stale-while-revalidate），命中路径不再等全量快照。
       workflowStateStats.recentHits += 1;
       workflowStateStats.hits += 1;
+      if (nowMs - recent.at >= WORKFLOW_REVALIDATE_MS) revalidateWorkflowState(ctx);
       return recent.value;
     }
     const fp = workflowStateFingerprint(ctx.teamName);
@@ -9359,25 +9392,9 @@ ipcMain.handle('theme:metrics', async () => {
         return hit;
       }
     }
-    const snapshot = workflowSnapshot(ctx.project);
-    // R-9fbe F-9fbe-5：把两个账本处置通道的可用性一起下发（只读、不含令牌值）——
-    // 面板据此给按钮禁用原因；真点下去仍由 owner:ledger-* 复核（PM_TOKEN_REQUIRED 等）。
-    // R-4657：附带缺陷自动验收开关与撤回窗口（池行只看这两项，不再自己猜）。
-    const value = { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName), autoAccept: autoAcceptUiConfig() };
-    // T-18bf：workflow:state 也默认只下发任务摘要（详情走 workflow:get {detail:'full'}），
-    // 避免每次轮询把 1,372 条完整任务（含 detail/acceptance/history）经 IPC 序列化。
-    capWorkflowTasksForUi(value);
+    const value = buildWorkflowStateValue(ctx);
     workflowStateStats.misses += 1;
-    if (fp) {
-      // 只按任务数组规模挡超大对象（避免对 1.5MB 响应再 JSON.stringify 一次计字节，profile 热点）；
-      // 正常快照直接进 8 条上限的缓存，保证下轮命中。
-      const tasksLen = Array.isArray(value && value.tasks) ? value.tasks.length : 0;
-      if (tasksLen <= 5000) {
-        workflowStateCache.set(cacheKey, value);
-        if (workflowStateCache.size > 8) workflowStateCache.delete(workflowStateCache.keys().next().value);
-      }
-    }
-    workflowRecentCache.set(String(ctx.project.id), { at: nowMs, value });
+    rememberWorkflowState(ctx, value);
     return value;
   }));
   ipcMain.handle('workflow:boot', runWorkflowIpc(async (ctx, p, meta) => {
@@ -9388,19 +9405,58 @@ ipcMain.handle('theme:metrics', async () => {
       teamMode: normalizeTeamMode(p.teamMode || ctx.project.teamMode)
     });
   }));
-  // PM 20:50（Owner：主进程 CPU 被打满）：briefingStatus 每次都要读工作流 + 算 6 个角色的文档哈希，
-  // 而界面每 5 秒轮询一次 → 加 4 秒 TTL 缓存（同一项目）。
+  // PM 20:50（Owner：主进程 CPU 被打满）：briefingStatus 每次读工作流 + 算 6 个角色文档哈希（~2.1s）。
+  // T-18bf 改 stale-while-revalidate：有旧值立即返回（>3s 后台重算），不再让每次轮询等 2.1s。
   const briefingCache = new Map();
+  const briefingRevalidating = new Set();
+  const BRIEFING_REVALIDATE_MS = 3000;
+  const briefingStateStats = { hits: 0, misses: 0, revalidations: 0 };
+  const buildBriefing = async (teamName) => {
+    const value = await Promise.resolve(teamTools.briefingStatus(teamName));
+    return value;
+  };
+  const rememberBriefing = (key, value) => {
+    briefingCache.set(key, { at: Date.now(), value });
+    if (briefingCache.size > 8) briefingCache.delete(briefingCache.keys().next().value);
+  };
+  const revalidateBriefing = (key, teamName) => {
+    if (briefingRevalidating.has(key)) return;
+    briefingRevalidating.add(key);
+    setImmediate(async () => {
+      try {
+        const value = await buildBriefing(teamName);
+        rememberBriefing(key, value);
+        briefingStateStats.revalidations += 1;
+      } catch { /* 后台刷新失败保留旧值 */ } finally { briefingRevalidating.delete(key); }
+    });
+  };
   ipcMain.handle('workflow:briefing', runWorkflowIpc(async (ctx) => {
     const key = String(ctx.teamName || '');
-    const nowMs = Date.now();
     const hit = briefingCache.get(key);
-    if (hit && nowMs - hit.at < 4000) return hit.value;
-    const value = teamTools.briefingStatus(ctx.teamName);
-    briefingCache.set(key, { at: nowMs, value });
-    if (briefingCache.size > 8) briefingCache.delete(briefingCache.keys().next().value);
+    if (hit) {
+      briefingStateStats.hits += 1;
+      if (Date.now() - hit.at >= BRIEFING_REVALIDATE_MS) revalidateBriefing(key, ctx.teamName);
+      return hit.value;
+    }
+    briefingStateStats.misses += 1;
+    const value = await buildBriefing(ctx.teamName);
+    rememberBriefing(key, value);
     return value;
   }));
+  // T-18bf：启动后 3s 后台预热一次 briefing，避免重启后第一次轮询仍等 2.1s（首调拉高均值）。
+  try {
+    const warm = setTimeout(async () => {
+      try {
+        const store = readStoreCached();
+        const active = (store.projects || []).find((p) => p && p.id === store.activeProjectId) || (store.projects || [])[0];
+        const teamName = String((active && (active.teamName || active.name)) || '');
+        if (!teamName || briefingCache.has(teamName)) return;
+        const value = await buildBriefing(teamName);
+        rememberBriefing(teamName, value);
+      } catch { /* 预热失败等首调 */ }
+    }, 3000);
+    if (warm && typeof warm.unref === 'function') warm.unref();
+  } catch { /* ignore */ }
   // B-20261114-003257-0a46（R-d734）：项目信息/项目铁律的真实存在性。
   // 不走 files:list（600 项 / 4 层截断会把根目录文档截掉，旧版因此误报“缺失”）。
   ipcMain.handle('docs:presence', runWorkflowIpc(async (ctx) => {
@@ -13930,7 +13986,8 @@ ipcMain.handle('mem:cache-stats', () => {
   return {
     ok: true,
     hotIpc: { count: hotIpcCache.size, bytes: hotIpcCacheBytes, maxEntryBytes: hotMax, entryCapBytes: HOT_IPC_ENTRY_MAX_BYTES, totalCapBytes: HOT_IPC_TOTAL_MAX_BYTES },
-    workflowState: { count: workflowStateCache.size, rows: workflow, hits: workflowStateStats.hits, misses: workflowStateStats.misses, recentHits: workflowStateStats.recentHits, lastFp: workflowStateStats.lastFp, entryMaxBytes: WORKFLOW_STATE_ENTRY_MAX_BYTES },
+    workflowState: { count: workflowStateCache.size, rows: workflow, hits: workflowStateStats.hits, misses: workflowStateStats.misses, recentHits: workflowStateStats.recentHits, lastFp: workflowStateStats.lastFp, entryMaxBytes: WORKFLOW_STATE_ENTRY_MAX_BYTES, recentTtlMs: WORKFLOW_RECENT_MS, revalidateMs: WORKFLOW_REVALIDATE_MS },
+    briefing: { ...briefingStateStats, cached: briefingCache.size, revalidateMs: BRIEFING_REVALIDATE_MS },
     ledgerActions: { cachedTeams: ledgerActionsCache.size, ttlMs: LEDGER_ACTIONS_CACHE_MS },
     schedAdvice: { cachedProjects: schedAdviceCache.size, ttlMs: SCHED_ADVICE_CACHE_MS },
     bootTokenDirs: { cachedDirs: bootTokenDirCache.size, ttlMs: BOOT_TOKEN_CACHE_MS },
