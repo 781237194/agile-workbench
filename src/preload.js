@@ -33,6 +33,13 @@ if (IS_BOARD_WINDOW) {
   // T-77e4：透明覆盖窗粒子状态（主窗 fx-layer → 主进程 → 覆盖窗；鼠标事件不经过它）。
   fxOverlayState: (state) => ipcRenderer.send('fx:overlay-state', state),
   fxOverlayStatus: () => ipcRenderer.invoke('fx:overlay-status'),
+  fxOverlayBenchmark: () => ipcRenderer.invoke('fx:overlay-benchmark'),
+  onFxOverlayReady: (handler) => {
+    if (typeof handler !== 'function') return () => {};
+    const listener = (_event, payload) => { try { handler(payload || {}); } catch { /* ignore */ } };
+    ipcRenderer.on('fx-overlay-ready', listener);
+    return () => { try { ipcRenderer.removeListener('fx-overlay-ready', listener); } catch { /* ignore */ } };
+  },
   // e610：在线升级（版本 / 检查 / 一步升级）
   appVersion: () => ipcRenderer.invoke('app:version'),
   upgradeCheck: (payload) => ipcRenderer.invoke('app:upgrade-check', payload),

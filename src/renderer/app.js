@@ -16040,6 +16040,7 @@ function renderDsh(dsh) {
     else if (window.workbench && typeof window.workbench.fxOverlayState === 'function') {
       window.workbench.fxOverlayState({ enabled: false, count: 0, colors: [], opacityRange: [0.15, 0.55], mode: 'full' });
     }
+    if (window.AWB_FX && typeof window.AWB_FX.sync === 'function') window.AWB_FX.sync();
   } catch { /* 覆盖窗不可用时主窗 canvas 兜底 */ }
   const stateLabel = online ? 'DSH 已连接' : (configured ? 'DSH 离线' : 'DSH 未配置');
 

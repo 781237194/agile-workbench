@@ -920,7 +920,14 @@
     } else if (!options.keepSeed) {
       try { ensureParticles(); } catch (e) { /* 画布异常不影响主题 */ }
     }
-    if (S.mode === 'off') stopLoop();
+    // T-77e4：覆盖窗已就绪且 DSH 在线时，壳内画布被 webview 盖住只会白耗 CPU/GPU → 停画并清空；
+    // 覆盖窗创建失败/离线/降级时 overlayOwns=false，壳内照常绘制（降级兜底）。
+    var overlayOwns = Boolean(particlesOn && W.__awbFxOverlayReady === true && W.__awbFxOverlayOnline === true);
+    if (overlayOwns && S.canvas) {
+      clearCanvas();
+      S.canvas.setAttribute('data-fx-particles', '0');
+    }
+    if (S.mode === 'off' || overlayOwns) stopLoop();
     else if (!S.paused) startLoop();
     try {
       logFxDiag({
@@ -1515,4 +1522,19 @@
     degraded: degradedInfo
   };
   try { W.__fxLayerEvidence = layerEvidence; } catch (e) { /* ignore */ }
+  // T-77e4：覆盖窗就绪/关闭时切换壳内绘制；状态订阅晚于创建时用一次 status 补齐。
+  try {
+    if (W.workbench && typeof W.workbench.onFxOverlayReady === 'function') {
+      W.workbench.onFxOverlayReady(function (payload) {
+        W.__awbFxOverlayReady = Boolean(payload && payload.ready === true);
+        try { sync(); } catch (e) { /* ignore */ }
+      });
+    }
+    if (W.workbench && typeof W.workbench.fxOverlayStatus === 'function') {
+      W.workbench.fxOverlayStatus().then(function (status) {
+        W.__awbFxOverlayReady = Boolean(status && status.ready === true);
+        try { sync(); } catch (e) { /* ignore */ }
+      }).catch(function () { /* ignore */ });
+    }
+  } catch (e) { /* ignore */ }
 })();

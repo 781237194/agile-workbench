@@ -405,9 +405,34 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
     ready: Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayReady),
     visible: Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayWindow.isVisible()),
     state: fxOverlayState,
+    metrics: fxOverlayMetrics(),
   }));
+  rawIpcHandle('fx:overlay-benchmark', async () => {
+    const withOverlay = fxOverlayMetrics();
+    const wasVisible = Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayWindow.isVisible());
+    try { if (fxOverlayWindow && !fxOverlayWindow.isDestroyed()) fxOverlayWindow.hide(); } catch { /* ignore */ }
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    const withoutOverlay = fxOverlayMetrics();
+    if (wasVisible) { try { pushFxOverlayState(); } catch { /* ignore */ } }
+    const delta = (key) => {
+      const a = withOverlay && withOverlay[key] ? Number(withOverlay[key]) || 0 : 0;
+      const b = withoutOverlay && withoutOverlay[key] ? Number(withoutOverlay[key]) || 0 : 0;
+      return Math.round((a - b) * 10) / 10;
+    };
+    return {
+      ok: true,
+      note: 'withOverlay - withoutOverlay；采样窗口 2.5s，metrics 来自 app.getAppMetrics()',
+      withOverlay, withoutOverlay,
+      delta: {
+        gpuRssMB: delta('gpuRssMB') || Math.round(((withOverlay.gpu && withOverlay.gpu.rssMB || 0) - (withoutOverlay.gpu && withoutOverlay.gpu.rssMB || 0)) * 10) / 10,
+        mainCpuPercent: delta('mainCpuPercent') || Math.round(((withOverlay.main && withOverlay.main.cpuPercent || 0) - (withoutOverlay.main && withoutOverlay.main.cpuPercent || 0)) * 10) / 10,
+        overlayRssMB: withOverlay.overlay ? withOverlay.overlay.rssMB : 0,
+      },
+    };
+  });
   ipcMain.on('fx:overlay-ready', () => {
     fxOverlayReady = true;
+    try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fx-overlay-ready', { ready: true }); } catch { /* ignore */ }
     try { pushFxOverlayState(); } catch { /* ignore */ }
   });
   ipcMain.on('fx:overlay-state', (_event, state) => {
@@ -14247,6 +14272,28 @@ function scheduleBoardPregeneration() {
    DSH 是 <webview>（独立合成），主窗 DOM 的 #fx-layer 即使 z-index 9600 也会被盖住。
    覆盖窗 transparent + frame:false + parent 主窗 + setIgnoreMouseEvents(true,{forward:true})，
    只绘制粒子；鼠标/键盘/滚动全部透传给主窗，离线时隐藏（主窗 canvas 继续兜底）。 */
+function fxOverlayMetrics() {
+  try {
+    const rows = typeof app.getAppMetrics === 'function' ? app.getAppMetrics() : [];
+    const overlayPid = (fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayWindow.webContents)
+      ? fxOverlayWindow.webContents.getOSProcessId() : 0;
+    const map = (row) => ({
+      pid: Number(row && row.pid) || 0,
+      type: String((row && row.type) || ''),
+      rssMB: Math.round((Number(row && row.memory && row.memory.workingSetSize) || 0) / 1024 * 10) / 10,
+      cpuPercent: Number(row && row.cpu && row.cpu.percentCPUUsage) || 0,
+    });
+    const list = (Array.isArray(rows) ? rows : []).map(map);
+    const main = list.find((row) => row.type === 'Browser') || null;
+    const gpu = list.find((row) => row.type === 'GPU') || null;
+    const overlay = overlayPid ? list.find((row) => row.pid === overlayPid) || null : null;
+    const sumRss = Math.round(list.reduce((sum, row) => sum + row.rssMB, 0) * 10) / 10;
+    return { supported: list.length > 0, main, gpu, overlay, sumRssMB: sumRss, processes: list };
+  } catch (error) {
+    return { supported: false, error: String((error && error.message) || error).slice(0, 160), main: null, gpu: null, overlay: null, sumRssMB: 0, processes: [] };
+  }
+}
+
 function fxOverlayBoundsOfMain() {
   try {
     if (!mainWindow || mainWindow.isDestroyed()) return null;
@@ -14263,7 +14310,7 @@ function syncFxOverlayBounds() {
 function pushFxOverlayState() {
   if (!fxOverlayWindow || fxOverlayWindow.isDestroyed()) return;
   const visible = Boolean(fxOverlayState.enabled && mainWindow && !mainWindow.isDestroyed()
-    && mainWindow.isVisible() && !mainWindow.isMinimized());
+    && mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused());
   try { fxOverlayWindow.webContents.send('fx:overlay-state', fxOverlayState); } catch { /* ignore */ }
   if (visible) {
     syncFxOverlayBounds();
@@ -14271,6 +14318,11 @@ function pushFxOverlayState() {
   } else {
     try { if (fxOverlayWindow.isVisible()) fxOverlayWindow.hide(); } catch { /* ignore */ }
   }
+}
+function notifyFxOverlayReady(ready) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fx-overlay-ready', { ready: Boolean(ready) });
+  } catch { /* ignore */ }
 }
 function ensureFxOverlayWindow() {
   if (fxOverlayWindow && !fxOverlayWindow.isDestroyed()) return fxOverlayWindow;
@@ -14290,12 +14342,14 @@ function ensureFxOverlayWindow() {
     });
     fxOverlayWindow.setIgnoreMouseEvents(true, { forward: true });
     fxOverlayWindow.loadFile(path.join(__dirname, 'renderer', 'fx-overlay.html'));
-    fxOverlayWindow.on('closed', () => { fxOverlayWindow = null; fxOverlayReady = false; });
-    fxOverlayWindow.webContents.on('did-finish-load', () => { syncFxOverlayBounds(); pushFxOverlayState(); });
+    fxOverlayWindow.on('closed', () => { fxOverlayWindow = null; fxOverlayReady = false; notifyFxOverlayReady(false); });
+    fxOverlayWindow.webContents.on('did-finish-load', () => { syncFxOverlayBounds(); pushFxOverlayState(); notifyFxOverlayReady(fxOverlayReady); });
     return fxOverlayWindow;
   } catch (error) {
     try { console.warn('[fx-overlay] create failed ' + String((error && error.message) || error).slice(0, 160)); } catch { /* ignore */ }
     fxOverlayWindow = null;
+    fxOverlayReady = false;
+    notifyFxOverlayReady(false);
     return null;
   }
 }
@@ -14306,10 +14360,12 @@ function bindFxOverlayToMainWindow() {
   mainWindow.on('move', () => { syncFxOverlayBounds(); if (fxOverlayBoundsTimer) clearTimeout(fxOverlayBoundsTimer); fxOverlayBoundsTimer = setTimeout(syncFxOverlayBounds, 30); });
   mainWindow.on('show', () => { ensure(); pushFxOverlayState(); });
   mainWindow.on('hide', () => { pushFxOverlayState(); });
+  mainWindow.on('focus', () => { ensure(); pushFxOverlayState(); });
+  mainWindow.on('blur', () => { try { if (fxOverlayWindow && fxOverlayWindow.isVisible()) fxOverlayWindow.hide(); } catch { /* ignore */ } });
   mainWindow.on('minimize', () => { try { if (fxOverlayWindow) fxOverlayWindow.hide(); } catch { /* ignore */ } });
   mainWindow.on('restore', () => { ensure(); pushFxOverlayState(); });
   mainWindow.on('closed', () => { try { if (fxOverlayWindow && !fxOverlayWindow.isDestroyed()) fxOverlayWindow.close(); } catch { /* ignore */ } fxOverlayWindow = null; });
-  mainWindow.webContents.on('did-finish-load', () => { ensure(); pushFxOverlayState(); });
+  mainWindow.webContents.on('did-finish-load', () => { ensure(); pushFxOverlayState(); notifyFxOverlayReady(fxOverlayReady); });
   ensure();
 }
 

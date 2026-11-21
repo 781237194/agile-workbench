@@ -43,6 +43,25 @@ check('覆盖窗只画粒子、不加载 DSH 页面', () => {
   assert.doesNotMatch(js, /#dsh-view|dsh-off|src\s*=\s*["']http/i);
   assert.match(js, /requestAnimationFrame/);
 });
+check('在线且覆盖窗就绪时壳内停止绘制（失败/离线回退）', () => {
+  const fx = read('src/renderer/fx-layer.js');
+  assert.match(fx, /overlayOwns/);
+  assert.match(fx, /clearCanvas\(\)/);
+  assert.match(fx, /stopLoop\(\)/);
+  assert.match(fx, /__awbFxOverlayReady/);
+  const preload = read('src/preload.js');
+  assert.match(preload, /onFxOverlayReady/);
+});
+check('覆盖窗 focus/blur 与 metrics 已接线', () => {
+  const main = read('src/main.js');
+  assert.match(main, /mainWindow\.on\('blur'/);
+  assert.match(main, /mainWindow\.on\('focus'/);
+  assert.match(main, /function fxOverlayMetrics\(/);
+  assert.match(main, /metrics:\s*fxOverlayMetrics\(\)/);
+  assert.match(main, /fx:overlay-benchmark/);
+  const preload = read('src/preload.js');
+  assert.match(preload, /fxOverlayBenchmark/);
+});
 check('层级证据取数口已暴露', () => {
   const fx = read('src/renderer/fx-layer.js');
   assert.match(fx, /function layerEvidence\(/);
