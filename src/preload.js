@@ -38,6 +38,9 @@ if (IS_BOARD_WINDOW) {
   upgradeAutoGet: () => ipcRenderer.invoke('app:upgrade-auto-get'),
   upgradeAutoSet: (enabled) => ipcRenderer.invoke('app:upgrade-auto-set', enabled),
     filesList: (payload) => ipcRenderer.invoke('files:list', payload),
+    // R-e31b/f01c：主进程 RSS 只读读数（结构性压缩验收；不触发回收）
+    mainRss: () => ipcRenderer.invoke('mem:main-rss'),
+    cacheStats: () => ipcRenderer.invoke('mem:cache-stats'),
     // R-e31b：摘要/分页契约（列表只拿摘要，详情按需单取）。
     tasksSummary: (payload) => ipcRenderer.invoke('workflow:tasks-summary', payload),
     workflowTasksSummary: (payload) => ipcRenderer.invoke('workflow:tasks-summary', payload),

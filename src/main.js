@@ -95,6 +95,14 @@ const HOT_IPC_TTL_MS = {
 };
 const hotIpcCache = new Map();
 const hotIpcStats = { hits: 0, misses: 0 };
+// R-e31b/f01c（结构性压缩）：热点缓存必须有字节上限，避免把 workflow/board 等大对象长期常驻；
+// 入口 >512KB 不入缓存，总量 >8MB 按 LRU 淘汰。只改缓存策略，不改 handler 返回值。
+const HOT_IPC_ENTRY_MAX_BYTES = 512 * 1024;
+const HOT_IPC_TOTAL_MAX_BYTES = 8 * 1024 * 1024;
+let hotIpcCacheBytes = 0;
+function cacheValueBytes(value) {
+  try { const text = JSON.stringify(value); return Buffer.byteLength(text == null ? '' : text, 'utf8'); } catch { return Infinity; }
+}
 // 这些通道的结果**不依赖本进程 store**（外部进程写文件 / 系统指标），writeStore 清缓存时保留它们，
 // 否则每次写盘都把 metrics/presence 缓存打掉，导致每次都重跑 nvidia-smi / 子进程（tester v256 实测 1.7s/5.7s）。
 const HOT_IPC_STORE_INDEPENDENT = new Set(['system:metrics', 'team:presence', 'dsh:team-status', 'team:status']);
@@ -117,6 +125,8 @@ function hotIpcCacheClear() {
   for (const key of Array.from(hotIpcCache.keys())) {
     const channel = String(key).split('|')[0];
     if (HOT_IPC_STORE_INDEPENDENT.has(channel)) continue;
+    const row = hotIpcCache.get(key);
+    hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number((row && row.bytes) || 0));
     hotIpcCache.delete(key);
   }
 }
@@ -131,8 +141,19 @@ function hotIpcTtlWrap(channel, handler) {
     if (hit && now - hit.at < ttl) { hotIpcStats.hits += 1; return hit.value; }
     hotIpcStats.misses += 1;
     const value = await handler.apply(this, args);
-    hotIpcCache.set(key, { at: Date.now(), value });
-    if (hotIpcCache.size > 64) hotIpcCache.delete(hotIpcCache.keys().next().value);
+    const bytes = cacheValueBytes(value);
+    if (bytes <= HOT_IPC_ENTRY_MAX_BYTES) {
+      const row = { at: Date.now(), value, bytes };
+      hotIpcCache.set(key, row);
+      hotIpcCacheBytes += bytes;
+      while (hotIpcCache.size > 64 || hotIpcCacheBytes > HOT_IPC_TOTAL_MAX_BYTES) {
+        const oldestKey = hotIpcCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        const old = hotIpcCache.get(oldestKey);
+        hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number((old && old.bytes) || 0));
+        hotIpcCache.delete(oldestKey);
+      }
+    }
     return value;
   };
 }
@@ -5041,6 +5062,8 @@ async function ensureBoardWindowWithSkeleton({ theme = 'dark', style = 'native',
       teamBoardProjectPath = null;
       teamBoardFilePath = '';
       teamBoardExpandedBounds = null;
+      // 结构性压缩：看板 HTML 最大 12MB，窗口关闭即释放，不让主进程长期常驻。
+      teamBoardHtmlCache = null;
     });
   }
   const windowReadyAt = Date.now();
@@ -9099,8 +9122,12 @@ ipcMain.handle('theme:metrics', async () => {
     const value = { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName), autoAccept: autoAcceptUiConfig() };
     if (fp) {
       workflowStateStats.misses += 1;
-      workflowStateCache.set(cacheKey, value);
-      if (workflowStateCache.size > 8) workflowStateCache.delete(workflowStateCache.keys().next().value);
+      // 结构性上限：单条 >1MB 不进常驻缓存（任务/看板快照不再长期占主进程堆）。
+      const bytes = cacheValueBytes(value);
+      if (bytes <= 1024 * 1024) {
+        workflowStateCache.set(cacheKey, value);
+        if (workflowStateCache.size > 8) workflowStateCache.delete(workflowStateCache.keys().next().value);
+      }
     }
     return value;
   }));
@@ -9122,6 +9149,7 @@ ipcMain.handle('theme:metrics', async () => {
     if (hit && nowMs - hit.at < 4000) return hit.value;
     const value = teamTools.briefingStatus(ctx.teamName);
     briefingCache.set(key, { at: nowMs, value });
+    if (briefingCache.size > 8) briefingCache.delete(briefingCache.keys().next().value);
     return value;
   }));
   // B-20261114-003257-0a46（R-d734）：项目信息/项目铁律的真实存在性。
@@ -10110,8 +10138,9 @@ ipcMain.handle('theme:metrics', async () => {
         const stat = fs.statSync(abs);
         let cached = reviewDocCache.get(abs);
         if (!cached || cached.mtimeMs !== stat.mtimeMs) {
-          cached = { mtimeMs: stat.mtimeMs, text: fs.readFileSync(abs, 'utf8').slice(0, 200000) };
+          cached = { mtimeMs: stat.mtimeMs, text: fs.readFileSync(abs, 'utf8').slice(0, 65536) };
           reviewDocCache.set(abs, cached);
+          if (reviewDocCache.size > 20) reviewDocCache.delete(reviewDocCache.keys().next().value);
         }
         row.docText = cached.text;
       } catch { /* 读不到正文就降级为旧展示，不阻断评审 */ }
@@ -13301,6 +13330,17 @@ function memThresholdMB() {
   if (Number.isFinite(memState.baselineMB) && memState.baselineMB > 0) return memPolicy.adaptiveThresholdMB(memState.baselineMB);
   return memPolicy.MIN_THRESHOLD_MB;
 }
+// R-e31b/f01c（结构性压缩）：主进程 RSS/堆读数（只读，不触发回收/重载）。
+function mainHeapMB() {
+  try {
+    const m = process.memoryUsage();
+    return {
+      rssMB: Math.round((m.rss / 1048576) * 10) / 10,
+      heapUsedMB: Math.round((m.heapUsed / 1048576) * 10) / 10,
+      externalMB: Math.round((m.external / 1048576) * 10) / 10,
+    };
+  } catch { return { rssMB: null, heapUsedMB: null, externalMB: null }; }
+}
 
 /* ── B-20261115-134716-2dd3（P0）：内存阈值告警（一次性 + 带去抖）────────────────
  * 缺口：原来只有「超阈值才自动回收」，没有任何阈值告警/审计（本文件改前 0 实现）。
@@ -13588,7 +13628,23 @@ ipcMain.handle('mem:stats-get', async () => ({
   baselineMB: memState.baselineMB,
   rateMBPerMin: memPolicy.growthRateMBPerMin(memState.samples, Date.now()),
   fixedThresholdMB: MEM_FIXED_MB || null,
+  mainRssMB: mainHeapMB().rssMB,
 }));
+// R-e31b/f01c：主进程 RSS 只读读数（验收取 3 次样本用；不触发任何清理/回收）。
+ipcMain.handle('mem:main-rss', () => ({ ok: true, ...mainHeapMB(), targetMB: 400 }));
+// R-e31b/f01c：常驻缓存规模只读读数（证明大对象已被上限挡住；不清理、不改缓存）。
+ipcMain.handle('mem:cache-stats', () => {
+  let hotMax = 0;
+  for (const row of hotIpcCache.values()) hotMax = Math.max(hotMax, Number((row && row.bytes) || 0));
+  const workflow = [];
+  for (const [key, value] of workflowStateCache.entries()) workflow.push({ key, bytes: cacheValueBytes(value) });
+  return {
+    ok: true,
+    hotIpc: { count: hotIpcCache.size, bytes: hotIpcCacheBytes, maxEntryBytes: hotMax, entryCapBytes: HOT_IPC_ENTRY_MAX_BYTES, totalCapBytes: HOT_IPC_TOTAL_MAX_BYTES },
+    workflowState: { count: workflowStateCache.size, rows: workflow },
+    boardHtmlBootstrapCached: Boolean(teamBoardHtmlCache),
+  };
+});
 // 手动「立即回收」：不经过阈值/速率/冷却判定（任务③），只受“正在回收”锁约束。
 ipcMain.handle('mem:recycle', async () => recycleRenderer('Owner/PM 手动点击「立即回收」', 'manual', undefined, { cause: '手动' }));
 
