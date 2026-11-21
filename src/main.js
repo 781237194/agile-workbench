@@ -1,11 +1,15 @@
 'use strict';
 
-// R-e31b/f01c（结构性压缩）：主进程 V8 老年代上限。长跑轮询会反复解析 store/快照，
-// 堆扩张后即使 GC 也不还给 OS；启动时固定 384MB 上限，让 GC 更早回收（不新增定时器/自动重载）。
-try {
+// R-e31b/f01c（结构性压缩）：V8 老年代上限**默认不设**。PM 实测默认 384MB 会让 V8 在阈值附近
+// 频繁 GC（主进程 CPU 116–122%），且超限只有 OOM 崩溃、无降级；只在显式 `AWB_MAIN_HEAP_MB=<MB>`
+// 时注入（测试/受控实验用），生产默认沿用 V8 默认值。
+const MAIN_HEAP_CAP_MB = (() => {
   const raw = Number(process.env.AWB_MAIN_HEAP_MB);
-  const capMB = Number.isFinite(raw) && raw > 0 ? raw : 384;
-  if (process.env.AWB_MAIN_HEAP_MB !== '0') require('node:v8').setFlagsFromString(`--max-old-space-size=${capMB}`);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.max(64, Math.round(raw));
+})();
+try {
+  if (MAIN_HEAP_CAP_MB > 0) require('node:v8').setFlagsFromString(`--max-old-space-size=${MAIN_HEAP_CAP_MB}`);
 } catch { /* 运行时不支持时忽略 */ }
 
 const { app, BrowserWindow, ipcMain, dialog, shell, session, screen, webContents } = require('electron');
@@ -13739,7 +13743,7 @@ ipcMain.handle('mem:main-rss', () => {
     const row = (app.getAppMetrics ? app.getAppMetrics() : []).find((r) => String(r.type || '').toLowerCase() === 'browser');
     cpuPercent = row && row.cpu ? row.cpu.percentCPUUsage : null;
   } catch { /* ignore */ }
-  return { ok: true, ...mainHeapMB(), cpuPercent, targetMB: 400 };
+  return { ok: true, ...mainHeapMB(), cpuPercent, heapCapMB: MAIN_HEAP_CAP_MB, targetMB: 400 };
 });
 // R-e31b/f01c：常驻缓存规模只读读数（证明大对象已被上限挡住；不清理、不改缓存）。
 ipcMain.handle('mem:cache-stats', () => {
@@ -13753,6 +13757,7 @@ ipcMain.handle('mem:cache-stats', () => {
     workflowState: { count: workflowStateCache.size, rows: workflow, hits: workflowStateStats.hits, misses: workflowStateStats.misses, recentHits: workflowStateStats.recentHits, lastFp: workflowStateStats.lastFp, entryMaxBytes: WORKFLOW_STATE_ENTRY_MAX_BYTES },
     ledgerActions: { cachedTeams: ledgerActionsCache.size, ttlMs: LEDGER_ACTIONS_CACHE_MS },
     bootTokenDirs: { cachedDirs: bootTokenDirCache.size, ttlMs: BOOT_TOKEN_CACHE_MS },
+    heapCapMB: MAIN_HEAP_CAP_MB,
     storeCacheBytes: storeCache && storeCache.value ? cacheValueBytes(storeCache.value) : 0,
     appStateCacheBytes: appStateCache && appStateCache.value ? cacheValueBytes(appStateCache.value) : 0,
     boardHtmlCacheBytes: teamBoardHtmlCache ? Number(teamBoardHtmlCache.bytes || (teamBoardHtmlCache.html ? Buffer.byteLength(teamBoardHtmlCache.html, 'utf8') : 0)) : 0,
