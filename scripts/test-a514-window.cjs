@@ -101,7 +101,8 @@ function launch() {
     ...process.env,
     AWB_DATA_DIR: path.join(SB, 'data'), AWB_STORE: STORE, AWB_TEAM_ROOT: TEAM,
     TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(SB, '项目'), TEAM_WORKBENCH_JSON: STORE,
-    TEAM_SELFTEST: '1', AWB_START_HIDDEN: '1', DSH_WEB_URL: 'http://127.0.0.1:1', AWB_SHOW_INACTIVE: '1',
+    AWB_START_HIDDEN: '1', DSH_WEB_URL: 'http://127.0.0.1:1', AWB_SHOW_INACTIVE: '1',
+    ...(process.env.A514_PROD_PATH === '1' ? {} : { TEAM_SELFTEST: '1' }),
     // 隐藏窗口下 Chromium 会节流 rAF，打字「下一帧」测不出来；测试实例关闭后台节流。
     AWB_BACKGROUND_THROTTLING: '0',
   };

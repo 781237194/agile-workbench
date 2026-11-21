@@ -2600,6 +2600,7 @@ window.__awbTypingProbe = function typingProbe(durationMs) {
   return new Promise((resolve) => {
     const latencies = [];
     const longTasks = [];
+    const longTaskDetails = [];
     const started = performance.now();
     let stopped = false;
     const gateStatsBefore = (() => { try { return window.AWBGate && AWBGate.stats ? JSON.parse(JSON.stringify(AWBGate.stats)) : null; } catch { return null; } })();
@@ -2613,7 +2614,17 @@ window.__awbTypingProbe = function typingProbe(durationMs) {
     try {
       if (typeof PerformanceObserver === 'function') {
         observer = new PerformanceObserver((list) => {
-          for (const entry of list.getEntries()) longTasks.push(entry.duration);
+          for (const entry of list.getEntries()) {
+            longTasks.push(entry.duration);
+            try {
+              longTaskDetails.push({
+                duration: Math.round(entry.duration * 10) / 10,
+                startTime: Math.round((entry.startTime - started) * 10) / 10,
+                name: String(entry.name || ''),
+                attribution: (Array.isArray(entry.attribution) ? entry.attribution : []).map((a) => ({ name: String(a.name || ''), containerType: String(a.containerType || ''), containerId: String(a.containerId || ''), containerName: String(a.containerName || '') }))
+              });
+            } catch { /* ignore */ }
+          }
         });
         observer.observe({ entryTypes: ['longtask'] });
       }
@@ -2629,7 +2640,7 @@ window.__awbTypingProbe = function typingProbe(durationMs) {
       try { summary = window.AWBInputLatency ? window.AWBInputLatency.typingVerdict({ latencies, longTasks, gateSkipped }) : null; } catch { summary = null; }
       resolve({
         durationMs: Math.round(performance.now() - started),
-        latencies, longTasks, gateSkipped,
+        latencies, longTasks, longTaskDetails, gateSkipped,
         summary,
         verdict: summary ? summary.ok : (latencies.length > 0 && Math.max(...latencies) <= 50 && longTasks.every((d) => d <= 100)),
       });
@@ -16943,6 +16954,11 @@ async function tickDaemonStatus() {
 let metricsBusy = false;
 async function tickMetrics() {
   if (metricsBusy) return; // B-fa80：2 秒一次，慢返回时跳过当前，避免 IPC 堆积
+  // a514：打字（输入框聚焦）时不刷新指标——longtask 归因显示每 ~2s 一次 self/window 长任务。
+  try {
+    const el = document.activeElement;
+    if (el && (/^(input|textarea)$/i.test(String(el.tagName || '')) || el.isContentEditable)) return;
+  } catch { /* ignore */ }
   metricsBusy = true;
   try {
     const m = await window.workbench.metrics();
