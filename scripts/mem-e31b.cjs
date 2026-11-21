@@ -89,6 +89,11 @@ delete env.ELECTRON_RUN_AS_NODE;
 delete env.AWB_IPC_COALESCE_MS;
 const electron = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const child = spawn(electron, [ROOT, `--remote-debugging-port=${PORT}`], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+// 纪律：只回收自己 spawn 的 PID 树（Windows child.kill 不保证收子进程）。
+const killOwnChild = () => {
+  try { child.kill(); } catch { /* ignore */ }
+  try { require('node:child_process').spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* ignore */ }
+};
 let stdout = '';
 child.stdout.on('data', (d) => { stdout += String(d); });
 child.stderr.on('data', (d) => { stdout += String(d); });
@@ -125,7 +130,7 @@ class Cdp {
       }
     } catch { /* retry */ }
   }
-  if (!cdp) { console.error('CDP target index.html 未就绪'); try { child.kill(); } catch { /* ignore */ } process.exit(2); }
+  if (!cdp) { console.error('CDP target index.html 未就绪'); killOwnChild(); process.exit(2); }
   await cdp.send('Runtime.enable');
   await sleep(4000);
   const meta = await cdp.eval(`(() => ({ count: (window.workbench && window.workbench.__state ? 1 : 1), heap: performance.memory ? performance.memory.usedJSHeapSize : -1 }))()`);
@@ -205,9 +210,9 @@ class Cdp {
   fs.writeFileSync(path.join(OUT, 'heap.jsonl'), samples.map((s) => JSON.stringify({ ...s, targetId: targetInfo.id, title: targetInfo.title })).join('\n') + '\n');
   fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ out: OUT, target: targetInfo.url, samples: samples.length, first: samples[0] && samples[0].usedJSHeapSize, last: samples[samples.length - 1] && samples[samples.length - 1].usedJSHeapSize, gcHeap, long, counts, contracts, clicks }));
-  try { child.kill(); } catch { /* ignore */ }
+  killOwnChild();
   try { await cdp.send('Browser.close'); } catch { /* ignore */ }
   await sleep(800);
   if (!KEEP) { try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch { /* ignore */ } }
   process.exit(0);
-})().catch((e) => { console.error('FAILED', e && e.stack); try { child.kill(); } catch { /* ignore */ } process.exit(1); });
+})().catch((e) => { console.error('FAILED', e && e.stack); killOwnChild(); process.exit(1); });
