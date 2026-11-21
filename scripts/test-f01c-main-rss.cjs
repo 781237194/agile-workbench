@@ -74,10 +74,20 @@ process.on('exit', cleanup);
     AWB_TEAM_ROOT: TEAM, AWB_TEAM_PROJECTS_ROOT: path.join(SANDBOX, '项目区'),
     TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(SANDBOX, '项目区'),
     TEAM_WORKBENCH_JSON: STORE, AWB_STORE: STORE, AWB_DATA_DIR: DATA,
-    AWB_DSH_BASE_URL: 'http://127.0.0.1:1', DSH_WEB_URL: 'http://127.0.0.1:1',
     AWB_SHOW_INACTIVE: '1', AWB_BOARD_PREGEN_MS: '0', AWB_MEM_RECYCLE_MB: '0',
     TEAM_SELFTEST: '1',
   };
+  if (process.env.AWB_F01C_REAL_DSH === '1') {
+    // 可选：连真实 DSH（只读页面），用于对比“真实数据量”下的主进程 RSS；沙盘 DSH_HOME 只放凭据副本。
+    const dshHome = path.join(SANDBOX, 'dsh-home');
+    fs.mkdirSync(dshHome, { recursive: true });
+    try { fs.copyFileSync(path.join(process.env.USERPROFILE || 'C:\\Users\\Admin', '.dsh', '.credentials.yaml'), path.join(dshHome, '.credentials.yaml')); } catch { /* 无凭据则走发现 */ }
+    env.DSH_HOME = dshHome;
+    delete env.DSH_WEB_URL; delete env.AWB_DSH_BASE_URL;
+  } else {
+    env.AWB_DSH_BASE_URL = 'http://127.0.0.1:1';
+    env.DSH_WEB_URL = 'http://127.0.0.1:1';
+  }
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.AWB_START_HIDDEN;
   const electron = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
@@ -97,11 +107,14 @@ process.on('exit', cleanup);
   if (!shell) throw new Error('shell target not ready');
   await shell.send('Runtime.enable');
   await sleep(4000);
-  // 压一遍热点缓存（app:state / workflow:state 各 12 次），模拟日常刷新后的常驻对象。
-  await shell.eval(`(async () => { for (let i=0;i<12;i+=1){ try{ await window.workbench.state(); } catch{} try{ await window.workbench.workflowState({}); } catch{} } return true; })()`, 60000).catch(() => null);
+  // 压一遍热点缓存（app:state / workflow:state），模拟日常刷新后的常驻对象。
+  const stress = Number(process.env.AWB_F01C_STRESS) > 0 ? Number(process.env.AWB_F01C_STRESS) : 12;
+  await shell.eval(`(async () => { for (let i=0;i<${stress};i+=1){ try{ await window.workbench.state(); } catch{} try{ await window.workbench.workflowState({}); } catch{} } return true; })()`, 120000).catch(() => null);
   const samples = [];
-  for (let i = 0; i < 3; i += 1) {
-    await sleep(2500);
+  const sampleCount = Number(process.env.AWB_F01C_SAMPLES) > 0 ? Number(process.env.AWB_F01C_SAMPLES) : 3;
+  const sampleGapMs = Number(process.env.AWB_F01C_GAP_MS) > 0 ? Number(process.env.AWB_F01C_GAP_MS) : 2500;
+  for (let i = 0; i < sampleCount; i += 1) {
+    await sleep(sampleGapMs);
     const r = await shell.eval('window.workbench.mainRss()');
     samples.push({ n: i + 1, at: new Date().toISOString(), ...r });
     console.log(`采样${i + 1}: rss=${r && r.rssMB}MB heap=${r && r.heapUsedMB}MB`);

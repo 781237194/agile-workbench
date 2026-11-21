@@ -1,5 +1,13 @@
 'use strict';
 
+// R-e31b/f01c（结构性压缩）：主进程 V8 老年代上限。长跑轮询会反复解析 store/快照，
+// 堆扩张后即使 GC 也不还给 OS；启动时固定 384MB 上限，让 GC 更早回收（不新增定时器/自动重载）。
+try {
+  const raw = Number(process.env.AWB_MAIN_HEAP_MB);
+  const capMB = Number.isFinite(raw) && raw > 0 ? raw : 384;
+  if (process.env.AWB_MAIN_HEAP_MB !== '0') require('node:v8').setFlagsFromString(`--max-old-space-size=${capMB}`);
+} catch { /* 运行时不支持时忽略 */ }
+
 const { app, BrowserWindow, ipcMain, dialog, shell, session, screen, webContents } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -143,6 +151,8 @@ function hotIpcTtlWrap(channel, handler) {
     const value = await handler.apply(this, args);
     const bytes = cacheValueBytes(value);
     if (bytes <= HOT_IPC_ENTRY_MAX_BYTES) {
+      const prev = hotIpcCache.get(key);
+      if (prev) hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number(prev.bytes || 0));
       const row = { at: Date.now(), value, bytes };
       hotIpcCache.set(key, row);
       hotIpcCacheBytes += bytes;
@@ -13334,12 +13344,20 @@ function memThresholdMB() {
 function mainHeapMB() {
   try {
     const m = process.memoryUsage();
+    let heapTotalMB = null;
+    let arrayBuffersMB = null;
+    try { const v8 = require('node:v8'); const h = v8.getHeapStatistics(); heapTotalMB = Math.round((h.total_heap_size / 1048576) * 10) / 10; } catch { /* ignore */ }
+    arrayBuffersMB = Math.round(((m.arrayBuffers || 0) / 1048576) * 10) / 10;
     return {
+      pid: process.pid,
+      type: 'Browser',
       rssMB: Math.round((m.rss / 1048576) * 10) / 10,
       heapUsedMB: Math.round((m.heapUsed / 1048576) * 10) / 10,
+      heapTotalMB,
       externalMB: Math.round((m.external / 1048576) * 10) / 10,
+      arrayBuffersMB,
     };
-  } catch { return { rssMB: null, heapUsedMB: null, externalMB: null }; }
+  } catch { return { pid: process.pid, type: 'Browser', rssMB: null, heapUsedMB: null, heapTotalMB: null, externalMB: null, arrayBuffersMB: null }; }
 }
 
 /* ── B-20261115-134716-2dd3（P0）：内存阈值告警（一次性 + 带去抖）────────────────
@@ -13642,6 +13660,9 @@ ipcMain.handle('mem:cache-stats', () => {
     ok: true,
     hotIpc: { count: hotIpcCache.size, bytes: hotIpcCacheBytes, maxEntryBytes: hotMax, entryCapBytes: HOT_IPC_ENTRY_MAX_BYTES, totalCapBytes: HOT_IPC_TOTAL_MAX_BYTES },
     workflowState: { count: workflowStateCache.size, rows: workflow },
+    storeCacheBytes: storeCache && storeCache.value ? cacheValueBytes(storeCache.value) : 0,
+    appStateCacheBytes: appStateCache && appStateCache.value ? cacheValueBytes(appStateCache.value) : 0,
+    boardHtmlCacheBytes: teamBoardHtmlCache ? Number(teamBoardHtmlCache.bytes || (teamBoardHtmlCache.html ? Buffer.byteLength(teamBoardHtmlCache.html, 'utf8') : 0)) : 0,
     boardHtmlBootstrapCached: Boolean(teamBoardHtmlCache),
   };
 });
