@@ -10531,7 +10531,8 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     const indexWarning = { code: 'PROJECT_INDEX_REFRESH_QUEUED', message: '索引在后台刷新（不阻塞本次落账）' };
     let snapshot = readWorkflowSnapshot(ctx.name, ctx.projectPath);
     if (snapshot.ok) {
-      const fresh = readWorkflowState(ctx.name);
+      // a514：写盘返回值 already 是最新 state，不再 readWorkflowState 重读一遍（PM 指出的第二段同步读）。
+      const fresh = { ok: Boolean(written && written.state), state: (written && written.state) || {} };
       if (fresh.ok && fresh.state.ownerReview && fresh.state.ownerReview.kind !== (decision === 'accepted' ? 'acceptance' : decision === 'iterate' ? 'iterate' : 'terminate')) {
         const kind = decision === 'accepted' ? 'acceptance' : decision === 'iterate' ? 'iterate' : 'terminate';
         const merged = mutateWorkflowState(ctx.name, (state) => {

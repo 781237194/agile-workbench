@@ -13,7 +13,9 @@ const { spawn, spawnSync } = require('node:child_process');
 const ROOT = path.resolve(__dirname, '..');
 const OUT = (() => { const i = process.argv.indexOf('--out'); return i > 0 && process.argv[i + 1] ? path.resolve(process.argv[i + 1]) : path.join(ROOT, '_tmp', 'a514-window'); })();
 fs.mkdirSync(OUT, { recursive: true });
-const SB = fs.mkdtempSync(path.join(os.tmpdir(), 'a514win-'));
+const SANDBOX_ROOT = process.env.AWB_SANDBOX_ROOT || 'D:/awb-sandbox/tmp';
+fs.mkdirSync(SANDBOX_ROOT, { recursive: true });
+const SB = fs.mkdtempSync(path.join(SANDBOX_ROOT, 'a514win-'));
 const TEAM = path.join(SB, '团队');
 const PROJ = path.join(SB, '项目', '工作台改造修复');
 const STORE = path.join(SB, 'store', 'workbench.json');
@@ -99,6 +101,7 @@ function launch() {
   const port = 9700 + Math.floor(Math.random() * 200);
   const env = {
     ...process.env,
+    TEMP: SANDBOX_ROOT, TMP: SANDBOX_ROOT, TMPDIR: SANDBOX_ROOT,
     AWB_DATA_DIR: path.join(SB, 'data'), AWB_STORE: STORE, AWB_TEAM_ROOT: TEAM,
     TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(SB, '项目'), TEAM_WORKBENCH_JSON: STORE,
     AWB_START_HIDDEN: '1', DSH_WEB_URL: 'http://127.0.0.1:1', AWB_SHOW_INACTIVE: '1',
@@ -256,5 +259,11 @@ const TYPING = `(async () => {
     process.exitCode = 1;
   } finally {
     try { spawnSync('taskkill', ['/PID', String(inst.child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 20000 }); } catch { /* ignore */ }
+    // PM 132753：跑完自清（AWB_KEEP_SANDBOX=1 才保留，便于事后归因）。
+    if (String(process.env.AWB_KEEP_SANDBOX || '') !== '1') {
+      try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
+    } else {
+      log('sandbox kept', SB);
+    }
   }
 })();
