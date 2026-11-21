@@ -3232,19 +3232,22 @@ function renderSessions() {
   // 并集/空态逻辑在 session-rows.js（rosterRows=1 也出 6 行，仅 trulyEmptyRoster 才空态）。
   const rosterEntries = (window.AWBSessionRows && typeof window.AWBSessionRows.buildRosterEntries === 'function')
     ? window.AWBSessionRows.buildRosterEntries({ rosterRows, localRoles: localRoleRows, sessions: p && p.sessions, allEntries, roleById })
-    : (localRoleRows.length
-      ? localRoleRows.map((row) => {
-        const roleId = String(row.role || '');
-        const role = roleById.get(roleId) || { id: roleId, name: row.name, color: '#888' };
-        const mapped = p && p.sessions && p.sessions[roleId] ? String(p.sessions[roleId]) : '';
-        return { role, sessionId: mapped, stateRow: null };
-      })
-      : (Array.isArray(rosterRows) && rosterRows.length ? rosterRows.map((row) => {
-        const roleId = String((row && row.role) || '');
-        const role = roleById.get(roleId) || { id: roleId, name: String((row && row.name) || roleId), color: '#888' };
-        const mapped = p && p.sessions && p.sessions[roleId] ? String(p.sessions[roleId]) : '';
-        return { role, sessionId: mapped, stateRow: row };
-      }) : allEntries));
+    : (() => {
+      // PM 05:03：即使 session-rows.js 未加载，也按「teamRoles 骨架 + rosterRows 只作 state」出行；
+      // 只有本模式角色为空时才退回名册行/映射，绝不因 rosterRows=1 只画 1 行。
+      const roles = teamRoles(p) || [];
+      const rows = Array.isArray(rosterRows) ? rosterRows : [];
+      const rowOf = new Map(rows.map((row) => [String((row && row.role) || ''), row]));
+      const skeleton = roles.length ? roles : rows.map((row) => ({ id: String((row && row.role) || ''), name: String((row && row.name) || '') }));
+      return skeleton.map((role) => {
+        const roleId = String((role && role.id) || '');
+        return {
+          role: roleById.get(roleId) || { id: roleId, name: String((role && role.name) || roleId), color: '#888' },
+          sessionId: p && p.sessions && p.sessions[roleId] ? String(p.sessions[roleId]) : '',
+          stateRow: rowOf.get(roleId) || null
+        };
+      });
+    })();
   const entries = rosterEntries;
   const ready = entries.filter((item) => item.sessionId).length;
   const rosterTotal = cache && Number(cache.memberCount) > 0 ? Number(cache.memberCount) : (Array.isArray(rosterRows) ? rosterRows.length : 0);
