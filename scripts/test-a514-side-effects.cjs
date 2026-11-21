@@ -115,9 +115,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const teamSrc2 = fs.readFileSync(path.join(ROOT, 'src', 'team-tools.js'), 'utf8');
   const appSrc2 = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
   const mainSrc2 = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-  check('B6 快照去重：readWorkflowSnapshotRaw + snapshotMemo + 指纹 1.2s',
+  check('B6 快照去重：readWorkflowSnapshotRaw + snapshotMemo + 指纹（TTL 8000；指纹变化即失效）',
     teamSrc2.includes('function readWorkflowSnapshotRaw(') && teamSrc2.includes('const snapshotMemo = new Map()')
-    && teamSrc2.includes('function workflowSnapshotFingerprint(') && teamSrc2.includes('memo.at) < 1200'), {});
+    && teamSrc2.includes('function workflowSnapshotFingerprint(') && teamSrc2.includes('memo.at) < 8000'), {});
   check('B7 workflowResponse 不原地改快照行（enrichedRows 复制，无 row.supplements =）',
     mainSrc2.includes('const enrichedRows = []') && !mainSrc2.includes('row.supplements = rows.map('), {});
   check('B8 失败条重试在途禁用（不二次触发）', appSrc2.includes('if (retry.disabled) return;') && appSrc2.includes('retry.disabled = true'), {});
