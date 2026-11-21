@@ -32,6 +32,8 @@ const WakeTimerPolicy = require('./wake-timer-policy.js');
 const perfCache = require('./perf-cache.js');
 // B-20261118-191527-c437（P1 稳定性）：崩溃后「复活主窗 / 恢复 webview / 不误退」的纯判定逻辑（Node 可测）。
 const CrashGuard = require('./crash-guard.js');
+// R-e31b 内存预算（T-f0d1）：失焦 60s 回收判定 + guest 输入/滚动快照恢复脚本（纯逻辑，Node 可测）。
+const MemIdleReclaim = require('./mem-idle-reclaim.js');
 // R-b34a 批5：目录扫描结果缓存（files:list 等递归扫描用；键=目录 mtime+size，3s TTL 兜底）
 const dirScanCache = require('./dir-scan-cache.js');
 // B-20261120-163528-ebbb（P0）：维护调用「取最后一个完整 JSON」+ install-logs 调用日志（纯逻辑，Node 可测）
@@ -13530,6 +13532,167 @@ async function recycleRenderer(reason, trigger, projectNameHint, extra) {
   }
   return { ok: true, beforeMB: before, thresholdMB, reason, trigger, webviews };
 }
+// ── R-e31b 内存预算（T-f0d1）：失焦 60s 安全回收 guest + 主进程缓存压缩 ──
+const MEM_IDLE_MS = (() => {
+  const raw = Number(process.env.AWB_MEM_IDLE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : MemIdleReclaim.DEFAULT_IDLE_MS;
+})();
+const MEM_IDLE_THRESHOLD_MB = (() => {
+  const raw = Number(process.env.AWB_MEM_IDLE_RECLAIM_MB);
+  return Number.isFinite(raw) && raw > 0 ? raw : MemIdleReclaim.DEFAULT_THRESHOLD_MB;
+})();
+const memIdleState = { unfocusedSince: 0, episodeReclaimed: false, lastReclaimAt: 0, reclaiming: false, lastResult: null };
+function mainRssMB() { try { return Math.round((process.memoryUsage().rss / 1048576) * 10) / 10; } catch { return null; } }
+function mainHeapMB() { try { const m = process.memoryUsage(); return { rssMB: Math.round(m.rss / 1048576 * 10) / 10, heapUsedMB: Math.round(m.heapUsed / 1048576 * 10) / 10, externalMB: Math.round(m.external / 1048576 * 10) / 10 }; } catch { return null; } }
+function findDshGuest() {
+  try {
+    const guests = typeof webContents.getAllWebContents === 'function' ? webContents.getAllWebContents() : [];
+    return guests.find((contents) => {
+      try { return contents && contents.getType() === 'webview' && !contents.isDestroyed(); } catch { return false; }
+    }) || null;
+  } catch { return null; }
+}
+/** 只清“可重建”的缓存，不碰业务对象；仅在失焦/手动回收后调用，避免影响输入路径。 */
+function trimMainMemory(reason) {
+  const before = mainRssMB();
+  let cleared = 0;
+  const clearMap = (map) => { try { if (map && typeof map.clear === 'function' && map.size) { cleared += map.size; map.clear(); } } catch { /* ignore */ } };
+  try { if (appStateCache.value) { appStateCache.key = ''; appStateCache.at = 0; appStateCache.value = null; cleared += 1; } } catch { /* ignore */ }
+  clearMap(hotIpcCache);
+  clearMap(workflowStateCache);
+  clearMap(mirrorStampCache);
+  clearMap(supplementShaCache);
+  try { teamBoardHtmlCache = null; cleared += 1; } catch { /* ignore */ }
+  try { if (dirScanCache && typeof dirScanCache.clear === 'function') { dirScanCache.clear(); cleared += 1; } } catch { /* ignore */ }
+  try { storeCache = { file: '', key: '', value: null, hits: 0 }; cleared += 1; } catch { /* ignore */ }
+  let gcOk = false;
+  try {
+    const v8 = require('node:v8');
+    v8.setFlagsFromString('--expose_gc');
+    const vm = require('node:vm');
+    const gc = vm.runInNewContext('gc');
+    if (typeof gc === 'function') { gc(); gcOk = true; }
+  } catch { /* 生产不一定允许，失败不影响 */ }
+  const after = mainRssMB();
+  try { console.log(`[mem-trim] reason=${reason} cleared=${cleared} gc=${gcOk} rss ${before}MB → ${after}MB`); } catch { /* ignore */ }
+  return { ok: true, reason, cleared, gc: gcOk, beforeMB: before, afterMB: after };
+}
+function sendMemStatsNow(sample) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed() || !sample) return;
+    mainWindow.webContents.send('mem:stats', {
+      mb: sample.mb, parts: sample.parts, source: sample.source || 'getAppMetrics',
+      thresholdMB: memThresholdMB(), baselineMB: memState.baselineMB,
+      rateMBPerMin: memPolicy.growthRateMBPerMin(memState.samples, Date.now()),
+      fixedThresholdMB: MEM_FIXED_MB || null, at: Date.now(), mainRssMB: mainRssMB()
+    });
+  } catch { /* 页面未就绪 */ }
+}
+async function waitGuestLoad(guest, timeoutMs) {
+  if (!guest || guest.isDestroyed()) return false;
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => { if (done) return; done = true; try { guest.removeListener('did-finish-load', onLoad); guest.removeListener('did-fail-load', onFail); } catch { /* ignore */ } resolve(ok); };
+    const onLoad = () => finish(true);
+    const onFail = () => finish(false);
+    try { guest.once('did-finish-load', onLoad); guest.once('did-fail-load', onFail); } catch { finish(false); return; }
+    setTimeout(() => finish(false), Math.max(1000, Number(timeoutMs) || 15000));
+  });
+}
+async function restoreGuestState(guest, snapshot) {
+  if (!guest || guest.isDestroyed() || !snapshot) return null;
+  const script = MemIdleReclaim.restoreScript(snapshot);
+  const retryDelays = [800, 1800, 3500, 6000, 9000, 12000];
+  let spent = 0;
+  for (const delay of retryDelays) {
+    await new Promise((r) => setTimeout(r, Math.max(200, delay - spent)));
+    spent = delay;
+    try {
+      const result = await guest.executeJavaScript(script, true);
+      if (result && (result.restoredComposer || result.restoredScroll)) return result;
+    } catch { /* 页面还在加载，下一轮重试 */ }
+  }
+  return null;
+}
+/**
+ * 失焦 60s + 壳+guest > 阈值时的安全回收：**只重载 DSH guest，不重载壳**；
+ * 壳内输入/滚动完全不动；guest 输入草稿/滚动位置尽量恢复。绝不弹窗、不打断输入。
+ */
+async function reclaimIdleGuest(totalMB, idleForMs) {
+  if (memIdleState.reclaiming || memRecycling) return { ok: false, code: 'BUSY' };
+  memIdleState.reclaiming = true;
+  const at = new Date().toISOString();
+  const before = mainRssMB();
+  const guest = findDshGuest();
+  let snapshot = null;
+  if (guest) {
+    try { snapshot = await guest.executeJavaScript(MemIdleReclaim.captureScript(), true); } catch { snapshot = null; }
+  }
+  let reloaded = false;
+  let reloadError = '';
+  if (guest) {
+    try { guest.reload(); reloaded = true; } catch (error) { reloadError = String((error && error.message) || error).slice(0, 200); }
+  } else reloadError = 'DSH_WEBVIEW_MISSING';
+  if (!reloaded) {
+    memIdleState.reclaiming = false;
+    const failed = { ok: false, code: reloadError === 'DSH_WEBVIEW_MISSING' ? 'DSH_WEBVIEW_MISSING' : 'GUEST_RELOAD_FAILED', message: reloadError, beforeMB: before, at };
+    memIdleState.lastResult = failed;
+    console.log('[mem-idle] guest reload failed ' + JSON.stringify(failed));
+    return failed;
+  }
+  await waitGuestLoad(guest, 20000);
+  const restore = await restoreGuestState(guest, snapshot);
+  // 等进程回收后再采样；标题栏 mem-badge 由这次 mem:stats 刷新。
+  await new Promise((r) => setTimeout(r, 3500));
+  const sample = await sampleRendererMem();
+  const afterMB = sample ? sample.mb : null;
+  const trim = trimMainMemory('idle-blur');
+  const afterMain = mainRssMB();
+  try { sendMemStatsNow(sample); } catch { /* ignore */ }
+  memIdleState.lastReclaimAt = Date.now();
+  memIdleState.episodeReclaimed = true;
+  memIdleState.reclaiming = false;
+  const result = { ok: true, trigger: 'idle-blur', at, rendererBeforeMB: Number(totalMB) || null, rendererAfterMB: afterMB, mainRssBeforeMB: before, mainRssAfterMB: afterMain, trim, restore, snapshot: snapshot ? { href: snapshot.href, hasComposer: Boolean(snapshot.composer && snapshot.composer.text), scrollY: snapshot.scrollY, scrollables: Array.isArray(snapshot.scrollables) ? snapshot.scrollables.map((x) => ({ id: x.id, tag: x.tag, top: x.top })) : [] } : null, idleForMs: Number(idleForMs) || null };
+  memIdleState.lastResult = result;
+  try {
+    appendMemAudit({ at, trigger: 'idle-blur', beforeMB: Number(totalMB) || null, afterMB, mainRssBeforeMB: before, mainRssAfterMB: afterMain, idleForMs: Number(idleForMs) || null, restore, snapshot: result.snapshot });
+  } catch { /* ignore */ }
+  try { console.log('[mem-idle] ' + JSON.stringify(result)); } catch { /* ignore */ }
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('mem:idle-reclaimed', result); } catch { /* ignore */ }
+  return result;
+}
+function checkIdleReclaim(sample) {
+  if (!mainWindow || mainWindow.isDestroyed() || !sample || memIdleState.reclaiming) return;
+  let focused = true;
+  try { focused = mainWindow.isFocused(); } catch { focused = true; }
+  const now = Date.now();
+  if (focused) {
+    memIdleState.unfocusedSince = 0;
+    memIdleState.episodeReclaimed = false;
+    return;
+  }
+  if (!memIdleState.unfocusedSince) memIdleState.unfocusedSince = now;
+  // 主进程 RSS 超预算时，失焦期间周期性清“可重建缓存”并 GC（不碰输入路径）。
+  try {
+    const rss = mainRssMB();
+    if (Number.isFinite(rss) && rss > 400 && now - (memIdleState.lastMainTrimAt || 0) > 60000) {
+      memIdleState.lastMainTrimAt = now;
+      trimMainMemory('idle-rss');
+    }
+  } catch { /* ignore */ }
+  const decision = MemIdleReclaim.decideIdleReclaim({
+    now, focused, totalMB: sample.mb, idleMs: MEM_IDLE_MS, thresholdMB: MEM_IDLE_THRESHOLD_MB,
+    unfocusedSince: memIdleState.unfocusedSince, episodeReclaimed: memIdleState.episodeReclaimed,
+    lastReclaimAt: memIdleState.lastReclaimAt,
+  });
+  if (!decision.reclaim) return;
+  memIdleState.episodeReclaimed = true;
+  reclaimIdleGuest(sample.mb, decision.idleForMs).catch((error) => {
+    memIdleState.reclaiming = false;
+    console.log('[mem-idle] failed ' + String((error && error.message) || error).slice(0, 200));
+  });
+}
+
 function startMemSampler() {
   if (memSampler) return;
   memSampler = setInterval(async () => {
@@ -13555,9 +13718,10 @@ function startMemSampler() {
       mainWindow.webContents.send('mem:stats', {
         mb, parts: sample.parts, source: sample.source || 'webContents',
         thresholdMB, baselineMB: memState.baselineMB, rateMBPerMin,
-        fixedThresholdMB: MEM_FIXED_MB || null, at: now,
+        fixedThresholdMB: MEM_FIXED_MB || null, at: now, mainRssMB: mainRssMB(),
       });
     } catch { /* 页面未就绪 */ }
+    checkIdleReclaim(sample);
     if (memRecycling) return;
     const decision = memPolicy.shouldAutoRecycle({
       mb, now, thresholdMB, rateMBPerMin,
@@ -13588,6 +13752,18 @@ ipcMain.handle('mem:stats-get', async () => ({
   baselineMB: memState.baselineMB,
   rateMBPerMin: memPolicy.growthRateMBPerMin(memState.samples, Date.now()),
   fixedThresholdMB: MEM_FIXED_MB || null,
+  mainRssMB: mainRssMB(),
+}));
+// R-e31b 内存预算：主进程 RSS/堆与失焦回收状态（只读，供验收断面与标题栏旁证）
+ipcMain.handle('mem:main-rss', () => ({ ok: true, ...mainHeapMB(), targetMB: 400 }));
+ipcMain.handle('mem:idle-state', () => ({
+  ok: true, focused: mainWindow && !mainWindow.isDestroyed() ? mainWindow.isFocused() : null,
+  idleMs: MEM_IDLE_MS, thresholdMB: MEM_IDLE_THRESHOLD_MB,
+  unfocusedSince: memIdleState.unfocusedSince || null,
+  idleForMs: memIdleState.unfocusedSince ? Math.max(0, Date.now() - memIdleState.unfocusedSince) : 0,
+  episodeReclaimed: memIdleState.episodeReclaimed, reclaiming: memIdleState.reclaiming,
+  lastReclaimAt: memIdleState.lastReclaimAt || null, lastResult: memIdleState.lastResult || null,
+  mainRssMB: mainRssMB(),
 }));
 // 手动「立即回收」：不经过阈值/速率/冷却判定（任务③），只受“正在回收”锁约束。
 ipcMain.handle('mem:recycle', async () => recycleRenderer('Owner/PM 手动点击「立即回收」', 'manual', undefined, { cause: '手动' }));
