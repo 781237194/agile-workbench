@@ -3228,6 +3228,8 @@ function renderSessions() {
   const localRoleRows = (teamRoles(p) || []).map((role) => ({ role: String(role.id || ''), name: role.name }));
   // P0（Owner 0509：rosterRows 只有 1 行时仍只画 1 行）：**行数只由本模式角色决定**，
   // rosterRows 仅作为「状态来源」（stateRow），不再决定画几行。纯逻辑抽在 session-rows.js，假 DOM 可测。
+  // PM 05:02（M-20261121-050229-42361f）：行数只由本模式角色（teamRoles）决定，rosterRows 只作 state 来源；
+  // 并集/空态逻辑在 session-rows.js（rosterRows=1 也出 6 行，仅 trulyEmptyRoster 才空态）。
   const rosterEntries = (window.AWBSessionRows && typeof window.AWBSessionRows.buildRosterEntries === 'function')
     ? window.AWBSessionRows.buildRosterEntries({ rosterRows, localRoles: localRoleRows, sessions: p && p.sessions, allEntries, roleById })
     : (localRoleRows.length
