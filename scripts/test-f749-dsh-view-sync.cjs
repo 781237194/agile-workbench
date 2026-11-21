@@ -115,6 +115,16 @@ async function shot(cdp, file) {
 }
 
 (async () => {
+  const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const reloadFn = (appSrc.match(/function reloadDshView\([\s\S]*?\n\}/) || [''])[0];
+  check('V0a', 'reloadDshView 先 applyDshViewSrc 再决定 reload（无裸 view.reload 第一句）', /applyDshViewSrc\(false, 'reload'\)/.test(reloadFn) && reloadFn.indexOf("applyDshViewSrc(false, 'reload')") < reloadFn.indexOf('if (!repointed)') && /if \(!repointed\)[\s\S]{0,120}view\.reload\(\)/.test(reloadFn), { hasApply: /applyDshViewSrc\(false, 'reload'\)/.test(reloadFn), hasReload: /if \(!repointed\)[\s\S]{0,120}view\.reload\(\)/.test(reloadFn) });
+  check('V0b', 'renderDsh 每次同步 webview（syncDshViewWithStatus）', /syncDshViewWithStatus\(dsh\)/.test(appSrc));
+  check('V0c', 'did-fail-load 记录 URL/错误码（dshViewError）', /did-fail-load[\s\S]{0,800}dshViewError\s*=/.test(appSrc));
+  if (process.env.AWB_F749_STATIC === '1') {
+    console.log('\n' + R.filter((x) => x.ok).length + '/' + R.length + ' PASS');
+    process.exitCode = R.some((x) => !x.ok) ? 1 : 0;
+    return;
+  }
   const freeMB = Math.round(os.freemem() / 2 ** 20);
   if (freeMB < 2048 && String(process.env.AWB_F749_ALLOW_LOW_MEM || '') !== '1') { console.log('REFUSED_LOW_MEMORY freeMB=' + freeMB + '（<2GB 不起真窗口）'); process.exitCode = 2; return; }
   fs.mkdirSync(OUT, { recursive: true });

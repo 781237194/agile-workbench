@@ -16149,7 +16149,12 @@ function reloadDshView(opts = {}) {
   if (!view) return false;
   dshViewFailed = false;
   dshReady = false;
-  try { view.reload(); } catch { applyDshViewSrc(); }
+  // B-f749（PM 04:43）：旧实现直接 view.reload()，重载的是当前已失效的 src。
+  // 先 applyDshViewSrc() 把 webview 指回 state.dsh.baseUrl；src 已等于 baseUrl 才直接 reload。
+  const repointed = applyDshViewSrc(false, 'reload');
+  if (!repointed) {
+    try { view.reload(); } catch { /* ignore */ }
+  }
   renderDsh(state?.dsh);
   // B-405f 补充：重载聊天区的同时重读会话映射，成员列表/计数一起刷新（不用重启工作台）。
   if (window.__teamRoster && typeof window.__teamRoster.sync === 'function') {
