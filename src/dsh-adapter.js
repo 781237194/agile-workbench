@@ -377,12 +377,54 @@ function dshHomeDirs(env) {
   });
 }
 
-/** 读端口文件候选：只读已知文件名，不遍历目录，失败一律返回空数组（不抛）。 */
+/** 读 `~/.dsh/dsh-config-manager/running/*.json`（插件写的运行描述，常有 port/pid/updatedAt）。 */
+function readDshConfigManagerPorts(env, sink) {
+  const found = [];
+  const report = (row) => { try { if (Array.isArray(sink)) sink.push(row); } catch { /* ignore */ } };
+  const seen = new Set();
+  for (const home of dshHomeDirs(env)) {
+    const dir = path.join(home, 'dsh-config-manager', 'running');
+    let names = [];
+    try { names = fs.readdirSync(dir).filter((name) => /\.json$/i.test(name)).slice(0, 50); } catch { continue; }
+    const rows = [];
+    for (const name of names) {
+      const file = path.join(dir, name);
+      try {
+        const stat = fs.statSync(file);
+        if (!stat.isFile() || stat.size > 64 * 1024) continue;
+        const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const port = Number(data && (data.port || data.webPort || data.web_port)) || parsePortFileText(JSON.stringify(data));
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          report({ file, exists: true, raw: String(JSON.stringify(data)).slice(0, 64), port: 0, note: '无有效端口' });
+          continue;
+        }
+        const updated = Number(data && data.updatedAt) || stat.mtimeMs || 0;
+        rows.push({ file, port, baseUrl: 'http://127.0.0.1:' + port, raw: String(JSON.stringify(data)).slice(0, 64), updated, pid: Number(data && data.pid) || 0 });
+      } catch { report({ file, exists: true, raw: '', port: 0, note: 'JSON 不可读' }); }
+    }
+    rows.sort((a, b) => b.updated - a.updated);
+    for (const row of rows) {
+      if (seen.has(row.port)) continue;
+      seen.add(row.port);
+      report({ file: row.file, exists: true, raw: row.raw, port: row.port, note: 'config-manager' });
+      found.push(row);
+    }
+  }
+  return found;
+}
+
+/** 读端口文件候选：config-manager 运行描述优先，再看 ~/.dsh/*.port；只读已知位置，失败返回空。 */
 function readDshPortFiles(env, sink) {
   const files = ['gui.port', 'web.port', 'port', 'dsh.port'];
   const found = [];
   const report = (row) => { try { if (Array.isArray(sink)) sink.push(row); } catch { /* 读数不影响发现 */ } };
   const seenPorts = new Set();
+  // PM 2026-11-22 05:39：真实部署里 ~/.dsh/*.port 全不存在；插件写的 running/*.json 才是常用落点。
+  for (const row of readDshConfigManagerPorts(env, sink)) {
+    if (seenPorts.has(row.port)) continue;
+    seenPorts.add(row.port);
+    found.push({ file: row.file, port: row.port, baseUrl: row.baseUrl, raw: row.raw, source: 'config-manager', pid: row.pid });
+  }
   for (const dir of dshHomeDirs(env)) {
     for (const name of files) {
       const file = path.join(dir, name);
@@ -834,7 +876,10 @@ function isDshProcess(proc) {
   if (isDshHelperProcess(cmd)) return false;
   const nameMatch = /^(?:deepseek[ -]?harness(?:\.exe)?|dsh(?:\.exe)?|dsh-web(?:\.exe)?)$/i.test(name);
   const cmdMatch = /dsh-desktop-host|[\\/]@deepseek-ai[\\/]dsh(?:[\\/]|\s|$)|[\\/]dsh[\\/](?:bin|lib)[\\/]|(?:^|[\\/ ])dsh(?:\.exe)?(?:\s|$)/i.test(cmd);
-  return nameMatch || cmdMatch;
+  // T-dcb5：CLI 形态是 node 进程（不是 dsh-desktop-host），必须按命令行识别，否则任意端口兜底会漏。
+  const nodeCli = /^(?:node|nodejs)(?:\.exe)?$/i.test(name)
+    && /(?:[\\/]dsh(?:[\\/]|\.exe)|[\\/]@deepseek-ai[\\/]dsh[\\/]|(?:^|\s)dsh-cli(?:\s|$)|dsh-desktop-host)/i.test(cmd);
+  return nameMatch || cmdMatch || nodeCli;
 }
 
 function extractPortsFromCommandLine(commandLine) {
