@@ -13,6 +13,7 @@ import { initialScenarioConfirm } from './scenario-confirm.mjs';
 import { DEFAULT_IRON, bootDocSpecs, readDocRecord, readRequirementDocs } from './scaffold.mjs';
 // R-75ec：任务层 Owner 门禁唯一判定入口（gates.mjs → taskGateOf）；此处只调用、不自己判 decisions。
 import { taskGateOf, auditGate } from './gates.mjs';
+import { writeJsonAtomic } from './json-atomic.mjs';
 
 // 角色常量单一真相在 roles.mjs；这里重导出，保持旧调用方向不变。
 export { ROLES, ROLE_NAMES };
@@ -696,7 +697,8 @@ export function writeTeamFileAtomic(team, source = 'store/writeTeamFileAtomic', 
     event: 'roster_write', source: sourceText, stack,
     beforeCount: before.nonEmpty, afterCount: after.nonEmpty,
   });
-  return writeJson(PATHS.team, team);
+  // T-1205：真正落盘也统一走 json-atomic 唯一出口（自动受 team.json 全清守卫保护）。
+  return writeJsonAtomic(PATHS.team, team, { case: sourceText, allowRosterClear: options.allowClear === true });
 }
 
 export function saveTeam(team, options = {}) {

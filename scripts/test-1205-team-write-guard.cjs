@@ -60,6 +60,18 @@ function auditRows() {
 (async () => {
   writeTeam(makeTeam(false));
   const store = await import(require('node:url').pathToFileURL(path.join(REAL_REPO, '团队', '工具', 'lib', 'store.mjs')).href);
+  const jsonAtomic = await import(require('node:url').pathToFileURL(path.join(REAL_REPO, '团队', '工具', 'lib', 'json-atomic.mjs')).href);
+
+  check('jsonAtomic 直接写 teamFile 也拒全清（6 处直写统一受保护）', () => {
+    const before = fs.readFileSync(teamFile, 'utf8');
+    let code = '';
+    try { jsonAtomic.writeJsonAtomic(teamFile, makeTeam(true), { case: 'test/json-direct' }); } catch (error) { code = String((error && error.code) || ''); }
+    assert.strictEqual(code, 'ROSTER_CLEAR_BLOCKED');
+    assert.strictEqual(fs.readFileSync(teamFile, 'utf8'), before);
+    const blocked = auditRows().find((row) => row.event === 'roster_cleared_blocked' && row.case === 'test/json-direct');
+    assert.ok(blocked, '缺 json-atomic case 审计');
+    assert.ok(Array.isArray(blocked.stack) && blocked.stack.length >= 1, '审计缺 stack');
+  });
 
   check('写后六角色全空：拒写且文件不变', () => {
     const before = fs.readFileSync(teamFile, 'utf8');
@@ -69,7 +81,7 @@ function auditRows() {
     assert.strictEqual(code, 'ROSTER_CLEAR_BLOCKED');
     assert.strictEqual(fs.readFileSync(teamFile, 'utf8'), before);
     const rows = auditRows();
-    const blocked = rows.find((row) => row.event === 'roster_cleared_blocked');
+    const blocked = rows.find((row) => row.event === 'roster_cleared_blocked' && row.source === 'test/clear-all');
     assert.ok(blocked, '缺 roster_cleared_blocked 审计');
     assert.strictEqual(blocked.source, 'test/clear-all');
     assert.ok(Array.isArray(blocked.stack) && blocked.stack.length >= 1, '审计缺 stack');

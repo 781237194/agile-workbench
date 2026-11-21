@@ -231,8 +231,48 @@ function readJsonSafe(file) {
 }
 
 /** 锁外单次写：调用方自己保证互斥（writeJsonAtomic 内部会取锁；内部函数不取锁）。 */
+function teamRosterNonEmptyCount(data) {
+  const members = Array.isArray(data && data.members) ? data.members : [];
+  return members.filter((m) => m && String(m.sessionId || '').trim()).length;
+}
+
+/** T-1205（P0）：团队.json 的整文件写唯一硬保险（所有 writeJsonAtomic/updateJsonAtomic 都经过这里）。 */
+function assertTeamRosterNotCleared(file, data, opts) {
+  if (path.basename(String(file || '')) !== '团队.json') return;
+  if (opts && opts.allowRosterClear === true) return;
+  let before = null;
+  try { before = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* 首建/坏文件按 0 */ }
+  const beforeCount = teamRosterNonEmptyCount(before);
+  const afterCount = teamRosterNonEmptyCount(data);
+  if (beforeCount > 0 && afterCount === 0) {
+    const project = String((opts && opts.project) || (data && data.activeProject) || (before && before.activeProject) || '');
+    const row = {
+      at: nowIso(),
+      event: 'roster_cleared_blocked',
+      by: 'json-atomic',
+      source: String((opts && opts.case) || 'jsonAtomic.writeJsonAtomic'),
+      case: String((opts && opts.case) || ''),
+      stack: String(new Error().stack || '').split('\n').slice(1, 6),
+      project,
+      before,
+      after: data,
+      code: 'ROSTER_CLEAR_BLOCKED',
+    };
+    try {
+      const dir = project ? path.join(path.dirname(file), '项目', project) : path.dirname(file);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, '名册变更.jsonl'), JSON.stringify(row) + '\n', 'utf8');
+    } catch { /* 审计失败不掩盖拒写 */ }
+    appendAudit(file, opts, { result: 'blocked', code: 'ROSTER_CLEAR_BLOCKED', prevSha: shaOfFile(file), newSha: '' });
+    throw new AtomicError('ROSTER_CLEAR_BLOCKED', `拒写 ${path.basename(file)}：写前 ${beforeCount} 个非空 sessionId，写后 0 个（case=${row.case || '(空)'}）；已记 名册变更.jsonl`, {
+      file, case: row.case, beforeCount, afterCount, project,
+    });
+  }
+}
+
 function writeJsonAtomicRaw(file, data, opts) {
   assertPath(file, opts);
+  assertTeamRosterNotCleared(file, data, opts);
   const buf = Buffer.from(JSON.stringify(data, null, 2) + '\n', 'utf8');
   const prevSha = shaOfFile(file);
   const prev = (opts && opts.prevSha !== undefined && opts.prevSha !== null) ? String(opts.prevSha) : null;

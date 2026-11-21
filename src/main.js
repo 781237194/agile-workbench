@@ -10272,7 +10272,7 @@ ipcMain.handle('theme:metrics', async () => {
       // ── 步骤 3：写团队.json（先于归档：归档失败不能导致名册回写）────────────
       step('team-write', () => {
         if (!team || !roster || !roster.teamChanged) return null;
-        jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'panelTeamSync' });
+        jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: 'panelTeamSync', allowRosterClear: true });
         removed.teamWrites = (removed.teamWrites || 0) + 1;
         return null;
       });
@@ -24984,7 +24984,7 @@ function sweepRosterFromTombstone(teamName) {
     }
     if (team && team.activeProject && String(team.activeProject) === String(teamName)) { team.activeProject = null; teamChanged = true; }
     if (!teamChanged) return { cleared: false, reason: "already-empty" };
-    jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: "panelTeamSync" });
+    jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: "panelTeamSync", allowRosterClear: true });
     try {
       teamTools.appendRosterAudit(String(teamName), {
         event: 'roster_cleared', source: 'shell/deletion-tombstone', cleared: roles,
