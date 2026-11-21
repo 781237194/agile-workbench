@@ -932,7 +932,57 @@
         source: 'sync'
       });
     } catch (e) { /* 诊断失败不影响渲染 */ }
+    try { notifyOverlay(); } catch (e) { /* 覆盖窗不可用时主窗画布仍兜底 */ }
     return { level: S.mode, reasons: S.reasons.slice() };
+  }
+
+  /* ── T-77e4：透明覆盖窗状态 + 连接态层级证据（不改主画布） ─────────────── */
+  function overlayState() {
+    var cfg = S.cfg || {};
+    return {
+      mode: S.mode,
+      count: S.parts.length,
+      colors: Array.isArray(cfg.paletteSample) ? cfg.paletteSample.slice(0, 6).map(String) : [],
+      opacityRange: Array.isArray(cfg.opacityRange) ? cfg.opacityRange.slice(0, 2) : [0.15, 0.55],
+      degraded: Boolean(S.degraded.particles),
+      paused: Boolean(S.paused),
+      enabled: S.mode === 'full' && !S.degraded.particles && !S.paused && S.parts.length > 0 && W.__awbFxOverlayOnline === true
+    };
+  }
+  function notifyOverlay() {
+    if (!W.workbench || typeof W.workbench.fxOverlayState !== 'function') return;
+    try { W.workbench.fxOverlayState(overlayState()); } catch (e) { /* ignore */ }
+  }
+  /** 连接态层级证据：computed z-index/position、中心 elementFromPoint、webview 几何。 */
+  function layerEvidence() {
+    var layer = S.layer || D.getElementById('fx-layer');
+    var webview = D.getElementById('dsh-view');
+    var center = { x: Math.round((W.innerWidth || 0) / 2), y: Math.round((W.innerHeight || 0) / 2) };
+    var hit = null;
+    try { hit = D.elementFromPoint(center.x, center.y); } catch (e) { hit = null; }
+    var styleOf = function (node) {
+      if (!node || !W.getComputedStyle) return null;
+      var cs = W.getComputedStyle(node);
+      var r = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+      return {
+        id: String(node.id || ''), tag: String(node.tagName || '').toLowerCase(),
+        zIndex: String(cs.zIndex || ''), position: String(cs.position || ''),
+        display: String(cs.display || ''), visibility: String(cs.visibility || ''),
+        rect: r ? { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) } : null
+      };
+    };
+    return {
+      at: Date.now(),
+      viewport: { w: W.innerWidth, h: W.innerHeight },
+      layer: styleOf(layer),
+      layerIsBodyChild: Boolean(layer && layer.parentElement === D.body),
+      webview: styleOf(webview),
+      webviewSrc: webview ? String(webview.getAttribute('src') || '') : '',
+      elementFromPoint: hit ? { id: String(hit.id || ''), tag: String(hit.tagName || '').toLowerCase(), className: String(hit.className || '') } : null,
+      canvas: S.canvas ? { w: S.canvas.width, h: S.canvas.height, particles: Number(S.canvas.getAttribute('data-fx-particles') || 0) } : null,
+      overlay: overlayState(),
+      mode: S.mode
+    };
   }
 
   /* ── 采样：粒子可见度（AC15 / 卷 §四.3） ──────────────────────────────── */
@@ -1443,6 +1493,9 @@
     sync: sync,
     sample: sample,
     themeStateFx: themeStateFx,
+    overlayState: overlayState,
+    layerEvidence: layerEvidence,
+    notifyOverlay: notifyOverlay,
     describe: describe,
     effects: effects,
     particleCount: particleCount,
@@ -1461,4 +1514,5 @@
     mode: function () { return { level: S.mode, reasons: S.reasons.slice(), forced: S.reasons.indexOf('forced:true') >= 0 }; },
     degraded: degradedInfo
   };
+  try { W.__fxLayerEvidence = layerEvidence; } catch (e) { /* ignore */ }
 })();

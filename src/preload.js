@@ -30,6 +30,9 @@ if (IS_BOARD_WINDOW) {
   // 7a3b 补口：强制开启落盘（重启保持）
   fxForceGet: () => ipcRenderer.invoke('theme:fx-force-get'),
   fxForceSet: (force) => ipcRenderer.invoke('theme:set-fx-force', force),
+  // T-77e4：透明覆盖窗粒子状态（主窗 fx-layer → 主进程 → 覆盖窗；鼠标事件不经过它）。
+  fxOverlayState: (state) => ipcRenderer.send('fx:overlay-state', state),
+  fxOverlayStatus: () => ipcRenderer.invoke('fx:overlay-status'),
   // e610：在线升级（版本 / 检查 / 一步升级）
   appVersion: () => ipcRenderer.invoke('app:version'),
   upgradeCheck: (payload) => ipcRenderer.invoke('app:upgrade-check', payload),

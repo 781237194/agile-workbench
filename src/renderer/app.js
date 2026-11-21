@@ -16033,6 +16033,14 @@ function renderDsh(dsh) {
   const detail = $('#dsh-detail');
   const online = Boolean(dsh && dsh.online);
   const configured = Boolean(dsh && dsh.configured);
+  // T-77e4：连接后 webview 是独立合成层，会盖住主窗 #fx-layer；在线时由透明覆盖窗画粒子。
+  try {
+    window.__awbFxOverlayOnline = online;
+    if (window.AWB_FX && typeof window.AWB_FX.notifyOverlay === 'function') window.AWB_FX.notifyOverlay();
+    else if (window.workbench && typeof window.workbench.fxOverlayState === 'function') {
+      window.workbench.fxOverlayState({ enabled: false, count: 0, colors: [], opacityRange: [0.15, 0.55], mode: 'full' });
+    }
+  } catch { /* 覆盖窗不可用时主窗 canvas 兜底 */ }
   const stateLabel = online ? 'DSH 已连接' : (configured ? 'DSH 离线' : 'DSH 未配置');
 
   if (pill) {

@@ -399,6 +399,28 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
       return { ok: false, code: 'FX_LOG_WRITE_FAILED' };
     }
   });
+  // T-77e4：透明覆盖窗状态（主窗 fx-layer 推送；覆盖窗只读渲染，不接触浏览器业务数据）。
+  rawIpcHandle('fx:overlay-status', () => ({
+    ok: true,
+    ready: Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayReady),
+    visible: Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayWindow.isVisible()),
+    state: fxOverlayState,
+  }));
+  ipcMain.on('fx:overlay-ready', () => {
+    fxOverlayReady = true;
+    try { pushFxOverlayState(); } catch { /* ignore */ }
+  });
+  ipcMain.on('fx:overlay-state', (_event, state) => {
+    if (!state || typeof state !== 'object') return;
+    fxOverlayState = {
+      enabled: state.enabled === true,
+      count: Math.max(0, Math.min(1200, Number(state.count) || 0)),
+      colors: Array.isArray(state.colors) ? state.colors.slice(0, 8).map(String) : [],
+      opacityRange: Array.isArray(state.opacityRange) ? state.opacityRange.slice(0, 2).map(Number) : [0.15, 0.55],
+      mode: String(state.mode || 'full'),
+    };
+    try { pushFxOverlayState(); } catch { /* ignore */ }
+  });
   // ── e610 在线升级：版本 / 检查 / 一步升级 / 审计（沙盘只验 UI+审计，不真实升级）────────
   let upgradeBusy = false;
   const upgradeRecordFile = () => path.join(LOCAL_DATA, '升级记录.jsonl');
@@ -2866,6 +2888,11 @@ function reconcileProjectCommStatesCached(store) {
 }
 
 let mainWindow = null;
+// T-77e4：连接态粒子覆盖窗（webview 独立合成，DOM #fx-layer 会被盖住）。
+let fxOverlayWindow = null;
+let fxOverlayState = { enabled: false, count: 0, colors: [], opacityRange: [0.15, 0.55], mode: 'full' };
+let fxOverlayReady = false;
+let fxOverlayBoundsTimer = null;
 let teamBoardWindow = null;
 let teamBoardProjectId = null;
 let teamBoardProjectPath = null;
@@ -14216,6 +14243,76 @@ function scheduleBoardPregeneration() {
   } catch { /* 预生成失败不影响启动 */ }
 }
 
+/* ── T-77e4：连接态粒子透明覆盖窗 ───────────────────────────────────────
+   DSH 是 <webview>（独立合成），主窗 DOM 的 #fx-layer 即使 z-index 9600 也会被盖住。
+   覆盖窗 transparent + frame:false + parent 主窗 + setIgnoreMouseEvents(true,{forward:true})，
+   只绘制粒子；鼠标/键盘/滚动全部透传给主窗，离线时隐藏（主窗 canvas 继续兜底）。 */
+function fxOverlayBoundsOfMain() {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return null;
+    const b = mainWindow.getBounds();
+    return { x: b.x, y: b.y, width: Math.max(1, b.width), height: Math.max(1, b.height) };
+  } catch { return null; }
+}
+function syncFxOverlayBounds() {
+  if (!fxOverlayWindow || fxOverlayWindow.isDestroyed()) return;
+  const bounds = fxOverlayBoundsOfMain();
+  if (!bounds) return;
+  try { fxOverlayWindow.setBounds(bounds); } catch { /* ignore */ }
+}
+function pushFxOverlayState() {
+  if (!fxOverlayWindow || fxOverlayWindow.isDestroyed()) return;
+  const visible = Boolean(fxOverlayState.enabled && mainWindow && !mainWindow.isDestroyed()
+    && mainWindow.isVisible() && !mainWindow.isMinimized());
+  try { fxOverlayWindow.webContents.send('fx:overlay-state', fxOverlayState); } catch { /* ignore */ }
+  if (visible) {
+    syncFxOverlayBounds();
+    try { if (!fxOverlayWindow.isVisible()) fxOverlayWindow.showInactive(); } catch { /* ignore */ }
+  } else {
+    try { if (fxOverlayWindow.isVisible()) fxOverlayWindow.hide(); } catch { /* ignore */ }
+  }
+}
+function ensureFxOverlayWindow() {
+  if (fxOverlayWindow && !fxOverlayWindow.isDestroyed()) return fxOverlayWindow;
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  // 自测沙盘不建额外窗口，避免污染进程数/截图与自检报告。
+  if (IS_SELFTEST) return null;
+  try {
+    fxOverlayWindow = new BrowserWindow({
+      ...fxOverlayBoundsOfMain(),
+      frame: false, transparent: true, backgroundColor: '#00000000', hasShadow: false,
+      resizable: false, movable: false, minimizable: false, maximizable: false,
+      focusable: false, skipTaskbar: true, show: false, parent: mainWindow, modal: false,
+      webPreferences: {
+        preload: path.join(__dirname, 'preload-fx-overlay.js'),
+        contextIsolation: true, nodeIntegration: false, sandbox: false,
+      },
+    });
+    fxOverlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    fxOverlayWindow.loadFile(path.join(__dirname, 'renderer', 'fx-overlay.html'));
+    fxOverlayWindow.on('closed', () => { fxOverlayWindow = null; fxOverlayReady = false; });
+    fxOverlayWindow.webContents.on('did-finish-load', () => { syncFxOverlayBounds(); pushFxOverlayState(); });
+    return fxOverlayWindow;
+  } catch (error) {
+    try { console.warn('[fx-overlay] create failed ' + String((error && error.message) || error).slice(0, 160)); } catch { /* ignore */ }
+    fxOverlayWindow = null;
+    return null;
+  }
+}
+function bindFxOverlayToMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const ensure = () => { try { ensureFxOverlayWindow(); } catch { /* ignore */ } };
+  mainWindow.on('resize', () => { syncFxOverlayBounds(); if (fxOverlayBoundsTimer) clearTimeout(fxOverlayBoundsTimer); fxOverlayBoundsTimer = setTimeout(syncFxOverlayBounds, 30); });
+  mainWindow.on('move', () => { syncFxOverlayBounds(); if (fxOverlayBoundsTimer) clearTimeout(fxOverlayBoundsTimer); fxOverlayBoundsTimer = setTimeout(syncFxOverlayBounds, 30); });
+  mainWindow.on('show', () => { ensure(); pushFxOverlayState(); });
+  mainWindow.on('hide', () => { pushFxOverlayState(); });
+  mainWindow.on('minimize', () => { try { if (fxOverlayWindow) fxOverlayWindow.hide(); } catch { /* ignore */ } });
+  mainWindow.on('restore', () => { ensure(); pushFxOverlayState(); });
+  mainWindow.on('closed', () => { try { if (fxOverlayWindow && !fxOverlayWindow.isDestroyed()) fxOverlayWindow.close(); } catch { /* ignore */ } fxOverlayWindow = null; });
+  mainWindow.webContents.on('did-finish-load', () => { ensure(); pushFxOverlayState(); });
+  ensure();
+}
+
 function createWindow() {
   const bounds = initialWindowBounds();
   mainWindow = new BrowserWindow({
@@ -14233,6 +14330,7 @@ function createWindow() {
     }
   });
   markStartup('windowCreated');
+  try { bindFxOverlayToMainWindow(); } catch { /* 覆盖窗失败时主窗 canvas 兜底 */ }
   mainWindow.webContents.on('did-start-loading', () => { if (!startupMarks.loadStart) markStartup('loadStart'); });
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // PM 2026-11-18 20:42：app ready 后**后台低优先级预生成** 看板.html，让用户首次打开看板也命中磁盘缓存
