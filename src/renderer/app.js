@@ -2776,8 +2776,9 @@ function showTab(name, opts = {}) {
   if (changed && !opts.fromRender && opts.open !== false) setDrawer('project', { keepScroll: true });
   if (name === 'files') loadFiles();
   if (name === 'docs' || name === 'roles' || name === 'flow') loadLegacyDocs();
-  if (name === 'flow') { loadGateCheck(); loadGateAudit(); }
-  if (name === 'roles') loadDshTeamStatus();
+  if (name === 'flow') { loadGateCheck(); loadGateAudit(); renderFlow(); }
+  if (name === 'roles') { loadDshTeamStatus(); renderRoles(); }
+  if (name === 'docs') renderLegacyDocs();
 }
 
 /* ── 总渲染 ───────────────────────────────────────────── */
@@ -9631,10 +9632,11 @@ function renderLegacyPanels() {
   if (!state) return;
   renderTruthStrip();
   renderOverview();
-  renderLegacyDocs();
-  renderRoles();
-  renderFlow();
+  // T-0f58：只渲染当前 tab 的大列表；隐藏 tab 不重绘（切 tab 时由 showTab 单独触发一次）。
+  if (activeTab === 'docs') renderLegacyDocs();
   renderLegacyRequirements();
+  if (activeTab === 'roles') renderRoles();
+  renderFlow();
   renderLegacyTeamGate();
   renderHeader();
   renderVotes();
@@ -14126,6 +14128,9 @@ function flowRenderSignature(p) {
 function renderFlow() {
   const p = activeProject();
   const board = $('#flow-board');
+  // T-20261121-221004-0f58（内存预算）：flow 浮窗隐藏且不在 flow 页时**不渲染、不读数据**（打开时由 showTab 触发一次）。
+  const flowPanelEl = $('#flow-panel');
+  if ((!flowPanelEl || flowPanelEl.hidden) && activeTab !== 'flow') return;
   const meta = $('#flow-meta');
   const summary = $('#flow-summary');
   const mini = $('#flow-mini');
@@ -15122,16 +15127,45 @@ function markdownToHtml(source) {
 }
 
 /** 只走主进程 files:read；不再回退 file://，否则会绕过 realpath 和大小限制。 */
+// T-0f58（内存预算）：图片预览解码缓存上限——最多 8 张且 dataUrl 总量 ≤64MB，LRU 淘汰；统计可查 __awbImageCacheStats。
+const IMAGE_PREVIEW_CACHE_MAX = 8;
+const IMAGE_PREVIEW_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const imagePreviewCache = new Map();
+function imageCacheStats() {
+  let bytes = 0;
+  for (const v of imagePreviewCache.values()) bytes += Number(v.bytes || 0);
+  return { entries: imagePreviewCache.size, bytes, maxEntries: IMAGE_PREVIEW_CACHE_MAX, maxBytes: IMAGE_PREVIEW_CACHE_MAX_BYTES };
+}
+try { window.__awbImageCacheStats = imageCacheStats; } catch { /* ignore */ }
+function imageCachePut(key, value) {
+  try {
+    imagePreviewCache.delete(key);
+    imagePreviewCache.set(key, value);
+    while (imagePreviewCache.size > IMAGE_PREVIEW_CACHE_MAX) {
+      const oldest = imagePreviewCache.keys().next().value;
+      imagePreviewCache.delete(oldest);
+    }
+    let total = 0;
+    for (const [k, v] of imagePreviewCache) { total += Number(v.bytes || 0); if (total > IMAGE_PREVIEW_CACHE_MAX_BYTES) { imagePreviewCache.delete(k); total -= Number(v.bytes || 0); } }
+  } catch { /* ignore */ }
+}
 async function readProjectFileForPreview(project, item) {
   const name = item.name || String(item.rel || '').split('/').pop();
   const ext = fileExt(name);
   if (typeof window.workbench.filesRead !== 'function') throw new Error('当前版本没有受控文件读取接口，请用系统程序打开');
+  const cacheKey = `${project.id}:${item.rel}:${item.size || 0}:${item.mtime || ''}`;
+  const isImage = FILE_IMAGE_EXT.has(ext);
+  if (isImage) {
+    const hit = imagePreviewCache.get(cacheKey);
+    if (hit && hit.result) { imagePreviewCache.delete(cacheKey); imagePreviewCache.set(cacheKey, hit); return hit.result; }
+  }
   const result = await window.workbench.filesRead({
     projectId: project.id, rel: item.rel,
     textMaxBytes: 512 * 1024, imageMaxBytes: 8 * 1024 * 1024
   });
   if (!result || !result.ok) throw new Error((result && result.message) || '读取失败');
-  if (FILE_IMAGE_EXT.has(ext) && result.kind !== 'image') throw new Error('图片格式不受支持或文件损坏');
+  if (isImage && result.kind !== 'image') throw new Error('图片格式不受支持或文件损坏');
+  if (isImage && result.dataUrl) imageCachePut(cacheKey, { result, bytes: String(result.dataUrl || '').length });
   return result;
 }
 

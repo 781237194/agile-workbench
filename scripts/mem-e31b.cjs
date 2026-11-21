@@ -162,6 +162,33 @@ class Cdp {
       };
     })()`);
   } catch (e) { contracts = { error: String(e && e.message || e).slice(0, 300) }; }
+  // E31B_PANELS：隐藏面板懒渲染证据（T-0f58）：打开前后 DOM 数 / flow 行数 / 板面板 / 图片缓存上限
+  let panels = null;
+  try {
+    panels = await cdp.eval(`(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const count = () => ({
+        nodes: document.getElementsByTagName(String.fromCharCode(42)).length,
+        heap: performance.memory ? performance.memory.usedJSHeapSize : -1,
+        flowPanelHidden: Boolean(document.querySelector('#flow-panel') && document.querySelector('#flow-panel').hidden),
+        flowBoardRows: document.querySelectorAll('#flow-board *').length,
+        boardPanelHidden: Boolean(document.querySelector('#board-panel') && document.querySelector('#board-panel').hidden),
+        boardPanelNodes: document.querySelectorAll('#board-panel *').length,
+        reviewDialogNodes: document.querySelectorAll('[data-owner-review-dialog] *').length,
+      });
+      const before = count();
+      const flowBtn = document.querySelector('[data-tab="flow"]');
+      if (flowBtn) flowBtn.click();
+      await wait(900);
+      const afterFlow = count();
+      const boardBtn = document.querySelector('#board-launcher');
+      if (boardBtn) boardBtn.click();
+      await wait(900);
+      const afterBoard = count();
+      const cache = (typeof window.__awbImageCacheStats === 'function') ? window.__awbImageCacheStats() : null;
+      return { before, afterFlow, afterBoard, imageCache: cache };
+    })()`);
+  } catch (e) { panels = { error: String(e && e.message || e).slice(0, 300) }; }
   // E31B_CLICKS：20 次点击→可见（任务行/文件页/翻页三入口能点哪个点哪个）
   let clicks = null;
   try {
@@ -178,7 +205,7 @@ class Cdp {
         if (!el) return { ok: false, error: 'no clickable', samples };
         const t0 = performance.now();
         el.click();
-        await raf2();
+        await Promise.race([raf2(), wait(150)]);
         samples.push(Math.round(performance.now() - t0));
         await wait(60);
       }
@@ -205,7 +232,7 @@ class Cdp {
   try { await cdp.send('HeapProfiler.enable'); await cdp.send('HeapProfiler.collectGarbage'); await sleep(800); gcHeap = await cdp.eval('performance.memory ? performance.memory.usedJSHeapSize : -1'); } catch { /* ignore */ }
   const long = await cdp.eval('window.__e31bLong || null').catch(() => null);
   const counts = await cdp.eval(`(() => { const st = window.__awbState || null; const p = st && st.projects && st.projects[0]; return { hasState: Boolean(st), tasks: p ? (p.tasks || []).length : -1, messages: p ? (p.messages || []).length : -1, requirements: p ? (p.requirements || []).length : -1, projects: st ? (st.projects || []).length : -1 }; })()`).catch(() => null);
-  const report = { at: new Date().toISOString(), minutes: MINUTES, target: targetInfo, meta, samples, gcHeap, long, counts, contracts, clicks, root: ROOT, sandbox: SANDBOX, stdoutTail: stdout.slice(-2000) };
+  const report = { at: new Date().toISOString(), minutes: MINUTES, target: targetInfo, meta, samples, gcHeap, long, counts, contracts, panels, clicks, root: ROOT, sandbox: SANDBOX, stdoutTail: stdout.slice(-2000) };
   fs.mkdirSync(OUT, { recursive: true });
   fs.writeFileSync(path.join(OUT, 'heap.jsonl'), samples.map((s) => JSON.stringify({ ...s, targetId: targetInfo.id, title: targetInfo.title })).join('\n') + '\n');
   fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify(report, null, 2));
