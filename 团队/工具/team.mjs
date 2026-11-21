@@ -415,6 +415,12 @@ async function main() {
       process.exitCode = r.ok ? 0 : 1;
       break;
     }
+    case 'storage': {
+      // R-20261121-124427-bcac：存储位置只读状态（与壳层 workbench.storageStatus 同源口径）。
+      const { cmdStorage } = await import('./lib/storage-show.mjs');
+      cmdStorage(args);
+      break;
+    }
     case 'tmp': {
       // B-20261117-140928-b51b：测试沙盘治理（默认 dry-run，--yes 才删，删前写审计）
       const { cmdTmp } = await import('./lib/tmp-prune.mjs');

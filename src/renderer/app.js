@@ -16525,6 +16525,131 @@ function syncMoreMenu() {
   syncThemeUi();
 }
 
+// R-bcac：设置页「存储位置」浮层（应用数据目录 / 临时沙盘目录；占用 / 上限 / 上次清理 / 一键清理）。
+// 只改「以后写哪里」：不搬已有数据；旧 tmpDir 内容不自动删，由用户点一键清理。
+let storagePanelEl = null;
+let storagePanelState = null;
+function storagePanelNode() {
+  if (storagePanelEl && document.body.contains(storagePanelEl)) return storagePanelEl;
+  const mask = document.createElement('div');
+  mask.setAttribute('data-storage-modal', '1');
+  mask.style.cssText = 'position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;';
+  const card = document.createElement('div');
+  card.setAttribute('data-storage-card', '1');
+  card.style.cssText = 'width:min(720px,92vw);max-height:86vh;overflow:auto;background:#161a20;color:#d8dde5;border:1px solid #2a313b;border-radius:12px;padding:18px 20px;box-shadow:0 12px 40px rgba(0,0,0,.5);font-size:13px;line-height:1.6;';
+  card.innerHTML = [
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">',
+    '  <b style="font-size:15px;">存储位置</b><button type="button" data-storage-close="1" style="background:transparent;border:0;color:#9aa4b2;font-size:18px;cursor:pointer;">×</button>',
+    '</div>',
+    '<div data-storage-error hidden style="margin:0 0 10px;padding:8px 10px;border-radius:8px;background:#3a1616;color:#ffb4b4;border:1px solid #7a2b2b;"></div>',
+    '<div style="margin-bottom:10px;"><label style="display:block;color:#9aa4b2;margin-bottom:4px;">应用数据目录（workbench.json / data）</label>',
+    '  <input type="text" data-storage-data-dir style="width:100%;box-sizing:border-box;background:#0f1216;color:#d8dde5;border:1px solid #2a313b;border-radius:8px;padding:7px 9px;" /></div>',
+    '<div style="margin-bottom:10px;"><label style="display:block;color:#9aa4b2;margin-bottom:4px;">临时沙盘目录（_tmp / 夹具根）</label>',
+    '  <input type="text" data-storage-tmp-dir style="width:100%;box-sizing:border-box;background:#0f1216;color:#d8dde5;border:1px solid #2a313b;border-radius:8px;padding:7px 9px;" /></div>',
+    '<div data-storage-summary style="margin:10px 0;padding:10px 12px;border-radius:8px;background:#0f1216;border:1px solid #232a33;white-space:pre-wrap;"></div>',
+    '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">',
+    '  <button type="button" data-storage-clean="1" style="background:#2a313b;color:#ffd9a3;border:0;border-radius:8px;padding:7px 12px;cursor:pointer;">一键清理过期沙盘</button>',
+    '  <button type="button" data-storage-save="1" style="background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:7px 14px;cursor:pointer;">保存并立即生效</button>',
+    '</div>',
+    '<div style="margin-top:8px;color:#9aa4b2;font-size:12px;">只改「以后写哪里」，不移动已有数据；旧临时目录内容不自动删除（可用一键清理）。系统盘路径会被拒绝。</div>'
+  ].join('');
+  mask.appendChild(card);
+  mask.addEventListener('click', (event) => { if (event.target === mask) closeStoragePanel(); });
+  document.body.appendChild(mask);
+  storagePanelEl = mask;
+  return mask;
+}
+function storageFormatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+function storagePaint(status) {
+  storagePanelState = status;
+  const mask = storagePanelNode();
+  const cfg = (status && status.settings) || {};
+  const guard = (status && status.guard) || {};
+  const dataInput = mask.querySelector('[data-storage-data-dir]');
+  const tmpInput = mask.querySelector('[data-storage-tmp-dir]');
+  if (document.activeElement !== dataInput) dataInput.value = String(cfg.dataDir || '');
+  if (document.activeElement !== tmpInput) tmpInput.value = String(cfg.tmpDir || '');
+  const limits = guard.limits || {};
+  const usage = guard.usage || {};
+  const last = (status && status.lastCleanup) || null;
+  const lines = [
+    '临时沙盘占用：' + storageFormatBytes(usage.bytes) + '（' + Number(usage.files || 0) + ' 文件 / ' + Number(usage.sandboxes || 0) + ' 个沙盘目录）',
+    '上限：' + storageFormatBytes(limits.maxBytes) + ' / ' + Number(limits.maxFiles || 0) + ' 文件（使用率 ' + Math.round(Number(usage.ratio || 0) * 100) + '%）',
+    last ? ('上次清理：' + String(last.at || '') + '，释放 ' + storageFormatBytes(last.freedBytes) + '，删除 ' + Number(last.removed || 0) + ' 个（' + String(last.reason || '') + '）') : '上次清理：无记录',
+    guard.ok === false ? ('⚠ ' + String(guard.message || '临时沙盘超限，请清理或改路径')) : ''
+  ].filter(Boolean);
+  mask.querySelector('[data-storage-summary]').textContent = lines.join('\n');
+  const err = mask.querySelector('[data-storage-error]');
+  err.hidden = true;
+  err.textContent = '';
+  document.querySelectorAll('[data-storage-usage]').forEach((node) => {
+    node.textContent = storageFormatBytes(usage.bytes);
+  });
+  return mask;
+}
+async function openStoragePanel() {
+  try { setMoreMenu(false); } catch { /* ignore */ }
+  try {
+    const mask = storagePaint(null);
+    const status = await window.workbench.storageStatus();
+    storagePaint(status);
+    // 绑定一次事件（用 dataset 标记防重复绑定）
+    const card = mask;
+    if (!card.dataset.bound) {
+      card.dataset.bound = '1';
+      card.addEventListener('click', async (event) => {
+        const target = event.target;
+        if (target.closest('[data-storage-close]')) { closeStoragePanel(); return; }
+        const err = card.querySelector('[data-storage-error]');
+        if (target.closest('[data-storage-clean]')) {
+          target.disabled = true;
+          try {
+            const res = await window.workbench.storageClean({ all: true });
+            const status2 = await window.workbench.storageStatus();
+            storagePaint(status2);
+            if (err) { err.hidden = false; err.textContent = '已清理：删除 ' + Number((res && res.removed) || 0) + ' 个，释放 ' + storageFormatBytes((res && res.freedBytes) || 0); }
+          } catch (e) {
+            if (err) { err.hidden = false; err.textContent = '清理失败：' + String((e && e.message) || e); }
+          } finally { target.disabled = false; }
+          return;
+        }
+        if (target.closest('[data-storage-save]')) {
+          target.disabled = true;
+          try {
+            const payload = {
+              dataDir: String(card.querySelector('[data-storage-data-dir]').value || '').trim(),
+              tmpDir: String(card.querySelector('[data-storage-tmp-dir]').value || '').trim(),
+            };
+            const saved = await window.workbench.storageSave(payload);
+            if (!saved || saved.ok === false) {
+              if (err) { err.hidden = false; err.textContent = String((saved && (saved.message || saved.code)) || '保存失败'); }
+              return;
+            }
+            storagePaint(saved.status || await window.workbench.storageStatus());
+            if (err) { err.hidden = false; err.textContent = '已保存，立即生效（只影响以后写入；旧数据不移动）'; }
+          } catch (e) {
+            if (err) { err.hidden = false; err.textContent = '保存失败：' + String((e && e.message) || e); }
+          } finally { target.disabled = false; }
+          return;
+        }
+      });
+    }
+  } catch (e) {
+    try { console.warn('[storage] open failed ' + String((e && e.message) || e)); } catch { /* ignore */ }
+  }
+}
+function closeStoragePanel() {
+  if (storagePanelEl && storagePanelEl.parentNode) storagePanelEl.parentNode.removeChild(storagePanelEl);
+  storagePanelEl = null;
+}
+try { window.__awbOpenStoragePanel = openStoragePanel; } catch { /* ignore */ }
+
 function setMoreMenu(open) {
   const menu = $('#more-menu');
   const btn = $('#btn-more');
@@ -17427,6 +17552,11 @@ function bind() {
     const btn = e.target.closest('[data-more]');
     if (!btn || btn.disabled) return;
     e.stopPropagation();
+    if (btn.dataset.more === 'storage') {
+      // R-bcac：设置页「存储位置」——应用数据目录 / 临时沙盘目录可改，显示占用/上限/上次清理。
+      openStoragePanel();
+      return;
+    }
     if (btn.dataset.more === 'effect') {
       const box = $('#more-menu [data-effect-menu]');
       const willOpen = Boolean(box && box.hidden);
