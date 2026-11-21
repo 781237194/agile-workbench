@@ -5745,7 +5745,6 @@ function renderTeamLog(p) {
     box.appendChild(more);
   }
 }
-}
 
 function startAckTicker(project) {
   if (dispatchTicker) {
