@@ -11634,6 +11634,7 @@ ipcMain.handle('theme:metrics', async () => {
     // B-fe22：弹窗决定必须落到需求行。之前这里只改项目级 ownerReview，需求行仍是 pending，
     // 弹窗列表/阶段都不动，Owner 看到的就是“点了没效果”；写入失败必须抛错让前端横幅显示。
     let requirementWrite = null;
+    const __rvT0 = Date.now();
     if (decideRequirementId && ['approved', 'skipped', 'rejected'].includes(status)) {
       const requirementResult = await teamTools.applyOwnerDecisionToRequirement({
         project,
@@ -11653,6 +11654,7 @@ ipcMain.handle('theme:metrics', async () => {
           }
           : {}),
       });
+      try { console.log('[review-profile] ' + JSON.stringify({ action: 'owner:decide', ms: Date.now() - __rvT0, ok: Boolean(requirementResult && requirementResult.ok), code: String((requirementResult && requirementResult.code) || '') })); } catch { /* ignore */ }
       if (!requirementResult || requirementResult.ok === false) {
         throw codedError(
           (requirementResult && requirementResult.code) || 'OWNER_REQUIREMENT_WRITE_FAILED',
