@@ -854,8 +854,10 @@ html[data-theme="light"] .stage-actions .owner-review-proxy { color: #1f5f8b; bo
   color: var(--gold);
   font-family: var(--mono);
   font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* B-f749：错误 URL/错误码必须完整可见（旧 nowrap+ellipsis 会把错误说明截掉）。 */
+  white-space: normal;
+  word-break: break-all;
+  line-height: 1.55;
 }
 .dsh-off-card code { padding: 1px 5px; border-radius: 3px; background: var(--panel-2); color: var(--text); font-family: var(--mono); font-size: 9px; }
 .dsh-off-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 14px; }

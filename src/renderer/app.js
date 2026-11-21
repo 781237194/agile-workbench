@@ -15747,6 +15747,52 @@ function openOwnerModal() {
 
 /* ── DSH 适配 ─────────────────────────────────────────── */
 
+// B-f749：webview 与状态同源。记录最后一次同步的地址/在线态 + 最近一次加载失败（URL/错误码）。
+const dshViewUi = { lastBaseUrl: '', lastOnline: null };
+let dshViewError = null;
+
+function forceReloadDshView(reason = 'manual') {
+  const view = $('#dsh-view');
+  if (!view) return false;
+  const base = String((state && state.dsh && state.dsh.baseUrl) || '');
+  dshViewFailed = false;
+  dshReady = false;
+  dshViewError = null;
+  if (!base) { try { renderDsh(state?.dsh); } catch { /* ignore */ } return false; }
+  const current = String(view.getAttribute('src') || '');
+  try {
+    if (current !== base) view.setAttribute('src', base);
+    else view.reload();
+  } catch {
+    try { view.setAttribute('src', base); } catch { /* ignore */ }
+  }
+  try { console.log('[dsh-view] reload reason=' + String(reason || 'manual') + ' url=' + base); } catch { /* ignore */ }
+  try { renderDsh(state?.dsh); } catch { /* ignore */ }
+  return true;
+}
+
+/** 状态变化时保证 webview 指向同一地址：地址变→改 src；同址离线→在线→强制 reload。 */
+function syncDshViewWithStatus(dsh) {
+  const view = $('#dsh-view');
+  if (!view) return;
+  const base = String((dsh && dsh.baseUrl) || '');
+  const online = Boolean(dsh && dsh.online);
+  const prevBase = dshViewUi.lastBaseUrl;
+  const prevOnline = dshViewUi.lastOnline;
+  dshViewUi.lastBaseUrl = base;
+  dshViewUi.lastOnline = online;
+  if (!base || !online) return;
+  const current = String(view.getAttribute('src') || '');
+  if (String(current) !== base || (prevBase && prevBase !== base)) {
+    dshViewFailed = false;
+    dshViewError = null;
+    try { view.setAttribute('src', base); } catch { /* ignore */ }
+    return;
+  }
+  // 同址从离线恢复（启动时 webview 已指向旧/失败地址）：强制 reload，不能只等页面自己恢复。
+  if (prevOnline !== true) forceReloadDshView('reconnect');
+}
+
 function renderDsh(dsh) {
   const pill = $('#btn-dsh');
   const dot = $('#dsh-dot');
@@ -15770,16 +15816,28 @@ function renderDsh(dsh) {
 
   const off = $('#dsh-off');
   if (off) {
-    const showOff = !online || dshViewFailed;
+    // B-f749：加载失败后即使迟到的 did-finish-load 把 failed 清掉，错误也必须保留到用户重试/地址成功切换，
+    // 否则会出现「状态已连接、主区黑屏且无任何错误提示」。
+    const showOff = !online || dshViewFailed || Boolean(dshViewError);
     off.hidden = !showOff;
     const url = $('#dsh-off-url');
-    if (url) url.textContent = (dsh?.baseUrl || '地址未配置') + (dsh?.message ? ' · ' + dsh.message : '');
+    if (url) {
+      if (dshViewError && (dshViewError.code || dshViewError.url)) {
+        url.textContent = 'WebView 加载失败：' + String(dshViewError.url || '（地址未知）')
+          + ' · 错误码 ' + String(dshViewError.code == null ? '未知' : dshViewError.code)
+          + (dshViewError.description ? '（' + dshViewError.description + '）' : '')
+          + ' · 可点「重载 WebView」重试';
+      } else {
+        url.textContent = (dsh?.baseUrl || '地址未配置') + (dsh?.message ? ' · ' + dsh.message : '');
+      }
+    }
   }
   const modeButton = $('#btn-dsh-mode');
   if (modeButton) {
     modeButton.title = online ? '重载 DSH 主画面' : 'DSH 离线：先启动 DSH Web';
     modeButton.setAttribute('aria-pressed', String(!online));
   }
+  syncDshViewWithStatus(dsh);
 }
 
 async function probeDsh(force = false, quiet = false) {
@@ -17056,7 +17114,7 @@ function bind() {
   $('#btn-folder-top')?.addEventListener('click', openProjectFolder);
   $('#metrics')?.addEventListener('click', () => { tickMetrics(); });
   $('#btn-dsh-mode')?.addEventListener('click', () => reloadDshView());
-  $('#btn-dsh-off-reload')?.addEventListener('click', () => reloadDshView());
+  $('#btn-dsh-off-reload')?.addEventListener('click', () => forceReloadDshView('button'));
   $('#btn-side')?.addEventListener('click', () => setSidebarHidden(!document.body.classList.contains('sidebar-hidden')));
   $('#btn-wc-folder')?.addEventListener('click', openProjectFolder);
   $('#btn-wc-team')?.addEventListener('click', () => setDrawer('team'));
@@ -17815,6 +17873,9 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
     view.addEventListener('did-finish-load', async () => {
       dshReady = true;
       dshViewFailed = false;
+      // 只清「与当前状态同址」的成功加载；迟到的 about:blank/旧地址 finish 不能抹掉新错误。
+      const loadedUrl = String(view.getAttribute('src') || '');
+      if (loadedUrl && loadedUrl !== 'about:blank' && loadedUrl === String((state && state.dsh && state.dsh.baseUrl) || '')) dshViewError = null;
       if (state) renderDsh(state.dsh);
       if (pendingDshFocus) await flushPendingDshFocus();
       else {
@@ -17827,6 +17888,12 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       if (e.isMainFrame === false) return;
       dshReady = false;
       dshViewFailed = true;
+      dshViewError = {
+        url: String(e.validatedURL || view.getAttribute('src') || (state?.dsh?.baseUrl) || ''),
+        code: e.errorCode,
+        description: String(e.errorDescription || '')
+      };
+      try { console.warn('[dsh-view] did-fail-load url=' + dshViewError.url + ' code=' + dshViewError.code + ' ' + dshViewError.description); } catch { /* ignore */ }
       renderDsh(state?.dsh);
     });
   }
