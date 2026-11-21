@@ -16138,7 +16138,7 @@ const autoRebindUi = { busy: false, lastKey: '', lastAt: 0 };
 
 /** B-33b9 追加：地址切换/重载成功后一次刷新全部（dsh 状态 + 名册 + 映射 + 六角色区）。 */
 async function refreshDshEverywhere(reason = 'push') {
-  // D1：凭据/secret 变化时重置 cookie 重试与自动重载预算，允许新凭据再次自愈。
+  // D1：凭据变化时重置 cookie 重试与自动重载预算，允许新凭据再次自愈。
   if (/credential/i.test(String(reason || ''))) {
     dshCookieRetry.at = 0;
     dshCookieRetry.url = '';
