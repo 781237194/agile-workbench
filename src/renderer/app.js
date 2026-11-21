@@ -2760,6 +2760,8 @@ function setDrawer(name, opts = {}) {
     if (changed && !opts.keepScroll) $('#project-drawer .drawer-scroll')?.scrollTo({ top: 0 });
     loadDshTeamStatus();
     loadLegacyDocs();
+    // T-27a3：deferred 链只在项目面板可见时才刷新重面板；打开时立刻补一次，避免等下一拍。
+    try { renderLegacyPanels(); } catch { /* 面板失败不拖垮抽屉 */ }
   }
   if (next === 'team') {
     if (changed) r5Skeleton('#team-drawer', '团队台加载中…', 8);
@@ -2791,7 +2793,7 @@ function showTab(name, opts = {}) {
   if (changed && !opts.fromRender && opts.open !== false) setDrawer('project', { keepScroll: true });
   if (name === 'files') loadFiles();
   if (name === 'docs' || name === 'roles' || name === 'flow') loadLegacyDocs();
-  if (name === 'flow') { loadGateCheck(); loadGateAudit(); renderFlow(); }
+  if (name === 'flow') { loadGateCheck(); loadGateAudit(); renderFlow(); renderLegacyRequirements(); }
   if (name === 'roles') { loadDshTeamStatus(); renderRoles(); }
   if (name === 'docs') renderLegacyDocs();
 }
@@ -2884,16 +2886,43 @@ function render() {
   // 下一拍补绘；首屏在此之前已经可见（rAF 打点早于这里）。
   // AC2 归因（T-32a3）：__deferred 单次实测 106–1499ms（trace timer 任务），改为 gate.chunked 分片（每片 ≤8ms），
   // 把整块补绘摊到多帧，避免一次 >100ms 长任务；无 gate.chunked 时退回原行为。
+  const drawerOpen = (sel) => { const el = $(sel); return Boolean(el && !el.hidden); };
+  const projectPanelOpen = drawerOpen('#project-drawer');
+  const teamPanelOpen = drawerOpen('#team-drawer');
   const deferredTasks = [
     () => __t('truthStrip', renderTruthStrip),
     () => __t('overview', renderOverview),
     () => __t('flow', renderFlow),
     () => __t('roles', renderRoles),
-    () => __t('team', renderTeam),
+    // AC2 归因（T-27a3）：团队台重面板只在抽屉打开时分片刷新；关闭时仅更新轻量摘要，
+    // 避免每轮 render 都把隐藏面板整块重绘成一次 >100ms 长任务（runDeferred 占 >100ms 时长 95.8% 的根因之一）。
+    () => __t('teamLight', () => renderTeam({ light: true })),
+    ...(teamPanelOpen ? [
+      () => __t('teamInbox', renderInbox),
+      () => __t('teamSessions', renderTeamSessions),
+      () => __t('teamRoleQueue', renderRoleQueue),
+      () => __t('teamLoads', () => { loadRoleQueue(); loadDecisionBox(); loadVotes(); }),
+      () => __t('teamWorkspace', renderTeamWorkspace),
+      () => __t('teamBoardSummary', renderBoardSummary),
+      () => __t('teamReceipts', renderReceipts),
+      () => __t('teamLog', () => renderTeamLog(activeProject())),
+      () => __t('teamDispatch', () => renderDispatch(activeProject())),
+      () => __t('teamAckTicker', () => startAckTicker(activeProject())),
+      () => __t('teamGate', renderLegacyTeamGate),
+      () => __t('teamVotes', renderVotes),
+    ] : []),
     () => __t('workspacePopover', renderWorkspacePopover),
     () => __t('boardPanel', renderBoardPanel),
     () => __t('launchers', renderLaunchers),
-    ...(current ? [switchedProjects ? () => { loadLegacyDocs(); } : () => __t('legacyPanels', renderLegacyPanels)] : []),
+    ...(current ? [
+      ...(projectPanelOpen ? [
+        () => __t('legacyRequirements', () => { if (activeTab === 'flow') renderLegacyRequirements(); }),
+        () => __t('legacyDocs', () => { if (activeTab === 'docs') renderLegacyDocs(); }),
+        () => __t('legacyBootButtons', syncBootAllButtons),
+        () => __t('legacyBootTick', scheduleBootExpiryTick),
+      ] : []),
+      ...(switchedProjects ? [() => { loadLegacyDocs(); }] : []),
+    ] : []),
     () => __t('tab', () => showTab(activeTab, { fromRender: true })),
     () => __t('modeCopy', () => { renderModeCopyAnchors(); applyTeamModeCopy(document.body); }),
   ];
@@ -4669,23 +4698,18 @@ async function refreshChannelWarn() {
   } catch { box.hidden = true; }
 }
 
-function renderTeam() {
+function renderTeam(opts) {
+  const light = Boolean(opts && opts.light);
   const summary = $('#team-summary');
   const log = $('#team-log');
   const msgSummary = $('#team-msg-summary');  const p = activeProject();
-  renderInbox();
-  renderTeamSessions();
-  renderRoleQueue();
-  loadRoleQueue();
-  loadDecisionBox();
-  renderTeamWorkspace();
-  renderBoardSummary();
-  renderReceipts();
-  renderLegacyTeamGate();
-  renderLogFilter();
-  renderVotes();
-  loadVotes();
   if (!p) {
+    renderInbox();
+    renderTeamSessions();
+    renderRoleQueue();
+    renderTeamWorkspace();
+    renderBoardSummary();
+    renderReceipts();
     if (summary) summary.textContent = '先新建或恢复一个工作区';
     if (msgSummary) msgSummary.textContent = '';
     if (log) log.innerHTML = '<div class="empty-row">还没有工作区。团队台会显示六角色会话、派单与回执。</div>';
@@ -4731,6 +4755,21 @@ function renderTeam() {
       + ` · ${messagesTotal} 条消息${messagesTotal > messages.length ? `（显示最近 ${messages.length} 条）` : ''}`;
   }
   if (msgSummary) msgSummary.textContent = messagesTotal ? `${messagesTotal} 条` : '暂无消息';
+  // AC2 归因（T-27a3）：render() 的 deferred 链只要「轻量摘要」，重面板由各自 deferred 任务分片刷新；
+  // 团队台真正打开/刷新时才走下面的完整重绘（setDrawer('team') 等入口不带 light）。
+  if (light) return;
+  renderInbox();
+  renderTeamSessions();
+  renderRoleQueue();
+  loadRoleQueue();
+  loadDecisionBox();
+  renderTeamWorkspace();
+  renderBoardSummary();
+  renderReceipts();
+  renderLegacyTeamGate();
+  renderLogFilter();
+  renderVotes();
+  loadVotes();
   renderTeamLog(p);
   renderDispatch(p);
   startAckTicker(p);
