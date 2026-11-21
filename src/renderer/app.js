@@ -17995,6 +17995,7 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       // 一旦成功隐藏，只有新 did-fail-load 才恢复（dshGuestBodyLen 保持 >0，不再被 0 覆盖）。
       const probeSeq = (dshBodyProbeSeq += 1);
       void (async () => {
+        let blankStreak = 0;
         for (let i = 0; i < 20; i += 1) {
           await new Promise((resolve) => setTimeout(resolve, 500));
           if (probeSeq !== dshBodyProbeSeq) return;
@@ -18008,7 +18009,17 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
           }
           const bodyLen = Number(probe.bodyLen) || 0;
           const text = String(probe.body || '');
-          if (!bodyLen) continue;
+          if (!bodyLen) {
+            // PM 16:00 热修（Owner 重启又空白）：body=0 时**必须触发 cookie 重装重试**。
+            // 旧实现 `continue` 直接跳过 → 冷启动 401/空白永远自愈不了，只能手点「重载 WebView」。
+            blankStreak += 1;
+            if (blankStreak >= 3) {
+              blankStreak = 0;
+              void retryDshCookieOnce('blank');
+            }
+            continue;
+          }
+          blankStreak = 0;
           if (probe.boot) {
             // PM 15:48（Owner）：**不要自动跳过开机动画**——Owner 要保留 DSH 自己的启动动画，
             // 让它自然播完进主界面即可。这里只等待，不做任何点击/跳过动作。
