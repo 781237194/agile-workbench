@@ -2536,6 +2536,21 @@ function scheduleLazyRendererScripts() {
   } catch { setTimeout(run, 120); }
 }
 
+// a514：后台镜像完成后的 refresh 去抖——连续动作会连续触发镜像事件，若每次都整页重渲染，
+// 打字（尤其是刚点完评审/验收后）会被周期性重渲染拖慢。交互期（gate.interacting）内直接跳过。
+let workflowSideEffectsRefreshTimer = null;
+function scheduleWorkflowSideEffectsRefresh() {
+  if (workflowSideEffectsRefreshTimer) return;
+  workflowSideEffectsRefreshTimer = setTimeout(() => {
+    workflowSideEffectsRefreshTimer = null;
+    let interacting = false;
+    try { interacting = Boolean(window.AWBGate && typeof AWBGate.interacting === 'function' && AWBGate.interacting()); } catch { interacting = false; }
+    if (interacting) { scheduleWorkflowSideEffectsRefresh(); return; }
+    try { void refresh(); } catch { /* ignore */ }
+  }, 1200);
+  try { if (workflowSideEffectsRefreshTimer.unref) workflowSideEffectsRefreshTimer.unref(); } catch { /* ignore */ }
+}
+
 // a514：后台副作用失败必须可见可重试（不允许乐观成功后无声失败）。
 function bindWorkflowSideEffects() {
   const api = window.workbench || {};
@@ -2562,7 +2577,7 @@ function bindWorkflowSideEffects() {
   api.onWorkflowSideEffects((p) => {
     const payload = p || {};
     if (retry) retry.disabled = false;
-    if (payload.ok) { if (banner) banner.hidden = true; try { void refresh(); } catch { /* ignore */ } return; }
+    if (payload.ok) { if (banner) banner.hidden = true; scheduleWorkflowSideEffectsRefresh(); return; }
     ensure();
     text.textContent = '后台同步失败：' + String(payload.message || '未知原因') + '；本次状态可能尚未反映到本地，可重试。';
     banner.hidden = false;

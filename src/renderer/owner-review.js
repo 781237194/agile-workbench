@@ -3364,26 +3364,25 @@
         ...(proxyActive ? { recordedBy: 'pm' } : {}),
       });
       if (!r || r.ok === false) throw new Error((r && (r.message || r.code)) || '提交失败');
-      // B-fe22：成功后必须给反馈——Owner 实测“点完像没生效”，就是因为没有成功提示。
+      // a514：点击→「已通过」可见不得等列表整表重载（loadData 会再拉一遍评审列表，实测 2–3s）。
+      // 先出结果提示，再后台刷新列表；刷新失败只记日志，不把已生效的决定显示成失败。
       const title = String(((state.data && state.data.requirements) || []).find((row) => String(row.id) === String(state.selected))?.title || '').trim();
       const label = status === 'approved' ? '已通过' : (status === 'rejected' ? '已打回' : '已先跳过');
+      const notifyFail = (r && r.ownerDecisionNotify && r.ownerDecisionNotify.ok === false) ? r.ownerDecisionNotify : null;
+      const notifyOkButWarn = !notifyFail && r && r.notifyFailed === true ? { code: 'OWNER_DECISION_NOTIFY_FAILED', message: '' } : null;
+      const notify = notifyFail || notifyOkButWarn;
+      const notifySuffix = notify ? '（已生效；附：通知 PM 失败 code=' + String(notify.code || 'OWNER_DECISION_NOTIFY_FAILED') + '）' : '';
+      showNotice(`${label}${title ? '：' + title : ''}${notifySuffix}；列表已更新`, notify ? 'warn' : 'ok');
       state.draft = '';
       opinionEl.value = '';
       state.skipOpen = false;
       state.skipDraft = { analyst: '', product: '', dev: '' };
       state.materials = null;
       state.materialsFor = '';
-      await loadData();
+      try { await loadData(); } catch (error) { try { console.warn('[owner-review] loadData after decision failed ' + String((error && error.message) || error).slice(0, 160)); } catch { /* ignore */ } }
       // 这条已不在待评估里：选中下一条，避免正文停在旧条目上（否则看起来“列表没动”）。
       const next = pendingRows()[0];
       state.selected = next ? String(next.id) : '';
-      // B-82e2（P1）：落账成功、但后续「通知 PM」失败时，不能说整体失败——文案写成
-      // 「已通过（附：通知 PM 失败 code=X）」，并明确「决定已生效」。
-      const notifyFail = (r && r.ownerDecisionNotify && r.ownerDecisionNotify.ok === false) ? r.ownerDecisionNotify : null;
-      const notifyOkButWarn = !notifyFail && r && r.notifyFailed === true ? { code: 'OWNER_DECISION_NOTIFY_FAILED', message: '' } : null;
-      const notify = notifyFail || notifyOkButWarn;
-      const notifySuffix = notify ? `（已生效；附：通知 PM 失败 code=${String(notify.code || 'OWNER_DECISION_NOTIFY_FAILED')}）` : '';
-      showNotice(`${label}${title ? '：' + title : ''}${notifySuffix}；列表已更新`, notify ? 'warn' : 'ok');
       if (notify) {
         // 横幅同样写清「已生效」：避免 Owner 看到红字就以为决定没落账。
         try {

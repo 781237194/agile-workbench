@@ -13332,7 +13332,16 @@ function createWindow() {
     applyZoomToWindow(mainWindow, readZoomPref());
   });
   startMemSampler();
-  mainWindow.once('ready-to-show', () => { if (!AWB_START_HIDDEN) mainWindow.show(); });
+  mainWindow.once('ready-to-show', () => {
+    // a514 测量：隐藏窗口不产帧（rAF 被挂起），打字「keydown→下一帧」测不出真实值。
+    // 测试实例用屏幕外 + showInactive（可见但不抢焦点、不占桌面）拿真实帧；生产默认不变。
+    if (String(process.env.AWB_SHOW_INACTIVE || '') === '1') {
+      try { mainWindow.setSkipTaskbar(true); mainWindow.setPosition(-32000, -32000); } catch { /* ignore */ }
+      try { mainWindow.showInactive(); } catch { /* ignore */ }
+      return;
+    }
+    if (!AWB_START_HIDDEN) mainWindow.show();
+  });
   // 拖动/缩放后防抖记住尺寸；关闭前补一次，避免最后一秒的变化丢掉。
   let saveTimer = null;
   const scheduleWindowSave = () => {

@@ -7641,7 +7641,9 @@ function createTeamTools(options = {}) {
     // 只有旧命令真的存在（升级后的 team.mjs）才走旧协议，不用本地假状态冒充旧命令执行。
     const caps = legacyCapabilities();
     const legacyOwnerAvailable = Boolean(caps.available && caps.commands && caps.commands.owner);
-    const shellOwnedOwner = !legacyOwnerAvailable;
+    // a514：Owner 界面（channel=ui）的决定走壳层收口——旧命令每次 spawn team.mjs（~3s，CLI 冷启动+门禁读取），
+    // 不满足「点击→结果 ≤1s」。落账/审计/索引仍在进程内完成；只有 PM 通知后台化（可重试）。
+    const shellOwnedOwner = !legacyOwnerAvailable || String(input.channel || '') === 'ui' || input.shellOwned === true;
     // 只有正文的旧需求没有任务/工作流行：先补兼容记录，Owner 决定才能落到旧协议。
     const imported = ensureLegacyRequirementRecord(ctx.name, ctx.projectPath, requirementId);
     if (!imported.ok) return imported;
@@ -7795,7 +7797,29 @@ function createTeamTools(options = {}) {
     if (!written.ok) return written;
     // B-7e49：**落账已成功**，此处才通知 PM（软要求：失败只写审计，不影响本次返回值）。
     let ownerDecisionNotify = null;
-    try {
+    // a514：壳层收口时通知 PM 改后台（spawn owner-notify 约 0.5–1s，不应计入点击响应）；失败只进审计。
+    const notifyAsync = shellOwnedOwner;
+    if (notifyAsync) {
+      ownerDecisionNotify = { ok: true, async: true, queued: true, message: 'PM 通知已后台排队（失败会写审计，不阻塞本次落账）' };
+      setImmediate(() => {
+        void (async () => {
+          try {
+            const roundNow = Number((() => {
+              const rowNow = findStateRequirementRow(written.state || {}, requirementId);
+              return (rowNow && rowNow.row && rowNow.row.round) || 1;
+            })() || 1);
+            await withBootToken(ctx.name, 'pm', async (token) => runNode(layout.teamTool, [
+              'owner-notify', '--boot', token, '--project', ctx.name,
+              '--requirement', requirementId, '--status', status, '--round', String(roundNow),
+              '--opinion', String(opinion || '').slice(0, 1000), '--channel', String(ownerChannel || 'ui'), '--json',
+            ], { timeoutMs: TIMEOUTS.send }));
+          } catch (error) {
+            try { console.warn('[owner-notify-async] failed ' + String((error && error.message) || error).slice(0, 200)); } catch { /* ignore */ }
+          }
+        })();
+      });
+    }
+    if (!notifyAsync) try {
       const roundNow = Number((() => {
         const rowNow = findStateRequirementRow(written.state || {}, requirementId);
         return (rowNow && rowNow.row && rowNow.row.round) || 1;
@@ -8164,31 +8188,37 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     //   ① 真正补上通知（唯一实现＝team.mjs owner-notify，与 legacy 分支同一执行体/文案/去重/审计）；
     //   ② 通知/索引/快照等所有后续步骤一律**软失败**，失败码进 ownerDecisionNotify.code / warnings；
     //   ③ 打点 [owner-decide] 给出每一步的 code，便于定位「哪一步抛错」。
-    let ownerDecisionNotify = null;
-    try {
-      const roundNow = Number(((existingTarget && existingTarget.row && existingTarget.row.round) || 1)) || 1;
-      const notifyRun = await withBootToken(name, 'pm', async (token) => runNode(layout.teamTool, [
-        'owner-notify', '--boot', token, '--project', name,
-        '--requirement', requirementId, '--status', status, '--round', String(roundNow),
-        '--opinion', String(opinion || '').slice(0, 1000), '--channel', String(channel || 'ui'), '--json',
-      ], { timeoutMs: TIMEOUTS.send }));
-      ownerDecisionNotify = (notifyRun && notifyRun.value && notifyRun.value.notify)
-        || { ok: false, code: 'OWNER_DECISION_NOTIFY_FAILED', message: String((notifyRun && (notifyRun.message || notifyRun.errorCode)) || 'owner-notify 无返回').slice(0, 300) };
-    } catch (error) {
-      ownerDecisionNotify = { ok: false, code: 'OWNER_DECISION_NOTIFY_FAILED', message: String((error && error.message) || error).slice(0, 300) };
-    }
+    // a514：通知 PM 是「落账成功后的可重试副作用」——spawn owner-notify 约 3s（CLI 冷启动+令牌），
+    // 不能占点击响应。这里后台执行；失败写日志（审计仍由 CLI 侧写），不影响本次决定已生效。
+    const ownerDecisionNotify = { ok: true, async: true, queued: true, message: 'PM 通知已后台排队（失败会写审计，不阻塞本次落账）' };
+    const roundNow = Number(((existingTarget && existingTarget.row && existingTarget.row.round) || 1)) || 1;
+    setImmediate(() => {
+      void (async () => {
+        try {
+          await withBootToken(name, 'pm', async (token) => runNode(layout.teamTool, [
+            'owner-notify', '--boot', token, '--project', name,
+            '--requirement', requirementId, '--status', status, '--round', String(roundNow),
+            '--opinion', String(opinion || '').slice(0, 1000), '--channel', String(channel || 'ui'), '--json',
+          ], { timeoutMs: TIMEOUTS.send }));
+        } catch (error) {
+          try { console.warn('[owner-decide] async notify failed ' + String((error && error.message) || error).slice(0, 200)); } catch { /* ignore */ }
+        }
+      })();
+    });
     console.log('[owner-decide] decision=' + status + ' requirement=' + requirementId
       + ' notify=' + (ownerDecisionNotify && ownerDecisionNotify.ok ? 'ok' : ('fail:' + String((ownerDecisionNotify && ownerDecisionNotify.code) || 'UNKNOWN'))));
     const projectPath = String((input.project && input.project.path) || (registrationFor(name) || {}).path || '');
+    // a514：索引刷新扫描 1360+ 任务文件（1–2.5s），移出点击响应；后台执行、失败只记日志。
     let projectIndex = null;
     let indexWarning = null;
-    try {
-      projectIndex = await refreshProjectIndex(name, projectPath);
-      indexWarning = projectIndexWarning(projectIndex);
-    } catch (error) {
-      indexWarning = { code: 'PROJECT_INDEX_REFRESH_FAILED', message: String((error && error.message) || error).slice(0, 300) };
-      console.log('[owner-decide] index=fail:' + indexWarning.code);
-    }
+    setImmediate(() => {
+      void (async () => {
+        try { await refreshProjectIndex(name, projectPath); } catch (error) {
+          try { console.warn('[owner-decide] async index failed ' + String((error && error.message) || error).slice(0, 200)); } catch { /* ignore */ }
+        }
+      })();
+    });
+    indexWarning = { code: 'PROJECT_INDEX_REFRESH_QUEUED', message: '索引在后台刷新（不阻塞本次落账）' };
     const warnings = [];
     if (indexWarning) warnings.push(indexWarning);
     if (ownerDecisionNotify && ownerDecisionNotify.ok === false) {
