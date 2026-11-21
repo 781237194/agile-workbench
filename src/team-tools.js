@@ -6543,6 +6543,32 @@ function createTeamTools(options = {}) {
       return parts.join('|');
     } catch { return ''; }
   }
+  /**
+   * 收口指令 B-1：启动后台预热——把任务索引与 1.2s 快照 memo 先填上，让用户第一次点验收/评审就是热态。
+   * 只读；失败仅日志，不抛。返回各段耗时供 [prewarm] 打点。
+   */
+  function prewarmWorkflowCaches(projectName, projectPath) {
+    const name = String(projectName || '').trim();
+    const result = { ok: true, name, parts: {} };
+    if (!name) return { ok: false, code: 'PROJECT_REQUIRED' };
+    const t0 = Date.now();
+    try {
+      const rows = readLegacyTasks(name);
+      result.parts.tasks = { ok: true, count: Array.isArray(rows) ? rows.length : 0, ms: Date.now() - t0 };
+    } catch (error) {
+      result.parts.tasks = { ok: false, error: String((error && error.message) || error).slice(0, 120), ms: Date.now() - t0 };
+    }
+    const t1 = Date.now();
+    try {
+      const snap = readWorkflowSnapshot(name, projectPath);
+      result.parts.snapshot = { ok: Boolean(snap && snap.ok), ms: Date.now() - t1 };
+    } catch (error) {
+      result.parts.snapshot = { ok: false, error: String((error && error.message) || error).slice(0, 120), ms: Date.now() - t1 };
+    }
+    try { console.log('[prewarm] ' + JSON.stringify(result)); } catch { /* ignore */ }
+    return result;
+  }
+
   function readWorkflowSnapshot(projectName, projectPath) {
     const name = String(projectName || '').trim();
     if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
@@ -11053,6 +11079,7 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     readRequirementDocs,
     readWorkflowState,
     writeWorkflowState,
+    prewarmWorkflowCaches,
     readWorkflowSnapshot,
     // B-20261117-093837-02e9：任务扫描（带目录签名缓存）单独暴露，供自检脚本量化命中/失效
     readLegacyTasks,

@@ -158,6 +158,10 @@ if (IS_BOARD_WINDOW) {
       ipcRenderer.on('workflow:side-effects', handler);
       return () => { try { ipcRenderer.off('workflow:side-effects', handler); } catch { /* ignore */ } };
     },
+    // R-bcac：存储位置（应用数据目录 / 临时沙盘目录）
+    storageStatus: () => ipcRenderer.invoke('storage:status'),
+    storageSave: (payload) => ipcRenderer.invoke('storage:save', payload),
+    storageClean: (payload) => ipcRenderer.invoke('storage:clean', payload),
     workflowSideEffectsStatus: () => ipcRenderer.invoke('workflow:side-effects-status'),
     workflowSideEffectsRetry: (payload) => ipcRenderer.invoke('workflow:side-effects-retry', payload),
     // B-20261117-133419-6543：看板后台重建完成推送（验收落账后不再同步等重建，完成后界面自刷新）。
@@ -286,7 +290,7 @@ if (IS_BOARD_WINDOW) {
       return () => { try { ipcRenderer.off('app:render-crash', handler); } catch { /* ignore */ } };
     },
     reloadDshView: () => ipcRenderer.invoke('app:reload-dsh'),
-  // B-f749：DSH 重启后 cookie secret 可能变化 → 401/空白时由渲染层请求重新安装 cookie 再 reload。
+  // B-f749：DSH 重启后 cookie 密钥可能变化 → 401/空白时由渲染层请求重新安装 cookie 再 reload。
   reinstallDshCookie: () => ipcRenderer.invoke('dsh:reinstall-cookie'),
     crashSelfTest: () => ipcRenderer.invoke('app:crash-selftest'),
     crashAudit: (payload) => ipcRenderer.invoke('app:crash-audit', payload),

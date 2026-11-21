@@ -15759,7 +15759,7 @@ let dshViewError = null;
 let dshGuestBodyLen = 0;
 const dshCookieRetry = { at: 0, url: '' };
 
-/** DSH 重启后 browser-session secret 可能变化 → 401/空白。重新安装 cookie 并只重试一次。 */
+/** DSH 重启后 browser-session 密钥可能变化 → 401/空白。重新安装 cookie 并只重试一次。 */
 async function retryDshCookieOnce(reason = 'blank') {
   const api = window.workbench;
   if (!api || typeof api.reinstallDshCookie !== 'function') return false;
@@ -17002,6 +17002,9 @@ async function tickDaemonStatus() {
 let metricsBusy = false;
 async function tickMetrics() {
   if (metricsBusy) return; // B-fa80：2 秒一次，慢返回时跳过当前，避免 IPC 堆积
+  // 收口指令 B-3：交互期（AWBGate.installInteraction 的 900ms 窗口）内直接 return，不再只判焦点；
+  // longtask attribution 指向每 ~2s 的指标/轮询 tick，交互期跑它会制造 >100ms 主线程阻塞。
+  try { if (window.AWBGate && typeof AWBGate.interacting === 'function' && AWBGate.interacting()) return; } catch { /* ignore */ }
   // a514：打字（输入框聚焦）时不刷新指标——longtask 归因显示每 ~2s 一次 self/window 长任务。
   try {
     const el = document.activeElement;
@@ -17944,7 +17947,7 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       try { loadedUrl = String(view.getURL() || ''); } catch { loadedUrl = ''; }
       if (loadedUrl && loadedUrl !== 'about:blank' && loadedUrl === String((state && state.dsh && state.dsh.baseUrl) || '')) dshViewError = null;
       if (state) renderDsh(state.dsh);
-      // PM 04:47：加载后 401/空白也要重装 cookie 再 reload 一次（DSH 重启后 secret 可能变化）。
+      // PM 04:47：加载后 401/空白也要重装 cookie 再 reload 一次（DSH 重启后密钥可能变化）。
       setTimeout(async () => {
         try {
           const text = String(await view.executeJavaScript('document.body ? String(document.body.innerText || "").slice(0, 400) : ""') || '');

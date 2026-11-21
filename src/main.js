@@ -8,6 +8,7 @@ const crypto = require('node:crypto');
 const { execFileSync, spawnSync } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 // B-20261120-020530-0823：会话用量阈值判定的纯逻辑（阈值单源来自 团队/工具/lib/session.mjs）。
+const StorageConfig = require('./storage-config.js');
 const UsageThreshold = require('./usage-threshold.js');
 // B-7009（P1）：会话用量展示口径（点名角色 + 原生三项对照表 + 缓存键含角色）的纯逻辑。
 const UsageView = require('./usage-view.js');
@@ -9116,6 +9117,20 @@ ipcMain.handle('theme:metrics', async () => {
     },
   });
   const scheduleBoardRebuild = (project, reason) => boardRebuild.schedule(project, reason);
+  // R-bcac：存储位置（设置页 + 启动守卫共用 StorageConfig 单源）
+  ipcMain.handle('storage:status', async () => StorageConfig.storageStatus({ config: StorageConfig.resolveStorage({}) }));
+  ipcMain.handle('storage:save', async (_e, payload) => {
+    const saved = StorageConfig.saveStorage(payload || {});
+    if (saved.ok) {
+      const status = StorageConfig.storageStatus({ config: StorageConfig.resolveStorage({}) });
+      return { ...saved, status };
+    }
+    return saved;
+  });
+  ipcMain.handle('storage:clean', async () => {
+    const cfg = StorageConfig.resolveStorage({});
+    return StorageConfig.cleanSandboxes({ tmpDir: cfg.tmpDir, dataDir: cfg.dataDir, all: true, reason: 'manual-one-click' });
+  });
   ipcMain.handle('workflow:side-effects-status', async () => workflowSideEffects.status());
   ipcMain.handle('workflow:side-effects-retry', async (_e, payload) => {
     const p = payload || {};
@@ -13326,7 +13341,9 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: false,
-      webviewTag: true
+      webviewTag: true,
+      // a514 测量：隐藏窗口下 rAF 会被 Chromium 节流，打字「下一帧」无法测；测试实例用 AWB_BACKGROUND_THROTTLING=0 关闭节流。
+      backgroundThrottling: String(process.env.AWB_BACKGROUND_THROTTLING || '') !== '0'
     }
   });
   markStartup('windowCreated');
@@ -13343,6 +13360,20 @@ function createWindow() {
   });
   startMemSampler();
   mainWindow.once('ready-to-show', () => {
+    // 收口指令 B-1：窗口显示后 1.5s 在后台预热任务索引与工作流快照（只读，失败仅日志），
+    // 让用户第一次点验收/评审命中热缓存（冷态首次验收 ≤1s）。
+    setTimeout(() => {
+      try {
+        const storeNow = readStore();
+        const projectNow = (storeNow.projects || []).find((row) => row && row.id === storeNow.activeProjectId)
+          || (storeNow.projects || [])[0];
+        if (projectNow && projectNow.teamName) {
+          setImmediate(() => {
+            try { teamTools.prewarmWorkflowCaches(projectNow.teamName, projectNow.path); } catch { /* ignore */ }
+          });
+        }
+      } catch { /* ignore */ }
+    }, 1500);
     // a514 测量：隐藏窗口不产帧（rAF 被挂起），打字「keydown→下一帧」测不出真实值。
     // 测试实例用屏幕外 + showInactive（可见但不抢焦点、不占桌面）拿真实帧；生产默认不变。
     if (String(process.env.AWB_SHOW_INACTIVE || '') === '1') {
@@ -24028,6 +24059,39 @@ app.whenReady().then(async () => {
   markStartup('appReady');
   // B-4fdd：把 whenReady 里的同步前置段逐段计时——PM 012728 的冷启离群（2.4-4.8s 页面加载之外）
   // 需要证据判断是 registerIpc 还是 tombstones/采样器吃掉了那 1-2 秒。
+  // R-bcac：启动前存储容量守卫——超限先清过期沙盘，仍超用原生对话框三选一（清理并继续 / 改位置 / 退出）。
+  try {
+    const guard = StorageConfig.ensureStorageCapacity({ config: StorageConfig.resolveStorage({}) });
+    if (!guard.ok) {
+      const choice = dialog.showMessageBoxSync({
+        type: 'warning',
+        title: '临时沙盘超限',
+        message: guard.message,
+        detail: '临时沙盘目录：' + guard.tmpDir + '\n已用 ' + (guard.after.bytes / 1024 / 1024 / 1024).toFixed(2) + 'GB / ' + guard.after.files + ' 文件（上限 ' + (guard.limits.maxBytes / 1024 / 1024 / 1024).toFixed(0) + 'GB / ' + guard.limits.maxFiles + '）',
+        buttons: ['清理并继续', '改存储位置', '退出'],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true,
+      });
+      if (choice === 0) {
+        StorageConfig.cleanSandboxes({ tmpDir: guard.tmpDir, dataDir: guard.dataDir, all: true, reason: 'startup-clean-all' });
+        const retry = StorageConfig.ensureStorageCapacity({ config: StorageConfig.resolveStorage({}) });
+        if (!retry.ok) { dialog.showErrorBox('仍超限', retry.message); app.quit(); return; }
+      } else if (choice === 1) {
+        const picked = dialog.showOpenDialogSync({ title: '选择临时沙盘目录', properties: ['openDirectory', 'createDirectory'] });
+        if (!picked || !picked[0]) { app.quit(); return; }
+        const saved = StorageConfig.saveStorage({ tmpDir: picked[0] });
+        if (!saved.ok) { dialog.showErrorBox('保存失败', saved.message || saved.code); app.quit(); return; }
+        const retry = StorageConfig.ensureStorageCapacity({ config: StorageConfig.resolveStorage({}) });
+        if (!retry.ok) { dialog.showErrorBox('仍超限', retry.message); app.quit(); return; }
+      } else {
+        app.quit();
+        return;
+      }
+    }
+  } catch (error) {
+    try { console.warn('[storage-guard] ' + String((error && error.message) || error).slice(0, 200)); } catch { /* ignore */ }
+  }
   const __phase = (name, fn) => {
     const t0 = Date.now();
     try { return fn(); } finally {
