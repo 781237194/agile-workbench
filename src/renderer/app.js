@@ -15757,6 +15757,7 @@ let dshViewError = null;
 // 只有「页面真的加载出内容」才允许隐藏「DSH 引擎没有连上」覆盖层；
 // 否则 401/空白页会被误判成成功，变成黑屏且无任何提示。
 let dshGuestBodyLen = 0;
+let dshBodyProbeSeq = 0;
 const dshCookieRetry = { at: 0, url: '' };
 
 /** DSH 重启后 browser-session 密钥可能变化 → 401/空白。重新安装 cookie 并只重试一次。 */
@@ -17947,16 +17948,33 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       try { loadedUrl = String(view.getURL() || ''); } catch { loadedUrl = ''; }
       if (loadedUrl && loadedUrl !== 'about:blank' && loadedUrl === String((state && state.dsh && state.dsh.baseUrl) || '')) dshViewError = null;
       if (state) renderDsh(state.dsh);
-      // PM 04:47：加载后 401/空白也要重装 cookie 再 reload 一次（DSH 重启后密钥可能变化）。
-      setTimeout(async () => {
-        try {
-          const text = String(await view.executeJavaScript('document.body ? String(document.body.innerText || "").slice(0, 400) : ""') || '');
-          // PM 13:41：把真实正文长度记下来，供覆盖层显隐判定（body=0 不隐藏，避免 401/空白被当成功）。
-          dshGuestBodyLen = text.trim().length;
+      // PM 13:58：DSH 进场页 bodyLen 在 0/39 间抖，单次采样会误判；改持续采样 10s，任一次 >0 即撤覆盖层。
+      // 一旦成功隐藏，只有新 did-fail-load 才恢复（dshGuestBodyLen 保持 >0，不再被 0 覆盖）。
+      const probeSeq = (dshBodyProbeSeq += 1);
+      void (async () => {
+        for (let i = 0; i < 20; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          if (probeSeq !== dshBodyProbeSeq) return;
+          let text = '';
+          try { text = String(await view.executeJavaScript('document.body ? String(document.body.innerText || "") : ""') || ''); } catch { continue; }
+          if (probeSeq !== dshBodyProbeSeq) return;
+          const bodyLen = text.trim().length;
+          if (!bodyLen) continue;
+          if (/authentication required|unauthorized|\b401\b/i.test(text)) {
+            void retryDshCookieOnce('blank-401');
+            continue;
+          }
+          dshGuestBodyLen = bodyLen;
+          dshViewError = null;
           if (state) renderDsh(state.dsh);
-          if (!text.trim() || /authentication required|unauthorized|\b401\b/i.test(text)) void retryDshCookieOnce('blank-401');
-        } catch { /* ignore */ }
-      }, 700);
+          return;
+        }
+        if (probeSeq === dshBodyProbeSeq) {
+          dshGuestBodyLen = 0;
+          dshViewError = { url: String((state && state.dsh && state.dsh.baseUrl) || ''), code: 'DSH_BLANK', description: '页面空白：10s 内 document.body.innerText.length=0' };
+          if (state) renderDsh(state.dsh);
+        }
+      })();
       if (pendingDshFocus) await flushPendingDshFocus();
       else {
         const p = activeProject();

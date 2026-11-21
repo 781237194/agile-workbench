@@ -34,6 +34,9 @@ check('O7', 'app.js 使用 AWBDshOverlay.overlayState，index.html 先加载 dsh
 // O8：隐藏实例里 webview guest 默认会被 Chromium 节流 → DSH 的 boot 脚本停在「正在进入…」；
 // 只给 BrowserWindow 设 backgroundThrottling 不够，必须冻结 guest 的节流（PM 13:32 的 285 字进场页）。
 check('O8', 'webview 冻结后台节流（webpreferences=backgroundThrottling=no）', /<webview[^>]*backgroundThrottling=no/.test(indexSrc));
+// O9：PM 13:58 要求持续采样 500ms×10s，任一次 >0 即撤；10s 全 0 才报 DSH_BLANK。
+check('O9', '持续采样 500ms×20 且 10s 空页落 DSH_BLANK', /for \(let i = 0; i < 20; i \+= 1\)/.test(appSrc)
+  && /setTimeout\(resolve, 500\)/.test(appSrc) && /DSH_BLANK/.test(appSrc) && /dshBodyProbeSeq/.test(appSrc));
 
 console.log('\n' + R.filter((x) => x.ok).length + '/' + R.length + ' PASS');
 process.exitCode = R.some((x) => !x.ok) ? 1 : 0;
