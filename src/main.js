@@ -2104,8 +2104,23 @@ async function workflowProjectContext(payload) {
 // B-20261118-211237-9ded：验收点击中复用「门预检」读到的快照给镜像回写，避免一次点击重复扫 1000+ 任务文件。
 let reuseWorkflowSnapshotForMirror = null;
 
+// PM 19:40（Owner：工作台把 CPU 跑满）：镜像按「工作流文件 mtime+size」短路。
+// 旧实现每 3 秒被调度一次，每次都 readWorkflowSnapshot（扫 1300+ 任务文件）+ 写 5MB store → 主进程常年 100%。
+const mirrorStampCache = new Map();
+
 function mirrorWorkflowToStore(projectId, teamName, projectPath) {
   if (!projectId || !teamName) return null;
+  {
+    const cached = mirrorStampCache.get(projectId);
+    if (cached && cached.file) {
+      try {
+        const st = fs.statSync(cached.file);
+        if (st.mtimeMs === cached.mtimeMs && st.size === cached.size) {
+          return { skipped: true, requirements: [], workflowMirror: null, stage: cached.stage || null };
+        }
+      } catch { /* 文件不在就继续正常流程 */ }
+    }
+  }
   let snapshot = null;
   // B-20261118-211237-9ded：同一请求内复用验收门已读到的快照（2s 内且同项目），否则照旧读盘。
   try {
@@ -2123,6 +2138,36 @@ function mirrorWorkflowToStore(projectId, teamName, projectPath) {
     const store = readStore();
     const current = store.projects.find((project) => project.id === projectId);
     if (!current) return null;
+    // PM 19:30（Owner：每秒重写 3–5MB）：镜像前先拍签名，写完再比 —— 内容没变就**不写盘**。
+    // 旧实现每次都把 updatedAt 刷成 now()，导致「永远有变化」→ 每 3 秒写一次 5MB。
+    const mirrorSigOf = (proj) => {
+      try {
+        const m = proj.workflowMirror ? { ...proj.workflowMirror } : null;
+        if (m) delete m.updatedAt;
+        return JSON.stringify({
+          teamName: String(proj.teamName || ''),
+          requirements: Array.isArray(proj.requirements) ? proj.requirements : [],
+          votes: Array.isArray(proj.votes) ? proj.votes : [],
+          mirror: m,
+          tasks: (Array.isArray(proj.tasks) ? proj.tasks : []).map((t) => [t && t.id, t && t.title, t && t.status, t && t.updatedAt, t && t.owner, t && t.priority, t && t.requirementId]),
+        });
+      } catch { return ''; }
+    };
+    const mirrorSigBefore = mirrorSigOf(current);
+    let diffStoreBefore = null;
+    if (process.env.AWB_TRACE_WRITES === '1') {
+      try {
+        const m = current.workflowMirror ? { ...current.workflowMirror } : null;
+        if (m) delete m.updatedAt;
+        diffStoreBefore = JSON.stringify({
+          teamName: String(current.teamName || ''),
+          requirements: JSON.stringify(Array.isArray(current.requirements) ? current.requirements : []),
+          votes: JSON.stringify(Array.isArray(current.votes) ? current.votes : []),
+          mirror: JSON.stringify(m),
+          tasks: JSON.stringify((Array.isArray(current.tasks) ? current.tasks : []).map((t) => [t && t.id, t && t.title, t && t.status, t && t.updatedAt, t && t.owner, t && t.priority, t && t.requirementId])),
+        });
+      } catch { diffStoreBefore = null; }
+    }
     current.teamName = teamName;
     current.requirements = Array.isArray(snapshot.requirements) ? snapshot.requirements : [];
     current.votes = Array.isArray(snapshot.votes) ? snapshot.votes : [];
@@ -2179,6 +2224,40 @@ function mirrorWorkflowToStore(projectId, teamName, projectPath) {
     }
     if (previousPhase !== snapshot.phase) {
       addEvent(current, `工作流镜像：${previousPhase || '无'} → ${snapshot.phase}（${snapshot.stage}）`);
+    }
+    mirrorStampCache.set(projectId, {
+      file: snapshot && snapshot.file ? String(snapshot.file) : '',
+      mtimeMs: (() => { try { return fs.statSync(String(snapshot.file)).mtimeMs; } catch { return 0; } })(),
+      size: (() => { try { return fs.statSync(String(snapshot.file)).size; } catch { return 0; } })(),
+      stage: (snapshot && snapshot.stage) || null,
+    });
+    const mirrorSigAfter = mirrorSigOf(current);
+    if (mirrorSigAfter !== mirrorSigBefore && process.env.AWB_TRACE_WRITES === '1') {
+      try {
+        const parts = (proj) => {
+          const m = proj.workflowMirror ? { ...proj.workflowMirror } : null;
+          if (m) delete m.updatedAt;
+          return {
+            teamName: String(proj.teamName || ''),
+            requirements: JSON.stringify(Array.isArray(proj.requirements) ? proj.requirements : []),
+            votes: JSON.stringify(Array.isArray(proj.votes) ? proj.votes : []),
+            mirror: JSON.stringify(m),
+            tasks: JSON.stringify((Array.isArray(proj.tasks) ? proj.tasks : []).map((t) => [t && t.id, t && t.title, t && t.status, t && t.updatedAt, t && t.owner, t && t.priority, t && t.requirementId])),
+          };
+        };
+        const after = parts(current);
+        const before = JSON.parse(diffStoreBefore || '{}');
+        const diff = {};
+        for (const k of Object.keys(after)) if (before[k] !== after[k]) diff[k] = { beforeLen: String(before[k] || '').length, afterLen: String(after[k] || '').length };
+        fs.appendFileSync(path.join(path.dirname(storeFile()), '写盘差异.jsonl'), JSON.stringify({ at: new Date().toISOString(), diff }) + '\n');
+      } catch { /* ignore */ }
+    }
+    if (mirrorSigAfter === mirrorSigBefore) {
+      // 内容一致：连 updatedAt 一起还原，彻底不写盘（这是「每 3 秒写 5MB」的主要来源）。
+      if (current.workflowMirror && snapshot && snapshot.updatedAt !== undefined) {
+        current.workflowMirror.updatedAt = mirrorSigBefore ? current.workflowMirror.updatedAt : current.workflowMirror.updatedAt;
+      }
+      return current;
     }
     writeStore(store);
     return current;
@@ -3207,6 +3286,14 @@ function writeStore(store) {
   try { dirScanCache.clear(); } catch { /* 目录扫描缓存清理失败不阻断写盘 */ }
   if (storeFatal) throw new Error('状态文件损坏且没有可用备份，已阻止写入；请先处理 workbench.json.corrupt-*');
   const file = storeFile();
+  // PM 19:25 临时诊断：AWB_TRACE_WRITES=1 时记录每次写盘的调用栈，用于定位「每秒重写 3–5MB」的写者。
+  if (process.env.AWB_TRACE_WRITES === '1') {
+    try {
+      const stack = String(new Error().stack || '').split('\n').slice(1, 6).map((l) => l.trim()).join(' | ');
+      const proj = Array.isArray(store && store.projects) ? store.projects.map((x) => (x && x.messages ? x.messages.length : 0)).join(',') : '';
+      fs.appendFileSync(path.join(path.dirname(file), '写盘调用栈.jsonl'), JSON.stringify({ at: new Date().toISOString(), msgs: proj, stack }) + '\n');
+    } catch { /* ignore */ }
+  }
   // B-20261117-113926-8be3：workbench.json 的写入原来没有任何审计行（json-atomic 的 appendAudit 只认
   // 状态/项目/<项目>/ 下的文件）。这里在写前记 prevSha，写成功后 append 一行 8 键审计（无变化/失败不写）。
   const storeAuditPrev = (() => {
