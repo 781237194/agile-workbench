@@ -1530,6 +1530,31 @@
   let noticeTimer = null;
   // B-20261118-213848 P2：验收列表(#accept-list)盖在评审弹窗之外，而 [data-or-notice] 在弹窗内 →
   // 从「我的验收」列表点完确认后用户看不到成功提示。这里在验收列表容器顶部再挂一条可见提示（同文案，6s 收起）。
+  // PM 172739：点击瞬间先同步渲染一条全局固定提示（不等 IPC/列表重建），保证任何内存压力下都有可见反馈；
+  // 后续同一节点只改文字，避免重建 DOM。
+  let acceptGlobalTimer = null;
+  function acceptGlobalNotice(text, kind = 'ok') {
+    try {
+      let bar = document.getElementById('awb-accept-global');
+      if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'awb-accept-global';
+        bar.setAttribute('data-accept-global', '1');
+        bar.setAttribute('role', 'status');
+        bar.style.cssText = 'position:fixed;left:50%;top:52px;transform:translateX(-50%);z-index:10000;'
+          + 'padding:8px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+        document.body.appendChild(bar);
+      }
+      bar.style.background = kind === 'bad' ? '#3a1616' : '#143a22';
+      bar.style.color = kind === 'bad' ? '#ffb4b4' : '#c9f7d6';
+      bar.style.border = '1px solid ' + (kind === 'bad' ? '#7a2b2b' : '#2f7d4b');
+      bar.textContent = String(text || '');
+      bar.hidden = false;
+      if (acceptGlobalTimer) clearTimeout(acceptGlobalTimer);
+      acceptGlobalTimer = setTimeout(() => { bar.hidden = true; }, 8000);
+      return bar;
+    } catch { return null; }
+  }
   function acceptListNotice(text, kind = 'ok') {
     try {
       const box = document.getElementById('accept-list');
@@ -2276,6 +2301,21 @@
       err.hidden = true;
       startBusy();
       showNotice(rejecting ? `正在打回 ${row.id}…` : `正在验收 ${row.id}…`);
+      // PM 172739：点击瞬间同步渲染全局固定提示（不等 IPC / 列表重建），并打点 t0→t1→t2。
+      const __clickT0 = performance.now();
+      const __acceptBar = acceptGlobalNotice(rejecting ? `正在打回 ${row.id}…` : `正在验收 ${row.id}…`, 'ok');
+      try {
+        window.__acceptUiLast = { t0: __clickT0, insertMs: Math.round(performance.now() - __clickT0) };
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            try {
+              const rect = __acceptBar && __acceptBar.getBoundingClientRect();
+              window.__acceptUiLast.visibleMs = Math.round(performance.now() - __clickT0);
+              window.__acceptUiLast.rect = rect ? Math.round(rect.height) : 0;
+            } catch { /* ignore */ }
+          });
+        });
+      } catch { /* ignore */ }
       const opinion = String(op.value || '').trim();
       // R-c431：打回必须填原因——前端先拦一次，后端 OWNER_OPINION_REQUIRED 再兜一次。
       if (rejecting && !opinion) {
@@ -2326,7 +2366,17 @@
           : (pendingSync ? `已验收：${row.id}（后台同步中，稍后自动完成；失败可在验收列表重试）` : `已验收：${row.id}；流程图 ≤6 秒内更新`);
         showNotice(successText);
         acceptListNotice(pendingSync ? `已验收：${row.id}（后台同步中）` : (rejecting ? `已打回：${row.id}` : `已验收：${row.id}（流程图 ≤6 秒内更新）`), 'ok');
-        void Promise.resolve().then(() => loadData()).then(() => renderAcceptList()).catch(() => { /* 刷新失败不掩盖成功 */ });
+        acceptGlobalNotice(pendingSync ? `已验收：${row.id}（后台同步中）` : (rejecting ? `已打回：${row.id}` : `已验收：${row.id}`), 'ok');
+        // PM 172739：504 条列表的整块重建挪到 requestIdleCallback（提示先可见），完成后记 t3。
+        const finishRefresh = () => {
+          try {
+            void loadData().then(() => renderAcceptList()).then(() => {
+              try { if (window.__acceptUiLast) window.__acceptUiLast.t3 = Math.round(performance.now() - __clickT0); } catch { /* ignore */ }
+            }).catch(() => { /* 刷新失败不掩盖成功 */ });
+          } catch { /* ignore */ }
+        };
+        if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(finishRefresh, { timeout: 1500 });
+        else setTimeout(finishRefresh, 300);
       } catch (e) {
         submitting = false;
         stopBusy();

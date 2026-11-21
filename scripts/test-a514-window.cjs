@@ -32,7 +32,7 @@ const STORE = path.join(SB, 'store', 'workbench.json');
 const WF = path.join(TEAM, '状态', '项目', '工作台改造修复', '工作流.json');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // PM 171732：单实例锁——锁文件存在且 pid 存活时拒绝启动，避免并发/循环起实例。
-let INSTANCE_LOCK = '';
+var INSTANCE_LOCK = ''; // SB 定义之后立刻赋值；var 声明避免 TDZ
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 function acquireInstanceLock() {
   if (!INSTANCE_LOCK) return;
@@ -327,9 +327,15 @@ const ACCEPT_ONE = `(async () => {
   const n0 = document.querySelector('[data-accept-list-notice]'); if (n0) n0.remove();
   const t0 = performance.now();
   c.v.click();
-  const seen = await until(() => { const n = document.querySelector('[data-accept-list-notice]'); return n && n.getBoundingClientRect().height > 0 && /已验收|验收/.test(n.textContent || ''); }, 15000);
+  const seen = await until(() => {
+    const list = [document.querySelector('#awb-accept-global'), document.querySelector('[data-accept-list-notice]')];
+    return list.find((n) => n && n.getBoundingClientRect().height > 0 && /已验收|验收/.test(n.textContent || '')) || null;
+  }, 20000);
   if (!seen) return { ok: false, error: 'notice timeout' };
-  return { ok: true, ms: Math.round(seen.at - t0), notice: String((document.querySelector('[data-accept-list-notice]') || {}).textContent || '').slice(0, 80) };
+  // PM 172739：t0 click → t1 提示节点插入 → t2 实际可见（rect>0）→ t3 列表重建完
+  const ui = window.__acceptUiLast || null;
+  const t2 = Math.round(performance.now() - t0);
+  return { ok: true, ms: t2, notice: String((seen.v ? seen.v.textContent : '') || '').slice(0, 80), ui: ui ? { ...ui, t2VisibleMs: t2 } : { t2VisibleMs: t2 } };
 })()`;
 const REVIEW_ONE = `(async () => {
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -385,6 +391,7 @@ const TYPING = `(async () => {
     log('lazyLoaded', lazy);
     const ONLY_REVIEW = process.env.A514_ONLY_REVIEW === '1';
     let coldAccept = null;
+    let coldUi = null;
     let cold = null;
     if (!ONLY_REVIEW) {
       // PM 14:37：冷态样本＝新实例 lazyLoaded 后立刻点验收（不预热弹窗、不 sleep 2s）。
@@ -392,6 +399,7 @@ const TYPING = `(async () => {
       await sleep(150);
       cold = await cdp.evaluate(ACCEPT_ONE);
       coldAccept = cold && cold.ok ? cold.ms : null;
+      coldUi = cold && cold.ok ? (cold.ui || null) : null;
       if (coldAccept === null) errors.push('coldAccept: ' + JSON.stringify(cold));
       log('cold accept', JSON.stringify({ ms: coldAccept, cold }));
       await pageWaitIdle(cdp);
@@ -425,8 +433,10 @@ const TYPING = `(async () => {
       await pageWaitIdle(cdp); await sleep(5000);
       typing = await cdp.evaluate(TYPING);
     }
+    // 列表重建（requestIdleCallback 后）完成时间：t3
+    try { coldUi = (await cdp.evaluate('window.__acceptUiLast || null')) || coldUi; } catch { /* ignore */ }
     const profiles = inst.getStdout().split(/\r?\n/).filter((l) => /\[accept-profile\]|\[review-profile\]|\[side-effects-profile\]|\[board-profile\]|\[workflow-prewarm\]/.test(l)).slice(-60);
-    const report = { at: new Date().toISOString(), coldAccept, coldNotice: cold && cold.notice ? String(cold.notice) : '', samples, errors, typing, profiles };
+    const report = { at: new Date().toISOString(), coldAccept, coldUi, coldNotice: cold && cold.notice ? String(cold.notice) : '', samples, errors, typing, profiles };
     fs.writeFileSync(path.join(OUT, 'window-report.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
     fs.writeFileSync(path.join(OUT, 'window-stdout.log'), inst.getStdout(), 'utf8');
     log('accept samples', JSON.stringify(samples.accept));

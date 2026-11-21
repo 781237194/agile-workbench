@@ -6632,7 +6632,9 @@ function createTeamTools(options = {}) {
     if (!name) return failure('PROJECT_REQUIRED', '缺少团队项目名');
     const fp = workflowSnapshotFingerprint(name, projectPath);
     const memo = snapshotMemo.get(name);
-    if (memo && fp && memo.fp === fp && (Date.now() - memo.at) < 1200) {
+    // a514/PM 172739：冷态首次点击也要命中预热快照——memo 仍是「五文件 mtime+size 指纹」校验，
+    // 把 TTL 从 1200ms 放宽到 8000ms（指纹变化立即失效，不会把旧状态当新状态）。
+    if (memo && fp && memo.fp === fp && (Date.now() - memo.at) < 8000) {
       snapshotMemoStats.hits += 1;
       taskCacheStats.lastHitAt = new Date().toISOString();
       return memo.value;

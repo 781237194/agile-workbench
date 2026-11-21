@@ -11639,7 +11639,9 @@ ipcMain.handle('theme:metrics', async () => {
     // 旧协议 workflow:owner 用 decision，新界面用 status。
     const status = String(p.status || p.decision || '');
     // Owner 确认码已废弃：决定直接以 role=owner 接受，不再校验 confirmToken/nonce。
-    const roundKey = workflowSnapshot(project).roundKey;
+    // PM 172739：不再为了 roundKey 在 handler 入口读一遍 1.5MB 工作流快照（teamTools 内部会用当前 state 计算），
+    // 这是 review IPC 715–1328ms 里除落账外的主要同步成本。
+    const roundKey = String(p.roundKey || '');
     // R-6f60 AC24.4/24.10：代管（channel=proxy）落账判定。
     // PM 代记 Owner 决定时前端传 recordedBy=pm；通道未开启/已结束 → OWNER_ACTION_REQUIRED，缺授权 → PROXY_UNAUTHORIZED。
     const decideRequirementId = String(p.requirementId || '');
@@ -13519,6 +13521,17 @@ function createWindow() {
       return;
     }
     if (!AWB_START_HIDDEN) mainWindow.show();
+    // PM 172739：显示后 2.5s 再预热一次（只读、后台）——保证用户首次点击验收/评审时快照 memo 仍热（TTL 8s）。
+    setTimeout(() => {
+      try {
+        const storeWarm = readStore();
+        const projectWarm = (storeWarm.projects || []).find((row) => row && row.id === storeWarm.activeProjectId)
+          || (storeWarm.projects || [])[0];
+        if (projectWarm && projectWarm.teamName) {
+          setImmediate(() => { try { teamTools.prewarmWorkflowCaches(projectWarm.teamName, projectWarm.path); } catch { /* ignore */ } });
+        }
+      } catch { /* ignore */ }
+    }, 2500);
   });
   // 拖动/缩放后防抖记住尺寸；关闭前补一次，避免最后一秒的变化丢掉。
   let saveTimer = null;
