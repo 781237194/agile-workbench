@@ -16,6 +16,8 @@ const UsageView = require('./usage-view.js');
 const ReviewCopy = require('./review-copy.js');
 // R-c1ed F-1：渲染内存采样分片 / 保留 / 取数通道（纯逻辑，Node 可测）
 const RenderMemory = require('./render-memory.js');
+// R-20261121-204514-e31b（T-af31）：渲染层大数组治理——任务摘要 / 消息分页 / 目录单层懒加载的纯逻辑。
+const RenderDataPaging = require('./render-data-paging.js');
 const SamplerDecide = require('./mem-sampler-decide.js');
 const RenderMemDir = require('./render-mem-dir.js');
 // B-20261117-113926-8be3：状态写入审计行（workbench.json 原来没有任何审计）
@@ -2314,6 +2316,28 @@ function scheduleWorkflowMirror(projectId, teamName, projectPath, reason) {
   return workflowSideEffects.schedule({ projectId, teamName, projectPath, reason: String(reason || 'workflow') });
 }
 
+/** R-e31b §5.1：任务行摘要投影（列表只吃摘要；详情按需 workflow:get {detail:'full'}）。 */
+function summarizeTaskRowForUi(task) {
+  const t = task && typeof task === 'object' ? task : {};
+  return {
+    id: String(t.id || ''),
+    title: String(t.title || ''),
+    status: String(t.status || ''),
+    owner: String(t.owner || ''),
+    priority: String(t.priority || ''),
+    updatedAt: String(t.updatedAt || t.claimedAt || t.createdAt || ''),
+    role: String(t.role || ''),
+    requirementId: String(t.requirementId || ''),
+  };
+}
+function capWorkflowTasksForUi(payload, detail) {
+  if (!payload || !Array.isArray(payload.tasks) || detail === 'full') return payload;
+  const all = payload.tasks;
+  payload.tasksTotal = all.length;
+  payload.tasks = all.map(summarizeTaskRowForUi);
+  payload.tasksSummary = true;
+  return payload;
+}
 /** 统一工作流返回：失败也镜像一次，界面/测试能看到旧状态是否已部分落盘。 */
 function workflowResponse(projectId, teamName, projectPath, result) {
   // a514：同步只保留需求行写盘；镜像回写进后台队列（失败可见 + 可重试）。
@@ -2327,6 +2351,7 @@ function workflowResponse(projectId, teamName, projectPath, result) {
     sideEffects: mirrorScheduled,
     state: statePayload()
   };
+  capWorkflowTasksForUi(payload);
   // R-f9b1 补单（T-cb02②）：池行挂增补卷路径——**不改 工作流.json、不改正文哈希**，
   // 只在返回给界面的快照里按需补一份 supplements[]（真源仍是 需求/增补卷-*.md 文件本身；
   // 工作流行若已声明 supplements 就原样保留，这里只补缺的那一份）。
@@ -3664,9 +3689,22 @@ function publicProject(project) {
         staged: null
       }] : [])
   }));
+  // R-e31b：app:state 不再携带大数组全量——消息只留最近 50 条（含未回执那条）、本地任务只留摘要；
+  // 详情/分页/下一层走 tasks:summary / messages:page / files:list 新契约。
+  const allMessages = Array.isArray(project.messages) ? project.messages : [];
+  const pendingMessage = project.pendingAck ? allMessages.find((msg) => msg && msg.id === project.pendingAck) : null;
+  const recentMessages = allMessages.slice(-50);
+  if (pendingMessage && !recentMessages.some((msg) => msg && msg.id === pendingMessage.id)) recentMessages.push(pendingMessage);
+  const allLocalTasks = Array.isArray(project.tasks) ? project.tasks : [];
+  const localTaskSummaries = allLocalTasks.slice(0, 300).map(RenderDataPaging.taskUiSummaryOf);
   const flow = workflowSnapshot(project);
   return {
     ...project,
+    // R-e31b：只下发摘要与最近 50 条消息；完整数据走新 IPC。
+    messages: recentMessages,
+    messagesTotal: allMessages.length,
+    tasks: localTaskSummaries,
+    localTasksTotal: allLocalTasks.length,
     proposals,
     exists,
     // R-97db（B-190a 残差）：名册口径就绪角色集合——app:state 的 projects 走 publicProject，
@@ -5962,16 +6000,53 @@ function registerIpc() {
     return value;
   });
   ipcMain.handle('app:version', () => ({ ok: true, version: APP_VERSION, commit: readAppVersion().commit, name: readAppVersion().name }));
-  ipcMain.handle('files:list', async (_e, projectId) => {
+  ipcMain.handle('files:list', async (_e, payload) => {
     const store = readStore();
-    const project = store.projects.find((p) => p.id === projectId);
+    // R-e31b §5.3：目录懒加载——传 {projectId?, dir, limit?} 时只列一层（不递归）；
+    // 传字符串/无 dir 时保持旧行为（递归扫树），供历史调用方使用。
+    const opts = (payload && typeof payload === 'object') ? payload : { projectId: payload };
+    const project = store.projects.find((p) => p.id === (opts.projectId || store.activeProjectId));
     if (!project) throw new Error('项目不存在');
     const root = path.resolve(project.path);
     if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) throw new Error('项目目录不存在：' + root);
+    if (opts.dir !== undefined || opts.limit !== undefined) {
+      try {
+        const page = RenderDataPaging.buildFilesPage({ root, dir: opts.dir, limit: opts.limit });
+        return { ok: true, dir: page.dir, items: page.items, truncated: page.truncated, count: page.count, limit: page.limit, root };
+      } catch (error) {
+        return { ok: false, code: error.code || 'FILES_DIR_ERROR', message: String((error && error.message) || error).slice(0, 200) };
+      }
+    }
     // R-b34a 批5（测量单 d）：递归扫描走目录扫描缓存——键=目录 mtime+size（顶层变化即刻失效）+ 3s TTL 兜底，
     // 命中时不 readdir、不逐文件 stat；返回结构不变，仅多一个 cached 标记。
     const scanned = dirScanCache.scanTreeCached(root, { maxDepth: FILES_LIST_MAX_DEPTH, maxFiles: FILES_LIST_MAX_FILES, ttlMs: FILES_LIST_TTL_MS });
     return { ok: true, root, files: scanned.files, count: scanned.count, truncated: scanned.truncated, maxDepth: scanned.maxDepth, cached: scanned.cached };
+  });
+  // R-e31b §5.1：任务摘要 IPC——只投影七个字段，列表渲染用它，详情再单取（禁带 detail/acceptance/story）。
+  const e31bTaskSummaryHandler = async (_e, payload) => {
+    const p = payload || {};
+    const store = readStore();
+    const project = store.projects.find((row) => row.id === (p.projectId || store.activeProjectId));
+    if (!project) return { ok: false, code: 'PROJECT_NOT_FOUND', message: '项目不存在', items: [], total: 0, shown: 0 };
+    let rows = [];
+    try {
+      const snap = workflowSnapshot(project);
+      rows = Array.isArray(snap && snap.tasks) ? snap.tasks : [];
+    } catch { rows = []; }
+    const page = RenderDataPaging.buildTasksSummary(rows, p);
+    return { ok: true, items: page.items, total: page.total, shown: page.shown };
+  };
+  ipcMain.handle('workflow:tasks-summary', e31bTaskSummaryHandler);
+  ipcMain.handle('tasks:summary', e31bTaskSummaryHandler);
+  ipcMain.handle('tasks-summary', e31bTaskSummaryHandler);
+  // R-e31b §5.2：消息分页——at 倒序，items 不含 body；offset≥total 返回空 + total 真值。
+  ipcMain.handle('messages:page', async (_e, payload) => {
+    const p = payload || {};
+    const store = readStore();
+    const project = store.projects.find((row) => row.id === (p.projectId || store.activeProjectId));
+    if (!project) return { ok: false, code: 'PROJECT_NOT_FOUND', message: '项目不存在', items: [], total: 0, offset: 0, limit: 50 };
+    const page = RenderDataPaging.buildLocalMessagesPage(project.messages, p);
+    return { ok: true, items: page.items, total: page.total, offset: page.offset, limit: page.limit };
   });
   // B-20261117-074103-75e9：同一路径 3s 内只开一次、5 分钟内已开则不再新开（尽力聚焦已有窗口）。
   const { execFile: execFileAsync } = require('node:child_process');
@@ -8879,7 +8954,11 @@ ipcMain.handle('theme:metrics', async () => {
     try {
       const store = readStore();
       const project = pickProject(store, typeof payload === 'string' ? { projectId: payload } : (payload || {}));
-      return { ...workflowSnapshot(project), state: statePayload() };
+      // R-e31b：任务列表默认只下发摘要（1369 条全量是渲染堆与 IPC 大头）；{detail:'full'} 才回全量。
+      const out = { ...workflowSnapshot(project), state: statePayload() };
+      const askFull = Boolean(payload && typeof payload === 'object' && (payload.detail === 'full' || payload.full === true));
+      if (!askFull) capWorkflowTasksForUi(out);
+      return out;
     } catch (e) {
       return { ok: false, code: 'WORKFLOW_FAILED', why: String(e && e.message || e).slice(0, 500), state: statePayload() };
     }

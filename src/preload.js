@@ -37,7 +37,11 @@ if (IS_BOARD_WINDOW) {
   // e610 AC6：自动检查开关（只检查/只提示，不自动安装）
   upgradeAutoGet: () => ipcRenderer.invoke('app:upgrade-auto-get'),
   upgradeAutoSet: (enabled) => ipcRenderer.invoke('app:upgrade-auto-set', enabled),
-    filesList: (projectId) => ipcRenderer.invoke('files:list', projectId),
+    filesList: (payload) => ipcRenderer.invoke('files:list', payload),
+    // R-e31b：摘要/分页契约（列表只拿摘要，详情按需单取）。
+    tasksSummary: (payload) => ipcRenderer.invoke('workflow:tasks-summary', payload),
+    workflowTasksSummary: (payload) => ipcRenderer.invoke('workflow:tasks-summary', payload),
+    messagesPage: (payload) => ipcRenderer.invoke('messages:page', payload),
     // 只读文件预览：文本/Markdown/图片，主进程做路径越界与大小上限校验。
     filesRead: (payload) => ipcRenderer.invoke('files:read', payload),
     filesOpen: (payload) => ipcRenderer.invoke('files:open', payload),
