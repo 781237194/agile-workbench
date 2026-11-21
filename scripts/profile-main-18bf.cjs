@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const SANDBOX_BASE = String.fromCharCode(68) + ':\\awb-sandbox';
@@ -58,6 +58,13 @@ class Cdp {
   send(method, params = {}, timeout = 20000) { const id = ++this.id; return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.ws.send(JSON.stringify({ id, method, params })); setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error('timeout ' + method)); } }, timeout); }); }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function osCpuSeconds(pid) {
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).TotalProcessorTime.TotalSeconds`], { encoding: 'utf8', timeout: 8000 }).trim();
+    const n = Number(out);
+    return Number.isFinite(n) ? n : null;
+  } catch { return null; }
+}
 const httpJson = (url) => new Promise((resolve, reject) => { const req = http.get(url, (res) => { let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } }); }); req.on('error', reject); req.setTimeout(2500, () => req.destroy(new Error('timeout'))); });
 let child = null;
 const cleanup = () => {
@@ -102,8 +109,12 @@ function aggregate(profile) {
     AWB_SHOW_INACTIVE: '1', AWB_BOARD_PREGEN_MS: '0', AWB_MEM_RECYCLE_MB: '0', TEAM_SELFTEST: '1',
   };
   delete env.ELECTRON_RUN_AS_NODE;
+  if (process.env.AWB_PROFILE_NO_DSH === '1') {
+    env.AWB_DSH_BASE_URL = 'http://127.0.0.1:1';
+    env.DSH_WEB_URL = 'http://127.0.0.1:1';
+  }
   const electron = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
-  child = spawn(electron, [ROOT, `--inspect=${INSPECT_PORT}`, `--remote-debugging-port=${DEBUG_PORT}`], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(electron, [ROOT, `--inspect=${INSPECT_PORT}`, `--remote-debugging-port=${DEBUG_PORT}`].concat(process.env.AWB_PROFILE_DISABLE_GPU === '1' ? ['--disable-gpu'] : []), { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   child.stdout.on('data', (d) => { stdout += String(d); });
   child.stderr.on('data', (d) => { stdout += String(d); });
@@ -129,18 +140,30 @@ function aggregate(profile) {
   }
   // 等启动期结束，再采稳态 12s。
   await sleep(10000);
-  await mainInspector.send('Profiler.enable');
-  await mainInspector.send('Profiler.setSamplingInterval', { interval: 1000 });
-  await mainInspector.send('Profiler.start');
+  if (shell && process.env.AWB_PROFILE_HIDE === '1') {
+    await shell.send('Runtime.evaluate', { expression: "window.workbench.windowControl('hide')", awaitPromise: true, returnByValue: true }).catch(() => null);
+    await sleep(2000);
+  }
+  // 先取一次接口值，重置 process.cpuUsage 窗口；OS 口径同时取 TotalProcessorTime。
+  if (shell) await shell.send('Runtime.evaluate', { expression: 'window.workbench.mainRss()', awaitPromise: true, returnByValue: true }).catch(() => null);
+  const osCpuT0 = osCpuSeconds(child.pid);
+  const wallT0 = Date.now();
+  const noProfiler = process.env.AWB_PROFILE_NO_PROFILER === '1';
+  if (!noProfiler) {
+    await mainInspector.send('Profiler.enable');
+    await mainInspector.send('Profiler.setSamplingInterval', { interval: 1000 });
+    await mainInspector.send('Profiler.start');
+  }
   if (shell) {
-    for (let i = 0; i < 12; i += 1) {
+    // 生产面板 5s 轮询；不要 1s 压测，否则会把 CPU 采样放大 5 倍。
+    for (let i = 0; i < 3; i += 1) {
+      await sleep(5000);
       await shell.send('Runtime.evaluate', { expression: 'window.workbench.teamSessionQueue({})', awaitPromise: true, returnByValue: true }, 20000).catch(() => null);
-      await sleep(1000);
     }
   } else {
     await sleep(12000);
   }
-  const profile = await mainInspector.send('Profiler.stop', {}, 60000);
+  const profile = noProfiler ? { profile: { nodes: [], samples: [], timeDeltas: [] } } : await mainInspector.send('Profiler.stop', {}, 60000);
   const agg = aggregate(profile.profile || {});
   // 壳页面取主进程读数
   let mainRss = null;
@@ -152,7 +175,10 @@ function aggregate(profile) {
       mainRss = { ...mainRss, cacheStats: c && c.result ? c.result.value : null };
     }
   } catch { /* ignore */ }
-  const result = { ok: true, inspectPort: INSPECT_PORT, debugPort: DEBUG_PORT, mainRss, profile: agg, stdoutTail: stdout.slice(-1500) };
+  const osCpuT1 = osCpuSeconds(child.pid);
+  const wallSec = (Date.now() - wallT0) / 1000;
+  const osCpuPercent = osCpuT0 !== null && osCpuT1 !== null && wallSec > 0 ? Math.round((((osCpuT1 - osCpuT0) / wallSec) * 100) * 100) / 100 : null;
+  const result = { ok: true, inspectPort: INSPECT_PORT, debugPort: DEBUG_PORT, mainRss, osCpu: { cpuPercent: osCpuPercent, windowSec: Math.round(wallSec * 100) / 100, pid: child.pid }, profile: agg, stdoutTail: stdout.slice(-1500) };
   fs.writeFileSync(path.join(OUT, 'main-cpu-profile.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify({ mainRss, durationSec: agg.durationSec, top: agg.top }, null, 2));
   console.log('证据：' + path.join(OUT, 'main-cpu-profile.json'));

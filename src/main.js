@@ -162,8 +162,11 @@ function cacheValueBytes(value) {
 // 这些通道的结果**不依赖本进程 store**（外部进程写文件 / 系统指标），writeStore 清缓存时保留它们，
 // 否则每次写盘都把 metrics/presence 缓存打掉，导致每次都重跑 nvidia-smi / 子进程（tester v256 实测 1.7s/5.7s）。
 const HOT_IPC_STORE_INDEPENDENT = new Set(['system:metrics', 'team:presence', 'dsh:team-status', 'team:status']);
+// 大载荷通道已有自己的缓存（appStateCache / workflowStateCache / 看板缓存），不再进 hotIpcCache：
+// 避免每个轮询都对 1.5MB 响应做一次 JSON.stringify 计字节（profile 中 cacheValueBytes 是主线程热点之一）。
+const HOT_IPC_SKIP_CACHE = new Set(['app:state', 'workflow:state', 'team:board']);
 /** 工作流快照的 mtime 指纹：工作流.json / 任务目录 / 状态/启动 / store 文件（缺一不可，缺则返回空串=不缓存）。 */
-function workflowStateFingerprint(teamName) {
+function computeWorkflowStateFingerprint(teamName) {
   try {
     const name = String(teamName || '').trim();
     if (!name) return '';
@@ -197,19 +200,21 @@ function hotIpcTtlWrap(channel, handler) {
     if (hit && now - hit.at < ttl) { hotIpcStats.hits += 1; return hit.value; }
     hotIpcStats.misses += 1;
     const value = await handler.apply(this, args);
-    const bytes = cacheValueBytes(value);
-    if (bytes <= HOT_IPC_ENTRY_MAX_BYTES) {
-      const prev = hotIpcCache.get(key);
-      if (prev) hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number(prev.bytes || 0));
-      const row = { at: Date.now(), value, bytes };
-      hotIpcCache.set(key, row);
-      hotIpcCacheBytes += bytes;
-      while (hotIpcCache.size > 64 || hotIpcCacheBytes > HOT_IPC_TOTAL_MAX_BYTES) {
-        const oldestKey = hotIpcCache.keys().next().value;
-        if (oldestKey === undefined) break;
-        const old = hotIpcCache.get(oldestKey);
-        hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number((old && old.bytes) || 0));
-        hotIpcCache.delete(oldestKey);
+    if (!HOT_IPC_SKIP_CACHE.has(channel)) {
+      const bytes = cacheValueBytes(value);
+      if (bytes <= HOT_IPC_ENTRY_MAX_BYTES) {
+        const prev = hotIpcCache.get(key);
+        if (prev) hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number(prev.bytes || 0));
+        const row = { at: Date.now(), value, bytes };
+        hotIpcCache.set(key, row);
+        hotIpcCacheBytes += bytes;
+        while (hotIpcCache.size > 64 || hotIpcCacheBytes > HOT_IPC_TOTAL_MAX_BYTES) {
+          const oldestKey = hotIpcCache.keys().next().value;
+          if (oldestKey === undefined) break;
+          const old = hotIpcCache.get(oldestKey);
+          hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number((old && old.bytes) || 0));
+          hotIpcCache.delete(oldestKey);
+        }
       }
     }
     return value;
@@ -2167,6 +2172,10 @@ function requireOwnerConfirmation(payload, expected = {}) {
  */
 async function workflowProjectContext(payload) {
   const p = payload || {};
+  const cacheKey = String(p.projectId || p.taskId || p.requirementId || 'active');
+  const nowMs = Date.now();
+  const cached = workflowContextCache.get(cacheKey);
+  if (cached && nowMs - cached.at < WORKFLOW_CONTEXT_CACHE_MS) return cached.value;
   let project = requireProject(readStore(), p.projectId);
   const ensured = await ensureTeamName(project);
   if (!ensured.ok || !ensured.teamName) {
@@ -2174,8 +2183,13 @@ async function workflowProjectContext(payload) {
   }
   const teamName = String(ensured.teamName);
   project = persistTeamName(project.id, teamName) || requireProject(readStore(), project.id);
-  return { project, teamName, projectPath: path.resolve(String(project.path)) };
+  const value = { project, teamName, projectPath: path.resolve(String(project.path)) };
+  workflowContextCache.set(cacheKey, { at: nowMs, value });
+  if (workflowContextCache.size > 16) workflowContextCache.delete(workflowContextCache.keys().next().value);
+  return value;
 }
+const WORKFLOW_CONTEXT_CACHE_MS = 1500;
+const workflowContextCache = new Map();
 
 /**
  * 旧团队状态 → 本地 workbench.json 的只读镜像。
@@ -3416,6 +3430,8 @@ function writeStore(store) {
   try { perfCache.invalidate(storeFile()); } catch { /* 缓存失效失败不阻断写盘 */ }
   // R-b34a 批4：写后清热点 IPC 短 TTL 缓存（防「界面停在旧值」，与 mtime 双保险同向）。
   try { hotIpcCacheClear(); } catch { /* 清缓存失败不阻断写盘 */ }
+  try { projectFlowCache.clear(); } catch { /* 项目快照缓存未初始化/已清 */ }
+  try { workflowContextCache.clear(); } catch { /* 工作流上下文缓存未初始化/已清 */ }
   try { dirScanCache.clear(); } catch { /* 目录扫描缓存清理失败不阻断写盘 */ }
   if (storeFatal) throw new Error('状态文件损坏且没有可用备份，已阻止写入；请先处理 workbench.json.corrupt-*');
   const file = storeFile();
@@ -3866,6 +3882,9 @@ function reconcileExpiredLocks(store) {
  */
 function statePayload(options = {}) {
   const readOnly = options && options.readOnly === true;
+  // T-18bf：session-queue / workflow / 其它只读面板都直接调 statePayload，原只有 app:state 有 2s 缓存；
+  // 这里统一 2s 复用（writeStore 会清空），避免同一轮询周期内重复 readStore + project 投影。
+  if (Date.now() - appStateCache.at < 2000 && appStateCache.value) return appStateCache.value;
   // PM 20:50：只读路径用 readStoreCached()（零 structuredClone），5MB store 不再每次 IPC 深拷贝。
   const store = readOnly ? readStoreCached() : readStore();
   if (!readOnly) {
@@ -3879,7 +3898,7 @@ function statePayload(options = {}) {
   // 不能因为这里静默回退到 projects[0] 就永远看不到错误（activeProjectId 仍给已解析值供既有消费方）。
   const activeIdRaw = String(store.activeProjectId || '');
   const activeMissing = Boolean(activeIdRaw) && !store.projects.some((p) => String(p && p.id) === activeIdRaw);
-  return {
+  const value = {
     version: APP_VERSION,
     commit: APP_COMMIT,
     roles: ROLES,
@@ -3901,6 +3920,10 @@ function statePayload(options = {}) {
     mapping: publicMapping(active),
     storeError: storeWarning ? { ...storeWarning, fatal: storeFatal } : null
   };
+  appStateCache.value = value;
+  appStateCache.at = Date.now();
+  appStateCache.key = '';
+  return value;
 }
 
 function projectTemplate(name) {
@@ -4754,7 +4777,34 @@ function attachRequirementSupplements(project, requirements) {
   });
 }
 
+// T-18bf：publicProject 每次 statePayload 都会重建 workflowSnapshot（读 1,372 任务/需求正文指纹），
+// 面板每 5s 轮询 → 主线程 stat/read 大头。这里加 2s 项目级快照缓存；写路径 writeStore 会清。
+const projectFlowCache = new Map();
+const PROJECT_FLOW_CACHE_MS = 2000;
+// T-18bf：指纹本身要 stat 工作流/任务目录；2s 内复用，避免 publicProject/workflow:state 每轮都 stat。
+const workflowFingerprintCache = new Map();
+const WORKFLOW_FINGERPRINT_CACHE_MS = 2000;
+function workflowStateFingerprint(teamName) {
+  const key = String(teamName || '');
+  const nowMs = Date.now();
+  const hit = workflowFingerprintCache.get(key);
+  if (hit && nowMs - hit.at < WORKFLOW_FINGERPRINT_CACHE_MS) return hit.value;
+  const value = computeWorkflowStateFingerprint(key);
+  workflowFingerprintCache.set(key, { at: nowMs, value });
+  if (workflowFingerprintCache.size > 16) workflowFingerprintCache.delete(workflowFingerprintCache.keys().next().value);
+  return value;
+}
 function workflowSnapshot(project) {
+  const key = String((project && project.id) || '');
+  const nowMs = Date.now();
+  const hit = projectFlowCache.get(key);
+  if (hit && nowMs - hit.at < PROJECT_FLOW_CACHE_MS) return hit.value;
+  const value = computeWorkflowSnapshot(project);
+  projectFlowCache.set(key, { at: nowMs, value });
+  if (projectFlowCache.size > 16) projectFlowCache.delete(projectFlowCache.keys().next().value);
+  return value;
+}
+function computeWorkflowSnapshot(project) {
   const teamName = String(project.teamName || project.name || '').trim();
   let legacyProbe = null;
   if (teamName) {
@@ -9240,11 +9290,15 @@ ipcMain.handle('theme:metrics', async () => {
     // 面板据此给按钮禁用原因；真点下去仍由 owner:ledger-* 复核（PM_TOKEN_REQUIRED 等）。
     // R-4657：附带缺陷自动验收开关与撤回窗口（池行只看这两项，不再自己猜）。
     const value = { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName), autoAccept: autoAcceptUiConfig() };
+    // T-18bf：workflow:state 也默认只下发任务摘要（详情走 workflow:get {detail:'full'}），
+    // 避免每次轮询把 1,372 条完整任务（含 detail/acceptance/history）经 IPC 序列化。
+    capWorkflowTasksForUi(value);
     workflowStateStats.misses += 1;
     if (fp) {
-      // 结构性上限：单条 >4MB 不进常驻缓存（大对象不长期占堆；正常快照 ≤4MB 要能命中，否则每次全量重建）。
-      const bytes = cacheValueBytes(value);
-      if (bytes <= WORKFLOW_STATE_ENTRY_MAX_BYTES) {
+      // 只按任务数组规模挡超大对象（避免对 1.5MB 响应再 JSON.stringify 一次计字节，profile 热点）；
+      // 正常快照直接进 8 条上限的缓存，保证下轮命中。
+      const tasksLen = Array.isArray(value && value.tasks) ? value.tasks.length : 0;
+      if (tasksLen <= 5000) {
         workflowStateCache.set(cacheKey, value);
         if (workflowStateCache.size > 8) workflowStateCache.delete(workflowStateCache.keys().next().value);
       }
@@ -13460,19 +13514,44 @@ function mainHeapMB() {
   try {
     const m = process.memoryUsage();
     let heapTotalMB = null;
-    let arrayBuffersMB = null;
     try { const v8 = require('node:v8'); const h = v8.getHeapStatistics(); heapTotalMB = Math.round((h.total_heap_size / 1048576) * 10) / 10; } catch { /* ignore */ }
-    arrayBuffersMB = Math.round(((m.arrayBuffers || 0) / 1048576) * 10) / 10;
+    const arrayBuffersMB = Math.round(((m.arrayBuffers || 0) / 1048576) * 10) / 10;
+    const rssMB = Math.round((m.rss / 1048576) * 10) / 10;
     return {
       pid: process.pid,
       type: 'Browser',
-      rssMB: Math.round((m.rss / 1048576) * 10) / 10,
+      rssMB,
       heapUsedMB: Math.round((m.heapUsed / 1048576) * 10) / 10,
       heapTotalMB,
       externalMB: Math.round((m.external / 1048576) * 10) / 10,
       arrayBuffersMB,
+      // 近似“堆外” = RSS − V8 已提交堆 − external；仅作排查参考（含共享/原生分配）。
+      nativeApproxMB: heapTotalMB === null ? null : Math.round((rssMB - heapTotalMB - Math.round((m.external / 1048576) * 10) / 10) * 10) / 10,
     };
-  } catch { return { pid: process.pid, type: 'Browser', rssMB: null, heapUsedMB: null, heapTotalMB: null, externalMB: null, arrayBuffersMB: null }; }
+  } catch { return { pid: process.pid, type: 'Browser', rssMB: null, heapUsedMB: null, heapTotalMB: null, externalMB: null, arrayBuffersMB: null, nativeApproxMB: null }; }
+}
+// PM 打回：app.getAppMetrics 的 Browser cpuPercent 不是本进程 CPU 窗口，实测与 OS 差 10 倍。
+// 唯一口径 = process.cpuUsage() 的 user+system 增量 / 挂钟（≥5s 窗口），与 Windows Get-Process 对齐。
+let mainCpuWindow = { at: Date.now(), usage: process.cpuUsage() };
+function sampleMainCpuPercent(minWindowMs = 5000) {
+  const now = Date.now();
+  const usage = process.cpuUsage();
+  const wallSec = (now - mainCpuWindow.at) / 1000;
+  if (!(wallSec >= Math.max(1, Number(minWindowMs) / 1000))) {
+    return { cpuPercent: null, cpuWindowSec: Math.round(wallSec * 100) / 100, cpuSource: 'process.cpuUsage', cpuPending: true };
+  }
+  const userMs = (usage.user - mainCpuWindow.usage.user) / 1000;
+  const systemMs = (usage.system - mainCpuWindow.usage.system) / 1000;
+  // process.cpuUsage 是微秒；换算成 % 时还要除以 1000：CPU 毫秒 / (wallSec*1000) * 100 = ms/wallSec/10。
+  const cpuPercent = Math.round(((userMs + systemMs) / wallSec / 10) * 100) / 100;
+  mainCpuWindow = { at: now, usage };
+  return {
+    cpuPercent,
+    cpuWindowSec: Math.round(wallSec * 100) / 100,
+    cpuSource: 'process.cpuUsage',
+    cpuUserMs: Math.round(userMs * 10) / 10,
+    cpuSystemMs: Math.round(systemMs * 10) / 10,
+  };
 }
 
 /* ── B-20261115-134716-2dd3（P0）：内存阈值告警（一次性 + 带去抖）────────────────
@@ -13765,12 +13844,8 @@ ipcMain.handle('mem:stats-get', async () => ({
 }));
 // R-e31b/f01c：主进程 RSS 只读读数（验收取 3 次样本用；不触发任何清理/回收）。
 ipcMain.handle('mem:main-rss', () => {
-  let cpuPercent = null;
-  try {
-    const row = (app.getAppMetrics ? app.getAppMetrics() : []).find((r) => String(r.type || '').toLowerCase() === 'browser');
-    cpuPercent = row && row.cpu ? row.cpu.percentCPUUsage : null;
-  } catch { /* ignore */ }
-  return { ok: true, ...mainHeapMB(), cpuPercent, heapCapMB: MAIN_HEAP_CAP_MB, targetMB: 400 };
+  const cpu = sampleMainCpuPercent(5000);
+  return { ok: true, ...mainHeapMB(), ...cpu, heapCapMB: MAIN_HEAP_CAP_MB, targetMB: 400 };
 });
 // R-e31b/f01c：常驻缓存规模只读读数（证明大对象已被上限挡住；不清理、不改缓存）。
 ipcMain.handle('mem:cache-stats', () => {
