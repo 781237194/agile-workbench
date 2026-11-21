@@ -6565,7 +6565,8 @@ function createTeamTools(options = {}) {
     } catch (error) {
       result.parts.snapshot = { ok: false, error: String((error && error.message) || error).slice(0, 120), ms: Date.now() - t1 };
     }
-    try { console.log('[prewarm] ' + JSON.stringify(result)); } catch { /* ignore */ }
+    result.totalMs = Date.now() - t0;
+    try { console.log('[prewarm] done cold=' + result.totalMs + ' tasksMs=' + result.parts.tasks.ms + ' snapshotMs=' + result.parts.snapshot.ms); } catch { /* ignore */ }
     return result;
   }
 
@@ -10146,7 +10147,10 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     // 两条命令当前 team.mjs 都是 NOT_IMPLEMENTED；缺哪条就由壳层收口哪条（Fast / Full 一致），
     // 返回值明确 SHELL_OWNED，不冒充旧命令执行。命令真存在时仍走旧协议。
     const protocolCommand = isAcceptDecision ? 'owner' : 'workflow';
-    const shellOwnedCloseout = isAcceptDecision ? !ownerCommand : !workflowCommand;
+    // 冷态实测：UI 验收（channel=ui）走 legacy team.mjs owner 要 spawn 一次 CLI（accept-profile acceptMs≈4s），
+    // 是「点击→可见」超 1s 的主因。UI 验收改由壳层收口（写盘/审计等价），旧命令 spawn 不再进入点击路径。
+    const uiAcceptance = isAcceptDecision && String(input.channel || '') === 'ui';
+    const shellOwnedCloseout = isAcceptDecision ? (!ownerCommand || uiAcceptance) : !workflowCommand;
     const commandGuard = shellOwnedCloseout ? null : requireLegacyCommand(protocolCommand);
     if (commandGuard) return { ...commandGuard, project: ctx.name, projectPath: ctx.projectPath };
     // 只有正文的旧需求：先补任务/工作流行，否则验收连“需求存在”都查不到。
@@ -10317,17 +10321,35 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
           fs.writeFileSync(abs, `# ${requirementKey} 验收记录\n\n- 决定：${decision}\n- 执行人：${role}\n- 时间：${at}\n- 意见：${opinion || '（无）'}\n`, 'utf8');
           acceptRecordRel = rel.split(path.sep).join('/');
         } catch { acceptRecordRel = ''; }
-        requirementTaskDone = await runLegacyCommand(ctx.name, 'pm', 'task done', (token) => [
+        // 冷态实测：这一步 spawn 一次 team.mjs task done（1–4s），不能留在 UI 验收点击路径里。
+        // 验收落账后由后台收口旧任务；失败只记日志（工作流刷新/后续同步会自愈）。
+        const closeArgs = (token) => [
           'task', 'done', '--boot', token, '--id', requirementKey,
           '--evidence', `${acceptRecordRel ? acceptRecordRel + '（' : ''}Owner 验收通过${opinion ? '：' + opinion.slice(0, 120) : ''}${acceptRecordRel ? '）' : ''}`
-        ], { sessionId: String(input.sessionId || '').trim() });
-        if (!requirementTaskDone.ok) {
-          return {
-            ...requirementTaskDone,
-            ok: false,
-            code: requirementTaskDone.code || 'OWNER_TASK_CLOSE_FAILED',
-            message: `Owner 验收前关闭旧需求任务失败：${String(requirementTaskDone.message || '').slice(0, 300)}`
-          };
+        ];
+        const closeTaskDone = () => runLegacyCommand(ctx.name, 'pm', 'task done', closeArgs, { sessionId: String(input.sessionId || '').trim() });
+        if (uiAcceptance) {
+          requirementTaskDone = { ok: true, code: 'TASK_CLOSE_QUEUED' };
+          setImmediate(() => {
+            void (async () => {
+              try {
+                const closed = await closeTaskDone();
+                if (!closed.ok) console.warn('[owner-accept] async task done failed ' + String(closed.code || '') + ' ' + String(closed.message || '').slice(0, 160));
+              } catch (error) {
+                try { console.warn('[owner-accept] async task done error ' + String((error && error.message) || error).slice(0, 160)); } catch { /* ignore */ }
+              }
+            })();
+          });
+        } else {
+          requirementTaskDone = await closeTaskDone();
+          if (!requirementTaskDone.ok) {
+            return {
+              ...requirementTaskDone,
+              ok: false,
+              code: requirementTaskDone.code || 'OWNER_TASK_CLOSE_FAILED',
+              message: `Owner 验收前关闭旧需求任务失败：${String(requirementTaskDone.message || '').slice(0, 300)}`
+            };
+          }
         }
       }
     }
