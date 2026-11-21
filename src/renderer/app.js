@@ -15762,6 +15762,7 @@ const dshCookieRetry = { at: 0, url: '', count: 0 };
 const DSH_COOKIE_RETRY_MAX = 3;
 // PM 13:45：导航在途禁止自动重载；同一 baseUrl 的自动重试全局只允许 1 次，之后只能用户手动点。
 const dshViewLoad = { starts: 0, stops: 0, loading: false, loadingSince: 0, autoReloads: {} };
+const dshNormUrl = (u) => String(u || '').replace(/\/+$/, '');
 try { window.__dshViewLoadStats = () => ({ starts: dshViewLoad.starts, stops: dshViewLoad.stops, loading: dshViewLoad.loading, autoReloads: dshViewLoad.autoReloads, bodyLen: dshGuestBodyLen, error: dshViewError }); } catch { /* ignore */ }
 /** 优先让主进程读 guest（webview.executeJavaScript 在部分 Electron 版本/时机不可用，会永远测到 0）。 */
 async function dshGuestProbe() {
@@ -15863,8 +15864,15 @@ function syncDshViewWithStatus(dsh) {
   dshViewUi.lastBaseUrl = base;
   dshViewUi.lastOnline = online;
   if (!base || !online) return;
+  // 地址变化时重置自动重载/cookie 重试预算（A-04/A-05：旧地址的失败次数不能拖累新地址）。
+  if (prevBase && prevBase !== base) {
+    dshViewLoad.autoReloads = {};
+    dshCookieRetry.at = 0;
+    dshCookieRetry.url = '';
+    dshCookieRetry.count = 0;
+  }
   const current = String(view.getAttribute('src') || '');
-  if (current !== base || (prevBase && prevBase !== base)) {
+  if (dshNormUrl(current) !== dshNormUrl(base) || (prevBase && prevBase !== base)) {
     applyDshViewSrc(false, 'status', { auto: true });
     return;
   }
@@ -15895,14 +15903,10 @@ function renderDsh(dsh) {
 
   const off = $('#dsh-off');
   if (off) {
-    // B-f749：加载失败后即使迟到的 did-finish-load 把 failed 清掉，错误也必须保留到用户重试/地址成功切换，
-    // 否则会出现「状态已连接、主区黑屏且无任何错误提示」。
-    // PM 13:41 热修（A 复核）：覆盖层显隐与「页面是否真有内容」绑定——body>0 且无失败才隐藏；
-    // 纯判定抽在 dsh-overlay.js，Node/假 DOM 可测（body=0 必须显示、body>0 必须隐藏）。
-    const overlay = (window.AWBDshOverlay && typeof window.AWBDshOverlay.overlayState === 'function')
-      ? window.AWBDshOverlay.overlayState({ online, failed: dshViewFailed, hasError: Boolean(dshViewError), ready: dshReady, bodyLen: dshGuestBodyLen })
-      : { showOff: !(dshReady && !dshViewFailed && !dshViewError && dshGuestBodyLen > 0) && (!online || dshViewFailed || Boolean(dshViewError)) };
-    const showOff = overlay.showOff;
+    // PM 16:05（Owner 拍板，最高优先级）：**连上就直接显示原生 DSH 界面，不做任何遮挡**。
+    // 覆盖层只在「DSH 本身没连上（online=false）」时出现；不再依据 bodyLen/probe/did-finish 状态判定，
+    // 也不允许因为"探针读到 0"把已经加载出来的原生界面盖住（今天多次因此把好页面挡了）。
+    const showOff = !online;
     off.hidden = !showOff;
     const url = $('#dsh-off-url');
     if (url) {
@@ -17978,18 +17982,26 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       dshViewLoad.stops += 1;
       dshViewLoad.loading = false;
       try { console.log('[dsh-view] did-stop-loading #' + dshViewLoad.stops + ' starts=' + dshViewLoad.starts + ' elapsedMs=' + Math.max(0, Date.now() - dshViewLoad.loadingSince)); } catch { /* ignore */ }
+      // A-07：地址在加载途中变化时，sync 会被 loading 闸挡掉；stop 后补一次同步。
+      try {
+        const base = String((state && state.dsh && state.dsh.baseUrl) || '');
+        const current = String(view.getAttribute('src') || '');
+        if (base && state?.dsh?.online && dshNormUrl(current) !== dshNormUrl(base)) syncDshViewWithStatus(state.dsh);
+      } catch { /* ignore */ }
     });
     view.addEventListener('console-message', (e) => {
       try { console.log('[dsh-console] level=' + String(e.level) + ' msg=' + String(e.message || '').slice(0, 500)); } catch { /* ignore */ }
     });
     view.addEventListener('did-finish-load', async () => {
-      dshReady = true;
-      dshViewFailed = false;
-      // 只清「与当前状态同址」的成功加载；迟到的 about:blank/旧地址 finish 不能抹掉新错误。
-      // 用 guest 的实际 URL（不是 src 属性）：属性已被改成新地址时，旧页 finish 不能冒充新地址成功。
+      // A-03：先校验 guest 实际 URL；旧页/about:blank 的迟到 finish 不得置 ready、不得采样。
       let loadedUrl = '';
       try { loadedUrl = String(view.getURL() || ''); } catch { loadedUrl = ''; }
-      if (loadedUrl && loadedUrl !== 'about:blank' && loadedUrl === String((state && state.dsh && state.dsh.baseUrl) || '')) dshViewError = null;
+      if (!loadedUrl || loadedUrl === 'about:blank') return;
+      const expectedBase = String((state && state.dsh && state.dsh.baseUrl) || '');
+      if (expectedBase && dshNormUrl(loadedUrl) !== dshNormUrl(expectedBase)) return;
+      dshReady = true;
+      dshViewFailed = false;
+      dshViewError = null;
       if (state) renderDsh(state.dsh);
       // PM 13:58：DSH 进场页 bodyLen 在 0/39 间抖，单次采样会误判；改持续采样 10s，任一次 >0 即撤覆盖层。
       // 一旦成功隐藏，只有新 did-fail-load 才恢复（dshGuestBodyLen 保持 >0，不再被 0 覆盖）。
@@ -18033,13 +18045,18 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
           }
           dshGuestBodyLen = bodyLen;
           dshViewError = null;
+          // A-04/A-05：成功加载后重置自动重载与 cookie 重试预算，下一次 DSH 重启仍能自愈。
+          dshViewLoad.autoReloads = {};
+          dshCookieRetry.at = 0;
+          dshCookieRetry.url = '';
+          dshCookieRetry.count = 0;
           if (state) renderDsh(state.dsh);
           return;
         }
         if (probeSeq === dshBodyProbeSeq) {
-          dshGuestBodyLen = 0;
-          dshViewError = { url: String((state && state.dsh && state.dsh.baseUrl) || ''), code: 'DSH_BLANK', description: '页面空白：10s 内 document.body.innerText.length=0' };
-          if (state) renderDsh(state.dsh);
+          // PM 16:05（Owner）：**不再用探针判定把界面判成"空白"**——探针在本机读 guest 不可靠，
+          // 会把已经正常显示的原生 DSH 界面判成 DSH_BLANK 并盖上错误层。这里只记日志、不设错误态、不画覆盖层。
+          try { console.log('[dsh-view] probe 10s 仍未读到正文（仅日志，不遮挡界面）'); } catch { /* ignore */ }
         }
       })();
       if (pendingDshFocus) await flushPendingDshFocus();
