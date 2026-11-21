@@ -195,11 +195,17 @@ async function shot(cdp, file) {
   await cdp.send('Runtime.enable');
   let status = null;
   let onlineAt = 0;
-  for (let i = 0; i < 130; i += 1) {
+  let addressAt = 0;
+  for (let i = 0; i < 200; i += 1) {
     status = await cdp.evaluate('window.workbench && window.workbench.dshStatus ? window.workbench.dshStatus() : null').catch(() => null);
+    const base = String((status && status.status && status.status.baseUrl) || '');
+    if (!addressAt && base.endsWith(':' + real.port)) addressAt = Date.now() - startedAt;
     if (status && status.status && status.status.online) { onlineAt = Date.now() - startedAt; break; }
-    await sleep(150);
+    await sleep(100);
   }
+  await sleep(800);
+  const rendererRefreshAt = Number(await cdp.evaluate('window.__dshLastRefreshAt || 0').catch(() => 0)) || 0;
+  const onlineLagMs = addressAt && onlineAt ? Math.max(0, onlineAt - addressAt) : 0;
   // 启动期（DSH 自身正在加载 538 个会话、主线程抖动）首轮发现可能被预算截断；
   // 这里补一次「手动重新发现」——与启动后台 retry 走同一条 discoverDshWeb 链路，用于量该链路真实耗时。
   let rediscoverMs = 0;
@@ -232,6 +238,7 @@ async function shot(cdp, file) {
   const startup = status && status.startup || {};
   const epDuration = Number(resolved[resolved.length - 1] && resolved[resolved.length - 1].durationMs);
   const chainMs = epDuration || rediscoverMs;
+  check('R1b', '地址变化→在线 ≤3s（端到端）', onlineAt > 0 && (addressAt === 0 || onlineLagMs <= 3000), { addressAt, onlineAt, onlineLagMs, rendererRefreshAt, discovery: status && status.discovery });
   check('R4', '真实发现链耗时 ≤1.5s（dsh-endpoint.durationMs / 重发现墙钟）', chainMs > 0 && chainMs <= 1500, { endpointDurationMs: epDuration, rediscoverMs, startupDiscoveryMs: startup.discoveryMs, startupStats: startup.discoveryStats });
   // 冷启首屏是独立性能单（B-1688）的指标：本单只记录，不拿它当通过判据，也不掩盖。
   const firstScreenMs = Number(startup.marks && startup.marks.firstScreenMs);

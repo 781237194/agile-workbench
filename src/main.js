@@ -11873,7 +11873,7 @@ installShellAuditSensors();
       try {
         const bgTimer = setTimeout(() => {
           startBackgroundDiscovery('startup-bg');
-        }, 1200);
+        }, 200);
         if (bgTimer.unref) bgTimer.unref();
       } catch { /* 定时器失败不影响首屏 */ }
     }
@@ -21611,6 +21611,8 @@ function dshDiscoverySummary(result) {
     probes: Array.isArray(result.probes) ? result.probes.length : 0,
     // d637：发现耗时拆解（权威源短路与否、是否扫描、扫描端口数与并发），界面/夹具/排障同源。
     stats: result.stats || null,
+    adoptMs: Number(result.adoptMs) || 0,
+    endToEndMs: Number(result.endToEndMs) || 0,
     durationMs: result.durationMs || 0
   };
 }
@@ -22261,6 +22263,7 @@ async function reloadDshWebview(baseUrl) {
 }
 
 async function adoptDiscoveredDsh(discovery) {
+  const adoptStartedAt = Date.now();
   const baseUrl = normalizeDshBaseUrl(discovery && discovery.baseUrl);
   const previousBaseUrl = dsh.baseUrl;
   const warnings = [];
@@ -22302,6 +22305,7 @@ async function adoptDiscoveredDsh(discovery) {
       cookieOk: true,
       webview,
       status,
+      adoptMs: Date.now() - adoptStartedAt,
       warnings
     };
   }
@@ -22339,6 +22343,7 @@ async function adoptDiscoveredDsh(discovery) {
     cookieOk,
     webview,
     status,
+    adoptMs: Date.now() - adoptStartedAt,
     warnings
   };
 }
@@ -22376,6 +22381,7 @@ function recordDshEndpointEvent(result) {
 async function runDshDiscovery(reason = 'status', budgets = {}) {
   if (dshDiscovery.running) return dshDiscovery.running;
   const task = (async () => {
+    const runStartedAt = Date.now();
     const previousBaseUrl = dsh.baseUrl;
     let discovery;
     try {
@@ -22466,7 +22472,8 @@ async function runDshDiscovery(reason = 'status', budgets = {}) {
       message,
       previousBaseUrl,
       code: changed ? 'DSH_DISCOVERED' : 'DSH_ALREADY_CURRENT',
-      state: discovery.state || 'resolved'
+      state: discovery.state || 'resolved',
+      endToEndMs: Date.now() - runStartedAt
     };
     result.event = recordDshEndpointEvent(result);
     dshDiscovery.last = result;
@@ -22538,9 +22545,9 @@ async function startBackgroundDiscovery(reason = 'startup-bg') {
       startupMarks.backgroundDiscovery.durationMs = Number(result && result.durationMs) || 0;
     }
     try { console.log('[startup] backgroundDiscovery code=' + String((result && result.code) || '') + ' ok=' + Boolean(result && result.ok) + ' ' + (Number(result && result.durationMs) || 0) + 'ms'); } catch { /* ignore */ }
-    // 离线兜底：15s / 45s / 120s 各再试一次（force），成功即停；定时器 unref 不拖住退出。
+    // 地址变化后端到端 ≤3s：首轮 fast 失败后 0.2s 立刻后台重试，再 1s/3s/8s 兜底（旧 15s 会把上线拖到 20s+）。
     if (!(result && result.ok)) {
-      const delays = [15000, 45000, 120000];
+      const delays = [1000, 3000, 8000];
       let attempt = 0;
       const retry = async () => {
         if (attempt >= delays.length) return;

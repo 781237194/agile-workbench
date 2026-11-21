@@ -16071,6 +16071,7 @@ async function refreshDshEverywhere(reason = 'push') {
       try { renderSessions(); renderSidebar(); renderDsh(state?.dsh); } catch { /* ignore */ }
       await maybeAutoRebindByTitle();
       dshRefreshUi.lastAt = Date.now();
+      try { window.__dshLastRefreshAt = dshRefreshUi.lastAt; } catch { /* ignore */ }
     } finally {
       dshRefreshUi.busy = null;
       if (dshRefreshUi.pending) {
