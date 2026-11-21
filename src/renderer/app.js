@@ -2801,6 +2801,19 @@ function renderModeCopyAnchors() {
 
 function render() {
   if (!state) return;
+  // AC2（T-2d30）：交互期（AWBGate 900ms 窗口）内不做整块重建——合并成一次延后重绘，
+  // 避免打字/点击瞬间被整页 render 的长任务打断。
+  try {
+    if (window.AWBGate && typeof AWBGate.interacting === 'function' && AWBGate.interacting()) {
+      if (!window.__awbRenderDeferred) {
+        window.__awbRenderDeferred = setTimeout(() => {
+          window.__awbRenderDeferred = null;
+          try { render(); } catch { /* 延后重绘失败不抛到事件循环 */ }
+        }, 950);
+      }
+      return;
+    }
+  } catch { /* ignore */ }
   hydrateTeamModes();
   // 换项目时丢掉上一个项目的 DSH 核验结果与旧文档缓存，避免“新项目也显示 6/6 / 上一个项目的 boot 证据”。
   const current = activeProject();
@@ -12298,8 +12311,14 @@ function renderTaskList(container, p) {
     container.innerHTML = `<div class="empty-row"><span>还没有任务。先建一个任务，流程才会开始。</span><br><button class="ghost small" type="button" data-open-task>＋ 新建任务</button></div>`;
     return;
   }
+  // AC2（T-2d30）：任务列表只留可见行（≤80）+ 签名未变不重建（5s 轮询不再整块重排）。
+  const VISIBLE = 80;
+  const shownTasks = tasks.slice(0, VISIBLE);
+  const sig = String(p.id || '') + '|' + shownTasks.map((t) => `${t.id}:${t.status}:${t.updatedAt || ''}`).join(',') + '|' + tasks.length;
+  if (sig === renderTaskList.__sig && container.childElementCount > 0) return;
+  renderTaskList.__sig = sig;
   const order = ['todo', 'doing', 'review', 'done'];
-  container.innerHTML = tasks.map((t) => {
+  container.innerHTML = shownTasks.map((t) => {
     const idx = order.indexOf(t.status);
     const next = order[Math.min(order.length - 1, idx + 1)];
     return `<div class="task-row">
@@ -12312,7 +12331,7 @@ function renderTaskList(container, p) {
         <button class="icon-btn" type="button" data-task-del="${esc(t.id)}" title="删除任务">×</button>
       </div>
     </div>`;
-  }).join('');
+  }).join('') + (tasks.length > VISIBLE ? `<div class="empty-row">只显示前 ${VISIBLE} 条（共 ${tasks.length} 条）；完整列表用 CLI 或任务页筛选查看。</div>` : '');
 
   container.querySelectorAll('[data-task-status]').forEach((b) => b.addEventListener('click', async () => {
     const task = tasks.find((t) => t.id === b.dataset.taskStatus);
@@ -12350,12 +12369,19 @@ function renderBoard() {
   const tasks = Array.isArray(p.tasks) ? p.tasks : [];
   const count = (status) => tasks.filter((t) => t.status === status).length;
   if (summary) summary.textContent = `任务 ${tasks.length} · 待办 ${count('todo')} · 进行 ${count('doing')} · 待评审 ${count('review')} · 完成 ${count('done')}`;
+  // AC2（T-2d30）：看板每列只渲染可见卡片（≤20），签名未变不重建——否则 300 张卡每 2s 重排会造长任务。
+  const CARD_VISIBLE = 20;
+  const sig = String(p.id || '') + '|' + tasks.map((t) => `${t.id}:${t.status}:${t.updatedAt || ''}`).join(',');
+  if (sig === renderBoard.__sig && board.childElementCount > 0) return;
+  renderBoard.__sig = sig;
 
   const cols = [['todo', '待办'], ['doing', '进行中'], ['review', '待评审'], ['done', '已完成']];
   board.innerHTML = cols.map(([id, label]) => {
-    const items = tasks.filter((t) => t.status === id);
+    const allItems = tasks.filter((t) => t.status === id);
+    const items = allItems.slice(0, CARD_VISIBLE);
+    const more = allItems.length > items.length ? `<div class="board-empty">还有 ${allItems.length - items.length} 条（列表已截断）</div>` : '';
     return `<section class="board-col">
-      <header class="board-col-head"><b>${label}</b><span>${items.length}</span></header>
+      <header class="board-col-head"><b>${label}</b><span>${allItems.length}</span></header>
       <div class="board-cards">${items.map((t) => `
         <article class="board-card">
           <div class="bc-title">${esc(t.title)}</div>
@@ -12364,7 +12390,7 @@ function renderBoard() {
             ${id !== 'done' ? `<button type="button" data-next="${esc(t.id)}">下一步</button>` : ''}
             <button type="button" data-remove="${esc(t.id)}">删除</button>
           </div>
-        </article>`).join('') || `<button class="board-empty" type="button" data-open-task>＋ 添加任务</button>`}</div>
+        </article>`).join('') || `<button class="board-empty" type="button" data-open-task>＋ 添加任务</button>`}${more}</div>
     </section>`;
   }).join('');
 
