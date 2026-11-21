@@ -14,6 +14,36 @@ const fs = require('node:fs');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { execFileSync, spawnSync } = require('node:child_process');
+// R-e31b/f01c 诊断（测试专用）：统计 team.mjs/workspace.mjs/launch.mjs 子进程的 stdout 字节与活跃数，
+// 并允许 AWB_TEST_NO_TEAM_EXEC=1 关闭这些 spawn 做“关①量 RSS”的对照；生产默认完全不启用。
+const childProc = require('node:child_process');
+const teamSpawnStats = { calls: 0, stdoutBytes: 0, active: 0, peakStdoutBytes: 0, disabled: false };
+(function instrumentTeamSpawn() {
+  const original = childProc.execFile;
+  if (typeof original !== 'function') return;
+  childProc.execFile = function patchedExecFile(file, args, options, callback) {
+    let cb = callback;
+    let opts = options;
+    if (typeof options === 'function') { cb = options; opts = undefined; }
+    const isTeamTool = /team\.mjs|workspace\.mjs|launch\.mjs/i.test(String(file || ''));
+    if (!isTeamTool || typeof cb !== 'function') return original.call(childProc, file, args, options, callback);
+    teamSpawnStats.calls += 1;
+    teamSpawnStats.active += 1;
+    if (process.env.AWB_TEST_NO_TEAM_EXEC === '1') {
+      teamSpawnStats.disabled = true;
+      process.nextTick(() => { teamSpawnStats.active = Math.max(0, teamSpawnStats.active - 1); cb(new Error('TEST_TEAM_EXEC_DISABLED'), '', ''); });
+      return { kill() { /* no-op */ } };
+    }
+    const wrapped = (err, stdout, stderr) => {
+      teamSpawnStats.active = Math.max(0, teamSpawnStats.active - 1);
+      const bytes = Buffer.byteLength(String(stdout || ''), 'utf8');
+      teamSpawnStats.stdoutBytes += bytes;
+      teamSpawnStats.peakStdoutBytes = Math.max(teamSpawnStats.peakStdoutBytes, bytes);
+      cb(err, stdout, stderr);
+    };
+    return original.call(childProc, file, args, opts, wrapped);
+  };
+})();
 const { pathToFileURL } = require('node:url');
 // B-20261120-020530-0823：会话用量阈值判定的纯逻辑（阈值单源来自 团队/工具/lib/session.mjs）。
 const StorageConfig = require('./storage-config.js');
@@ -10139,7 +10169,11 @@ ipcMain.handle('theme:metrics', async () => {
   const reviewDocCache = new Map();
   const attachReviewDocText = (project, requirements) => {
     const base = path.resolve(String((project && project.path) || ''));
-    for (const row of (Array.isArray(requirements) ? requirements : [])) {
+    // f01c 结构性压缩（根因）：旧实现直接给 team-tools 快照里的同一批 row 挂 docText，
+    // 这些对象同时被 app:state 的 requirements 引用 → 137 条正文（~2MB）被塞进每次状态载荷并在主进程常驻。
+    // 这里只返回“带 docText 的副本”，评审弹窗仍能拿到正文，app:state/缓存对象不再被污染。
+    const rows = (Array.isArray(requirements) ? requirements : []).map((row) => (row && typeof row === 'object' ? { ...row } : row));
+    for (const row of rows) {
       const rel = String((row && row.doc) || '').replace(/\\/g, '/');
       if (!rel || rel.includes('..')) continue;
       const abs = path.resolve(base, rel);
@@ -10155,7 +10189,7 @@ ipcMain.handle('theme:metrics', async () => {
         row.docText = cached.text;
       } catch { /* 读不到正文就降级为旧展示，不阻断评审 */ }
     }
-    return requirements;
+    return rows;
   };
   ipcMain.handle('owner:review-data', async (_e, payload) => {
     const p = payload || {};
@@ -13664,6 +13698,7 @@ ipcMain.handle('mem:cache-stats', () => {
     appStateCacheBytes: appStateCache && appStateCache.value ? cacheValueBytes(appStateCache.value) : 0,
     boardHtmlCacheBytes: teamBoardHtmlCache ? Number(teamBoardHtmlCache.bytes || (teamBoardHtmlCache.html ? Buffer.byteLength(teamBoardHtmlCache.html, 'utf8') : 0)) : 0,
     boardHtmlBootstrapCached: Boolean(teamBoardHtmlCache),
+    teamSpawn: { ...teamSpawnStats },
   };
 });
 // 手动「立即回收」：不经过阈值/速率/冷却判定（任务③），只受“正在回收”锁约束。

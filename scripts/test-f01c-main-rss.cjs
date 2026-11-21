@@ -37,6 +37,11 @@ function seed() {
     for (const m of team.members || []) m.sessionId = '';
     fs.writeFileSync(path.join(TEAM, '状态', '团队.json'), JSON.stringify(team, null, 2), 'utf8');
   }
+  // 真实团队项目状态（工作流/任务/回执等）只读复制，让主进程加载与生产同量级的数据。
+  const realProjectState = path.join(ROOT, '团队', '状态', '项目', '工作台改造修复');
+  if (fs.existsSync(realProjectState)) {
+    try { fs.cpSync(realProjectState, path.join(TEAM, '状态', '项目', '工作台改造修复'), { recursive: true }); } catch { /* 复制失败则只用 store */ }
+  }
 }
 class Cdp {
   constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map(); }
