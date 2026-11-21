@@ -148,9 +148,31 @@ const HOT_IPC_TTL_MS = {
   'workspace:plan': 8000, 'workspace:list': 8000,
   // app:state 依赖 store → 随 writeStore 失效；3s 内重复调用（面板刷新/多面板同屏）直接复用。
   'app:state': 3000,
+  // T-18bf 二轮（PM：主进程 73% 大头是渲染层高频 IPC）：只读面板通道加 2–5s 结果复用；
+  // 写路径不进来（HOT_IPC_TTL 只列只读 handler），同参并发由下方 inflight 合并。
+  'team:session-queue': 2000,
+  'mem:stats-get': 5000,
+  'render-memory:recent': 5000,
+  'perf:recent': 5000,
+  'owner:pending-counts': 5000,
+  'team:inbox': 5000,
+  'team:receipts': 5000,
+  'team:comm': 5000,
+  'workflow:tasks-summary': 3000,
+  'messages:page': 3000,
+  'files:list': 3000,
 };
 const hotIpcCache = new Map();
 const hotIpcStats = { hits: 0, misses: 0 };
+// T-18bf：每个 IPC 通道的调用/命中/耗时计数（只增长几个数字，不序列化 payload），
+// 供 mem:cache-stats 输出“谁在打 sendReply”的通道命中表；不改变任何 handler 语义。
+const ipcChannelStats = new Map();
+const hotIpcInflight = new Map();
+function ipcChannelStatOf(channel) {
+  let row = ipcChannelStats.get(channel);
+  if (!row) { row = { channel, calls: 0, hits: 0, misses: 0, inflightHits: 0, totalMs: 0, maxMs: 0, lastAt: '' }; ipcChannelStats.set(channel, row); }
+  return row;
+}
 // R-e31b/f01c（结构性压缩）：热点缓存必须有字节上限，避免把 workflow/board 等大对象长期常驻；
 // 入口 >512KB 不入缓存，总量 >8MB 按 LRU 淘汰。只改缓存策略，不改 handler 返回值。
 const HOT_IPC_ENTRY_MAX_BYTES = 512 * 1024;
@@ -161,7 +183,7 @@ function cacheValueBytes(value) {
 }
 // 这些通道的结果**不依赖本进程 store**（外部进程写文件 / 系统指标），writeStore 清缓存时保留它们，
 // 否则每次写盘都把 metrics/presence 缓存打掉，导致每次都重跑 nvidia-smi / 子进程（tester v256 实测 1.7s/5.7s）。
-const HOT_IPC_STORE_INDEPENDENT = new Set(['system:metrics', 'team:presence', 'dsh:team-status', 'team:status']);
+const HOT_IPC_STORE_INDEPENDENT = new Set(['system:metrics', 'team:presence', 'dsh:team-status', 'team:status', 'mem:stats-get', 'render-memory:recent', 'perf:recent']);
 // 大载荷通道已有自己的缓存（appStateCache / workflowStateCache / 看板缓存），不再进 hotIpcCache：
 // 避免每个轮询都对 1.5MB 响应做一次 JSON.stringify 计字节（profile 中 cacheValueBytes 是主线程热点之一）。
 const HOT_IPC_SKIP_CACHE = new Set(['app:state', 'workflow:state', 'team:board']);
@@ -191,33 +213,58 @@ function hotIpcCacheClear() {
 }
 function hotIpcTtlWrap(channel, handler) {
   const ttl = Number(HOT_IPC_TTL_MS[channel]) || 0;
-  if (!ttl) return handler;
-  return async function hotTtlHandler(...args) {
+  const stats = ipcChannelStatOf(channel);
+  async function run(thisArg, args) {
     let key = channel;
     try { key = `${channel}|${JSON.stringify(args[1] === undefined ? null : args[1])}`; } catch { key = channel; }
     const now = Date.now();
     const hit = hotIpcCache.get(key);
-    if (hit && now - hit.at < ttl) { hotIpcStats.hits += 1; return hit.value; }
+    if (ttl && hit && now - hit.at < ttl) { hotIpcStats.hits += 1; stats.hits += 1; return hit.value; }
+    if (ttl) {
+      // 同一参数在途只算一次（与 ipc-coalesce 的 300ms 窗口叠加，专门保护 2s+ 的慢只读通道）。
+      const inflight = hotIpcInflight.get(key);
+      if (inflight) { stats.inflightHits += 1; return inflight; }
+    }
     hotIpcStats.misses += 1;
-    const value = await handler.apply(this, args);
-    if (!HOT_IPC_SKIP_CACHE.has(channel)) {
-      const bytes = cacheValueBytes(value);
-      if (bytes <= HOT_IPC_ENTRY_MAX_BYTES) {
-        const prev = hotIpcCache.get(key);
-        if (prev) hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number(prev.bytes || 0));
-        const row = { at: Date.now(), value, bytes };
-        hotIpcCache.set(key, row);
-        hotIpcCacheBytes += bytes;
-        while (hotIpcCache.size > 64 || hotIpcCacheBytes > HOT_IPC_TOTAL_MAX_BYTES) {
-          const oldestKey = hotIpcCache.keys().next().value;
-          if (oldestKey === undefined) break;
-          const old = hotIpcCache.get(oldestKey);
-          hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number((old && old.bytes) || 0));
-          hotIpcCache.delete(oldestKey);
+    stats.misses += 1;
+    const task = (async () => {
+      const value = await handler.apply(thisArg, args);
+      if (ttl && !HOT_IPC_SKIP_CACHE.has(channel)) {
+        const bytes = cacheValueBytes(value);
+        if (bytes <= HOT_IPC_ENTRY_MAX_BYTES) {
+          const prev = hotIpcCache.get(key);
+          if (prev) hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number(prev.bytes || 0));
+          const row = { at: Date.now(), value, bytes };
+          hotIpcCache.set(key, row);
+          hotIpcCacheBytes += bytes;
+          while (hotIpcCache.size > 64 || hotIpcCacheBytes > HOT_IPC_TOTAL_MAX_BYTES) {
+            const oldestKey = hotIpcCache.keys().next().value;
+            if (oldestKey === undefined) break;
+            const old = hotIpcCache.get(oldestKey);
+            hotIpcCacheBytes = Math.max(0, hotIpcCacheBytes - Number((old && old.bytes) || 0));
+            hotIpcCache.delete(oldestKey);
+          }
         }
       }
+      return value;
+    })();
+    if (ttl) {
+      hotIpcInflight.set(key, task);
+      task.finally(() => { hotIpcInflight.delete(key); }).catch(() => { /* 由调用方处理 */ });
     }
-    return value;
+    return task;
+  }
+  return async function hotTtlHandler(...args) {
+    stats.calls += 1;
+    const started = process.hrtime.bigint();
+    try {
+      return await run(this, args);
+    } finally {
+      const ms = Number(process.hrtime.bigint() - started) / 1e6;
+      stats.totalMs += ms;
+      stats.maxMs = Math.max(stats.maxMs, ms);
+      stats.lastAt = new Date().toISOString();
+    }
   };
 }
 // PM 2026-11-18 18:0x 裁定 A 案：慢日志/IPC 计时唯一实现＝B 的 src/perf-log.js（delegateToPerfLog:true）；
@@ -13860,6 +13907,19 @@ ipcMain.handle('mem:cache-stats', () => {
     ledgerActions: { cachedTeams: ledgerActionsCache.size, ttlMs: LEDGER_ACTIONS_CACHE_MS },
     schedAdvice: { cachedProjects: schedAdviceCache.size, ttlMs: SCHED_ADVICE_CACHE_MS },
     bootTokenDirs: { cachedDirs: bootTokenDirCache.size, ttlMs: BOOT_TOKEN_CACHE_MS },
+    // T-18bf：按调用次数排序的 IPC 通道表（谁的 handler 在吃主线程）；不含 payload。
+    ipcChannels: Array.from(ipcChannelStats.values())
+      .sort((a, b) => b.calls - a.calls)
+      .slice(0, 30)
+      .map((row) => ({
+        channel: row.channel,
+        calls: row.calls,
+        hits: row.hits,
+        misses: row.misses,
+        inflightHits: row.inflightHits,
+        avgMs: row.calls ? Math.round((row.totalMs / row.calls) * 10) / 10 : 0,
+        maxMs: Math.round(row.maxMs * 10) / 10,
+      })),
     heapCapMB: MAIN_HEAP_CAP_MB,
     storeCacheBytes: storeCache && storeCache.value ? cacheValueBytes(storeCache.value) : 0,
     appStateCacheBytes: appStateCache && appStateCache.value ? cacheValueBytes(appStateCache.value) : 0,
