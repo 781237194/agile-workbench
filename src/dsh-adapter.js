@@ -1233,6 +1233,7 @@ async function discoverDshWeb(options = {}) {
   }
   let rangeProbed = false;
   let scan = null;
+  // T-c7a6：pin 失效时仍允许「有界 range」兜底（进程/监听端口是主路径；全段扫描默认关闭）。
   const canProbeBeyond = !explicitBaseUrl && options.includeRange !== false;
   if (!best) {
     // 已探过的监听端口不重复探；只探进程参数/默认端口等新增候选。

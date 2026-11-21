@@ -793,7 +793,7 @@ const SAVED_DSH_URL = (() => {
  * F-4：显式配置 = 用户自己 pin 的地址（dsh.json 里 source=user / pinned=true）或环境变量。
  * 只有它能让「多候选」不报 ambiguous；自动发现写进 dsh.json 的地址（source=auto）只是提示，不算显式配置。
  */
-const DSH_EXPLICIT = (() => {
+function readDshExplicitConfig() {
   const envUrl = String(process.env.AWB_DSH_BASE_URL || process.env.DSH_WEB_URL || '').trim();
   if (envUrl) return { baseUrl: envUrl, source: '环境变量 DSH_WEB_URL' };
   const envPort = String(process.env.DSH_WEB_PORT || process.env.DSH_PORT || '').trim();
@@ -805,7 +805,8 @@ const DSH_EXPLICIT = (() => {
     }
   } catch { /* 配置读不到就当没有显式配置 */ }
   return { baseUrl: '', source: '' };
-})();
+}
+let DSH_EXPLICIT = readDshExplicitConfig();
 // D2（P1）：数据目录权限拒绝时不能静默卡死——启动前做一次可写探测，失败弹一次人话错误框。
 function verifyLocalDataWritable() {
   const probe = path.join(USER_DATA, '.write-probe');
@@ -2876,6 +2877,7 @@ let dsh = new DshAdapter(process.env.AWB_DSH_BASE_URL || process.env.DSH_WEB_URL
 const DSH_DISCOVERY_COOLDOWN_MS = 15000;
 const DSH_DISCOVERY_CHECK_TIMEOUT_MS = 4000;
 let dshDiscovery = { at: 0, last: null, running: null };
+let dshOfflineRetryTimer = null;
 const sessionCreateLocks = new Map();
 const provisionLocks = new Map();
 
@@ -12700,6 +12702,8 @@ installShellAuditSensors();
         finalStatus = { ...finalStatus, message: String(finalStatus.message || 'DSH 离线') + '；已尝试源：' + attempted.join('；') };
       }
     }
+    // T-c7a6：离线每 30 秒自动重试（pin 失效/DSH 换端口后不需要用户手动点）。
+    if (!finalStatus.online) scheduleDshOfflineRetry('status-offline-30s');
     return { ok: true, status: finalStatus, discovery: discovery ? dshDiscoverySummary(discovery) : null, startup: startupSummary() };
   });
   // 手动“重新发现”：供设置页/诊断按钮调用；不新增假 UI，返回结构化结果。
@@ -23225,7 +23229,7 @@ async function adoptDiscoveredDsh(discovery) {
   if (pinUnreachable) {
     warnings.push({
       code: 'DSH_PIN_UNREACHABLE_TEMP_FALLBACK',
-      message: '显式 pin 地址 ' + DSH_EXPLICIT.baseUrl + ' 不可达，本次临时使用自动发现的 ' + baseUrl + '（未覆盖 dsh.json 里的 pin）'
+      message: '显式 pin 地址 ' + DSH_EXPLICIT.baseUrl + ' 不可达，已自动切换到 ' + baseUrl + '（写回 dsh.json，pinned=false）'
     });
   }
   if (baseUrl === previousBaseUrl) {
@@ -23252,6 +23256,7 @@ async function adoptDiscoveredDsh(discovery) {
       persisted: false,
       pinUnreachable,
       pinActive,
+      pinCleared: false,
       cookieOk,
       webview,
       status,
@@ -23262,11 +23267,19 @@ async function adoptDiscoveredDsh(discovery) {
   dsh = new DshAdapter(baseUrl);
   let persisted = false;
   let persistError = null;
-  const mayPersist = !pinActive && discovery.shouldPersist !== false;
+  // T-c7a6：pin 旧端口不可达时，自动发现命中后把新地址写回 dsh.json（source=auto / pinned=false）；
+  // pin 只作提示，不能因为旧 pin 让每次重启都先失败。用户手填（source=user）才保持 pinned=true。
+  const mayPersist = (pinUnreachable || !pinActive) && discovery.shouldPersist !== false;
+  let pinCleared = false;
   if (mayPersist) {
     try {
-      persistDshConfig(baseUrl, { source: 'auto' });
+      persistDshConfig(baseUrl, { source: 'auto', pinned: false });
       persisted = true;
+      if (pinUnreachable) {
+        pinCleared = true;
+        // 同一进程内也要让后续发现不再把旧 pin 当显式地址。
+        DSH_EXPLICIT = readDshExplicitConfig();
+      }
     } catch (error) {
       persistError = {
         code: 'DSH_CONFIG_WRITE_FAILED',
@@ -23290,6 +23303,7 @@ async function adoptDiscoveredDsh(discovery) {
     persistError,
     pinActive,
     pinUnreachable,
+    pinCleared,
     cookieOk,
     webview,
     status,
@@ -23444,9 +23458,28 @@ async function runDshDiscovery(reason = 'status', budgets = {}) {
   }
 }
 
+/**
+ * T-c7a6：离线每 30 秒自动重试一次（换端口后 ≤30 秒自动连上，不要求用户点「重新发现」）。
+ * 只在本机 DSH 自动发现允许、且当前离线时启动；成功一次即停，后续再离线由 dsh:status 重新排。
+ */
+function scheduleDshOfflineRetry(reason = 'offline-30s') {
+  if (IS_SELFTEST || dshOfflineRetryTimer) return;
+  const timer = setTimeout(async () => {
+    dshOfflineRetryTimer = null;
+    try {
+      const current = dsh.statusSync ? dsh.statusSync() : null;
+      if (current && current.online) return;
+      const result = await maybeAutoDiscoverDsh(reason, {}, { force: true });
+      try { console.log('[dsh] offline retry code=' + String((result && result.code) || '') + ' ok=' + Boolean(result && result.ok)); } catch { /* ignore */ }
+      if (!(result && result.ok) && !(result && result.skipped)) scheduleDshOfflineRetry(reason);
+    } catch { scheduleDshOfflineRetry(reason); }
+  }, 30000);
+  if (timer && typeof timer.unref === 'function') timer.unref();
+  dshOfflineRetryTimer = timer;
+}
+
 async function maybeAutoDiscoverDsh(reason = 'status', budgets = {}, options = {}) {
-  const manual = reason === 'manual';
-  const force = Boolean(options && options.force);
+  const manual = reason === 'manual';  const force = Boolean(options && options.force);
   // 自测沙盘绝不访问真实 DSH；手动 IPC 在自测里也只返回跳过，不碰本机端口。
   if (IS_SELFTEST) {
     return {
