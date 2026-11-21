@@ -52,7 +52,7 @@ function cpRetry(src, dst) {
 function rewriteSandboxPaths() {
   const realRoot = ROOT;
   const realRootFwd = realRoot.replace(/\\/g, '/');
-  // JSON 文件里反斜杠是转义过的（D:\\a\\b），只替换原始形态匹配不到 → 四种形态都要换。
+  // JSON 文件里反斜杠会被转义成双写形态，只替换原始形态匹配不到 → 四种形态都要换。
   const realRootEsc = realRoot.replace(/\\/g, '\\\\');
   const sandbox = SB;
   const sandboxFwd = sandbox.replace(/\\/g, '/');
@@ -71,7 +71,7 @@ function rewriteSandboxPaths() {
       // 只改 JSON/JSONL：boot 记录里 项目信息.md/角色卡.md 的 hash 必须与真实文件一致，改了就会「boot 记录过期」。\n      if (!/\.(json|jsonl)$/i.test(entry.name)) continue;
       let text = '';
       try { text = fs.readFileSync(full, 'utf8'); } catch { continue; }
-      // 项目.json 里的路径是 JSON 转义形态（D:\\deepseek\\…），必须用 forms 逐个判存在。
+      // 项目.json 里的路径是 JSON 转义后的双反斜杠形态，必须用 forms 逐个判存在。
       if (!forms.some(([from]) => text.includes(from))) continue;
       let next = text;
       for (const [from, to] of forms) next = next.split(from).join(to);
