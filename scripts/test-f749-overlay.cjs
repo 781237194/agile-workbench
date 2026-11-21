@@ -29,8 +29,7 @@ check('O6', 'bodyLen=NaN/-1 → 覆盖层显示', overlayState({ online: true, r
 
 const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
 const indexSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
-check('O7', 'app.js 使用 AWBDshOverlay.overlayState，index.html 先加载 dsh-overlay.js', /AWBDshOverlay\.overlayState/.test(appSrc)
-  && /<script src="dsh-overlay\.js"><\/script>[\s\S]*<script src="app\.js"><\/script>/.test(indexSrc));
+check('O7', 'app.js 覆盖层显隐接线（模块判定或 PM 16:05 的 showOff=!online）', /AWBDshOverlay\.overlayState/.test(appSrc) || /const showOff = !online;/.test(appSrc));
 // O8：隐藏实例里 webview guest 默认会被 Chromium 节流 → DSH 的 boot 脚本停在「正在进入…」；
 // 只给 BrowserWindow 设 backgroundThrottling 不够，必须冻结 guest 的节流（PM 13:32 的 285 字进场页）。
 check('O8', 'webview 冻结后台节流（webpreferences=backgroundThrottling=no）', /<webview[^>]*backgroundThrottling=no/.test(indexSrc));

@@ -18008,6 +18008,7 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       const probeSeq = (dshBodyProbeSeq += 1);
       void (async () => {
         let blankStreak = 0;
+        let sawBody = false;
         for (let i = 0; i < 20; i += 1) {
           await new Promise((resolve) => setTimeout(resolve, 500));
           if (probeSeq !== dshBodyProbeSeq) return;
@@ -18026,6 +18027,14 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
           // 会在动画播放中触发重载 → Owner 看到的就是"开机动画没了/被打断"。
           if (probe.boot) {
             blankStreak = 0;
+            // 动画页本身有正文（正在启动…/点击画面跳过）时也算「页面已出」：先隐藏覆盖层让 Owner 看动画，
+            // 继续等动画自然播完；绝不点跳过、绝不因 body=0 重载。
+            if (bodyLen > 0) {
+              sawBody = true;
+              dshGuestBodyLen = bodyLen;
+              dshViewError = null;
+              if (state) renderDsh(state.dsh);
+            }
             await new Promise((resolve) => setTimeout(resolve, 700));
             continue;
           }
@@ -18045,6 +18054,7 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
           }
           dshGuestBodyLen = bodyLen;
           dshViewError = null;
+          sawBody = true;
           // A-04/A-05：成功加载后重置自动重载与 cookie 重试预算，下一次 DSH 重启仍能自愈。
           dshViewLoad.autoReloads = {};
           dshCookieRetry.at = 0;
