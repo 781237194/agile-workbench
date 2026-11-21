@@ -81,7 +81,7 @@ process.on('exit', cleanup);
     // 可选：连真实 DSH（只读页面），用于对比“真实数据量”下的主进程 RSS；沙盘 DSH_HOME 只放凭据副本。
     const dshHome = path.join(SANDBOX, 'dsh-home');
     fs.mkdirSync(dshHome, { recursive: true });
-    try { fs.copyFileSync(path.join(process.env.USERPROFILE || 'C:\\Users\\Admin', '.dsh', '.credentials.yaml'), path.join(dshHome, '.credentials.yaml')); } catch { /* 无凭据则走发现 */ }
+    try { if (process.env.USERPROFILE) fs.copyFileSync(path.join(process.env.USERPROFILE, '.dsh', '.credentials.yaml'), path.join(dshHome, '.credentials.yaml')); } catch { /* 无凭据则走发现 */ }
     env.DSH_HOME = dshHome;
     delete env.DSH_WEB_URL; delete env.AWB_DSH_BASE_URL;
   } else {
