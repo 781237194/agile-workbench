@@ -124,7 +124,8 @@ async function shot(cdp, file) {
     AWB_DATA_DIR: DATA, AWB_STORE: STORE,
     AWB_TEAM_ROOT: TEAM, AWB_TEAM_PROJECTS_ROOT: path.join(SB, '项目区'),
     TEAM_ROOT: TEAM, TEAM_PROJECTS_ROOT: path.join(SB, '项目区'),
-    TEAM_WORKBENCH_JSON: STORE, AWB_START_HIDDEN: '1', AWB_DSH_COMMAND_STUB: JSON.stringify(stub)
+    TEAM_WORKBENCH_JSON: STORE, AWB_DSH_COMMAND_STUB: JSON.stringify(stub),
+    ...(process.env.AWB_F749_SHOW === '1' ? {} : { AWB_START_HIDDEN: '1' })
   };
   for (const key of ['DSH_WEB_URL', 'AWB_DSH_BASE_URL', 'DSH_WEB_PORT', 'DSH_PORT']) delete env[key];
   try { const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh'); fs.mkdirSync(path.join(SB, 'dsh-home'), { recursive: true }); fs.copyFileSync(path.join(home, '.credentials.yaml'), path.join(SB, 'dsh-home', '.credentials.yaml')); } catch { /* ignore */ }
