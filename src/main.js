@@ -133,9 +133,15 @@ const SCHED_ADVICE_CACHE_MS = 15000;
 const workflowRecentCache = new Map();
 const WORKFLOW_RECENT_MS = 10000;
 const WORKFLOW_REVALIDATE_MS = 3000;
+const WORKFLOW_RECENT_MAX = 4;
 const workflowRevalidating = new Set();
 const WORKFLOW_STATE_ENTRY_MAX_BYTES = 4 * 1024 * 1024;
 const workflowStateStats = { hits: 0, misses: 0, recentHits: 0, lastFp: '' };
+// T-18bf：briefing 缓存放模块级，mem:cache-stats（独立注册块）也能读到；此前局部变量导致 ReferenceError。
+const briefingCache = new Map();
+const briefingRevalidating = new Set();
+const BRIEFING_REVALIDATE_MS = 3000;
+const briefingStateStats = { hits: 0, misses: 0, revalidations: 0 };
 const METRICS_GPU_TTL_MS = 30000;
 const metricsGpuCache = { at: 0, value: null };
 let metricsGpuSampling = false;
@@ -1512,12 +1518,17 @@ async function setProjectTeamMode(projectId, teamMode) {
 
 function syncTeamRosterSessions(sessions, options = {}) {
   try {
+    const currentSessions = sessions && typeof sessions === 'object' ? sessions : {};
+    // T-20261122-4e35（P0）：启动期/DSH 未就绪时 current.sessions 可能为空（或全是空串）；
+    // 空来源绝不能进入名册同步（哪怕 roster-apply 已有 !wanted 守卫，也不能让 activeProject 等分支写盘）。
+    const hasAnySession = Object.values(currentSessions).some((value) => String(value || '').trim());
+    if (!hasAnySession) return { ok: true, changed: false, skipped: 'EMPTY_SESSIONS', rejected: [] };
     const teamRoot = resolveTeamRoot();
     const teamFile = path.join(teamRoot, '状态', '团队.json');
     if (!fs.existsSync(teamFile) || !sessions) return;
     const team = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
     if (!Array.isArray(team.members)) return;
-    const current = sessions && typeof sessions === 'object' ? sessions : {};
+    const current = currentSessions;
     const projectName = String(options.projectName || options.teamName || '').trim();
     const roleIds = roleIdsForTeamMode(options.teamMode);
     // B-20261118-164055-2a44：赋值/写前校验走 team-tools → roster-apply.cjs 单源（与 roster-writer 同一实现），
@@ -4867,7 +4878,7 @@ function workflowSnapshot(project) {
   if (hit && nowMs - hit.at < PROJECT_FLOW_CACHE_MS) return hit.value;
   const value = computeWorkflowSnapshot(project);
   projectFlowCache.set(key, { at: nowMs, value });
-  if (projectFlowCache.size > 16) projectFlowCache.delete(projectFlowCache.keys().next().value);
+  if (projectFlowCache.size > 4) projectFlowCache.delete(projectFlowCache.keys().next().value);
   return value;
 }
 function computeWorkflowSnapshot(project) {
@@ -9342,6 +9353,10 @@ ipcMain.handle('theme:metrics', async () => {
     };
   });
 
+  const rememberWorkflowRecent = (projectId, value) => {
+    workflowRecentCache.set(String(projectId), { at: Date.now(), value });
+    if (workflowRecentCache.size > WORKFLOW_RECENT_MAX) workflowRecentCache.delete(workflowRecentCache.keys().next().value);
+  };
   const buildWorkflowStateValue = (ctx) => {
     const snapshot = workflowSnapshot(ctx.project);
     const value = { ...(snapshot || {}), ledgerActions: ledgerActionAvailability(ctx.teamName), autoAccept: autoAcceptUiConfig() };
@@ -9357,11 +9372,10 @@ ipcMain.handle('theme:metrics', async () => {
       if (tasksLen <= 5000) {
         const cacheKey = `${ctx.project.id}|${fp}`;
         workflowStateCache.set(cacheKey, value);
-        if (workflowStateCache.size > 8) workflowStateCache.delete(workflowStateCache.keys().next().value);
+        if (workflowStateCache.size > 4) workflowStateCache.delete(workflowStateCache.keys().next().value);
       }
     }
-    workflowRecentCache.set(String(ctx.project.id), { at: Date.now(), value });
-    if (workflowRecentCache.size > 8) workflowRecentCache.delete(workflowRecentCache.keys().next().value);
+    rememberWorkflowRecent(ctx.project.id, value);
   };
   const revalidateWorkflowState = (ctx) => {
     const id = String(ctx.project.id);
@@ -9388,7 +9402,7 @@ ipcMain.handle('theme:metrics', async () => {
       const hit = workflowStateCache.get(cacheKey);
       if (hit) {
         workflowStateStats.hits += 1;
-        workflowRecentCache.set(String(ctx.project.id), { at: nowMs, value: hit });
+        rememberWorkflowRecent(ctx.project.id, hit);
         return hit;
       }
     }
@@ -9407,17 +9421,25 @@ ipcMain.handle('theme:metrics', async () => {
   }));
   // PM 20:50（Owner：主进程 CPU 被打满）：briefingStatus 每次读工作流 + 算 6 个角色文档哈希（~2.1s）。
   // T-18bf 改 stale-while-revalidate：有旧值立即返回（>3s 后台重算），不再让每次轮询等 2.1s。
-  const briefingCache = new Map();
-  const briefingRevalidating = new Set();
-  const BRIEFING_REVALIDATE_MS = 3000;
-  const briefingStateStats = { hits: 0, misses: 0, revalidations: 0 };
   const buildBriefing = async (teamName) => {
-    const value = await Promise.resolve(teamTools.briefingStatus(teamName));
-    return value;
+    const raw = await Promise.resolve(teamTools.briefingStatus(teamName));
+    // T-18bf：briefing 每角色带 requirements 明细（6 角色重复），是 heapUsed 从 50→144MB 的主因；
+    // UI 只用 booted/complete/stale/missing/at/evidence，缓存前裁掉 requirements 只留 hash。
+    if (raw && typeof raw === 'object' && raw.roles && typeof raw.roles === 'object') {
+      const roles = {};
+      for (const [roleId, row] of Object.entries(raw.roles)) {
+        if (!row || typeof row !== 'object') { roles[roleId] = row; continue; }
+        const { requirements, ...rest } = row;
+        roles[roleId] = rest;
+        if (Array.isArray(requirements)) roles[roleId].requirementsCount = requirements.length;
+      }
+      return { ...raw, roles };
+    }
+    return raw;
   };
   const rememberBriefing = (key, value) => {
     briefingCache.set(key, { at: Date.now(), value });
-    if (briefingCache.size > 8) briefingCache.delete(briefingCache.keys().next().value);
+    if (briefingCache.size > 4) briefingCache.delete(briefingCache.keys().next().value);
   };
   const revalidateBriefing = (key, teamName) => {
     if (briefingRevalidating.has(key)) return;
