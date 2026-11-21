@@ -97,8 +97,9 @@ function seed(mockPort) {
     projects: [{ id: 'p-f749', name: '工作台改造修复', teamName: '工作台改造修复', path: PROJECT_DIR, teamMode: 'full', sessions: {}, sessionMeta: {}, workspace: { id: 'w-f749', path: PROJECT_DIR, name: '工作台改造修复', bound: true, sessionIds: [] }, requirements: [], tasks: [], messages: [], proposals: [], docs: [] }], ui: {}
   };
   fs.writeFileSync(STORE, JSON.stringify(store, null, 2) + '\n', 'utf8');
-  fs.writeFileSync(path.join(DATA, 'dsh.json'), JSON.stringify({ version: 1, baseUrl: 'http://127.0.0.1:65533', source: 'auto', pinned: false }, null, 2) + '\n', 'utf8');
-  return { 'netstat.exe': { ok: true, stdout: ['活动连接', '', '  TCP    127.0.0.1:65501    0.0.0.0:0    LISTENING    4242'].join('\r\n') + '\r\n' } };
+  const baseForSeed = process.env.AWB_F749_RECOVERED === '1' ? ('http://127.0.0.1:' + mockPort) : 'http://127.0.0.1:65533';
+  fs.writeFileSync(path.join(DATA, 'dsh.json'), JSON.stringify({ version: 1, baseUrl: baseForSeed, source: 'auto', pinned: false }, null, 2) + '\n', 'utf8');
+  return { 'netstat.exe': { ok: true, stdout: ['活动连接', '', '  TCP    127.0.0.1:' + (process.env.AWB_F749_RECOVERED === '1' ? mockPort : 65501) + '    0.0.0.0:0    LISTENING    4242'].join('\r\n') + '\r\n' } };
 }
 async function close(inst, keep) {
   if (!inst) return;
@@ -142,6 +143,28 @@ async function shot(cdp, file) {
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false }, 10000);
   for (let i = 0; i < 120; i += 1) { const ready = await cdp.evaluate('Boolean(document.querySelector("#dsh-view")) && Boolean(document.querySelector("#dsh-off"))'); if (ready === true) break; await sleep(250); }
   await sleep(3500); // 等 initDsh/启动发现落定，避免它晚到的 offline renderDsh 覆盖手动状态
+  if (process.env.AWB_F749_RECOVERED === '1') {
+    // 正确地址冷启动（mock 在册）→ webview 必须真显示 mock 页面，供恢复态截图。
+    let ok = false;
+    let title = '';
+    for (let i = 0; i < 80; i += 1) {
+      await sleep(150);
+      try { title = String(await cdp.evaluate(`document.querySelector('#dsh-view').executeJavaScript('document.title')`)); } catch { title = ''; }
+      const hidden = await cdp.evaluate(`Boolean(document.querySelector('#dsh-off').hidden)`);
+      if (/DeepSeek Harness mock/.test(title) && hidden === true) { ok = true; break; }
+    }
+    check('R1', '正确地址冷启动：webview 真显示 mock 页面（title 匹配）', ok, { title });
+    const png = await shot(cdp, path.join(OUT, 'dsh-view-recovered.png'));
+    check('R2', '恢复态真窗口截图 dsh-view-recovered.png', png > 10000, { bytes: png });
+    fs.writeFileSync(path.join(OUT, 'dsh-view-sync.json'), JSON.stringify({ at: new Date().toISOString(), mode: 'recovered', title, png }, null, 2) + '\n', 'utf8');
+    const bad = R.some((x) => !x.ok);
+    if (bad) console.log('KEEP_SANDBOX=' + SB);
+    await close({ child, ws, cdp }, bad);
+    mock.server.close();
+    console.log('\n' + R.filter((x) => x.ok).length + '/' + R.length + ' PASS');
+    process.exitCode = bad ? 1 : 0;
+    return;
+  }
   // 直接操作渲染层状态，模拟「发现到正确端口前后」的两次 renderDsh（不依赖启动时序）。
   let res = await cdp.evaluate(`(async () => {
     // 先让正常 mock 加载完成，再把 webview 指向死端口 → 触发真实 did-fail-load（状态仍保持 mock 在线，
