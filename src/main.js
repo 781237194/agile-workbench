@@ -1097,6 +1097,7 @@ try {
 } catch { /* 钩子注册失败不阻断启动 */ }
 // B-20261119-015113-2443（97db）：名册四态/删除清四处映射/恢复四段审计的纯逻辑单源（壳层与夹具共用）。
 const projectRosterCleanup = require('./project-roster-cleanup.js');
+const rosterStartupGuard = require('./roster-startup-guard.js');
 // R-fefa（T-20261119-185311-66b4）壳层补充：压缩信号 compact.signal + 会话用量（usage tokens 通道）。
 const rolecardShellHook = require('./rolecard-shell-hook.js');
 // 压缩检测基线（按 sessionId 记上一次探测到的 marker）与 usage 写盘节流（30s）。
@@ -1573,6 +1574,7 @@ function syncTeamRosterSessions(sessions, options = {}) {
           teamTools.appendRosterAudit(projectName, {
             event: 'roster_cleared',
             source: 'shell/syncTeamRosterSessions',
+            case: 'syncTeamRosterSessions',
             stack: String(new Error().stack || '').split('\n').slice(1, 4),
             before: Object.fromEntries(beforeSessions),
             after: Object.fromEntries((team.members || []).filter((m) => m && m.role).map((m) => [String(m.role), String(m.sessionId || '')])),
@@ -24957,22 +24959,35 @@ function sweepRosterFromTombstone(teamName) {
       const store = readStore();
       storeProjects = Array.isArray(store.projects) ? store.projects : [];
     } catch { /* 读库失败按未就绪处理，绝不清理 */ }
-    // T-1205（P0）：store 未加载/为空时不能证明项目已删除，保守不动名册；墓碑先保留等下次。
-    if (!storeProjects.length) {
-      try { teamTools.appendRosterAudit(String(teamName), { event: 'roster_clear_skipped', source: 'shell/deletion-tombstone', reason: 'store-not-ready', stack: String(new Error().stack || '').split('\n').slice(1, 4) }); } catch { /* ignore */ }
-      return { cleared: false, reason: "store-not-ready" };
-    }
-    // 只要 store 里还有同 teamName 的项目记录就视为“项目仍在”，消费墓碑而不是清名册；
-    // 不拿 path 是否存在当判据（路径暂时不可访问会把在岗团队误判为已删除）。
-    const stillActive = storeProjects.some((proj) => proj && (String(proj.teamName || proj.name) === String(teamName)));
-    if (stillActive) {
-      try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
-      try { teamTools.appendRosterAudit(String(teamName), { source: "shell/deletion-tombstone-consumed", gen: tomb.generation || 0 }); } catch { /* ignore */ }
-      return { cleared: false, reason: "project-exists", tombstoneCleared: true };
-    }
     const teamFile = path.join(resolveTeamRoot(), "状态", "团队.json");
     if (!fs.existsSync(teamFile)) return { cleared: false, reason: "no-team" };
-    const team = JSON.parse(fs.readFileSync(teamFile, "utf8"));
+    const team = JSON.parse(fs.readFileSync(teamFile, "utf8").replace(/^\uFEFF/, ''));
+    const teamActiveProject = String((team && team.activeProject) || '');
+    // T-1205（P0）：启动后 16–21 秒的 4 秒全空来自「旧团队墓碑清当前全局名册」。
+    // 统一走保守判定：store 未就绪/非同团队/项目仍在 → 不清，只留审计。
+    const decision = rosterStartupGuard.tombstoneClearDecision({
+      tombstoneTeam: teamName,
+      teamActiveProject,
+      storeProjects,
+      storeReady: storeProjects.length > 0,
+    });
+    if (!decision.allow) {
+      try {
+        teamTools.appendRosterAudit(String(teamName), {
+          event: 'roster_clear_skipped', source: 'shell/deletion-tombstone',
+          case: 'deletion-tombstone', reason: decision.reason,
+          tombstoneTeam: String(teamName || ''), teamActiveProject,
+          stack: String(new Error().stack || '').split('\n').slice(1, 4),
+          gen: tomb.generation || 0,
+        });
+      } catch { /* ignore */ }
+      if (decision.reason === 'project-exists') {
+        try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
+        try { teamTools.appendRosterAudit(String(teamName), { source: "shell/deletion-tombstone-consumed", case: 'deletion-tombstone', gen: tomb.generation || 0 }); } catch { /* ignore */ }
+        return { cleared: false, reason: "project-exists", tombstoneCleared: true };
+      }
+      return { cleared: false, reason: decision.reason };
+    }
     const roles = [];
     const before = {};
     let teamChanged = false;
@@ -24984,10 +24999,10 @@ function sweepRosterFromTombstone(teamName) {
     }
     if (team && team.activeProject && String(team.activeProject) === String(teamName)) { team.activeProject = null; teamChanged = true; }
     if (!teamChanged) return { cleared: false, reason: "already-empty" };
-    jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: "panelTeamSync", allowRosterClear: true });
+    jsonAtomicCore.writeJsonAtomic(teamFile, team, { case: "deletion-tombstone", allowRosterClear: true });
     try {
       teamTools.appendRosterAudit(String(teamName), {
-        event: 'roster_cleared', source: 'shell/deletion-tombstone', cleared: roles,
+        event: 'roster_cleared', source: 'shell/deletion-tombstone', case: 'deletion-tombstone', cleared: roles,
         before, after: Object.fromEntries(team.members.map((m) => [String(m.role || ''), String(m.sessionId || '')])),
         stack: String(new Error().stack || '').split('\n').slice(1, 4), gen: tomb.generation || 0,
       });
