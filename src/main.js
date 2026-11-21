@@ -22451,14 +22451,16 @@ async function runDshDiscovery(reason = 'status', budgets = {}) {
         // F-4：显式配置优先；有它就不再报 ambiguous。
         explicitBaseUrl: DSH_EXPLICIT.baseUrl,
         explicitSource: DSH_EXPLICIT.source,
+        // PM 14:40（Owner）：恢复「50000–60000 端口段扫描」作为权威源/监听端口失败后的兜底。
+        // 命中保存地址时不会扫（quickHit 短路），冷启仍快；只有旧地址失效/端口列表漏掉时才扫段。
+        includeScan: true,
+        scanRange: { start: 50000, end: 60000 },
         // B-4fdd：启动首轮 fast 预算——跳过进程发现（netstat/powershell 最贵），扫描预算收紧。
         ...(budgets.fast ? {
           skipProcessDiscovery: true,
           includeRange: false,
-          // B-33b9 AC④：首屏只做「netstat 监听端口枚举 + 特征校验」，不扫段；
-          // 总预算 1.2s（AC 要求发现链 ≤1.5s，冷启墙钟 ≤2s 给 check 留 700ms）。
-          totalBudgetMs: 1200,
-          includeScan: false,
+          // 端口段兜底需要预算；命中 saved/netstat 时不会走到扫描。
+          totalBudgetMs: 3000,
           maxCandidates: 8,
         } : {}),
       });
