@@ -15935,17 +15935,6 @@ async function probeDsh(force = false, quiet = false) {
   }
 }
 
-function applyDshViewSrcLegacy() {
-  const view = $('#dsh-view');
-  const base = state?.dsh?.baseUrl;
-  if (!view || !base) return;
-  const current = view.getAttribute('src') || '';
-  if (!current || current === 'about:blank' || current !== base) {
-    dshViewFailed = false;
-    view.setAttribute('src', base);
-  }
-}
-
 async function initDsh() {
   try {
     const s = await window.workbench.dshStatus();
