@@ -257,6 +257,8 @@ async function shot(cdp, file) {
   }
   const elapsed = Date.now() - clickAt;
   check('U5', '点「产品设计师」chip → ≤2s 标签/数值切到该角色', click === 'CLICKED' && after && after.role === 'product' && /本会话\(产品设计师\)/.test(String(after.label)) && elapsed <= 2000, { click, elapsed, after });
+  const cacheKey = await cdp.evaluate(`(() => { const host = document.querySelector('#session-usage'); return host ? String(host.getAttribute('data-usage-cache-key') || '') : ''; })()`);
+  check('U5b', '切角色缓存键绑角色（cacheKey 含 ::product）', /::product$/.test(String(cacheKey || '')), { cacheKey });
   const shotAfter = await shot(cdp, path.join(OUT, 'usage-after.png'));
   check('U6', '真窗口截图 2（切角色后）', shotAfter > 10000, { bytes: shotAfter });
   const report = { at: new Date().toISOString(), before, after, elapsedMs: elapsed, mockPort: mock.port, screenshots: { before: shotBefore, after: shotAfter } };
