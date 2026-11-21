@@ -326,16 +326,18 @@ const ACCEPT_ONE = `(async () => {
   if (!c) return { ok: false, error: 'confirm missing' };
   const n0 = document.querySelector('[data-accept-list-notice]'); if (n0) n0.remove();
   const t0 = performance.now();
+  try { c.v.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse' })); } catch { /* ignore */ }
   c.v.click();
   const seen = await until(() => {
     const list = [document.querySelector('#awb-accept-global'), document.querySelector('[data-accept-list-notice]')];
     return list.find((n) => n && n.getBoundingClientRect().height > 0 && /已验收|验收/.test(n.textContent || '')) || null;
   }, 20000);
   if (!seen) return { ok: false, error: 'notice timeout' };
-  // PM 172739：t0 click → t1 提示节点插入 → t2 实际可见（rect>0）→ t3 列表重建完
-  const ui = window.__acceptUiLast || null;
+  // PM 172739/173217：t0 click → t1 提示节点插入 → t2 实际可见 → t3 列表重建；另给 pointerdown→handler→notice→visible→IPC 五段
+  const uiLast = window.__acceptUiLast || null;
+  const click4 = window.__acceptClick4 || null;
   const t2 = Math.round(performance.now() - t0);
-  return { ok: true, ms: t2, notice: String((seen.v ? seen.v.textContent : '') || '').slice(0, 80), ui: ui ? { ...ui, t2VisibleMs: t2 } : { t2VisibleMs: t2 } };
+  return { ok: true, ms: t2, notice: String((seen.v ? seen.v.textContent : '') || '').slice(0, 80), ui: uiLast ? { ...uiLast, t2VisibleMs: t2 } : { t2VisibleMs: t2 }, click4 };
 })()`;
 const REVIEW_ONE = `(async () => {
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -436,7 +438,7 @@ const TYPING = `(async () => {
     // 列表重建（requestIdleCallback 后）完成时间：t3
     try { coldUi = (await cdp.evaluate('window.__acceptUiLast || null')) || coldUi; } catch { /* ignore */ }
     const profiles = inst.getStdout().split(/\r?\n/).filter((l) => /\[accept-profile\]|\[review-profile\]|\[side-effects-profile\]|\[board-profile\]|\[workflow-prewarm\]/.test(l)).slice(-60);
-    const report = { at: new Date().toISOString(), coldAccept, coldUi, coldNotice: cold && cold.notice ? String(cold.notice) : '', samples, errors, typing, profiles };
+    const report = { at: new Date().toISOString(), coldAccept, coldUi, coldClick4: (cold && cold.click4) || null, coldNotice: cold && cold.notice ? String(cold.notice) : '', samples, errors, typing, profiles };
     fs.writeFileSync(path.join(OUT, 'window-report.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
     fs.writeFileSync(path.join(OUT, 'window-stdout.log'), inst.getStdout(), 'utf8');
     log('accept samples', JSON.stringify(samples.accept));

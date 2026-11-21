@@ -2069,6 +2069,23 @@
     const box = ensureAcceptList();
     const body = box.querySelector('[data-accept-body]');
     const rows = acceptRows();
+    // PM 173217：504 行整块重建是「点击被前一长任务挡住」的根源。两道路闸：
+    // ①交互期（AWBGate 900ms）内不重建，延后 800ms 再来；②数据签名未变就只更新来源行，不重建。
+    try { if (window.AWBGate && typeof AWBGate.interacting === 'function' && AWBGate.interacting()) { setTimeout(renderAcceptList, 800); return; } } catch { /* ignore */ }
+    const sig = (() => {
+      try { return JSON.stringify(rows.map((row) => [String(row.id || ''), String(row.status || ''), String(row.updatedAt || ''), String((row.__ac && row.__ac.canAccept) || '')])); } catch { return ''; }
+    })();
+    const startedAt = performance.now();
+    if (sig && sig === renderAcceptList.__sig && body && body.childElementCount > 0) {
+      // 只更新来源行（轻量），其它 DOM 全部复用，锚点/滚动/选中都不动。
+      try {
+        const srcText = body.querySelector('[data-accept-source] .accept-source-text');
+        if (srcText) srcText.textContent = acceptSourceText();
+      } catch { /* ignore */ }
+      try { window.__acceptListRender = { at: new Date().toISOString(), ms: Math.round(performance.now() - startedAt), sigChanged: false }; } catch { /* ignore */ }
+      return;
+    }
+    renderAcceptList.__sig = sig;
     body.innerHTML = '';
     const form = box.querySelector('[data-accept-form]');
     if (form && form.hidden) { /* 保留已打开的表单 */ }
@@ -2194,6 +2211,7 @@
       item.appendChild(actions);
       body.appendChild(item);
     });
+    try { window.__acceptListRender = { at: new Date().toISOString(), ms: Math.round(performance.now() - startedAt), sigChanged: true, rows: rows.length }; } catch { /* ignore */ }
   }
   function acceptFormEl() {
     return ensureAcceptList().querySelector('[data-accept-form]');
@@ -2266,6 +2284,8 @@
     const ok = el('button', 'accept-btn', rejecting ? '确认打回' : '确认验收');
     ok.type = 'button';
     ok.setAttribute('data-action', rejecting ? 'owner-reject-confirm' : 'owner-accept-confirm');
+    // PM 173217：记录真实 pointerdown 时刻，用于「pointerdown→handler 进入」分段。
+    ok.addEventListener('pointerdown', () => { ok.__awbPointerDownAt = performance.now(); }, { passive: true });
     // B-53ff：以前点「确认验收」到 IPC 返回之间界面完全没变化（一次 1.5–3 秒），Owner 体感是"点了没反应"。
     // 现在：立刻进入忙碌态（按钮文案 + 进度行 + 计时）、成功后立刻把该行从列表移除，失败才恢复。
     // B-20261118-211237-9ded：一次验收只允许一个在途请求（成功后重置，失败也重置）。
@@ -2293,14 +2313,36 @@
       busy.hidden = true;
     };
     ok.addEventListener('click', async () => {
-      // B-20261118-211237-9ded：防重复提交（按钮 disabled 之外再加一道闸，键盘/连点都拦）。
+      // PM 173217：防重复提交（按钮 disabled 之外再加一道闸，键盘/连点都拦）。
       if (submitting) return;
       submitting = true;
+      const __hEnter = performance.now();
+      const __pd = Number(ok.__awbPointerDownAt) > 0 ? Number(ok.__awbPointerDownAt) : __hEnter;
       ok.disabled = true;
       ok.textContent = rejecting ? '正在打回…' : '正在验收…';
       err.hidden = true;
       startBusy();
       showNotice(rejecting ? `正在打回 ${row.id}…` : `正在验收 ${row.id}…`);
+      // PM 173217②：点击后**同步**写列表提示（不等 IPC），IPC 返回再覆盖最终文案。
+      try { acceptListNotice(rejecting ? `正在打回 ${row.id}…` : `正在验收 ${row.id}…`, 'ok'); } catch { /* ignore */ }
+      const __noticeAt = performance.now();
+      try {
+        window.__acceptClick4 = {
+          pointerdownToHandler: Math.round(__hEnter - __pd),
+          handlerToNotice: Math.round(__noticeAt - __hEnter),
+          at: new Date().toISOString(),
+        };
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            try {
+              const node = document.querySelector('#awb-accept-global') || document.querySelector('[data-accept-list-notice]');
+              const rect = node && node.getBoundingClientRect();
+              window.__acceptClick4.noticeToVisible = Math.round(performance.now() - __noticeAt);
+              window.__acceptClick4.rect = rect ? Math.round(rect.height) : 0;
+            } catch { /* ignore */ }
+          });
+        });
+      } catch { /* ignore */ }
       // PM 172739：点击瞬间同步渲染全局固定提示（不等 IPC / 列表重建），并打点 t0→t1→t2。
       const __clickT0 = performance.now();
       const __acceptBar = acceptGlobalNotice(rejecting ? `正在打回 ${row.id}…` : `正在验收 ${row.id}…`, 'ok');
@@ -2343,6 +2385,7 @@
           expectedStatus: acceptExpectedStatus(row),
           expectedUpdatedAt: acceptExpectedAt()
         });
+        try { if (window.__acceptClick4) window.__acceptClick4.ipcReturnMs = Math.round(performance.now() - __hEnter); } catch { /* ignore */ }
         if (!r || r.ok === false) {
           const error = new Error((r && (r.message || r.code)) || '验收失败');
           error.code = String((r && r.code) || '');
