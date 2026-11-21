@@ -333,6 +333,8 @@ const ACCEPT_ONE = `(async () => {
     return list.find((n) => n && n.getBoundingClientRect().height > 0 && /已验收|验收/.test(n.textContent || '')) || null;
   }, 20000);
   if (!seen) return { ok: false, error: 'notice timeout' };
+  // 等最终文案落定（__acceptUiLast.totalMs），最长 800ms，不阻塞主判据
+  await new Promise((resolve) => { const t0 = performance.now(); const tick = () => { const u = window.__acceptUiLast; if ((u && u.totalMs) || performance.now() - t0 > 800) return resolve(); setTimeout(tick, 16); }; tick(); });
   // PM 172739/173217：t0 click → t1 提示节点插入 → t2 实际可见 → t3 列表重建；另给 pointerdown→handler→notice→visible→IPC 五段
   const uiLast = window.__acceptUiLast || null;
   const click4 = window.__acceptClick4 || null;

@@ -2317,6 +2317,7 @@
       if (submitting) return;
       submitting = true;
       const __hEnter = performance.now();
+      let __ipcAt = 0;
       const __pd = Number(ok.__awbPointerDownAt) > 0 ? Number(ok.__awbPointerDownAt) : __hEnter;
       ok.disabled = true;
       ok.textContent = rejecting ? '正在打回…' : '正在验收…';
@@ -2385,7 +2386,11 @@
           expectedStatus: acceptExpectedStatus(row),
           expectedUpdatedAt: acceptExpectedAt()
         });
-        try { if (window.__acceptClick4) window.__acceptClick4.ipcReturnMs = Math.round(performance.now() - __hEnter); } catch { /* ignore */ }
+        try {
+          __ipcAt = performance.now();
+          if (window.__acceptClick4) window.__acceptClick4.ipcReturnMs = Math.round(__ipcAt - __hEnter);
+          if (window.__acceptUiLast) window.__acceptUiLast.ipcMs = Math.round(__ipcAt - __hEnter);
+        } catch { /* ignore */ }
         if (!r || r.ok === false) {
           const error = new Error((r && (r.message || r.code)) || '验收失败');
           error.code = String((r && r.code) || '');
@@ -2420,6 +2425,12 @@
         };
         if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(finishRefresh, { timeout: 1500 });
         else setTimeout(finishRefresh, 300);
+        try {
+          if (window.__acceptUiLast) {
+            window.__acceptUiLast.noticeMs = Math.round(__noticeAt - __hEnter);
+            window.__acceptUiLast.totalMs = Math.round(performance.now() - __hEnter);
+          }
+        } catch { /* ignore */ }
       } catch (e) {
         submitting = false;
         stopBusy();
@@ -3429,6 +3440,12 @@
   async function submit(status) {
     const dialog = dialogEl();
     if (!dialog || !state.selected) return;
+    // PM 173757：评审点击也先同步写提示（不等 IPC/弹窗重绘），并在 await 前落点。
+    const __submitT0 = performance.now();
+    const __submitId = String(state.selected || '');
+    try { acceptListNotice(`正在提交 ${__submitId}…`, 'ok'); } catch { /* ignore */ }
+    try { acceptGlobalNotice(`正在提交 ${__submitId}…`, 'ok'); } catch { /* ignore */ }
+    const __submitNoticeAt = performance.now();
     // B-2ed9：提交前校验“列表选中 = 右侧展示 = 真正要落账的需求”，任何不一致直接拦下，
     // 避免 Owner 以为在点 A、决定却记到 B 上（ea86 被连记 10 条就是这个）。
     const paneId = String((dialog.querySelector('[data-or-summary-box]') || {}).getAttribute
@@ -3512,10 +3529,12 @@
       // PM 172622 分段：t0 点击提交 → t1 invoke 前 → t2 决定写入返回 → t3 提示可见。
       try {
         window.__reviewUiLast = {
-          t0: __uiT0,
+          t0: Math.round(__submitT0),
+          handlerDelayMs: Math.round(__uiT0 - __submitT0),
+          progressNoticeMs: Math.round(__submitNoticeAt - __submitT0),
           ipcMs: Math.round(__uiT1 - __uiT0),
           noticeMs: Math.round(performance.now() - __uiT1),
-          totalMs: Math.round(performance.now() - __uiT0),
+          totalMs: Math.round(performance.now() - __submitT0),
           at: new Date().toISOString(),
         };
       } catch { /* ignore */ }
