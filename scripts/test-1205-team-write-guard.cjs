@@ -89,6 +89,14 @@ function auditRows() {
     assert.strictEqual(row.afterCount, 6);
   });
 
+  check('saveTeam 也走同一拒绝守卫', () => {
+    let code = '';
+    try { store.saveTeam(makeTeam(true), { source: 'test/saveTeam' }); } catch (error) { code = String((error && error.code) || ''); }
+    assert.strictEqual(code, 'ROSTER_CLEAR_BLOCKED');
+    const disk = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
+    assert.strictEqual(disk.members.filter((m) => String(m.sessionId || '').trim()).length, 6);
+  });
+
   check('显式 allowClear 才允许全清', () => {
     const cleared = makeTeam(true);
     store.writeTeamFileAtomic(cleared, 'test/allow-clear', { allowClear: true });
