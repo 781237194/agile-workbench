@@ -1,6 +1,9 @@
 'use strict';
 // R-e31b AC2 生产采样（只读）：连 PM/生产实例已开的 CDP 端口，target 限 url 含 index.html，
 // 每 30s 读 usedJSHeapSize + PerformanceObserver 长任务，10 分钟；不点击、不 reload、不关闭任何窗口。
+// T-0f58 补强：记录 instanceStartTime（performance.timeOrigin），每样点校验 timeOrigin/连接，
+// 窗口内一旦发现重启（timeOrigin 变 / CDP 断）立即标记 restartDetected 并提前收尾，产出 INVALID 标记，
+// report.valid=false（退出码 4），该轮数据不得用于 AC 判定。
 // 用法：node scripts/e31b-prod-sample.cjs --port 9223 --minutes 10 --out <dir>
 const fs = require('node:fs');
 const path = require('node:path');
@@ -26,7 +29,18 @@ class Cdp {
   await cdp.send('Runtime.enable');
   const t0 = Date.now();
   fs.mkdirSync(OUT, { recursive: true });
-  const meta = { at: new Date().toISOString(), port: PORT, target: { id: page.id, title: page.title, url: page.url }, minutes: MINUTES };
+  // 实例启动时间与「窗口内是否重启」基线：performance.timeOrigin 在渲染进程重启/reload 后会变。
+  const base = await cdp.eval('({ timeOrigin: performance.timeOrigin, href: location.href, title: document.title })');
+  const instanceStartTime = new Date(Number(base.timeOrigin)).toISOString();
+  const meta = { at: new Date().toISOString(), port: PORT, target: { id: page.id, title: page.title, url: page.url }, minutes: MINUTES, instanceStartTime, instanceTimeOrigin: base.timeOrigin };
+  let restartDetected = false;
+  let restartInfo = null;
+  const markRestart = (why, extra) => {
+    if (restartDetected) return;
+    restartDetected = true;
+    restartInfo = { at: new Date().toISOString(), tMs: Date.now() - t0, why, ...extra };
+    try { fs.writeFileSync(path.join(OUT, 'restart-detected.json'), JSON.stringify(restartInfo, null, 2) + '\n'); } catch { /* ignore */ }
+  };
   fs.writeFileSync(path.join(OUT, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
   await cdp.eval('(() => { window.__e31bProd = { count: 0, max: 0, over50: 0, over100: 0, items: [] }; try { window.__e31bProdObs && window.__e31bProdObs.disconnect(); } catch {} window.__e31bProdObs = new PerformanceObserver((list) => { for (const e of list.getEntries()) { const ms = Math.round(e.duration); const o = window.__e31bProd; o.count += 1; o.max = Math.max(o.max, ms); if (ms > 50) o.over50 += 1; if (ms > 100) { o.over100 += 1; o.items.push(ms); } } }); window.__e31bProdObs.observe({ entryTypes: [String.fromCharCode(108,111,110,103,116,97,115,107)] }); return true; })()');
   const lines = [];
@@ -35,7 +49,7 @@ class Cdp {
     try {
       fs.writeFileSync(path.join(OUT, 'heap.jsonl'), lines.join('\n') + '\n');
       const last = lines.length ? JSON.parse(lines[lines.length - 1]).usedJSHeapSize : -1;
-      const simple = { at: meta.at, port: PORT, target: meta.target, minutes: MINUTES, samples: lines.length, heapFirst: lines.length ? JSON.parse(lines[0]).usedJSHeapSize : -1, heapLast: last, partial: !final };
+      const simple = { at: meta.at, port: PORT, target: meta.target, minutes: MINUTES, instanceStartTime, restartDetected, restartInfo, samples: lines.length, heapFirst: lines.length ? JSON.parse(lines[0]).usedJSHeapSize : -1, heapLast: last, partial: !final };
       fs.writeFileSync(path.join(OUT, 'progress.json'), JSON.stringify(simple, null, 2) + '\n');
     } catch { /* ignore */ }
   };
@@ -45,17 +59,40 @@ class Cdp {
   const deadline = Date.now() + MINUTES * 60000;
   while (Date.now() < deadline) {
     let heap = -1;
-    try { heap = await cdp.eval('performance.memory ? performance.memory.usedJSHeapSize : -1'); } catch { /* ignore */ }
-    lines.push(JSON.stringify({ at: new Date().toISOString(), tMs: Date.now() - t0, usedJSHeapSize: heap, targetId: page.id, title: page.title }));
+    let timeOrigin = null;
+    try {
+      const s = await cdp.eval('({ heap: performance.memory ? performance.memory.usedJSHeapSize : -1, timeOrigin: performance.timeOrigin })');
+      heap = s.heap;
+      timeOrigin = s.timeOrigin;
+    } catch (e) {
+      markRestart('cdp-error', { error: String((e && e.message) || e).slice(0, 200) });
+      break;
+    }
+    if (Number(timeOrigin) !== Number(base.timeOrigin)) {
+      markRestart('timeOrigin-changed', { oldTimeOrigin: base.timeOrigin, newTimeOrigin: timeOrigin });
+      break;
+    }
+    lines.push(JSON.stringify({ at: new Date().toISOString(), tMs: Date.now() - t0, usedJSHeapSize: heap, timeOrigin, targetId: page.id, title: page.title }));
     flush(false);
     await sleep(30000);
   }
   let gcHeap = -1;
   try { await cdp.send('HeapProfiler.enable'); await cdp.send('HeapProfiler.collectGarbage'); await sleep(800); gcHeap = await cdp.eval('performance.memory ? performance.memory.usedJSHeapSize : -1'); } catch { /* ignore */ }
   const long = await cdp.eval('window.__e31bProd || null').catch(() => null);
-  fs.writeFileSync(path.join(OUT, 'heap.jsonl'), lines.join('\n') + '\n');
-  const report = { ...meta, samples: lines.length, heapFirst: JSON.parse(lines[0]).usedJSHeapSize, heapLast: JSON.parse(lines[lines.length - 1]).usedJSHeapSize, gcHeap, long };
+  flush(true);
+  const expected = Math.max(1, Math.floor((MINUTES * 60000) / 30000));
+  const valid = !restartDetected && lines.length >= expected - 1;
+  const report = {
+    ...meta, samples: lines.length, expectedSamples: expected, valid, restartDetected, restartInfo,
+    sampleWindow: { from: meta.at, to: new Date().toISOString() },
+    heapFirst: lines.length ? JSON.parse(lines[0]).usedJSHeapSize : -1,
+    heapLast: lines.length ? JSON.parse(lines[lines.length - 1]).usedJSHeapSize : -1,
+    gcHeap, long
+  };
   fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-  console.log(JSON.stringify({ out: OUT, samples: lines.length, heapFirst: report.heapFirst, heapLast: report.heapLast, gcHeap, longCount: long && long.count, longMax: long && long.max, over100: long && long.over100 }));
-  process.exit(0);
+  if (!valid) {
+    fs.writeFileSync(path.join(OUT, 'INVALID'), `invalid: restartDetected=${restartDetected} samples=${lines.length}/${expected}\n`);
+  }
+  console.log(JSON.stringify({ out: OUT, valid, restartDetected, restartInfo, samples: lines.length, expectedSamples: expected, instanceStartTime, heapFirst: report.heapFirst, heapLast: report.heapLast, gcHeap, longCount: long && long.count, longMax: long && long.max, over100: long && long.over100 }));
+  process.exit(valid ? 0 : 4);
 })().catch((e) => { console.error('FAILED', e && e.stack); process.exit(1); });
