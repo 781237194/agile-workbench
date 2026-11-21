@@ -662,6 +662,31 @@ const DSH_EXPLICIT = (() => {
   } catch { /* 配置读不到就当没有显式配置 */ }
   return { baseUrl: '', source: '' };
 })();
+// D2（P1）：数据目录权限拒绝时不能静默卡死——启动前做一次可写探测，失败弹一次人话错误框。
+function verifyLocalDataWritable() {
+  const probe = path.join(USER_DATA, '.write-probe');
+  try {
+    fs.mkdirSync(USER_DATA, { recursive: true });
+    fs.writeFileSync(probe, 'ok', 'utf8');
+    fs.rmSync(probe, { force: true });
+    return '';
+  } catch (error) {
+    const code = String((error && error.code) || '');
+    if (!/EACCES|EPERM|EROFS|ENOSPC/i.test(code)) return '';
+    return { code, message: String((error && error.message) || error || '').slice(0, 300) };
+  }
+}
+{
+  const perm = verifyLocalDataWritable();
+  if (perm) {
+    const text = '数据目录不可写：' + USER_DATA + '\n错误：' + perm.code + (perm.message ? '（' + perm.message + '）' : '')
+      + '\n\n处理：右键该目录 → 属性 → 安全 → 给当前用户「完全控制」后重开工作台；'
+      + '\n或设置环境变量 AWB_DATA_DIR 指到一个可写目录（如 D:\\awb-data）再启动。';
+    try { console.error('[data-dir] ' + text.replace(/\n/g, '；')); } catch { /* ignore */ }
+    try { require('electron').dialog.showErrorBox('PM工作台：数据目录不可写', text); } catch { /* 无 GUI 时只留日志 */ }
+    process.exit(1);
+  }
+}
 app.setPath('userData', USER_DATA);
 app.setPath('sessionData', USER_DATA);
 app.setPath('temp', TEMP_ROOT);
@@ -22669,6 +22694,40 @@ async function installDshCookie() {
   } catch { return false; }
 }
 
+// D1（P0）：运行期 DSH 凭据/secret 变化（重启 DSH、换 .credentials.yaml）→ 自动重装 cookie + reload。
+// 旧实现只在启动/离线发现时装 cookie，运行中换凭据后 45s 都不恢复，必须手点重载。
+let dshCredentialWatcher = null;
+let dshCredentialDebounce = null;
+function dshCredentialFilePath() {
+  const home = String(process.env.DSH_HOME || '').trim() || path.join(require('node:os').homedir(), '.dsh');
+  return path.join(home, '.credentials.yaml');
+}
+function watchDshCredentials() {
+  if (dshCredentialWatcher) return;
+  const file = dshCredentialFilePath();
+  const dir = path.dirname(file);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    dshCredentialWatcher = fs.watch(dir, (eventType, filename) => {
+      const name = String(filename || '');
+      if (name && name !== '.credentials.yaml' && name !== path.basename(file)) return;
+      clearTimeout(dshCredentialDebounce);
+      dshCredentialDebounce = setTimeout(async () => {
+        try {
+          await installDshCookie();
+          try { await reloadDshWebview(dsh.baseUrl); } catch { /* ignore */ }
+          let status = null;
+          try { status = await dsh.check({ timeoutMs: 5000 }); } catch { /* ignore */ }
+          try { console.log('[dsh-credential] changed, cookie reinstalled, reloaded, online=' + Boolean(status && status.online)); } catch { /* ignore */ }
+          broadcastDshStatusChanged('credential-change', { status, discovery: null });
+        } catch { /* ignore */ }
+      }, 600);
+      if (dshCredentialDebounce && typeof dshCredentialDebounce.unref === 'function') dshCredentialDebounce.unref();
+    });
+    if (dshCredentialWatcher && typeof dshCredentialWatcher.unref === 'function') dshCredentialWatcher.unref();
+  } catch { /* 监听失败不影响启动；dsh:status 仍有 cookie 自愈 */ }
+}
+
 // 单实例：两个窗口同时写 workbench.json / 团队状态会丢更新。自测/布局自检用独立 userData，不参与锁。
 const singleInstanceLock = (IS_SELFTEST || IS_LAYOUT_CHECK || IS_EFFECT_CHECK || IS_THEME_SHOTS || IS_C651_CHECK || IS_B2EBE_CHECK || IS_QUEUE_CHECK || IS_DAEMON_CHECK || IS_SUPPLEMENT_CHECK || IS_SQ_CHECK || IS_LIVE_CHECK) ? true : app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
@@ -24165,6 +24224,8 @@ const __phase = (name, fn) => {
   try { const t = setInterval(() => { try { runPmIdentityReconcile('interval60'); } catch { /* ignore */ } }, 60000); if (t.unref) t.unref(); } catch { /* ignore */ }
   // B-4fdd：cookie 安装不阻塞（先建窗，装完再继续）。
   const dshCookieTask = installDshCookie().catch(() => false);
+  // D1：运行期凭据变化监听（换 secret / DSH 重启写新凭据 → 自动重装 cookie + reload）。
+  watchDshCredentials();
   // R-c1ed F-1 接线：采样定时器 + 启动/24h 清理（自检/布局检查模式不采，避免污染证据目录与拖慢断言）。
   if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_EFFECT_CHECK && !IS_THEME_SHOTS) {
     __phase('memSampler', () => { startRenderMemorySampler(); scheduleRenderMemoryMaintenance(); });
