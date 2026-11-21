@@ -595,8 +595,15 @@
 
   /* ── 循环 ───────────────────────────────────────────────────────────── */
 
+  function overlayOwnsShell() {
+    // T-f9dc R2：覆盖窗就绪且在线时，壳内 canvas 必须保持停画；blur→focus 的 resume 不得重新 startLoop。
+    return Boolean(S.mode === 'full' && !S.degraded.particles && !S.paused
+      && W.__awbFxOverlayReady === true && W.__awbFxOverlayOnline === true);
+  }
+
   function startLoop() {
     if (S.running) return;
+    if (overlayOwnsShell()) { stopLoop(); return; }
     S.running = true;
     S.lastFrame = 0;
     S.lastDraw = 0;
@@ -616,6 +623,7 @@
   function loop(ts) {
     S.raf = 0;
     if (!S.running) return;
+    if (overlayOwnsShell()) { stopLoop(); return; }
     if (S.lastFrame) {
       var gap = ts - S.lastFrame;
       if (gap > 0 && gap < 500) {
@@ -833,7 +841,18 @@
     S.pausedReason = '';
     S.lastInput = Date.now();
     logPause('resume', '');
-    if (S.mode !== 'off') startLoop();
+    if (S.mode !== 'off') {
+      if (overlayOwnsShell()) {
+        // T-f9dc R2：resume 时覆盖窗仍接管 → 壳内保持停画，并清掉暂停前残留的 canvas/属性。
+        if (S.canvas) {
+          clearCanvas();
+          S.canvas.setAttribute('data-fx-particles', '0');
+        }
+        stopLoop();
+      } else {
+        startLoop();
+      }
+    }
   }
 
   /* ── 输入绑定（只绑一次）────────────────────────────────────────────── */
@@ -922,7 +941,7 @@
     }
     // T-77e4：覆盖窗已就绪且 DSH 在线时，壳内画布被 webview 盖住只会白耗 CPU/GPU → 停画并清空；
     // 覆盖窗创建失败/离线/降级时 overlayOwns=false，壳内照常绘制（降级兜底）。
-    var overlayOwns = Boolean(particlesOn && W.__awbFxOverlayReady === true && W.__awbFxOverlayOnline === true);
+    var overlayOwns = overlayOwnsShell();
     if (overlayOwns && S.canvas) {
       clearCanvas();
       S.canvas.setAttribute('data-fx-particles', '0');
