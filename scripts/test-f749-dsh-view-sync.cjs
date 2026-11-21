@@ -144,12 +144,18 @@ async function shot(cdp, file) {
   await sleep(3500); // 等 initDsh/启动发现落定，避免它晚到的 offline renderDsh 覆盖手动状态
   // 直接操作渲染层状态，模拟「发现到正确端口前后」的两次 renderDsh（不依赖启动时序）。
   let res = await cdp.evaluate(`(async () => {
-    // 冻结自动刷新/发现，模拟「状态已指向死端口」的稳定错误态（真实 did-fail-load，不伪造事件）。
-    try { window.__f749SavedRefresh = refresh; refresh = async () => {}; } catch { /* ignore */ }
-    try { window.__f749SavedProbe = probeDsh; probeDsh = async () => null; } catch { /* ignore */ }
-    state.dsh = { configured: true, online: true, baseUrl: 'http://127.0.0.1:65533', message: 'mock-dead', code: 'MOCK_OFFLINE' };
-    renderDsh(state.dsh);
-    for (let i = 0; i < 40; i += 1) {
+    // 先让正常 mock 加载完成，再把 webview 指向死端口 → 触发真实 did-fail-load（状态仍保持 mock 在线，
+    // 主进程不会把状态改回离线；错误层由 dshViewError 保留到成功重载）。
+    for (let i = 0; i < 60; i += 1) {
+      await new Promise((r) => setTimeout(r, 150));
+      const view0 = document.querySelector('#dsh-view');
+      let title0 = '';
+      try { title0 = String(await view0.executeJavaScript('document.title') || ''); } catch { title0 = ''; }
+      if (/DeepSeek Harness mock/.test(title0)) break;
+    }
+    const view = document.querySelector('#dsh-view');
+    view.setAttribute('src', 'http://127.0.0.1:65533');
+    for (let i = 0; i < 50; i += 1) {
       await new Promise((r) => setTimeout(r, 150));
       const off = document.querySelector('#dsh-off');
       const url = String((document.querySelector('#dsh-off-url') || {}).textContent || '');

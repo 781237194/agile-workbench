@@ -15762,27 +15762,40 @@ function openOwnerModal() {
 const dshViewUi = { lastBaseUrl: '', lastOnline: null };
 let dshViewError = null;
 
-function forceReloadDshView(reason = 'manual') {
+/**
+ * B-f749：唯一 webview 地址/重载函数。
+ * - 地址与 status.baseUrl 不同 → 改 src；
+ * - force=true（同址离线→在线/点「重载 WebView」）→ reload。
+ * 不再有第二份 src 赋值；按钮与 renderDsh 都走这里。
+ */
+function applyDshViewSrc(force = false, reason = 'src') {
   const view = $('#dsh-view');
   if (!view) return false;
   const base = String((state && state.dsh && state.dsh.baseUrl) || '');
+  if (!base) return false;
+  const current = String(view.getAttribute('src') || '');
+  const same = current === base;
+  if (same && !force) return false;
   dshViewFailed = false;
   dshReady = false;
   dshViewError = null;
-  if (!base) { try { renderDsh(state?.dsh); } catch { /* ignore */ } return false; }
-  const current = String(view.getAttribute('src') || '');
   try {
-    if (current !== base) view.setAttribute('src', base);
-    else view.reload();
+    if (same) view.reload();
+    else view.setAttribute('src', base);
   } catch {
     try { view.setAttribute('src', base); } catch { /* ignore */ }
   }
-  try { console.log('[dsh-view] reload reason=' + String(reason || 'manual') + ' url=' + base); } catch { /* ignore */ }
-  try { renderDsh(state?.dsh); } catch { /* ignore */ }
+  try { console.log('[dsh-view] ' + (same ? 'reload' : 'set-src') + ' reason=' + String(reason || 'src') + ' url=' + base); } catch { /* ignore */ }
   return true;
 }
 
-/** 状态变化时保证 webview 指向同一地址：地址变→改 src；同址离线→在线→强制 reload。 */
+function forceReloadDshView(reason = 'manual') {
+  const changed = applyDshViewSrc(true, reason);
+  try { renderDsh(state?.dsh); } catch { /* ignore */ }
+  return changed;
+}
+
+/** 状态变化时保证 webview 指向同一地址：地址变→applyDshViewSrc；同址离线→在线→强制 reload。 */
 function syncDshViewWithStatus(dsh) {
   const view = $('#dsh-view');
   if (!view) return;
@@ -15794,14 +15807,12 @@ function syncDshViewWithStatus(dsh) {
   dshViewUi.lastOnline = online;
   if (!base || !online) return;
   const current = String(view.getAttribute('src') || '');
-  if (String(current) !== base || (prevBase && prevBase !== base)) {
-    dshViewFailed = false;
-    dshViewError = null;
-    try { view.setAttribute('src', base); } catch { /* ignore */ }
+  if (current !== base || (prevBase && prevBase !== base)) {
+    applyDshViewSrc(false, 'status');
     return;
   }
   // 同址从离线恢复（启动时 webview 已指向旧/失败地址）：强制 reload，不能只等页面自己恢复。
-  if (prevOnline !== true) forceReloadDshView('reconnect');
+  if (prevOnline !== true) applyDshViewSrc(true, 'reconnect');
 }
 
 function renderDsh(dsh) {
@@ -17891,7 +17902,9 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       dshReady = true;
       dshViewFailed = false;
       // 只清「与当前状态同址」的成功加载；迟到的 about:blank/旧地址 finish 不能抹掉新错误。
-      const loadedUrl = String(view.getAttribute('src') || '');
+      // 用 guest 的实际 URL（不是 src 属性）：属性已被改成新地址时，旧页 finish 不能冒充新地址成功。
+      let loadedUrl = '';
+      try { loadedUrl = String(view.getURL() || ''); } catch { loadedUrl = ''; }
       if (loadedUrl && loadedUrl !== 'about:blank' && loadedUrl === String((state && state.dsh && state.dsh.baseUrl) || '')) dshViewError = null;
       if (state) renderDsh(state.dsh);
       if (pendingDshFocus) await flushPendingDshFocus();
