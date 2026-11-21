@@ -24113,7 +24113,7 @@ app.whenReady().then(async () => {
         try {
           const tCli = Date.now();
           const { execFile } = require('node:child_process');
-          execFile(process.execPath, [path.join(ROOT, '团队', '工具', 'team.mjs'), '--version'], { cwd: ROOT, timeout: 8000, windowsHide: true }, (error, stdout, stderr) => {
+          execFile(process.execPath, [path.join(ROOT, '团队', '工具', 'team.mjs'), '--version'], { cwd: ROOT, timeout: 3000, windowsHide: true }, (error, stdout, stderr) => {
             try {
               console.log('[prewarm] cli-warm ms=' + (Date.now() - tCli) + ' ok=' + (!error) + ' out=' + String(stdout || stderr || '').trim().slice(0, 60));
             } catch { /* ignore */ }

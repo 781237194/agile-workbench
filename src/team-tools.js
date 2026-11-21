@@ -853,6 +853,14 @@ function createTeamTools(options = {}) {
     };
   }
 
+  // 冷态诊断（PM 14:48）：把点击路径里的 spawn 次数/毫秒数记下来，供 [accept-profile] 分辨「外部进程」还是「写盘」。
+  const spawnProf = { active: false, calls: 0, ms: 0, events: [] };
+  function beginSpawnProfiling() { spawnProf.active = true; spawnProf.calls = 0; spawnProf.ms = 0; spawnProf.events = []; }
+  function endSpawnProfiling() {
+    spawnProf.active = false;
+    return { calls: spawnProf.calls, ms: spawnProf.ms, events: spawnProf.events.slice(0, 12) };
+  }
+
   function runNode(toolFile, args, runOptions = {}) {
     const timeoutMs = Number(runOptions.timeoutMs) > 0 ? Number(runOptions.timeoutMs) : TIMEOUTS.ensure;
     const startedAt = Date.now();
@@ -880,6 +888,11 @@ function createTeamTools(options = {}) {
             ? (typeof err.code === 'number' ? err.code : (err.code === 'ENOENT' ? -2 : 1))
             : 0;
           const timedOut = Boolean(err && (err.killed || err.signal === 'SIGTERM' || err.code === 'ETIMEDOUT'));
+          if (spawnProf.active) {
+            spawnProf.calls += 1;
+            spawnProf.ms += ms;
+            try { spawnProf.events.push({ tool: path.basename(toolFile), cmd: args.slice(0, 3).join(' '), ms }); } catch { /* ignore */ }
+          }
           const base = {
             tool: path.basename(toolFile),
             args,
@@ -1561,6 +1574,26 @@ function createTeamTools(options = {}) {
     let warning = null;
     if (!fs.existsSync(notifiedTool)) {
       warning = { code: 'OWNER_NOTE_MISSING', message: '旧版 owner-note.mjs 不存在，PM 收件箱没有写入系统消息' };
+    } else if (input.asyncNotify === true) {
+      // PM 14:48：owner-note.mjs 是外部进程（冷态 ≈800ms），不能占验收点击响应；写进邮箱+唤醒放后台。
+      setImmediate(() => {
+        void (async () => {
+          try {
+            const run = await runNode(notifiedTool, [
+              written.name,
+              String(input.status || input.decision || ''),
+              String(input.opinion || ''),
+              String(input.roundKey || '')
+            ], { timeoutMs: TIMEOUTS.send });
+            if (!run.ok || !(run.value && run.value.ok)) {
+              console.warn('[owner-accept] async owner-note failed ' + String((run.value && run.value.error) || run.errorCode || '') + ' ' + String(run.message || '').slice(0, 120));
+            }
+          } catch (error) {
+            try { console.warn('[owner-accept] async owner-note error ' + String((error && error.message) || error).slice(0, 120)); } catch { /* ignore */ }
+          }
+        })();
+      });
+      notified = { queued: true, at: new Date().toISOString() };
     } else {
       const run = await runNode(notifiedTool, [
         written.name,
@@ -10558,7 +10591,8 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
         roundKey: `${ctx.name}|${read.state.round}|${Object.keys(read.state.requirements).length}`,
         by: 'Owner',
         channel: acceptChannel,
-        requirementId: resolvedRequirementId
+        requirementId: resolvedRequirementId,
+        asyncNotify: uiAcceptance
       });
     } catch (error) {
       warning = { code: 'OWNER_NOTE_FAILED', message: String(error && error.message || error).slice(0, 300) };
@@ -11101,6 +11135,8 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     readRequirementDocs,
     readWorkflowState,
     writeWorkflowState,
+    beginSpawnProfiling,
+    endSpawnProfiling,
     prewarmWorkflowCaches,
     readWorkflowSnapshot,
     // B-20261117-093837-02e9：任务扫描（带目录签名缓存）单独暴露，供自检脚本量化命中/失效
