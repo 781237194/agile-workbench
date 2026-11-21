@@ -1079,6 +1079,22 @@ const {
 } = require('./mcp-selfcheck');
 // 自测会把 teamTools 换成一个带 mock 旧协议命令的实例；生产始终保持默认工具。
 let teamTools = require('./team-tools');
+// T-1205（P0）：名册任何清空（含归档/换人/同步）都写一行审计，带调用栈前 3 帧 + before/after。
+// 钩子装在 roster-apply 唯一写入点 applyMemberSession 上，覆盖所有调用方；审计失败绝不阻断主流程。
+try {
+  const rosterApplyForAudit = require(path.join(__dirname, '..', '团队', '工具', 'lib', 'roster-apply.cjs'));
+  if (rosterApplyForAudit && typeof rosterApplyForAudit.setClearAuditHook === 'function') {
+    rosterApplyForAudit.setClearAuditHook((info) => {
+      try {
+        const store = readStoreCached();
+        const active = (store.projects || []).find((p) => p && p.id === store.activeProjectId) || (store.projects || [])[0];
+        const name = active ? String(active.teamName || active.name || '') : '';
+        if (!name || !teamTools || typeof teamTools.appendRosterAudit !== 'function') return;
+        teamTools.appendRosterAudit(name, { event: 'roster_cleared_apply', source: 'roster-apply/applyMemberSession', ...info });
+      } catch { /* 审计失败不阻断 */ }
+    });
+  }
+} catch { /* 钩子注册失败不阻断启动 */ }
 // B-20261119-015113-2443（97db）：名册四态/删除清四处映射/恢复四段审计的纯逻辑单源（壳层与夹具共用）。
 const projectRosterCleanup = require('./project-roster-cleanup.js');
 // R-fefa（T-20261119-185311-66b4）壳层补充：压缩信号 compact.signal + 会话用量（usage tokens 通道）。

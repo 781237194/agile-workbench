@@ -64,6 +64,29 @@ check('三次重启空来源后仍 6/6', () => {
   }
 });
 
+check('空来源 sync 不触发清空审计', () => {
+  const audit = [];
+  core.setClearAuditHook((row) => audit.push(row));
+  const team = makeTeam();
+  core.syncRosterSessions(team, {}, { roleIds: ROLE_IDS, activeProject: '工作台改造修复' });
+  core.setClearAuditHook(null);
+  assert.strictEqual(audit.length, 0);
+  assertNoClear(team, '空来源无审计');
+});
+
+check('显式清空 applyMemberSession 触发审计（含 stack）', () => {
+  const audit = [];
+  core.setClearAuditHook((row) => audit.push(row));
+  const team = makeTeam();
+  core.applyMemberSession(team.members[0], '');
+  core.setClearAuditHook(null);
+  assert.strictEqual(audit.length, 1);
+  assert.strictEqual(audit[0].role, 'pm');
+  assert.match(audit[0].before, /^session-pm-base$/);
+  assert.strictEqual(audit[0].after, '');
+  assert.ok(Array.isArray(audit[0].stack) && audit[0].stack.length >= 1);
+});
+
 const failed = results.filter((r) => !r.pass);
 console.log(`ROSTER_EMPTY_SESSIONS ${results.length - failed.length}/${results.length} PASS`);
 if (failed.length) process.exitCode = 1;

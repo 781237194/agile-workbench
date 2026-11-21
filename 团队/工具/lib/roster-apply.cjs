@@ -42,10 +42,19 @@ function validateSessionId(sessionId) {
   return { ok: true, sessionId: s };
 }
 
+let clearAuditHook = null;
+/** T-1205：壳层注册清空审计钩子（每次把非空 sessionId 清成空时回调，带调用栈）。 */
+function setClearAuditHook(fn) { clearAuditHook = typeof fn === 'function' ? fn : null; }
+
 /** 给一个 member 对象写 sessionId（可带额外字段）。**唯一的 `.sessionId =` 落点**。 */
 function applyMemberSession(member, sessionId, extra = {}) {
   if (!member || typeof member !== 'object') return null;
+  const before = String(member.sessionId || '');
   member.sessionId = String(sessionId === undefined || sessionId === null ? '' : sessionId);
+  const after = String(member.sessionId || '');
+  if (before && !after && clearAuditHook) {
+    try { clearAuditHook({ role: String(member.role || ''), before, after, stack: String(new Error().stack || '').split('\n').slice(1, 4) }); } catch { /* 审计失败不阻断 */ }
+  }
   for (const [k, v] of Object.entries(extra || {})) {
     if (v !== undefined) member[k] = v;
   }
@@ -150,6 +159,7 @@ module.exports = {
   applyMemberSession,
   setMemberSession,
   pushRosterMember,
+  setClearAuditHook,
   syncRosterSessions,
   clearRosterSessions,
 };
