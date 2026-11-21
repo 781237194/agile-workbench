@@ -658,14 +658,55 @@ export function loadTeam() {
   return migrated;
 }
 
-export function saveTeam(team) {
+function teamRosterCounts(team) {
+  const members = Array.isArray(team && team.members) ? team.members : [];
+  const nonEmpty = members.filter((m) => m && String(m.sessionId || '').trim());
+  return { members: members.length, nonEmpty: nonEmpty.length };
+}
+
+function appendTeamWriteAudit(team, row) {
+  try {
+    const active = String((team && team.activeProject) || '');
+    const dir = active ? path.join(PATHS.state, '项目', slug(active)) : path.join(PATHS.state);
+    ensureDir(dir);
+    fs.appendFileSync(path.join(dir, '名册变更.jsonl'), JSON.stringify({ at: nowIso(), by: 'store', ...row }) + '\n', 'utf8');
+  } catch { /* 审计失败不阻断 */ }
+}
+
+/**
+ * T-1205（P0）：团队.json 整文件写唯一入口。
+ * 关键保险：写后非空 sessionId=0 且写前>0 → 拒写并写 roster_cleared_blocked（带 stack）；
+ * 其它写也记 roster_write(source+stack)，用于定位「内存旧快照整文件回写」。
+ */
+export function writeTeamFileAtomic(team, source = 'store/writeTeamFileAtomic', options = {}) {
+  const sourceText = String(source || 'store/writeTeamFileAtomic');
+  let beforeTeam = null;
+  try { beforeTeam = readJson(PATHS.team); } catch { /* 首建/坏文件按 0 处理 */ }
+  const before = teamRosterCounts(beforeTeam);
+  const after = teamRosterCounts(team);
+  const stack = String(new Error().stack || '').split('\n').slice(1, 5);
+  if (before.nonEmpty > 0 && after.nonEmpty === 0 && !options.allowClear) {
+    appendTeamWriteAudit(team || beforeTeam, {
+      event: 'roster_cleared_blocked', source: sourceText, stack,
+      before: beforeTeam, after: team, reason: 'write-after-all-sessions-empty',
+    });
+    fail('ROSTER_CLEAR_BLOCKED', `拒绝整文件写：写前 ${before.nonEmpty} 个非空 sessionId，写后 0 个（source=${sourceText}）`);
+  }
+  appendTeamWriteAudit(team, {
+    event: 'roster_write', source: sourceText, stack,
+    beforeCount: before.nonEmpty, afterCount: after.nonEmpty,
+  });
+  return writeJson(PATHS.team, team);
+}
+
+export function saveTeam(team, options = {}) {
   // 归一值不落盘（见 codeMaxShimmed 注释）：只把 shim 抬过的对象还原成历史值，其它情况原样写。
   let outgoing = team;
   if (team && codeMaxShimmed.has(team)) {
     outgoing = { ...team, config: { ...(team.config || {}) } };
     if (Number(outgoing.config.codeMaxBytes) === codeMaxBytesFor({})) outgoing.config.codeMaxBytes = LEGACY_CODE_MAX_BYTES;
   }
-  return writeJson(PATHS.team, outgoing);
+  return writeTeamFileAtomic(outgoing, options.source || 'store/saveTeam', options);
 }
 
 export function mutateTeam(fn) {
