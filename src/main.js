@@ -13328,13 +13328,9 @@ function evaluateMemAlert(input) {
     advice: '立即回收 / 减少会话',
     source: 'sampler',
   };
-  let bannerSent = false;
-  try {
-    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
-      mainWindow.webContents.send('app:render-crash', banner);
-      bannerSent = true;
-    }
-  } catch { /* 窗口不可达：审计已落盘，界面提示降级 */ }
+  // PM 22:10（Owner 要求）：内存告警**不再弹横幅**，只写审计与日志，避免打扰。
+  const bannerSent = false;
+  try { console.log(`[mem-alert] banner suppressed total=${totalMB}MB threshold=${thresholdMB}MB`); } catch { /* ignore */ }
   console.log(`[mem-alert] 超限告警 kind=${kind} total=${totalMB}MB threshold=${thresholdMB}MB top=${row.top.length} wrote=${wrote.ok} banner=${bannerSent}`);
   return { action: kind, row, banner, bannerSent, wrote: wrote.ok };
 }
@@ -13492,6 +13488,10 @@ function startMemSampler() {
     });
     if (!decision.auto) return;
     memState.lastAutoAt = now;
+    // PM 22:10（Owner：那个自动回收不要弄了，烦死了）：**不再自动重载渲染进程**。
+    // 自动回收会重载 webview，表现就是「字还没打又黑屏」；改为只记日志，用户需要时手动点。
+    console.log(`[mem] auto-recycle disabled（Owner 要求） mb=${mb}MB threshold=${thresholdMB}MB cause=${decision.cause || "阈值"}`);
+    return;
     const detail = [`阈值 ${thresholdMB}MB`];
     if (Number.isFinite(memState.baselineMB)) detail.push(`基线 ${memState.baselineMB}MB`);
     if (Number.isFinite(rateMBPerMin)) detail.push(`近 1 分钟涨 ${rateMBPerMin}MB`);
