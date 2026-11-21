@@ -3033,8 +3033,28 @@ function readStoreCached() {
   readStoreSharedDepth += 1;
   try { return readStore(); } finally { readStoreSharedDepth -= 1; }
 }
+// PM 21:00 临时诊断：AWB_PROFILE_READSTORE=1 时每 10 秒把 readStore 的调用栈 TOP5 落盘，定位「谁在狂调 readStore」。
+const readStoreTally = new Map();
+let readStoreTallyAt = 0;
+function readStoreTallyTick() {
+  if (process.env.AWB_PROFILE_READSTORE !== '1') return;
+  readStoreTally.set = readStoreTally.set.bind(readStoreTally);
+  const now = Date.now();
+  if (!readStoreTallyAt) { readStoreTallyAt = now; return; }
+  if (now - readStoreTallyAt < 10000) return;
+  try {
+    const rows = [...readStoreTally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+    const line = JSON.stringify({ at: new Date().toISOString(), windowMs: now - readStoreTallyAt, top: rows.map(([k, v]) => ({ stack: k, count: v })) });
+    fs.appendFileSync(path.join(path.dirname(storeFile()), 'readstore-profile.jsonl'), line + '\n');
+  } catch { /* ignore */ }
+  readStoreTally.clear();
+  readStoreTallyAt = now;
+}
 function readStore() {
   const file = storeFile();
+  if (process.env.AWB_PROFILE_READSTORE === '1') {
+    try { const st = String(new Error().stack || '').split('\n').slice(2, 5).map((l) => l.trim().split(' (')[0]).join(' < '); readStoreTally.set(st, (readStoreTally.get(st) || 0) + 1); readStoreTallyTick(); } catch { /* ignore */ }
+  }
   const parse = (target) => {
     const parsed = JSON.parse(fs.readFileSync(target, 'utf8').replace(/^\uFEFF/, ''));
     if (!parsed || !Array.isArray(parsed.projects)) throw new Error('状态文件缺少 projects 数组');
@@ -6137,10 +6157,23 @@ ipcMain.handle('theme:metrics', async () => {
   });
 
   // 7a3b 补口（AC1⑥）：强制开启必须重启保持——落盘 workbench.json ui.fxForce（唯一写入口走 writeStore）。
+  // PM 21:20（Owner：打字一卡一卡）：fx-force-get 被渲染层高频调用（30+ 次/秒），
+  // 每次都 readStore() 克隆整个 store，是主进程 CPU 的主要来源之一。改成进程内缓存，set 时失效。
+  const fxForceCache = { at: 0, value: null };
   ipcMain.handle('theme:fx-force-get', () => {
-    try { const store = readStore(); return { ok: true, force: Boolean(store.ui && store.ui.fxForce) }; }
-    catch (error) { return { ok: false, code: 'FX_FORCE_READ_FAILED', message: String((error && error.message) || error).slice(0, 200), force: false }; }
+    const nowMs = Date.now();
+    if (fxForceCache.value !== null && nowMs - fxForceCache.at < 60000) return fxForceCache.value;
+    try {
+      const store = readStore();
+      const value = { ok: true, force: Boolean(store.ui && store.ui.fxForce) };
+      fxForceCache.at = nowMs;
+      fxForceCache.value = value;
+      return value;
+    } catch (error) {
+      return { ok: false, code: 'FX_FORCE_READ_FAILED', message: String((error && error.message) || error).slice(0, 200), force: false };
+    }
   });
+  const invalidateFxForceCache = () => { fxForceCache.at = 0; fxForceCache.value = null; };
   ipcMain.handle('theme:set-fx-force', (_e, raw) => {
     const payload = raw && typeof raw === 'object' ? raw : { force: raw };
     const force = payload.force === true || payload.force === 'true' || payload.force === 1;
@@ -6149,6 +6182,7 @@ ipcMain.handle('theme:metrics', async () => {
       const current = Boolean(store.ui && store.ui.fxForce);
       if (current === force) return { ok: true, changed: false, force };
       const next = { ...store, ui: { ...(store.ui || {}), fxForce: force } };
+      try { invalidateFxForceCache(); } catch { /* ignore */ }
       writeStore(next);
       const js = `(function(){try{var d=document.documentElement;if(${force ? 'true' : 'false'}){d.setAttribute('data-fx-force','1');}else{d.removeAttribute('data-fx-force');}try{if(window.AWB_FX&&typeof window.AWB_FX.sync==='function')window.AWB_FX.sync();}catch(e){}if(typeof window.__awbPaintEffectMenu==='function')try{window.__awbPaintEffectMenu();}catch(e){}}catch(e){}})();`;
       for (const wc of webContents.getAllWebContents()) { try { if (!wc.isDestroyed()) wc.executeJavaScript(js, true).catch(() => {}); } catch { /* 窗口销毁中 */ } }
