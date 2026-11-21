@@ -352,7 +352,7 @@ const REVIEW_ONE = `(async () => {
     return list.find((n) => n && n.getBoundingClientRect().height > 0 && /已通过/.test(n.textContent || '')) || null;
   }, 20000);
   if (!seen) return { ok: false, error: 'notice timeout' };
-  return { ok: true, ms: Math.round(seen.at - t0), notice: String((document.querySelector('[data-or-notice]') || {}).textContent || '').slice(0, 80) };
+  return { ok: true, ms: Math.round(seen.at - t0), notice: String((document.querySelector('[data-or-notice]') || {}).textContent || '').slice(0, 80), ui: window.__reviewUiLast || null };
 })()`;
 const TYPING = `(async () => {
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -415,7 +415,7 @@ const TYPING = `(async () => {
       resetWf();
       await sleep(400);
       const r = await cdp.evaluate(REVIEW_ONE);
-      if (r && r.ok) samples.review.push(r.ms); else errors.push('review: ' + JSON.stringify(r));
+      if (r && r.ok) { samples.review.push(r.ms); samples.reviewUi = samples.reviewUi || []; samples.reviewUi.push(r.ui || null); } else errors.push('review: ' + JSON.stringify(r));
       await pageWaitIdle(cdp); await sleep(1200);
       try { await cdp.evaluate(`(() => { const c = document.querySelector('[data-or-close]'); if (c) c.click(); return true; })()`); } catch { /* ignore */ }
       await sleep(300);

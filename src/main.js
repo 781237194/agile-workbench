@@ -11710,6 +11710,77 @@ ipcMain.handle('theme:metrics', async () => {
       }
       requirementWrite = requirementResult;
     }
+    // PM 172622：评审回退（2.1–3.6s）定位到「需求行写完之后还同步做了项目级 store 写 + 记录决定 + 通知」
+    // （recordOwnerDecision 里还有 1.5MB 工作流写 + owner-note spawn）。改成两段：
+    // 需求行已落账就立即返回让提示可见，其余统一后台（失败只记日志，界面 5s 轮询/事件会自愈）。
+    if (requirementWrite && requirementWrite.ok === true) {
+      const decidedAtIso = new Date().toISOString();
+      const optimisticOwnerReview = {
+        ...(project.ownerReview || {}),
+        status,
+        opinion: String(p.opinion || '').slice(0, 1000),
+        at: decidedAtIso,
+        by: 'Owner',
+        actor: 'owner',
+        channel: decisionChannel,
+        requirementId: decideRequirementId,
+        ...(proxyRow ? { recordedBy: 'pm', proxy: String(proxyRow.scope || ''), authorization: String(proxyRow.authorization || '') } : {}),
+        ...(committee ? { committee } : {}),
+      };
+      const storeForBg = store;
+      const projectForBg = project;
+      const bgRequirementId = decideRequirementId;
+      const bgT0 = Date.now();
+      setImmediate(() => {
+        void (async () => {
+          try {
+            ownerDecide(projectForBg, status, p.opinion, { roundKey });
+            if (bgRequirementId) {
+              projectForBg.ownerReview.requirementId = bgRequirementId;
+              projectForBg.ownerReview.channel = decisionChannel;
+              projectForBg.ownerReview.decidedBy = 'owner';
+              projectForBg.ownerReview.actor = 'owner';
+              if (proxyRow) {
+                projectForBg.ownerReview.recordedBy = 'pm';
+                projectForBg.ownerReview.proxy = String(proxyRow.scope || '');
+                projectForBg.ownerReview.authorization = proxyRow.authorization || '';
+              }
+              if (committee) projectForBg.ownerReview.committee = committee;
+            }
+            writeStore(storeForBg);
+            const currentBg = requireProject(readStore(), projectForBg.id);
+            try {
+              await teamTools.recordOwnerDecision(currentBg, {
+                status, opinion: p.opinion, roundKey, by: 'Owner',
+                channel: decisionChannel, decidedBy: 'owner', requirementId: bgRequirementId,
+                asyncNotify: true,
+                ...(committee ? { committee } : {}),
+                ...(proxyRow ? { recordedBy: 'pm', proxy: String(proxyRow.scope || ''), authorization: String(proxyRow.authorization || '') } : {}),
+              });
+            } catch (error) {
+              try { console.warn('[review-bg] recordOwnerDecision failed ' + String((error && error.message) || error).slice(0, 160)); } catch { /* ignore */ }
+            }
+          } catch (error) {
+            try { console.warn('[review-bg] failed ' + String((error && error.message) || error).slice(0, 160)); } catch { /* ignore */ }
+          } finally {
+            try { console.log('[review-bg] ms=' + (Date.now() - bgT0)); } catch { /* ignore */ }
+          }
+        })();
+      });
+      return {
+        ok: true,
+        projectId: project.id,
+        ownerReview: optimisticOwnerReview,
+        requirement: null,
+        requirementWrite: { ok: true, code: requirementWrite.code, channel: requirementWrite.channel },
+        decided: true,
+        decidedAt: decidedAtIso,
+        notifyFailed: false,
+        ownerDecisionNotify: { ok: true, async: true, queued: true, message: 'PM 通知已后台排队' },
+        roundKey,
+        sideEffectsQueued: true,
+      };
+    }
     // B-82e2：requirementWrite 上面只留了 ok/code/channel，通知结果要单独带出去（见下方 return）。
     ownerDecide(project, status, p.opinion, { roundKey });
     if (p.requirementId) {

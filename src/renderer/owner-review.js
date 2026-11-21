@@ -3395,6 +3395,7 @@
         && String(state.proxy.requirementId || '') === String(state.selected || '')
         && !state.proxy.endedAt
       );
+      const __uiT0 = performance.now();
       const r = await window.workbench.ownerDecide({
         projectId: state.projectId,
         requirementId: state.selected,
@@ -3404,6 +3405,7 @@
         ...(committee ? { committee } : {}),
         ...(proxyActive ? { recordedBy: 'pm' } : {}),
       });
+      const __uiT1 = performance.now();
       if (!r || r.ok === false) throw new Error((r && (r.message || r.code)) || '提交失败');
       // a514：点击→「已通过」可见不得等列表整表重载（loadData 会再拉一遍评审列表，实测 2–3s）。
       // 先出结果提示，再后台刷新列表；刷新失败只记日志，不把已生效的决定显示成失败。
@@ -3414,6 +3416,16 @@
       const notify = notifyFail || notifyOkButWarn;
       const notifySuffix = notify ? '（已生效；附：通知 PM 失败 code=' + String(notify.code || 'OWNER_DECISION_NOTIFY_FAILED') + '）' : '';
       showNotice(`${label}${title ? '：' + title : ''}${notifySuffix}；列表已更新`, notify ? 'warn' : 'ok');
+      // PM 172622 分段：t0 点击提交 → t1 invoke 前 → t2 决定写入返回 → t3 提示可见。
+      try {
+        window.__reviewUiLast = {
+          t0: __uiT0,
+          ipcMs: Math.round(__uiT1 - __uiT0),
+          noticeMs: Math.round(performance.now() - __uiT1),
+          totalMs: Math.round(performance.now() - __uiT0),
+          at: new Date().toISOString(),
+        };
+      } catch { /* ignore */ }
       state.draft = '';
       opinionEl.value = '';
       state.skipOpen = false;

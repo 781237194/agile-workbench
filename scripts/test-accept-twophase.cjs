@@ -136,6 +136,16 @@ function check(name, ok, detail) {
     const decisionSlice = decisionStart >= 0 ? src.slice(decisionStart, decisionEnd) : '';
     check('K1 验收 ui 路径不再二次全量写（skipWorkflowWrite）', /skipWorkflowWrite:\s*uiAcceptance/.test(acceptSlice) && /if \(!uiAcceptance\) \{/.test(acceptSlice), {});
     check('K2 评审索引改后台队列（无同步 refreshProjectIndex）', /scheduleIndexRefresh\(ctx\.name, ctx\.projectPath\)/.test(decisionSlice) && !/await refreshProjectIndex\(ctx\.name, ctx\.projectPath\)/.test(decisionSlice), {});
+    // K3（PM 172622）：评审路径两段式——需求行写完后立即返回，store 写/记录决定/通知/看板在后台；
+    // 且评审不触发验收队列三态/回放（queue 只在 ownerAccept 里）。
+    const mainSrc = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const decideStart = mainSrc.indexOf("ipcMain.handle('owner:decide'");
+    const decideEnd = decideStart >= 0 ? decideStart + 30000 : -1;
+    const decideSlice = decideStart >= 0 ? mainSrc.slice(decideStart, decideEnd) : '';
+    check('K3 评审 envelope 两段式（立即返回 + [review-bg] 后台）', /\[review-bg\]/.test(decideSlice) && /requirementWrite && requirementWrite\.ok === true/.test(decideSlice) && /sideEffectsQueued: true/.test(decideSlice), {});
+    check('K4 评审不触发验收队列（无 applyPendingAcceptances/listAcceptanceRows）', !/applyPendingAcceptances|listAcceptanceRows|backfillAcceptanceArtifacts/.test(decideSlice), {});
+    const renderer = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'owner-review.js'), 'utf8');
+    check('K5 渲染层评审分段 t0/t1/t2 暴露 __reviewUiLast', /__reviewUiLast/.test(renderer) && /ipcMs:/.test(renderer) && /noticeMs:/.test(renderer), {});
   }
 
   try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
