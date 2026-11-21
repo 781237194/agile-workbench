@@ -15,6 +15,13 @@ const OUT = (() => { const i = process.argv.indexOf('--out'); return i > 0 && pr
 fs.mkdirSync(OUT, { recursive: true });
 const SANDBOX_ROOT = process.env.AWB_SANDBOX_ROOT || 'D:/awb-sandbox/tmp';
 fs.mkdirSync(SANDBOX_ROOT, { recursive: true });
+// 740a：启动前过沙盘守卫（超 8GB/20 万文件直接拒绝，不创建新沙盘）。
+try {
+  require(path.join(ROOT, 'scripts', 'sandbox-guard.cjs')).guard({ root: SANDBOX_ROOT });
+} catch (error) {
+  console.error(String((error && error.code) || 'SANDBOX_GUARD_FAILED') + ': ' + String((error && error.message) || error));
+  process.exit(2);
+}
 const SB = fs.mkdtempSync(path.join(SANDBOX_ROOT, 'a514win-'));
 const TEAM = path.join(SB, '团队');
 const PROJ = path.join(SB, '项目', '工作台改造修复');
