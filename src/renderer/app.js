@@ -15906,10 +15906,9 @@ function renderDsh(dsh) {
     // PM 16:05（Owner 拍板，最高优先级）：**连上就直接显示原生 DSH 界面，不做任何遮挡**。
     // 覆盖层只在「DSH 本身没连上（online=false）」时出现；不再依据 bodyLen/probe/did-finish 状态判定，
     // 也不允许因为"探针读到 0"把已经加载出来的原生界面盖住（今天多次因此把好页面挡了）。
-    // 覆盖层：页面已出正文（含开机动画的「正在启动…」）且无失败/错误时隐藏；
-    // 不要只按 online，否则启动探测还没回来时，覆盖层会压在正在播放的开机动画上。
-    const loadedOk = dshReady && !dshViewFailed && !dshViewError && dshGuestBodyLen > 0;
-    const showOff = !loadedOk && (!online || dshViewFailed || Boolean(dshViewError));
+    // Owner 16:05 拍板（最高优先级，覆盖此前 loadedOk 判定）：连上就直接显示原生 DSH 界面。
+    // 覆盖层只在 online=false 时出现；探针/正文判定一律不得遮挡主区。
+    const showOff = !online;
     off.hidden = !showOff;
     const url = $('#dsh-off-url');
     if (url) {
