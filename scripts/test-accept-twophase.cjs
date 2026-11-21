@@ -80,6 +80,64 @@ function check(name, ok, detail) {
   const mainSrc = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   check('F 接线：main.js 预热段调用 applyPendingAcceptances', /applyPendingAcceptances\(projectNow\.teamName/.test(mainSrc), {});
 
+  // G 队列三态：新队列项 state 必须是 pending（不是旧值 queued）
+  const freshQueued = await teamTools.ownerAccept({ ...baseInput(), requirementId: 'R-20261121-1705-e514' });
+  const freshRowFile = path.join(queueDir, freshQueued.queuedId + '.json');
+  const pendingRow = JSON.parse(fs.readFileSync(freshRowFile, 'utf8'));
+  check('G 队列三态：新入队 state=pending', pendingRow.state === 'pending', { state: pendingRow.state });
+  await teamTools.applyPendingAcceptances(PROJECT, PROJ, { retries: 1, applyOverride: async () => ({ ok: true, code: 'OK' }) });
+
+  // H failed 点击原地重试：制造 failed 行 → 再点同一需求 → retrying=true、attempts+1、state 回 pending
+  {
+    const retryReq = 'R-20261121-1703-c514';
+    const queued = await teamTools.ownerAccept({ ...baseInput(), requirementId: retryReq });
+    await teamTools.applyPendingAcceptances(PROJECT, PROJ, { retries: 1, applyOverride: async () => ({ ok: false, code: 'APPLY_BOOM', message: 'boom' }) });
+    const rowFile = fs.readdirSync(queueDir).map((n) => path.join(queueDir, n)).find((p) => {
+      try { return JSON.parse(fs.readFileSync(p, 'utf8')).requirementId === retryReq; } catch { return false; }
+    });
+    const failedRow = rowFile ? JSON.parse(fs.readFileSync(rowFile, 'utf8')) : {};
+    const clicked = await teamTools.ownerAccept({ ...baseInput(), requirementId: retryReq });
+    const afterRow = rowFile ? JSON.parse(fs.readFileSync(rowFile, 'utf8')) : {};
+    const journalText2 = fs.readFileSync(journal, 'utf8');
+    check('H failed 点击原地重试：retrying + attempts+1 + state 回 pending + 审计 acceptance_retry',
+      failedRow.state === 'failed' && clicked.retrying === true && Number(afterRow.attempts) === Number(failedRow.attempts || 0) + 1 && afterRow.state === 'pending' && /acceptance_retry/.test(journalText2),
+      { failedRow: { state: failedRow.state, attempts: failedRow.attempts }, clicked: { retrying: clicked.retrying, code: clicked.code }, afterRow: { state: afterRow.state, attempts: afterRow.attempts } });
+    // 收尾：让队列进入 applied，避免影响后续
+    await teamTools.applyPendingAcceptances(PROJECT, PROJ, { retries: 1, applyOverride: async () => ({ ok: true, code: 'OK' }) });
+  }
+
+  // I W2：回放遇到 ALREADY_ACCEPTED → 补齐工件后 applied + acceptance_backfill 审计
+  {
+    const alreadyReq = 'R-20261121-1704-d514';
+    await teamTools.ownerAccept({ ...baseInput(), requirementId: alreadyReq });
+    const appliedAlready = await teamTools.applyPendingAcceptances(PROJECT, PROJ, { retries: 1, applyOverride: async () => ({ ok: false, code: 'ALREADY_ACCEPTED', message: 'already' }) });
+    const rowFile = fs.readdirSync(queueDir).map((n) => path.join(queueDir, n)).find((p) => {
+      try { return JSON.parse(fs.readFileSync(p, 'utf8')).requirementId === alreadyReq; } catch { return false; }
+    });
+    const row = rowFile ? JSON.parse(fs.readFileSync(rowFile, 'utf8')) : {};
+    const journalText3 = fs.readFileSync(journal, 'utf8');
+    check('I ALREADY_ACCEPTED 回放：标 applied + acceptance_backfill 审计', appliedAlready.ok === true && row.state === 'applied' && /acceptance_backfill/.test(journalText3), { applied: appliedAlready, state: row.state });
+  }
+
+  // J applied 才早退：同需求再点 → ALREADY_ACCEPTED（pending=false）
+  {
+    const clicked = await teamTools.ownerAccept({ ...baseInput(), requirementId: 'R-20261121-1704-d514' });
+    check('J applied 早退：ALREADY_ACCEPTED 且 pending=false', clicked.code === 'ALREADY_ACCEPTED' && clicked.pending === false && clicked.applied === true, { clicked: { code: clicked.code, pending: clicked.pending } });
+  }
+
+  // K W1/W3 静态接线：验收不再二次写/二次读；评审索引改 scheduleIndexRefresh
+  {
+    const src = fs.readFileSync(path.join(ROOT, 'src', 'team-tools.js'), 'utf8');
+    const acceptStart = src.indexOf('async function ownerAcceptCommit');
+    const acceptEnd = src.indexOf('function failure(', acceptStart);
+    const acceptSlice = acceptStart >= 0 ? src.slice(acceptStart, acceptEnd > acceptStart ? acceptEnd : acceptStart + 120000) : '';
+    const decisionStart = src.indexOf('async function ownerRequirementDecision');
+    const decisionEnd = src.indexOf('async function ', decisionStart + 10);
+    const decisionSlice = decisionStart >= 0 ? src.slice(decisionStart, decisionEnd) : '';
+    check('K1 验收 ui 路径不再二次全量写（skipWorkflowWrite）', /skipWorkflowWrite:\s*uiAcceptance/.test(acceptSlice) && /if \(!uiAcceptance\) \{/.test(acceptSlice), {});
+    check('K2 评审索引改后台队列（无同步 refreshProjectIndex）', /scheduleIndexRefresh\(ctx\.name, ctx\.projectPath\)/.test(decisionSlice) && !/await refreshProjectIndex\(ctx\.name, ctx\.projectPath\)/.test(decisionSlice), {});
+  }
+
   try { fs.rmSync(SB, { recursive: true, force: true }); } catch { /* ignore */ }
   const failed = ROWS.filter((r) => !r.ok).length;
   if (JSON_OUT) console.log(JSON.stringify({ total: ROWS.length, passed: ROWS.length - failed, failed: ROWS.filter((r) => !r.ok).map((r) => r.name), rows: ROWS }, null, 2));

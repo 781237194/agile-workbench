@@ -1490,6 +1490,10 @@ function createTeamTools(options = {}) {
       if (!proxyAuthorization) return failure('PROXY_UNAUTHORIZED', '代管落账缺少 Owner 授权来源（authorization）：先取得 Owner 书面授权再落账');
       if (!['once', 'always'].includes(proxyScope)) return failure('PROXY_UNAUTHORIZED', '代管范围必须是 once 或 always');
     }
+    if (input.skipWorkflowWrite === true) {
+      // W1（审计）：调用方（两段式验收）已完成同一次全量写，避免二次 1.5MB 重写。
+      return { ok: true, code: 'OK', name, file, workflow: previous, skippedWrite: true };
+    }
     const basis = input.basis || ownerDecisionBasis(project, String(input.requirementId || input.id || project.id || ''));
     const decisionRecord = {
       status,
@@ -4014,6 +4018,26 @@ function createTeamTools(options = {}) {
     })) return false;
     pushWorkflowEvent(state, event);
     return true;
+  }
+
+  // W3（审计）：索引刷新统一投后台——同项目 1s 内合并一次，点击路径/两段式 commit 都只入队。
+  const indexRefreshTimers = new Map();
+  function scheduleIndexRefresh(projectName, projectPath, delayMs = 15000) {
+    const name = String(projectName || '').trim();
+    if (!name) return { queued: false, message: '缺少项目名' };
+    if (indexRefreshTimers.has(name)) return { queued: true, merged: true };
+    const timer = setTimeout(() => {
+      indexRefreshTimers.delete(name);
+      const started = Date.now();
+      try {
+        Promise.resolve(refreshProjectIndex(name, projectPath)).then((res) => {
+          try { console.log('[index-profile] ' + JSON.stringify({ action: 'scheduled-refresh', ok: Boolean(res && res.ok), ms: Date.now() - started })); } catch { /* ignore */ }
+        }).catch(() => { /* ignore */ });
+      } catch { /* ignore */ }
+    }, Math.max(100, Number(delayMs) || 800));
+    try { if (timer.unref) timer.unref(); } catch { /* ignore */ }
+    indexRefreshTimers.set(name, timer);
+    return { queued: true, merged: false };
   }
 
   function mutateWorkflowState(projectName, mutator) {
@@ -7908,8 +7932,10 @@ function createTeamTools(options = {}) {
         `Owner 决定${decision}${opinion ? '：' + opinion.slice(0, 80) : ''}`
       )
       : null;
-    const projectIndex = await refreshProjectIndex(ctx.name, ctx.projectPath);
-    const indexWarning = projectIndexWarning(projectIndex);
+    // W3（审计）：评审点击路径不再同步扫 1360+ 任务建索引；投后台去抖队列（同项目 1s 内合并），
+    // 索引完成后由既有刷新/广播路径自愈，点击只等落账 + 一次快照（memo）。
+    scheduleIndexRefresh(ctx.name, ctx.projectPath);
+    const indexWarning = { code: 'PROJECT_INDEX_REFRESH_QUEUED', message: '索引在后台刷新（不阻塞本次决定）' };
     const snapshot = readWorkflowSnapshot(ctx.name, ctx.projectPath);
     return {
       ok: true,
@@ -10157,7 +10183,7 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     appendAcceptJournal(name, { event: 'acceptance_queued', id: pending.id, requirementId: pending.requirementId, decision: pending.decision, round: pending.round, channel: pending.channel });
     return { ok: true, file };
   }
-  function listPendingAcceptances(name) {
+  function listAcceptanceRows(name) {
     const dir = acceptQueueDir(name);
     let names = [];
     try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return []; }
@@ -10165,10 +10191,14 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     for (const fileName of names) {
       try {
         const row = JSON.parse(fs.readFileSync(path.join(dir, fileName), 'utf8'));
-        if (row && row.state !== 'applied') rows.push(row);
+        if (row && row.id) rows.push(row);
       } catch { /* ignore */ }
     }
     return rows;
+  }
+  function listPendingAcceptances(name) {
+    // W2（审计）：三态 pending / applied / failed；pending 兼容旧值 queued。
+    return listAcceptanceRows(name).filter((row) => String(row.state || 'pending') !== 'applied');
   }
   function updatePendingAcceptance(name, id, patch) {
     const file = acceptQueueFile(name, id);
@@ -10180,6 +10210,47 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     } catch { return null; }
   }
   function acceptReplayKey(row) { return `${String(row.requirementId || '')}|${String(row.round || '')}|${String(row.decision || '')}`; }
+  /**
+   * W2（审计）：回放遇到 ALREADY_ACCEPTED = 工作流已写、后续工件（状态文档/旧任务收口/PM 通知）可能没做。
+   * 这里把「该补齐的工件」按 best-effort 补齐，再标 applied；所有失败只进审计，不让队列卡死。
+   */
+  async function backfillAcceptanceArtifacts(pending) {
+    const name = String(pending.projectName || '').trim();
+    const warnings = [];
+    if (!name) return { ok: false, warnings };
+    const projectPath = String(pending.projectPath || (registrationFor(name) || {}).path || '');
+    const ctx = { name, projectPath };
+    const requirementId = String(pending.requirementId || '');
+    const requirementKey = String(pending.requirementKey || requirementId);
+    // 1) 需求正文/状态记录/总览同步（幂等，按同一状态去重）
+    try {
+      const st = readWorkflowState(name);
+      const row = st && st.ok && st.state && st.state.requirements ? st.state.requirements[requirementId] : null;
+      const legacyKey = String((row && (row.legacyId || row.taskId)) || requirementKey);
+      const docStatus = pending.decision === 'rejected' ? 'rejected' : 'accepted';
+      if (typeof syncRequirementStatusArtifacts === 'function') {
+        const sync = syncRequirementStatusArtifacts(ctx, legacyKey, docStatus, String(pending.opinion || ''));
+        if (sync && Array.isArray(sync.warnings)) warnings.push(...sync.warnings.slice(0, 3));
+      }
+    } catch (error) { warnings.push('status:' + String((error && error.message) || error).slice(0, 120)); }
+    // 2) 旧任务收口（best-effort；任务已 done 时 CLI 会返回 ALREADY_DONE）
+    try {
+      const closed = await runLegacyCommand(name, 'pm', 'task done', (token) => [
+        'task', 'done', '--boot', token, '--id', requirementKey, '--evidence', 'Owner 验收后台补齐（回放）'
+      ], { sessionId: String(pending.sessionId || '') });
+      if (!closed.ok && !/TASK_ALREADY|ALREADY_DONE/i.test(String(closed.code || ''))) warnings.push('task:' + String(closed.code || 'FAILED'));
+    } catch (error) { warnings.push('task:' + String((error && error.message) || error).slice(0, 120)); }
+    // 3) PM 通知（owner-note，失败只记警告）
+    try {
+      const noteTool = path.join(layout.toolRoot, 'owner-note.mjs');
+      if (fs.existsSync(noteTool)) {
+        const noted = await runNode(noteTool, [name, pending.decision === 'rejected' ? 'rejected' : 'approved', `[验收${pending.decision}] ${String(pending.opinion || '').slice(0, 1000)}`, '']);
+        if (!noted.ok) warnings.push('note:' + String(noted.errorCode || 'FAILED'));
+      }
+    } catch (error) { warnings.push('note:' + String((error && error.message) || error).slice(0, 120)); }
+    appendAcceptJournal(name, { event: 'acceptance_backfill', id: pending.id, warnings });
+    return { ok: true, warnings };
+  }
   /**
    * 应用待办验收（启动时回放 / 点击后后台执行共用）。
    * @param {object} opts { retries=3, applyOverride?(pending)=>Promise<{ok:boolean,code?:string}> }
@@ -10214,9 +10285,15 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
         try {
           const res = await apply(pending);
           if (res && res.ok) { applied = res; break; }
+          // W2（审计）：工作流已写但工件可能没做 → 补齐工件后按 applied 处理，不能让队列永远卡 failed。
+          if (res && /ALREADY_ACCEPTED/i.test(String(res.code || ''))) {
+            try { await backfillAcceptanceArtifacts(pending); } catch { /* 补齐失败只记审计 */ }
+            applied = res;
+            break;
+          }
           lastError = String((res && (res.code || res.message)) || 'APPLY_FAILED').slice(0, 200);
-          // 已落账（重复决定/已应用）也视为成功，避免重试把已完成的验收当失败。
-          if (res && /DUPLICATE_DECISION|ALREADY_/i.test(String(res.code || ''))) { applied = res; break; }
+          // 已落账（重复决定）也视为成功，避免重试把已完成的验收当失败。
+          if (res && /DUPLICATE_DECISION/i.test(String(res.code || ''))) { applied = res; break; }
         } catch (error) {
           lastError = String((error && error.message) || error).slice(0, 200);
         }
@@ -10243,14 +10320,35 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
     const requirementId = String(input.requirementId || '').trim();
     const decision = String(input.decision || input.status || '').trim();
     if (!name || !requirementId) return ownerAcceptCommit(input);
-    // 同一需求+同一轮+同一决定已排队/已应用 → 直接返回排队结果（幂等，连点不重复验收）。
     const roundNow = (() => {
       try { const st = readWorkflowState(name); return (st && st.ok && st.state && Number(st.state.round)) || 1; } catch { return 1; }
     })();
-    const existing = listPendingAcceptances(name).find((row) => String(row.requirementId) === requirementId
+    // W4（审计）：三态幂等——pending（同步中）→ failed（原地重试 attempt+1）→ applied（才早退）。
+    const existing = listAcceptanceRows(name).find((row) => String(row.requirementId) === requirementId
       && String(row.decision) === decision
       && Number(row.round) === Number(roundNow));
     if (existing) {
+      const state = String(existing.state || 'pending');
+      const projectPathExisting = String(input.project && input.project.path || (registrationFor(name) || {}).path || '');
+      if (state === 'applied') {
+        return {
+          ok: true, code: 'ALREADY_ACCEPTED', pending: false, applied: true, queuedId: existing.id,
+          decided: true, decidedAt: existing.appliedAt || existing.at || null,
+          requirement: null, message: '已验收（已同步完成）', channel: 'ui', driver: 'shell-queue',
+        };
+      }
+      if (state === 'failed') {
+        const attempts = Number(existing.attempts || 0) + 1;
+        updatePendingAcceptance(name, existing.id, { state: 'pending', attempts, lastRetryAt: new Date().toISOString() });
+        appendAcceptJournal(name, { event: 'acceptance_retry', id: existing.id, attempts, key: acceptReplayKey(existing) });
+        setImmediate(() => {
+          void applyPendingAcceptances(name, projectPathExisting, { retries: 3 }).catch(() => { /* ignore */ });
+        });
+        return {
+          ok: true, code: 'OWNER_ACCEPT_QUEUED', pending: true, retrying: true, queuedId: existing.id,
+          decided: true, message: '已验收（后台同步中，正在重试第 ' + attempts + ' 次）', requirement: null, channel: 'ui', driver: 'shell-queue',
+        };
+      }
       return { ok: true, code: 'OWNER_ACCEPT_QUEUED', pending: true, queuedId: existing.id, decided: true, message: '已验收（后台同步中，重复提交已合并）', requirement: null };
     }
     const id = 'ACQ-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
@@ -10258,6 +10356,7 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
       id,
       at: new Date().toISOString(),
       projectName: name,
+      projectPath: String(input.project && input.project.path || (registrationFor(name) || {}).path || ''),
       requirementId,
       decision,
       round: roundNow,
@@ -10269,7 +10368,7 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
       ownerConfirmed: input.ownerConfirmed === true,
       expectedStatus: String(input.expectedStatus || ''),
       expectedUpdatedAt: String(input.expectedUpdatedAt || ''),
-      state: 'queued',
+      state: 'pending',
       attempts: 0,
     };
     try {
@@ -10759,35 +10858,32 @@ async function applyOwnerDecisionToRequirementInner(input = {}) {
         by: 'Owner',
         channel: acceptChannel,
         requirementId: resolvedRequirementId,
-        asyncNotify: uiAcceptance
+        asyncNotify: uiAcceptance,
+        // W1（审计）：UI 两段式已完成工作流全量写，这里不再让 writeOwnerWorkflow 二次全量写；
+        // 决定历史以 验收决定.jsonl + 工作流 events 为准（PM 通知仍异步发）。
+        skipWorkflowWrite: uiAcceptance === true
       });
     } catch (error) {
       warning = { code: 'OWNER_NOTE_FAILED', message: String(error && error.message || error).slice(0, 300) };
     }
-    // a514：验收里的索引刷新（扫 1360+ 任务，1–2.5s）移后台，点击响应只等落账 + 一次快照。
-    const __idxT0 = Date.now();
-    setImmediate(() => {
-      void (async () => {
-        try {
-          await refreshProjectIndex(ctx.name, ctx.projectPath);
-          try { console.log('[index-profile] ' + JSON.stringify({ action: 'owner-accept', indexMs: Date.now() - __idxT0, ok: true })); } catch { /* ignore */ }
-        } catch (error) {
-          try { console.log('[index-profile] ' + JSON.stringify({ action: 'owner-accept', indexMs: Date.now() - __idxT0, ok: false })); } catch { /* ignore */ }
-        }
-      })();
-    });
+    // W13（审计）：索引刷新统一走去抖队列（同项目 1s 内合并），不再每次验收各扫一遍。
+    scheduleIndexRefresh(ctx.name, ctx.projectPath);
     const projectIndex = null;
     const indexWarning = { code: 'PROJECT_INDEX_REFRESH_QUEUED', message: '索引在后台刷新（不阻塞本次落账）' };
-    let snapshot = readWorkflowSnapshot(ctx.name, ctx.projectPath);
-    if (snapshot.ok) {
-      // a514：写盘返回值 already 是最新 state，不再 readWorkflowState 重读一遍（PM 指出的第二段同步读）。
-      const fresh = { ok: Boolean(written && written.state), state: (written && written.state) || {} };
-      if (fresh.ok && fresh.state.ownerReview && fresh.state.ownerReview.kind !== (decision === 'accepted' ? 'acceptance' : decision === 'iterate' ? 'iterate' : 'terminate')) {
-        const kind = decision === 'accepted' ? 'acceptance' : decision === 'iterate' ? 'iterate' : 'terminate';
-        const merged = mutateWorkflowState(ctx.name, (state) => {
-          state.ownerReview = { ...(state.ownerReview || {}), kind };
-        });
-        if (merged.ok) snapshot = readWorkflowSnapshot(ctx.name, ctx.projectPath);
+    // W1+W8（审计）：UI 两段式只做一次写 + 一次快照；写盘返回值已是最新 state，
+    // kind 在首个 mutator 内已写对，不再二次 mutate/二次 readWorkflowSnapshot。
+    let snapshot = { ok: false };
+    if (!uiAcceptance) {
+      snapshot = readWorkflowSnapshot(ctx.name, ctx.projectPath);
+      if (snapshot.ok) {
+        const fresh = { ok: Boolean(written && written.state), state: (written && written.state) || {} };
+        if (fresh.ok && fresh.state.ownerReview && fresh.state.ownerReview.kind !== (decision === 'accepted' ? 'acceptance' : decision === 'iterate' ? 'iterate' : 'terminate')) {
+          const kind = decision === 'accepted' ? 'acceptance' : decision === 'iterate' ? 'iterate' : 'terminate';
+          const merged = mutateWorkflowState(ctx.name, (state) => {
+            state.ownerReview = { ...(state.ownerReview || {}), kind };
+          });
+          if (merged.ok) snapshot = readWorkflowSnapshot(ctx.name, ctx.projectPath);
+        }
       }
     }
     return {

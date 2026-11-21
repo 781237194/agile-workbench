@@ -354,25 +354,28 @@ const TYPING = `(async () => {
     await cdp.evaluate(`new Promise((r) => { const t0 = Date.now(); const tick = () => { if (window.workbench && document.querySelector('#app')) return r(true); if (Date.now() - t0 > 30000) return r(false); setTimeout(tick, 200); }; tick(); })`);
     const lazy = await cdp.evaluate(`new Promise((r) => { const t0 = Date.now(); const tick = () => { if (window.__awbLazyLoaded) return r(true); if (Date.now() - t0 > 20000) return r(false); setTimeout(tick, 200); }; tick(); })`);
     log('lazyLoaded', lazy);
-    // PM 14:37：冷态样本＝新实例 lazyLoaded 后立刻点验收，不做弹窗预热、不 sleep 2s。
-    resetWf();
-    await sleep(150);
-    const cold = await cdp.evaluate(ACCEPT_ONE);
-    const coldAccept = cold && cold.ok ? cold.ms : null;
-    if (coldAccept === null) errors.push('coldAccept: ' + JSON.stringify(cold));
-    log('cold accept', JSON.stringify({ ms: coldAccept, cold }));
-    await pageWaitIdle(cdp);
-    // 预热两个弹窗（冷数据不计入样本）
-    await cdp.evaluate(`(async () => { const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-      try { window.__awbOpenAcceptList && window.__awbOpenAcceptList(); } catch {}
-      await wait(900);
-      try { const c = document.querySelector('[data-accept-list-close], #accept-list .close'); if (c) c.click(); } catch {}
-      try { const e = document.querySelector('#owner-review-entry'); if (e) e.click(); } catch {}
-      await wait(900);
-      try { const c = document.querySelector('[data-or-close]'); if (c) c.click(); } catch {}
-      return true; })()`);
-    await pageWaitIdle(cdp); await sleep(1200);
-    for (let i = 0; i < 1; i += 1) {
+    const ONLY_REVIEW = process.env.A514_ONLY_REVIEW === '1';
+    let coldAccept = null;
+    let cold = null;
+    if (!ONLY_REVIEW) {
+      // PM 14:37：冷态样本＝新实例 lazyLoaded 后立刻点验收（不预热弹窗、不 sleep 2s）。
+      resetWf();
+      await sleep(150);
+      cold = await cdp.evaluate(ACCEPT_ONE);
+      coldAccept = cold && cold.ok ? cold.ms : null;
+      if (coldAccept === null) errors.push('coldAccept: ' + JSON.stringify(cold));
+      log('cold accept', JSON.stringify({ ms: coldAccept, cold }));
+      await pageWaitIdle(cdp);
+      // 预热两个弹窗（冷数据不计入样本）
+      await cdp.evaluate(`(async () => { const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        try { window.__awbOpenAcceptList && window.__awbOpenAcceptList(); } catch {}
+        await wait(900);
+        try { const c = document.querySelector('[data-accept-list-close], #accept-list .close'); if (c) c.click(); } catch {}
+        try { const e = document.querySelector('#owner-review-entry'); if (e) e.click(); } catch {}
+        await wait(900);
+        try { const c = document.querySelector('[data-or-close]'); if (c) c.click(); } catch {}
+        return true; })()`);
+      await pageWaitIdle(cdp); await sleep(1200);
       resetWf();
       await sleep(400);
       const r = await cdp.evaluate(ACCEPT_ONE);
@@ -388,8 +391,11 @@ const TYPING = `(async () => {
       try { await cdp.evaluate(`(() => { const c = document.querySelector('[data-or-close]'); if (c) c.click(); return true; })()`); } catch { /* ignore */ }
       await sleep(300);
     }
-    await pageWaitIdle(cdp); await sleep(5000);
-    const typing = await cdp.evaluate(TYPING);
+    let typing = null;
+    if (!ONLY_REVIEW) {
+      await pageWaitIdle(cdp); await sleep(5000);
+      typing = await cdp.evaluate(TYPING);
+    }
     const profiles = inst.getStdout().split(/\r?\n/).filter((l) => /\[accept-profile\]|\[review-profile\]|\[side-effects-profile\]|\[board-profile\]|\[workflow-prewarm\]/.test(l)).slice(-60);
     const report = { at: new Date().toISOString(), coldAccept, coldNotice: cold && cold.notice ? String(cold.notice) : '', samples, errors, typing, profiles };
     fs.writeFileSync(path.join(OUT, 'window-report.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
