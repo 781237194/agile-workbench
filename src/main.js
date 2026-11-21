@@ -22012,6 +22012,8 @@ function scheduleCrashRecovery(row, info) {
   }
   if (decision.action === 'reload-webview') {
     crashRecoverTimes.push(nowMs);
+    // PM 19:12：崩溃后重载必须先重装 cookie，否则重载出来是 401 空白 → 状态栏「已连接」但主区全黑。
+    try { installDshCookie().catch(() => {}); } catch { /* ignore */ }
     try {
       const wc = (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) ? mainWindow.webContents : null;
       if (wc) {
@@ -22416,6 +22418,8 @@ function reloadDshGuest() {
 async function reloadDshWebview(baseUrl) {
   const target = String(baseUrl || '');
   if (!target) return { ok: false, code: 'DSH_URL_REQUIRED', message: '没有可加载的 DSH 地址' };
+  // PM 19:12（Owner：卡→自重启→黑屏）：任何重载前先重装 cookie，别让调用方各记一遍。
+  try { await installDshCookie(); } catch { /* 失败也继续，页面会走 401 自愈 */ }
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       const handled = await mainWindow.webContents.executeJavaScript(`(() => {
@@ -22423,7 +22427,8 @@ async function reloadDshWebview(baseUrl) {
         if (!view) return false;
         const target = ${JSON.stringify(target)};
         if (view.getAttribute('src') === target) {
-          // 已经在目标地址（或正在加载）时不要 reload；否则会中止当前导航并产生 ERR_ABORTED。
+          // PM 19:12：同地址时**必须真的 reload**（旧实现直接 return，导致「重载 WebView」空转、黑屏救不回来）。
+          try { view.reload(); } catch { /* ignore */ }
           return true;
         }
         view.setAttribute('src', target);

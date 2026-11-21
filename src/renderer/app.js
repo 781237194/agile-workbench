@@ -15759,6 +15759,11 @@ let dshViewError = null;
 let dshGuestBodyLen = 0;
 let dshBodyProbeSeq = 0;
 const dshCookieRetry = { at: 0, url: '', count: 0 };
+// PM 19:15 热修（Owner：卡到打不了字，随后自重启黑屏）：重载必须有**全局硬闸**。
+// 401 页正文很短时会被误判成「页面已出」→ 预算被反复重置 → reload 风暴 → CPU 打满。
+const dshReloadCap = { at: 0, count: 0 };
+const DSH_RELOAD_CAP_MAX = 6;
+const DSH_RELOAD_CAP_WINDOW_MS = 10 * 60 * 1000;
 const DSH_COOKIE_RETRY_MAX = 3;
 // PM 13:45：导航在途禁止自动重载；同一 baseUrl 的自动重试全局只允许 1 次，之后只能用户手动点。
 const dshViewLoad = { starts: 0, stops: 0, loading: false, loadingSince: 0, autoReloads: {} };
@@ -15794,6 +15799,11 @@ async function retryDshCookieOnce(reason = 'blank') {
   // PM 15:45 热修：冷启动首次加载常还没装好 cookie（401/空白），cookie 重试不能被
   // 「同 base 只自动重载 1 次」的闸挡死；改用独立预算（每 base 最多 3 次、间隔 ≥8s）。
   if (dshCookieRetry.url !== base) dshCookieRetry.count = 0;
+  if (Date.now() - dshReloadCap.at > DSH_RELOAD_CAP_WINDOW_MS) { dshReloadCap.at = Date.now(); dshReloadCap.count = 0; }
+  if (dshReloadCap.count >= DSH_RELOAD_CAP_MAX) {
+    try { console.log('[dsh-view] reload-cap reached count=' + dshReloadCap.count); } catch { /* ignore */ }
+    return false;
+  }
   if ((dshCookieRetry.count || 0) >= DSH_COOKIE_RETRY_MAX) {
     try { console.log('[dsh-view] cookie-retry exhausted count=' + dshCookieRetry.count); } catch { /* ignore */ }
     return false;
@@ -15801,6 +15811,7 @@ async function retryDshCookieOnce(reason = 'blank') {
   dshCookieRetry.url = base;
   dshCookieRetry.at = Date.now();
   dshCookieRetry.count = (dshCookieRetry.count || 0) + 1;
+  dshReloadCap.count += 1;
   try {
     const result = await api.reinstallDshCookie();
     try { console.log('[dsh-view] cookie-retry reason=' + reason + ' ok=' + Boolean(result && result.ok)); } catch { /* ignore */ }
@@ -18195,11 +18206,14 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
           dshGuestBodyLen = bodyLen;
           dshViewError = null;
           sawBody = true;
-          // A-04/A-05：成功加载后重置自动重载与 cookie 重试预算，下一次 DSH 重启仍能自愈。
-          dshViewLoad.autoReloads = {};
-          dshCookieRetry.at = 0;
-          dshCookieRetry.url = '';
-          dshCookieRetry.count = 0;
+          // PM 19:15：只有**真实界面**（正文 >1000 字）才重置预算；401/错误页正文很短，
+          // 旧实现把短正文也当成功 → 预算反复重置 → 无限重载。
+          if (bodyLen > 1000) {
+            dshViewLoad.autoReloads = {};
+            dshCookieRetry.at = 0;
+            dshCookieRetry.url = '';
+            dshCookieRetry.count = 0;
+          }
           if (state) renderDsh(state.dsh);
           return;
         }
