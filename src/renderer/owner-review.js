@@ -2290,6 +2290,9 @@
       }
       try {
         const r = await window.workbench.ownerAccept({
+          // PM 15:52：必须带 channel='ui' —— 后端据此走「壳层收口」而不是 spawn 一次
+          // `node team.mjs owner`（冷态那次 spawn 就是验收 2861ms 的主体）。
+          channel: 'ui',
           projectId: state.projectId,
           requirementId: String(row.id),
           decision: rejecting ? 'rejected' : 'accepted',
