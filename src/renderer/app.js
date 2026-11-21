@@ -15753,6 +15753,10 @@ function openOwnerModal() {
 // B-f749：webview 与状态同源。记录最后一次同步的地址/在线态 + 最近一次加载失败（URL/错误码）。
 const dshViewUi = { lastBaseUrl: '', lastOnline: null };
 let dshViewError = null;
+// PM 13:41 热修（f749 残留）：记录 webview 真实显示的正文长度。
+// 只有「页面真的加载出内容」才允许隐藏「DSH 引擎没有连上」覆盖层；
+// 否则 401/空白页会被误判成成功，变成黑屏且无任何提示。
+let dshGuestBodyLen = 0;
 const dshCookieRetry = { at: 0, url: '' };
 
 /** DSH 重启后 browser-session secret 可能变化 → 401/空白。重新安装 cookie 并只重试一次。 */
@@ -15853,7 +15857,10 @@ function renderDsh(dsh) {
   if (off) {
     // B-f749：加载失败后即使迟到的 did-finish-load 把 failed 清掉，错误也必须保留到用户重试/地址成功切换，
     // 否则会出现「状态已连接、主区黑屏且无任何错误提示」。
-    const showOff = !online || dshViewFailed || Boolean(dshViewError);
+    // PM 13:41：覆盖层显隐与「页面是否真有内容」绑定——webview 已出正文（body>0）且无失败/错误时一律隐藏，
+    // 不再依赖 probe 回来的 online（探测滞后会让「页面已出+覆盖层压着」两态并存）。
+    const loadedOk = dshReady && !dshViewFailed && !dshViewError && dshGuestBodyLen > 0;
+    const showOff = !loadedOk && (!online || dshViewFailed || Boolean(dshViewError));
     off.hidden = !showOff;
     const url = $('#dsh-off-url');
     if (url) {
@@ -16162,6 +16169,7 @@ async function reloadDshView(opts = {}) {
   if (!view) return false;
   dshViewFailed = false;
   dshReady = false;
+  dshGuestBodyLen = 0;
   const api = window.workbench;
   let result = null;
   // B-f749（PM 04:47）：必须走主进程 app:reload-dsh（重新发现→cookie→reload→广播），
@@ -17938,6 +17946,9 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       setTimeout(async () => {
         try {
           const text = String(await view.executeJavaScript('document.body ? String(document.body.innerText || "").slice(0, 400) : ""') || '');
+          // PM 13:41：把真实正文长度记下来，供覆盖层显隐判定（body=0 不隐藏，避免 401/空白被当成功）。
+          dshGuestBodyLen = text.trim().length;
+          if (state) renderDsh(state.dsh);
           if (!text.trim() || /authentication required|unauthorized|\b401\b/i.test(text)) void retryDshCookieOnce('blank-401');
         } catch { /* ignore */ }
       }, 700);
@@ -17952,6 +17963,7 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
       if (e.isMainFrame === false) return;
       dshReady = false;
       dshViewFailed = true;
+      dshGuestBodyLen = 0;
       dshViewError = {
         url: String(e.validatedURL || view.getAttribute('src') || (state?.dsh?.baseUrl) || ''),
         code: e.errorCode,

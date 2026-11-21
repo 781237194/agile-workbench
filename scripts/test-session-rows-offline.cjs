@@ -44,7 +44,7 @@ function countMissing(html) { return (String(html).match(/DSH 会话未创建/g)
 const rosterOne = [{ role: 'pm', name: '项目经理', state: 'missing' }];
 const entries1 = ROWS.buildRosterEntries({ rosterRows: rosterOne, localRoles: LOCAL_ROLES, sessions: { pm: 'session-abc123456' }, allEntries: [] });
 const box1 = renderInto(fakeDom(), entries1);
-check('F1', '缓存缺失（memberStatesCache=null）+ 名册仅 1 行 → 容器 6 行', entries1.length === 6 && countRows(box1.innerHTML) === 6, { entries: entries1.length, rows: countRows(box1.innerHTML) });
+check('F1', 'memberStatesCache=1 行（rosterRows=1）+ 角色 6 → 容器 6 行，rosterRows 只作 stateRow', entries1.length === 6 && countRows(box1.innerHTML) === 6 && entries1.filter((entry) => entry.stateRow).length === 1, { entries: entries1.length, rows: countRows(box1.innerHTML), stateRows: entries1.filter((entry) => entry.stateRow).length });
 check('F2', '6 行都含角色名（项目经理…测试人员）', countNames(box1.innerHTML) === 6, { names: countNames(box1.innerHTML) });
 const subs1 = entries1.map((entry) => ROWS.rowModel(entry).sub);
 check('F3', '未建会话的 5 行显示「DSH 会话未创建」，已映射行显示短 id', subs1.filter((s) => s === 'DSH 会话未创建').length === 5 && subs1.filter((s) => /abc123456/.test(s)).length === 1, { subs: subs1 });
