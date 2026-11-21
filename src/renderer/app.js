@@ -15857,10 +15857,12 @@ function renderDsh(dsh) {
   if (off) {
     // B-f749：加载失败后即使迟到的 did-finish-load 把 failed 清掉，错误也必须保留到用户重试/地址成功切换，
     // 否则会出现「状态已连接、主区黑屏且无任何错误提示」。
-    // PM 13:41：覆盖层显隐与「页面是否真有内容」绑定——webview 已出正文（body>0）且无失败/错误时一律隐藏，
-    // 不再依赖 probe 回来的 online（探测滞后会让「页面已出+覆盖层压着」两态并存）。
-    const loadedOk = dshReady && !dshViewFailed && !dshViewError && dshGuestBodyLen > 0;
-    const showOff = !loadedOk && (!online || dshViewFailed || Boolean(dshViewError));
+    // PM 13:41 热修（A 复核）：覆盖层显隐与「页面是否真有内容」绑定——body>0 且无失败才隐藏；
+    // 纯判定抽在 dsh-overlay.js，Node/假 DOM 可测（body=0 必须显示、body>0 必须隐藏）。
+    const overlay = (window.AWBDshOverlay && typeof window.AWBDshOverlay.overlayState === 'function')
+      ? window.AWBDshOverlay.overlayState({ online, failed: dshViewFailed, hasError: Boolean(dshViewError), ready: dshReady, bodyLen: dshGuestBodyLen })
+      : { showOff: !(dshReady && !dshViewFailed && !dshViewError && dshGuestBodyLen > 0) && (!online || dshViewFailed || Boolean(dshViewError)) };
+    const showOff = overlay.showOff;
     off.hidden = !showOff;
     const url = $('#dsh-off-url');
     if (url) {
