@@ -113,7 +113,7 @@ for (let i = 0; i < 8; i += 1) fs.writeFileSync(path.join(projectRoot, 'doc-' + 
 fs.writeFileSync(path.join(projectRoot, '需求', 'R-1.md'), '需求');
 fs.writeFileSync(path.join(projectRoot, 'src', 'renderer', 'app.js'), 'js');
 for (let i = 0; i < 80; i += 1) fs.writeFileSync(path.join(projectRoot, 'src', 'renderer', 'part-' + i + '.js'), 'y'.repeat(200));
-fs.writeFileSync(path.join(projectRoot, '.git', 'config'), 'secret');
+fs.writeFileSync(path.join(projectRoot, '.git', 'config'), 'gitconfig');
 fs.writeFileSync(path.join(projectRoot, 'node_modules', 'x', 'index.js'), 'nm');
 
 const top = Paging.buildFilesPage({ root: projectRoot, dir: '', limit: 500 });
