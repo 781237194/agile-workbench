@@ -18009,9 +18009,16 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
           }
           const bodyLen = Number(probe.bodyLen) || 0;
           const text = String(probe.body || '');
+          // PM 16:03（Owner）：**开机动画期间绝不做 cookie 重试/重载**。
+          // DSH 的 splash 是 canvas 动画、正文可能为 0；旧顺序先判 body=0 再判 boot，
+          // 会在动画播放中触发重载 → Owner 看到的就是"开机动画没了/被打断"。
+          if (probe.boot) {
+            blankStreak = 0;
+            await new Promise((resolve) => setTimeout(resolve, 700));
+            continue;
+          }
           if (!bodyLen) {
-            // PM 16:00 热修（Owner 重启又空白）：body=0 时**必须触发 cookie 重装重试**。
-            // 旧实现 `continue` 直接跳过 → 冷启动 401/空白永远自愈不了，只能手点「重载 WebView」。
+            // body=0 且**不在**开机动画中 → 视为加载异常，触发 cookie 重装重试自愈。
             blankStreak += 1;
             if (blankStreak >= 3) {
               blankStreak = 0;
@@ -18020,12 +18027,6 @@ $('#btn-dsh-pin')?.addEventListener('click', async () => {
             continue;
           }
           blankStreak = 0;
-          if (probe.boot) {
-            // PM 15:48（Owner）：**不要自动跳过开机动画**——Owner 要保留 DSH 自己的启动动画，
-            // 让它自然播完进主界面即可。这里只等待，不做任何点击/跳过动作。
-            await new Promise((resolve) => setTimeout(resolve, 700));
-            continue;
-          }
           if (/authentication required|unauthorized|\b401\b/i.test(text)) {
             void retryDshCookieOnce('blank-401');
             continue;
