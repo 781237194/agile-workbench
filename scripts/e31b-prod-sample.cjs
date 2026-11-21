@@ -30,11 +30,24 @@ class Cdp {
   fs.writeFileSync(path.join(OUT, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
   await cdp.eval('(() => { window.__e31bProd = { count: 0, max: 0, over50: 0, over100: 0, items: [] }; try { window.__e31bProdObs && window.__e31bProdObs.disconnect(); } catch {} window.__e31bProdObs = new PerformanceObserver((list) => { for (const e of list.getEntries()) { const ms = Math.round(e.duration); const o = window.__e31bProd; o.count += 1; o.max = Math.max(o.max, ms); if (ms > 50) o.over50 += 1; if (ms > 100) { o.over100 += 1; o.items.push(ms); } } }); window.__e31bProdObs.observe({ entryTypes: [String.fromCharCode(108,111,110,103,116,97,115,107)] }); return true; })()');
   const lines = [];
+  // 增量落盘：即使进程被外部终止，也保留已采样本与进度（audit 用）。
+  const flush = (final) => {
+    try {
+      fs.writeFileSync(path.join(OUT, 'heap.jsonl'), lines.join('\n') + '\n');
+      const last = lines.length ? JSON.parse(lines[lines.length - 1]).usedJSHeapSize : -1;
+      const simple = { at: meta.at, port: PORT, target: meta.target, minutes: MINUTES, samples: lines.length, heapFirst: lines.length ? JSON.parse(lines[0]).usedJSHeapSize : -1, heapLast: last, partial: !final };
+      fs.writeFileSync(path.join(OUT, 'progress.json'), JSON.stringify(simple, null, 2) + '\n');
+    } catch { /* ignore */ }
+  };
+  const onSignal = () => { flush(false); process.exit(3); };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
   const deadline = Date.now() + MINUTES * 60000;
   while (Date.now() < deadline) {
     let heap = -1;
     try { heap = await cdp.eval('performance.memory ? performance.memory.usedJSHeapSize : -1'); } catch { /* ignore */ }
     lines.push(JSON.stringify({ at: new Date().toISOString(), tMs: Date.now() - t0, usedJSHeapSize: heap, targetId: page.id, title: page.title }));
+    flush(false);
     await sleep(30000);
   }
   let gcHeap = -1;
