@@ -13151,18 +13151,23 @@ app.on('web-contents-created', (_e, wc) => {
     if (!wc || typeof wc.getType !== 'function') return;
     // R-2a69：F1 新手引导。焦点常常在 DSH webview 里，宿主页面的 keydown 收不到，
     // 所以在主进程对所有渲染进程（含 webview guest）统一接管 F1，转发给壳层渲染进程。
-    wc.on('before-input-event', (event, input) => {
-      try {
-        if (!input || input.type !== 'keyDown') return;
-        if (String(input.key || '') !== 'F1') return;
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          event.preventDefault();
-          mainWindow.webContents.send('guide:open');
-        }
-      } catch { /* 单个进程失败不影响其它 */ }
-    });
+    // PM 22:05（Owner：长按退格不生效、按一下卡一下）：**绝不给 webview guest 挂 before-input-event**。
+    // 挂了以后每一次按键都要先过主进程再回渲染进程，主进程一忙，退格/长按就直接卡死。
+    if (wc.getType() !== 'webview') {
+      wc.on('before-input-event', (event, input) => {
+        try {
+          if (!input || input.type !== 'keyDown') return;
+          if (String(input.key || '') !== 'F1') return;
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            event.preventDefault();
+            mainWindow.webContents.send('guide:open');
+          }
+        } catch { /* 单个进程失败不影响其它 */ }
+      });
+    }
     if (wc.getType() !== 'webview') return;
     wc.on('did-finish-load', () => {
+      // PM 22:05：聊天区恒 1.0，不再读 store（避免每次加载都读盘）；其它 webview 才取偏好。
       try { wc.setZoomFactor(isDshChatWebview(wc) ? DSH_VIEW_ZOOM : readZoomPref()); } catch { /* ignore */ }
       // T-5d98 三时机之一：DSH webview 每次加载完成后重新对齐 PM 身份绑定。
       schedulePmIdentityReconcile('webview_load');
