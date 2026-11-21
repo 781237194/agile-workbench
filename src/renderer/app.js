@@ -62,6 +62,8 @@ document.addEventListener('click', (ev) => {
 const r4Gate = (fn) => (R4GateApi && typeof R4GateApi.gate === 'function' ? R4GateApi.gate(fn) : fn);
 const r4Coalesce = (fn, ms, key) => (R4GateApi && typeof R4GateApi.coalesce === 'function' ? R4GateApi.coalesce(fn, ms, key) : fn);
 
+// R-e31b §5.2：消息默认 50 条 + 可加载更多（messages:page 分页，历史不常驻）。
+const msgUi = { extra: [], limit: 30, loading: false, projectId: null };
 // R-e31b §5.3：文件面板按目录懒加载——只存当前已加载层的条目（不整树常驻）。
 const fileUi = {
   projectId: null,
@@ -4675,6 +4677,8 @@ function renderTeam() {
   const verified = verifiedCount(p);
   const total = teamRoleCount(p);
   const messages = Array.isArray(p.messages) ? p.messages : [];
+  // R-e31b：app:state 只下发最近 50 条（messagesTotal 为真值），计数不能再拿数组长度冒充总数。
+  const messagesTotal = Number(p.messagesTotal) > messages.length ? Number(p.messagesTotal) : messages.length;
   const pending = messages.find((m) => m.id === p.pendingAck) || null;
   const unacked = messages.filter((m) => !m.ack && m.ackRequired !== false).length;
   const manual = messages.filter((m) => m.manualAck && !m.ack).length;
@@ -4687,9 +4691,9 @@ function renderTeam() {
       + `${manual ? ` · ${manual} 条人工确认（非角色回执）` : ''}`
       + `${mutual ? ` · 角色互发 ${mutual} 条` : ''}`
       + `${toPm ? ` · 发给 PM ${toPm} 条` : ''}`
-      + ` · ${messages.length} 条消息`;
+      + ` · ${messagesTotal} 条消息${messagesTotal > messages.length ? `（显示最近 ${messages.length} 条）` : ''}`;
   }
-  if (msgSummary) msgSummary.textContent = messages.length ? `${messages.length} 条` : '暂无消息';
+  if (msgSummary) msgSummary.textContent = messagesTotal ? `${messagesTotal} 条` : '暂无消息';
   renderTeamLog(p);
   renderDispatch(p);
   startAckTicker(p);
@@ -5636,7 +5640,10 @@ function renderLogFilter() {
 function renderTeamLog(p) {
   const box = $('#team-log');
   if (!box || !p) return;
-  const allMessages = Array.isArray(p?.messages) ? p.messages : [];
+  if (msgUi.projectId !== p.id) { msgUi.projectId = p.id; msgUi.extra = []; msgUi.limit = 30; }
+  const allMessages = msgUi.extra.length
+    ? msgUi.extra.concat(Array.isArray(p?.messages) ? p.messages : [])
+    : (Array.isArray(p?.messages) ? p.messages.slice() : []);
   const visible = new Set(teamRoleIds(p));
   const all = isQuickTeam(p)
     ? allMessages.filter((m) => visible.has(String(m.from || '')) && visible.has(String(m.to || '')))
@@ -5655,7 +5662,7 @@ function renderTeamLog(p) {
   }
   const remain = ackRemainMs(p);
   const ackBlocked = Boolean(p.pendingAck);
-  box.innerHTML = messages.slice(0, 30).map((m) => {
+  box.innerHTML = messages.slice(0, msgUi.limit).map((m) => {
     const pending = m.id === p.pendingAck;
     const from = roleById(m.from);
     const to = roleById(m.to);
@@ -5711,6 +5718,33 @@ function renderTeamLog(p) {
   });
   box.querySelectorAll('[data-msg-cancel]').forEach((b) => b.addEventListener('click', () => cancelPending(p, b.dataset.msgCancel)));
   box.querySelectorAll('[data-msg-inbox]').forEach((b) => b.addEventListener('click', () => openInboxFor(b.dataset.msgInboxRole, b.dataset.msgInbox)));
+  // R-e31b §5.2：还有更多（显示数 < 已取到的或 < total）时给「加载更多」，按 messages:page 取下一页，历史不进常驻内存。
+  const totalAll = Number(p.messagesTotal) > 0 ? Number(p.messagesTotal) : (p.messages || []).length;
+  const loaded = (Array.isArray(p.messages) ? p.messages.length : 0) + msgUi.extra.length;
+  if (messages.length > msgUi.limit || loaded < totalAll) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'ghost small';
+    more.setAttribute('data-msg-more', '1');
+    more.textContent = msgUi.loading ? '加载中…' : '加载更多（已显示 ' + Math.min(messages.length, msgUi.limit) + ' / 共 ' + totalAll + '）';
+    more.disabled = Boolean(msgUi.loading);
+    more.addEventListener('click', async () => {
+      if (msgUi.loading) return;
+      msgUi.loading = true;
+      try {
+        const r = await window.workbench.messagesPage({ projectId: p.id, limit: 50, offset: loaded });
+        if (r && r.ok && Array.isArray(r.items)) msgUi.extra = msgUi.extra.concat(r.items);
+        msgUi.limit += 30;
+      } catch (e) {
+        toast('加载更多失败：' + humanError(e.message), 'bad');
+      } finally {
+        msgUi.loading = false;
+        renderTeamLog(activeProject());
+      }
+    });
+    box.appendChild(more);
+  }
+}
 }
 
 function startAckTicker(project) {
