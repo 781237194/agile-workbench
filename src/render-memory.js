@@ -123,6 +123,44 @@ function appendSample(projectPath, row, options = {}) {
   return { file: cached.path, created, bytes: cached.bytes, lineBytes };
 }
 
+/** 主进程批量落盘：同一刷新窗口的多行一次 append（T-18bf：renderMemory 5s 采样缓冲）。 */
+function appendSamples(projectPath, rows, options = {}) {
+  const dir = String(projectPath || '');
+  if (!dir) throw new Error('PROJECT_PATH_REQUIRED');
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return { file: '', created: false, bytes: 0, lines: 0 };
+  const dateKey = String(options.dateKey || dateKeyOf(options.at || (list[0] && list[0].at)));
+  const lines = list.map((row) => JSON.stringify(normalizeSampleLine(row)) + '\n');
+  const text = lines.join('');
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes > SHARD_MAX_BYTES) {
+    // 极端情况下单批超一片：退回逐行（仍由本函数一次调用，避免调用方每次 tick 都写盘）。
+    let last = null;
+    for (const row of list) last = appendSample(dir, row, { dateKey });
+    return { file: last ? last.file : '', created: Boolean(last && last.created), bytes: last ? last.bytes : 0, lines: list.length };
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  const cacheKey = `${dir}|${dateKey}`;
+  let cached = shardCache.get(cacheKey);
+  if (!cached) {
+    const shards = listShards(dir).filter((item) => item.dateKey === dateKey);
+    const last = shards.length ? shards[shards.length - 1] : null;
+    cached = { path: last ? last.path : '', index: last ? last.index : 0, bytes: last ? fileBytes(last.path) : 0 };
+    shardCache.set(cacheKey, cached);
+  }
+  let created = false;
+  if (!cached.path || cached.bytes + bytes > SHARD_MAX_BYTES) {
+    const nextIndex = cached.index ? cached.index + 1 : 1;
+    const name = shardNameOf(dateKey, nextIndex);
+    cached = { path: path.join(dir, name), index: nextIndex, bytes: fileBytes(path.join(dir, name)) };
+    shardCache.set(cacheKey, cached);
+    created = true;
+  }
+  fs.appendFileSync(cached.path, text, 'utf8');
+  cached.bytes += bytes;
+  return { file: cached.path, created, bytes: cached.bytes, lineBytes: bytes, lines: list.length };
+}
+
 /** 测试/清理用：清空分片缓存（外部删了分片后要清，否则会写回旧路径）。 */
 function resetShardCache() {
   shardCache.clear();
@@ -408,6 +446,7 @@ const api = {
   listShards,
   normalizeSampleLine,
   appendSample,
+  appendSamples,
   resetShardCache,
   readShardRows,
   readRenderMemoryWindow,

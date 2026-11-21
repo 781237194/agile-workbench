@@ -168,6 +168,8 @@ const hotIpcStats = { hits: 0, misses: 0 };
 // 供 mem:cache-stats 输出“谁在打 sendReply”的通道命中表；不改变任何 handler 语义。
 const ipcChannelStats = new Map();
 const hotIpcInflight = new Map();
+// T-18bf：任务目录 watcher 的事件/批次数（PM 要求 500ms 去抖 + 同 tick 合并）。
+const watchBatchStats = { taskEvents: 0, taskBatches: 0, taskUpdates: 0 };
 function ipcChannelStatOf(channel) {
   let row = ipcChannelStats.get(channel);
   if (!row) { row = { channel, calls: 0, hits: 0, misses: 0, inflightHits: 0, totalMs: 0, maxMs: 0, lastAt: '' }; ipcChannelStats.set(channel, row); }
@@ -3198,6 +3200,19 @@ function readStoreCached() {
   readStoreSharedDepth += 1;
   try { return readStore(); } finally { readStoreSharedDepth -= 1; }
 }
+// T-18bf：两个 5s ensure watcher 共用同一份 active project（5s 内只读一次盘）。
+const watchActiveProjectCache = { at: 0, value: null };
+function activeProjectForWatch() {
+  const nowMs = Date.now();
+  if (watchActiveProjectCache.value && nowMs - watchActiveProjectCache.at < 5000) return watchActiveProjectCache.value;
+  try {
+    const store = readStoreCached();
+    const active = (store.projects || []).find((p) => p && p.id === store.activeProjectId) || null;
+    watchActiveProjectCache.value = active;
+    watchActiveProjectCache.at = nowMs;
+    return active;
+  } catch { return null; }
+}
 // PM 21:00 临时诊断：AWB_PROFILE_READSTORE=1 时每 10 秒把 readStore 的调用栈 TOP5 落盘，定位「谁在狂调 readStore」。
 const readStoreTally = new Map();
 let readStoreTallyAt = 0;
@@ -3479,6 +3494,7 @@ function writeStore(store) {
   try { hotIpcCacheClear(); } catch { /* 清缓存失败不阻断写盘 */ }
   try { projectFlowCache.clear(); } catch { /* 项目快照缓存未初始化/已清 */ }
   try { workflowContextCache.clear(); } catch { /* 工作流上下文缓存未初始化/已清 */ }
+  try { watchActiveProjectCache.at = 0; watchActiveProjectCache.value = null; } catch { /* ignore */ }
   try { dirScanCache.clear(); } catch { /* 目录扫描缓存清理失败不阻断写盘 */ }
   if (storeFatal) throw new Error('状态文件损坏且没有可用备份，已阻止写入；请先处理 workbench.json.corrupt-*');
   const file = storeFile();
@@ -8055,6 +8071,18 @@ ipcMain.handle('theme:metrics', async () => {
   let sqTaskWatchDir = '';
   let sqTaskWatch = null;
   let sqTaskWatchTimer = null;
+  const sqTaskWatchPending = new Set();
+  const flushTaskWatchBatch = () => {
+    const files = Array.from(sqTaskWatchPending);
+    sqTaskWatchPending.clear();
+    sqTaskWatchTimer = null;
+    if (!files.length) return;
+    watchBatchStats.taskBatches += 1;
+    for (const changed of files) {
+      try { updateTaskIndexFile(sqTaskWatchDir, changed); watchBatchStats.taskUpdates += 1; } catch { sqTaskIdx.dirty = true; }
+    }
+    notifySessionQueueChanged('task-watch');
+  };
   const ensureSessionQueueTaskWatch = (dir) => {
     if (sqPushDisabled || !dir) return;
     if (sqTaskWatch && sqTaskWatchDir === dir) return;
@@ -8063,10 +8091,10 @@ ipcMain.handle('theme:metrics', async () => {
       fs.mkdirSync(dir, { recursive: true });
       sqTaskWatch = fs.watch(dir, (_event, filename) => {
         const changed = String(filename || '');
-        // 先做单文件增量（只读这一个 json），再按同一事件通知渲染层
-        try { if (changed) updateTaskIndexFile(dir, changed); } catch { /* 增量失败标脏等重建 */ sqTaskIdx.dirty = true; }
-        clearTimeout(sqTaskWatchTimer);
-        sqTaskWatchTimer = setTimeout(() => notifySessionQueueChanged('task-watch'), 300);
+        if (changed) sqTaskWatchPending.add(changed); else sqTaskIdx.dirty = true;
+        watchBatchStats.taskEvents += 1;
+        // 500ms 固定窗口合并：同一批内多次写只更新/通知一次；连续事件不会因重置定时器而饿死。
+        if (!sqTaskWatchTimer) sqTaskWatchTimer = setTimeout(flushTaskWatchBatch, 500);
       });
       sqTaskWatch.on('error', () => { try { sqTaskWatch.close(); } catch { /* ignore */ } sqTaskWatch = null; sqTaskWatchDir = ''; });
       sqTaskWatchDir = dir;
@@ -8182,8 +8210,7 @@ ipcMain.handle('theme:metrics', async () => {
   const decisionBoxFileOf = (name) => path.join(teamTools._paths().projectsDir, teamTools.teamSlug(name), '决策箱.json');
   const decisionBoxFileActive = () => {
     try {
-      const store = readStore();
-      const active = store.projects.find((p) => p.id === store.activeProjectId) || null;
+      const active = activeProjectForWatch();
       const name = String((active && (active.teamName || active.name)) || '');
       return name ? decisionBoxFileOf(name) : '';
     } catch { return ''; }
@@ -10291,7 +10318,7 @@ ipcMain.handle('theme:metrics', async () => {
     }
   };
   const ensureProxyWatch = () => {
-    const active = readStore().projects.find((p) => p.id === readStore().activeProjectId) || null;
+    const active = activeProjectForWatch();
     const file = active ? ownerProxyFile(active) : '';
     const dir = file ? path.dirname(file) : '';
     if (!dir) return;
@@ -13926,6 +13953,16 @@ ipcMain.handle('mem:cache-stats', () => {
     boardHtmlCacheBytes: teamBoardHtmlCache ? Number(teamBoardHtmlCache.bytes || (teamBoardHtmlCache.html ? Buffer.byteLength(teamBoardHtmlCache.html, 'utf8') : 0)) : 0,
     boardHtmlBootstrapCached: Boolean(teamBoardHtmlCache),
     teamSpawn: { ...teamSpawnStats },
+    watchBatch: { ...watchBatchStats },
+    renderSampler: {
+      intervalMs: renderMemoryState.intervalMs,
+      pendingFlushEvery: renderMemoryState.pendingFlushEvery,
+      pending: Array.isArray(renderMemoryState.pendingSamples) ? renderMemoryState.pendingSamples.length : 0,
+      flushedRows: renderMemoryState.flushedRows || 0,
+      lastFlushMs: renderMemoryState.lastFlushMs || 0,
+      writeMsTotal: Math.round((renderMemoryState.writeMsTotal || 0) * 10) / 10,
+      writeMsMax: Math.round((renderMemoryState.writeMsMax || 0) * 10) / 10,
+    },
   };
 });
 // 手动「立即回收」：不经过阈值/速率/冷却判定（任务③），只受“正在回收”锁约束。
@@ -22627,7 +22664,8 @@ function installCrashSensors() {
  */
 function renderMemoryProjectDir() {
   try {
-    const store = readStore();
+    // T-18bf：采样器只读热路径，零 structuredClone；5s 内命中 store 的文件 mtime 缓存。
+    const store = readStoreCached();
     const project = (store.projects || []).find((item) => item && item.id === store.activeProjectId);
     // 缺陷 B-20261115-171218-3fb8（P1）：优先尊重隔离根，否则测量实例会与真实实例共写同一分片
     // B-9300 初核 a：本函数**故意独立解析 env**（只隔离「渲染采样目录」，不改团队状态/工作流/任务路径）；
@@ -22645,7 +22683,13 @@ function renderMemoryProjectDir() {
 
 const renderMemoryState = {
   timer: null,
-  intervalMs: 1000,
+  // T-18bf：1s tick 本身是主线程/磁盘大头（readStore + 每秒 append）；PM 批准降为 5s，
+  // 采样行先在内存缓冲，每 5 拍（25s）批量落盘一次。
+  intervalMs: 5000,
+  pendingSamples: [],
+  pendingFlushEvery: 5,
+  flushedRows: 0,
+  lastFlushMs: 0,
   degraded: false,
   samples: 0,
   writeMsTotal: 0,
@@ -22692,6 +22736,28 @@ function writeRenderSample(cause) {
   }
 }
 
+/** T-18bf：把内存缓冲的采样行批量落盘；返回 {ok, lines, file, ms}，失败 fail-open。 */
+function flushRenderMemorySamples(reason) {
+  const rows = Array.isArray(renderMemoryState.pendingSamples) ? renderMemoryState.pendingSamples.splice(0) : [];
+  if (!rows.length) return { ok: true, lines: 0, ms: 0 };
+  const started = process.hrtime.bigint();
+  try {
+    const dir = renderMemoryProjectDir();
+    if (!dir) { renderMemoryState.pendingSamples = rows.concat(renderMemoryState.pendingSamples || []); return { ok: false, code: 'STATE_DIR_UNAVAILABLE', lines: 0, ms: 0 }; }
+    const res = RenderMemory.appendSamples(dir, rows, { at: rows[rows.length - 1] && rows[rows.length - 1].at });
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    renderMemoryState.flushedRows += rows.length;
+    renderMemoryState.lastFlushMs = ms;
+    renderMemoryState.lastFlushAt = now();
+    return { ok: true, lines: rows.length, file: res && res.file, ms: Math.round(ms * 10) / 10, reason: String(reason || '') };
+  } catch (error) {
+    // 落盘失败保留行（有上限），下一轮再试；不阻断采样。
+    renderMemoryState.pendingSamples = rows.concat(renderMemoryState.pendingSamples || []).slice(-20);
+    renderMemoryState.lastError = String((error && error.message) || error).slice(0, 160);
+    return { ok: false, code: 'SAMPLE_WRITE_FAILED', message: renderMemoryState.lastError, lines: 0, ms: 0 };
+  }
+}
+
 function startRenderMemorySampler() {
   // 硬要求①：单例守卫 + samplerId/chainId 观测（PM M-20261115-161228-23177f / 163358-9f0ec6）
   if (renderMemoryState.timer) { renderMemoryState.duplicateStarts = (renderMemoryState.duplicateStarts || 0) + 1; return { started: false, reason: 'ALREADY_RUNNING' }; }
@@ -22705,10 +22771,9 @@ function startRenderMemorySampler() {
   renderMemoryState.reconcile = reconcile;
   const bootAtMs = Date.now();
   stopRenderMemorySampler();
-  // PM 裁决（M-20261115-153633-f0ea6d，方案2）：**1s 行保住 AC3 的 ≥300 行**，但 getAppMetrics 单次约 13ms，
-  // 所以底层 metrics 每 5 拍真取一次（≈5s），中间 4 拍复用上一值并标 sampledFrom（真实采样时刻）。
-  // 判据：斜率只用真采样点（sampledFrom 缺省或等于 at），R1/R2/R3 用全行。
-  const REAL_SAMPLE_EVERY = 5;
+  // PM 裁决（M-20261115-153633-f0ea6d，方案2）：1s 行改 5s 后，每拍都真取 metrics（原 5 拍 ≈25s 太久）；
+  // 5s 一次 app.getAppMetrics（13ms）开销可接受，换来行值准确。
+  const REAL_SAMPLE_EVERY = 1;
   let tickIndex = 0;
   let lastReal = null; // { at, workingSetMB, pid }
   let pidSignature = '';
@@ -22771,17 +22836,16 @@ function startRenderMemorySampler() {
       }
     }
     try {
-      const dir = renderMemoryProjectDir();
-      if (dir) {
-        RenderMemory.appendSample(dir, row);
-        reconcile.lines += 1;
-        // B-2dd3：记录本行写入时刻（近 5 分钟行数 → 崩溃归因 samplerLinesLast5Min）
-        if (!Array.isArray(renderMemoryState.lineAtMs)) renderMemoryState.lineAtMs = [];
-        const lineMs = Date.parse(at);
-        if (Number.isFinite(lineMs)) {
-          renderMemoryState.lineAtMs.push(lineMs);
-          if (renderMemoryState.lineAtMs.length > 1500) renderMemoryState.lineAtMs = renderMemoryState.lineAtMs.slice(-1500);
-        }
+      renderMemoryState.pendingSamples.push(row);
+      if (!Array.isArray(renderMemoryState.lineAtMs)) renderMemoryState.lineAtMs = [];
+      const lineMs = Date.parse(at);
+      if (Number.isFinite(lineMs)) {
+        renderMemoryState.lineAtMs.push(lineMs);
+        if (renderMemoryState.lineAtMs.length > 1500) renderMemoryState.lineAtMs = renderMemoryState.lineAtMs.slice(-1500);
+      }
+      if (renderMemoryState.pendingSamples.length >= renderMemoryState.pendingFlushEvery) {
+        const flushed = flushRenderMemorySamples('interval');
+        reconcile.lines += flushed.lines || 0;
       }
     } catch (error) { renderMemoryState.lastError = String((error && error.message) || error).slice(0, 160); }
     // B-2dd3：阈值告警评估——复用本拍已采到的 total（不新增采样/定时器），采样行先落盘再评估。
@@ -22845,6 +22909,7 @@ function startRenderMemorySampler() {
 function stopRenderMemorySampler() {
   if (renderMemoryState.timer) { try { clearTimeout(renderMemoryState.timer); } catch { /* ignore */ } }
   renderMemoryState.timer = null;
+  try { if (Array.isArray(renderMemoryState.pendingSamples) && renderMemoryState.pendingSamples.length) flushRenderMemorySamples('stop'); } catch { /* fail-open */ }
   // 60s 自检 interval 也要停掉，否则 stop→start 会残留空转的 interval（假观测 + 泄漏）
   if (renderMemoryState.selfCheckTimer) { try { clearInterval(renderMemoryState.selfCheckTimer); } catch { /* ignore */ } }
   renderMemoryState.selfCheckTimer = null;

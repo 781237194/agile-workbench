@@ -96,7 +96,7 @@ process.on('exit', cleanup);
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.AWB_START_HIDDEN;
   const electron = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
-  child = spawn(electron, [ROOT, `--remote-debugging-port=${PORT}`], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(electron, [ROOT, `--remote-debugging-port=${PORT}`, `--user-data-dir=${path.join(SANDBOX, 'userdata')}`], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   child.stdout.on('data', (d) => { stdout += String(d); });
   child.stderr.on('data', (d) => { stdout += String(d); });
@@ -127,7 +127,8 @@ process.on('exit', cleanup);
         cpuSamples.push({ at: new Date().toISOString(), cpuPercent: r && r.cpuPercent, rssMB: r && r.rssMB });
       }
     }
-    const result = { ok: Boolean(after && after.workflowState && after.workflowState.hits > after.workflowState.misses) && (!cpuSamples.length || cpuSamples.every((s) => Number(s.cpuPercent) <= 30)), calls, elapsedMs, before, after, cpuSamples };
+    const finalStats = await shell.eval('window.workbench.cacheStats()').catch(() => null);
+    const result = { ok: Boolean(after && after.workflowState && after.workflowState.hits > after.workflowState.misses) && (!cpuSamples.length || cpuSamples.every((s) => Number(s.cpuPercent) <= 30)), calls, elapsedMs, before, after, cpuSamples, finalStats };
     fs.writeFileSync(path.join(OUT, 'workflow-cache.json'), JSON.stringify(result, null, 2));
     console.log(`workflow:state ×${calls}，${elapsedMs}ms，hits=${after && after.workflowState.hits} misses=${after && after.workflowState.misses} recent=${after && after.workflowState.recentHits}`);
     if (cpuSamples.length) console.log('CPU 60s：' + cpuSamples.map((s) => String(s.cpuPercent)).join(' / '));
