@@ -574,6 +574,12 @@
   function preparePoolRows(wf) {
     const requirements = wf && Array.isArray(wf.requirements) ? wf.requirements : [];
     const tasks = wf && Array.isArray(wf.tasks) ? wf.tasks : [];
+    // T-d365：e31b 后 workflowState 的 tasks 是摘要（tasksSummary=true），里面仍从旧任务目录
+    // 带出上千条历史 bug；缺陷池应显示“当前未闭环缺陷”，不能把 done/accepted/cancelled/terminated
+    // 的历史行也倒进右侧列表（Owner 口径 2026-11-22 19:2x：账本 5 条未闭环）。
+    // 全量 workflow（无 tasksSummary，夹具/调试）保持原“全部 bug 任务进池”的既有口径。
+    const summaryMode = Boolean(wf && wf.tasksSummary === true);
+    const closedTaskStatus = new Set(['done', 'accepted', 'cancelled', 'terminated']);
     const rows = [];
     const seen = new Set();
     // R-4657：撤回窗口可由主进程 workflowState.autoAccept.retractHours 覆盖（默认 24h）。
@@ -590,6 +596,7 @@
     for (const item of tasks) {
       const type = String((item && item.type) || '').toLowerCase();
       if (type !== 'bug' && type !== 'scenario-bug') continue;
+      if (summaryMode && closedTaskStatus.has(String((item && item.status) || '').toLowerCase())) continue;
       const id = textOf(item && item.id);
       if (!id || seen.has(id)) continue;
       seen.add(id);

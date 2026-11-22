@@ -165,7 +165,7 @@ function extractFunctionBody(source, signature) {
   return null;
 }
 const rowMarkupBody = extractFunctionBody(coreSrc, 'function poolRowMarkup(row)') || '';
-const fetchBody = extractFunctionBody(appSrc, 'async function poolFetchRows()') || '';
+const fetchBody = extractFunctionBody(appSrc, 'async function poolFetchRows(') || '';
 const renderBody = extractFunctionBody(appSrc, 'function renderPool()') || '';
 
 /* ══════════════════════════════════════════════════════════════════════

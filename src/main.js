@@ -2801,6 +2801,7 @@ function summarizeTaskRowForUi(task) {
     priority: String(t.priority || ''),
     updatedAt: String(t.updatedAt || t.claimedAt || t.createdAt || ''),
     role: String(t.role || ''),
+    type: String(t.type || ''),
     requirementId: String(t.requirementId || ''),
   };
 }

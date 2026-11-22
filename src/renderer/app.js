@@ -13520,6 +13520,10 @@ function renderPool() {
   const signature = POOL_CORE.poolRowsSignature(rows);
   const reqList = $('#pool-req-list');
   const defList = $('#pool-def-list');
+  // T-d365：打开池子时注入的骨架不是池行；R4GateApi.reconcileReplaceMarkup 只删 data-reconcile-key 节点，
+  // 不会删骨架。数据回来（含空数据）必须先清骨架，否则判断/差量永远看到「加载中…」子节点。
+  if (reqList) r5ClearSkeleton(reqList);
+  if (defList) r5ClearSkeleton(defList);
   renderPoolGhostBar(rows);
   renderBugRetractBar(rows);
   // 重建条件：数据集合变了、容器缺了、或两列都还没渲染过（空数据首次打开也要出空态文案）。
@@ -13530,11 +13534,14 @@ function renderPool() {
     const def = rows.filter((row) => row.kind !== 'requirement');
     if (reqList) renderPoolReqList();
     if (defList) {
+      // T-d365：空缺陷池要显式写空态；差量入口对空数组只删 keyed 节点，不会写空态。
+      if (!def.length) {
+        defList.innerHTML = '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
       // R5（T-20261118-182736-ac7f）：缺陷列表改用行级差量（同 key 复用节点，不整块 innerHTML 重建）。
-      if (R4GateApi && typeof R4GateApi.reconcileReplaceMarkup === 'function') {
+      } else if (R4GateApi && typeof R4GateApi.reconcileReplaceMarkup === 'function') {
         R4GateApi.reconcileReplaceMarkup(defList, def, { keyOf: (row) => String(row.id || ''), markup: poolRowMarkup });
       } else {
-        defList.innerHTML = def.length ? def.map(poolRowMarkup).join('') : '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
+        defList.innerHTML = def.map(poolRowMarkup).join('');
       }
     }
     poolUi.signature = signature;
@@ -13543,6 +13550,14 @@ function renderPool() {
       if (rows.some((row) => row.id === poolUi.detailId)) openPoolDetail(poolUi.detailId);
       else closePoolDetail(false);
     }
+  }
+  // T-d365：同签名再次打开时只清了骨架、needsRebuild=false；空列补空态，避免留下空白/残留骨架。
+  if (defList && !defList.querySelector('.pool-row') && !defList.querySelector('.pool-empty')) {
+    defList.innerHTML = '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
+  }
+  if (reqList && !reqList.querySelector('.pool-row') && !reqList.querySelector('.pool-empty')
+    && !reqList.querySelector('.pool-virtual-gap')) {
+    poolApplyReqVisible([]);
   }
   renderPoolChips();
   applyPoolFilters();
