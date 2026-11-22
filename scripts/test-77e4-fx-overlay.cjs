@@ -69,6 +69,16 @@ check('f9dc R2：blur→focus resume 不得重建壳内 loop', () => {
   assert.match(fx, /function loop\(ts\)[\s\S]{0,180}if \(overlayOwnsShell\(\)\) \{ stopLoop\(\); return; \}/);
   assert.match(fx, /function resume\(\)[\s\S]{0,500}if \(overlayOwnsShell\(\)\) \{[\s\S]{0,500}stopLoop\(\);[\s\S]{0,240}else \{[\s\S]{0,80}startLoop\(\);/);
 });
+check('T-810d 探针仅在 AWB_FX_OVERLAY_TEST=1 暴露', () => {
+  const preload = read('src/preload.js');
+  const fx = read('src/renderer/fx-layer.js');
+  const main = read('src/main.js');
+  assert.match(preload, /AWB_FX_OVERLAY_TEST/);
+  assert.match(preload, /FX_OVERLAY_TEST \? \{ fxOverlayProbe/);
+  assert.match(fx, /W\.workbench\.fxOverlayProbe/);
+  assert.match(main, /fx:overlay-window-control/);
+  assert.match(main, /TEST_ONLY/);
+});
 check('层级证据取数口已暴露', () => {
   const fx = read('src/renderer/fx-layer.js');
   assert.match(fx, /function layerEvidence\(/);

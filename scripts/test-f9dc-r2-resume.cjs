@@ -53,7 +53,7 @@ const realBefore = { team: sha(REAL_TEAM_JSON), workbench: sha(REAL_WORKBENCH) }
 (async () => {
   fs.mkdirSync(OUT, { recursive: true });
   seed();
-  const env = { ...process.env, AWB_DATA_DIR: DATA, TEAM_ROOT: TEAM, TEAM_SELFTEST: '1', AWB_SHOW_INACTIVE: '1', DSH_WEB_URL: 'http://127.0.0.1:1' };
+  const env = { ...process.env, AWB_DATA_DIR: DATA, TEAM_ROOT: TEAM, TEAM_SELFTEST: '1', AWB_FX_OVERLAY_TEST: '1', AWB_SHOW_INACTIVE: '1', DSH_WEB_URL: 'http://127.0.0.1:1' };
   const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + PORT, '--user-data-dir=' + path.join(BASE, 'userdata-electron')], { cwd: ROOT, env, stdio: 'ignore', windowsHide: false });
   let inst = null;
   try {
@@ -89,7 +89,40 @@ const realBefore = { team: sha(REAL_TEAM_JSON), workbench: sha(REAL_WORKBENCH) }
       const fallback = await inst.cdp.evaluate('(() => { const s = window.AWB_FX.sample(); return { running: Boolean(s.degrade && s.degrade.running), paused: Boolean(s.degrade && s.degrade.paused), shellParticles: s.particles && s.particles.count }; })()');
       const fallbackCanvas = await canvasState(inst.cdp);
       check('R2-4 ready=false 时壳内恢复绘制（不误伤降级兜底）', fallback.running === true && fallback.shellParticles > 0 && fallbackCanvas.particles > 0, { fallback, fallbackCanvas });
-      report.case = { before, syncState, blurState, resumeNow, afterCanvas, fallback, fallbackCanvas };
+      const probe = await inst.cdp.evaluate('window.__fxOverlayProbe ? window.__fxOverlayProbe() : { __missing: true }');
+      check('R2-5 __fxOverlayProbe 可取 bounds/DPI/双画布采样；离线壳内 nonZero>0', Boolean(probe && probe.ok === true
+        && probe.mainBounds && probe.overlayBounds
+        && Number(probe.mainBounds.width) === Number(probe.overlayBounds.width)
+        && Number(probe.dpr) > 0 && probe.displayId != null
+        && probe.webContentsMetrics && probe.overlayRssMB != null
+        && probe.shellCanvas && probe.shellCanvas.nonZero > 0 && probe.overlayCanvas && probe.overlayCanvas.nonZero > 0), probe && { mainBounds: probe.mainBounds, overlayBounds: probe.overlayBounds, overlayVisible: probe.overlayVisible, dpr: probe.dpr, displayId: probe.displayId, shell: probe.shell, shellCanvas: probe.shellCanvas, overlayCanvas: probe.overlayCanvas, overlayRssMB: probe.overlayRssMB, wc: probe.webContentsMetrics, missing: probe.__missing });
+      // T-810d：bounds 覆盖 resize / maximize / restore / fullscreen / minimize（test-only IPC）。
+      const control = async (payload) => {
+        const r = await inst.cdp.evaluate('window.workbench.fxOverlayControl(' + JSON.stringify(payload) + ')');
+        await sleep(450);
+        return { control: r, probe: await inst.cdp.evaluate('window.__fxOverlayProbe()') };
+      };
+      const boundsFollow = (p) => Boolean(p && p.mainBounds && p.overlayBounds
+        && Math.abs(Number(p.mainBounds.x) - Number(p.overlayBounds.x)) <= 2
+        && Math.abs(Number(p.mainBounds.y) - Number(p.overlayBounds.y)) <= 2
+        && Math.abs(Number(p.mainBounds.width) - Number(p.overlayBounds.width)) <= 2
+        && Math.abs(Number(p.mainBounds.height) - Number(p.overlayBounds.height)) <= 2);
+      const maxStep = await control({ action: 'maximize' });
+      const restoreStep = await control({ action: 'unmaximize' });
+      const resizeStep = await control({ action: 'setBounds', x: 80, y: 80, width: 1280, height: 800 });
+      const resizeStep2 = await control({ action: 'setBounds', x: 120, y: 120, width: 1120, height: 760 });
+      check('R2-6 resize/maximize/restore 后覆盖窗 bounds 跟随', boundsFollow(maxStep.probe) && boundsFollow(restoreStep.probe) && boundsFollow(resizeStep.probe) && boundsFollow(resizeStep2.probe), { max: maxStep.probe && maxStep.probe.mainBounds, maxOverlay: maxStep.probe && maxStep.probe.overlayBounds, restored: restoreStep.probe && restoreStep.probe.mainBounds, resized: resizeStep2.probe && resizeStep2.probe.mainBounds, resizedOverlay: resizeStep2.probe && resizeStep2.probe.overlayBounds, controls: [maxStep.control, restoreStep.control, resizeStep.control, resizeStep2.control] });
+      const fullStep = await control({ action: 'fullscreen' });
+      check('R2-7 fullscreen 后覆盖窗 bounds 跟随', boundsFollow(fullStep.probe), { main: fullStep.probe && fullStep.probe.mainBounds, overlay: fullStep.probe && fullStep.probe.overlayBounds, visible: fullStep.probe && fullStep.probe.overlayVisible, control: fullStep.control });
+      const leaveFull = await control({ action: 'leave-fullscreen' });
+      const minStep = await control({ action: 'minimize' });
+      const minHidden = Boolean(minStep.probe && minStep.probe.overlayVisible === false);
+      const restoreVisibleStep = await control({ action: 'restore' });
+      await inst.cdp.evaluate('window.dispatchEvent(new Event("focus")); true');
+      await sleep(500);
+      const restoredVisible = await inst.cdp.evaluate('window.__fxOverlayProbe()');
+      check('R2-8 minimized 时覆盖窗隐藏、restore 后恢复', minHidden && Boolean(restoredVisible && restoredVisible.overlayVisible === true), { minimized: minStep.probe && { visible: minStep.probe.overlayVisible, bounds: minStep.probe.mainBounds }, restored: restoredVisible && { visible: restoredVisible.overlayVisible, bounds: restoredVisible.mainBounds }, restoreControl: restoreVisibleStep.control, leaveFull: leaveFull.control });
+      report.case = { before, syncState, blurState, resumeNow, afterCanvas, fallback, fallbackCanvas, probe, maxStep, restoreStep, resizeStep, resizeStep2, fullStep, leaveFull, minStep, restoredVisible };
     } finally { try { inst.cdp.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ } await sleep(800); try { inst.ws.close(); } catch { /* ignore */ } try { child.kill(); } catch { /* ignore */ } await sleep(400); try { if (child && child.pid && child.exitCode === null) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ } }
   }
   report.summary = { pass: rows.filter((r) => r.ok).length, total: rows.length };

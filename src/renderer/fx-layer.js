@@ -948,6 +948,10 @@
     }
     if (S.mode === 'off' || overlayOwns) stopLoop();
     else if (!S.paused) startLoop();
+    // T-810d：离线/覆盖窗未接管时，sync 完立即落一帧，避免等 rAF（后台节流）导致 alpha 采样为 0。
+    if (!overlayOwns && particlesOn && S.parts.length && !S.paused) {
+      try { drawParticles(); } catch (e) { /* 画布异常不影响主题 */ }
+    }
     try {
       logFxDiag({
         ts: new Date().toISOString(),
@@ -1541,6 +1545,42 @@
     degraded: degradedInfo
   };
   try { W.__fxLayerEvidence = layerEvidence; } catch (e) { /* ignore */ }
+  // T-810d：AWB_FX_OVERLAY_TEST=1 时由主进程暴露 fxOverlayProbe；探针同时给两画布 alpha 采样、bounds/DPI。
+  try {
+    if (W.workbench && typeof W.workbench.fxOverlayProbe === 'function') {
+      var canvasSample = function (c) {
+        if (!c) return { missing: true };
+        var ctx = c.getContext('2d');
+        var nonZero = 0, sampled = 0;
+        try {
+          var d = ctx.getImageData(0, 0, c.width, c.height).data;
+          var step = 4 * 16;
+          for (var i = 3; i < d.length; i += step) { sampled += 1; if (d[i] > 0) nonZero += 1; }
+        } catch (e) { return { err: String(e && e.message || e) }; }
+        return { w: c.width, h: c.height, sampled: sampled, nonZero: nonZero, particles: Number(c.getAttribute('data-fx-particles') || 0) };
+      };
+      W.__fxOverlayProbe = function () {
+        return Promise.resolve(W.workbench.fxOverlayProbe()).then(function (main) {
+          var ev = layerEvidence();
+          return {
+            ok: true,
+            at: Date.now(),
+            ...main,
+            layer: ev.layer, webview: ev.webview, webviewSrc: ev.webviewSrc,
+            elementFromPoint: ev.elementFromPoint,
+            overlayState: overlayState(),
+            shell: {
+              running: Boolean(S.running), paused: Boolean(S.paused), pausedReason: S.pausedReason,
+              parts: S.parts.length, buckets: S.buckets.length, lastDraw: S.lastDraw || 0, raf: S.raf || 0,
+              overlayOwns: overlayOwnsShell(), mode: S.mode,
+            },
+            shellCanvas: canvasSample(S.canvas),
+            overlayCanvas: main && main.overlayCanvas ? main.overlayCanvas : null,
+          };
+        });
+      };
+    }
+  } catch (e) { /* 探针不可用不影响渲染 */ }
   // T-77e4：覆盖窗就绪/关闭时切换壳内绘制；状态订阅晚于创建时用一次 status 补齐。
   try {
     if (W.workbench && typeof W.workbench.onFxOverlayReady === 'function') {

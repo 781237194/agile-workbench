@@ -8,6 +8,8 @@ const IS_BOARD_WINDOW = process.argv.includes('--awb-board');
 // Owner 2026-11-17 10:19：发消息与回执一律唤醒，无静默开关（静默参数已删除，传就由主进程报错退出）。
 // 沙盘静默只靠既有 TEAM_SELFTEST=1 环境（不新增开关）：沙盘下 toast 只落审计、不自增计数。
 const IS_SANDBOX = String(process.env.TEAM_SELFTEST || '') === '1';
+// T-810d：覆盖窗探针只在显式测试开关下暴露，生产 window 上不存在该 API。
+const FX_OVERLAY_TEST = String(process.env.AWB_FX_OVERLAY_TEST || '') === '1';
 
 if (IS_BOARD_WINDOW) {
   contextBridge.exposeInMainWorld('boardWin', {
@@ -34,6 +36,7 @@ if (IS_BOARD_WINDOW) {
   fxOverlayState: (state) => ipcRenderer.send('fx:overlay-state', state),
   fxOverlayStatus: () => ipcRenderer.invoke('fx:overlay-status'),
   fxOverlayBenchmark: () => ipcRenderer.invoke('fx:overlay-benchmark'),
+  ...(FX_OVERLAY_TEST ? { fxOverlayProbe: () => ipcRenderer.invoke('fx:overlay-probe'), fxOverlayControl: (payload) => ipcRenderer.invoke('fx:overlay-window-control', payload) } : {}),
   onFxOverlayReady: (handler) => {
     if (typeof handler !== 'function') return () => {};
     const listener = (_event, payload) => { try { handler(payload || {}); } catch { /* ignore */ } };

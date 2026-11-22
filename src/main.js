@@ -430,6 +430,68 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
       },
     };
   });
+  rawIpcHandle('fx:overlay-window-control', async (_event, payload) => {
+    if (String(process.env.AWB_FX_OVERLAY_TEST || '') !== '1') return { ok: false, code: 'TEST_ONLY' };
+    if (!mainWindow || mainWindow.isDestroyed()) return { ok: false, code: 'NO_MAIN_WINDOW' };
+    const action = String(payload && payload.action || '');
+    try {
+      if (action === 'maximize') mainWindow.maximize();
+      else if (action === 'unmaximize') mainWindow.unmaximize();
+      else if (action === 'fullscreen') mainWindow.setFullScreen(true);
+      else if (action === 'leave-fullscreen') mainWindow.setFullScreen(false);
+      else if (action === 'minimize') mainWindow.minimize();
+      else if (action === 'restore') mainWindow.restore();
+      else if (action === 'setBounds') mainWindow.setBounds({
+        x: Number(payload.x), y: Number(payload.y),
+        width: Math.max(200, Number(payload.width) || 800), height: Math.max(200, Number(payload.height) || 600),
+      });
+      else return { ok: false, code: 'BAD_ACTION' };
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      return { ok: true, action, mainBounds: mainWindow.getBounds() };
+    } catch (error) {
+      return { ok: false, code: 'CONTROL_FAILED', message: String((error && error.message) || error).slice(0, 160) };
+    }
+  });
+  rawIpcHandle('fx:overlay-probe', async () => {
+    const mainBounds = (() => { try { return mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null; } catch { return null; } })();
+    const overlayBounds = (() => { try { return fxOverlayWindow && !fxOverlayWindow.isDestroyed() ? fxOverlayWindow.getBounds() : null; } catch { return null; } })();
+    const display = (() => { try { return mainBounds ? screen.getDisplayMatching(mainBounds) : screen.getPrimaryDisplay(); } catch { return null; } })();
+    const overlayCanvas = await (async () => {
+      try {
+        if (!fxOverlayWindow || fxOverlayWindow.isDestroyed()) return null;
+        return await fxOverlayWindow.webContents.executeJavaScript(`(() => {
+          const c = document.querySelector('#fx-overlay-canvas');
+          if (!c) return { missing: true };
+          const ctx = c.getContext('2d');
+          let nonZero = 0, sampled = 0;
+          try {
+            const d = ctx.getImageData(0, 0, c.width, c.height).data;
+            const step = 4 * 16;
+            for (let i = 3; i < d.length; i += step) { sampled += 1; if (d[i] > 0) nonZero += 1; }
+          } catch (e) { return { err: String(e && e.message || e) }; }
+          return { w: c.width, h: c.height, sampled, nonZero };
+        })()`, true);
+      } catch (e) { return { err: String((e && e.message) || e).slice(0, 160) }; }
+    })();
+    const wcMetrics = async (wc) => {
+      try { return wc && !wc.isDestroyed() ? await wc.getProcessMemoryInfo() : null; } catch { return null; }
+    };
+    return {
+      ok: true,
+      mainBounds, overlayBounds,
+      overlayVisible: Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayWindow.isVisible()),
+      overlayReady: Boolean(fxOverlayReady),
+      dpr: display ? Number(display.scaleFactor) || 1 : null,
+      displayId: display ? Number(display.id) || 0 : null,
+      displayBounds: display ? display.bounds : null,
+      overlayRssMB: (() => { const m = fxOverlayMetrics(); return m.overlay ? m.overlay.rssMB : null; })(),
+      webContentsMetrics: {
+        main: await wcMetrics(mainWindow && mainWindow.webContents),
+        overlay: await wcMetrics(fxOverlayWindow && fxOverlayWindow.webContents),
+      },
+      overlayCanvas,
+    };
+  });
   ipcMain.on('fx:overlay-ready', () => {
     fxOverlayReady = true;
     try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fx-overlay-ready', { ready: true }); } catch { /* ignore */ }
@@ -14327,8 +14389,8 @@ function notifyFxOverlayReady(ready) {
 function ensureFxOverlayWindow() {
   if (fxOverlayWindow && !fxOverlayWindow.isDestroyed()) return fxOverlayWindow;
   if (!mainWindow || mainWindow.isDestroyed()) return null;
-  // 自测沙盘不建额外窗口，避免污染进程数/截图与自检报告。
-  if (IS_SELFTEST) return null;
+  // 自测沙盘默认不建覆盖窗（避免污染进程数/截图）；T-810d 显式测试开关下允许创建，供探针取 bounds/DPI。
+  if (IS_SELFTEST && String(process.env.AWB_FX_OVERLAY_TEST || '') !== '1') return null;
   try {
     fxOverlayWindow = new BrowserWindow({
       ...fxOverlayBoundsOfMain(),
