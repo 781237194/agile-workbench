@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2.1.18（2026-11-22）
+
+### V2 收尾
+
+- **星光粒子**：fx-layer/fx-overlay 共用 10×10 预渲染四芒星 sprite（亮核+横/纵十字光芒、边缘锐利），核心直径 1.5–3px、光芒外延 2.4×，逐颗相位闪烁（0.6–1.0 正弦 globalAlpha），imageSmoothing=false；不再画软圆点气泡，sprite 每档只预渲染一次（fps 167–170、长任务不回归）。
+- **缺陷池修复**：workflow 摘要补 type（bug/scenario-bug 不再被丢）、打开池子清骨架并显式空态、摘要模式只显未闭环缺陷；实测需求池 137 行/缺陷池 2 行、计数=行数、无「加载中…」。
+- **升级/卸载覆盖复核**：包 760 条/关键条目缺 0/用户数据泄漏 0；TestUpgradeApply ok=true/verifiedFiles=246（含 src/briefing-worker.cjs）；沙盘卸载 verdict=CLEAN、安装目录整删。
+
 ## 2.1.16（2026-11-22）
 
 ### Owner 凌晨现场报障收口

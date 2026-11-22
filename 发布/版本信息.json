@@ -1,7 +1,7 @@
 {
-  "version": "2.1.17",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.17/发布/pm-workbench-2.1.17.zip",
-  "sha256": "c83c03109eb2b8845a4a6f168c26e36d44ce403774e4cca68af3ded5da96a80f",
-  "size": 4810013,
-  "notes": "本版为 2026-11-22 下午现场修复：①主进程「无响应」根治——briefingStatus 每 3 秒同步重算 2.1 秒的瓶颈移入 worker_threads（主线程只收发+SWR 缓存，TTL 12s，窗口隐藏/失焦不重算），启动令牌目录 5331 个 JSON 的全量同步扫描改目录签名索引（取令牌 1135ms→0.75ms）；新增主进程卡顿/慢任务/心跳三份可观测日志；②鼠标与输入卡顿——Windows 去掉覆盖窗 mousemove forward 转发，连续滑动/滚轮/点击不再抢主线程；③拖动窗口闪烁——move/resize 期间隐藏覆盖窗、150ms debounce 后一次性定位，不再逐帧 setBounds；④覆盖面补齐——覆盖窗在 DSH 在线时接管壳内绘制、离线回退可见，R2 失焦→聚焦不重复绘制；⑤AC2 长任务：修前 10 分钟 >100ms 14 次（max 1214ms）→ 修后 0–2 次（max 122ms）；⑥在线升级/一键卸载覆盖本轮全部新文件（含 src/briefing-worker.cjs），升级后文件 sha 与包内一致、卸载整删安装目录。"
+  "version": "2.1.18",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.18/发布/pm-workbench-2.1.18.zip",
+  "sha256": "6c473f2b2e24eb2daf0c0359d172404b6cfacb289f43202c5df4b865e7b44f09",
+  "size": 4822186,
+  "notes": "本版为 2026-11-22 晚 V2 收尾版：①粒子特效换回星光感——fx-layer/fx-overlay 共用 10×10 预渲染四芒星 sprite（亮核+横/纵十字光芒、边缘锐利），核心直径 1.5–3px、光芒外延 2.4×，逐颗相位闪烁（0.6–1.0 正弦 globalAlpha），imageSmoothing 关闭；不再画软圆点气泡，sprite 每档只预渲染一次（fps 167–170、长任务不回归）；②缺陷池修复——workflow 摘要补 type（bug/scenario-bug 不再被丢）、打开池子清理骨架并显式空态、摘要模式只显未闭环缺陷（实测需求池 137 行/缺陷池 2 行、计数=行数、无「加载中…」）；③升级/卸载覆盖复核——2.1.18 包关键条目缺 0、用户数据泄漏 0，TestUpgradeApply ok=true/verifiedFiles=246（含新文件 src/briefing-worker.cjs），沙盘卸载 verdict=CLEAN、安装目录整删。"
 }
