@@ -98,7 +98,7 @@
    */
   var FX_CONFIG = {
     particle: {
-      diameterPx: [1.5, 3],        // 单颗直径（CSS px）—— Owner 2026-11-22：星光 1.5–3px（不再像气泡）
+      diameterPx: [5, 8],        // 单颗直径（CSS px）—— Owner 2026-11-22：星光 2–3.5px（在 1.5–3 基础上稍微放大一点点）
       densityPerMpx: [150, 190],   // 每百万像素多少颗（1920×1080 ≈ 311–394 颗）
       opacity: [0.2, 0.45],        // 单颗不透明度上下限
       hueJitterDeg: 12,            // 色相抖动 ±12°
@@ -389,41 +389,15 @@
     return a + diff * t;
   }
 
-  /** 单颗 sprite：16×16 预渲染的四芒星光（亮核 + 横/纵十字光芒，边缘锐利）；每档只建一次，不逐帧建 gradient。 */
+  /** 单颗 sprite：统一调用 fx-sprite.js（11×11 四芒星，亮核+横/纵十字光芒）——AC① 禁止第二份实现。 */
   function buildSprite(rgb) {
-    var size = 10;
-    var c = D.createElement('canvas');
-    c.width = size;
-    c.height = size;
-    var ctx = c.getContext('2d');
-    if (!ctx) return c;
-    var center = size / 2;
-    var text = rgb[0] + ',' + rgb[1] + ',' + rgb[2];
-    // 光芒用一次径向渐变做轮廓填充：中心亮、外缘透明，四个尖端自然收锐。
-    var grad = ctx.createRadialGradient(center, center, 0, center, center, center);
-    grad.addColorStop(0, 'rgba(' + text + ',1)');
-    grad.addColorStop(0.55, 'rgba(' + text + ',1)');
-    grad.addColorStop(0.8, 'rgba(' + text + ',0.6)');
-    grad.addColorStop(1, 'rgba(' + text + ',0)');
-    ctx.fillStyle = grad;
-    var outer = center - 0.5;
-    var inner = outer * 0.4;
-    ctx.beginPath();
-    for (var i = 0; i < 8; i += 1) {
-      var ang = -Math.PI / 2 + i * (Math.PI / 4);
-      var r = i % 2 === 0 ? outer : inner;
-      var x = center + Math.cos(ang) * r;
-      var y = center + Math.sin(ang) * r;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    var shared = W.AWBFxSprite;
+    if (!shared || typeof shared.build !== 'function') {
+      // 公共模块没加载属于打包错误：不保留第二份实现，宁可粒子不画也不让两层再分叉。
+      try { console.warn('[fx] fx-sprite.js 未加载：粒子统一 sprite 不可用'); } catch (e) { /* ignore */ }
+      return D.createElement('canvas');
     }
-    ctx.closePath();
-    ctx.fill();
-    // 亮核：3px 缩略时仍能读成「一点星光」，而不是灰点。
-    ctx.fillStyle = 'rgba(' + text + ',1)';
-    ctx.beginPath();
-    ctx.arc(center, center, 2.0, 0, Math.PI * 2);
-    ctx.fill();
-    return c;
+    return shared.build(rgb);
   }
 
   function seedParticles(canvas, plan, themeConf) {
@@ -431,8 +405,8 @@
     var h = canvas.height;
     var cfg = FX_CONFIG.particle;
     var palette = buildPalette(themeConf, themeConf);
-    var rawD = cfg.diameterPx || [1.5, 3];
-    var dLo = Math.max(1.5, Number(rawD[0]) || 1.5);
+    var rawD = cfg.diameterPx || [5, 8];
+    var dLo = Math.max(5, Number(rawD[0]) || 5);
     var dHi = Math.max(dLo, Number(rawD[1]) || dLo);
     S.palette = palette;
     S.buckets = palette.map(function () { return []; });

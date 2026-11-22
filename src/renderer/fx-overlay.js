@@ -8,7 +8,7 @@
  *
  * 2026-11-22（T-20261122-190253-6c78）：与壳内共用「四芒星光」观感——
  * sprite 为 16×16 预渲染四芒星（亮核+横/纵十字光芒），每档颜色只建一次；
- * 单颗直径 1.5–3px，逐颗相位闪烁（0.6–1.0 正弦 globalAlpha），不再画软圆气泡。
+ * 单颗直径 5–8px，逐颗相位闪烁（0.6–1.0 正弦 globalAlpha），不再画软圆气泡。
  */
 (function () {
   var canvas = document.getElementById('fx-overlay-canvas');
@@ -43,39 +43,14 @@
     return { r: Math.round(Number(m[1]) || 0), g: Math.round(Number(m[2]) || 0), b: Math.round(Number(m[3]) || 0), a: m[4] === undefined ? 1 : Math.max(0, Math.min(1, Number(m[4]) || 0)) };
   }
 
-  /** 16×16 预渲染四芒星：亮核 + 横/纵十字光芒，边缘锐利；每档颜色只建一次。 */
+  /** 统一调用 fx-sprite.js（11×11 四芒星，亮核+横/纵十字光芒）——AC① 禁止第二份实现。 */
   function buildStar(rgb) {
-    var size = 10;
-    var c = document.createElement('canvas');
-    c.width = size;
-    c.height = size;
-    var g = c.getContext('2d');
-    if (!g) return c;
-    var center = size / 2;
-    var text = rgb.r + ',' + rgb.g + ',' + rgb.b;
-    var grad = g.createRadialGradient(center, center, 0, center, center, center);
-    grad.addColorStop(0, 'rgba(' + text + ',1)');
-    grad.addColorStop(0.55, 'rgba(' + text + ',1)');
-    grad.addColorStop(0.8, 'rgba(' + text + ',0.6)');
-    grad.addColorStop(1, 'rgba(' + text + ',0)');
-    g.fillStyle = grad;
-    var outer = center - 0.5;
-    var inner = outer * 0.4;
-    g.beginPath();
-    for (var i = 0; i < 8; i += 1) {
-      var ang = -Math.PI / 2 + i * (Math.PI / 4);
-      var r = i % 2 === 0 ? outer : inner;
-      var x = center + Math.cos(ang) * r;
-      var y = center + Math.sin(ang) * r;
-      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    var shared = window.AWBFxSprite;
+    if (!shared || typeof shared.build !== 'function') {
+      try { console.warn('[fx-overlay] fx-sprite.js 未加载：粒子统一 sprite 不可用'); } catch (e) { /* ignore */ }
+      return document.createElement('canvas');
     }
-    g.closePath();
-    g.fill();
-    g.fillStyle = 'rgba(' + text + ',1)';
-    g.beginPath();
-    g.arc(center, center, 2.0, 0, Math.PI * 2);
-    g.fill();
-    return c;
+    return shared.build(rgb);
   }
 
   function spriteAt(css) {
@@ -95,8 +70,8 @@
       parts.push({
         x: Math.random() * W,
         y: Math.random() * H,
-        // 与壳内同一口径：核心直径 1.5–3px、十字光芒外延 2.4×。
-        d: Math.round((1.5 + Math.random() * 1.5) * 2) / 2,
+        // 与壳内同一口径：核心直径 5–8px（Owner 2026-11-22 再放大一点点）。
+        d: Math.round((5 + Math.random() * 3) * 2) / 2,
         // 运动与壳内一致（随机漂移，不统一向上）；亮度只由全局闪烁决定（与壳内 sprite 满 alpha 对齐）。
         vx: (Math.random() - 0.5) * 0.18,
         vy: (Math.random() - 0.5) * 0.18,
