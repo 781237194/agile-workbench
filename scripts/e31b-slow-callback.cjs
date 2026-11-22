@@ -15,11 +15,11 @@ const MINUTES = Number(argOf('--minutes', '10')) || 10;
 const SLOW_MS = Number(argOf('--slow-ms', '80')) || 80;
 const OUT = path.resolve(argOf('--out', path.join('_tmp', 'e31b-slow-' + Date.now())));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const httpJson = (url) => new Promise((resolve, reject) => { const req = http.get(url, (res) => { let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } }); }); req.on('error', reject); req.setTimeout(3000, () => req.destroy(new Error('timeout'))); });
+const httpJson = (url) => new Promise((resolve, reject) => { const req = http.get(url, (res) => { let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } }); }); req.on('error', reject); req.setTimeout(10000, () => req.destroy(new Error('timeout'))); });
 class Cdp {
   constructor(u) { this.u = u; this.id = 0; this.p = new Map(); }
   connect() { return new Promise((res, rej) => { const ws = new WebSocket(this.u); this.ws = ws; ws.onopen = res; ws.onerror = rej; ws.onmessage = (ev) => { try { const m = JSON.parse(ev.data); if (m.id && this.p.has(m.id)) { const q = this.p.get(m.id); this.p.delete(m.id); m.error ? q.reject(new Error(JSON.stringify(m.error))) : q.resolve(m.result); } } catch { /* ignore */ } }; }); }
-  send(method, params = {}) { return new Promise((res, rej) => { const id = ++this.id; this.p.set(id, { resolve: res, reject: rej }); this.ws.send(JSON.stringify({ id, method, params })); }); }
+  send(method, params = {}) { return new Promise((res, rej) => { const id = ++this.id; this.p.set(id, { resolve: res, reject: rej }); this.ws.send(JSON.stringify({ id, method, params })); setTimeout(() => { if (this.p.has(id)) { this.p.delete(id); rej(new Error('CDP 超时 ' + method)); } }, 30000); }); }
   async eval(expr) { const r = await this.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }); if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails).slice(0, 300)); return r.result ? r.result.value : undefined; }
 }
 const INSTRUMENT = `(() => {
@@ -194,15 +194,39 @@ function aggregate(dump, meta, profiler) {
 }
 
 (async () => {
-  const list = await httpJson(`http://127.0.0.1:${PORT}/json/list`);
+  let list = null;
+  for (let attempt = 1; attempt <= 12 && !list; attempt += 1) {
+    try { list = await httpJson(`http://127.0.0.1:${PORT}/json/list`); } catch (e) { if (attempt === 12) throw e; await sleep(3000); }
+  }
   const page = (list || []).find((t) => t.type === 'page' && /index\.html/i.test(String(t.url || '')));
   if (!page) throw new Error('no index.html target on port ' + PORT);
   const cdp = new Cdp(page.webSocketDebuggerUrl);
   await cdp.connect();
-  await cdp.send('Runtime.enable');
+  try { await cdp.send('Runtime.enable'); } catch (e) { /* 生产主进程忙时 enable 可能超时；evaluate 仍可用 */ }
   const t0 = Date.now();
+  // 生产主进程忙时首条命令可能排队：先做一次 evaluate 预热（失败重试 15×2s），避免一上来就误判。
+  let warm = false;
+  for (let i = 0; i < 15 && !warm; i += 1) {
+    try { const rs = await cdp.eval('1+1'); warm = rs === 2; } catch (e) { if (i === 14) throw e; await sleep(2000); }
+  }
   const base = await cdp.eval('({ timeOrigin: performance.timeOrigin, href: location.href, title: document.title })');
-  const meta = { at: new Date().toISOString(), startedAt: new Date().toISOString(), port: PORT, target: { id: page.id, title: page.title, url: page.url }, minutes: MINUTES, slowMs: SLOW_MS, instanceStartTime: new Date(Number(base.timeOrigin)).toISOString(), instanceTimeOrigin: base.timeOrigin };
+  // PM M-20261122-070927 要求：分别记 shell page 与 webview 的 timeOrigin，便于区分 shell reload / webview reload。
+  let webview = null;
+  try {
+    const wvTarget = (list || []).find((t) => t.type === 'webview');
+    if (wvTarget && wvTarget.webSocketDebuggerUrl) {
+      const wvCdp = new Cdp(wvTarget.webSocketDebuggerUrl);
+      await wvCdp.connect();
+      let wvBase = null;
+      for (let i = 0; i < 10 && !wvBase; i += 1) {
+        try { wvBase = await wvCdp.eval('({ timeOrigin: performance.timeOrigin, href: location.href, ready: document.readyState })'); } catch (e) { await sleep(1000); }
+      }
+      if (wvBase) webview = { id: wvTarget.id, title: wvTarget.title, url: wvTarget.url, href: wvBase.href, timeOrigin: wvBase.timeOrigin, instanceStartTime: new Date(Number(wvBase.timeOrigin)).toISOString(), base: wvBase, cdp: wvCdp };
+    }
+  } catch (e) { webview = null; }
+  let appVersion = null;
+  try { appVersion = await cdp.eval('window.workbench && window.workbench.appVersion ? window.workbench.appVersion() : null'); } catch (e) { appVersion = null; }
+  const meta = { at: new Date().toISOString(), startedAt: new Date().toISOString(), port: PORT, target: { id: page.id, title: page.title, url: page.url }, minutes: MINUTES, slowMs: SLOW_MS, instanceStartTime: new Date(Number(base.timeOrigin)).toISOString(), instanceTimeOrigin: base.timeOrigin, appVersion, webview: webview ? { id: webview.id, title: webview.title, url: webview.url, href: webview.href, timeOrigin: webview.timeOrigin, instanceStartTime: webview.instanceStartTime } : null };
   const instrument = await cdp.eval(INSTRUMENT);
   // V8 CPU 采样：把长任务里的自耗时精确归到「函数 + 文件:行」（1ms 采样）。
   let profilerStarted = false;
@@ -225,6 +249,13 @@ function aggregate(dump, meta, profiler) {
     } catch (e) { markRestart('cdp-error', { error: String((e && e.message) || e).slice(0, 200) }); break; }
     await sleep(30000);
   }
+  let webviewEnd = null;
+  if (webview && webview.cdp) {
+    try {
+      const wvEnd = await webview.cdp.eval('({ timeOrigin: performance.timeOrigin, ready: document.readyState })');
+      webviewEnd = { timeOrigin: wvEnd && wvEnd.timeOrigin, ready: wvEnd && wvEnd.ready, changed: Number(wvEnd && wvEnd.timeOrigin) !== Number(webview.base.timeOrigin), at: new Date().toISOString() };
+    } catch (e) { webviewEnd = { error: String((e && e.message) || e).slice(0, 160) }; }
+  }
   let dump = null;
   try { dump = await cdp.eval('window.__e31bSlowDump ? window.__e31bSlowDump() : (function(){ if(!window.__e31bSlow) return null; var d = window.__e31bSlow; try { clearInterval(d.timer); } catch(e){} return { startedAt: d.startedAt, longtasks: d.longtasks, slow: d.slow, heap: d.heap }; })()'); } catch (e) { dump = null; }
   if (!dump) dump = { startedAt: null, longtasks: [], slow: [], heap: [] };
@@ -235,7 +266,7 @@ function aggregate(dump, meta, profiler) {
   const endedAt = new Date().toISOString();
   const valid = !restartDetected && Array.isArray(dump.longtasks) && Date.now() - t0 >= MINUTES * 60000 * 0.9;
   fs.mkdirSync(OUT, { recursive: true });
-  fs.writeFileSync(path.join(OUT, 'meta.json'), JSON.stringify({ ...meta, instrument, valid, restartDetected, restartInfo, endedAt }, null, 2) + '\n');
-  aggregate(dump, { ...meta, endedAt, valid, restartDetected, restartInfo }, profiler);
+  fs.writeFileSync(path.join(OUT, 'meta.json'), JSON.stringify({ ...meta, webviewEnd, instrument, valid, restartDetected, restartInfo, endedAt }, null, 2) + '\n');
+  aggregate(dump, { ...meta, webviewEnd, endedAt, valid, restartDetected, restartInfo }, profiler);
   process.exit(valid ? 0 : 4);
 })().catch((e) => { console.error('FAILED', e && e.stack); process.exit(1); });
