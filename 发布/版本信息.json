@@ -1,7 +1,7 @@
 {
-  "version": "2.1.19",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.19/发布/pm-workbench-2.1.19.zip",
-  "sha256": "65fa704e67f85befdc06d1fbb52fa58e6eb0473ac6065681268dfa7240be13d2",
-  "size": 4832468,
-  "notes": "本版为 V2 收尾正式版（原 2.1.18 因缺陷池回归被叫停回滚）：①星光粒子统一实现——新增 src/renderer/fx-sprite.js 唯一 sprite（11×11 四芒星、亮核+十字光芒），壳层 fx-layer 与覆盖窗 fx-overlay 共用，同主题同 DPR 下两层 alphaGrid 逐像素一致（夹具 10/10）；粒子直径放大到 5–8px（Owner 认可），闪烁/48 色/随机漂移/lighter 与连接前一致；②粒子「每 1–1.5 秒全体瞬移」修复——renderDsh 仅在线态变化才推状态、notifyOverlay 同参数去重、fx-overlay 仅签名变化才 seed（resize 仅尺寸变化才 seed），seedCount 恒为 1（夹具 12/12），并加 seedLog 诊断；③缺陷池显示全部历史缺陷——撤销未闭环过滤，368 条 bug/scenario-bug 全进池（open 2/done 21/accepted 302/cancelled 43），状态徽标/类型筛选保留，缺陷列窗口化（数据 368/DOM 31），打开约 394ms，需求池 137 行；④升级/卸载覆盖复核：包 762 条/关键条目缺 0/用户数据泄漏 0，TestUpgradeApply ok=true（含新文件 fx-sprite.js/briefing-worker.cjs），卸载沙盘 verdict=CLEAN。"
+  "version": "2.1.20",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.20/发布/pm-workbench-2.1.20.zip",
+  "sha256": "dd85ea5f5bf5925e9a5b7f35b72ef6ac33780cba4906546da5038f97043a1d1f",
+  "size": 4833364,
+  "notes": "启动白屏修复版：①主窗首次 show 先移到屏幕外显示，用 capturePage 强制合成一帧后再移回原位置（Windows 首次 show 必先呈现一帧白底，与页面是否画完无关），并留 800ms/2s 双兜底回位；②透明覆盖窗改为等渲染层 ready（fx:overlay-ready）后才第一次显示，避免覆盖窗白闪；③index.html 给 html 预设深/浅底色，防止 CSS 加载前露白。实测：连续 2 次冷启动白帧（白像素≥10%）0 次（修复前每次 1–2 帧 47.8% 全窗纯白）；升级闸门 TestUpgradeApply ok=true/verifiedFiles=247，隔离卸载 verdict=CLEAN。"
 }
