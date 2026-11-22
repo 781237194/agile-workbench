@@ -478,7 +478,30 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
       } catch (e) { return { err: String((e && e.message) || e).slice(0, 160) }; }
     })();
     const wcMetrics = async (wc) => {
-      try { return wc && !wc.isDestroyed() ? await wc.getProcessMemoryInfo() : null; } catch { return null; }
+      if (!wc || wc.isDestroyed()) return null;
+      const pid = (() => { try { return Number(wc.getOSProcessId()) || 0; } catch { return 0; } })();
+      // T-171008：旧 Electron 没有 getProcessMemoryInfo 时必须回退 app.getAppMetrics，探针不能返回 null。
+      try {
+        if (typeof wc.getProcessMemoryInfo === 'function') {
+          const info = await wc.getProcessMemoryInfo();
+          if (info && typeof info === 'object') {
+            const kb = Number(info.private ?? info.privateBytes ?? info.residentSet ?? info.workingSetSize) || 0;
+            return { pid, source: 'webContents', rssMB: kb > 0 ? Math.round((kb / 1024) * 10) / 10 : null, raw: info };
+          }
+        }
+      } catch { /* fall through */ }
+      try {
+        const row = (app.getAppMetrics() || []).find((item) => Number(item && item.pid) === pid);
+        if (row) {
+          return {
+            pid, source: 'app.getAppMetrics',
+            rssMB: Math.round(((Number(row.memory && row.memory.workingSetSize) || 0) / 1024) * 10) / 10,
+            cpuPercent: Number(row.cpu && row.cpu.percentCPUUsage) || 0,
+            type: String(row.type || ''),
+          };
+        }
+      } catch { /* ignore */ }
+      return { pid, source: 'unavailable', rssMB: null, cpuPercent: null };
     };
     return {
       ok: true,
