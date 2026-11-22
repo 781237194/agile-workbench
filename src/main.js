@@ -18,6 +18,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { execFileSync, spawnSync } = require('node:child_process');
+const { Worker } = require('node:worker_threads');
 // R-e31b/f01c 诊断（测试专用）：统计 team.mjs/workspace.mjs/launch.mjs 子进程的 stdout 字节与活跃数，
 // 并允许 AWB_TEST_NO_TEAM_EXEC=1 关闭这些 spawn 做“关①量 RSS”的对照；生产默认完全不启用。
 const childProc = require('node:child_process');
@@ -131,6 +132,7 @@ let bootTokenIndexRunning = 0;
 let mainLoopStallCount = 0;
 let mainLoopLastStallAt = 0;
 let mainLoopMaxDelayMs = 0;
+let mainSlowTaskCount = 0;
 const ledgerActionsCache = new Map();
 const BOOT_TOKEN_CACHE_MS = 10000;
 const LEDGER_ACTIONS_CACHE_MS = 10000;
@@ -149,8 +151,60 @@ const workflowStateStats = { hits: 0, misses: 0, recentHits: 0, lastFp: '' };
 // T-18bf：briefing 缓存放模块级，mem:cache-stats（独立注册块）也能读到；此前局部变量导致 ReferenceError。
 const briefingCache = new Map();
 const briefingRevalidating = new Set();
-const BRIEFING_REVALIDATE_MS = 3000;
-const briefingStateStats = { hits: 0, misses: 0, revalidations: 0 };
+const BRIEFING_REVALIDATE_MS = 12000;
+const briefingStateStats = { hits: 0, misses: 0, revalidations: 0, workerRequests: 0, workerFailures: 0, lastHitMs: null };
+// T-ff27：briefingStatus 的重活（6 角色文档哈希/工作流读）必须在 worker 线程，主线程只收发结果。
+let briefingWorker = null;
+let briefingWorkerSeq = 0;
+const briefingWorkerPending = new Map();
+function ensureBriefingWorker() {
+  if (briefingWorker) return briefingWorker;
+  const worker = new Worker(path.join(__dirname, 'briefing-worker.cjs'), { env: process.env });
+  worker.on('message', (msg) => {
+    const id = Number(msg && msg.id) || 0;
+    const pending = briefingWorkerPending.get(id);
+    if (!pending) return;
+    briefingWorkerPending.delete(id);
+    clearTimeout(pending.timer);
+    if (msg && msg.ok) pending.resolve(msg.raw);
+    else pending.reject(new Error(String((msg && (msg.message || msg.code)) || 'BRIEFING_WORKER_FAILED')));
+  });
+  const failAll = (reason) => {
+    for (const [id, pending] of briefingWorkerPending) {
+      briefingWorkerPending.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    if (briefingWorker === worker) briefingWorker = null;
+  };
+  worker.on('error', (error) => failAll('BRIEFING_WORKER_ERROR ' + String((error && error.message) || error).slice(0, 240)));
+  worker.on('exit', (code) => { if (briefingWorker === worker) briefingWorker = null; if (code !== 0) failAll('BRIEFING_WORKER_EXIT ' + code); });
+  try { worker.unref(); } catch { /* ignore */ }
+  briefingWorker = worker;
+  return worker;
+}
+function briefingWorkerRequest(teamName) {
+  return new Promise((resolve, reject) => {
+    let worker;
+    try { worker = ensureBriefingWorker(); } catch (error) { reject(error); return; }
+    const id = ++briefingWorkerSeq;
+    briefingStateStats.workerRequests += 1;
+    const timer = setTimeout(() => {
+      const pending = briefingWorkerPending.get(id);
+      if (!pending) return;
+      briefingWorkerPending.delete(id);
+      briefingStateStats.workerFailures += 1;
+      pending.reject(new Error('BRIEFING_WORKER_TIMEOUT'));
+    }, 30000);
+    briefingWorkerPending.set(id, { resolve, reject, timer });
+    try { worker.postMessage({ id, teamName: String(teamName || '') }); }
+    catch (error) {
+      briefingWorkerPending.delete(id);
+      clearTimeout(timer);
+      reject(error);
+    }
+  });
+}
 const METRICS_GPU_TTL_MS = 30000;
 const metricsGpuCache = { at: 0, value: null };
 let metricsGpuSampling = false;
@@ -404,6 +458,7 @@ function startMainLoopWatch() {
   mainLoopWatchStarted = true;
   try { fs.mkdirSync(LOCAL_DATA, { recursive: true }); } catch { /* ignore */ }
   const stallFile = path.join(LOCAL_DATA, '主进程卡顿.jsonl');
+  const slowTaskFile = path.join(LOCAL_DATA, '主进程慢任务.jsonl');
   const heartbeatFile = path.join(LOCAL_DATA, '主进程心跳.json');
   let histogram = null;
   try {
@@ -412,6 +467,7 @@ function startMainLoopWatch() {
     histogram.enable();
   } catch { histogram = null; }
   let lastStallLogAt = 0;
+  let lastSlowTaskLogAt = 0;
   let lastLoopMaxMs = 0;
   const bootIndexSnapshot = () => ({ dirs: bootTokenIndex.size, builds: bootTokenIndexBuilds, running: bootTokenIndexRunning, hits: bootTokenIndexHits, misses: bootTokenIndexMisses });
   try {
@@ -421,6 +477,18 @@ function startMainLoopWatch() {
         if (histogram) { maxMs = Math.round((Number(histogram.max) || 0) / 1e6 * 10) / 10; histogram.reset(); }
       } catch { maxMs = 0; }
       lastLoopMaxMs = maxMs;
+      // T-ff27：任何 >200ms 的主线程任务都记慢任务（event-loop delay 归因 name/mark；不阻塞业务）。
+      if (maxMs > 200 && Date.now() - lastSlowTaskLogAt > 2000) {
+        lastSlowTaskLogAt = Date.now();
+        mainSlowTaskCount += 1;
+        try {
+          fs.appendFileSync(slowTaskFile, JSON.stringify({
+            at: new Date(lastSlowTaskLogAt).toISOString(), name: 'event-loop-delay', durationMs: maxMs,
+            mark: maxMs > 1000 ? 'main-loop-stall' : 'main-loop-slow', pid: process.pid,
+            uptimeSec: Math.round(process.uptime()), rssMB: Math.round(process.memoryUsage().rss / 1048576),
+          }) + '\n', 'utf8');
+        } catch { /* 日志写失败不影响运行 */ }
+      }
       if (maxMs > 1000 && Date.now() - lastStallLogAt > 2000) {
         lastStallLogAt = Date.now();
         mainLoopStallCount += 1;
@@ -444,6 +512,7 @@ function startMainLoopWatch() {
           at: new Date().toISOString(), pid: process.pid, uptimeSec: Math.round(process.uptime()),
           rssMB: Math.round(process.memoryUsage().rss / 1048576), eventLoopMaxMs: lastLoopMaxMs,
           stallCount: mainLoopStallCount, lastStallAt: mainLoopLastStallAt ? new Date(mainLoopLastStallAt).toISOString() : '',
+          slowTaskCount: mainSlowTaskCount,
           bootIndex: bootIndexSnapshot(),
         };
         const tmp = heartbeatFile + '.tmp';
@@ -9756,7 +9825,7 @@ ipcMain.handle('theme:metrics', async () => {
   // PM 20:50（Owner：主进程 CPU 被打满）：briefingStatus 每次读工作流 + 算 6 个角色文档哈希（~2.1s）。
   // T-18bf 改 stale-while-revalidate：有旧值立即返回（>3s 后台重算），不再让每次轮询等 2.1s。
   const buildBriefing = async (teamName) => {
-    const raw = await Promise.resolve(teamTools.briefingStatus(teamName));
+    const raw = await briefingWorkerRequest(teamName);
     // T-18bf：briefing 每角色带 requirements 明细（6 角色重复），是 heapUsed 从 50→144MB 的主因；
     // UI 只用 booted/complete/stale/missing/at/evidence，缓存前裁掉 requirements 只留 hash。
     if (raw && typeof raw === 'object' && raw.roles && typeof raw.roles === 'object') {
@@ -9775,8 +9844,15 @@ ipcMain.handle('theme:metrics', async () => {
     briefingCache.set(key, { at: Date.now(), value });
     if (briefingCache.size > 4) briefingCache.delete(briefingCache.keys().next().value);
   };
+  const briefingWindowActive = () => {
+    try {
+      return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused());
+    } catch { return false; }
+  };
   const revalidateBriefing = (key, teamName) => {
     if (briefingRevalidating.has(key)) return;
+    // T-ff27：隐藏/失焦不重算；下次可见时缓存过期仍会触发，数据不丢。
+    if (!briefingWindowActive()) return;
     briefingRevalidating.add(key);
     setImmediate(async () => {
       try {
@@ -9790,8 +9866,10 @@ ipcMain.handle('theme:metrics', async () => {
     const key = String(ctx.teamName || '');
     const hit = briefingCache.get(key);
     if (hit) {
+      const hitT0 = process.hrtime.bigint();
       briefingStateStats.hits += 1;
       if (Date.now() - hit.at >= BRIEFING_REVALIDATE_MS) revalidateBriefing(key, ctx.teamName);
+      briefingStateStats.lastHitMs = Math.round(Number(process.hrtime.bigint() - hitT0) / 1e4) / 100;
       return hit.value;
     }
     briefingStateStats.misses += 1;
