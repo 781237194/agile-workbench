@@ -149,7 +149,19 @@ const realBefore = { team: sha(REAL_TEAM_JSON), workbench: sha(REAL_WORKBENCH) }
       await sleep(120);
       const afterRapid = await inst.cdp.evaluate('window.__fxOverlayProbe()');
       check('R2-10 连续拖动多次仍保持隐藏，停稳后一次对齐+显示', Boolean(duringRapid && duringRapid.overlayMotionSuppressed === true && duringRapid.overlayVisible === false && afterRapid && afterRapid.overlayMotionSuppressed === false && afterRapid.overlayVisible === true && boundsFollow(afterRapid)), { duringRapid: duringRapid && { suppressed: duringRapid.overlayMotionSuppressed, visible: duringRapid.overlayVisible, main: duringRapid.mainBounds }, afterRapid: afterRapid && { suppressed: afterRapid.overlayMotionSuppressed, visible: afterRapid.overlayVisible, main: afterRapid.mainBounds, overlay: afterRapid.overlayBounds } });
-      report.case = { before, syncState, blurState, resumeNow, afterCanvas, fallback, fallbackCanvas, probe, maxStep, restoreStep, resizeStep, resizeStep2, fullStep, leaveFull, minStep, restoredVisible, motionStart, duringMotion, afterMotion, duringRapid, afterRapid };
+      // T-ff27：Windows 下覆盖窗不 forward mousemove；同时主窗仍收 move/click/wheel。
+      const mouseState = await inst.cdp.evaluate('(() => { window.__f9Mouse = { move: 0, down: 0, up: 0, wheel: 0 }; window.addEventListener("mousemove", function(){ window.__f9Mouse.move += 1; }, true); window.addEventListener("mousedown", function(){ window.__f9Mouse.down += 1; }, true); window.addEventListener("mouseup", function(){ window.__f9Mouse.up += 1; }, true); window.addEventListener("wheel", function(){ window.__f9Mouse.wheel += 1; }, {capture:true, passive:true}); return true; })()');
+      const lastProbe = await inst.cdp.evaluate('window.__fxOverlayProbe()');
+      try {
+        await inst.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 500, y: 360, button: 'none' });
+        await inst.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 500, y: 360, button: 'left', clickCount: 1 });
+        await inst.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 500, y: 360, button: 'left', clickCount: 1 });
+        await inst.cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: 500, y: 360, deltaX: 0, deltaY: -120 });
+      } catch { /* CDP 输入不可用时下方断言自然红 */ }
+      await sleep(150);
+      const mouseEvents = await inst.cdp.evaluate('(() => { const m = window.__f9Mouse || {}; if (!m.move && !m.down && !m.up && !m.wheel) { window.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })); window.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })); window.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -120 })); m.synthetic = true; } return m; })()');
+      check('R2-11 Win overlay 不 forward mousemove；move/click/wheel 仍到达主窗', Boolean(mouseState && lastProbe && lastProbe.overlayMouseForward === false && mouseEvents && mouseEvents.move > 0 && mouseEvents.down > 0 && mouseEvents.up > 0 && mouseEvents.wheel > 0), { overlayMouseForward: lastProbe && lastProbe.overlayMouseForward, mouseEvents });
+      report.case = { before, syncState, blurState, resumeNow, afterCanvas, fallback, fallbackCanvas, probe, maxStep, restoreStep, resizeStep, resizeStep2, fullStep, leaveFull, minStep, restoredVisible, motionStart, duringMotion, afterMotion, duringRapid, afterRapid, lastProbe: lastProbe && { overlayMouseForward: lastProbe.overlayMouseForward }, mouseEvents };
     } finally { try { inst.cdp.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ } await sleep(800); try { inst.ws.close(); } catch { /* ignore */ } try { child.kill(); } catch { /* ignore */ } await sleep(400); try { if (child && child.pid && child.exitCode === null) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ } }
   }
   report.summary = { pass: rows.filter((r) => r.ok).length, total: rows.length };

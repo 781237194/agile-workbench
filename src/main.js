@@ -645,6 +645,7 @@ function startMainLoopWatch() {
       overlayReady: Boolean(fxOverlayReady),
       overlayMotionSuppressed: Boolean(fxOverlayMotionSuppressed),
       overlayBoundsTimerPending: Boolean(fxOverlayBoundsTimer),
+      overlayMouseForward: Boolean(fxOverlayMouseForward),
       dpr: display ? Number(display.scaleFactor) || 1 : null,
       displayId: display ? Number(display.id) || 0 : null,
       displayBounds: display ? display.bounds : null,
@@ -3143,6 +3144,9 @@ let mainWindow = null;
 let fxOverlayWindow = null;
 let fxOverlayState = { enabled: false, count: 0, colors: [], opacityRange: [0.15, 0.55], mode: 'full' };
 let fxOverlayReady = false;
+// T-ff27：Windows 下 forward:true 会把每个 mousemove 转发给父窗，放大主进程输入事件；
+// 只保留 setIgnoreMouseEvents(true) 的 click-through，不再 forward。
+let fxOverlayMouseForward = process.platform !== 'win32';
 let fxOverlayBoundsTimer = null;
 let fxOverlayMotionSuppressed = false;
 const FX_OVERLAY_MOTION_DEBOUNCE_MS = 150;
@@ -14655,7 +14659,7 @@ function ensureFxOverlayWindow() {
         contextIsolation: true, nodeIntegration: false, sandbox: false,
       },
     });
-    fxOverlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    fxOverlayWindow.setIgnoreMouseEvents(true, { forward: fxOverlayMouseForward });
     fxOverlayWindow.loadFile(path.join(__dirname, 'renderer', 'fx-overlay.html'));
     fxOverlayWindow.on('closed', () => { fxOverlayWindow = null; fxOverlayReady = false; notifyFxOverlayReady(false); });
     fxOverlayWindow.webContents.on('did-finish-load', () => { syncFxOverlayBounds(); pushFxOverlayState(); notifyFxOverlayReady(fxOverlayReady); });
