@@ -23,6 +23,7 @@
   var lastSig = '';
   var seedCount = 0;
   var seededAt = 0;
+  var seedLog = [];
 
   function resize() {
     var nextW = Math.max(1, window.innerWidth || 1);
@@ -67,9 +68,13 @@
     return sprites[key];
   }
 
-  function seed() {
+  function seed(why) {
     seedCount += 1;
     seededAt = Date.now();
+    try {
+      seedLog.push({ n: seedCount, why: String(why || 'apply'), at: seededAt });
+      if (seedLog.length > 12) seedLog.shift();
+    } catch (e) { /* ignore */ }
     parts = [];
     sprites = {};
     var want = state.enabled ? Math.max(0, Math.min(1200, Number(state.count) || 0)) : 0;
@@ -133,6 +138,7 @@
       sprites: Object.keys(sprites).length,
       seedCount: seedCount,
       seededAt: seededAt,
+      seedLog: seedLog.slice(),
       minDiameterPx: ds.length ? Math.min.apply(null, ds) : 0,
       maxDiameterPx: ds.length ? Math.max.apply(null, ds) : 0,
       canvas: canvas ? { w: canvas.width, h: canvas.height } : null
@@ -161,7 +167,7 @@
     var sig = sigOf(state);
     // 只有参数（启用/模式/数量/颜色/透明度）真正变化才重新撒点；否则保留现有粒子继续漂移。
     if (sig !== lastSig || !parts.length) {
-      seed();
+      seed(parts.length ? 'apply-sig' : 'apply-first');
       lastSig = sig;
     }
     if (!raf) raf = window.requestAnimationFrame(draw);
@@ -173,7 +179,7 @@
     } catch (e) { /* ignore */ }
   }
 
-  window.addEventListener('resize', function () { if (resize()) seed(); }, { passive: true });
+  window.addEventListener('resize', function () { if (resize()) seed('resize'); }, { passive: true });
   window.addEventListener('DOMContentLoaded', ready, { once: true });
   if (document.readyState !== 'loading') ready();
   try {
