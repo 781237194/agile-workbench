@@ -98,7 +98,7 @@
    */
   var FX_CONFIG = {
     particle: {
-      diameterPx: [2, 3],          // 单颗直径（CSS px，整数档）—— Owner：压到 2–3px
+      diameterPx: [1.5, 3],        // 单颗直径（CSS px）—— Owner 2026-11-22：星光 1.5–3px（不再像气泡）
       densityPerMpx: [150, 190],   // 每百万像素多少颗（1920×1080 ≈ 311–394 颗）
       opacity: [0.2, 0.45],        // 单颗不透明度上下限
       hueJitterDeg: 12,            // 色相抖动 ±12°
@@ -389,24 +389,39 @@
     return a + diff * t;
   }
 
-  /** 单颗 sprite：8×8 画布上的软圆点（缩到 2–3px 时边缘自然柔化） */
+  /** 单颗 sprite：16×16 预渲染的四芒星光（亮核 + 横/纵十字光芒，边缘锐利）；每档只建一次，不逐帧建 gradient。 */
   function buildSprite(rgb) {
-    var size = 8;
+    var size = 10;
     var c = D.createElement('canvas');
     c.width = size;
     c.height = size;
     var ctx = c.getContext('2d');
     if (!ctx) return c;
     var center = size / 2;
-    var radius = center - 0.5;
-    var grad = ctx.createRadialGradient(center, center, 0, center, center, radius);
     var text = rgb[0] + ',' + rgb[1] + ',' + rgb[2];
+    // 光芒用一次径向渐变做轮廓填充：中心亮、外缘透明，四个尖端自然收锐。
+    var grad = ctx.createRadialGradient(center, center, 0, center, center, center);
     grad.addColorStop(0, 'rgba(' + text + ',1)');
-    grad.addColorStop(0.55, 'rgba(' + text + ',0.85)');
+    grad.addColorStop(0.55, 'rgba(' + text + ',1)');
+    grad.addColorStop(0.8, 'rgba(' + text + ',0.6)');
     grad.addColorStop(1, 'rgba(' + text + ',0)');
     ctx.fillStyle = grad;
+    var outer = center - 0.5;
+    var inner = outer * 0.4;
     ctx.beginPath();
-    ctx.arc(center, center, radius, 0, Math.PI * 2);
+    for (var i = 0; i < 8; i += 1) {
+      var ang = -Math.PI / 2 + i * (Math.PI / 4);
+      var r = i % 2 === 0 ? outer : inner;
+      var x = center + Math.cos(ang) * r;
+      var y = center + Math.sin(ang) * r;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    // 亮核：3px 缩略时仍能读成「一点星光」，而不是灰点。
+    ctx.fillStyle = 'rgba(' + text + ',1)';
+    ctx.beginPath();
+    ctx.arc(center, center, 2.0, 0, Math.PI * 2);
     ctx.fill();
     return c;
   }
@@ -416,9 +431,9 @@
     var h = canvas.height;
     var cfg = FX_CONFIG.particle;
     var palette = buildPalette(themeConf, themeConf);
-    var rawD = cfg.diameterPx || [2, 3];
-    var dLo = Math.max(1, Math.round(Number(rawD[0]) || 2));
-    var dHi = Math.max(dLo, Math.round(Number(rawD[1]) || dLo));
+    var rawD = cfg.diameterPx || [1.5, 3];
+    var dLo = Math.max(1.5, Number(rawD[0]) || 1.5);
+    var dHi = Math.max(dLo, Number(rawD[1]) || dLo);
     S.palette = palette;
     S.buckets = palette.map(function () { return []; });
     var parts = [];
@@ -436,9 +451,12 @@
       var p = {
         x: col * cellW + jx * cellW,
         y: row * cellH + jy * cellH,
-        d: dLo + Math.floor(Math.random() * (dHi - dLo + 1)),
+        d: Math.round((dLo + Math.random() * (dHi - dLo)) * 2) / 2,
         vx: (Math.random() - 0.5) * 0.18,
         vy: (Math.random() - 0.5) * 0.18,
+        // 星光闪烁：每颗独立相位/频率，drawParticles 里用 0.6–1.0 的正弦 globalAlpha 调制。
+        ph: Math.random() * Math.PI * 2,
+        fq: 0.0011 + Math.random() * 0.0017,
         bucket: Math.floor(Math.random() * palette.length)
       };
       parts.push(p);
@@ -488,9 +506,12 @@
     var ctx = S.ctx;
     var canvas = S.canvas;
     if (!ctx || !canvas || !S.parts.length) return;
+    var nowMs = (W.performance && W.performance.now) ? W.performance.now() : Date.now();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.globalCompositeOperation = (S.cfg && S.cfg.composite) || 'source-over';
+    // 星光 sprite 缩到 1.5–3px：关掉插值保留十字光芒的锐利像素（不逐帧建 gradient）。
+    ctx.imageSmoothingEnabled = false;
     for (var bi = 0; bi < S.buckets.length; bi += 1) {
       var list = S.buckets[bi];
       if (!list.length) continue;
@@ -504,9 +525,13 @@
         if (p.x > canvas.width + 4) p.x = -4;
         if (p.y < -4) p.y = canvas.height + 4;
         if (p.y > canvas.height + 4) p.y = -4;
+        // 星光相位闪烁：0.6–1.0 正弦 globalAlpha（每颗相位/频率不同，整屏不呼吸同步）。
+        var flick = 0.8 + 0.2 * Math.sin(nowMs * (p.fq || 0.0016) + (p.ph || 0));
+        ctx.globalAlpha = flick;
         ctx.drawImage(sprite, p.x - p.d / 2, p.y - p.d / 2, p.d, p.d);
       }
     }
+    ctx.globalAlpha = 1;
   }
 
   /* ── 降级档位：off > prefers-reduced-motion / effectLevel=reduced > full ── */
