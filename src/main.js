@@ -6778,18 +6778,18 @@ ipcMain.handle('theme:metrics', async () => {
   async function readBootTokenDirAsyncRows(dir) {
     const rows = [];
     let names = [];
-    try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return rows; }
-    const CHUNK = 128;
+    try { names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.json')); } catch { return rows; }
+    const CHUNK = 256;
     for (let i = 0; i < names.length; i += CHUNK) {
       const part = names.slice(i, i + CHUNK);
-      for (const name of part) {
+      await Promise.all(part.map(async (name) => {
         try {
-          const row = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, ''));
+          const row = JSON.parse((await fs.promises.readFile(path.join(dir, name), 'utf8')).replace(/^\uFEFF/, ''));
           const normalized = bootTokenRowOf(name, row);
           if (normalized) rows.push(normalized);
         } catch { /* 跳过损坏令牌，不中断索引 */ }
-      }
-      // T-6626：分片让出主线程；每片 128 个文件的同步读取通常只有几十毫秒，不形成 >1s 长任务。
+      }));
+      // T-6626：分片让出主线程，5k+ 令牌的异步重建也不形成 >1s 长任务。
       await new Promise((resolve) => setImmediate(resolve));
     }
     return rows;
