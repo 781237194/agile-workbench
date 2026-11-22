@@ -92,16 +92,14 @@
     var hi = state.opacityRange[1] >= 0 ? Number(state.opacityRange[1]) : 0.55;
     for (var i = 0; i < want; i += 1) {
       var css = colorAt(i);
-      var col = parseColor(css);
       parts.push({
         x: Math.random() * W,
         y: Math.random() * H,
-        // 2026-11-22：星光直径 1.5–3px（原 2.4–7.6px 像气泡）
+        // 与壳内同一口径：核心直径 1.5–3px、十字光芒外延 2.4×。
         d: Math.round((1.5 + Math.random() * 1.5) * 2) / 2,
-        vx: (Math.random() - 0.5) * 0.20,
-        vy: -0.06 - Math.random() * 0.30,
-        // 星光在 1.5–3px 上有效亮面比旧圆点小，按 1.5 倍补偿单颗不透明度（上限 0.9）。
-        a: Math.min(1, col.a * 2.5 * (lo + Math.random() * Math.max(0, hi - lo))),
+        // 运动与壳内一致（随机漂移，不统一向上）；亮度只由全局闪烁决定（与壳内 sprite 满 alpha 对齐）。
+        vx: (Math.random() - 0.5) * 0.18,
+        vy: (Math.random() - 0.5) * 0.18,
         ph: Math.random() * Math.PI * 2,
         fq: 0.0011 + Math.random() * 0.0017,
         c: css
@@ -114,8 +112,8 @@
     if (!ctx || !canvas) return;
     ctx.clearRect(0, 0, W, H);
     if (!state.enabled || state.mode !== 'full') return;
-    // 与壳内同口径：关闭插值，让 1.5–3px 四芒星的十字尖端保持锐利。
-    ctx.imageSmoothingEnabled = false;
+    // 与壳内同口径：加色混合（lighter）+ 默认平滑，避免小 sprite 采样出现块状伪影；亮度只做 0.6–1.0 相位闪烁。
+    ctx.globalCompositeOperation = 'lighter';
     var nowMs = performance.now();
     for (var i = 0; i < parts.length; i += 1) {
       var p = parts[i];
@@ -125,13 +123,14 @@
       if (p.x < -6) p.x = W + 6;
       if (p.x > W + 6) p.x = -6;
       var sprite = spriteAt(p.c);
-      // 逐颗相位闪烁：0.6–1.0 正弦 globalAlpha（与壳内同一口径）
-      ctx.globalAlpha = p.a * (0.8 + 0.2 * Math.sin(nowMs * p.fq + p.ph));
-      // 与壳内同口径：核心直径 1.5–3px，十字光芒外延 2.4×（星光可辨）。
-      var drawD = p.d * 2.4;
+      // 逐颗相位闪烁：0.6–1.0 正弦 globalAlpha（与壳内同一公式，不再乘颜色 alpha）。
+      ctx.globalAlpha = 0.8 + 0.2 * Math.sin(nowMs * p.fq + p.ph);
+      // 与壳内完全同一几何：sprite 直接按核心直径 d（1.5–3px）绘制，不多倍放大，避免覆盖窗看起来比开机层更「胖/像气泡」。
+      var drawD = p.d;
       ctx.drawImage(sprite, p.x - drawD / 2, p.y - drawD / 2, drawD, drawD);
     }
     ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
     raf = window.requestAnimationFrame(draw);
   }
 
@@ -158,7 +157,7 @@
     state = {
       enabled: next.enabled === true,
       count: Number(next.count) || 0,
-      colors: Array.isArray(next.colors) ? next.colors.slice(0, 8).map(String) : [],
+      colors: Array.isArray(next.colors) ? next.colors.slice(0, 48).map(String) : [],
       opacityRange: Array.isArray(next.opacityRange) ? next.opacityRange.slice(0, 2).map(Number) : [0.15, 0.55],
       mode: String(next.mode || 'full')
     };

@@ -72,14 +72,11 @@ function saveShot(b64) { fs.mkdirSync(OUT, { recursive: true }); const p = path.
         ovReady = (await ov.eval('document.readyState === "complete" && Boolean(document.getElementById("fx-overlay-canvas")) && (typeof window.__fxOverlayForce === "function" || typeof window.fxOverlay === "object")')) === true;
         if (!ovReady) await sleep(500);
       }
-      const ovProbe = await ov.eval('({ ready: document.readyState, canvas: Boolean(document.getElementById("fx-overlay-canvas")), force: typeof window.__fxOverlayForce, fx: typeof window.fxOverlay, href: location.href })');
-      console.log('OVPROBE', JSON.stringify(ovProbe));
-      const ovProbe2 = await ov.eval('({ a: 1, b: "x" })');
-      console.log('OVPROBE2', JSON.stringify(ovProbe2));
-      const ovProbe3 = await ov.eval('(() => { const st = { enabled: true, count: 12, colors: ["rgba(120,200,255,0.45)"], opacityRange: [0.25, 0.5], mode: "full" }; return window.__fxOverlayForce(st); })()');
-      console.log('OVPROBE3', JSON.stringify(ovProbe3).slice(0, 300));
       // 诊断取数口强制一帧 + 单独取 dataURL（同一次 evaluate 里取大字符串会被 CDP 序列化成空对象）。
-      const ovForce = await ov.eval('(() => { const st = { enabled: true, count: 420, colors: ["rgba(120,200,255,0.45)","rgba(255,200,120,0.4)","rgba(180,255,220,0.42)"], opacityRange: [0.25, 0.5], mode: "full" }; if (typeof window.__fxOverlayForce === "function") return window.__fxOverlayForce(st); try { window.fxOverlay.onState(st); } catch (e) {} return window.__fxOverlayStats ? window.__fxOverlayStats() : null; })()');
+      // 用壳内真实的 overlayState（colors/count/opacityRange）驱动覆盖窗，保证「覆盖窗 = 连接前壳内」同参数对照。
+      const shellOverlay = await shell.eval('window.AWB_FX && typeof window.AWB_FX.overlayState === "function" ? window.AWB_FX.overlayState() : null');
+      const parityState = { enabled: true, count: Number(shellOverlay && shellOverlay.count) || 0, colors: (shellOverlay && shellOverlay.colors) || [], opacityRange: (shellOverlay && shellOverlay.opacityRange) || [0.2, 0.45], mode: 'full' };
+      const ovForce = await ov.eval(`(() => { const st = ${JSON.stringify(parityState)}; if (typeof window.__fxOverlayForce === "function") return window.__fxOverlayForce(st); try { window.fxOverlay.onState(st); } catch (e) {} return window.__fxOverlayStats ? window.__fxOverlayStats() : null; })()`);
       await sleep(40);
       const ovUrl = await ov.eval('(() => { const c = document.getElementById("fx-overlay-canvas"); return c ? c.toDataURL("image/png") : null; })()');
       const ovSnap = { stats: ovForce, url: typeof ovUrl === 'string' ? ovUrl : null, w: 1647, h: 1070 };

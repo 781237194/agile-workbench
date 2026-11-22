@@ -510,8 +510,6 @@
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.globalCompositeOperation = (S.cfg && S.cfg.composite) || 'source-over';
-    // 星光 sprite 缩到 1.5–3px：关掉插值保留十字光芒的锐利像素（不逐帧建 gradient）。
-    ctx.imageSmoothingEnabled = false;
     for (var bi = 0; bi < S.buckets.length; bi += 1) {
       var list = S.buckets[bi];
       if (!list.length) continue;
@@ -872,10 +870,12 @@
         if (S.canvas) {
           clearCanvas();
           S.canvas.setAttribute('data-fx-particles', '0');
+          try { S.canvas.style.visibility = 'hidden'; } catch (e) { /* ignore */ }
         }
         stopLoop();
       } else {
         startLoop();
+        if (S.canvas) { try { S.canvas.style.visibility = ''; } catch (e) { /* ignore */ } }
       }
     }
   }
@@ -970,6 +970,11 @@
     if (overlayOwns && S.canvas) {
       clearCanvas();
       S.canvas.setAttribute('data-fx-particles', '0');
+      // 覆盖窗接管时把壳内 canvas 隐藏并重置 backing，避免上层 UI 的透明区域露出旧的/损坏的 GPU 纹理（左上角马赛克）。
+      try { S.canvas.style.visibility = 'hidden'; } catch (e) { /* ignore */ }
+      try { if (S.canvas.width) S.canvas.width = S.canvas.width; } catch (e) { /* ignore */ }
+    } else if (S.canvas) {
+      try { S.canvas.style.visibility = ''; } catch (e) { /* ignore */ }
     }
     if (S.mode === 'off' || overlayOwns) stopLoop();
     else if (!S.paused) startLoop();
@@ -997,7 +1002,9 @@
     return {
       mode: S.mode,
       count: S.parts.length,
-      colors: Array.isArray(cfg.paletteSample) ? cfg.paletteSample.slice(0, 6).map(String) : [],
+      colors: Array.isArray(S.palette) && S.palette.length
+        ? S.palette.map(function (item) { return item.css; }).slice(0, 48)
+        : (Array.isArray(cfg.paletteSample) ? cfg.paletteSample.slice(0, 24).map(String) : []),
       opacityRange: Array.isArray(cfg.opacityRange) ? cfg.opacityRange.slice(0, 2) : [0.15, 0.55],
       degraded: Boolean(S.degraded.particles),
       paused: Boolean(S.paused),
