@@ -2,11 +2,12 @@
 
 ## 2.1.19（2026-11-22）
 
-### V2 收尾（原 2.1.18 因缺陷池回归被叫停回滚，本版补齐重发）
+### V2 收尾正式版（2.1.18 因缺陷池回归被叫停回滚）
 
-- **星光粒子**：fx-layer/fx-overlay 共用 10×10 预渲染四芒星 sprite（亮核+横/纵十字光芒、边缘锐利），核心直径 1.5–3px、光芒外延 2.4×，逐颗相位闪烁（0.6–1.0 正弦 globalAlpha），imageSmoothing=false；不再画软圆点气泡，sprite 每档只预渲染一次（fps 167–170、长任务不回归）。
-- **缺陷池修复**：workflow 摘要补 type（bug/scenario-bug 不再被丢）、打开池子清骨架并显式空态、摘要模式只显未闭环缺陷；实测需求池 137 行/缺陷池 2 行、计数=行数、无「加载中…」。
-- **升级/卸载覆盖复核**：包 760 条/关键条目缺 0/用户数据泄漏 0；TestUpgradeApply ok=true/verifiedFiles=246（含 src/briefing-worker.cjs）；沙盘卸载 verdict=CLEAN、安装目录整删。
+- **星光粒子统一实现**：新增 src/renderer/fx-sprite.js 唯一 sprite（11×11 四芒星、亮核+十字光芒），壳层与覆盖窗共用；两层 alphaGrid 逐像素一致（10/10）；粒子直径放大到 5–8px；闪烁/48 色/随机漂移/lighter 与连接前一致。
+- **粒子全体瞬移修复**：renderDsh 仅在线态变化才推状态、notifyOverlay 同参数去重、fx-overlay 仅签名变化才 seed（resize 仅尺寸变化才 seed）；seedCount 恒 1（12/12），新增 seedLog 诊断。
+- **缺陷池全量**：撤销未闭环过滤，368 条 bug/scenario-bug 全进池（状态徽标/类型筛选），窗口化（数据 368/DOM 31），打开约 394ms；需求池 137 行。
+- **升级/卸载覆盖复核**：包 762 条/关键条目缺 0/泄漏 0；TestUpgradeApply ok=true；卸载沙盘 verdict=CLEAN。
 
 ## 2.1.16（2026-11-22）
 
