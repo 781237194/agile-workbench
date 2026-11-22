@@ -441,13 +441,17 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
       else if (action === 'leave-fullscreen') mainWindow.setFullScreen(false);
       else if (action === 'minimize') mainWindow.minimize();
       else if (action === 'restore') mainWindow.restore();
+      else if (action === 'focus') mainWindow.focus();
+      else if (action === 'blur') mainWindow.blur();
       else if (action === 'setBounds') mainWindow.setBounds({
         x: Number(payload.x), y: Number(payload.y),
         width: Math.max(200, Number(payload.width) || 800), height: Math.max(200, Number(payload.height) || 600),
       });
       else return { ok: false, code: 'BAD_ACTION' };
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      return { ok: true, action, mainBounds: mainWindow.getBounds() };
+      const waitRaw = Number(payload && payload.waitMs);
+      const waitMs = Number.isFinite(waitRaw) ? Math.max(0, Math.min(2000, waitRaw)) : 350;
+      if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+      return { ok: true, action, mainBounds: mainWindow.getBounds(), motionSuppressed: fxOverlayMotionSuppressed, motionTimerPending: Boolean(fxOverlayBoundsTimer) };
     } catch (error) {
       return { ok: false, code: 'CONTROL_FAILED', message: String((error && error.message) || error).slice(0, 160) };
     }
@@ -481,6 +485,8 @@ const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_
       mainBounds, overlayBounds,
       overlayVisible: Boolean(fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayWindow.isVisible()),
       overlayReady: Boolean(fxOverlayReady),
+      overlayMotionSuppressed: Boolean(fxOverlayMotionSuppressed),
+      overlayBoundsTimerPending: Boolean(fxOverlayBoundsTimer),
       dpr: display ? Number(display.scaleFactor) || 1 : null,
       displayId: display ? Number(display.id) || 0 : null,
       displayBounds: display ? display.bounds : null,
@@ -2980,6 +2986,8 @@ let fxOverlayWindow = null;
 let fxOverlayState = { enabled: false, count: 0, colors: [], opacityRange: [0.15, 0.55], mode: 'full' };
 let fxOverlayReady = false;
 let fxOverlayBoundsTimer = null;
+let fxOverlayMotionSuppressed = false;
+const FX_OVERLAY_MOTION_DEBOUNCE_MS = 150;
 let teamBoardWindow = null;
 let teamBoardProjectId = null;
 let teamBoardProjectPath = null;
@@ -14372,7 +14380,7 @@ function syncFxOverlayBounds() {
 function pushFxOverlayState() {
   if (!fxOverlayWindow || fxOverlayWindow.isDestroyed()) return;
   const visible = Boolean(fxOverlayState.enabled && mainWindow && !mainWindow.isDestroyed()
-    && mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused());
+    && mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused() && !fxOverlayMotionSuppressed);
   try { fxOverlayWindow.webContents.send('fx:overlay-state', fxOverlayState); } catch { /* ignore */ }
   if (visible) {
     syncFxOverlayBounds();
@@ -14415,11 +14423,24 @@ function ensureFxOverlayWindow() {
     return null;
   }
 }
+function scheduleFxOverlayAfterMotion() {
+  // T-拖动闪烁：拖动/缩放期间主窗每帧 move/resize，逐帧 setBounds 会让透明覆盖窗不断重绘→闪烁。
+  // 拖动一开始就隐藏覆盖窗，连续事件只重置 debounce；停稳 150ms 后一次性对齐 bounds 再显示。
+  fxOverlayMotionSuppressed = true;
+  try { if (fxOverlayWindow && !fxOverlayWindow.isDestroyed() && fxOverlayWindow.isVisible()) fxOverlayWindow.hide(); } catch { /* ignore */ }
+  if (fxOverlayBoundsTimer) clearTimeout(fxOverlayBoundsTimer);
+  fxOverlayBoundsTimer = setTimeout(() => {
+    fxOverlayBoundsTimer = null;
+    fxOverlayMotionSuppressed = false;
+    try { syncFxOverlayBounds(); } catch { /* ignore */ }
+    try { pushFxOverlayState(); } catch { /* ignore */ }
+  }, FX_OVERLAY_MOTION_DEBOUNCE_MS);
+}
 function bindFxOverlayToMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const ensure = () => { try { ensureFxOverlayWindow(); } catch { /* ignore */ } };
-  mainWindow.on('resize', () => { syncFxOverlayBounds(); if (fxOverlayBoundsTimer) clearTimeout(fxOverlayBoundsTimer); fxOverlayBoundsTimer = setTimeout(syncFxOverlayBounds, 30); });
-  mainWindow.on('move', () => { syncFxOverlayBounds(); if (fxOverlayBoundsTimer) clearTimeout(fxOverlayBoundsTimer); fxOverlayBoundsTimer = setTimeout(syncFxOverlayBounds, 30); });
+  mainWindow.on('resize', () => { scheduleFxOverlayAfterMotion(); });
+  mainWindow.on('move', () => { scheduleFxOverlayAfterMotion(); });
   mainWindow.on('show', () => { ensure(); pushFxOverlayState(); });
   mainWindow.on('hide', () => { pushFxOverlayState(); });
   mainWindow.on('focus', () => { ensure(); pushFxOverlayState(); });

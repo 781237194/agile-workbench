@@ -123,7 +123,29 @@ const realBefore = { team: sha(REAL_TEAM_JSON), workbench: sha(REAL_WORKBENCH) }
       await sleep(500);
       const restoredVisible = await inst.cdp.evaluate('window.__fxOverlayProbe()');
       check('R2-8 minimized 时覆盖窗隐藏、restore 后恢复', minHidden && Boolean(restoredVisible && restoredVisible.overlayVisible === true), { minimized: minStep.probe && { visible: minStep.probe.overlayVisible, bounds: minStep.probe.mainBounds }, restored: restoredVisible && { visible: restoredVisible.overlayVisible, bounds: restoredVisible.mainBounds }, restoreControl: restoreVisibleStep.control, leaveFull: leaveFull.control });
-      report.case = { before, syncState, blurState, resumeNow, afterCanvas, fallback, fallbackCanvas, probe, maxStep, restoreStep, resizeStep, resizeStep2, fullStep, leaveFull, minStep, restoredVisible };
+      // T-拖动闪烁：move/resize 期间覆盖窗必须隐藏，停稳 150ms 后一次性对齐并显示。
+      const fastControl = async (payload) => inst.cdp.evaluate('window.workbench.fxOverlayControl(' + JSON.stringify({ ...payload, waitMs: 0 }) + ')');
+      const motionStart = await fastControl({ action: 'setBounds', x: 240, y: 200, width: 1180, height: 740 });
+      await sleep(40);
+      const duringMotion = await inst.cdp.evaluate('window.__fxOverlayProbe()');
+      await sleep(320);
+      await fastControl({ action: 'focus' });
+      await sleep(120);
+      const afterMotion = await inst.cdp.evaluate('window.__fxOverlayProbe()');
+      check('R2-9 move/resize 期间 overlayHidden（不逐帧重绘）', Boolean(motionStart && motionStart.ok === true && motionStart.motionSuppressed === true && duringMotion && duringMotion.overlayMotionSuppressed === true && duringMotion.overlayVisible === false && afterMotion && afterMotion.overlayMotionSuppressed === false && afterMotion.overlayVisible === true && boundsFollow(afterMotion)), { start: motionStart, during: duringMotion && { suppressed: duringMotion.overlayMotionSuppressed, visible: duringMotion.overlayVisible, main: duringMotion.mainBounds }, after: afterMotion && { suppressed: afterMotion.overlayMotionSuppressed, visible: afterMotion.overlayVisible, main: afterMotion.mainBounds, overlay: afterMotion.overlayBounds } });
+      let duringRapid = null;
+      for (let i = 0; i < 4; i += 1) {
+        await fastControl({ action: 'setBounds', x: 260 + i * 18, y: 220 + i * 12, width: 1120 + i * 10, height: 700 + i * 8 });
+        await sleep(35);
+        duringRapid = await inst.cdp.evaluate('window.__fxOverlayProbe()');
+        if (!duringRapid || duringRapid.overlayMotionSuppressed !== true || duringRapid.overlayVisible !== false) break;
+      }
+      await sleep(320);
+      await fastControl({ action: 'focus' });
+      await sleep(120);
+      const afterRapid = await inst.cdp.evaluate('window.__fxOverlayProbe()');
+      check('R2-10 连续拖动多次仍保持隐藏，停稳后一次对齐+显示', Boolean(duringRapid && duringRapid.overlayMotionSuppressed === true && duringRapid.overlayVisible === false && afterRapid && afterRapid.overlayMotionSuppressed === false && afterRapid.overlayVisible === true && boundsFollow(afterRapid)), { duringRapid: duringRapid && { suppressed: duringRapid.overlayMotionSuppressed, visible: duringRapid.overlayVisible, main: duringRapid.mainBounds }, afterRapid: afterRapid && { suppressed: afterRapid.overlayMotionSuppressed, visible: afterRapid.overlayVisible, main: afterRapid.mainBounds, overlay: afterRapid.overlayBounds } });
+      report.case = { before, syncState, blurState, resumeNow, afterCanvas, fallback, fallbackCanvas, probe, maxStep, restoreStep, resizeStep, resizeStep2, fullStep, leaveFull, minStep, restoredVisible, motionStart, duringMotion, afterMotion, duringRapid, afterRapid };
     } finally { try { inst.cdp.send('Browser.close', {}, 3000).catch(() => {}); } catch { /* ignore */ } await sleep(800); try { inst.ws.close(); } catch { /* ignore */ } try { child.kill(); } catch { /* ignore */ } await sleep(400); try { if (child && child.pid && child.exitCode === null) spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ } }
   }
   report.summary = { pass: rows.filter((r) => r.ok).length, total: rows.length };
