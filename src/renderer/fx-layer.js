@@ -1562,6 +1562,8 @@
       W.__fxOverlayProbe = function () {
         return Promise.resolve(W.workbench.fxOverlayProbe()).then(function (main) {
           var ev = layerEvidence();
+          var shellSample = canvasSample(S.canvas);
+          var overlaySample = main && main.overlayCanvas ? main.overlayCanvas : null;
           return {
             ok: true,
             at: Date.now(),
@@ -1574,8 +1576,11 @@
               parts: S.parts.length, buckets: S.buckets.length, lastDraw: S.lastDraw || 0, raf: S.raf || 0,
               overlayOwns: overlayOwnsShell(), mode: S.mode,
             },
-            shellCanvas: canvasSample(S.canvas),
-            overlayCanvas: main && main.overlayCanvas ? main.overlayCanvas : null,
+            shellCanvas: shellSample,
+            overlayCanvas: overlaySample,
+            // T-810d AC 命名：同时给 shellCanvasSample / overlayCanvasSample 两个别名，夹具可按字段名直接取。
+            shellCanvasSample: shellSample,
+            overlayCanvasSample: overlaySample,
           };
         });
       };

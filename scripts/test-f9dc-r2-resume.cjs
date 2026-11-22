@@ -95,7 +95,8 @@ const realBefore = { team: sha(REAL_TEAM_JSON), workbench: sha(REAL_WORKBENCH) }
         && Number(probe.mainBounds.width) === Number(probe.overlayBounds.width)
         && Number(probe.dpr) > 0 && probe.displayId != null
         && probe.webContentsMetrics && probe.overlayRssMB != null
-        && probe.shellCanvas && probe.shellCanvas.nonZero > 0 && probe.overlayCanvas && probe.overlayCanvas.nonZero > 0), probe && { mainBounds: probe.mainBounds, overlayBounds: probe.overlayBounds, overlayVisible: probe.overlayVisible, dpr: probe.dpr, displayId: probe.displayId, shell: probe.shell, shellCanvas: probe.shellCanvas, overlayCanvas: probe.overlayCanvas, overlayRssMB: probe.overlayRssMB, wc: probe.webContentsMetrics, missing: probe.__missing });
+        && probe.shellCanvas && probe.shellCanvas.nonZero > 0 && probe.overlayCanvas && probe.overlayCanvas.nonZero > 0
+        && probe.shellCanvasSample && probe.shellCanvasSample.nonZero > 0 && probe.overlayCanvasSample && probe.overlayCanvasSample.nonZero > 0), probe && { mainBounds: probe.mainBounds, overlayBounds: probe.overlayBounds, overlayVisible: probe.overlayVisible, dpr: probe.dpr, displayId: probe.displayId, shell: probe.shell, shellCanvas: probe.shellCanvas, overlayCanvas: probe.overlayCanvas, shellCanvasSample: probe.shellCanvasSample, overlayCanvasSample: probe.overlayCanvasSample, overlayRssMB: probe.overlayRssMB, wc: probe.webContentsMetrics, missing: probe.__missing });
       // T-810d：bounds 覆盖 resize / maximize / restore / fullscreen / minimize（test-only IPC）。
       const control = async (payload) => {
         const r = await inst.cdp.evaluate('window.workbench.fxOverlayControl(' + JSON.stringify(payload) + ')');
