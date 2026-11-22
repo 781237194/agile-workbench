@@ -13063,6 +13063,10 @@ const poolUi = {
   virtual: null,
   virtualRows: [],
   virtualRaf: false,
+  // T-05f4：缺陷池也可有数百条历史行，同样做窗口化，避免一次创建 368 个 DOM 行拖慢打开。
+  defVirtual: null,
+  defVirtualRows: [],
+  defVirtualRaf: false,
   // R-c72a AC2（批3）：按项目预取的需求行缓存——切项目时先同步换列表，不被 selectProject 的工作区激活拖住。
   byProject: {},
   // 取数序号：并发 refresh 时只让最后一次写回，避免 A/B 两个项目的返回交错覆盖。
@@ -13357,11 +13361,8 @@ function applyPoolFilters() {
   const state = { status: poolUi.filter, kind: poolUi.kindFilter, query: poolUi.query };
   const visible = POOL_CORE.poolVisibleRows(rows, state);
   const visibleIds = new Set(visible.map((row) => row.id));
-  // 缺陷池行数少，沿用 hidden 切换；需求池走虚拟化（按筛选结果重渲窗口）。
-  mask.querySelectorAll('#pool-def-list .pool-row').forEach((node) => {
-    const on = visibleIds.has(node.dataset.id);
-    if (node.hidden === on) node.hidden = !on;
-  });
+  // 缺陷池行数可能数百：统一走窗口化/小列表渲染，筛选切换不逐行 hidden。
+  poolApplyDefVisible(visible.filter((row) => row && row.kind !== 'requirement'));
   poolApplyReqVisible(visible.filter((row) => row && row.kind === 'requirement'));
   const counts = POOL_CORE.poolFilterCounts(rows, state);
   const statusBox = $('#pool-filters');
@@ -13446,9 +13447,9 @@ const POOL_VIRTUAL_BUFFER = 10;
 function poolReqRows() {
   return (Array.isArray(poolUi.rows) ? poolUi.rows : []).filter((row) => row && row.kind === 'requirement');
 }
-function poolRowHeightPx() {
-  const el = $('#pool-req-list');
-  const raw = el ? parseInt(el.getAttribute('data-row-height') || '', 10) : NaN;
+function poolRowHeightPx(el = $('#pool-req-list')) {
+  const node = el || $('#pool-req-list');
+  const raw = node ? parseInt(node.getAttribute('data-row-height') || '', 10) : NaN;
   return Number.isFinite(raw) && raw > 0 ? raw : POOL_VIRTUAL_ROW_H;
 }
 function poolVirtualBindScroll() {
@@ -13507,6 +13508,69 @@ function poolApplyReqVisible(visibleReq) {
 function renderPoolReqList() {
   poolApplyReqVisible(poolReqRows());
 }
+/* T-05f4：缺陷池窗口化——历史 bug 368 条，不能一次建 368 个行节点拖慢打开。 */
+function poolDefRows() {
+  return (Array.isArray(poolUi.rows) ? poolUi.rows : []).filter((row) => row && row.kind !== 'requirement');
+}
+function poolDefVirtualBindScroll() {
+  const el = $('#pool-def-list');
+  if (!el || el.dataset.defVirtualBound === '1') return;
+  el.dataset.defVirtualBound = '1';
+  el.addEventListener('scroll', () => {
+    if (!poolUi.defVirtual || poolUi.defVirtualRaf) return;
+    poolUi.defVirtualRaf = true;
+    const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16));
+    raf(() => { poolUi.defVirtualRaf = false; poolDefVirtualPaint(); });
+  }, { passive: true });
+}
+function poolDefVirtualPaint() {
+  const el = $('#pool-def-list');
+  const rows = poolUi.defVirtualRows || [];
+  if (!el) return;
+  if (!rows.length) {
+    poolUi.defVirtual = null;
+    delete el.dataset.defVirtual;
+    el.innerHTML = '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
+    return;
+  }
+  const rowH = poolRowHeightPx(el);
+  if (el.style.getPropertyValue('--pool-row-h') !== rowH + 'px') el.style.setProperty('--pool-row-h', rowH + 'px');
+  const viewport = Math.max(el.clientHeight || 0, rowH * 4);
+  const top = Math.max(0, el.scrollTop || 0);
+  const first = Math.max(0, Math.floor(top / rowH) - POOL_VIRTUAL_BUFFER);
+  const last = Math.min(rows.length, Math.ceil((top + viewport) / rowH) + POOL_VIRTUAL_BUFFER);
+  const lead = first * rowH;
+  const tail = Math.max(0, (rows.length - last) * rowH);
+  const leadHtml = lead > 0 ? '<div class="pool-virtual-gap" style="height:' + lead + 'px" aria-hidden="true"></div>' : '';
+  const tailHtml = tail > 0 ? '<div class="pool-virtual-gap" style="height:' + tail + 'px" aria-hidden="true"></div>' : '';
+  el.innerHTML = leadHtml + rows.slice(first, last).map(poolRowMarkup).join('') + tailHtml;
+  poolUi.defVirtual = { first, last, total: rows.length, rowH };
+  el.dataset.defVirtual = JSON.stringify(poolUi.defVirtual);
+  poolDefVirtualBindScroll();
+}
+function poolApplyDefVisible(visibleDef) {
+  const el = $('#pool-def-list');
+  const rows = Array.isArray(visibleDef) ? visibleDef : [];
+  if (!el) return;
+  if (!el.getAttribute('data-row-height')) el.setAttribute('data-row-height', String(POOL_VIRTUAL_ROW_H));
+  if (rows.length >= POOL_VIRTUAL_MIN_ROWS) {
+    poolUi.defVirtualRows = rows;
+    poolDefVirtualPaint();
+    return;
+  }
+  poolUi.defVirtual = null;
+  poolUi.defVirtualRows = rows;
+  delete el.dataset.defVirtual;
+  if (!rows.length) {
+    el.innerHTML = '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
+    return;
+  }
+  if (R4GateApi && typeof R4GateApi.reconcileReplaceMarkup === 'function') {
+    R4GateApi.reconcileReplaceMarkup(el, rows, { keyOf: (row) => String(row.id || ''), markup: poolRowMarkup });
+  } else {
+    el.innerHTML = rows.map(poolRowMarkup).join('');
+  }
+}
 function renderPool() {
   poolPanelEnsure();
   if (!POOL_CORE) {
@@ -13534,15 +13598,8 @@ function renderPool() {
     const def = rows.filter((row) => row.kind !== 'requirement');
     if (reqList) renderPoolReqList();
     if (defList) {
-      // T-d365：空缺陷池要显式写空态；差量入口对空数组只删 keyed 节点，不会写空态。
-      if (!def.length) {
-        defList.innerHTML = '<p class="pool-empty">缺陷池暂无（评审通过的缺陷自动入池）</p>';
-      // R5（T-20261118-182736-ac7f）：缺陷列表改用行级差量（同 key 复用节点，不整块 innerHTML 重建）。
-      } else if (R4GateApi && typeof R4GateApi.reconcileReplaceMarkup === 'function') {
-        R4GateApi.reconcileReplaceMarkup(defList, def, { keyOf: (row) => String(row.id || ''), markup: poolRowMarkup });
-      } else {
-        defList.innerHTML = def.map(poolRowMarkup).join('');
-      }
+      // T-05f4：≥200 条缺陷走窗口化，其余走原行级差量；空数据仍显式空态。
+      poolApplyDefVisible(def);
     }
     poolUi.signature = signature;
     // 详情打开时数据变了：按 data-id 重渲染，不继续显示旧数据（并发边界）。
@@ -13721,6 +13778,13 @@ async function togglePool(force) {
   }
   r5Skeleton('#pool-req-list', '需求池加载中…', 5);
   r5Skeleton('#pool-def-list', '缺陷池加载中…', 5);
+  // T-05f4：启动时已后台预取的池行先同步出列表（打开不等 workflowState），再后台刷新。
+  const cachedPid = String(((activeProject() || {}).id) || '');
+  const cachedRows = cachedPid ? poolUi.byProject[cachedPid] : null;
+  if (Array.isArray(cachedRows)) {
+    poolUi.rows = cachedRows;
+    renderPool();
+  }
   await refreshPool();
   void prefetchPoolRows(); // R-c72a AC2：预取各项目需求行，切项目时先同步换列表
 }
@@ -18899,3 +18963,17 @@ if (document.readyState === 'loading') {
   bindDecisionAutoRefresh();
   bindAutoAcceptRefresh();
 }
+
+// T-05f4：池子数据后台预取（只读、失败忽略）；打开池子时先同步出缓存，避免等 workflowState。
+function schedulePoolPrefetch() {
+  let tries = 0;
+  const tick = () => {
+    try {
+      const projects = Array.isArray(state && state.projects) ? state.projects : [];
+      if (!projects.length && tries < 6) { tries += 1; setTimeout(tick, 1000); return; }
+      if (projects.length) void prefetchPoolRows();
+    } catch { /* 预取失败不影响手动打开 */ }
+  };
+  setTimeout(tick, 300);
+}
+try { schedulePoolPrefetch(); } catch { /* ignore */ }

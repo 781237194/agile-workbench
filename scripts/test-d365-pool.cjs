@@ -60,9 +60,29 @@ const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.
     await cdp.send('Runtime.enable');
     await cdp.send('Page.enable').catch(() => {});
     for (let i = 0; i < 100; i += 1) { if ((await cdp.eval('Boolean(window.workbench && document.querySelector("#btn-pool"))')) === true) break; await sleep(300); }
-    await sleep(800);
-    const clicked = await cdp.eval('(() => { const b = document.querySelector("#btn-pool"); if (!b) return false; b.click(); return true; })()');
-    await sleep(2500);
+    await sleep(3000);
+    const openTiming = await cdp.eval(`(async () => {
+      const t0 = performance.now();
+      const b = document.querySelector('#btn-pool');
+      if (!b) return { clicked: false, ms: -1 };
+      b.click();
+      for (let i = 0; i < 120; i += 1) {
+        await new Promise((r) => setTimeout(r, 25));
+        const n = document.querySelector('#pool-def-n');
+        const list = document.querySelector('#pool-def-list');
+        if (n && Number(n.textContent) === 0 && list && list.querySelector('.pool-empty')) {
+          return { clicked: true, ms: Math.round((performance.now() - t0) * 10) / 10, count: 0, rows: 0, virtual: '' };
+        }
+        if (n && Number(n.textContent) > 100 && list && list.querySelectorAll('.pool-row').length > 0) {
+          return { clicked: true, ms: Math.round((performance.now() - t0) * 10) / 10, count: Number(n.textContent), rows: list.querySelectorAll('.pool-row').length, virtual: list.dataset.defVirtual || '' };
+        }
+      }
+      const n = document.querySelector('#pool-def-n');
+      const list = document.querySelector('#pool-def-list');
+      return { clicked: true, ms: Math.round((performance.now() - t0) * 10) / 10, count: n ? Number(n.textContent) : -1, rows: list ? list.querySelectorAll('.pool-row').length : -1, timedOut: true };
+    })()`);
+    const clicked = Boolean(openTiming && openTiming.clicked);
+    await sleep(200);
     const wfProbe = await cdp.eval(`(async () => {
       try {
         const wf = await window.workbench.workflowState({});
@@ -75,6 +95,26 @@ const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.
         return { ok: Boolean(wf && wf.ok !== false), project: wf && wf.project, projectPath: wf && wf.projectPath, teamMode: wf && wf.teamMode, truthSource: wf && wf.truthSource, tasksTotal: wf && wf.tasksTotal, tasksSummary: wf && wf.tasksSummary, counts: wf && wf.counts, fullTasks: fullTasks.length, fullCounts: full && full.counts, keys: wf ? Object.keys(wf).slice(0, 16) : null, tasks: tasks.length, types, openBugIds, sample: tasks.slice(0, 3).map((t) => ({ id: t.id, type: t.type, status: t.status })) };
       } catch (e) { return { error: String((e && e.message) || e) }; }
     })()`);
+    const filterProbe = await cdp.eval(`(async () => {
+      const defN = document.querySelector('#pool-def-n');
+      if (defN && Number(defN.textContent) === 0 && document.querySelector('#pool-def-list .pool-empty')) {
+        return { ok: true, empty: true, count: 0, virtualTotal: 0, rows: 0 };
+      }
+      const defect = document.querySelector('#pool-kinds .pool-kind-chip[data-kind-filter="defect"]');
+      if (!defect) return { ok: false, reason: 'no-kind-filter' };
+      defect.click();
+      await new Promise((r) => setTimeout(r, 250));
+      const list = document.querySelector('#pool-def-list');
+      const n = document.querySelector('#pool-def-n');
+      const virtual = list && list.dataset.defVirtual ? JSON.parse(list.dataset.defVirtual) : null;
+      const chips = Array.from(document.querySelectorAll('#pool-kinds .pool-kind-chip')).map((b) => [b.dataset.kindFilter, b.querySelector('i') ? b.querySelector('i').textContent : '', b.classList.contains('on')]);
+      const foot = document.querySelector('#pool-foot') ? document.querySelector('#pool-foot').textContent : '';
+      const out = { ok: Boolean(n && Number(n.textContent) === 368 && virtual && Number(virtual.total) === 368 && list && list.querySelectorAll('.pool-row').length > 0), count: n ? Number(n.textContent) : -1, virtualTotal: virtual ? virtual.total : null, rows: list ? list.querySelectorAll('.pool-row').length : -1, chips, foot };
+      const all = document.querySelector('#pool-kinds .pool-kind-chip[data-kind-filter="all"]');
+      if (all) all.click();
+      await new Promise((r) => setTimeout(r, 150));
+      return out;
+    })()`);
     const state = await cdp.eval(`(() => {
       const q = (sel) => document.querySelector(sel);
       const def = q('#pool-def-list');
@@ -82,6 +122,8 @@ const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.
       return {
         maskOpen: Boolean(q('#pool-mask') && !q('#pool-mask').hidden),
         defRows: def ? def.querySelectorAll('.pool-row').length : -1,
+        defVirtual: def ? (def.dataset.defVirtual || '') : '',
+        defScrollHeight: def ? def.scrollHeight : -1,
         defN: q('#pool-def-n') ? q('#pool-def-n').textContent : null,
         defSkeleton: def ? def.querySelectorAll('[data-skeleton]').length : -1,
         defEmpty: Boolean(def && def.querySelector('.pool-empty')),
@@ -98,12 +140,12 @@ const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.
       shot = path.join(OUT, 'pool-open' + SUFFIX + '.png');
       fs.writeFileSync(shot, Buffer.from(cap.data, 'base64'));
     } catch { shot = null; }
-    const report = { at: new Date().toISOString(), pid: child.pid, clicked, wfProbe, state, shot };
+    const report = { at: new Date().toISOString(), pid: child.pid, clicked, openTiming, filterProbe, wfProbe, state, shot };
     fs.writeFileSync(path.join(OUT, 'pool-open' + SUFFIX + '.json'), JSON.stringify(report, null, 2) + '\n', 'utf8');
-    console.log('POOL_D365 ' + JSON.stringify({ pid: child.pid, clicked, wfProbe, defRows: state && state.defRows, defN: state && state.defN, defSkeleton: state && state.defSkeleton, defEmpty: state && state.defEmpty, reqRows: state && state.reqRows, reqN: state && state.reqN, shot }));
-    const ok = Boolean(clicked && state && state.maskOpen && state.defSkeleton === 0
+    console.log('POOL_D365 ' + JSON.stringify({ pid: child.pid, clicked, openTiming, filterProbe, defRows: state && state.defRows, defN: state && state.defN, defSkeleton: state && state.defSkeleton, defEmpty: state && state.defEmpty, reqRows: state && state.reqRows, reqN: state && state.reqN, shot }));
+    const ok = Boolean(clicked && filterProbe && filterProbe.ok === true && state && state.maskOpen && state.defSkeleton === 0
       && (state.defRows > 0 || state.defEmpty === true)
-      && String(state.defN) === String(state.defRows));
+      && String(state.defN) === String(state.defVirtual ? (JSON.parse(state.defVirtual).total) : state.defRows));
     code = ok ? 0 : 1;
     try { await cdp.send('Browser.close', {}, 2000); } catch { /* ignore */ }
     try { ws.close(); } catch { /* ignore */ }
