@@ -165,7 +165,9 @@
     perf: { intervals: [], lastProbe: null, memMB: null, lastMemAt: 0 },
     degraded: { healthyWindows: 0, particles: false, move: false, reason: '', at: 0, badWindows: 0, skippedHidden: 0, lastSkipAt: 0, lastRecoverAt: 0, lastRecoverReason: '' },
     // 诊断用：记录每次 pause/resume，方便自检看出「为什么粒子停了」（不参与渲染）
-    pauseLog: []
+    pauseLog: [],
+    // 上一次推给覆盖窗的 overlayState JSON（去重：同参数不重推，避免覆盖窗 seed 重排）
+    lastOverlayStateJson: ''
   };
 
   /* ── 小工具 ─────────────────────────────────────────────────────────── */
@@ -987,7 +989,14 @@
   }
   function notifyOverlay() {
     if (!W.workbench || typeof W.workbench.fxOverlayState !== 'function') return;
-    try { W.workbench.fxOverlayState(overlayState()); } catch (e) { /* ignore */ }
+    try {
+      var next = overlayState();
+      var json = JSON.stringify(next);
+      // 同参数重复推送不重发：覆盖窗 apply() 收到同状态不应 seed（否则粒子每几秒全体瞬移）。
+      if (json === S.lastOverlayStateJson) return;
+      S.lastOverlayStateJson = json;
+      W.workbench.fxOverlayState(next);
+    } catch (e) { /* ignore */ }
   }
   /** 连接态层级证据：computed z-index/position、中心 elementFromPoint、webview 几何。 */
   function layerEvidence() {

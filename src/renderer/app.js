@@ -16005,6 +16005,9 @@ function openOwnerModal() {
 
 // B-f749：webview 与状态同源。记录最后一次同步的地址/在线态 + 最近一次加载失败（URL/错误码）。
 const dshViewUi = { lastBaseUrl: '', lastOnline: null };
+// T-20261122-2017xx（Owner：粒子每隔几秒全体瞬移）：renderDsh 会被状态轮询周期性调用，
+// 但「在线/离线」没变时不应重推覆盖窗状态——否则 fx-overlay.apply() 每次都 seed() 重排粒子。
+let dshFxOnlineSent = null;
 let dshViewError = null;
 // PM 13:41 热修（f749 残留）：记录 webview 真实显示的正文长度。
 // 只有「页面真的加载出内容」才允许隐藏「DSH 引擎没有连上」覆盖层；
@@ -16152,13 +16155,18 @@ function renderDsh(dsh) {
   const online = Boolean(dsh && dsh.online);
   const configured = Boolean(dsh && dsh.configured);
   // T-77e4：连接后 webview 是独立合成层，会盖住主窗 #fx-layer；在线时由透明覆盖窗画粒子。
+  // T-20261122（Owner：粒子每隔几秒全体瞬移）：只在在线状态真正变化时才推状态/重 sync，
+  // 状态轮询反复调用 renderDsh 不再触发覆盖窗 seed 重排。
   try {
     window.__awbFxOverlayOnline = online;
-    if (window.AWB_FX && typeof window.AWB_FX.notifyOverlay === 'function') window.AWB_FX.notifyOverlay();
-    else if (window.workbench && typeof window.workbench.fxOverlayState === 'function') {
-      window.workbench.fxOverlayState({ enabled: false, count: 0, colors: [], opacityRange: [0.15, 0.55], mode: 'full' });
+    if (dshFxOnlineSent !== online) {
+      dshFxOnlineSent = online;
+      if (window.AWB_FX && typeof window.AWB_FX.notifyOverlay === 'function') window.AWB_FX.notifyOverlay();
+      else if (window.workbench && typeof window.workbench.fxOverlayState === 'function') {
+        window.workbench.fxOverlayState({ enabled: false, count: 0, colors: [], opacityRange: [0.15, 0.55], mode: 'full' });
+      }
+      if (window.AWB_FX && typeof window.AWB_FX.sync === 'function') window.AWB_FX.sync();
     }
-    if (window.AWB_FX && typeof window.AWB_FX.sync === 'function') window.AWB_FX.sync();
   } catch { /* 覆盖窗不可用时主窗 canvas 兜底 */ }
   const stateLabel = online ? 'DSH 已连接' : (configured ? 'DSH 离线' : 'DSH 未配置');
 

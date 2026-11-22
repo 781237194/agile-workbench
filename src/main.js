@@ -667,7 +667,7 @@ function startMainLoopWatch() {
     fxOverlayState = {
       enabled: state.enabled === true,
       count: Math.max(0, Math.min(1200, Number(state.count) || 0)),
-      colors: Array.isArray(state.colors) ? state.colors.slice(0, 8).map(String) : [],
+      colors: Array.isArray(state.colors) ? state.colors.slice(0, 48).map(String) : [],
       opacityRange: Array.isArray(state.opacityRange) ? state.opacityRange.slice(0, 2).map(Number) : [0.15, 0.55],
       mode: String(state.mode || 'full'),
     };

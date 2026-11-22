@@ -71,6 +71,7 @@ function seed() {
     // ③ 连 DSH 后：覆盖窗 canvas（用壳内真实 overlayState 驱动同一帧）
     const ovTarget = target(/fx-overlay/i);
     let overlay = null;
+    let noReseed = null;
     if (ovTarget) {
       const ov = await connect(ovTarget.webSocketDebuggerUrl);
       try { await ov.send('Runtime.enable'); await ov.send('Page.enable'); } catch { /* ignore */ }
@@ -88,6 +89,24 @@ function seed() {
       let ovPng = null;
       if (typeof url === 'string') { ovPng = path.join(OUT, `${TAG}-connected-overlay.png`); fs.writeFileSync(ovPng, Buffer.from(String(url).replace(/^data:image\/png;base64,/, ''), 'base64')); }
       overlay = { stats, png: ovPng, grids: ovGrids };
+      // 同状态反复推送（模拟 renderDsh 每秒轮询 / 主进程重复推送）不得重新 seed，否则粒子全体瞬移。
+      const sameState = JSON.stringify(st);
+      const seed0 = Number(stats && stats.seedCount) || 0;
+      for (let i = 0; i < 4; i += 1) { await ov.eval(`(() => { const s = ${sameState}; if (typeof window.__fxOverlayForce === "function") return window.__fxOverlayForce(s); return null; })()`); await sleep(250); }
+      for (let i = 0; i < 3; i += 1) { await shell.eval('window.AWB_FX && window.AWB_FX.notifyOverlay ? window.AWB_FX.notifyOverlay() : null'); await sleep(150); }
+      await sleep(400);
+      const afterSame = await ov.eval('window.__fxOverlayStats ? window.__fxOverlayStats() : null');
+      // 参数真正变化时才允许重新 seed（证明不是把 seed 永久关掉）。
+      const changed = Object.assign({}, st, { count: Math.max(1, (Number(st.count) || 1) + 7) });
+      await ov.eval(`(() => { const s = ${JSON.stringify(changed)}; if (typeof window.__fxOverlayForce === "function") return window.__fxOverlayForce(s); return null; })()`);
+      const afterChange = await ov.eval('window.__fxOverlayStats ? window.__fxOverlayStats() : null');
+      noReseed = {
+        seed0,
+        seedAfterSame: Number(afterSame && afterSame.seedCount) || 0,
+        seedAfterChange: Number(afterChange && afterChange.seedCount) || 0,
+        noReseedSame: Boolean(afterSame && (Number(afterSame.seedCount) || 0) === seed0),
+        reseededOnChange: Boolean(afterChange && (Number(afterChange.seedCount) || 0) === seed0 + 1),
+      };
     }
     // ④ 断言
     const gridsEqual = shellGrids && overlay && typeof shellGrids.grids !== 'undefined'
@@ -111,6 +130,8 @@ function seed() {
       { name: '粒子直径在 5–8px', ok: Boolean(shellFacts && shellFacts.particles && shellFacts.particles.minDiameterPx >= 5 && shellFacts.particles.maxDiameterPx <= 8), detail: shellFacts && shellFacts.particles && { min: shellFacts.particles.minDiameterPx, max: shellFacts.particles.maxDiameterPx } },
       { name: '覆盖窗粒子数/直径与壳层同口径', ok: Boolean(overlay && overlay.stats && overlay.stats.count > 0 && overlay.stats.minDiameterPx >= 5 && overlay.stats.maxDiameterPx <= 8), detail: overlay && overlay.stats },
       { name: 'fps ≥ 55 且 longtask max ≤ 120ms（不回归）', ok: Boolean(perf && perf.fps >= 55 && perf.ltMax <= 120), detail: perf },
+      { name: '同参数反复推送不重新撒点（不瞬移）', ok: Boolean(noReseed && noReseed.noReseedSame), detail: noReseed },
+      { name: '参数变化时才允许重新撒点', ok: Boolean(noReseed && noReseed.reseededOnChange), detail: noReseed && { seed0: noReseed.seed0, afterChange: noReseed.seedAfterChange } },
       { name: '连 DSH 前/后截图均已生成', ok: Boolean(shellShot && overlay && overlay.png), detail: { shell: Boolean(shellShot), overlay: Boolean(overlay && overlay.png) } },
     ];
     const result = { at: new Date().toISOString(), tag: TAG, task: 'T-20261122-195601-4855', port: PORT, shell: { grids: shellGrids, facts: shellFacts, perf, canvas: shellShot ? { w: shellShot.w, h: shellShot.h } : null }, overlay: overlay ? { stats: overlay.stats, grids: overlay.grids, png: overlay.png } : null, checks, pass: checks.filter((c) => c.ok).length, total: checks.length };

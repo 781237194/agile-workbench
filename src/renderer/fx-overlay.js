@@ -7,7 +7,7 @@
  * 状态由主窗 fx-layer 推送：{ enabled, count, colors, opacityRange, mode }。
  *
  * 2026-11-22（T-20261122-190253-6c78）：与壳内共用「四芒星光」观感——
- * sprite 为 16×16 预渲染四芒星（亮核+横/纵十字光芒），每档颜色只建一次；
+ * sprite 为 11×11 预渲染四芒星（亮核+横/纵十字光芒），每档颜色只建一次；
  * 单颗直径 5–8px，逐颗相位闪烁（0.6–1.0 正弦 globalAlpha），不再画软圆气泡。
  */
 (function () {
@@ -19,16 +19,24 @@
   var raf = 0;
   var dpr = Math.max(1, Math.min(2, (window.devicePixelRatio || 1)));
   var W = 0, H = 0;
+  // T-20261122（Owner：粒子每隔 1–1.5s 全体瞬移）：同参数状态重复推送时不得重新 seed。
+  var lastSig = '';
+  var seedCount = 0;
+  var seededAt = 0;
 
   function resize() {
-    W = Math.max(1, window.innerWidth || 1);
-    H = Math.max(1, window.innerHeight || 1);
-    if (!canvas) return;
+    var nextW = Math.max(1, window.innerWidth || 1);
+    var nextH = Math.max(1, window.innerHeight || 1);
+    var changed = nextW !== W || nextH !== H;
+    W = nextW;
+    H = nextH;
+    if (!canvas) return changed;
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
     canvas.style.width = W + 'px';
     canvas.style.height = H + 'px';
     if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return changed;
   }
 
   function colorAt(i) {
@@ -60,6 +68,8 @@
   }
 
   function seed() {
+    seedCount += 1;
+    seededAt = Date.now();
     parts = [];
     sprites = {};
     var want = state.enabled ? Math.max(0, Math.min(1200, Number(state.count) || 0)) : 0;
@@ -121,11 +131,17 @@
       mode: state.mode,
       count: parts.length,
       sprites: Object.keys(sprites).length,
+      seedCount: seedCount,
+      seededAt: seededAt,
       minDiameterPx: ds.length ? Math.min.apply(null, ds) : 0,
       maxDiameterPx: ds.length ? Math.max.apply(null, ds) : 0,
       canvas: canvas ? { w: canvas.width, h: canvas.height } : null
     };
   };
+
+  function sigOf(snapshot) {
+    return [snapshot.enabled ? '1' : '0', snapshot.mode, snapshot.count, snapshot.colors.join('|'), snapshot.opacityRange.join(',')].join('\n');
+  }
 
   function apply(next) {
     if (!next || typeof next !== 'object') return;
@@ -138,10 +154,16 @@
     };
     if (!state.enabled) {
       parts = [];
+      lastSig = sigOf(state);
       if (ctx) ctx.clearRect(0, 0, W, H);
       return;
     }
-    seed();
+    var sig = sigOf(state);
+    // 只有参数（启用/模式/数量/颜色/透明度）真正变化才重新撒点；否则保留现有粒子继续漂移。
+    if (sig !== lastSig || !parts.length) {
+      seed();
+      lastSig = sig;
+    }
     if (!raf) raf = window.requestAnimationFrame(draw);
   }
 
@@ -151,7 +173,7 @@
     } catch (e) { /* ignore */ }
   }
 
-  window.addEventListener('resize', function () { resize(); seed(); }, { passive: true });
+  window.addEventListener('resize', function () { if (resize()) seed(); }, { passive: true });
   window.addEventListener('DOMContentLoaded', ready, { once: true });
   if (document.readyState !== 'loading') ready();
   try {
