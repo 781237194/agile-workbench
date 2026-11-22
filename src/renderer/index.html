@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PM工作台 · DSH 壳</title>
+  <!-- 启动白屏修复（2026-11-23）：先给文档根一个底色，保证「窗口 show 到 style.css 首帧应用」之间
+       不会出现 Chromium 默认的白底（body 的深色渐变要等外部 CSS 加载后才生效）。 -->
+  <style>html { background: #0a0b0e; }</style>
   <!-- R-fe90 F-2：主题清单唯一来源（渲染层脚本与 node import 共用这一份） -->
   <script src="theme-manifest.js"></script>
   <script>
@@ -23,6 +26,8 @@
         el.setAttribute('data-style', picked.style);
         el.setAttribute('data-theme', picked.theme);
         el.setAttribute('data-theme-id', picked.themeId);
+        // 启动白屏修复：浅色主题用浅底，避免深底先闪一下再变亮（深色保持默认 #0a0b0e）。
+        el.style.backgroundColor = picked.theme === 'light' ? '#efede7' : '#0a0b0e';
       } catch (e) { /* 隐私模式 / 清单缺失：保持默认，不闪 */ }
     })();
   </script>

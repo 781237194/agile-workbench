@@ -14629,7 +14629,9 @@ function syncFxOverlayBounds() {
 }
 function pushFxOverlayState() {
   if (!fxOverlayWindow || fxOverlayWindow.isDestroyed()) return;
-  const visible = Boolean(fxOverlayState.enabled && mainWindow && !mainWindow.isDestroyed()
+  // 启动白屏修复（2026-11-23）：覆盖窗是 transparent 窗口，首次显示若页面还没画完会先铺白底，
+  // 尺寸与主窗一致会造成整窗白屏；必须等渲染层 ready（fx:overlay-ready）后再 show。
+  const visible = Boolean(fxOverlayState.enabled && fxOverlayReady && mainWindow && !mainWindow.isDestroyed()
     && mainWindow.isVisible() && !mainWindow.isMinimized() && mainWindow.isFocused() && !fxOverlayMotionSuppressed);
   try { fxOverlayWindow.webContents.send('fx:overlay-state', fxOverlayState); } catch { /* ignore */ }
   if (visible) {
@@ -14740,7 +14742,32 @@ function createWindow() {
       try { mainWindow.showInactive(); } catch { /* ignore */ }
       return;
     }
-    if (!AWB_START_HIDDEN) mainWindow.show();
+    if (!AWB_START_HIDDEN) {
+      // 启动白屏修复（2026-11-23）：Windows 在窗口「第一次 show」时会先呈现一帧白底（与内容是否已画完无关）。
+      // 做法：先在屏幕外 show，让这帧白底发生在屏幕外；再用 capturePage 强制合成一帧（离屏窗口默认不产帧），
+      // 合成完成后再把窗口移回原位置；另留 800ms 兜底。失败时退回直接 show。
+      try {
+        const savedBounds = mainWindow.getBounds();
+        const restoreBounds = () => {
+          try {
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            if (mainWindow.getBounds().x <= -30000) mainWindow.setBounds(savedBounds);
+            mainWindow.focus();
+          } catch { /* ignore */ }
+        };
+        mainWindow.setPosition(-32000, -32000);
+        mainWindow.show();
+        let restored = false;
+        const restoreOnce = () => { if (restored) return; restored = true; restoreBounds(); };
+        try {
+          mainWindow.webContents.capturePage().then(restoreOnce).catch(restoreOnce);
+        } catch { restoreOnce(); }
+        setTimeout(restoreOnce, 800);
+        setTimeout(restoreBounds, 2000);
+      } catch {
+        try { mainWindow.show(); } catch { /* ignore */ }
+      }
+    }
     // PM 172739：显示后 2.5s 再预热一次（只读、后台）——保证用户首次点击验收/评审时快照 memo 仍热（TTL 8s）。
     setTimeout(() => {
       try {
