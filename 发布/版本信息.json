@@ -1,7 +1,7 @@
 {
-  "version": "2.1.16",
-  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.16/发布/pm-workbench-2.1.16.zip",
-  "sha256": "e2bf30c41345e522936353a7c6c277faa6556df6db72bcd06459100618cae22d",
-  "size": 4772812,
-  "notes": "本版为 2026-11-22 凌晨现场修复：①名册清零根治——启动期「删除墓碑补扫」遇旧项目墓碑会清掉当前全局名册（每次重启 16–21 秒后六成员 sessionId 全空），新增 roster-startup-guard（墓碑团队≠activeProject / store 未就绪 / 同名项目仍在→不清）+ 团队.json 整文件写守卫（写后全空且写前>0→拒写并写 case/stack 审计）；②DSH 端口自愈——pin 只作提示，旧端口不可达 3 秒内自动回退发现（env→端口文件→进程端口→全监听端口探测），cookie 按新 authority 重签，离线每 30 秒重试；用户端口非默认（如 12341）也无需手改配置；③连接 DSH 后粒子可见——DSH 为 webview 独立合成层会盖住 DOM 粒子，新增透明覆盖 BrowserWindow（点击穿透、跟随 bounds、离线回退壳内）；④主进程 CPU 治理——briefing 2097ms→0.1ms（stale-while-revalidate + 裁 requirements）、workflow:state 422ms→62ms、fx-force-get 10 万次/100s 收敛、owner:pending-counts 热读 1.5MB 加缓存，OS 口径 CPU 41.8%→20.9%；⑤壳渲染层内存 76.6MB 堆 / 167.5MB RSS（≤250MB），缓存条目上限收紧。"
+  "version": "2.1.17",
+  "url": "https://cdn.jsdelivr.net/gh/781237194/agile-workbench@v2.1.17/发布/pm-workbench-2.1.17.zip",
+  "sha256": "c83c03109eb2b8845a4a6f168c26e36d44ce403774e4cca68af3ded5da96a80f",
+  "size": 4810013,
+  "notes": "本版为 2026-11-22 下午现场修复：①主进程「无响应」根治——briefingStatus 每 3 秒同步重算 2.1 秒的瓶颈移入 worker_threads（主线程只收发+SWR 缓存，TTL 12s，窗口隐藏/失焦不重算），启动令牌目录 5331 个 JSON 的全量同步扫描改目录签名索引（取令牌 1135ms→0.75ms）；新增主进程卡顿/慢任务/心跳三份可观测日志；②鼠标与输入卡顿——Windows 去掉覆盖窗 mousemove forward 转发，连续滑动/滚轮/点击不再抢主线程；③拖动窗口闪烁——move/resize 期间隐藏覆盖窗、150ms debounce 后一次性定位，不再逐帧 setBounds；④覆盖面补齐——覆盖窗在 DSH 在线时接管壳内绘制、离线回退可见，R2 失焦→聚焦不重复绘制；⑤AC2 长任务：修前 10 分钟 >100ms 14 次（max 1214ms）→ 修后 0–2 次（max 122ms）；⑥在线升级/一键卸载覆盖本轮全部新文件（含 src/briefing-worker.cjs），升级后文件 sha 与包内一致、卸载整删安装目录。"
 }
