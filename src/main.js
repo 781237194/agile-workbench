@@ -122,6 +122,15 @@ function storeFileFingerprint() {
 const workflowStateCache = new Map();
 // T-f18bf：启动令牌目录扫描（5k+ 文件）按目录 stamp 缓存 10s；ledgerActions 按团队 10s 缓存。
 const bootTokenDirCache = new Map();
+// T-6626：启动令牌目录 >5k 文件。索引缓存按「目录签名」复用；签名变化先返回旧快照，后台异步重建。
+const bootTokenIndex = new Map();
+let bootTokenIndexBuilds = 0;
+let bootTokenIndexHits = 0;
+let bootTokenIndexMisses = 0;
+let bootTokenIndexRunning = 0;
+let mainLoopStallCount = 0;
+let mainLoopLastStallAt = 0;
+let mainLoopMaxDelayMs = 0;
 const ledgerActionsCache = new Map();
 const BOOT_TOKEN_CACHE_MS = 10000;
 const LEDGER_ACTIONS_CACHE_MS = 10000;
@@ -388,6 +397,63 @@ const IS_SUPPLEMENT_CHECK = process.argv.includes('--supplement-check');
 // B-20261115-134716-2dd3（P0）：内存阈值告警 + 崩溃归因自检（隔离数据根 + 真实采样；不碰真实工作台/团队状态）。
 const IS_B2DD3_CHECK = process.argv.includes('--b2dd3-check');
 const LOCAL_DATA = process.env.AWB_DATA_DIR ? path.resolve(process.env.AWB_DATA_DIR) : path.join(ROOT, 'data');
+// T-6626：主进程卡死可观测性——1s 轮询 event-loop delay，>1s 追加 主进程卡顿.jsonl；2s 写心跳文件。
+let mainLoopWatchStarted = false;
+function startMainLoopWatch() {
+  if (mainLoopWatchStarted) return;
+  mainLoopWatchStarted = true;
+  try { fs.mkdirSync(LOCAL_DATA, { recursive: true }); } catch { /* ignore */ }
+  const stallFile = path.join(LOCAL_DATA, '主进程卡顿.jsonl');
+  const heartbeatFile = path.join(LOCAL_DATA, '主进程心跳.json');
+  let histogram = null;
+  try {
+    const { monitorEventLoopDelay } = require('node:perf_hooks');
+    histogram = monitorEventLoopDelay({ resolution: 50 });
+    histogram.enable();
+  } catch { histogram = null; }
+  let lastStallLogAt = 0;
+  let lastLoopMaxMs = 0;
+  const bootIndexSnapshot = () => ({ dirs: bootTokenIndex.size, builds: bootTokenIndexBuilds, running: bootTokenIndexRunning, hits: bootTokenIndexHits, misses: bootTokenIndexMisses });
+  try {
+    const timer = setInterval(() => {
+      let maxMs = 0;
+      try {
+        if (histogram) { maxMs = Math.round((Number(histogram.max) || 0) / 1e6 * 10) / 10; histogram.reset(); }
+      } catch { maxMs = 0; }
+      lastLoopMaxMs = maxMs;
+      if (maxMs > 1000 && Date.now() - lastStallLogAt > 2000) {
+        lastStallLogAt = Date.now();
+        mainLoopStallCount += 1;
+        mainLoopLastStallAt = lastStallLogAt;
+        mainLoopMaxDelayMs = Math.max(mainLoopMaxDelayMs, maxMs);
+        try {
+          fs.appendFileSync(stallFile, JSON.stringify({
+            at: new Date(lastStallLogAt).toISOString(), maxDelayMs: maxMs, pid: process.pid,
+            uptimeSec: Math.round(process.uptime()), rssMB: Math.round(process.memoryUsage().rss / 1048576),
+            bootIndex: bootIndexSnapshot(),
+          }) + '\n', 'utf8');
+        } catch { /* 日志写失败不影响运行 */ }
+      }
+    }, 1000);
+    if (timer.unref) timer.unref();
+  } catch { /* ignore */ }
+  try {
+    const hb = setInterval(() => {
+      try {
+        const body = {
+          at: new Date().toISOString(), pid: process.pid, uptimeSec: Math.round(process.uptime()),
+          rssMB: Math.round(process.memoryUsage().rss / 1048576), eventLoopMaxMs: lastLoopMaxMs,
+          stallCount: mainLoopStallCount, lastStallAt: mainLoopLastStallAt ? new Date(mainLoopLastStallAt).toISOString() : '',
+          bootIndex: bootIndexSnapshot(),
+        };
+        const tmp = heartbeatFile + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(body) + '\n', 'utf8');
+        fs.renameSync(tmp, heartbeatFile);
+      } catch { /* 心跳写失败不影响运行 */ }
+    }, 2000);
+    if (hb.unref) hb.unref();
+  } catch { /* ignore */ }
+}
   // 7a3b §6.3：fx 诊断日志落 <数据目录>/fx.jsonl（append-only；失败静默返回 ok:false，不影响渲染）。
   rawIpcHandle('fx:diag-log', (_e, row) => {
     try {
@@ -6696,37 +6762,140 @@ ipcMain.handle('theme:metrics', async () => {
   // 项目终验（R-fb48）：调团队工具 finalize；终端用本项目最近一次未过期 pm 令牌（终验需 PM/Owner 权限）。
   const TEAM_MJS_PATH = path.join(__dirname, '..', '团队', '工具', 'team.mjs');
   const TEAM_BOOT_DIR = path.join(__dirname, '..', '团队', '状态', '启动');
-  function latestPmBootToken(projectName) {
+  const bootTokenBuildPromises = new Map();
+  function bootTokenDirSignature(dir) {
+    try { const st = fs.statSync(dir); return `${st.mtimeMs}:${st.size}`; } catch { return 'missing'; }
+  }
+  function bootTokenRowOf(name, row) {
+    const token = String(row && row.token || String(name || '').replace(/\.json$/i, ''));
+    if (!token) return null;
+    return {
+      token, file: name, role: String(row && row.role || ''), project: String(row && row.project || ''),
+      issuedAt: String(row && (row.issuedAt || row.createdAt) || ''), expiresAt: String(row && row.expiresAt || ''),
+      sessionId: String(row && row.sessionId || '')
+    };
+  }
+  async function readBootTokenDirAsyncRows(dir) {
+    const rows = [];
     let names = [];
-    try { names = fs.readdirSync(TEAM_BOOT_DIR).filter((n) => n.endsWith('.json')); } catch { return ''; }
-    let best = null;
-    for (const name of names) {
-      try {
-        const j = JSON.parse(fs.readFileSync(path.join(TEAM_BOOT_DIR, name), 'utf8'));
-        if (j.role !== 'pm' || j.project !== projectName) continue;
-        if (Date.parse(j.expiresAt) < Date.now()) continue;
-        if (!best || String(j.issuedAt || j.createdAt || '') > String(best.issuedAt || best.createdAt || '')) best = j;
-      } catch { /* 跳过损坏令牌 */ }
+    try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return rows; }
+    const CHUNK = 128;
+    for (let i = 0; i < names.length; i += CHUNK) {
+      const part = names.slice(i, i + CHUNK);
+      for (const name of part) {
+        try {
+          const row = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, ''));
+          const normalized = bootTokenRowOf(name, row);
+          if (normalized) rows.push(normalized);
+        } catch { /* 跳过损坏令牌，不中断索引 */ }
+      }
+      // T-6626：分片让出主线程；每片 128 个文件的同步读取通常只有几十毫秒，不形成 >1s 长任务。
+      await new Promise((resolve) => setImmediate(resolve));
     }
-    return best ? String(best.token) : '';
+    return rows;
+  }
+  function scheduleBootTokenDirBuild(dir) {
+    const key = String(dir || '');
+    if (bootTokenBuildPromises.has(key)) return bootTokenBuildPromises.get(key);
+    const signature = bootTokenDirSignature(key);
+    bootTokenIndexBuilds += 1;
+    bootTokenIndexRunning += 1;
+    const prev = bootTokenIndex.get(key);
+    if (prev) prev.building = true;
+    const promise = (async () => {
+      let rows = [];
+      let nextSignature = signature;
+      try {
+        rows = await readBootTokenDirAsyncRows(key);
+        nextSignature = bootTokenDirSignature(key);
+      } catch { /* 读取失败保留旧快照 */ }
+      bootTokenIndex.set(key, { rows, signature: nextSignature, at: Date.now(), building: false });
+      if (bootTokenIndex.size > 16) bootTokenIndex.delete(bootTokenIndex.keys().next().value);
+      return rows;
+    })().catch(() => []).finally(() => {
+      bootTokenIndexRunning = Math.max(0, bootTokenIndexRunning - 1);
+      bootTokenBuildPromises.delete(key);
+    });
+    bootTokenBuildPromises.set(key, promise);
+    return promise;
+  }
+  /**
+   * T-6626：同步读索引（只 stat 目录，不 readdir/parse）。签名不变直接复用；
+   * 签名变了/冷缺失先返回旧快照（可能空），后台异步重建（stale-while-revalidate）。
+   */
+  function readBootTokenDirIndexed(dir) {
+    const key = String(dir || '');
+    const signature = bootTokenDirSignature(key);
+    const hit = bootTokenIndex.get(key);
+    if (hit && hit.rows && hit.signature === signature) {
+      bootTokenIndexHits += 1;
+      hit.at = Date.now();
+      return hit.rows;
+    }
+    bootTokenIndexMisses += 1;
+    try { scheduleBootTokenDirBuild(key); } catch { /* ignore */ }
+    if (hit && Array.isArray(hit.rows)) return hit.rows;
+    return [];
+  }
+  async function prewarmBootTokenIndex(dirs) {
+    const unique = Array.from(new Set((dirs || []).map((d) => String(d || '')).filter(Boolean)));
+    await Promise.all(unique.map((dir) => scheduleBootTokenDirBuild(dir)));
+  }
+  function bootTokenIndexStats() {
+    return {
+      dirs: bootTokenIndex.size, builds: bootTokenIndexBuilds, running: bootTokenIndexRunning,
+      hits: bootTokenIndexHits, misses: bootTokenIndexMisses,
+      rows: Array.from(bootTokenIndex.entries()).map(([dir, hit]) => ({ dir, rows: hit.rows.length, signature: hit.signature, building: Boolean(hit.building) }))
+    };
+  }
+  function latestPmBootToken(projectName) {
+    const dirs = [];
+    try { dirs.push(path.join(ledgerTeamRoot(), '状态', '启动')); } catch { /* ignore */ }
+    dirs.push(TEAM_BOOT_DIR);
+    let best = null;
+    for (const dir of Array.from(new Set(dirs))) {
+      const rows = readBootTokenDirIndexed(dir);
+      for (const row of rows) {
+        if (row.role !== 'pm' || row.project !== projectName) continue;
+        if (!best || String(row.issuedAt || '') > String(best.issuedAt || '')) best = row;
+      }
+      if (best) return String(best.token || '');
+    }
+    return '';
   }
   /** 任意角色的有效启动令牌（R-62b9 E1/E2：验收必须本人角色令牌；壳层不自 boot、不自代）。 */
   function latestBootTokenOf(projectName, role) {
-    let names = [];
     const dir = path.join(ledgerTeamRoot(), '状态', '启动');
-    try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.json')); } catch { return ''; }
+    const rows = readBootTokenDirIndexed(dir);
     let best = null;
-    for (const name of names) {
-      try {
-        const j = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-        if (String(j.role || '') !== String(role || '')) continue;
-        if (String(j.project || '') !== String(projectName || '')) continue;
-        if (Date.parse(j.expiresAt) < Date.now()) continue;
-        if (!best || String(j.issuedAt || j.createdAt || '') > String(best.issuedAt || best.createdAt || '')) best = j;
-      } catch { /* 跳过损坏令牌 */ }
+    for (const row of rows) {
+      if (String(row.role || '') !== String(role || '')) continue;
+      if (String(row.project || '') !== String(projectName || '')) continue;
+      if (!row.token) continue;
+      if (!best || String(row.issuedAt || '') > String(best.issuedAt || '')) best = row;
     }
     return best ? String(best.token) : '';
   }
+  // T-6626：app ready 即预热启动令牌索引（异步分片），用户点验收时直接命中签名快照。
+  try {
+    void prewarmBootTokenIndex([TEAM_BOOT_DIR, path.join(ledgerTeamRoot(), '状态', '启动')]).catch(() => { /* 预热失败只影响首次冷读 */ });
+  } catch { /* ignore */ }
+  // T-6626：测试专用——10 次取令牌耗时（验证不再同步全扫 5k+ 文件）；生产不暴露。
+  rawIpcHandle('boot:token-index-probe', async (_event, payload) => {
+    if (String(process.env.AWB_BOOT_INDEX_TEST || '') !== '1') return { ok: false, code: 'TEST_ONLY' };
+    const p = payload || {};
+    const project = String(p.project || '');
+    const role = String(p.role || 'pm');
+    const count = Math.max(1, Math.min(50, Number(p.count) || 10));
+    const times = [];
+    let token = '';
+    for (let i = 0; i < count; i += 1) {
+      const t0 = process.hrtime.bigint();
+      token = latestBootTokenOf(project, role);
+      times.push(Math.round(Number(process.hrtime.bigint() - t0) / 1e4) / 100);
+    }
+    return { ok: true, count, tokenFound: Boolean(token), timesMs: times, maxMs: Math.max(...times), stats: bootTokenIndexStats() };
+  });
   // R-62b9 E1/E2（维修模式·PM 授权）：缺陷单按角色验收的壳层透传通道。
   // 只透传，角色校验在团队工具侧（--as 必须与令牌角色一致）；不许壳层自代/自 boot。
   ipcMain.handle('task:accept', async (_e, payload) => {
@@ -6829,34 +6998,9 @@ ipcMain.handle('theme:metrics', async () => {
     }
     return null;
   }
-  /** T-f18bf：启动令牌目录（5k+ json）只解析一次，10s 内不再 readdir/readFile；目录变了最多滞后 10s。 */
+  /** T-f18bf/T-6626：启动令牌目录（5k+ json）走目录签名索引，不再同步 readdir/parse。 */
   function readBootTokenDirCached(dir) {
-    const key = String(dir || '');
-    const nowMs = Date.now();
-    const hit = bootTokenDirCache.get(key);
-    if (hit && nowMs - hit.at < BOOT_TOKEN_CACHE_MS) return hit.rows;
-    let signature = '';
-    try { const st = fs.statSync(dir); signature = `${st.mtimeMs}:${st.size}`; } catch { signature = 'missing'; }
-    if (hit && hit.signature === signature) { hit.at = nowMs; return hit.rows; }
-    const rows = [];
-    try {
-      for (const name of fs.readdirSync(dir)) {
-        if (!name.endsWith('.json')) continue;
-        try {
-          const row = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, ''));
-          const token = String(row.token || name.replace(/\.json$/, ''));
-          if (!token) continue;
-          rows.push({
-            token, file: name, role: String(row.role || ''), project: String(row.project || ''),
-            issuedAt: String(row.issuedAt || row.createdAt || ''), expiresAt: String(row.expiresAt || ''),
-            sessionId: String(row.sessionId || '')
-          });
-        } catch { /* 跳过损坏令牌文件，不中断查找 */ }
-      }
-    } catch { /* 目录不存在 */ }
-    bootTokenDirCache.set(key, { at: nowMs, signature, rows });
-    if (bootTokenDirCache.size > 16) bootTokenDirCache.delete(bootTokenDirCache.keys().next().value);
-    return rows;
+    return readBootTokenDirIndexed(dir);
   }
   function ledgerAuditFile(project) {
     const slug = teamTools.teamSlug(String(project.teamName || project.name || ''));
@@ -14204,7 +14348,7 @@ ipcMain.handle('mem:cache-stats', () => {
     briefing: { ...briefingStateStats, cached: briefingCache.size, revalidateMs: BRIEFING_REVALIDATE_MS },
     ledgerActions: { cachedTeams: ledgerActionsCache.size, ttlMs: LEDGER_ACTIONS_CACHE_MS },
     schedAdvice: { cachedProjects: schedAdviceCache.size, ttlMs: SCHED_ADVICE_CACHE_MS },
-    bootTokenDirs: { cachedDirs: bootTokenDirCache.size, ttlMs: BOOT_TOKEN_CACHE_MS },
+    bootTokenDirs: { cachedDirs: bootTokenIndex.size, builds: bootTokenIndexBuilds, hits: bootTokenIndexHits, misses: bootTokenIndexMisses },
     // T-18bf：按调用次数排序的 IPC 通道表（谁的 handler 在吃主线程）；不含 payload。
     ipcChannels: Array.from(ipcChannelStats.values())
       .sort((a, b) => b.calls - a.calls)
@@ -25387,6 +25531,8 @@ const __phase = (name, fn) => {
   if (!singleInstanceLock) return;
   app.setName(APP_NAME);
   __phase('registerIpc', () => registerIpc());
+  // T-6626：主进程卡顿日志 + 2s 心跳（自检/布局/特效/主题截图模式不启动，避免污染证据目录）。
+  if (!IS_SELFTEST && !IS_LAYOUT_CHECK && !IS_EFFECT_CHECK && !IS_THEME_SHOTS) startMainLoopWatch();
   // T-5d98：启动对齐 + 60 秒巡检（幂等；失败可见，写失败内部 60 秒重试一次）。
   __phase('reconcileSchedule', () => schedulePmIdentityReconcile('startup'));
   try { const t = setInterval(() => { try { runPmIdentityReconcile('interval60'); } catch { /* ignore */ } }, 60000); if (t.unref) t.unref(); } catch { /* ignore */ }

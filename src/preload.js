@@ -10,6 +10,7 @@ const IS_BOARD_WINDOW = process.argv.includes('--awb-board');
 const IS_SANDBOX = String(process.env.TEAM_SELFTEST || '') === '1';
 // T-810d：覆盖窗探针只在显式测试开关下暴露，生产 window 上不存在该 API。
 const FX_OVERLAY_TEST = String(process.env.AWB_FX_OVERLAY_TEST || '') === '1';
+const BOOT_INDEX_TEST = String(process.env.AWB_BOOT_INDEX_TEST || '') === '1';
 
 if (IS_BOARD_WINDOW) {
   contextBridge.exposeInMainWorld('boardWin', {
@@ -37,6 +38,7 @@ if (IS_BOARD_WINDOW) {
   fxOverlayStatus: () => ipcRenderer.invoke('fx:overlay-status'),
   fxOverlayBenchmark: () => ipcRenderer.invoke('fx:overlay-benchmark'),
   ...(FX_OVERLAY_TEST ? { fxOverlayProbe: () => ipcRenderer.invoke('fx:overlay-probe'), fxOverlayControl: (payload) => ipcRenderer.invoke('fx:overlay-window-control', payload) } : {}),
+  ...(BOOT_INDEX_TEST ? { bootTokenIndexProbe: (payload) => ipcRenderer.invoke('boot:token-index-probe', payload) } : {}),
   onFxOverlayReady: (handler) => {
     if (typeof handler !== 'function') return () => {};
     const listener = (_event, payload) => { try { handler(payload || {}); } catch { /* ignore */ } };

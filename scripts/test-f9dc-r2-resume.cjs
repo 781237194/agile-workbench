@@ -53,7 +53,7 @@ const realBefore = { team: sha(REAL_TEAM_JSON), workbench: sha(REAL_WORKBENCH) }
 (async () => {
   fs.mkdirSync(OUT, { recursive: true });
   seed();
-  const env = { ...process.env, AWB_DATA_DIR: DATA, TEAM_ROOT: TEAM, TEAM_SELFTEST: '1', AWB_FX_OVERLAY_TEST: '1', AWB_SHOW_INACTIVE: '1', DSH_WEB_URL: 'http://127.0.0.1:1' };
+  const env = { ...process.env, AWB_DATA_DIR: DATA, TEAM_ROOT: TEAM, TEAM_SELFTEST: '1', AWB_FX_OVERLAY_TEST: '1', AWB_BOOT_INDEX_TEST: '1', AWB_SHOW_INACTIVE: '1', DSH_WEB_URL: 'http://127.0.0.1:1' };
   const child = spawn(process.execPath, [path.join(ROOT, 'scripts', 'run-electron.cjs'), '.', '--remote-debugging-port=' + PORT, '--user-data-dir=' + path.join(BASE, 'userdata-electron')], { cwd: ROOT, env, stdio: 'ignore', windowsHide: false });
   let inst = null;
   try {
@@ -68,6 +68,8 @@ const realBefore = { team: sha(REAL_TEAM_JSON), workbench: sha(REAL_WORKBENCH) }
   } catch { inst = null; }
   if (!inst) { try { child.kill(); } catch { /* ignore */ } try { spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* ignore */ } }
   check('A0 隔离实例启动且 AWB_FX 就绪', Boolean(inst), { port: PORT });
+  const bootIndexProbe = inst ? await inst.cdp.evaluate('(async () => { await new Promise(r => setTimeout(r, 1800)); return window.workbench.bootTokenIndexProbe ? await window.workbench.bootTokenIndexProbe({ project: "工作台改造修复", role: "pm", count: 10 }) : { __missing: true }; })()') : null;
+  check('T-6626 启动令牌索引：10 次取令牌无同步全扫', Boolean(bootIndexProbe && bootIndexProbe.ok === true && Number(bootIndexProbe.maxMs) < 50 && bootIndexProbe.stats && bootIndexProbe.stats.builds >= 1 && bootIndexProbe.stats.dirs >= 1), bootIndexProbe);
   const report = { at: new Date().toISOString(), head: (() => { try { return spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim(); } catch { return ''; } })(), rows };
   if (inst) {
     try {
